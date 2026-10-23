@@ -37,6 +37,10 @@ type RepoRef struct {
 	Owner string `json:"owner"` // from repos[].url: https://<host>/<owner>/<name>
 	Name  string `json:"name"`
 	Base  string `json:"base"` // repos[].base, the branch PRs target
+	// Host is the host of repos[].url. The forge client refuses a ref whose
+	// Host is not its web host, so a url on another host is never read or
+	// written with this forge's App.
+	Host string `json:"host,omitempty"`
 }
 
 // MaxRepoPathBytes bounds one repository path or glob (design §5.1).
@@ -63,7 +67,9 @@ type Repo struct {
 	// the same id in two pipelines has the same url and base.
 	ID string `yaml:"id"`
 	// URL is https://<host>/<owner>/<name>, nothing more. The host is checked
-	// against the forge's web host at start, not here (Load reads no config).
+	// against the forge's web host by CheckRepoHosts at start, and again by
+	// the forge client on every call through RepoRef.Host (Load reads no
+	// config).
 	URL string `yaml:"url"`
 	// Base is the branch the fix PRs target.
 	Base string `yaml:"base"`
@@ -116,7 +122,37 @@ func (r Repo) Ref() RepoRef {
 	if owner == "" || name == "" {
 		owner, name, _ = parseRepoURL(r.URL)
 	}
-	return RepoRef{ID: r.ID, Owner: owner, Name: name, Base: r.Base}
+	return RepoRef{ID: r.ID, Owner: owner, Name: name, Base: r.Base, Host: repoURLHost(r.URL)}
+}
+
+// repoURLHost returns the lower-cased host (with any port) of a repo url,
+// "" when it does not parse.
+func repoURLHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Host)
+}
+
+// CheckRepoHosts refuses a file whose repos[].url names a host other than
+// webHost, the forge's web host (forge.Client.WebHost: github.com for
+// api.github.com, else the API host). Wiring calls it at start, once the
+// forge is configured; the error names the pipeline and repo id, never the
+// url.
+func (o *Owners) CheckRepoHosts(webHost string) error {
+	if o == nil {
+		return nil
+	}
+	want := strings.ToLower(webHost)
+	for _, p := range o.Pipelines {
+		for _, r := range p.Repos {
+			if h := repoURLHost(r.URL); h == "" || h != want {
+				return fmt.Errorf("pipeline %q: repo %s: url host is not the forge's web host %q", p.ID, quoteName(r.ID), webHost)
+			}
+		}
+	}
+	return nil
 }
 
 // LayerOf returns the layer of the globs that match path. The path is checked
@@ -430,6 +466,17 @@ func matchGlob(pattern, name string) bool {
 		}
 	}
 	return match[0][0]
+}
+
+// MatchGlob reports whether a repos[].paths glob matches the whole of a
+// repository path, by the rules LayerOf uses (matchGlob): one matcher for
+// owners.yaml and the forge tools, polynomial in the number of "**"
+// segments. A glob that fails CheckRepoPath(glob, true) matches nothing.
+func MatchGlob(pattern, name string) bool {
+	if CheckRepoPath(pattern, true) != nil {
+		return false
+	}
+	return matchGlob(pattern, name)
 }
 
 // hasGlobMeta reports whether a glob holds a wildcard.

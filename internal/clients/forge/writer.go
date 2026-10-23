@@ -116,7 +116,8 @@ func (w *Writer) OpenPullRequest(ctx context.Context, repo RepoRef, req PullRequ
 	if err != nil {
 		return PullRequest{}, fmt.Errorf("forge: reading base %s of %s: %w", repo.Base, repo.ID, err)
 	}
-	if err := w.checkMoved(ctx, repo, req, head); err != nil {
+	existing, err := w.checkMoved(ctx, repo, req, head)
+	if err != nil {
 		return PullRequest{}, err
 	}
 
@@ -131,15 +132,19 @@ func (w *Writer) OpenPullRequest(ctx context.Context, repo RepoRef, req PullRequ
 	if checkSHA(base.Tree.SHA) != nil {
 		return PullRequest{}, fmt.Errorf("forge: base commit of %s has no tree", repo.ID)
 	}
-	tree, err := w.writeTree(ctx, tok, repo, base.Tree.SHA, req.Files)
+	modes, err := w.fileModes(ctx, tok, repo, base.Tree.SHA, existing)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	tree, err := w.writeTree(ctx, tok, repo, base.Tree.SHA, req.Files, modes)
 	if err != nil {
 		return PullRequest{}, err
 	}
 
-	existing, err := c.branchHead(ctx, repo, req.Branch, scopeWrite)
+	branchSHA, err := c.branchHead(ctx, repo, req.Branch, scopeWrite)
 	switch {
 	case err == nil:
-		return w.reuse(ctx, tok, repo, req, existing, tree)
+		return w.reuse(ctx, tok, repo, req, branchSHA, tree)
 	case !isNotFound(err):
 		return PullRequest{}, fmt.Errorf("forge: checking branch %s of %s: %w", req.Branch, repo.ID, err)
 	}
@@ -199,14 +204,18 @@ func (w *Writer) blobAt(ctx context.Context, repo RepoRef, sha, p string) (strin
 // checkMoved returns ErrBaseMoved naming every file of req that differs
 // between req.BaseSHA and head. A new file's parent directories must be
 // directories (or absent) at BaseSHA: a tree entry under a symlink or a
-// submodule is never written.
-func (w *Writer) checkMoved(ctx context.Context, repo RepoRef, req PullRequestRequest, head string) error {
-	var moved []string
+// submodule is never written. It returns the paths of req that exist at
+// BaseSHA.
+func (w *Writer) checkMoved(ctx context.Context, repo RepoRef, req PullRequestRequest, head string) ([]string, error) {
+	var moved, existing []string
 	dirs := map[string]bool{}
 	for _, f := range req.Files {
 		at, err := w.blobAt(ctx, repo, req.BaseSHA, f.Path)
 		if err != nil {
-			return fmt.Errorf("forge: reading %s at the base commit: %w", f.Path, err)
+			return nil, fmt.Errorf("forge: reading %s at the base commit: %w", f.Path, err)
+		}
+		if at != "" {
+			existing = append(existing, f.Path)
 		}
 		if at == "" {
 			for d := path.Dir(f.Path); d != "."; d = path.Dir(d) {
@@ -218,14 +227,14 @@ func (w *Writer) checkMoved(ctx context.Context, repo RepoRef, req PullRequestRe
 		}
 		now, err := w.blobAt(ctx, repo, head, f.Path)
 		if err != nil {
-			return fmt.Errorf("forge: reading %s at the base head: %w", f.Path, err)
+			return nil, fmt.Errorf("forge: reading %s at the base head: %w", f.Path, err)
 		}
 		if now != at {
 			moved = append(moved, f.Path)
 		}
 	}
 	if len(moved) > 0 {
-		return fmt.Errorf("%w: %s changed on %s since %.7s; nothing was written", ErrBaseMoved, strings.Join(moved, ", "), repo.Base, req.BaseSHA)
+		return nil, fmt.Errorf("%w: %s changed on %s since %.7s; nothing was written", ErrBaseMoved, strings.Join(moved, ", "), repo.Base, req.BaseSHA)
 	}
 	ds := make([]string, 0, len(dirs))
 	for d := range dirs {
@@ -243,17 +252,97 @@ func (w *Writer) checkMoved(ctx context.Context, repo RepoRef, req PullRequestRe
 		case isNotFound(err):
 			absent[d] = true
 		case err != nil:
-			return fmt.Errorf("forge: reading directory %s at the base commit: %w", d, err)
+			return nil, fmt.Errorf("forge: reading directory %s at the base commit: %w", d, err)
 		case !dir:
-			return fmt.Errorf("%w: %s is not a directory at the base commit", ErrNotRegularFile, d)
+			return nil, fmt.Errorf("%w: %s is not a directory at the base commit", ErrNotRegularFile, d)
 		}
 	}
-	return nil
+	return existing, nil
+}
+
+// Git file modes the writer keeps or writes.
+const (
+	modeFile = "100644"
+	modeExec = "100755"
+)
+
+// treeEntry is one entry of a non-recursive tree listing.
+type treeEntry struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+}
+
+// fileModes returns the git mode of each existing path in the tree rootTree
+// (the base commit's), walking one directory listing per level: a fix keeps
+// an executable file executable (100755) and every other file 100644. The
+// contents API does not report the mode, and a recursive listing can be cut
+// on a large repository, so the walk reads only the directories on the
+// paths. A path whose entry is missing, or not a regular file, is refused:
+// the writer never guesses a mode.
+func (w *Writer) fileModes(ctx context.Context, tok netsec.Secret, repo RepoRef, rootTree string, paths []string) (map[string]string, error) {
+	modes := make(map[string]string, len(paths))
+	listings := map[string][]treeEntry{}
+	list := func(sha string) ([]treeEntry, error) {
+		if l, ok := listings[sha]; ok {
+			return l, nil
+		}
+		if checkSHA(sha) != nil {
+			return nil, fmt.Errorf("forge: a tree of %s has no valid id", repo.ID)
+		}
+		var out struct {
+			Tree      []treeEntry `json:"tree"`
+			Truncated bool        `json:"truncated"`
+		}
+		if err := w.c.do(ctx, tok, request{ep: epTree, method: http.MethodGet, path: repoPath(repo) + "/git/trees/" + sha}, &out); err != nil {
+			return nil, fmt.Errorf("forge: reading a tree of %s: %w", repo.ID, err)
+		}
+		if out.Truncated {
+			return nil, fmt.Errorf("forge: a directory listing of %s was cut; the file modes cannot be read", repo.ID)
+		}
+		listings[sha] = out.Tree
+		return out.Tree, nil
+	}
+	for _, p := range paths {
+		cur := rootTree
+		segs := strings.Split(p, "/")
+		for i, seg := range segs {
+			entries, err := list(cur)
+			if err != nil {
+				return nil, err
+			}
+			var e *treeEntry
+			for j := range entries {
+				if entries[j].Path == seg {
+					e = &entries[j]
+					break
+				}
+			}
+			if e == nil {
+				return nil, fmt.Errorf("forge: %s is not in the base tree of %s", p, repo.ID)
+			}
+			if i < len(segs)-1 {
+				if e.Type != "tree" {
+					return nil, fmt.Errorf("%w: a parent of %s is not a directory", ErrNotRegularFile, p)
+				}
+				cur = e.SHA
+				continue
+			}
+			if e.Type != "blob" || (e.Mode != modeFile && e.Mode != modeExec) {
+				return nil, fmt.Errorf("%w: %s", ErrNotRegularFile, p)
+			}
+			modes[p] = e.Mode
+		}
+	}
+	return modes, nil
 }
 
 // writeTree creates one blob per file and one tree on baseTree. Blobs and
 // trees are content-addressed objects no ref points at yet.
-func (w *Writer) writeTree(ctx context.Context, tok netsec.Secret, repo RepoRef, baseTree string, files []FileChange) (string, error) {
+// modes holds the mode of each file that exists in the base tree (fileModes);
+// a new file is 100644.
+func (w *Writer) writeTree(ctx context.Context, tok netsec.Secret, repo RepoRef, baseTree string, files []FileChange, modes map[string]string) (string, error) {
 	c := w.c
 	entries := make([]map[string]string, 0, len(files))
 	for _, f := range files {
@@ -267,7 +356,11 @@ func (w *Writer) writeTree(ctx context.Context, tok netsec.Secret, repo RepoRef,
 		if blob.SHA != BlobSHA(f.Content) {
 			return "", fmt.Errorf("forge: the blob GitHub stored for %s is not the content sent", f.Path)
 		}
-		entries = append(entries, map[string]string{"path": f.Path, "mode": "100644", "type": "blob", "sha": blob.SHA})
+		mode := modeFile
+		if modes[f.Path] == modeExec {
+			mode = modeExec
+		}
+		entries = append(entries, map[string]string{"path": f.Path, "mode": mode, "type": "blob", "sha": blob.SHA})
 	}
 	var tree struct {
 		SHA string `json:"sha"`
@@ -282,8 +375,14 @@ func (w *Writer) writeTree(ctx context.Context, tok netsec.Secret, repo RepoRef,
 	return tree.SHA, nil
 }
 
-// reuse handles a branch that exists already: it is reused only when its
-// head commit is exactly this change (parent BaseSHA, the same tree).
+// reuse handles a branch that exists already. It is reused only when its
+// head commit is exactly this change (parent BaseSHA, the same tree) and is
+// one the App wrote: author and committer are the App's bot and GitHub
+// verified the commit (a commit made through the API without an author is
+// signed by GitHub; one that only names the bot is not). An open PR on it is
+// returned only when the App opened it. Anyone else's branch or PR, even
+// with the same content, is ErrBranchExists: its title, body and later
+// pushes are not Piperoom's.
 func (w *Writer) reuse(ctx context.Context, tok netsec.Secret, repo RepoRef, req PullRequestRequest, headSHA, tree string) (PullRequest, error) {
 	c := w.c
 	var cm struct {
@@ -293,12 +392,28 @@ func (w *Writer) reuse(ctx context.Context, tok netsec.Secret, repo RepoRef, req
 		Parents []struct {
 			SHA string `json:"sha"`
 		} `json:"parents"`
+		Author struct {
+			Name string `json:"name"`
+		} `json:"author"`
+		Committer struct {
+			Name string `json:"name"`
+		} `json:"committer"`
+		Verification struct {
+			Verified bool `json:"verified"`
+		} `json:"verification"`
 	}
 	if err := c.do(ctx, tok, request{ep: epCommit, method: http.MethodGet, path: repoPath(repo) + "/git/commits/" + headSHA}, &cm); err != nil {
 		return PullRequest{}, fmt.Errorf("forge: reading branch %s of %s: %w", req.Branch, repo.ID, err)
 	}
 	if len(cm.Parents) != 1 || cm.Parents[0].SHA != req.BaseSHA || cm.Tree.SHA != tree {
 		return PullRequest{}, fmt.Errorf("%w: %s in %s", ErrBranchExists, req.Branch, repo.ID)
+	}
+	bot, err := c.botLogin(ctx)
+	if err != nil {
+		return PullRequest{}, err
+	}
+	if cm.Author.Name != bot || cm.Committer.Name != bot || !cm.Verification.Verified {
+		return PullRequest{}, fmt.Errorf("%w: %s in %s holds a commit the App did not write", ErrBranchExists, req.Branch, repo.ID)
 	}
 	var open []pullAnswer
 	q := url.Values{"head": {repo.Owner + ":" + req.Branch}, "base": {repo.Base}, "state": {"open"}}
@@ -307,6 +422,10 @@ func (w *Writer) reuse(ctx context.Context, tok netsec.Secret, repo RepoRef, req
 	}
 	for _, a := range open {
 		if a.Head.Ref == req.Branch {
+			if a.User.Login != bot || a.User.Type != "Bot" || a.Head.SHA != headSHA ||
+				a.Head.Repo == nil || !strings.EqualFold(a.Head.Repo.FullName, repo.Owner+"/"+repo.Name) {
+				return PullRequest{}, fmt.Errorf("%w: an open pull request on %s in %s was not opened by the App", ErrBranchExists, req.Branch, repo.ID)
+			}
 			pr, err := c.pull(repo, a)
 			if err != nil {
 				return PullRequest{}, err

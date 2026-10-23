@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"piperoom/internal/owners"
 )
 
 func TestFixBranch(t *testing.T) {
@@ -109,5 +111,41 @@ func TestBlobSHA(t *testing.T) {
 func TestFileChangeString(t *testing.T) {
 	if s := (FileChange{Path: "a", Content: []byte("secret=1")}).String(); strings.Contains(s, "secret") {
 		t.Fatalf("content printed: %s", s)
+	}
+}
+
+// The client and owners.yaml apply one path rule set: the same inputs give
+// the same answer from forge.CheckRepoPath and owners.CheckRepoPath, and a
+// refusal from either matches both packages' ErrRepoPathDenied. Before they
+// were two sets, and the client let through .git* files and glob characters
+// that owners.yaml refuses.
+func TestCheckRepoPathAgreesWithOwners(t *testing.T) {
+	cases := []struct {
+		p    string
+		glob bool
+		ok   bool
+	}{
+		{"connectors/.gitkeep", false, false},
+		{"connectors/.github-x.json", false, false},
+		{"connectors/a*b.json", false, false},
+		{"connectors/a?b.json", false, false},
+		{"connectors/[ab].json", false, false},
+		{".gitkeep", false, false},
+		{"connectors/orders-pg.json", false, true},
+		{"docker/connect/Dockerfile", false, true},
+		{"src/main/resources/application.yml", false, true},
+		{"docs/github-actions.md", false, true},
+		{"connectors/*.json", true, true},
+		{"src/**/application*.yml", true, true},
+		{"connectors/.git*", true, false},
+	}
+	for _, c := range cases {
+		ferr, oerr := CheckRepoPath(c.p, c.glob), owners.CheckRepoPath(c.p, c.glob)
+		if (ferr == nil) != c.ok || (oerr == nil) != c.ok {
+			t.Errorf("%q (glob %v): forge %v, owners %v, want ok %v", c.p, c.glob, ferr, oerr, c.ok)
+		}
+		if ferr != nil && (!errors.Is(ferr, ErrRepoPathDenied) || !errors.Is(ferr, owners.ErrRepoPathDenied)) {
+			t.Errorf("%q: forge error does not wrap ErrRepoPathDenied: %v", c.p, ferr)
+		}
 	}
 }

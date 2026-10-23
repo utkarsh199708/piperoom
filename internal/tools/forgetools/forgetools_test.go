@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"piperoom/internal/clients/forge"
 	"piperoom/internal/clients/forge/fake"
@@ -322,6 +323,8 @@ func (o opened) OpenedHead(_ context.Context, _ string, n int) (string, bool) {
 	return s, ok
 }
 
+func (o opened) AnyOpened(context.Context, string) bool { return len(o) > 0 }
+
 func TestPRStatus(t *testing.T) {
 	f := fake.New()
 	base := f.AddRepo(ref, forge.RepoInfo{}, map[string]string{"docker/connect/Dockerfile": "FROM a\n"})
@@ -415,5 +418,115 @@ func TestLayerOf(t *testing.T) {
 	}
 	if !matchGlob("**/x.yml", "x.yml") || !matchGlob("a/**/b", "a/b") || matchGlob("a/*", "a/b/c") {
 		t.Error("** semantics")
+	}
+}
+
+// A glob of many "**" segments against a long path that does not match is
+// cheap: the owners matcher is a table (len(glob) * len(path)), where the old
+// backtracking one took exponential time on a path the model chose.
+func TestLayerOfManyDoubleStarsIsFast(t *testing.T) {
+	glob := strings.Repeat("**/", 30) + "x.yml"
+	p := strings.Repeat("a/", 60) + "y.yml"
+	r := Repo{Ref: forge.RepoRef{ID: "app"}, Paths: []RepoPath{{Glob: glob, Layer: "consumer"}}}
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := r.LayerOf(p)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrPathNotListed) {
+			t.Fatalf("LayerOf = %v, want ErrPathNotListed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("LayerOf with many ** segments did not finish in 5s")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("LayerOf took %v", d)
+	}
+	if got, err := r.LayerOf(strings.Repeat("a/", 60) + "x.yml"); err != nil || got != "consumer" {
+		t.Errorf("matching path: %q %v", got, err)
+	}
+}
+
+// pr_status reads only the room's own PRs: a PR from a fork's piperoom/
+// branch is refused, and so is a same-repo piperoom/ PR the room did not
+// record once it recorded any.
+func TestPRStatusOnlyOwnPRs(t *testing.T) {
+	f := fake.New()
+	base := f.AddRepo(ref, forge.RepoInfo{}, map[string]string{"docker/connect/Dockerfile": "FROM a\n"})
+	ctx := context.Background()
+	open := func(proposal string) forge.PullRequest {
+		pr, err := f.OpenPullRequest(ctx, ref, forge.PullRequestRequest{BaseSHA: base, Branch: forge.FixBranch("r_1", proposal, 0), Title: "t", CommitMessage: "m",
+			Files: []forge.FileChange{{Path: "docker/connect/Dockerfile", Content: []byte("FROM " + proposal + "\n")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pr
+	}
+	ours, other := open("p_1"), open("p_2")
+	if ours.HeadRepo != "acme/connect-config" {
+		t.Fatalf("fake HeadRepo = %q", ours.HeadRepo)
+	}
+
+	// No record of openings: any same-repo piperoom/ PR, but never a fork's.
+	reg := tools.NewReadOnlyRegistry()
+	if err := Register(reg, Deps{Forge: f, Owners: testOwners(), Repos: testRepos()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, reg, scoped(), NamePRStatus, `{"repo":"connect-config","number":2}`); err != nil {
+		t.Fatalf("same-repo PR without a record: %v", err)
+	}
+	_ = f.SetHeadRepo(ref, other.Number, "mallory/connect-config")
+	if _, err := run(t, reg, scoped(), NamePRStatus, `{"repo":"connect-config","number":2}`); !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("fork PR: %v", err)
+	}
+	_ = f.SetHeadRepo(ref, other.Number, "")
+	if _, err := run(t, reg, scoped(), NamePRStatus, `{"repo":"connect-config","number":2}`); !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("PR from a deleted fork: %v", err)
+	}
+	_ = f.SetHeadRepo(ref, other.Number, "acme/connect-config")
+
+	// With a record: only the recorded PR.
+	reg2 := tools.NewReadOnlyRegistry()
+	if err := Register(reg2, Deps{Forge: f, Owners: testOwners(), Repos: testRepos(), Opened: opened{ours.Number: ours.HeadSHA}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, reg2, scoped(), NamePRStatus, `{"repo":"connect-config","number":1}`); err != nil {
+		t.Fatalf("recorded PR: %v", err)
+	}
+	if _, err := run(t, reg2, scoped(), NamePRStatus, `{"repo":"connect-config","number":2}`); !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("unrecorded PR with a record: %v", err)
+	}
+}
+
+// repo_read_file reads only at a base_sha the tools returned or at the base
+// head: another commit of the repository (a PR's head, old history) is
+// refused before the file is read.
+func TestReadFileOnlyReturnedSHAs(t *testing.T) {
+	f, base, reg, c := setup(t, map[string]string{"connectors/orders-pg.json": "{}\n"})
+	pr, err := f.OpenPullRequest(context.Background(), ref, forge.PullRequestRequest{BaseSHA: base, Branch: forge.FixBranch("r_1", "p_1", 0), Title: "t", CommitMessage: "m",
+		Files: []forge.FileChange{{Path: "connectors/orders-pg.json", Content: []byte("{\"evil\":1}\n")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := c.n.Load()
+	in := fmt.Sprintf(`{"repo":"connect-config","path":"connectors/orders-pg.json","sha":"%s"}`, pr.HeadSHA)
+	if _, err := run(t, reg, scoped(), NameReadFile, in); !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("PR head sha: %v", err)
+	}
+	if n := c.n.Load() - before; n != 1 { // the base head check only
+		t.Fatalf("%d forge calls for a refused sha, want 1 (BaseHead)", n)
+	}
+	// The base head is accepted, and once returned it stays readable after
+	// the base moves on.
+	in = fmt.Sprintf(`{"repo":"connect-config","path":"connectors/orders-pg.json","sha":"%s"}`, base)
+	if _, err := run(t, reg, scoped(), NameReadFile, in); err != nil {
+		t.Fatalf("base head: %v", err)
+	}
+	f.Commit(ref, "main", map[string]string{"connectors/orders-pg.json": "{\"v\":2}\n"})
+	if _, err := run(t, reg, scoped(), NameReadFile, in); err != nil {
+		t.Fatalf("returned base_sha after the base moved: %v", err)
 	}
 }

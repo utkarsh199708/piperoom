@@ -224,6 +224,19 @@ func (f *Forge) PushToPull(ref forge.RepoRef, number int, set map[string]string)
 	return nil
 }
 
+// SetHeadRepo sets the "owner/name" the head of pull request number is in,
+// as for a pull request from a fork.
+func (f *Forge) SetHeadRepo(ref forge.RepoRef, number int, headRepo string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, err := f.findPull(ref, number)
+	if err != nil {
+		return err
+	}
+	p.pr.HeadRepo = headRepo
+	return nil
+}
+
 // SetChecks sets the folded checks of pull request number.
 func (f *Forge) SetChecks(ref forge.RepoRef, number int, c forge.PullRequestChecks) error {
 	f.mu.Lock()
@@ -407,7 +420,7 @@ func (f *Forge) OpenPullRequest(_ context.Context, ref forge.RepoRef, req forge.
 	n := len(r.pulls) + 1
 	p := &pull{base: ref.Base, pr: forge.PullRequest{
 		Repo: ref.ID, Number: n, URL: "https://" + host + "/" + key(ref) + "/pull/" + strconv.Itoa(n),
-		State: forge.PRStateOpen, HeadRef: req.Branch, HeadSHA: r.branches[req.Branch],
+		State: forge.PRStateOpen, HeadRef: req.Branch, HeadSHA: r.branches[req.Branch], HeadRepo: key(ref),
 		Checks: forge.PullRequestChecks{State: forge.ChecksNone},
 	}}
 	r.pulls = append(r.pulls, p)

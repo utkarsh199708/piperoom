@@ -46,7 +46,7 @@ func TestReposLoadAndLayerOf(t *testing.T) {
 	if !ok || !r.Draft || r.PublicOK || r.Base != "main" {
 		t.Fatalf("Repo(connect-config) = %+v, %v", r, ok)
 	}
-	if got, want := r.Ref(), (RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main"}); got != want {
+	if got, want := r.Ref(), (RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main", Host: "github.com"}); got != want {
 		t.Fatalf("Ref = %+v, want %+v", got, want)
 	}
 	r2, _ := p.Repo("orders-consumer")
@@ -481,5 +481,34 @@ pipelines:
 	var nilO *Owners
 	if err := nilO.ValidateAutoApproveDeferred(nil, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Every repos[].url must be on the forge's web host: CheckRepoHosts refuses
+// another host (here the GHES url of orders-consumer against github.com), and
+// Ref records the host so the forge client can refuse it on every call too.
+func TestCheckRepoHosts(t *testing.T) {
+	o, err := Load(writeTemp(t, reposYAML(goodRepos, "")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	err = o.CheckRepoHosts("github.com")
+	if err == nil || !strings.Contains(err.Error(), "orders-consumer") || strings.Contains(err.Error(), "ghe.example.com") {
+		t.Fatalf("CheckRepoHosts(github.com) = %v, want a refusal naming the repo id and not the url", err)
+	}
+	p, _ := o.Pipeline("orders")
+	r, _ := p.Repo("orders-consumer")
+	if h := r.Ref().Host; h != "ghe.example.com:8443" {
+		t.Fatalf("Ref().Host = %q", h)
+	}
+	if err := (&Owners{}).CheckRepoHosts("github.com"); err != nil {
+		t.Fatalf("no repos: %v", err)
+	}
+	one := &Owners{Pipelines: []Pipeline{{ID: "p", Repos: []Repo{{ID: "a", URL: "https://GitHub.com/acme/a"}}}}}
+	if err := one.CheckRepoHosts("github.com"); err != nil {
+		t.Fatalf("same host, other case: %v", err)
+	}
+	if err := one.CheckRepoHosts("ghe.example.com"); err == nil {
+		t.Fatal("github.com url accepted for a GHES forge")
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -127,6 +128,10 @@ type Client struct {
 	hc             *http.Client
 	now            func() time.Time
 	tok            tokens
+	bot            struct {
+		mu    sync.Mutex
+		login string
+	}
 }
 
 var _ ForgeReader = (*Client)(nil)
@@ -233,6 +238,7 @@ const (
 	epNewRef
 	epNewPull
 	epDeleteOwnRef
+	epApp
 )
 
 // seg is one path segment GitHub names a repository by.
@@ -261,6 +267,7 @@ var allow = map[endpoint]struct {
 	epNewCommit:    {http.MethodPost, regexp.MustCompile(`^/repos/` + seg + `/` + seg + `/git/commits$`)},
 	epNewRef:       {http.MethodPost, regexp.MustCompile(`^/repos/` + seg + `/` + seg + `/git/refs$`)},
 	epNewPull:      {http.MethodPost, regexp.MustCompile(`^/repos/` + seg + `/` + seg + `/pulls$`)},
+	epApp:          {http.MethodGet, regexp.MustCompile(`^/app$`)},
 	epDeleteOwnRef: {http.MethodDelete, regexp.MustCompile(`^/repos/` + seg + `/` + seg + `/git/refs/heads/piperoom/[^?]+$`)},
 }
 

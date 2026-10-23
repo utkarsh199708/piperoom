@@ -52,6 +52,12 @@ const (
 
 var tRepo = RepoRef{ID: "connect-config", Owner: tOwner, Name: tName, Base: "main"}
 
+// tSlug is the test App's slug; its bot user is tBot.
+const (
+	tSlug = "piperoom-test"
+	tBot  = tSlug + "[bot]"
+)
+
 type ghReq struct {
 	Method, Path, Query, Auth string
 	Body                      []byte
@@ -66,6 +72,15 @@ type ghCommit struct {
 	parent string
 	tree   string
 	files  map[string][]byte
+	// bot: written through the API with an installation token (author and
+	// committer are the App's bot); otherwise a person's push.
+	bot bool
+}
+
+// ghDir is a directory of a tree, for one-level tree listings.
+type ghDir struct {
+	files  map[string][]byte
+	prefix string // "" for the root, else "a/b/"
 }
 
 type ghPull struct {
@@ -76,6 +91,9 @@ type ghPull struct {
 	mergeSHA         string
 	headRef, headSHA string
 	base             string
+	// user and userType are the PR's author; headRepo the head's
+	// owner/name ("" means the repository itself).
+	user, userType, headRepo string
 }
 
 type ghServer struct {
@@ -93,6 +111,8 @@ type ghServer struct {
 	blobs    map[string][]byte
 	branches map[string]string
 	special  map[string]string // path -> symlink | submodule | symlink-to:<target>
+	modes    map[string]string // path -> git mode other than 100644 (100755)
+	dirs     map[string]ghDir  // directory tree id -> directory
 	pulls    []*ghPull
 	runs     []map[string]any
 	statuses []map[string]any
@@ -105,7 +125,7 @@ func newGH(t *testing.T, files map[string]string) (*ghServer, string) {
 	t.Helper()
 	g := &ghServer{t: t, now: time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC), tokens: map[string]mintedToken{}, ttl: time.Hour,
 		commits: map[string]*ghCommit{}, trees: map[string]map[string][]byte{}, blobs: map[string][]byte{},
-		branches: map[string]string{}, special: map[string]string{},
+		branches: map[string]string{}, special: map[string]string{}, modes: map[string]string{}, dirs: map[string]ghDir{},
 		repoJSON: map[string]any{"visibility": "private", "private": true, "archived": false, "default_branch": "main"}}
 	fs := map[string][]byte{}
 	for p, c := range files {
@@ -280,6 +300,14 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, map[string]any{"token": tok, "expires_at": g.now.Add(g.ttl).Format(time.RFC3339), "permissions": in.Permissions, "repository_selection": "selected"})
 		return
 	}
+	if r.Method == http.MethodGet && p == "/app" {
+		if err := g.verifyJWT(auth); err != nil {
+			ghErr(w, http.StatusUnauthorized, "A JSON web token could not be decoded")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": tAppID, "slug": tSlug, "name": "Piperoom test"})
+		return
+	}
 	mt, ok := g.tokens[auth]
 	if !ok {
 		ghErr(w, http.StatusUnauthorized, "Bad credentials")
@@ -308,6 +336,19 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ref": "refs/heads/" + b, "object": map[string]string{"sha": sha, "type": "commit"}})
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/contents/"):
 		g.contents(w, strings.TrimPrefix(rest, "/contents/"), r.URL.Query().Get("ref"))
+	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/git/trees/") && r.URL.Query().Get("recursive") == "":
+		id := strings.TrimPrefix(rest, "/git/trees/")
+		d, ok := g.dirs[id]
+		if c, isCommit := g.commits[id]; isCommit {
+			d, ok = ghDir{files: c.files}, true
+		} else if fs, isTree := g.trees[id]; isTree {
+			d, ok = ghDir{files: fs}, true
+		}
+		if !ok {
+			ghErr(w, 404, "Not Found")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"sha": id, "tree": g.level(d), "truncated": false})
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/git/trees/"):
 		c, ok := g.commits[strings.TrimPrefix(rest, "/git/trees/")]
 		if !ok {
@@ -326,6 +367,8 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 				mode = "120000"
 			} else if k == "submodule" {
 				mode = "160000"
+			} else if m := g.modes[p]; m != "" {
+				mode = m
 			}
 			tree = append(tree, map[string]any{"path": p, "mode": mode, "type": "blob", "sha": BlobSHA(c.files[p]), "size": len(c.files[p])})
 		}
@@ -340,7 +383,13 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 		if c.parent != "" {
 			parents = append(parents, map[string]string{"sha": c.parent})
 		}
-		writeJSON(w, 200, map[string]any{"sha": strings.TrimPrefix(rest, "/git/commits/"), "tree": map[string]string{"sha": c.tree}, "parents": parents})
+		who := "Mallory"
+		if c.bot {
+			who = tBot
+		}
+		person := map[string]string{"name": who, "email": who + "@users.noreply.github.com"}
+		writeJSON(w, 200, map[string]any{"sha": strings.TrimPrefix(rest, "/git/commits/"), "tree": map[string]string{"sha": c.tree}, "parents": parents,
+			"author": person, "committer": person, "verification": map[string]any{"verified": true, "reason": "valid"}})
 	case r.Method == http.MethodPost && rest == "/git/blobs":
 		var in struct{ Content, Encoding string }
 		_ = json.Unmarshal(body, &in)
@@ -368,7 +417,7 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, e := range in.Tree {
 			b, ok := g.blobs[e.SHA]
-			if !ok || e.Mode != "100644" || e.Type != "blob" {
+			if !ok || (e.Mode != "100644" && e.Mode != "100755") || e.Type != "blob" {
 				ghErr(w, 422, "bad tree entry")
 				return
 			}
@@ -389,7 +438,9 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 			ghErr(w, 422, "bad commit")
 			return
 		}
-		writeJSON(w, 201, map[string]string{"sha": g.addCommit(in.Parents[0], fs)})
+		sha := g.addCommit(in.Parents[0], fs)
+		g.commits[sha].bot = true
+		writeJSON(w, 201, map[string]string{"sha": sha})
 	case r.Method == http.MethodPost && rest == "/git/refs":
 		var in struct{ Ref, SHA string }
 		_ = json.Unmarshal(body, &in)
@@ -432,7 +483,7 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 			ghErr(w, 422, "Validation Failed")
 			return
 		}
-		pr := &ghPull{number: len(g.pulls) + 1, state: "open", headRef: in.Head, headSHA: sha, base: in.Base}
+		pr := &ghPull{number: len(g.pulls) + 1, state: "open", headRef: in.Head, headSHA: sha, base: in.Base, user: tBot, userType: "Bot"}
 		g.pulls = append(g.pulls, pr)
 		writeJSON(w, 201, pullJSON(pr))
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "/pulls/"):
@@ -449,26 +500,91 @@ func (g *ghServer) serve(w http.ResponseWriter, r *http.Request) {
 			ghErr(w, 403, "Resource not accessible by integration")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"total_count": len(g.runs), "check_runs": g.runs})
+		writeJSON(w, 200, map[string]any{"total_count": len(g.runs), "check_runs": page(g.runs, r)})
 	case r.Method == http.MethodGet && strings.HasSuffix(rest, "/status"):
 		state := "pending"
 		if len(g.statuses) > 0 {
 			state = "success"
 		}
-		writeJSON(w, 200, map[string]any{"state": state, "total_count": len(g.statuses), "statuses": g.statuses})
+		writeJSON(w, 200, map[string]any{"state": state, "total_count": len(g.statuses), "statuses": page(g.statuses, r)})
 	default:
 		ghErr(w, 404, "Not Found")
 	}
 }
 
+// page returns the page of all that r asks for (per_page default 30, at
+// most 100; page from 1), as GitHub pages a list.
+func page(all []map[string]any, r *http.Request) []map[string]any {
+	per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	if per <= 0 {
+		per = 30
+	}
+	per = min(per, 100)
+	n, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	n = max(n, 1)
+	from := min((n-1)*per, len(all))
+	out := all[from:min(from+per, len(all))]
+	if out == nil {
+		out = []map[string]any{}
+	}
+	return out
+}
+
 func pullJSON(pr *ghPull) map[string]any {
+	headRepo, user, userType := pr.headRepo, pr.user, pr.userType
+	if headRepo == "" {
+		headRepo = tOwner + "/" + tName
+	}
+	if user == "" {
+		user, userType = "mallory", "User"
+	}
 	m := map[string]any{"number": pr.number, "state": pr.state, "merged": pr.merged, "merged_at": nil,
 		"merge_commit_sha": pr.mergeSHA, "html_url": "https://evil.example/phish",
-		"head": map[string]string{"ref": pr.headRef, "sha": pr.headSHA}, "base": map[string]string{"ref": pr.base}}
+		"head": map[string]any{"ref": pr.headRef, "sha": pr.headSHA, "repo": map[string]string{"full_name": headRepo}}, "base": map[string]string{"ref": pr.base},
+		"user": map[string]string{"login": user, "type": userType}}
 	if pr.mergedAt != "" {
 		m["merged_at"] = pr.mergedAt
 	}
 	return m
+}
+
+// level lists one directory of d: its files with their modes, and its
+// subdirectories as trees with ids registered in g.dirs.
+func (g *ghServer) level(d ghDir) []map[string]any {
+	seen := map[string]bool{}
+	out := []map[string]any{}
+	ps := make([]string, 0, len(d.files))
+	for p := range d.files {
+		ps = append(ps, p)
+	}
+	sort.Strings(ps)
+	for _, p := range ps {
+		rel, ok := strings.CutPrefix(p, d.prefix)
+		if !ok {
+			continue
+		}
+		name, _, isDir := strings.Cut(rel, "/")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if isDir {
+			id := fakeHash("dir", treeHash(d.files), d.prefix+name)
+			g.dirs[id] = ghDir{files: d.files, prefix: d.prefix + name + "/"}
+			out = append(out, map[string]any{"path": name, "mode": "040000", "type": "tree", "sha": id})
+			continue
+		}
+		mode := "100644"
+		if k := g.special[p]; k == "symlink" || strings.HasPrefix(k, "symlink-to:") {
+			mode = "120000"
+		} else if k == "submodule" {
+			mode = "160000"
+		} else if m := g.modes[p]; m != "" {
+			mode = m
+		}
+		out = append(out, map[string]any{"path": name, "mode": mode, "type": "blob", "sha": BlobSHA(d.files[p]), "size": len(d.files[p])})
+	}
+	return out
 }
 
 func (g *ghServer) contents(w http.ResponseWriter, p, ref string) {
@@ -520,6 +636,7 @@ var allowedRequests = []struct {
 	re     *regexp.Regexp
 }{
 	{"POST", regexp.MustCompile(`^/app/installations/[0-9]+/access_tokens$`)},
+	{"GET", regexp.MustCompile(`^/app$`)},
 	{"GET", regexp.MustCompile(`^/repos/[^/]+/[^/]+$`)},
 	{"GET", regexp.MustCompile(`^/repos/[^/]+/[^/]+/git/ref/heads/.+$`)},
 	{"GET", regexp.MustCompile(`^/repos/[^/]+/[^/]+/contents/.+$`)},

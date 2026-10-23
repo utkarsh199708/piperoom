@@ -9,13 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"piperoom/internal/owners"
 )
 
 // RepoRef is one repository of a pipeline's owners.yaml repos: block, resolved
@@ -26,6 +25,9 @@ type RepoRef struct {
 	Owner string `json:"owner"` // from repos[].url: https://<host>/<owner>/<name>
 	Name  string `json:"name"`
 	Base  string `json:"base"` // repos[].base, the branch PRs target
+	// Host is the web host of repos[].url (owners.Repo.Ref fills it). When
+	// set, the client refuses the repo unless it is the forge's WebHost.
+	Host string `json:"host,omitempty"`
 }
 
 // RepoInfo is what a fix PR needs to know about the repository itself. (Q7)
@@ -82,14 +84,16 @@ type ForgeWriter interface {
 	//     the base head now (a file that did not exist at BaseSHA exists now,
 	//     or the reverse). Nothing is written.
 	//   - A branch req.Branch that already holds exactly this change (same
-	//     parent, same tree) is reused, and an open pull request on it is
-	//     returned instead of a new one, so a retried call is idempotent;
-	//     a branch with other content is ErrBranchExists.
+	//     parent, same tree) in a commit the App wrote is reused, and an open
+	//     pull request on it the App opened is returned instead of a new one,
+	//     so a retried call is idempotent; a branch with other content, or a
+	//     branch or PR someone else made, is ErrBranchExists.
 	OpenPullRequest(ctx context.Context, repo RepoRef, req PullRequestRequest) (PullRequest, error)
 }
 
 // PullRequestRequest is one fix PR. Files hold the whole new content of each
-// file (mode 100644 always); the action computes them from the approved
+// file (an existing file keeps its mode, 100644 or 100755; a new file is
+// 100644); the action computes them from the approved
 // edits (docs/design/fix-pr.md §6.1). (Q7)
 type PullRequestRequest struct {
 	BaseSHA       string
@@ -113,12 +117,16 @@ func (f FileChange) String() string { return fmt.Sprintf("{%s %d bytes}", f.Path
 // PullRequest is the state of one pull request. Checks.Failed holds check
 // names written by the repository's CI: untrusted, redacted, cut. (Q7)
 type PullRequest struct {
-	Repo     string            `json:"repo"` // RepoRef.ID
-	Number   int               `json:"number"`
-	URL      string            `json:"url"`   // the html URL on the forge's web host
-	State    string            `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
-	HeadRef  string            `json:"head_ref"`
-	HeadSHA  string            `json:"head_sha"`
+	Repo    string `json:"repo"` // RepoRef.ID
+	Number  int    `json:"number"`
+	URL     string `json:"url"`   // the html URL on the forge's web host
+	State   string `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
+	HeadRef string `json:"head_ref"`
+	HeadSHA string `json:"head_sha"`
+	// HeadRepo is the "owner/name" of the repository the head branch is in:
+	// the PR's own repository, or a fork's. "" when GitHub no longer knows
+	// it (a deleted fork).
+	HeadRepo string            `json:"head_repo"`
 	MergeSHA string            `json:"merge_sha,omitempty"`
 	MergedAt time.Time         `json:"merged_at,omitzero"`
 	Checks   PullRequestChecks `json:"checks"`
@@ -150,7 +158,7 @@ const (
 	MaxFixParamsBytes  = 64 << 10  // a step's params (edits, title, body)
 	MaxFixDiffBytes    = 128 << 10 // a step's unified diff; a bigger one is refused, never cut
 	MaxRepoListEntries = 1000
-	MaxRepoPathBytes   = 255
+	MaxRepoPathBytes   = owners.MaxRepoPathBytes
 )
 
 // Errors of item 6. ErrNotFound is clients.ErrNotFound (a 404 matches it).
@@ -159,7 +167,7 @@ var (
 	ErrBranchExists     = errors.New("clients: the fix branch exists with other content")
 	ErrNotRegularFile   = errors.New("clients: not a regular file")
 	ErrRepoFileTooLarge = errors.New("clients: repository file too large")
-	ErrRepoPathDenied   = errors.New("clients: repository path is not allowed")
+	ErrRepoPathDenied   = owners.ErrRepoPathDenied // one error for both rule sites
 )
 
 // FixBranchPrefix starts every branch a ForgeWriter writes.
@@ -192,69 +200,11 @@ func ValidBranchName(s string) bool {
 	return true
 }
 
-// deniedDirs are directories nothing under which is ever read or written by
-// the PR fix, at any depth: CI and repository governance (design §6.2 rule 4).
-var deniedDirs = map[string]bool{
-	".github": true, ".git": true, ".gitlab": true, ".circleci": true, ".buildkite": true,
-	".azure-pipelines": true, ".woodpecker": true, ".husky": true, ".devcontainer": true,
-}
-
-// deniedFiles are file names refused in any directory (design §6.2 rule 4).
-var deniedFiles = map[string]bool{
-	"codeowners": true, ".gitmodules": true, ".gitattributes": true, ".gitignore": true,
-	".gitlab-ci.yml": true, ".travis.yml": true, ".drone.yml": true, "jenkinsfile": true,
-	"azure-pipelines.yml": true, "bitbucket-pipelines.yml": true, ".pre-commit-config.yaml": true,
-}
-
 // CheckRepoPath checks one repository path (or, with glob true, a pattern of
 // owners.yaml repos[].paths) against the fixed rules of
-// docs/design/fix-pr.md §6.2: clean, relative, at most MaxRepoPathBytes, no
-// "." or ".." segment, no backslash, NUL or control character, and not under
-// the deny list (CI and repository-governance files, case-insensitive). The
-// error wraps ErrRepoPathDenied. The deny list is the leads': it changes only
-// by a contract change, and no setting relaxes it. (Q7)
-func CheckRepoPath(p string, glob bool) error {
-	deny := func(why string) error { return fmt.Errorf("%w: %s", ErrRepoPathDenied, why) }
-	switch {
-	case p == "":
-		return deny("empty path")
-	case len(p) > MaxRepoPathBytes:
-		return deny(fmt.Sprintf("longer than %d bytes", MaxRepoPathBytes))
-	case !utf8.ValidString(p):
-		return deny("not valid UTF-8")
-	case strings.IndexFunc(p, func(r rune) bool { return r == '\\' || unicode.IsControl(r) }) >= 0:
-		return deny("backslash or control character")
-	case strings.HasPrefix(p, "/"):
-		return deny("absolute path")
-	case strings.HasSuffix(p, "/"):
-		return deny("trailing slash")
-	}
-	segs := strings.Split(p, "/")
-	for i, seg := range segs {
-		switch {
-		case seg == "":
-			return deny("empty segment")
-		case seg == "." || seg == "..":
-			return deny("dot segment")
-		}
-		low := strings.ToLower(seg)
-		if i < len(segs)-1 && deniedDirs[low] {
-			return deny("under " + seg + "/ (CI and repository-governance files are never changed)")
-		}
-		if i == len(segs)-1 && (deniedFiles[low] || deniedDirs[low]) {
-			return deny(seg + " is a CI or repository-governance file")
-		}
-		if glob && seg != "**" {
-			if _, err := path.Match(seg, ""); err != nil {
-				return deny("bad glob syntax in segment " + strconv.Itoa(i+1))
-			}
-			if strings.Contains(seg, "**") {
-				return deny("** must be a whole segment")
-			}
-		}
-	}
-	if !glob && path.Clean(p) != p {
-		return deny("not a clean path")
-	}
-	return nil
-}
+// docs/design/fix-pr.md §6.2. It is owners.CheckRepoPath: one rule set for
+// what owners.yaml accepts, what a tool reads and what the writer commits, so
+// the client never allows a path (a .git* file, a glob character in a plain
+// path) that owners.yaml refuses. The error wraps ErrRepoPathDenied, which is
+// owners.ErrRepoPathDenied. No setting relaxes it. (Q7)
+func CheckRepoPath(p string, glob bool) error { return owners.CheckRepoPath(p, glob) }

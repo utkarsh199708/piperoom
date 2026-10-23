@@ -14,8 +14,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,21 +142,77 @@ type cachedToken struct {
 	expires time.Time
 }
 
-// tokens mints and caches installation tokens, one per (repo, scope).
+// tokens mints and caches installation tokens, one per (repo, scope). mu
+// guards the maps only and is never held across a request: each key has its
+// own lock (a one-slot channel, so a waiter honours its context), so one slow
+// mint delays only the calls for that repo and scope, not every repo.
 type tokens struct {
 	mu    sync.Mutex
 	cache map[tokenKey]cachedToken
+	locks map[tokenKey]chan struct{}
+}
+
+// cached returns the cached token of key when it is valid past now+tokenRefresh.
+func (t *tokens) cached(key tokenKey, now time.Time) (netsec.Secret, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if c, ok := t.cache[key]; ok && now.Add(tokenRefresh).Before(c.expires) {
+		return c.tok, true
+	}
+	return "", false
+}
+
+// lock takes key's mint lock, or gives up when ctx ends.
+func (t *tokens) lock(ctx context.Context, key tokenKey) (unlock func(), err error) {
+	t.mu.Lock()
+	if t.locks == nil {
+		t.locks = map[tokenKey]chan struct{}{}
+	}
+	l, ok := t.locks[key]
+	if !ok {
+		l = make(chan struct{}, 1)
+		t.locks[key] = l
+	}
+	t.mu.Unlock()
+	select {
+	case l <- struct{}{}:
+		return func() { <-l }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("forge: waiting for an installation token for %s: %w", key.repo, ctx.Err())
+	}
+}
+
+func (t *tokens) store(key tokenKey, c cachedToken) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cache == nil {
+		t.cache = map[tokenKey]cachedToken{}
+	}
+	t.cache[key] = c
 }
 
 // token returns an installation token narrowed to repo and s, minting one
-// when none is cached or the cached one expires within tokenRefresh.
+// when none is cached or the cached one expires within tokenRefresh. A repo
+// that names its web host (RepoRef.Host, filled from repos[].url) is refused
+// when it is not this forge's: the App's token is never asked for, and no
+// request is sent, for a repository owners.yaml placed on another host.
 func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secret, error) {
+	if err := c.checkHost(repo); err != nil {
+		return "", err
+	}
 	key := tokenKey{repo: repo.Owner + "/" + repo.Name, scope: s}
+	if tok, ok := c.tok.cached(key, c.now()); ok {
+		return tok, nil
+	}
+	unlock, err := c.tok.lock(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	// Another call may have minted it while this one waited.
 	now := c.now()
-	c.tok.mu.Lock()
-	defer c.tok.mu.Unlock()
-	if t, ok := c.tok.cache[key]; ok && now.Add(tokenRefresh).Before(t.expires) {
-		return t.tok, nil
+	if tok, ok := c.tok.cached(key, now); ok {
+		return tok, nil
 	}
 	jwt, err := appJWT(c.key, c.appID, now)
 	if err != nil {
@@ -180,10 +238,44 @@ func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secre
 	if out.Token == "" || out.ExpiresAt.IsZero() {
 		return "", fmt.Errorf("forge: installation token answer for %s has no token or expires_at", key.repo)
 	}
-	if c.tok.cache == nil {
-		c.tok.cache = map[tokenKey]cachedToken{}
-	}
 	t := cachedToken{tok: netsec.Secret(out.Token), expires: out.ExpiresAt}
-	c.tok.cache[key] = t
+	c.tok.store(key, t)
 	return t.tok, nil
 }
+
+// checkHost refuses a RepoRef whose Host is set and is not this forge's web
+// host (case-insensitive). owners.Repo.Ref always sets Host from the url.
+func (c *Client) checkHost(repo RepoRef) error {
+	if repo.Host != "" && !strings.EqualFold(repo.Host, c.webHost) {
+		return fmt.Errorf("%w: repo %q is on host %q, but the forge is %q", ErrRefused, oneLine(repo.ID, 80), oneLine(repo.Host, 100), c.webHost)
+	}
+	return nil
+}
+
+// botLogin returns the login of the App's bot user ("<slug>[bot]"), read
+// once from GET /app with the App JWT. A failure is not cached.
+func (c *Client) botLogin(ctx context.Context) (string, error) {
+	c.bot.mu.Lock()
+	defer c.bot.mu.Unlock()
+	if c.bot.login != "" {
+		return c.bot.login, nil
+	}
+	jwt, err := appJWT(c.key, c.appID, c.now())
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		ID   int64  `json:"id"`
+		Slug string `json:"slug"`
+	}
+	if err := c.do(ctx, jwt, request{ep: epApp, method: http.MethodGet, path: "/app"}, &out); err != nil {
+		return "", fmt.Errorf("forge: reading the GitHub App: %w", err)
+	}
+	if out.ID != c.appID || !slugRE.MatchString(out.Slug) {
+		return "", fmt.Errorf("forge: the GitHub App answer is not App %d with a valid slug", c.appID)
+	}
+	c.bot.login = out.Slug + "[bot]"
+	return c.bot.login, nil
+}
+
+var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,99}$`)

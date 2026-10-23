@@ -117,11 +117,21 @@ func (t *readTool) Run(ctx context.Context, raw json.RawMessage) (tools.Result, 
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	sha := in.SHA
-	if sha == "" {
-		if sha, err = t.d.Forge.BaseHead(ctx, repo.Ref); err != nil {
+	if sha == "" || !t.d.returned.has(repo.Ref, sha) {
+		head, err := t.d.Forge.BaseHead(ctx, repo.Ref)
+		if err != nil {
 			return tools.Result{}, fmt.Errorf("forgetools: %s: base branch %s of %s: %w", NameReadFile, repo.Ref.Base, repo.Ref.ID, err)
 		}
+		// Only a base_sha these tools returned, or the base head now: never
+		// another commit the model names (old history, a fork PR's head,
+		// another branch), which nobody approved the reading of.
+		if sha != "" && sha != head {
+			return tools.Result{}, fmt.Errorf("%w: sha must be a base_sha that repo_list_files or repo_read_file returned for %s, or the head of its base branch %s (%.7s); omit it to read at the base head",
+				tools.ErrBadInput, repo.Ref.ID, repo.Ref.Base, head)
+		}
+		sha = head
 	}
+	t.d.returned.add(repo.Ref, sha)
 	data := ReadData{Repo: repo.Ref.ID, Path: in.Path, Layer: layer, BaseSHA: sha}
 	header := fmt.Sprintf("Repo %s, path %s, layer %s, base_sha %s", repo.Ref.ID, in.Path, layerText(layer, ambiguous), sha)
 	refuse := func(why string) (tools.Result, error) {

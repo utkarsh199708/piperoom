@@ -1,12 +1,6 @@
 package forgetools
 
 import (
-	"errors"
-	"fmt"
-	"path"
-	"sort"
-	"strings"
-
 	"piperoom/internal/clients/forge"
 	"piperoom/internal/owners"
 )
@@ -41,69 +35,29 @@ type RepoSourceFunc func(p owners.Pipeline) []Repo
 // Repos calls f.
 func (f RepoSourceFunc) Repos(p owners.Pipeline) []Repo { return f(p) }
 
-// Errors of LayerOf (owners.ErrPathNotListed and owners.ErrPathAmbiguous of
-// design §5.8, local until Q7a lands).
+// Errors of LayerOf: owners.ErrPathNotListed and owners.ErrPathAmbiguous
+// (design §5.8), so a caller matches either package's name.
 var (
-	ErrPathNotListed = errors.New("forgetools: path is not under the repo's globs")
-	ErrPathAmbiguous = errors.New("forgetools: path matches globs of two layers")
+	ErrPathNotListed = owners.ErrPathNotListed
+	ErrPathAmbiguous = owners.ErrPathAmbiguous
 )
 
-// LayerOf returns the layer of the globs that match p (design §3 rule 5):
-// CheckRepoPath first, no match is ErrPathNotListed, matches of two layers
-// are ErrPathAmbiguous (never first-match).
+// LayerOf returns the layer of the globs that match p (design §3 rule 5). It
+// is owners.Repo.LayerOf, the rule owners.yaml itself applies: CheckRepoPath
+// first, no match is ErrPathNotListed, matches of two layers are
+// ErrPathAmbiguous (never first-match), and the glob matcher is the owners
+// one (a table, not backtracking, so many "**" segments stay cheap). A glob
+// that fails CheckRepoPath(glob, true) matches nothing.
 func (r Repo) LayerOf(p string) (string, error) {
-	if err := forge.CheckRepoPath(p, false); err != nil {
-		return "", err
-	}
-	layers := map[string]bool{}
+	or := owners.Repo{ID: r.Ref.ID}
 	for _, g := range r.Paths {
-		if matchGlob(g.Glob, p) {
-			layers[g.Layer] = true
+		if owners.CheckRepoPath(g.Glob, true) != nil {
+			continue
 		}
+		or.Paths = append(or.Paths, owners.RepoPath{Glob: g.Glob, Layer: g.Layer})
 	}
-	switch len(layers) {
-	case 0:
-		return "", fmt.Errorf("%w: %s", ErrPathNotListed, p)
-	case 1:
-		for l := range layers {
-			return l, nil
-		}
-	}
-	names := make([]string, 0, len(layers))
-	for l := range layers {
-		names = append(names, l)
-	}
-	sort.Strings(names)
-	return "", fmt.Errorf("%w: %s (%s)", ErrPathAmbiguous, p, strings.Join(names, ", "))
+	return or.LayerOf(p)
 }
 
-// matchGlob matches p against a glob: path.Match per segment, where "*" does
-// not cross "/", plus "**" as a whole segment matching zero or more
-// segments. A malformed glob matches nothing.
-func matchGlob(glob, p string) bool {
-	if forge.CheckRepoPath(glob, true) != nil {
-		return false
-	}
-	return matchSegs(strings.Split(glob, "/"), strings.Split(p, "/"))
-}
-
-func matchSegs(g, p []string) bool {
-	for len(g) > 0 {
-		if g[0] == "**" {
-			for i := 0; i <= len(p); i++ {
-				if matchSegs(g[1:], p[i:]) {
-					return true
-				}
-			}
-			return false
-		}
-		if len(p) == 0 {
-			return false
-		}
-		if ok, err := path.Match(g[0], p[0]); err != nil || !ok {
-			return false
-		}
-		g, p = g[1:], p[1:]
-	}
-	return len(p) == 0
-}
+// matchGlob matches p against a glob: owners.MatchGlob.
+func matchGlob(glob, p string) bool { return owners.MatchGlob(glob, p) }

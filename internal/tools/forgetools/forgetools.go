@@ -16,8 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -62,11 +64,58 @@ type Deps struct {
 	// opened (the room's action.executed pull_request, Q7e). Nil: pr_status
 	// reports head_changed as unknown.
 	Opened OpenedPRs
+
+	// returned holds the base_sha values the tools returned (Register sets
+	// it): repo_read_file reads only at one of them or at the base head.
+	returned *returnedSHAs
 }
 
 // OpenedPRs is the room's record of the PRs its steps opened.
 type OpenedPRs interface {
 	OpenedHead(ctx context.Context, repoID string, number int) (headSHA string, ok bool)
+	// AnyOpened reports whether the room recorded any PR opening in repoID.
+	// When it did, pr_status reads only PRs it recorded.
+	AnyOpened(ctx context.Context, repoID string) bool
+}
+
+// maxReturnedSHAs bounds the base_sha values remembered per repository.
+const maxReturnedSHAs = 64
+
+// returnedSHAs remembers the base_sha values the tools returned, per
+// repository, newest last. Safe for concurrent use; a nil set remembers
+// nothing.
+type returnedSHAs struct {
+	mu sync.Mutex
+	m  map[string][]string
+}
+
+func refKey(r forge.RepoRef) string { return strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name) }
+
+func (s *returnedSHAs) add(r forge.RepoRef, sha string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = map[string][]string{}
+	}
+	k := refKey(r)
+	l := slices.DeleteFunc(s.m[k], func(x string) bool { return x == sha })
+	l = append(l, sha)
+	if len(l) > maxReturnedSHAs {
+		l = l[len(l)-maxReturnedSHAs:]
+	}
+	s.m[k] = l
+}
+
+func (s *returnedSHAs) has(r forge.RepoRef, sha string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Contains(s.m[refKey(r)], sha)
 }
 
 // Register adds the three tools to reg. Registering them in the agent's
@@ -75,6 +124,7 @@ func Register(reg *tools.Registry, d Deps) error {
 	if d.Forge == nil || d.Owners == nil || d.Repos == nil {
 		return errors.New("forgetools: Forge, Owners and Repos are required (wiring error)")
 	}
+	d.returned = &returnedSHAs{}
 	for _, t := range []tools.Tool{&listTool{d}, &readTool{d}, &prTool{d}} {
 		if err := reg.Register(t); err != nil {
 			return fmt.Errorf("forgetools: register %s: %w", t.Name(), err)
@@ -243,6 +293,7 @@ func (t *listTool) Run(ctx context.Context, raw json.RawMessage) (tools.Result, 
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("forgetools: %s: tree of %s: %w", NameListFiles, repo.Ref.ID, err)
 	}
+	t.d.returned.add(repo.Ref, head)
 	data := ListData{Repo: repo.Ref.ID, Base: repo.Ref.Base, BaseSHA: head, Files: []ListedFile{}, TreeTruncated: truncated}
 	for _, e := range entries {
 		layer, err := repo.LayerOf(e.Path)
@@ -360,19 +411,29 @@ func (t *prTool) Run(ctx context.Context, raw json.RawMessage) (tools.Result, er
 		return tools.Result{}, fmt.Errorf("forgetools: %s: #%d in %s: %w", NamePRStatus, *in.Number, repo.Ref.ID, err)
 	}
 	// Only PRs Piperoom opened: the rest of the repo's PRs are other people's
-	// work, outside the room.
-	if !strings.HasPrefix(pr.HeadRef, forge.FixBranchPrefix) {
-		return tools.Result{}, fmt.Errorf("%w: pull request #%d in %s is not from a %s branch; pr_status reads only pull requests Piperoom opened",
+	// work, outside the room. A piperoom/ branch name alone is not enough:
+	// anyone can open a PR from a fork's branch of that name, so the head
+	// must be in the repository itself, and when the room recorded its
+	// openings, this PR must be one of them.
+	if !strings.HasPrefix(pr.HeadRef, forge.FixBranchPrefix) || !strings.EqualFold(pr.HeadRepo, repo.Ref.Owner+"/"+repo.Ref.Name) {
+		return tools.Result{}, fmt.Errorf("%w: pull request #%d in %s is not from a %s branch of the repository itself; pr_status reads only pull requests Piperoom opened",
 			tools.ErrOutOfScope, *in.Number, repo.Ref.ID, forge.FixBranchPrefix)
+	}
+	var wrote string
+	recorded := false
+	if t.d.Opened != nil {
+		wrote, recorded = t.d.Opened.OpenedHead(ctx, repo.Ref.ID, pr.Number)
+		if !recorded && t.d.Opened.AnyOpened(ctx, repo.Ref.ID) {
+			return tools.Result{}, fmt.Errorf("%w: pull request #%d in %s is not one this room opened; pr_status reads only pull requests Piperoom opened",
+				tools.ErrOutOfScope, *in.Number, repo.Ref.ID)
+		}
 	}
 	data := PRData{Repo: repo.Ref.ID, Number: pr.Number, URL: pr.URL, State: pr.State, HeadRef: pr.HeadRef, HeadSHA: pr.HeadSHA,
 		MergeSHA: pr.MergeSHA, MergedAt: pr.MergedAt, HeadChanged: "unknown", ChecksState: pr.Checks.State, ChecksTotal: pr.Checks.Total}
-	if t.d.Opened != nil {
-		if wrote, ok := t.d.Opened.OpenedHead(ctx, repo.Ref.ID, pr.Number); ok {
-			data.HeadChanged = "no"
-			if wrote != pr.HeadSHA {
-				data.HeadChanged = "yes"
-			}
+	if recorded {
+		data.HeadChanged = "no"
+		if wrote != pr.HeadSHA {
+			data.HeadChanged = "yes"
 		}
 	}
 	var hits []InjectionHit

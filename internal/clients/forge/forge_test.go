@@ -279,7 +279,7 @@ func TestPullRequestStatesAndChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := PullRequest{Repo: tRepo.ID, Number: 1, URL: "https://" + c.WebHost() + "/acme/connect-config/pull/1", State: PRStateOpen,
-		HeadRef: "piperoom/r_1-p_1-0", HeadSHA: base, Checks: PullRequestChecks{State: ChecksNone}}
+		HeadRef: "piperoom/r_1-p_1-0", HeadSHA: base, HeadRepo: "acme/connect-config", Checks: PullRequestChecks{State: ChecksNone}}
 	if fmt.Sprint(pr) != fmt.Sprint(want) {
 		t.Fatalf("pr =\n%+v\nwant\n%+v", pr, want)
 	}
@@ -321,10 +321,15 @@ func TestPullRequestStatesAndChecks(t *testing.T) {
 
 func TestStatusErrors(t *testing.T) {
 	g, _ := newGH(t, baseFiles())
-	c := g.client(t, func(c *Config) { c.Timeout = 300 * time.Millisecond })
+	// Only the "timeout" case runs on the 300 ms client: the others send up
+	// to 4 MiB, which under -race can take longer than that to read.
+	c := g.client(t, func(c *Config) { c.Timeout = 10 * time.Second })
+	slow := g.client(t, func(c *Config) { c.Timeout = 300 * time.Millisecond })
 	ctx := ctx10(t)
-	if _, err := c.RepoInfo(ctx, tRepo); err != nil { // mint a token first
-		t.Fatal(err)
+	for _, cl := range []*Client{c, slow} {
+		if _, err := cl.RepoInfo(ctx, tRepo); err != nil { // mint a token first
+			t.Fatal(err)
+		}
 	}
 	reset := g.now.Add(10 * time.Minute).Unix()
 	cases := []struct {
@@ -384,7 +389,11 @@ func TestStatusErrors(t *testing.T) {
 				tc.serve(w)
 				return true
 			})
-			_, err := c.RepoInfo(ctx, tRepo)
+			cl := c
+			if tc.name == "timeout" {
+				cl = slow
+			}
+			_, err := cl.RepoInfo(ctx, tRepo)
 			if !tc.check(err) {
 				t.Fatalf("err = %v", err)
 			}

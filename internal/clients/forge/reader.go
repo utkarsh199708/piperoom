@@ -276,9 +276,16 @@ type pullAnswer struct {
 	MergedAt *time.Time `json:"merged_at"`
 	MergeSHA string     `json:"merge_commit_sha"`
 	Head     struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
+		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"head"`
+	User struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"user"`
 }
 
 // pull maps an answer. The URL is built from the web host, never taken from
@@ -291,6 +298,9 @@ func (c *Client) pull(repo RepoRef, a pullAnswer) (PullRequest, error) {
 		Repo: repo.ID, Number: a.Number,
 		URL:     "https://" + c.webHost + "/" + repo.Owner + "/" + repo.Name + "/pull/" + strconv.Itoa(a.Number),
 		HeadRef: oneLine(a.Head.Ref, 255), HeadSHA: a.Head.SHA,
+	}
+	if a.Head.Repo != nil {
+		pr.HeadRepo = oneLine(a.Head.Repo.FullName, 201)
 	}
 	switch {
 	case a.Merged || (a.MergedAt != nil && !a.MergedAt.IsZero()):
@@ -338,34 +348,75 @@ func (c *Client) PullRequest(ctx context.Context, repo RepoRef, number int) (Pul
 	return pr, nil
 }
 
-// checks folds the check runs and the combined commit status on sha.
+// maxCheckPages caps the pages of check runs and of commit statuses read
+// per call: checksPerPage * maxCheckPages = 1000 of each. A head with more
+// is reported pending (or failing, when a read page already failed), never
+// success: an unread page could hold a failure.
+const maxCheckPages = 10
+
+type checkRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+type commitStatus struct {
+	Context string `json:"context"`
+	State   string `json:"state"`
+}
+
+// checks folds the check runs and the combined commit status on sha, paging
+// through both (up to maxCheckPages each).
 func (c *Client) checks(ctx context.Context, tok netsec.Secret, repo RepoRef, sha string) (PullRequestChecks, error) {
-	q := url.Values{"per_page": {strconv.Itoa(checksPerPage)}}
-	var runs struct {
-		TotalCount int `json:"total_count"`
-		CheckRuns  []struct {
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_runs"`
-	}
 	base := repoPath(repo) + "/commits/" + sha
-	if err := c.do(ctx, tok, request{ep: epCheckRuns, method: http.MethodGet, path: base + "/check-runs", query: q}, &runs); err != nil {
-		return PullRequestChecks{}, err
+	var (
+		runs                     []checkRun
+		sts                      []commitStatus
+		runsTotal, statusesTotal int
+		allRuns, allStatuses     bool
+	)
+	for page := 1; page <= maxCheckPages; page++ {
+		q := url.Values{"per_page": {strconv.Itoa(checksPerPage)}, "page": {strconv.Itoa(page)}}
+		var out struct {
+			TotalCount int        `json:"total_count"`
+			CheckRuns  []checkRun `json:"check_runs"`
+		}
+		if err := c.do(ctx, tok, request{ep: epCheckRuns, method: http.MethodGet, path: base + "/check-runs", query: q}, &out); err != nil {
+			return PullRequestChecks{}, err
+		}
+		runsTotal = max(runsTotal, out.TotalCount)
+		runs = append(runs, out.CheckRuns...)
+		if len(runs) >= runsTotal || len(out.CheckRuns) == 0 {
+			allRuns = len(runs) >= runsTotal
+			break
+		}
 	}
-	var st struct {
-		TotalCount int `json:"total_count"`
-		Statuses   []struct {
-			Context string `json:"context"`
-			State   string `json:"state"`
-		} `json:"statuses"`
+	for page := 1; page <= maxCheckPages; page++ {
+		q := url.Values{"per_page": {strconv.Itoa(checksPerPage)}, "page": {strconv.Itoa(page)}}
+		var out struct {
+			TotalCount int            `json:"total_count"`
+			Statuses   []commitStatus `json:"statuses"`
+		}
+		if err := c.do(ctx, tok, request{ep: epStatus, method: http.MethodGet, path: base + "/status", query: q}, &out); err != nil {
+			return PullRequestChecks{}, err
+		}
+		statusesTotal = max(statusesTotal, out.TotalCount)
+		sts = append(sts, out.Statuses...)
+		if len(sts) >= statusesTotal || len(out.Statuses) == 0 {
+			allStatuses = len(sts) >= statusesTotal
+			break
+		}
 	}
-	if err := c.do(ctx, tok, request{ep: epStatus, method: http.MethodGet, path: base + "/status", query: q}, &st); err != nil {
-		return PullRequestChecks{}, err
-	}
+	return foldChecks(runs, sts, runsTotal, statusesTotal, !allRuns || !allStatuses), nil
+}
+
+// foldChecks folds read check runs and statuses; unread reports that some
+// were not read (the page cap, or a short answer), which is pending unless a
+// read one failed.
+func foldChecks(runs []checkRun, sts []commitStatus, runsTotal, statusesTotal int, unread bool) PullRequestChecks {
 	var failed []string
-	pending := runs.TotalCount > len(runs.CheckRuns) || st.TotalCount > len(st.Statuses)
-	for _, r := range runs.CheckRuns {
+	pending := unread
+	for _, r := range runs {
 		switch {
 		case r.Status != "completed":
 			pending = true
@@ -376,7 +427,7 @@ func (c *Client) checks(ctx context.Context, tok netsec.Secret, repo RepoRef, sh
 			pending = true
 		}
 	}
-	for _, s := range st.Statuses {
+	for _, s := range sts {
 		switch s.State {
 		case "failure", "error":
 			failed = append(failed, s.Context)
@@ -384,7 +435,7 @@ func (c *Client) checks(ctx context.Context, tok netsec.Secret, repo RepoRef, sh
 			pending = true
 		}
 	}
-	out := PullRequestChecks{Total: runs.TotalCount + st.TotalCount}
+	out := PullRequestChecks{Total: max(runsTotal, len(runs)) + max(statusesTotal, len(sts))}
 	switch {
 	case len(failed) > 0:
 		out.State = ChecksFailure
@@ -403,7 +454,7 @@ func (c *Client) checks(ctx context.Context, tok netsec.Secret, repo RepoRef, sh
 		// oneLine adds a 3-byte ellipsis when it cuts.
 		out.Failed = append(out.Failed, oneLine(red, maxCheckName-len("…")))
 	}
-	return out, nil
+	return out
 }
 
 // isNotFound reports a 404.
