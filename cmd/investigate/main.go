@@ -32,6 +32,7 @@ func main() {
 		pipeline  = flag.String("pipeline", "orders", "pipeline id to investigate")
 		title     = flag.String("title", "orders stale", "alert title")
 		fakeTools = flag.Bool("fake-tools", false, "use the built-in schema-change replay tools instead of real clients")
+		provider  = flag.String("provider", "", "model provider override: anthropic, bedrock, vertex, openai, gemini or bedrock-converse (default PIPEROOM_MODEL_PROVIDER); the role, key and start-check rules are the server's")
 		model     = flag.String("model", "", "model override (default from config)")
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
@@ -44,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	o := runOptions{
-		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Model: *model, Effort: *effort,
+		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Provider: *provider, Model: *model, Effort: *effort,
 		MaxTurns: *maxTurns, RecordDir: *record, ApproveAll: *approve, ConfirmDevStack: *confirm,
 		Kind: *kind, ListTools: *listOnly,
 	}
@@ -72,6 +73,8 @@ func exitCode(err error, w io.Writer) int {
 type runOptions struct {
 	Pipeline, Title string
 	FakeTools       bool
+	// Provider is -provider: "" keeps PIPEROOM_MODEL_PROVIDER.
+	Provider        string
 	Model, Effort   string
 	MaxTurns        int
 	RecordDir       string
@@ -87,7 +90,7 @@ type runOptions struct {
 func run(o runOptions) (err error) {
 	pipeline, title, fakeTools := o.Pipeline, o.Title, o.FakeTools
 	model, effort, maxTurns := o.Model, o.Effort, o.MaxTurns
-	cfg := config.Load()
+	cfg := withModelFlags(config.Load(), o.Provider, model)
 
 	// The owners file is read first: the approve-all guard must see the
 	// pipeline's connections before anything is opened.
@@ -238,6 +241,19 @@ func run(o runOptions) (err error) {
 		return fmt.Errorf("investigate: %w", err)
 	}
 	return nil
+}
+
+// withModelFlags applies -provider and -model to cfg before the endpoint is
+// built, so the start checks (supported list, probe, pricing) judge the model
+// the run will use. Empty flags keep the environment's values.
+func withModelFlags(cfg config.Config, provider, model string) config.Config {
+	if provider != "" {
+		cfg.ModelProvider = provider
+	}
+	if model != "" {
+		cfg.Model = model
+	}
+	return cfg
 }
 
 // alertTeams is agent.Alert.Teams: the owners.yaml teams of the pipeline's

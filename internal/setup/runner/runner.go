@@ -637,15 +637,23 @@ func (r *Runner) serve(ctx context.Context) error {
 			}
 		case protocol.FramePong:
 		case protocol.FrameOp:
+			// A resend of an op this runner still holds (in its checks, its
+			// T3 prompt, or running) is dropped: the first request answers
+			// for the id. Without this a T0 op, which has no start ledger,
+			// would run twice after a reconnect.
+			if r.opHeld(f.Op.ID) {
+				r.log.Debug("dropping a resend of an op still held", "op", f.Op.Op)
+				continue
+			}
 			// The op's cancel is registered before its goroutine starts, so
 			// a FrameCancel read next always reaches it, even while its
 			// checks or its T3 prompt are still running.
-			opCtx, cancel := context.WithCancel(ctx)
-			unwatch := r.watchConfirm(f.Op.ID, cancel)
+			opCtx, opCancel := context.WithCancel(ctx)
+			unwatch := r.watchConfirm(f.Op.ID, opCancel)
 			go func(req *protocol.OpRequest) {
-				defer cancel()
+				defer opCancel()
 				defer unwatch()
-				r.runOp(ctx, opCtx, cancel, req)
+				r.runOp(ctx, opCtx, opCancel, req)
 			}(f.Op)
 		case protocol.FrameCancel:
 			r.cancelOp(f.Cancel.ID)

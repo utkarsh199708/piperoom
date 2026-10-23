@@ -1,13 +1,15 @@
 // Package openai is the llm.Model adapter for OpenAI-compatible chat
 // completions hosts (provider "openai"): OpenAI, Azure OpenAI, Ollama, vLLM
 // and any other compatible server (design docs/design/model-providers.md
-// sections 3 and 7, row V3a). It speaks POST {base}/chat/completions over
+// sections 3 and 7, rows V3a and V3b). It speaks POST {base}/chat/completions over
 // net/http with no SDK and no streaming (design 3.1).
 //
 // A flavor sets the defaults and the quirks (auth header, token field,
 // reasoning, strict tools, structured output); it never changes the prompt
-// or the tools. The hosted flavors deepseek, qwen, mistral, groq, together,
-// openrouter and xai arrive in V3b; New refuses them until then.
+// or the tools. The hosted flavors (OpenAI, Azure and, from V3b, DeepSeek,
+// Qwen on DashScope, Mistral, Groq, Together, OpenRouter and xAI) know their
+// models by id (flavors.go); the local and generic flavors learn what they
+// support only from PIPEROOM_MODEL_CAPS.
 //
 // Every request goes through one *http.Client whose dialer refuses the
 // metadata deny list (config.ModelAddrDenied) at dial time, which never
@@ -32,15 +34,6 @@ import (
 	"piperoom/internal/config"
 )
 
-// Flavors this adapter serves (PIPEROOM_MODEL_FLAVOR).
-const (
-	FlavorOpenAI  = "openai"
-	FlavorAzure   = "azure"
-	FlavorOllama  = "ollama"
-	FlavorVLLM    = "vllm"
-	FlavorGeneric = "generic"
-)
-
 // TurnTimeout bounds one model turn, retries and rate-limit waits included
 // (design 3.1: the 10 min deadline of the Claude turn).
 const TurnTimeout = 10 * time.Minute
@@ -55,40 +48,6 @@ const (
 	toolNameMax = 64
 	maxTools    = 128
 )
-
-// flavor is one flavor's quirks.
-type flavor struct {
-	name string
-	// keyEnv is the standard key variable; "" when the flavor has none.
-	keyEnv string
-	// needsKey refuses New without a key.
-	needsKey bool
-	// azureAuth sends the key as api-key instead of a bearer token.
-	azureAuth bool
-	// hosted knows its models: strict tools, json_schema, automatic prompt
-	// cache, reasoning by model id, max_completion_tokens. The local and
-	// generic flavors get these only through PIPEROOM_MODEL_CAPS (and never
-	// strict tools: a cap cannot lower a check).
-	hosted bool
-}
-
-var flavors = map[string]flavor{
-	FlavorOpenAI:  {name: FlavorOpenAI, keyEnv: "OPENAI_API_KEY", needsKey: true, hosted: true},
-	FlavorAzure:   {name: FlavorAzure, keyEnv: "AZURE_OPENAI_API_KEY", needsKey: true, azureAuth: true, hosted: true},
-	FlavorOllama:  {name: FlavorOllama},
-	FlavorVLLM:    {name: FlavorVLLM, keyEnv: "PIPEROOM_MODEL_API_KEY"},
-	FlavorGeneric: {name: FlavorGeneric, keyEnv: "PIPEROOM_MODEL_API_KEY"},
-}
-
-// Flavors returns the flavors New accepts, sorted.
-func Flavors() []string {
-	return []string{FlavorAzure, FlavorGeneric, FlavorOllama, FlavorOpenAI, FlavorVLLM}
-}
-
-// KeyEnv is flavor's standard key variable, "" when it has none (ollama) or
-// the flavor is unknown. PIPEROOM_MODEL_API_KEY, when set, is the main
-// role's key on any flavor (LoadKey).
-func KeyEnv(flavorName string) string { return flavors[flavorName].keyEnv }
 
 // Options builds a Model.
 type Options struct {
@@ -134,6 +93,7 @@ type Model struct {
 	key      netsec.Secret
 	caps     map[string]bool
 	ctxToks  int64
+	china    string // the host when the endpoint is operated in the PRC, else ""
 	client   *http.Client
 	policy   retry.Policy
 	limiter  *retry.Limiter
@@ -155,9 +115,6 @@ func newModel(o Options, h hooks) (*Model, error) {
 	}
 	fl, ok := flavors[name]
 	if !ok {
-		if config.FlavorDefaultBaseURL(name) != "" {
-			return nil, fmt.Errorf("llm/openai: flavor %q is not served yet (V3b)", name)
-		}
 		return nil, fmt.Errorf("llm/openai: unknown flavor %q", name)
 	}
 	base, err := baseURL(fl, o)
@@ -182,6 +139,7 @@ func newModel(o Options, h hooks) (*Model, error) {
 		key:      o.Key,
 		caps:     map[string]bool{},
 		ctxToks:  o.ContextTokens,
+		china:    chinaHost(fl.name, &base),
 		policy:   policy,
 		limiter:  o.Limiter,
 		log:      log,
@@ -228,12 +186,13 @@ func (m *Model) Capabilities(model string) llm.Capabilities {
 		ToolNameMax:   toolNameMax,
 	}
 	if m.flavor.hosted {
-		c.ParallelToolCalls = true
-		c.StrictTools = true // per tool: only schemas in the strict subset (strictSchema)
-		c.StructuredOutput = true
-		c.PromptCache = true // automatic prefix caching, reported as cached_tokens
-		c.Reasoning = reasoningModel(model)
-		c.Effort = c.Reasoning
+		mc := m.flavor.models(model)
+		c.ParallelToolCalls = mc.parallel
+		c.StrictTools = mc.strictTools // per tool: only schemas in the strict subset (strictSchema)
+		c.StructuredOutput = mc.structured
+		c.PromptCache = mc.cache
+		c.Reasoning = mc.reasoning
+		c.Effort = mc.effort
 		return c
 	}
 	c.ParallelToolCalls = m.caps["parallel_tools"]
@@ -253,7 +212,7 @@ func (m *Model) contextTokens(model string) int64 {
 		return 0
 	}
 	id := strings.ToLower(model)
-	for _, e := range contextTable {
+	for _, e := range m.flavor.contexts {
 		if strings.HasPrefix(id, e.prefix) {
 			return e.tokens
 		}
@@ -261,35 +220,22 @@ func (m *Model) contextTokens(model string) int64 {
 	return 0
 }
 
-// contextTable is the context window of OpenAI model families by id prefix
-// (longest first), as OpenAI documents them in 2026-10. On Azure the model
-// is a deployment name, which often but not always repeats the model id.
-var contextTable = []struct {
-	prefix string
-	tokens int64
-}{
-	{"gpt-4.1", 1_047_576},
-	{"gpt-4o", 128_000},
-	{"gpt-5", 400_000},
-	{"o4", 200_000},
-	{"o3", 200_000},
-	{"o1", 200_000},
+// ChinaOperated returns the endpoint's host when it is operated in the
+// People's Republic of China (DeepSeek's API, the DashScope China endpoint;
+// config.ChinaOperatedEndpoint), else "". V6 refuses to start such an
+// endpoint without PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes (design 15, decision
+// 7); the adapter itself only reports it.
+func (m *Model) ChinaOperated() string { return m.china }
+
+// ChinaOperatedEndpoint is ChinaOperated before a Model exists: the host of
+// flavor's endpoint (base, or the flavor's default when base is nil) when it
+// is operated in the PRC, else "".
+func ChinaOperatedEndpoint(flavorName string, base *config.BaseURL) string {
+	return chinaHost(strings.ToLower(strings.TrimSpace(flavorName)), base)
 }
 
-// reasoningModel reports an OpenAI reasoning model by id: the o-series and
-// gpt-5, except the chat variants. It decides the developer role and
-// reasoning_effort.
-func reasoningModel(model string) bool {
-	id := strings.ToLower(model)
-	if strings.Contains(id, "-chat") {
-		return false
-	}
-	for _, p := range []string{"o1", "o3", "o4", "gpt-5"} {
-		if id == p || strings.HasPrefix(id, p+"-") || strings.HasPrefix(id, p+".") {
-			return true
-		}
-	}
-	return false
+func chinaHost(flavorName string, base *config.BaseURL) string {
+	return config.ChinaOperatedEndpoint(config.ModelRole{Provider: config.ModelProviderOpenAI, Flavor: flavorName, BaseURL: base})
 }
 
 // Turn encodes req, sends it with the shared retry policy and limits, and
