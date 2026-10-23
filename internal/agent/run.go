@@ -127,6 +127,11 @@ type runner struct {
 	// past is the worked-examples block of the first user turn (examples.go),
 	// "" when there is none.
 	past string
+
+	// driverVerdicts holds the verdict of each driver-authored proposal this
+	// run verified after its proposal_executed (driverproposal.go), so a
+	// repeated input reports it instead of checking again. Lost on restart.
+	driverVerdicts map[string]bool
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -264,7 +269,7 @@ func (r *runner) run(ctx context.Context) error {
 				return nil
 			}
 			inputs, outcome := r.handleInputs(ctx, inputs)
-			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
+			messages = appendUser(messages, r.idleInputBlocks(inputs, outcome.notes)...)
 			turns = 0
 			if r.parked(outcome) {
 				if !recovered {
@@ -455,7 +460,14 @@ func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.B
 // inputBlocks renders one batch of human input and its verification notes, in
 // the order the model reads them: the inputs, then what verification found.
 func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
-	return append(r.humanBlocks(inputs), verifyBlocks(notes)...)
+	return append(r.humanBlocks(inputs, false), verifyBlocks(notes)...)
+}
+
+// idleInputBlocks is inputBlocks for a batch that woke the agent from a wait
+// for input: the agent was idle, so a driver's proposal may get a read of its
+// own before the agent answers (P3e, driverproposal.go).
+func (r *runner) idleInputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+	return append(r.humanBlocks(inputs, true), verifyBlocks(notes)...)
 }
 
 // appendUser adds blocks to the history as a user turn. When the last message
@@ -469,10 +481,10 @@ func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaC
 	return append(messages, anthropic.NewBetaUserMessage(blocks...))
 }
 
-func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
+func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []anthropic.BetaContentBlockParamUnion {
 	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(inputs))
 	for _, in := range inputs {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(formatHumanInput(in)))
+		blocks = append(blocks, anthropic.NewBetaTextBlock(formatInput(in, idle)))
 	}
 	return blocks
 }
@@ -563,7 +575,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		return true, nil
 	}
 	inputs, outcome := r.handleInputs(ctx, inputs)
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.idleInputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
 	if r.parked(outcome) {
@@ -595,7 +607,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 			return true, stopErr(err)
 		}
 		inputs, outcome := r.handleInputs(ctx, inputs)
-		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
+		*messages = appendUser(*messages, r.idleInputBlocks(inputs, outcome.notes)...)
 		*turns = 0
 		if !r.parked(outcome) {
 			if !outcome.statusSet {
