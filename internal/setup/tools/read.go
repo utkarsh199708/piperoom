@@ -12,8 +12,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/room"
 	"piperoom/internal/setup/protocol"
+	"piperoom/internal/setup/remoteclients"
 	"piperoom/internal/tools"
 )
 
@@ -23,10 +25,6 @@ import (
 // sentinel needs no second error to check. It is answered before any
 // OpRequest is built.
 var ErrNoRunner = protocol.ErrNoRunner
-
-// ErrBadResult reports an op result this package cannot use: invalid JSON, a
-// missing envelope field, or a result the runner cut (Truncated).
-var ErrBadResult = errors.New("setuptools: unusable op result")
 
 const (
 	// readTimeout bounds one read (AGENTS.md §4 rule 4). A context with an
@@ -275,7 +273,9 @@ func readSpecs() []readSpec {
 			schema: objectSchema(map[string]any{
 				"file": map[string]any{"type": "string", "maxLength": 512},
 			}),
-			params: stackParams,
+			// compose_config renders the whole project: its input has only
+			// file, and services is refused like any unknown field.
+			params: fileParams,
 		},
 		{
 			name: "container_inspect",
@@ -307,7 +307,7 @@ type pathParam struct {
 	Path string `json:"path,omitempty"`
 }
 
-// stackParam is the input of compose_ps and compose_config.
+// stackParam is the input of compose_ps.
 type stackParam struct {
 	File     string   `json:"file,omitempty"`
 	Services []string `json:"services,omitempty"`
@@ -366,6 +366,18 @@ func stackParams(raw json.RawMessage) (any, error) {
 		File     string   `json:"file,omitempty"`
 		Services []string `json:"services,omitempty"`
 	}{File: in.File, Services: in.Services}, nil
+}
+
+// fileParams decodes the optional file of compose_config. It takes no
+// services: the decoder refuses that field as unknown, matching the schema.
+func fileParams(raw json.RawMessage) (any, error) {
+	var in struct {
+		File string `json:"file,omitempty"`
+	}
+	if err := decodeInput(raw, &in); err != nil {
+		return nil, err
+	}
+	return in, nil
 }
 
 // inspectParams decodes the required service and optional file of a container
@@ -469,7 +481,28 @@ func refused(res protocol.OpResult) error {
 	if text == "" {
 		text = "the runner refused the read"
 	}
-	return errors.New(clipText(text))
+	text = clipText(text)
+	switch errorCode(res.Data) {
+	case remoteclients.ErrorCodeOutOfScope:
+		return fmt.Errorf("%s: %w", text, tools.ErrOutOfScope)
+	case remoteclients.ErrorCodeNotFound:
+		return fmt.Errorf("%s: %w", text, clients.ErrNotFound)
+	}
+	return errors.New(text)
+}
+
+// errorCode reads Data's error_code, or "".
+func errorCode(data json.RawMessage) string {
+	if len(data) == 0 {
+		return ""
+	}
+	var env struct {
+		Code string `json:"error_code"`
+	}
+	if json.Unmarshal(data, &env) != nil {
+		return ""
+	}
+	return env.Code
 }
 
 // wrapOp names the op in an error.

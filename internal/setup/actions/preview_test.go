@@ -3,6 +3,7 @@ package setupactions
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"piperoom/internal/setup/plan"
@@ -92,26 +93,20 @@ func TestPreviewRefusesACutResult(t *testing.T) {
 
 func TestPreviewRefusesMissingOrBadData(t *testing.T) {
 	for name, data := range map[string]json.RawMessage{
-		"none":  nil,
-		"bad":   json.RawMessage(`[1,2]`),
-		"empty": json.RawMessage(`{}`),
+		"none": nil,
+		"bad":  json.RawMessage(`[1,2]`),
+		// An empty result, or Data of another shape that decodes to the zero
+		// PreviewResult, must never count as a preview that passed.
+		"empty":           json.RawMessage(`{}`),
+		"unknown shape":   json.RawMessage(`{"file":"compose.yaml","body":"services: {}"}`),
+		"only reversible": json.RawMessage(`{"reversible":true,"rollback":"x"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
 				return protocol.OpResult{ID: req.ID, OK: true, Data: data}, nil
 			}}
 			a := newTestAdapter(t, f)
-			res, err := a.Preview(testContext(t, grantParams), grantParams)
-			if name == "empty" {
-				// An empty PreviewResult is still a valid (if terse) answer.
-				if err != nil {
-					t.Fatalf("Preview(empty) = %v", err)
-				}
-				if res.Target != "" || res.Reversible {
-					t.Fatalf("preview = %+v, want the zero result", res)
-				}
-				return
-			}
+			_, err := a.Preview(testContext(t, grantParams), grantParams)
 			if !errors.Is(err, ErrBadPreview) {
 				t.Fatalf("Preview(%s) = %v, want ErrBadPreview", name, err)
 			}
@@ -163,7 +158,8 @@ func TestPreviewMapsParamsForARealPreviewOp(t *testing.T) {
 		t.Fatal("compose_up is not in EnvironmentSpecs")
 	}
 	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
-		return protocol.OpResult{ID: req.ID, OK: true, Data: json.RawMessage(`{"target":"stack","reversible":true}`)}, nil
+		// The real compose_config result shape (internal/setup/targets/compose).
+		return protocol.OpResult{ID: req.ID, OK: true, Data: realComposeConfigData}, nil
 	}}
 	a, err := New(*spec, Deps{Runner: f, RoomID: "r_setup"})
 	if err != nil {
@@ -171,8 +167,15 @@ func TestPreviewMapsParamsForARealPreviewOp(t *testing.T) {
 	}
 	params := json.RawMessage(`{"file":"compose.yaml","services":["connect"]}`)
 	ctx := tools.WithPipeline(testContext(t, params), testPipeline())
-	if _, err := a.Preview(ctx, params); err != nil {
+	res, err := a.Preview(ctx, params)
+	if err != nil {
 		t.Fatalf("Preview: %v", err)
+	}
+	if res.Target != "compose.yaml" || !strings.Contains(res.Expected, "image: debezium/connect") {
+		t.Fatalf("preview = %+v, want target = the file and expected = the render", res)
+	}
+	if res.Reversible {
+		t.Fatalf("preview = %+v, a compose_config render says nothing about reversibility", res)
 	}
 	req := f.recorded()[0].req
 	if req.Op != "compose_config" || req.Tier != plan.TierT0 {
@@ -180,5 +183,45 @@ func TestPreviewMapsParamsForARealPreviewOp(t *testing.T) {
 	}
 	if string(req.Params) != `{"file":"compose.yaml"}` {
 		t.Fatalf("preview params = %s, want services dropped for compose_config", req.Params)
+	}
+}
+
+// realComposeConfigData is compose_config's Data as the runner sends it
+// (composeConfigData in internal/setup/targets/compose/docker.go).
+var realComposeConfigData = json.RawMessage(`{
+	"file": "compose.yaml",
+	"body": "services:\n  connect:\n    image: debezium/connect:2.7\n    environment:\n      DB_PASSWORD: '***'\n",
+	"bytes": 96,
+	"masked_keys": ["DB_PASSWORD"]
+}`)
+
+func TestComposePreviewRefusesAnUnusableRender(t *testing.T) {
+	var spec Spec
+	for _, s := range EnvironmentSpecs() {
+		if s.Name == "compose_down" {
+			spec = s
+		}
+	}
+	for name, data := range map[string]json.RawMessage{
+		"empty":                json.RawMessage(`{}`),
+		"preview result shape": json.RawMessage(`{"target":"stack","reversible":true}`),
+		"no body":              json.RawMessage(`{"file":"compose.yaml","body":"","bytes":0}`),
+		"no file":              json.RawMessage(`{"body":"services: {}","bytes":12}`),
+		"cut render":           json.RawMessage(`{"file":"compose.yaml","body":"services:","bytes":9,"truncated":true}`),
+		"not an object":        json.RawMessage(`["compose.yaml"]`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+				return protocol.OpResult{ID: req.ID, OK: true, Data: data}, nil
+			}}
+			a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			params := json.RawMessage(`{"file":"compose.yaml"}`)
+			if _, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params); !errors.Is(err, ErrBadPreview) {
+				t.Fatalf("Preview(%s) = %v, want ErrBadPreview", data, err)
+			}
+		})
 	}
 }

@@ -5,7 +5,10 @@ import (
 	"testing"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/plan"
+	"piperoom/internal/setup/protocol"
+	"piperoom/internal/setup/targets/compose"
 )
 
 func TestEnvironmentSpecsAreSafe(t *testing.T) {
@@ -111,5 +114,73 @@ func TestEnvironmentActionsTier(t *testing.T) {
 	got, err = tiered.Tier(params, plan.ClassProduction)
 	if err != nil || got != plan.TierT3 {
 		t.Fatalf("Tier(file_write, production) = %q, %v", got, err)
+	}
+}
+
+// previewOpsPendingRunner lists the preview ops EnvironmentSpecs names that the
+// runner catalogue does not register yet. Until a runner op exists for one,
+// the runner refuses it as unknown_op and that action's Preview fails closed.
+// Registering one of these ops must remove it from this list, and a spec that
+// names any other unregistered preview op fails
+// TestSpecOpsAreInTheRunnerCatalogue.
+var previewOpsPendingRunner = map[string]bool{
+	"preview_file_write":       true,
+	"preview_file_delete":      true,
+	"preview_compose_write":    true,
+	"preview_properties_write": true,
+	"preview_plugin_install":   true,
+}
+
+// runnerCatalogue builds the runner's real op catalogue the way the runner
+// wiring does: ops.New plus the Compose target's ops.
+func runnerCatalogue(t *testing.T) *ops.Registry {
+	t.Helper()
+	reg, err := ops.New(ops.Config{ProjectDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("ops.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	if _, err := compose.Register(reg, compose.Options{}); err != nil {
+		t.Fatalf("compose.Register: %v", err)
+	}
+	return reg
+}
+
+func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
+	reg := runnerCatalogue(t)
+	for _, spec := range EnvironmentSpecs() {
+		floor, ok := reg.Floor(spec.Name)
+		if !ok {
+			t.Errorf("%s: the runner catalogue has no such op", spec.Name)
+		} else if floor != spec.Tier {
+			t.Errorf("%s: spec tier %q, runner floor %q", spec.Name, spec.Tier, floor)
+		}
+		if spec.PreviewOp == "" {
+			continue
+		}
+		pfloor, registered := reg.Floor(spec.PreviewOp)
+		switch {
+		case previewOpsPendingRunner[spec.PreviewOp] && registered:
+			t.Errorf("%s: preview op %q is now registered; remove it from previewOpsPendingRunner", spec.Name, spec.PreviewOp)
+		case previewOpsPendingRunner[spec.PreviewOp]:
+			// Known missing: the preview fails closed until the runner has it.
+		case !registered:
+			t.Errorf("%s: preview op %q is not in the runner catalogue nor in previewOpsPendingRunner", spec.Name, spec.PreviewOp)
+		case pfloor != protocol.TierT0:
+			t.Errorf("%s: preview op %q has floor %q, want T0", spec.Name, spec.PreviewOp, pfloor)
+		case spec.PreviewOp != PreviewOpName(spec.Name) && spec.PreviewDecode == nil:
+			// A borrowed read op answers its own Data shape, not an
+			// events.PreviewResult.
+			t.Errorf("%s: preview op %q needs a PreviewDecode", spec.Name, spec.PreviewOp)
+		}
+	}
+	for op := range previewOpsPendingRunner {
+		used := false
+		for _, spec := range EnvironmentSpecs() {
+			used = used || spec.PreviewOp == op
+		}
+		if !used {
+			t.Errorf("previewOpsPendingRunner lists %q, which no spec names", op)
+		}
 	}
 }

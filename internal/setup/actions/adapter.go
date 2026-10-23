@@ -49,7 +49,9 @@ var ErrNoStep = errors.New("setupactions: the call carries no setup proposal ste
 var ErrStepMismatch = errors.New("setupactions: the write is not the frozen proposal step's write")
 
 // ErrBadPreview reports a preview result this package cannot use: the runner
-// cut it, it carries no data, or the data is not an events.PreviewResult.
+// cut it, it carries no data, the data does not decode to an
+// events.PreviewResult, or the decoded result names neither a target nor an
+// expected state (an empty preview is never shown as one that passed).
 var ErrBadPreview = errors.New("setupactions: unusable preview result")
 
 const (
@@ -102,6 +104,11 @@ type Spec struct {
 	// PreviewParams maps the step's params to the preview op's params. Nil
 	// sends the step's params unchanged.
 	PreviewParams func(json.RawMessage) (json.RawMessage, error)
+	// PreviewDecode maps the preview op's result Data to an
+	// events.PreviewResult. Nil decodes Data as an events.PreviewResult
+	// itself; an op whose Data has another shape (compose_config) must set
+	// it, or its preview is refused as empty.
+	PreviewDecode func(json.RawMessage) (events.PreviewResult, error)
 }
 
 // Deps are the collaborators of an Adapter.
@@ -206,9 +213,12 @@ func (a *Adapter) Describe() string { return a.spec.Describe }
 // ParamsSchema is the op's bounded JSON Schema.
 func (a *Adapter) ParamsSchema() map[string]any { return cloneSchema(a.spec.Schema) }
 
-// Validate checks the params' shape without I/O. The runner validates against
-// the same op's schema and its own rules before it executes; this check is
-// what makes a bad proposal fail at creation instead of at execution.
+// Validate checks the params' shape without I/O: one bounded JSON object with
+// no ambiguous keys. It does not validate params against ParamsSchema (this
+// repository has no JSON Schema validator), so params that are an object but
+// break the schema (an unknown key, a missing required field, a wrong type)
+// pass here; the runner validates them against the op's schema and its own
+// rules before it executes, and refuses them there.
 func (a *Adapter) Validate(_ context.Context, params json.RawMessage) error {
 	return a.validateParams(params)
 }
@@ -305,7 +315,13 @@ func (a *Adapter) sendStepRequest(ctx context.Context, step room.SetupStep, para
 	default:
 		return protocol.OpResult{}, fmt.Errorf("setupactions: %s: the step has no valid endpoint class: %w", a.spec.Name, ErrStepMismatch)
 	}
-	tier := a.spec.Tier
+	// The op's floor raised to the step's class (plan.TierOf), so a step the
+	// room left without a tier still goes out at least at its class's tier
+	// rather than the bare floor; a tier the room set can only raise it.
+	tier, err := plan.TierOf(a.spec.Tier, class)
+	if err != nil {
+		return protocol.OpResult{}, fmt.Errorf("setupactions: %s: %v: %w", a.spec.Name, err, ErrStepMismatch)
+	}
 	if step.Tier != "" {
 		if !plan.ValidTier(step.Tier) {
 			return protocol.OpResult{}, fmt.Errorf("setupactions: %s: the step has tier %q: %w", a.spec.Name, clipText(step.Tier), ErrStepMismatch)

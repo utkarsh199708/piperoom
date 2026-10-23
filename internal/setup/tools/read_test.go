@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/room"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/tools"
@@ -178,6 +179,8 @@ func TestReadToolsRefuseUnknownInputFields(t *testing.T) {
 		"file_read":         json.RawMessage(`{"path":"a","op":"file_delete"}`),
 		"jar_list":          json.RawMessage(`{"path":"a","extra":true}`),
 		"container_inspect": json.RawMessage(`{"service":"connect","command":"rm -rf /"}`),
+		// compose_config renders the whole project; its schema has only file.
+		"compose_config": json.RawMessage(`{"file":"compose.yaml","services":["connect"]}`),
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -326,5 +329,40 @@ func TestReadToolWithholdsCutData(t *testing.T) {
 	}
 	if res.Data != nil {
 		t.Fatalf("cut data was returned: %v", res.Data)
+	}
+}
+
+func TestReadToolMapsErrorCodesToSentinels(t *testing.T) {
+	for code, want := range map[string]error{
+		"out_of_scope": tools.ErrOutOfScope,
+		"not_found":    clients.ErrNotFound,
+	} {
+		t.Run(code, func(t *testing.T) {
+			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+				return protocol.OpResult{ID: req.ID, OK: false, Summary: "refused", Data: json.RawMessage(`{"error_code":"` + code + `"}`)}, nil
+			}}
+			reg := tools.NewReadOnlyRegistry()
+			if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			tool, _ := reg.Get("file_read")
+			_, err := tool.Run(context.Background(), json.RawMessage(`{"path":"compose.yaml"}`))
+			if !errors.Is(err, want) {
+				t.Fatalf("Run with error_code %q = %v, want %v", code, err, want)
+			}
+		})
+	}
+	// An unknown code is still an error, with no sentinel.
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: false, Summary: "refused", Data: json.RawMessage(`{"error_code":"weird"}`)}, nil
+	}}
+	reg := tools.NewReadOnlyRegistry()
+	if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	tool, _ := reg.Get("file_read")
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"path":"compose.yaml"}`))
+	if err == nil || errors.Is(err, tools.ErrOutOfScope) || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("Run with an unknown error_code = %v, want a plain error", err)
 	}
 }

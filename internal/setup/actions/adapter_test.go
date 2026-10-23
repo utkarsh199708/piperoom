@@ -383,3 +383,52 @@ func TestParamsSchemaIsACopy(t *testing.T) {
 		t.Fatalf("the returned schema edits the adapter's: %v", again)
 	}
 }
+
+func TestExecuteRaisesAnUntieredStepToItsClass(t *testing.T) {
+	spec := testSpec()
+	spec.Tier = plan.TierT1
+	f := &fakeRunner{}
+	a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for class, want := range map[string]string{
+		protocol.ClassLocal:      plan.TierT1,
+		protocol.ClassShared:     plan.TierT2,
+		protocol.ClassProduction: plan.TierT3,
+	} {
+		ctx := room.WithSetupStep(testContext(t, grantParams), room.SetupStep{
+			ProposalID: "p_1", StepIndex: 0, ParamsHash: "h",
+			Class: class, Action: "source_grant_select", Params: grantParams,
+		})
+		if _, _, err := a.ExecuteReceipt(ctx, grantParams); err != nil {
+			t.Fatalf("ExecuteReceipt(%s): %v", class, err)
+		}
+		calls := f.recorded()
+		if got := calls[len(calls)-1].req.Tier; got != want {
+			t.Errorf("class %s with no step tier: tier = %q, want %q (plan.TierOf)", class, got, want)
+		}
+	}
+}
+
+func TestValidateChecksOnlyTheObjectShape(t *testing.T) {
+	a := newTestAdapter(t, &fakeRunner{})
+	// Not an object: refused here.
+	for _, bad := range []string{`[1]`, `"x"`, `null`, `{"role":"a","Role":"b"}`} {
+		if err := a.Validate(context.Background(), json.RawMessage(bad)); !errors.Is(err, ErrBadInput) {
+			t.Errorf("Validate(%s) = %v, want ErrBadInput", bad, err)
+		}
+	}
+	// An object that breaks the schema (missing required, unknown key, wrong
+	// type) passes the shape check: there is no JSON Schema validator here, and
+	// the runner refuses it against the op's schema before it executes.
+	for _, schemaBreaking := range []string{
+		`{}`,
+		`{"role":"r","tables":["public.orders"],"extra":true}`,
+		`{"role":7,"tables":"public.orders"}`,
+	} {
+		if err := a.Validate(context.Background(), json.RawMessage(schemaBreaking)); err != nil {
+			t.Errorf("Validate(%s) = %v, want nil (the runner validates the schema)", schemaBreaking, err)
+		}
+	}
+}

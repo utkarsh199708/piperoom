@@ -17,8 +17,16 @@ import (
 
 // Emitter receives the events a KindRoom setup tool produces. It is the
 // agent.Sink contract (Emit) expressed here so this package and the agent
-// package do not depend on each other; the room service's Sink satisfies it as
-// it stands.
+// package do not depend on each other.
+//
+// The room service's agent sink (room.agentEmit) does not accept these events
+// as it stands: it allow-lists agent.* types only. The PR that wires these
+// tools must add exactly two types to that allow-list, events.SetupPlan
+// (setup.plan, emitted here) and TypeVerificationRequested
+// (setup.verification_requested, emitted by setup_request_verification), and
+// must never add setup.verified, which only the server's ladder runner writes.
+// Until then every Emit through the room's sink is refused and the tool
+// reports the error.
 type Emitter interface {
 	Emit(ctx context.Context, typ events.Type, payload any) error
 }

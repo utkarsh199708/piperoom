@@ -91,6 +91,7 @@ func EnvironmentSpecs() []Spec {
 			// preview shows the effective services before they start.
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			PreviewDecode: composeConfigPreview,
 		},
 		{
 			Name:          "compose_restart",
@@ -101,6 +102,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			PreviewDecode: composeConfigPreview,
 		},
 		{
 			Name:          "compose_down",
@@ -111,6 +113,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			PreviewDecode: composeConfigPreview,
 		},
 		{
 			Name:     "plugin_install",
