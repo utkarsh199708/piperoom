@@ -158,7 +158,13 @@ func TestPropertiesRequiredKeysFromIndex(t *testing.T) {
 		t.Run(entry.SinkType, func(t *testing.T) {
 			required := withRequired(entry)
 			if len(required) == 0 {
-				t.Skip("the sink has no required key")
+				// A sink without required keys must build from an empty key
+				// set. Returning rather than skipping keeps the full-stack
+				// job's fail-on-skips gate green.
+				if _, err := f.drv.BuildProperties(PropertiesParams{Sink: entry.SinkType, Source: "postgres"}); err != nil {
+					t.Fatalf("the sink has no required keys but does not build empty: %v", err)
+				}
+				return
 			}
 			// Without the index's required keys the sink cannot start; the
 			// error names one of them.
@@ -468,6 +474,282 @@ func TestKeyAtImageTag(t *testing.T) {
 	if err := keyAtImageTag(knowledge.Key{Name: "k", Since: "3.1.0.Final", Until: "3.3.0.Final"}, "3.2.0.Final"); err != nil {
 		t.Errorf("a key inside the release: %v", err)
 	}
+}
+
+// TestPropertiesRenderRoundTrips parses the rendered file back with the Java
+// properties forms (comments, key=value, backslash continuations) and checks
+// every key and value survives unchanged. A value that ended in a backslash
+// would join the next line; none is accepted, so the pinned keys are all there.
+func TestPropertiesRenderRoundTrips(t *testing.T) {
+	f := newFixture(t, Options{})
+	sourceKeys := map[string]string{
+		"database.hostname":      "postgres",
+		"database.port":          "5432",
+		"database.user":          "debezium",
+		"database.password":      "${secret:pg_password}",
+		"table.include.list":     "public.canary,public.orders",
+		"transforms":             "unwrap",
+		"transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+		"transforms.unwrap.delete.tombstone.handling.mode": "rewrite",
+	}
+	for _, sink := range []string{"http", "kinesis", "pubsub", "redis", "kafka"} {
+		t.Run(sink, func(t *testing.T) {
+			p, err := f.drv.BuildProperties(PropertiesParams{
+				Sink: sink, SinkKeys: sinkSamples[sink], Source: "postgres", SourceKeys: sourceKeys,
+			})
+			if err != nil {
+				t.Fatalf("BuildProperties: %v", err)
+			}
+			parsed, order := parsePropertiesFile(string(p.render()))
+			if len(order) != len(p.Keys) {
+				t.Fatalf("parsed %d keys, rendered %d", len(order), len(p.Keys))
+			}
+			for _, key := range p.Keys {
+				if got, ok := parsed[key]; !ok || got != p.Entries[key] {
+					t.Errorf("%s = %q (present %v), want %q", key, got, ok, p.Entries[key])
+				}
+			}
+			if parsed[keySinkType] != sink {
+				t.Errorf("%s = %q, want %q (a value continued onto its line)", keySinkType, parsed[keySinkType], sink)
+			}
+		})
+	}
+}
+
+// TestPropertiesBackslashRefused is the injection rule: a value with a
+// backslash is refused on both halves before anything is rendered, so a
+// trailing one cannot continue the line and swallow the next pinned key.
+func TestPropertiesBackslashRefused(t *testing.T) {
+	f := newFixture(t, Options{})
+	cases := []struct {
+		name   string
+		sink   map[string]string
+		source map[string]string
+	}{
+		{"sink trailing backslash", map[string]string{"debezium.sink.http.url": `http://127.0.0.1:9080/x\`}, nil},
+		{"sink escaped path", map[string]string{
+			"debezium.sink.http.url":            "http://127.0.0.1:9080/x",
+			"debezium.sink.http.headers.prefix": `C:\certs\ca.pem`,
+		}, nil},
+		{"source trailing backslash", nil, map[string]string{"database.dbname": `orders\`}},
+		{"source unicode escape", nil, map[string]string{"database.dbname": `\u000a`}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sink := c.sink
+			if sink == nil {
+				sink = map[string]string{"debezium.sink.http.url": "http://127.0.0.1:9080/x"}
+			}
+			_, err := f.drv.BuildProperties(PropertiesParams{Sink: "http", SinkKeys: sink, Source: "postgres", SourceKeys: c.source})
+			if !errors.Is(err, ErrProperties) {
+				t.Fatalf("err = %v, want ErrProperties", err)
+			}
+		})
+	}
+}
+
+// TestPropertiesExpressionsRefused covers the SmallRye expansion rule on both
+// halves: only a literal or a ${secret:name} reference on a credential key is
+// accepted.
+func TestPropertiesExpressionsRefused(t *testing.T) {
+	f := newFixture(t, Options{})
+	build := func(sinkURL string, source map[string]string) error {
+		_, err := f.drv.BuildProperties(PropertiesParams{
+			Sink: "http", SinkKeys: map[string]string{"debezium.sink.http.url": sinkURL},
+			Source: "postgres", SourceKeys: source,
+		})
+		return err
+	}
+	for _, value := range []string{
+		"http://collector.example.com/${debezium.source.database.password}",
+		"http://collector.example.com/${env:HOME}",
+		"http://collector.example.com/${AWS_SECRET_ACCESS_KEY}",
+		"${env:HOME}",
+	} {
+		if err := build(value, nil); !errors.Is(err, ErrProperties) && !errors.Is(err, ErrSecretValue) {
+			t.Errorf("sink value %q: err = %v, want a refusal", value, err)
+		}
+	}
+	for _, value := range []string{"${debezium.source.database.password}", "${env:HOME}", "${secret:not_a_credential}"} {
+		if err := build("http://127.0.0.1:9080/x", map[string]string{"database.dbname": value}); !errors.Is(err, ErrProperties) && !errors.Is(err, ErrSecretValue) {
+			t.Errorf("source value %q: err = %v, want a refusal", value, err)
+		}
+	}
+	// A bare $ is text, not an expression.
+	if err := build("http://127.0.0.1:9080/$5", map[string]string{"database.dbname": "$HOME"}); err != nil {
+		t.Errorf("a literal $ was refused: %v", err)
+	}
+}
+
+// TestPropertiesSourceAllowList is the source-half table: the connector keys are
+// an allow-list, the transforms and predicates families go through the U3a
+// index, paths are data-only, and hosts are checked.
+func TestPropertiesSourceAllowList(t *testing.T) {
+	f := newFixture(t, Options{})
+	build := func(keys map[string]string) (Properties, error) {
+		return f.drv.BuildProperties(PropertiesParams{
+			Sink: "http", SinkKeys: map[string]string{"debezium.sink.http.url": "http://127.0.0.1:9080/x"},
+			Source: "postgres", SourceKeys: keys,
+		})
+	}
+	valid := map[string]string{
+		"database.hostname":                     "postgres",
+		"database.port":                         "5432",
+		"database.user":                         "debezium",
+		"database.password":                     "${secret:pg_password}",
+		"database.dbname":                       "orders",
+		"table.include.list":                    "public.orders,public.customers",
+		"plugin.name":                           "pgoutput",
+		"slot.name":                             "piperoom_slot",
+		"publication.name":                      "piperoom_pub",
+		"publication.autocreate.mode":           "filtered",
+		"topic.prefix":                          "orders",
+		"schema.history.internal":               "io.debezium.storage.file.history.FileSchemaHistory",
+		"schema.history.internal.file.filename": "data/history.dat",
+		"transforms":                            "unwrap",
+		"transforms.unwrap.type":                "io.debezium.transforms.ExtractNewRecordState",
+		"transforms.unwrap.delete.tombstone.handling.mode": "rewrite",
+	}
+	if _, err := build(valid); err != nil {
+		t.Fatalf("valid source keys: %v", err)
+	}
+	for _, host := range []string{"postgres", "127.0.0.1", "10.0.0.5", "db.internal"} {
+		if _, err := build(map[string]string{"database.hostname": host}); err != nil {
+			t.Errorf("host %q: %v", host, err)
+		}
+	}
+	cases := []struct {
+		name string
+		keys map[string]string
+		want error
+	}{
+		{"transform type outside the index", map[string]string{
+			"transforms": "x", "transforms.x.type": "org.example.Evil",
+		}, ErrProperties},
+		{"transform alias not declared", map[string]string{
+			"transforms": "x", "transforms.x.type": "io.debezium.transforms.ExtractNewRecordState",
+			"transforms.y.type": "io.debezium.transforms.ExtractNewRecordState",
+		}, ErrProperties},
+		{"transform declared without a type", map[string]string{"transforms": "x"}, ErrProperties},
+		{"transform key outside the index", map[string]string{
+			"transforms": "unwrap", "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+			"transforms.unwrap.not.indexed": "x",
+		}, ErrProperties},
+		{"predicate type outside the index", map[string]string{
+			"predicates": "p", "predicates.p.type": "org.example.Evil",
+		}, ErrProperties},
+		{"predicate declared without a type", map[string]string{"predicates": "p"}, ErrProperties},
+		{"predicate reference not declared", map[string]string{
+			"transforms": "x", "transforms.x.type": "org.apache.kafka.connect.transforms.Filter",
+			"transforms.x.predicate": "nope",
+		}, ErrProperties},
+		{"converter override", map[string]string{"key.converter": "org.example.Evil"}, ErrProperties},
+		{"file path outside data/", map[string]string{"schema.history.internal.file.filename": "/etc/passwd"}, ErrProperties},
+		{"schema history class outside the index", map[string]string{"schema.history.internal": "org.example.History"}, ErrProperties},
+		{"plain-text password", map[string]string{"database.password": "hunter2"}, ErrSecretValue},
+		{"plain-text pass key", map[string]string{"database.pass": "hunter2"}, ErrProperties},
+		{"metadata IP", map[string]string{"database.hostname": "169.254.169.254"}, ErrProperties},
+		{"metadata name", map[string]string{"database.hostname": "metadata.google.internal"}, ErrProperties},
+		{"host with a scheme", map[string]string{"database.hostname": "http://db"}, ErrProperties},
+		{"port out of range", map[string]string{"database.port": "0"}, ErrProperties},
+		{"unknown plugin", map[string]string{"plugin.name": "evil"}, ErrProperties},
+		{"empty list element", map[string]string{"table.include.list": "public.orders,"}, ErrProperties},
+		{"secret reference on a non-credential key", map[string]string{"database.hostname": "${secret:x}"}, ErrProperties},
+		{"backslash in a list", map[string]string{"table.include.list": `public\.orders`}, ErrProperties},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := build(c.keys); !errors.Is(err, c.want) {
+				t.Fatalf("err = %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// TestPropertiesMongoSourceKeys checks the per-connector table on the MongoDB
+// connector: a connection string is checked like a host and its user info is
+// refused, and a relational key has no place there.
+func TestPropertiesMongoSourceKeys(t *testing.T) {
+	f := newFixture(t, Options{})
+	build := func(keys map[string]string) error {
+		_, err := f.drv.BuildProperties(PropertiesParams{
+			Sink: "http", SinkKeys: map[string]string{"debezium.sink.http.url": "http://127.0.0.1:9080/x"},
+			Source: "mongodb", SourceKeys: keys,
+		})
+		return err
+	}
+	if err := build(map[string]string{
+		"mongodb.connection.string": "mongodb://mongo:27017/?replicaSet=rs0",
+		"mongodb.user":              "debezium",
+		"mongodb.password":          "${secret:mongo_password}",
+		"database.include.list":     "orders",
+		"collection.include.list":   "orders.customers",
+	}); err != nil {
+		t.Fatalf("valid mongodb source keys: %v", err)
+	}
+	cases := []struct {
+		name string
+		keys map[string]string
+		want error
+	}{
+		{"user info in the connection string", map[string]string{
+			"mongodb.connection.string": "mongodb://u:p@mongo:27017",
+		}, ErrSecretValue},
+		{"metadata address", map[string]string{
+			"mongodb.connection.string": "mongodb://169.254.169.254:27017",
+		}, ErrProperties},
+		{"relational key", map[string]string{"database.hostname": "mongo"}, ErrProperties},
+		{"plain-text password", map[string]string{"mongodb.password": "hunter2"}, ErrSecretValue},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := build(c.keys); !errors.Is(err, c.want) {
+				t.Fatalf("err = %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// parsePropertiesFile mirrors the host target's parseProperties: # comments,
+// key=value (and the ':'/' ' forms) and backslash continuations. The render
+// must round-trip through it unchanged.
+func parsePropertiesFile(text string) (map[string]string, []string) {
+	entries := map[string]string{}
+	var order []string
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimLeft(lines[i], " \t\f")
+		if line == "" || line[0] == '#' || line[0] == '!' {
+			continue
+		}
+		for lineContinued(line) && i+1 < len(lines) {
+			i++
+			line = line[:len(line)-1] + strings.TrimLeft(lines[i], " \t\f")
+		}
+		end := strings.IndexAny(line, "=: \t")
+		key, value := line, ""
+		if end >= 0 {
+			key = line[:end]
+			value = strings.TrimLeft(line[end:], " \t\f")
+			if value != "" && (value[0] == '=' || value[0] == ':') {
+				value = strings.TrimLeft(value[1:], " \t\f")
+			}
+		}
+		if _, seen := entries[key]; !seen {
+			order = append(order, key)
+		}
+		entries[key] = value
+	}
+	return entries, order
+}
+
+// lineContinued reports whether a line ends in an odd number of backslashes.
+func lineContinued(line string) bool {
+	n := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 func sortedStrings(list []string) bool {

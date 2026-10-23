@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"regexp"
@@ -79,15 +80,197 @@ var reservedSourceKeys = map[string]bool{
 	"offset.flush.interval.ms":     true,
 }
 
-// Patterns of a key and of a source connector key; the offset file stays
-// under data/ (the directory the Compose render mounts as a named volume and
-// the unit's working directory carries).
+// sourceRule is the shape a source key's value must have.
+type sourceRule int
+
+const (
+	// sourceText is a literal with no further shape (checkCommon and the
+	// credential and expression rules still apply).
+	sourceText sourceRule = iota
+	// sourceName is a connector identifier (a slot, a publication, a PDB).
+	sourceName
+	// sourceTopicPrefix is topic.prefix, the connector's namespace.
+	sourceTopicPrefix
+	// sourceBool is "true" or "false".
+	sourceBool
+	// sourceInt is a bounded integer (a count, an interval in ms).
+	sourceInt
+	// sourcePort is a TCP port, 1-65535.
+	sourcePort
+	// sourceHost is a host name or an IP literal: a metadata address and a
+	// metadata service name are refused, loopback and private addresses are
+	// normal for a source DB.
+	sourceHost
+	// sourceList is a comma-separated list with no empty element.
+	sourceList
+	// sourceDataPath is data/<name>, the directory the stack keeps state in.
+	sourceDataPath
+	// sourceClass is a Java class name (the exact class is in values).
+	sourceClass
+	// sourceMongoURI is a mongodb:// or mongodb+srv:// string without user
+	// info (credentials belong in mongodb.user and mongodb.password).
+	sourceMongoURI
+)
+
+// sourceKeySpec is the rule of one allow-listed source key plus the exact
+// values the connector accepts, when the key has an enumerated set.
+type sourceKeySpec struct {
+	rule   sourceRule
+	values []string
+}
+
+// Patterns of a key, a source connector key, a transform alias and the host
+// and path values; the offset file stays under data/ (the directory the
+// Compose render mounts as a named volume and the unit's working directory
+// carries).
 var (
 	secretRefOnlyRE = regexp.MustCompile(`^\$\{secret:[A-Za-z_][A-Za-z0-9_]*\}$`)
 	secretRefRE     = regexp.MustCompile(`\$\{secret:[A-Za-z_][A-Za-z0-9_]*\}`)
-	sourceKeyRE     = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
 	offsetsFileRE   = regexp.MustCompile(`^data/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	transformRE     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+	sourceNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,127}$`)
+	hostnameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+	intRE           = regexp.MustCompile(`^-?[0-9]{1,9}$`)
+	classValueRE    = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)+$`)
 )
+
+// metadataHostNames are the names connprobe.Guard refuses by name (its list is
+// unexported, so this is a copy). A source key's host must not name them: a
+// Debezium connector pointed at a metadata service would read its credentials.
+var metadataHostNames = map[string]bool{
+	"metadata.google.internal": true,
+	"metadata":                 true,
+	"instance-data":            true,
+}
+
+// commonSourceKeys are the source connector keys that are not tied to one
+// connector database. They are the keys design §2.5 lets a config set; a key
+// outside this table (and the connector tables below, and the transforms and
+// predicates families) is refused.
+var commonSourceKeys = map[string]sourceKeySpec{
+	"topic.prefix":                           {rule: sourceTopicPrefix},
+	"snapshot.mode":                          {rule: sourceText, values: []string{"initial", "initial_only", "schema_only", "schema_only_recovery", "never", "when_needed", "configuration_based", "custom"}},
+	"snapshot.locking.mode":                  {rule: sourceText, values: []string{"minimal", "minimal_per_table", "extended", "none", "custom"}},
+	"snapshot.isolation.mode":                {rule: sourceText, values: []string{"read_uncommitted", "read_committed", "repeatable_read", "snapshot", "serializable"}},
+	"snapshot.include.collection.list":       {rule: sourceList},
+	"snapshot.fetch.size":                    {rule: sourceInt},
+	"snapshot.delay.ms":                      {rule: sourceInt},
+	"snapshot.max.threads":                   {rule: sourceInt},
+	"event.processing.failure.handling.mode": {rule: sourceText, values: []string{"fail", "warn", "skip"}},
+	"tombstones.on.delete":                   {rule: sourceBool},
+	"include.schema.changes":                 {rule: sourceBool},
+	"provide.transaction.metadata":           {rule: sourceBool},
+	"decimal.handling.mode":                  {rule: sourceText, values: []string{"precise", "double", "string"}},
+	"time.precision.mode":                    {rule: sourceText, values: []string{"adaptive", "adaptive_time_microseconds", "connect"}},
+	"truncate.handling.mode":                 {rule: sourceText, values: []string{"skip", "include", "fail"}},
+	"binary.handling.mode":                   {rule: sourceText, values: []string{"bytes", "base64", "hex"}},
+	"schema.name.adjustment.mode":            {rule: sourceText, values: []string{"none", "avro", "avro_unicode"}},
+	"field.name.adjustment.mode":             {rule: sourceText, values: []string{"none", "avro", "avro_unicode"}},
+	"message.key.columns":                    {rule: sourceList},
+	"heartbeat.interval.ms":                  {rule: sourceInt},
+	"topic.naming.strategy":                  {rule: sourceClass, values: []string{"io.debezium.schema.DefaultTopicNamingStrategy"}},
+}
+
+// relationalSourceKeys are the keys the relational connectors share: the
+// database coordinates, the include/exclude lists, and a file schema history
+// under data/ (the only file path this target lets a source key name).
+var relationalSourceKeys = mergeSourceKeys(commonSourceKeys, map[string]sourceKeySpec{
+	"database.hostname": {rule: sourceHost},
+	"database.port":     {rule: sourcePort},
+	"database.user":     {rule: sourceText},
+	"database.password": {rule: sourceText}, // a credential by name: secret ref only
+	"database.dbname":   {rule: sourceText},
+
+	"database.include.list": {rule: sourceList},
+	"database.exclude.list": {rule: sourceList},
+	"table.include.list":    {rule: sourceList},
+	"table.exclude.list":    {rule: sourceList},
+	"schema.include.list":   {rule: sourceList},
+	"schema.exclude.list":   {rule: sourceList},
+	"column.include.list":   {rule: sourceList},
+	"column.exclude.list":   {rule: sourceList},
+
+	"schema.history.internal":                                   {rule: sourceClass, values: []string{"io.debezium.storage.file.history.FileSchemaHistory"}},
+	"schema.history.internal.file.filename":                     {rule: sourceDataPath},
+	"schema.history.internal.skip.unparseable.ddl":              {rule: sourceBool},
+	"schema.history.internal.store.only.captured.tables.ddl":    {rule: sourceBool},
+	"schema.history.internal.store.only.captured.databases.ddl": {rule: sourceBool},
+})
+
+// sourceKeyTables is the per-connector allow-list. The connector keys are the
+// documented Debezium 3.2 keys (each connector page under
+// https://debezium.io/documentation/reference/3.2/connectors/, and the server's
+// key pass-through documented at operations/debezium-server.html). The U3a
+// knowledge index does not carry connector keys yet (a source driver is U9+),
+// so this is the fixed table the review of U11a allows until one lands; the
+// transforms and predicates families are routed through the index.
+var sourceKeyTables = map[string]map[string]sourceKeySpec{
+	"postgres": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
+		"plugin.name":                 {rule: sourceText, values: []string{"pgoutput", "decoderbufs", "wal2json", "wal2json_rds", "wal2json_streaming", "wal2json_rds_streaming"}},
+		"slot.name":                   {rule: sourceName},
+		"slot.drop.on.stop":           {rule: sourceBool},
+		"publication.name":            {rule: sourceName},
+		"publication.autocreate.mode": {rule: sourceText, values: []string{"all_tables", "disabled", "filtered"}},
+		"publication.autocreate.filter.expression": {rule: sourceText},
+		"replica.identity.autoset.values":          {rule: sourceList},
+		"hstore.handling.mode":                     {rule: sourceText, values: []string{"json", "map"}},
+		"interval.handling.mode":                   {rule: sourceText, values: []string{"numeric", "string"}},
+		"money.fraction.digits":                    {rule: sourceInt},
+		"database.sslmode":                         {rule: sourceText, values: []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}},
+	}),
+	"mysql": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
+		"database.server.id":                          {rule: sourceInt},
+		"database.connectionTimeZone":                 {rule: sourceText},
+		"database.ssl.mode":                           {rule: sourceText, values: []string{"disabled", "preferred", "required", "verify_ca", "verify_identity"}},
+		"table.ignore.builtin":                        {rule: sourceBool},
+		"include.query":                               {rule: sourceBool},
+		"binlog.buffer.size":                          {rule: sourceInt},
+		"event.deserialization.failure.handling.mode": {rule: sourceText, values: []string{"fail", "warn", "skip"}},
+		"inconsistent.schema.handling.mode":           {rule: sourceText, values: []string{"fail", "warn", "skip"}},
+	}),
+	"sqlserver": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
+		"database.names":                  {rule: sourceList},
+		"database.instance":               {rule: sourceText},
+		"database.encrypt":                {rule: sourceBool},
+		"database.trustServerCertificate": {rule: sourceBool},
+		"database.applicationName":        {rule: sourceText},
+	}),
+	"oracle": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
+		"database.pdb.name":           {rule: sourceName},
+		"database.connection.adapter": {rule: sourceText, values: []string{"logminer", "xstream"}},
+		"database.out.server.name":    {rule: sourceName},
+		"log.mining.strategy":         {rule: sourceText, values: []string{"redo_log_catalog", "online_catalog"}},
+		"lob.enabled":                 {rule: sourceBool},
+	}),
+	"mongodb": mergeSourceKeys(commonSourceKeys, map[string]sourceKeySpec{
+		"mongodb.connection.string":            {rule: sourceMongoURI},
+		"mongodb.user":                         {rule: sourceText},
+		"mongodb.password":                     {rule: sourceText}, // a credential by name: secret ref only
+		"mongodb.authsource":                   {rule: sourceText},
+		"database.include.list":                {rule: sourceList},
+		"database.exclude.list":                {rule: sourceList},
+		"collection.include.list":              {rule: sourceList},
+		"collection.exclude.list":              {rule: sourceList},
+		"field.include.list":                   {rule: sourceList},
+		"field.exclude.list":                   {rule: sourceList},
+		"capture.mode":                         {rule: sourceText, values: []string{"change_streams", "change_streams_with_pre_image", "change_streams_update_full", "change_streams_update_full_with_pre_image", "oplog"}},
+		"mongodb.ssl.enabled":                  {rule: sourceBool},
+		"mongodb.ssl.invalid.hostname.allowed": {rule: sourceBool},
+		"mongodb.poll.interval.sec":            {rule: sourceInt},
+		"mongodb.members.auto.discover":        {rule: sourceBool},
+	}),
+}
+
+// mergeSourceKeys returns the union of the tables, later ones winning.
+func mergeSourceKeys(tables ...map[string]sourceKeySpec) map[string]sourceKeySpec {
+	out := map[string]sourceKeySpec{}
+	for _, table := range tables {
+		for name, spec := range table {
+			out[name] = spec
+		}
+	}
+	return out
+}
 
 // PropertiesParams are server_properties_write's typed params: one sink the
 // index knows, its keys, the source connector and its keys.
@@ -200,7 +383,7 @@ func (d *Driver) BuildProperties(p PropertiesParams) (Properties, error) {
 	if err := addSinkKeys(&props, entry, d.image.Tag, p.SinkKeys); err != nil {
 		return Properties{}, err
 	}
-	if err := addSourceKeys(&props, p.SourceKeys); err != nil {
+	if err := addSourceKeys(&props, props.Source, d.ix, d.image.Tag, p.SourceKeys); err != nil {
 		return Properties{}, err
 	}
 	if len(props.Entries) > maxPropertiesEntries {
@@ -280,6 +463,9 @@ func checkSinkValue(key knowledge.Key, value string) (string, error) {
 	if secretRefRE.MatchString(value) {
 		return "", fmt.Errorf("%w: key %s carries a ${secret:name} reference the index does not mark secret", ErrProperties, q(key.Name))
 	}
+	if err := checkNoExpression(value); err != nil {
+		return "", fmt.Errorf("%w: key %s", err, q(key.Name))
+	}
 	if len(key.Values) > 0 && !contains(key.Values, value) {
 		return "", fmt.Errorf("%w: key %s: value %s is not one of %s", ErrProperties, q(key.Name), q(value), strings.Join(key.Values, ", "))
 	}
@@ -292,48 +478,328 @@ func checkSinkValue(key knowledge.Key, value string) (string, error) {
 	return value, nil
 }
 
-// addSourceKeys validates the source half. The keys are the connector's own
-// (design §6: the source driver's ConnectorConfig), so their list lives with
-// that driver; this package checks the shape, refuses the keys it writes
-// itself, and holds a credential-named key to a ${secret:name} reference.
-func addSourceKeys(props *Properties, given map[string]string) error {
+// addSourceKeys validates the source half against the connector's allow-list.
+// A key not in the table, a value outside its rule, a plain-text credential, a
+// ${...} form other than ${secret:name} and a host or path the rule refuses are
+// rejected. The transforms and predicates families are checked against the
+// U3a index (addSourceFamilies), never treated as free-form engine keys.
+func addSourceKeys(props *Properties, source string, ix *knowledge.Index, tag string, given map[string]string) error {
+	table, ok := sourceKeyTables[source]
+	if !ok {
+		return fmt.Errorf("%w: source %s has no key allow-list", ErrProperties, q(source))
+	}
 	names := make([]string, 0, len(given))
 	for name := range given {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		value := given[name]
-		if !sourceKeyRE.MatchString(name) {
-			return fmt.Errorf("%w: source key %s is not a connector property name", ErrProperties, q(name))
-		}
 		if reservedSourceKeys[name] {
 			return fmt.Errorf("%w: source key %s is written by this driver and cannot be set twice", ErrProperties, q(name))
 		}
-		if err := checkCommon(value); err != nil {
-			return fmt.Errorf("%w: source key %s", err, q(name))
+		if isSourceFamilyKey(name) {
+			continue // addSourceFamilies owns these
 		}
-		rest := secretRefRE.ReplaceAllString(value, "")
-		if strings.Contains(rest, "$") {
-			return fmt.Errorf("%w: source key %s uses a $ form other than ${secret:name}", ErrProperties, q(name))
+		spec, ok := table[name]
+		if !ok {
+			return fmt.Errorf("%w: source key %s is not in the %s connector allow-list (%s)", ErrProperties, q(name), q(source), strings.Join(sourceKeyNames(source), ", "))
 		}
-		if actions.LooksSecret(name) && !secretRefOnlyRE.MatchString(value) {
-			return fmt.Errorf("%w: source key %s is a credential; its value must be a ${secret:name} reference", ErrSecretValue, q(name))
-		}
-		if !secretRefOnlyRE.MatchString(value) && plaintextCredential(value) {
-			return fmt.Errorf("%w: source key %s: the value looks like a credential", ErrSecretValue, q(name))
-		}
-		if err := checkURLValue(value); err != nil {
-			return fmt.Errorf("source key %s: %w", q(name), err)
+		value, err := checkSourceValue(name, given[name], spec)
+		if err != nil {
+			return err
 		}
 		props.Entries["debezium.source."+name] = value
+	}
+	return addSourceFamilies(props, ix, tag, given)
+}
+
+// isSourceFamilyKey reports whether name belongs to a family the index owns:
+// the list key itself or one of its aliases' keys.
+func isSourceFamilyKey(name string) bool {
+	return name == "transforms" || name == "predicates" ||
+		strings.HasPrefix(name, "transforms.") || strings.HasPrefix(name, "predicates.")
+}
+
+// checkSourceValue validates one allow-listed source value.
+func checkSourceValue(name, value string, spec sourceKeySpec) (string, error) {
+	if err := checkCommon(value); err != nil {
+		return "", fmt.Errorf("%w: source key %s", err, q(name))
+	}
+	if actions.LooksSecret(name) {
+		if !secretRefOnlyRE.MatchString(value) {
+			return "", fmt.Errorf("%w: source key %s is a credential; its value must be a ${secret:name} reference", ErrSecretValue, q(name))
+		}
+		return value, nil
+	}
+	if secretRefRE.MatchString(value) {
+		return "", fmt.Errorf("%w: source key %s carries a ${secret:name} reference but is not a credential", ErrProperties, q(name))
+	}
+	if err := checkNoExpression(value); err != nil {
+		return "", fmt.Errorf("%w: source key %s", err, q(name))
+	}
+	if len(spec.values) > 0 && !contains(spec.values, value) {
+		return "", fmt.Errorf("%w: source key %s: value %s is not one of %s", ErrProperties, q(name), q(value), strings.Join(spec.values, ", "))
+	}
+	if plaintextCredential(value) {
+		return "", fmt.Errorf("%w: source key %s: the value looks like a credential", ErrSecretValue, q(name))
+	}
+	if err := checkURLValue(value); err != nil {
+		return "", fmt.Errorf("source key %s: %w", q(name), err)
+	}
+	if err := checkSourceRule(name, value, spec.rule); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// checkSourceRule applies the key's shape rule to an otherwise valid value.
+func checkSourceRule(name, value string, rule sourceRule) error {
+	bad := func(what string) error {
+		return fmt.Errorf("%w: source key %s: %s", ErrProperties, q(name), what)
+	}
+	switch rule {
+	case sourceText:
+	case sourceName, sourceTopicPrefix:
+		if !sourceNameRE.MatchString(value) {
+			return bad("the value must be an identifier of letters, digits, '_', '.' and '-'")
+		}
+	case sourceBool:
+		if value != "true" && value != "false" {
+			return bad("the value must be true or false")
+		}
+	case sourceInt:
+		if !intRE.MatchString(value) {
+			return bad("the value must be an integer")
+		}
+	case sourcePort:
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 || n > 65535 {
+			return bad("the value must be a TCP port (1-65535)")
+		}
+	case sourceHost:
+		if err := checkHost(value); err != nil {
+			return fmt.Errorf("source key %s: %w", q(name), err)
+		}
+	case sourceList:
+		for _, part := range strings.Split(value, ",") {
+			if strings.TrimSpace(part) == "" {
+				return bad("the comma-separated list has an empty element")
+			}
+		}
+	case sourceDataPath:
+		if !offsetsFileRE.MatchString(value) {
+			return bad("the value must be data/<name> (the directory the stack keeps state in)")
+		}
+	case sourceClass:
+		if !classValueRE.MatchString(value) {
+			return bad("the value must be a Java class name")
+		}
+	case sourceMongoURI:
+		if err := checkMongoURI(value); err != nil {
+			return fmt.Errorf("source key %s: %w", q(name), err)
+		}
+	}
+	return nil
+}
+
+// checkHost validates a source host. A name is checked by shape only (Validate
+// does no I/O); an IP literal is checked against connprobe's guard, so a
+// link-local or metadata address is refused while loopback and private
+// addresses stay normal for a local source.
+func checkHost(value string) error {
+	host := strings.ToLower(strings.TrimSuffix(value, "."))
+	if host == "" {
+		return fmt.Errorf("%w: the host is empty", ErrProperties)
+	}
+	if metadataHostNames[host] {
+		return fmt.Errorf("%w: %s is a metadata service name", ErrProperties, host)
+	}
+	if ip, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		if err := urlGuard.CheckAddr(ip); err != nil {
+			return fmt.Errorf("%w: %v", ErrProperties, err)
+		}
+		return nil
+	}
+	if !hostnameRE.MatchString(host) || strings.HasSuffix(host, "-") {
+		return fmt.Errorf("%w: %s is not a host name or IP literal", ErrProperties, q(value))
+	}
+	return nil
+}
+
+// checkMongoURI validates a mongodb:// or mongodb+srv:// connection string: no
+// user info (the connector has mongodb.user/mongodb.password) and every host
+// checked like any other source host.
+func checkMongoURI(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "mongodb" && u.Scheme != "mongodb+srv") || u.Host == "" {
+		return fmt.Errorf("%w: the value is not a mongodb:// or mongodb+srv:// connection string", ErrProperties)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: the connection string carries a username or password; use mongodb.user and mongodb.password", ErrSecretValue)
+	}
+	for _, hostPort := range strings.Split(u.Host, ",") {
+		host := hostPort
+		if h, _, err := net.SplitHostPort(hostPort); err == nil {
+			host = h
+		}
+		if err := checkHost(host); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addSourceFamilies validates transforms and predicates: an alias must be
+// declared in its list key, its type must be an entry of the U3a index, and
+// every other key must be a key of that entry. This is how an SMT bypasses the
+// index only if the index permits it.
+func addSourceFamilies(props *Properties, ix *knowledge.Index, tag string, given map[string]string) error {
+	transforms, err := addSourceFamily(props, ix, tag, given, "transforms", knowledge.KindSMT)
+	if err != nil {
+		return err
+	}
+	predicates, err := addSourceFamily(props, ix, tag, given, "predicates", knowledge.KindPredicate)
+	if err != nil {
+		return err
+	}
+	for alias := range transforms {
+		ref := "transforms." + alias + ".predicate"
+		value, ok := given[ref]
+		if !ok {
+			continue
+		}
+		if _, declared := predicates[value]; !declared {
+			return fmt.Errorf("%w: source key %s names predicate %s, which predicates does not declare", ErrProperties, q(ref), q(value))
+		}
+	}
+	return nil
+}
+
+// addSourceFamily validates one family (transforms or predicates) and writes
+// its entries. It returns the declared aliases and the index entry each names.
+func addSourceFamily(props *Properties, ix *knowledge.Index, tag string, given map[string]string, listKey string, kind knowledge.Kind) (map[string]knowledge.Entry, error) {
+	var aliases []string
+	seen := map[string]bool{}
+	if list, ok := given[listKey]; ok {
+		if err := checkCommon(list); err != nil {
+			return nil, fmt.Errorf("%w: source key %s", err, q(listKey))
+		}
+		if err := checkNoExpression(list); err != nil {
+			return nil, fmt.Errorf("%w: source key %s", err, q(listKey))
+		}
+		for _, part := range strings.Split(list, ",") {
+			alias := strings.TrimSpace(part)
+			if !transformRE.MatchString(alias) {
+				return nil, fmt.Errorf("%w: source key %s: alias %s is not an identifier", ErrProperties, q(listKey), q(alias))
+			}
+			if seen[alias] {
+				return nil, fmt.Errorf("%w: source key %s lists %s twice", ErrProperties, q(listKey), q(alias))
+			}
+			seen[alias] = true
+			aliases = append(aliases, alias)
+		}
+	}
+	entries := make(map[string]knowledge.Entry, len(aliases))
+	for _, alias := range aliases {
+		typeKey := listKey + "." + alias + ".type"
+		value, ok := given[typeKey]
+		if !ok {
+			return nil, fmt.Errorf("%w: source key %s declares %s but %s is missing (the index needs the class)", ErrProperties, q(listKey), q(alias), q(typeKey))
+		}
+		entry, err := ix.Lookup(kind, value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: source key %s: %w", ErrProperties, q(typeKey), err)
+		}
+		entries[alias] = entry
+	}
+	names := make([]string, 0, len(given))
+	for name := range given {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !strings.HasPrefix(name, listKey+".") {
+			continue
+		}
+		alias, sub, ok := strings.Cut(strings.TrimPrefix(name, listKey+"."), ".")
+		if !ok || alias == "" || sub == "" {
+			return nil, fmt.Errorf("%w: source key %s is not %s.<alias>.<key>", ErrProperties, q(name), q(listKey))
+		}
+		entry, declared := entries[alias]
+		if !declared {
+			return nil, fmt.Errorf("%w: source key %s names %s %s, which %s does not declare", ErrProperties, q(name), listKey, q(alias), q(listKey))
+		}
+		value := given[name]
+		if sub == "type" {
+			if err := checkCommon(value); err != nil {
+				return nil, fmt.Errorf("%w: source key %s", err, q(name))
+			}
+			if err := checkNoExpression(value); err != nil {
+				return nil, fmt.Errorf("%w: source key %s", err, q(name))
+			}
+			props.Entries["debezium.source."+name] = value
+			continue
+		}
+		key, ok := entry.Key(sub)
+		if !ok {
+			return nil, fmt.Errorf("%w: source key %s is not a key of %s (%s)", ErrProperties, q(name), q(entry.Name), strings.Join(entryKeyNames(entry), ", "))
+		}
+		// A Debezium entry's keys are versioned against the server release; a
+		// Kafka entry's against Kafka's, which is not the image tag, so it is
+		// not compared.
+		if entry.Component == "debezium" {
+			if err := keyAtImageTag(key, tag); err != nil {
+				return nil, fmt.Errorf("%w: source key %s: %v", ErrProperties, q(name), err)
+			}
+		}
+		checked, err := checkSinkValue(key, value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: source key %s: %w", ErrProperties, q(name), err)
+		}
+		canonical := listKey + "." + alias + "." + key.Name
+		if key.Name != sub {
+			props.Aliases[name] = canonical
+		}
+		props.Entries["debezium.source."+canonical] = checked
+	}
+	if len(aliases) > 0 {
+		props.Entries["debezium.source."+listKey] = strings.Join(aliases, ",")
+	}
+	return entries, nil
+}
+
+// sourceKeyNames is one connector's allow-listed key names, sorted, for a
+// refusal; the transforms and predicates families are appended.
+func sourceKeyNames(source string) []string {
+	table := sourceKeyTables[source]
+	out := make([]string, 0, len(table)+2)
+	for name := range table {
+		out = append(out, name)
+	}
+	out = append(out, "transforms", "predicates")
+	sort.Strings(out)
+	return out
+}
+
+// checkNoExpression refuses every config expression other than a ${secret:name}
+// reference. SmallRye Config expands ${name} and ${name:default} from every
+// source, including the process environment, so a value with one could read a
+// credential the builder never meant to expose. A bare $ is ordinary text.
+func checkNoExpression(value string) error {
+	if strings.Contains(value, "${") {
+		return fmt.Errorf("%w: the value carries a ${...} expression; only a literal value or a ${secret:name} reference on a credential key is allowed", ErrProperties)
 	}
 	return nil
 }
 
 // checkCommon is the value rule every key shares: non-empty, no control
-// character, no surrounding space, and not a comment a properties parser
-// would swallow.
+// character, no backslash, no surrounding space, and not a comment a
+// properties parser would swallow. A backslash is refused because in a Java
+// properties file it escapes the next character, and a value ending in one
+// continues onto the next physical line: that would swallow the key rendered
+// after it (sink type, offset store, ...) and silently change other values
+// (C:\certs\ca.pem would read as C:certsca.pem). The host target refuses it
+// for the same reason.
 func checkCommon(value string) error {
 	if len(value) > maxValueBytes {
 		return fmt.Errorf("%w: the value is longer than %d bytes", ErrProperties, maxValueBytes)
@@ -343,6 +809,8 @@ func checkCommon(value string) error {
 		return fmt.Errorf("%w: the value is empty", ErrProperties)
 	case strings.ContainsFunc(value, unicode.IsControl):
 		return fmt.Errorf("%w: the value carries a control character", ErrProperties)
+	case strings.ContainsRune(value, '\\'):
+		return fmt.Errorf("%w: the value carries a backslash, which escapes or continues the line in a properties file", ErrProperties)
 	case strings.TrimSpace(value) != value:
 		return fmt.Errorf("%w: the value has a leading or trailing space", ErrProperties)
 	case strings.HasPrefix(value, "#"):
@@ -392,7 +860,10 @@ func plaintextCredential(value string) bool {
 }
 
 // render is the file text: a fixed header, then the keys in lexical order.
-// Values passed checkCommon, so no entry can add or continue a line.
+// Values passed checkCommon (no control character, no backslash), so no entry
+// can add or continue a line. The only ${...} form left is a credential key's
+// ${secret:name} reference (see properties_ops.go: materialising it is a
+// runner gap until U1-4).
 func (p Properties) render() []byte {
 	var b strings.Builder
 	b.WriteString("# Generated by piperoom setup (server_properties_write) for " + p.Source + " -> " + p.Sink +

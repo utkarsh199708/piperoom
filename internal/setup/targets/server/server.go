@@ -18,9 +18,15 @@
 // key the index does not carry for that sink, refuses a missing key the index
 // marks required, checks each value against the key's allowed values, and
 // accepts a ${secret:name} reference only on a key the index marks secret.
-// The source half is the source connector's own configuration (design §6:
-// the driver's ConnectorConfig, with ${secret:name} references); this package
-// checks its key shape and its values but does not own its key list.
+// The source half is held to a per-connector allow-list (sourceKeyTables in
+// properties.go): only the documented database and connector keys are
+// accepted, a credential-named key must be a ${secret:name} reference, file
+// paths may only name data/, hosts are checked like any other host (metadata
+// addresses and names refused), and the transforms and predicates families are
+// resolved against the same U3a index, so no SMT class or key outside the index
+// reaches the embedded engine. The knowledge index does not carry connector
+// keys yet; when a source driver lands (U9+), its ConnectorConfig replaces the
+// fixed table.
 //
 // The S1 rule for the other two artifacts: the Compose file is rendered from
 // a typed params set and passes compose.ValidateYAML before it is written (the
