@@ -180,8 +180,10 @@ func TestScenarioRootCauseTerms(t *testing.T) {
 // TestW4aRelaxedFacts pins KAN-492 (W4a): a required fact or evidence tool
 // must be reachable on the correct read path and carry information no other
 // required fact gives. The alert already carries the pipeline map, so the two
-// ClickHouse scenarios no longer demand a pipeline_map read; the other three
-// lose a reader whose answer another required fact already contains.
+// ClickHouse scenarios no longer demand a pipeline_map read (the readonly one
+// asks for kafka_consumer_lag instead, so a passing run has a step to cite);
+// the other three lose a reader whose answer another required fact already
+// contains.
 func TestW4aRelaxedFacts(t *testing.T) {
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
@@ -250,6 +252,9 @@ func TestW4aRelaxedFacts(t *testing.T) {
 			}
 		}
 	}
+	// With no facts left, the run still needs one successful read to cite; the
+	// consumer's status read rules out order-sync, the nearest upstream cause.
+	eq("clickhouse-readonly-profile", get("clickhouse-readonly-profile").EvidenceTools, []string{"kafka_consumer_lag"})
 	eq("rebalance-loop", get("rebalance-loop").EvidenceTools, []string{"connect_status", "connect_worker_metrics"})
 	if e := get("setup/flat-plugin-dir"); has(e.EvidenceTools, "connect_list_connectors") {
 		t.Errorf("setup/flat-plugin-dir: evidence_tools still lists connect_list_connectors: %v", e.EvidenceTools)
