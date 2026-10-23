@@ -225,18 +225,22 @@ repos:
 - `config.go`: `FORGE_KIND` (`github`), `GITHUB_API_URL` (GitHub Enterprise allowed), `GITHUB_APP_ID`,
   `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (secret file).
 
-### 7. MySQL source (proposed; Q8-0 settles it)
+### 7. MySQL source (settled by Q8-0: `docs/design/mysql-source.md` §5)
 
-- `owners.yaml` `source_kind: postgres | mysql` (default `postgres`). The layer id of a MySQL source: a `mysql` layer
-  with `LayersOf` taking the source kind, or a neutral `source` layer with a migration of owners files.
-- A topology node kind for a MySQL source; `SOURCE_DB_URL` and `SOURCE_DB_WRITE_URL` accept a `mysql://` DSN.
-- `BinlogReader`: `BinlogStatus(ctx) (BinlogStatus, error)` with `file`, `pos`, `gtid_executed`, `gtid_purged`,
-  `binlogs [{name, size}]`, `expire_seconds`.
-- The MySQL client implements `SourceSettingsReader` and `SourceAdminWriter` (item 2), `LongTransactions` and `Row`;
-  `ReplicationSlots` answers `ErrNotSupported`; `RecentDDL` reads the schema history topic or answers
-  `ErrNotSupported`.
-- Identifier rule: backtick quoting after the same `^[a-zA-Z_][a-zA-Z0-9_]*$` check; `AGENTS.md` §4 rule 6 gains a
-  MySQL line.
+The exact code is in the design's §5; it lands in one leads PR, "[Q8-0] contracts: item 7", before any Q8 code row.
+In short:
+
+- `events.go`: `SourceKindPostgres`, `SourceKindMySQL`, layer `LayerMySQL = "mysql"` (appended to `Layers`),
+  `SourceLayer(sourceKind)`, `LayersOfSource(kind, sourceKind)` (the source layer at index 0).
+- `clients.go`: item 2 moves in from the Q2a/Q2b adapters (the postgres package keeps aliases), with
+  `ScopedBlockerReader`, `ErrSessionProtected` and the additive `TableReplication.Engine`, `RoleInfo.Accounts`,
+  `RoleInfo.Privileges`; new optional `BinlogReader` / `BinlogStatus` / `BinlogFile`; `SourceReader` docs say MySQL
+  answers `ErrNotSupported` for `ReplicationSlots` and `RecentDDL` (DDL comes from the schema history topic).
+- `action.go`: optional marker `SourceLayered` and `LayerFor(a, sourceKind)`, so a source-neutral source action is
+  approved by the pipeline's source layer.
+- Docs only: `graph.go` node prefix `mysql:` (no new `NodeKind`), `config.go` (`SOURCE_DB_URL` accepts `mysql://`),
+  `docs/api.md` (layer `mysql`), `AGENTS.md` §4 rule 6 (the MySQL line: backticks after the same regex).
+- `owners.yaml` `source_kind: postgres | mysql` (default `postgres`) is A3's code (Q8d), not a contract.
 
 ## Step 0: contracts
 
@@ -329,20 +333,24 @@ repos:
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q8-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/mysql-source.md` and Q0 item 7 | decides the layer id of a MySQL source, `source_kind`, the DSN, which interfaces MySQL implements, where `RecentDDL` comes from, the MySQL identifier rule (and its line in `AGENTS.md` §4), the driver (`github.com/go-sql-driver/mysql`); item 7 lands in code with it | Q0 |
-| Q8a | A1 | Opus 5.5 | 2.5 | dev: compose profile `mysql` (MySQL 8.4 with GTID, Debezium MySQL connector `orders-mysql`); `devctl break`/`fix` `binlog-purged`, `history-topic-deleted`, `missing-replication-grant`, `server-id-clash`; the pipeline in `dev/owners.yaml` | profile healthy in < 3 min; each break trips the watcher or an alert; each fix restores | Q8-0 |
-| Q8b | A8 | Opus 5.5 | 3 | mysql: read-only client (`BinlogReader`, `SourceSettingsReader`, long transactions, row) | read-only session; 10 s per call; identifiers by the Q8-0 rule; the new module listed in the PR; settings `binlog_format`, `binlog_row_image`, `gtid_mode`, `server_id`, `log_bin`, `binlog_expire_logs_seconds`; integration on the profile | Q8-0, Q8a |
-| Q8c | A8 | Opus 5.5 | 1.5 | mysqltools: `mysql_binlog_status` | compares the connector's stored position (`SourceOffsetReader`) with the purged binlogs and GTIDs and says "the binlog the connector needs is purged"; a test shows the Q2a `source_*` tools work on MySQL through the interface | Q8b, Q5a |
-| Q8d | A3 | Opus 5.5 | 1.5 | owners + topology + scope: `source_kind`, the MySQL source node, `db.table` names in scope | builder and scope table tests for both source kinds | Q8-0 |
-| Q8e | A2 | Opus 5.5 | 1.5 | kafkatools + actions: `kafka_schema_history`; MySQL positions (file, pos, GTID set) in `connect_reset_source_offsets` | the tool flags a missing history topic, finite retention, more than one partition; the action refuses a position past the binlog end or in a purged file | Q8-0, Q5b |
-| Q8f | A8 | Opus 5.5 | 1.5 | mysql: `SourceAdminWriter` on the `SOURCE_DB_WRITE_URL` pool | `GrantSelect`, `EndSession` (`KILL` after the same re-read), `CreateHeartbeatTable`; `SetReplicaIdentity` answers `ErrNotSupported`; the Q2b refusals; integration on the profile | Q8b, Q2b |
-| Q8g | A4 | Opus 5.5 | 1.5 | wiring + agent: build MySQL clients for `source_kind: mysql` (writers only with write mode on); per-source prompt (binlog, GTID, schema history) | a MySQL room offers no `pg_*` tool and a Postgres room no `mysql_*`; prompt snapshots per source; Postgres evals unchanged | Q8b, Q8d, Q8f, P1a-3 |
-| Q8h | C10 | Opus 5.5 | 1 | discover: MySQL connectors give `source_kind: mysql` | the output loads with `owners.Load`; dev-profile integration test | Q8a, Q8d |
-| Q8i | C7 | Opus 5.5 | 1.5 | scenarios: the four Q8a breaks | labels name layer and action | Q8a |
+| Q8-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/mysql-source.md` and Q0 item 7 | decides the layer id of a MySQL source, `source_kind`, the DSN, which interfaces MySQL implements, where `RecentDDL` comes from, the MySQL identifier rule (and its line in `AGENTS.md` §4), the driver (`github.com/go-sql-driver/mysql`); done when the "[Q8-0] contracts: item 7" PR merges (it also moves item 2 into `clients.go`) | Q0 |
+| Q8a | A1 | Opus 5.5 | 2.5 | dev: compose profile `mysql` (MySQL 8.4 with GTID, Debezium MySQL connector `orders-mysql`); `devctl break`/`fix` `binlog-purged`, `history-topic-deleted`, `missing-replication-grant`, `server-id-clash`; the pipeline in `dev/owners.mysql.yaml` | profile healthy in < 3 min; each break trips the watcher or an alert; each fix restores; design §10.1 | Q8-0, Q8d |
+| Q8b | A8 | Opus 5.5 | 3 | mysql: read-only client (`SourceDB`, `SourceSettingsReader`, `ScopedBlockerReader`, `BinlogReader`) and the `gtid` package | `mysql://` parsed by the client with the parameter allow-list (design §6.1; every refused parameter tested); `transaction_read_only` and `max_execution_time` on the read pool; 10 s per call; identifiers by the Q8-0 rule; `ReplicationSlots` and `RecentDDL` answer `ErrNotSupported`; settings of design §6.2 with `pending_restart`; never selects `authentication_string`; `gtid` table tests against `GTID_SUBSET`/`GTID_SUBTRACT`; the new module listed in the PR, built outside the ship workflow (go.mod) and merged after the two-lead review; integration on the profile | Q8-0, Q8a |
+| Q8c | A8 | Opus 5.5 | 1.5 | mysqltools: `mysql_binlog_status` | compares the connector's stored position (`SourceOffsetReader`) with the purged binlogs and GTIDs and says "the binlog the connector needs is purged"; also another-server position, past-the-end, retention vs connector age, `database.server.id` clash (design §7.2); a test shows the Q2a `source_*` tools work on MySQL through the interface | Q8b, Q5a |
+| Q8d | A3 | Opus 5.5 | 1.5 | owners + topology + scope: `source_kind`, the MySQL source node, `db.table` names in scope | `Layers()` from `events.LayersOfSource`; Postgres-only `watch` fields refused on a MySQL pipeline; `mysql:` node with binlog facts; overlap port 3306; provisional `source_kind`; MySQL include lists in `connector_scope.go`; builder and scope table tests for both source kinds | Q8-0 |
+| Q8e | A2 | Opus 5.5 | 2 | kafkatools + actions: `kafka_schema_history`; MySQL positions (file, pos, GTID set) in `connect_reset_source_offsets`; `database.server.id` and `snapshot.mode` (recovery) keys and the MySQL heartbeat query in `connect_update_connector_config` | the tool flags a missing history topic, finite retention, more than one partition; the action refuses a position past the binlog end, in a purged file, or whose GTID set misses `gtid_purged`; design §7.3, §8.2, §8.3 | Q8-0, Q8b, Q5b |
+| Q8f | A8 | Opus 5.5 | 1.5 | mysql: `SourceAdminWriter` on the `SOURCE_DB_WRITE_URL` pool | `GrantSelect` (one unambiguous account, SELECT only), `EndSession` (`KILL CONNECTION` after the re-read on a pinned connection; protected sessions of design §6.8; zero `startedAt` refused), `CreateHeartbeatTable`; `SetReplicaIdentity` answers `ErrNotSupported`; the Q2b refusals; integration on the profile | Q8b, Q2b |
+| Q8g | A4 | Opus 5.5 | 1.5 | wiring + agent: build MySQL clients for `source_kind: mysql` (writers only with write mode on); per-source prompt (binlog, GTID, schema history) | driver chosen by URL scheme, a scheme that disagrees with `source_kind` fails Open; a MySQL room offers no `pg_*` tool or action and a Postgres room no `mysql_*`; the agent's action list uses `actions.LayerFor`; prompt snapshots per source; Postgres evals unchanged | Q8b, Q8d, Q8f, Q8n, P1a-3 |
+| Q8h | C10 | Opus 5.5 | 1 | discover: MySQL connectors give `source_kind: mysql` | the output loads with `owners.Load`; OpenLineage namespace `mysql://`; dev-profile integration test | Q8a, Q8d |
+| Q8i | C7 | Opus 5.5 | 1.5 | scenarios: the four Q8a breaks | labels name layer and action (design §10.4) | Q8a |
 | Q8j | C6 | Opus 5.5 | 1.5 | evals: MySQL replay readers; pass rate per source kind | the four scenarios score; Postgres pass rate unchanged | Q8c, Q8i |
 | Q8k | A6 | Opus 5.5 | 1 | web: MySQL source node and layer label | Vitest; Postgres lane unchanged | Q8d |
-| Q8l | C14 | Opus 5.5 | 1 | docs: MySQL read user (`SELECT`, `REPLICATION CLIENT`, `REPLICATION SLAVE`) and write user grants; setup rows | citations per claim | Q8b, Q8f |
+| Q8l | C14 | Opus 5.5 | 1 | docs: MySQL connector user, Piperoom read user (`SELECT`, `REPLICATION CLIENT`, `PROCESS`, `performance_schema`, column-level `mysql.user`; **no** `REPLICATION SLAVE`) and write user grants; `mysql://` URL rules; data-handling row; setup rows | citations per claim; design §10.2 | Q8b, Q8f |
 | Q8m | C1 | Opus 5.5 | 0.5 | ci: unit tests for the new packages; README lists MySQL | CI green | Q8c |
+| Q8n | A3 | Opus 5.5 | 1.5 | sourceactions + dbtools: source-neutral over the item 2 `clients` types; `SourceLayered`; MySQL previews; `source_row`, `source_long_transactions` | the Q2 actions and tools take `clients.*` types; heartbeat preview has no publication step on MySQL; end session refuses a zero `StartedAt` at Validate; grant names the resolved account; the two new tool names are registered for MySQL rooms only; Postgres prompt snapshots unchanged | Q8-0 |
+| Q8o | A5 | Opus 5.5 | 0.5 | room: the approving layer of a step from `actions.LayerFor` with the room pipeline's source kind | a `source_grant_select` step on a MySQL pipeline needs the `mysql` owner; Postgres unchanged; table test | Q8-0, Q8d |
+| Q8p | A7 | Opus 5.5 | 0.5 | watcher: no slot reads for a MySQL pipeline | slot signals off with one INFO line; connector, lag and DLQ signals unchanged; fake-clock test | Q8d |
+| Q8q | C18 | Opus 5.5 | 0.25 | nettools: default port 3306 for a `mysql://` source URL | table test | Q8-0 |
 
 ## Leads' decisions on the plan (review of #605, 2026-10-18)
 
@@ -395,7 +403,9 @@ no eighth local agent runs, A3 takes the A8 rows after step 2; the After column 
 | C10 | 1 | 1 | 1 | step 8 |
 | C1 | 1 | 0.5 | 0.5 | step 8 |
 
-Total about 78 agent-days over 61 PRs. The critical path is A2: Q0, Q1c, Q3a, Q4a, Q5a, Q5b, Q5c, Q8e, about 12
+Q8-0 (`docs/design/mysql-source.md` §13) adds Q8n (A3, 1.5), Q8o (A5, 0.5), Q8p (A7, 0.5), Q8q (C18, 0.25) and 0.5 day
+to Q8e (A2); the table above is from before that change. Total about 78 agent-days over 61 PRs before it, about 81 over 65
+after it. The critical path is A2: Q0, Q1c, Q3a, Q4a, Q5a, Q5b, Q5c, Q8e, about 12
 working days. The MySQL chain (Q0, Q8-0, Q8a, Q8b, Q8f, Q8g) is about as long. If A2 slips, Q8e moves to the end;
 only the MySQL offsets shape waits on it.
 
