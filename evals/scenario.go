@@ -74,13 +74,21 @@ type Scenario struct {
 	// Setup is the scenario's setup metadata (U1-20): the source kind and
 	// target kind a setup run starts from, which the report groups its
 	// per-source and per-target pass rates by. An incident scenario names
-	// none; its source kind defaults to postgres (the pipeline every incident
-	// scenario runs on) and it is in no target group.
+	// none (Setup is nil) and is in no source or target group; only setup
+	// scenarios are grouped by source, so by_source is not the CDC overall.
 	Setup *ScenarioSetup `yaml:"setup"`
 
 	// pipelineYAML is the pipeline as written, for the room path's owners
 	// file; nil for a scenario built in code.
 	pipelineYAML *yaml.Node
+	// setupRec is the runner-session recording Config.SetupDir attached
+	// (U1-20); nil for a scenario with none. The setup scenarios' scoring
+	// replays it (setup_replay.go).
+	setupRec *evalsetup.Recording
+	// setupErr says why a setup scenario has no recording to replay: a
+	// SetupDir that did not load, or no file for this scenario. The run fails
+	// with it instead of passing without the setup evidence.
+	setupErr string
 }
 
 // ScenarioSetup is the setup shape a scenario reports under (U1-20). The
@@ -91,32 +99,45 @@ type ScenarioSetup struct {
 	Target     string `yaml:"target"`
 }
 
-// DefaultSourceKind is the source kind of a scenario that names none: every
-// incident scenario and the U1-19 setup scenarios run on Postgres.
+// DefaultSourceKind is the source kind of a setup scenario that names none.
+// The U1-19 setup scenarios run on Postgres. Incident scenarios are in no
+// source group (setupKinds), so they never contribute to by_source.
 const DefaultSourceKind = "postgres"
 
 // setupKinds returns the source kind and target kind the report groups this
-// scenario's runs by. A target is "" (in no target group) when the scenario
-// names none.
+// scenario's runs by. Only a setup scenario (one with a setup block) is in a
+// source group; an incident scenario is in neither, so by_source is a setup
+// rate, not every CDC incident plus the six setup scenarios. The source of a
+// setup scenario that names none is DefaultSourceKind; the target is "" when
+// it names none.
 func (s Scenario) setupKinds() (source, target string) {
-	source = DefaultSourceKind
 	if s.Setup == nil {
-		return source, ""
+		return "", ""
 	}
+	source = DefaultSourceKind
 	if s.Setup.SourceKind != "" {
 		source = s.Setup.SourceKind
 	}
 	return source, s.Setup.Target
 }
 
+// isSetupScenario reports whether s is one of the U1-19 setup scenarios: it
+// has a setup block, or its name uses the setup/ prefix every setup scenario
+// in evals/scenarios/setup-*.yaml has. A setup scenario must replay a
+// recording (setup_replay.go); one without a recording fails its runs.
+func (s Scenario) isSetupScenario() bool {
+	return s.Setup != nil || strings.HasPrefix(s.Name, "setup/")
+}
+
 // attachSetup fills the scenario's setup kinds from its runner recording when
-// it names none (U1-20). A recording is the setup request's own session, so
-// its source and target are what the run started from; a scenario that states
-// a kind keeps it.
+// it names none (U1-20), and keeps the recording for the scoring replay. A
+// recording is the setup request's own session, so its source and target are
+// what the run started from; a scenario that states a kind keeps it.
 func attachSetup(s *Scenario, rec *evalsetup.Recording) {
 	if rec == nil {
 		return
 	}
+	s.setupRec = rec
 	if s.Setup == nil {
 		s.Setup = &ScenarioSetup{}
 	}

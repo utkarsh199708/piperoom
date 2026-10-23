@@ -67,12 +67,12 @@ type Config struct {
 	// ambiguous hypothesis is unjudged and counts as not passed.
 	JudgeMaxCalls int
 	// SetupDir is the directory of runner-session recordings (U1-20;
-	// evals/setup/recordings). A scenario with a recording gets the source
-	// and target kinds it reports under when it names none, so the report's
-	// per-source and per-target pass rates cover the setup scenarios; the
-	// recordings are also the replay a setup run's runner needs (evals/setup).
-	// Empty reads none. A directory that fails to load is logged as a warning
-	// and the run goes on without it.
+	// evals/setup/recordings). A scenario with a recording gets the source and
+	// target kinds it reports under when it names none, and the recording is
+	// replayed as part of every run's score (setup_replay.go): a setup
+	// scenario whose recording is missing or broken fails, so the setup
+	// evidence is never assumed. Empty reads none; the setup scenarios then
+	// fail with "no runner-session recording".
 	SetupDir string
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
@@ -120,22 +120,37 @@ func (c Config) gate() *judgeGate {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	// Copy the slice: attaching the recordings and the per-scenario setup
+	// error must not mutate the caller's scenarios.
+	scenarios = append([]Scenario(nil), scenarios...)
+	var setupErr error
 	if cfg.SetupDir != "" {
 		recs, err := evalsetup.LoadDir(cfg.SetupDir)
 		if err != nil {
-			// A broken recording costs the setup grouping, not every other
-			// scenario's run: warn and run the set without the recordings'
-			// kinds. evalrun -check fails on the same error.
-			cfg.Logger.Warn("evals: setup recordings not loaded; setup scenarios report without their source and target", "dir", cfg.SetupDir, "err", err)
-			recs = nil
+			// A broken recording costs the setup scenarios their runs, not
+			// every other scenario's: warn, and fail the setup scenarios below
+			// with the load error. evalrun -check fails on the same error
+			// before any run starts.
+			cfg.Logger.Warn("evals: setup recordings not loaded; the setup scenarios fail their runs", "dir", cfg.SetupDir, "err", err)
+			setupErr = err
 		}
-		// Copy the slice: attaching the recordings' kinds must not mutate the
-		// caller's scenarios.
-		scenarios = append([]Scenario(nil), scenarios...)
 		for i := range scenarios {
 			if rec, ok := recs[scenarios[i].Name]; ok {
 				attachSetup(&scenarios[i], rec)
 			}
+		}
+	}
+	for i := range scenarios {
+		if !scenarios[i].isSetupScenario() || scenarios[i].setupRec != nil {
+			continue
+		}
+		switch {
+		case setupErr != nil:
+			scenarios[i].setupErr = fmt.Sprintf("the recordings did not load: %v", setupErr)
+		case cfg.SetupDir == "":
+			scenarios[i].setupErr = "no runner-session recording (Config.SetupDir is empty)"
+		default:
+			scenarios[i].setupErr = fmt.Sprintf("no runner-session recording for %s in %s", scenarios[i].Name, cfg.SetupDir)
 		}
 	}
 	if cfg.Runner == nil {

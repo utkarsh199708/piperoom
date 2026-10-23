@@ -138,15 +138,15 @@ func TestReportRoundTripAndMarkdown(t *testing.T) {
 }
 
 // TestReportPerSourceAndPerTargetRates is the U1-20 rate math: runs are
-// pooled within a group (not averaged over scenarios), a scenario with no
-// target is in no target group, and a scenario with no source kind counts as
-// postgres.
+// pooled within a group (not averaged over scenarios), an incident scenario
+// (no setup block) is in neither group, and a setup scenario with no source
+// kind counts as postgres.
 func TestReportPerSourceAndPerTargetRates(t *testing.T) {
 	scs := []Scenario{
 		{Name: "a", Setup: &ScenarioSetup{SourceKind: "postgres", Target: "compose"}},
 		{Name: "b", Setup: &ScenarioSetup{SourceKind: "postgres", Target: "host"}},
 		{Name: "c", Setup: &ScenarioSetup{SourceKind: "mysql", Target: "compose"}},
-		{Name: "d"}, // no setup block: postgres, no target
+		{Name: "d"}, // no setup block: no source and no target group
 	}
 	res := []RunResult{
 		{Scenario: "a", Run: 1, Pass: true},
@@ -159,12 +159,12 @@ func TestReportPerSourceAndPerTargetRates(t *testing.T) {
 	}
 	r := buildReport(Config{Label: "rates", Runs: 3}, scs, res, timeZero())
 
-	if got := r.Scenarios[3].SourceKind; got != DefaultSourceKind {
-		t.Errorf("scenario d source = %q, want %q", got, DefaultSourceKind)
+	if got := r.Scenarios[3].SourceKind; got != "" {
+		t.Errorf("incident scenario d source = %q, want no source group", got)
 	}
 	wantSource := []Breakdown{
 		{Kind: "mysql", Scenarios: 1, Runs: 1, Passes: 0, PassRate: 0},
-		{Kind: "postgres", Scenarios: 3, Runs: 6, Passes: 5, PassRate: 5.0 / 6},
+		{Kind: "postgres", Scenarios: 2, Runs: 4, Passes: 3, PassRate: 3.0 / 4},
 	}
 	if !reflect.DeepEqual(r.BySource, wantSource) {
 		t.Errorf("by source = %+v, want %+v", r.BySource, wantSource)
@@ -192,7 +192,7 @@ func TestReportPerSourceAndPerTargetRates(t *testing.T) {
 	if err := r.WriteMarkdown(&b); err != nil {
 		t.Fatal(err)
 	}
-	if md := b.String(); !strings.Contains(md, "by source: mysql 0/1 (0%) · postgres 5/6 (83%)") ||
+	if md := b.String(); !strings.Contains(md, "by source: mysql 0/1 (0%) · postgres 3/4 (75%)") ||
 		!strings.Contains(md, "by target: compose 2/4 (50%) · host 1/1 (100%)") {
 		t.Errorf("markdown lacks the breakdown lines:\n%s", md)
 	}

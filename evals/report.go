@@ -50,9 +50,10 @@ type Report struct {
 	InfraStop string `json:"infra_stop,omitempty"`
 	// ByTarget and BySource are the pass rate grouped by the setup target
 	// kind and the source kind (U1-20), pooled over every scored run of the
-	// group. A scenario's source kind defaults to postgres; a scenario that
-	// names no target (every incident scenario) is in no target group. They
-	// are additive: no existing field changes.
+	// group. Only setup scenarios are grouped; an incident scenario is in
+	// neither group, so by_source is the setup rate, not every CDC incident
+	// plus the six setup scenarios. They are additive: no existing field
+	// changes.
 	ByTarget []Breakdown `json:"by_target,omitempty"`
 	BySource []Breakdown `json:"by_source,omitempty"`
 }
@@ -118,8 +119,8 @@ type Summary struct {
 
 // ScenarioSummary aggregates one scenario's runs. SourceKind and Target are
 // the setup kinds the report's per-source and per-target rates group by
-// (U1-20); SourceKind defaults to postgres, Target is "" when the scenario
-// names none.
+// (U1-20). Both are "" for an incident scenario, which is in neither group;
+// a setup scenario's SourceKind defaults to postgres.
 type ScenarioSummary struct {
 	Name       string `json:"name"`
 	SourceKind string `json:"source_kind,omitempty"`
