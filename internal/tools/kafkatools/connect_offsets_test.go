@@ -314,3 +314,126 @@ func TestConnectSourceOffsetsUnsupportedVersionSanitized(t *testing.T) {
 		t.Fatalf("err %v does not name the needed version", err)
 	}
 }
+
+// The cross-pipeline total cap: six connectors with 100 offsets each stop at
+// maxSourceOffsetsTotal entries overall, later rows count the remainder and
+// the result says it was cut.
+func TestConnectSourceOffsetsTotalCapAcrossConnectors(t *testing.T) {
+	perConnector := make([]connect.SourceOffset, maxSourceOffsetEntries)
+	for i := range perConnector {
+		perConnector[i] = connect.SourceOffset{
+			Partition: map[string]any{"n": json.Number(fmt.Sprint(i))},
+			Offset:    map[string]any{"lsn": json.Number(fmt.Sprint(i))},
+		}
+	}
+	f := newOffsetsFake(t, func(context.Context, string) ([]connect.SourceOffset, error) { return perConnector, nil })
+	tool := offsetsRegistry(t, Deps{Connect: f})
+	connectors := make([]string, 6)
+	for i := range connectors {
+		connectors[i] = fmt.Sprintf("pg-c%d", i)
+	}
+	ctx := tools.WithPipeline(context.Background(), owners.Pipeline{ID: "orders", Connectors: connectors})
+	r, err := tool.Run(ctx, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	rows := r.Data.(map[string]any)["connectors"].([]connectorOffsetsRow)
+	if len(rows) != 6 {
+		t.Fatalf("rows %d", len(rows))
+	}
+	total, omitted := 0, 0
+	for _, row := range rows {
+		total += len(row.Offsets)
+		omitted += row.Omitted
+	}
+	if total != maxSourceOffsetsTotal {
+		t.Fatalf("total offsets %d, want %d", total, maxSourceOffsetsTotal)
+	}
+	if omitted != 6*maxSourceOffsetEntries-maxSourceOffsetsTotal {
+		t.Fatalf("omitted %d", omitted)
+	}
+	if len(rows[5].Offsets) != 0 || rows[5].Omitted != maxSourceOffsetEntries {
+		t.Fatalf("last row = %d offsets, %d omitted", len(rows[5].Offsets), rows[5].Omitted)
+	}
+	if !r.Truncated {
+		t.Fatal("capped result not marked truncated")
+	}
+}
+
+// Per-map key caps: a map with more keys than maxOffsetMapKeys keeps at most
+// that many, and an empty or over-long key is dropped and counted.
+func TestConnectSourceOffsetsKeyCaps(t *testing.T) {
+	offset := map[string]any{
+		"":                                       "empty-key-value",
+		strings.Repeat("k", maxOffsetKeyBytes+1): "long-key-value",
+	}
+	for i := 0; i < 40; i++ {
+		offset[fmt.Sprintf("key%02d", i)] = json.Number(fmt.Sprint(i))
+	}
+	f := newOffsetsFake(t, func(context.Context, string) ([]connect.SourceOffset, error) {
+		return []connect.SourceOffset{{Partition: map[string]any{"server": "pg"}, Offset: offset}}, nil
+	})
+	tool := offsetsRegistry(t, Deps{Connect: f})
+	r := runTool(t, tool, `{"connector":"pg-orders-connector"}`)
+	rows := r.Data.(map[string]any)["connectors"].([]connectorOffsetsRow)
+	got := rows[0].Offsets[0].Offset
+	if len(got) > maxOffsetMapKeys {
+		t.Fatalf("offset map kept %d keys, cap %d", len(got), maxOffsetMapKeys)
+	}
+	for k := range got {
+		if k == "" || len(k) > maxOffsetKeyBytes {
+			t.Fatalf("bad key survived: %q", k)
+		}
+	}
+	if rows[0].ValuesOmitted < 42-maxOffsetMapKeys {
+		t.Fatalf("ValuesOmitted = %d", rows[0].ValuesOmitted)
+	}
+	for _, leak := range []string{"empty-key-value", "long-key-value"} {
+		if strings.Contains(r.Summary, leak) {
+			t.Fatalf("dropped key's value leaked: %q", r.Summary)
+		}
+	}
+	if !r.Truncated {
+		t.Fatal("capped result not marked truncated")
+	}
+}
+
+// Unicode format runes (bidi overrides, zero-width characters) are not
+// unicode.IsControl but can reorder or hide parts of a rendered summary line;
+// they are folded in values and reject a key. The sensitive-key list also
+// mirrors actions.LooksSecret beyond "password" and "jaas".
+func TestConnectSourceOffsetsFormatRunesAndSecretKeys(t *testing.T) {
+	f := newOffsetsFake(t, func(context.Context, string) ([]connect.SourceOffset, error) {
+		return []connect.SourceOffset{{
+			Partition: map[string]any{"server": "pg"},
+			Offset: map[string]any{
+				"lsn":            "12‮rev​hide34",
+				"bad‮key":        "format-key-value",
+				"passwd":         "pw-leak",
+				"aws.credential": "cred-leak",
+				"apikey":         "key-leak",
+				"private.pem":    "pem-leak",
+			},
+		}}, nil
+	})
+	tool := offsetsRegistry(t, Deps{Connect: f})
+	r := runTool(t, tool, `{"connector":"pg-orders-connector"}`)
+	for _, banned := range []string{"‮", "​", "format-key-value", "pw-leak", "cred-leak", "key-leak", "pem-leak"} {
+		if strings.Contains(r.Summary, banned) {
+			t.Fatalf("summary carries %q: %q", banned, r.Summary)
+		}
+	}
+	rows := r.Data.(map[string]any)["connectors"].([]connectorOffsetsRow)
+	got := rows[0].Offsets[0].Offset
+	for _, k := range []string{"passwd", "aws.credential", "apikey", "private.pem"} {
+		if got[k] != "***" {
+			t.Fatalf("%s = %v, want ***", k, got[k])
+		}
+	}
+	if v, ok := got["lsn"].(string); !ok || strings.ContainsAny(v, "‮​") {
+		t.Fatalf("lsn = %v", got["lsn"])
+	}
+	if _, ok := got["bad‮key"]; ok {
+		t.Fatal("format-rune key survived")
+	}
+}

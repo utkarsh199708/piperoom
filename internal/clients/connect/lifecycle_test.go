@@ -109,6 +109,89 @@ func TestSourceOffsetsConnectorMissing(t *testing.T) {
 	}
 }
 
+// When the 404-disambiguation probe itself fails (a 500 mid-rebalance), the
+// original ErrNotFound stands: a failed probe must not turn a missing
+// connector into "endpoint not supported".
+func TestSourceOffsetsProbeFailureKeepsNotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connectors/pg-orders-connector" {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"message":"boom"}`))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	_, err := c.SourceOffsets(context.Background(), "pg-orders-connector")
+	if !errors.Is(err, clients.ErrNotFound) || errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("err %v, want ErrNotFound and not ErrNotSupported", err)
+	}
+}
+
+// Every lifecycle error path sanitizes a Connect error body: credentials are
+// redacted and control characters folded before the body can reach a log or a
+// prompt, like createError always did.
+func TestLifecycleErrorsSanitizeBody(t *testing.T) {
+	const hostile = `{"message":"password=\"hunter2SecretQ\" \u001b[31mboom\nline"}`
+	serve := func() *Client {
+		return newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(hostile))
+		})
+	}
+	calls := map[string]func(c *Client) error{
+		"delete": func(c *Client) error { return c.DeleteConnector(unscoped(), "pg-orders-connector") },
+		"stop":   func(c *Client) error { return c.StopConnector(unscoped(), "pg-orders-connector") },
+		"reset":  func(c *Client) error { return c.ResetSourceOffsets(unscoped(), "pg-orders-connector") },
+		"alter": func(c *Client) error {
+			return c.AlterSourceOffsets(unscoped(), "pg-orders-connector", []SourceOffset{{Partition: map[string]any{"server": "s"}}})
+		},
+		"offsets": func(c *Client) error {
+			_, err := c.SourceOffsets(context.Background(), "pg-orders-connector")
+			return err
+		},
+		"info": func(c *Client) error { _, err := c.ServerInfo(context.Background()); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call(serve())
+			if err == nil {
+				t.Fatal("no error")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, "hunter2SecretQ") {
+				t.Fatalf("credential reached the error: %q", msg)
+			}
+			if strings.ContainsAny(msg, "\x1b\n\r") {
+				t.Fatalf("control characters reached the error: %q", msg)
+			}
+		})
+	}
+}
+
+// A create 409 is "already exists" only when Connect says so; the same status
+// during a worker rebalance is the transient ErrRebalancing, and treating it
+// as a duplicate would silently skip the create.
+func TestCreateConnectorConflictDisambiguation(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       error
+	}{
+		{"exists", `{"error_code":409,"message":"Connector pg-orders-connector already exists"}`, ErrConnectorExists},
+		{"rebalance", `{"error_code":409,"message":"Cannot complete request momentarily due to stale configuration (typically caused by a worker rebalance)"}`, ErrRebalancing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte(tc.body))
+			})
+			err := c.CreateConnector(unscoped(), "pg-orders-connector", map[string]string{"connector.class": "x"})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestSourceOffsetsCapAndBadJSON(t *testing.T) {
 	big := `{"offsets":[{"partition":{"server":"` + strings.Repeat("x", 5<<20) + `"},"offset":{}}]}`
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -327,15 +410,20 @@ func TestResetSourceOffsets(t *testing.T) {
 }
 
 // A running connector refuses offset changes. Kafka answers 409 for a state
-// conflict and 400 with the documented STOPPED message for this one.
+// conflict and 400 with the documented STOPPED message for this one; a 409
+// whose message names a rebalance is the transient ErrRebalancing instead
+// (the connector may already be stopped), and a 400 that merely echoes the
+// STOPPED phrase inside a request value is neither.
 func TestResetSourceOffsetsNotStopped(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		code int
 		body string
+		want error
 	}{
-		{"409", http.StatusConflict, `{"message":"rebalance expected"}`},
-		{"400 stopped message", http.StatusBadRequest, `{"message":"Connectors must be in the STOPPED state before their offsets can be modified."}`},
+		{"409 state conflict", http.StatusConflict, `{"message":"Connector pg-orders-connector is not in the STOPPED state"}`, ErrConnectorNotStopped},
+		{"409 rebalance", http.StatusConflict, `{"message":"Request cannot be completed because a rebalance is expected"}`, ErrRebalancing},
+		{"400 stopped message", http.StatusBadRequest, `{"message":"Connectors must be in the STOPPED state before their offsets can be modified."}`, ErrConnectorNotStopped},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -343,10 +431,20 @@ func TestResetSourceOffsetsNotStopped(t *testing.T) {
 				w.Write([]byte(tc.body))
 			})
 			err := c.ResetSourceOffsets(unscoped(), "pg-orders-connector")
-			if !errors.Is(err, ErrConnectorNotStopped) {
-				t.Fatalf("err %v, want ErrConnectorNotStopped", err)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err %v, want %v", err, tc.want)
 			}
 		})
+	}
+	// A 400 that echoes the phrase inside a request value (Connect quotes the
+	// offending input in deserialization errors) is not a state statement.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"message":"Cannot deserialize value 'x: Connectors must be in the STOPPED state y'"}`))
+	})
+	err := c.ResetSourceOffsets(unscoped(), "pg-orders-connector")
+	if err == nil || errors.Is(err, ErrConnectorNotStopped) || errors.Is(err, ErrRebalancing) {
+		t.Fatalf("echoed phrase was misread as a state conflict: %v", err)
 	}
 }
 

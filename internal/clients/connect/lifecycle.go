@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
@@ -95,6 +96,12 @@ var ErrConnectorExists = errors.New("connect: connector already exists")
 // that is not in the STOPPED state.
 var ErrConnectorNotStopped = errors.New("connect: connector is not stopped")
 
+// ErrRebalancing reports Connect's 409 for a worker-group rebalance: a
+// transient conflict to retry, not a statement about the connector's state or
+// name. (Additive to the Q-board shapes; see the PR's contract change
+// request.)
+var ErrRebalancing = errors.New("connect: worker group is rebalancing; retry")
+
 // The Kafka versions that add each KIP-875 endpoint, from the Apache Kafka
 // documentation:
 //   - 3.5 (https://kafka.apache.org/35/documentation.html#connect_rest)
@@ -136,7 +143,7 @@ func (c *Client) ServerInfo(ctx context.Context) (ServerInfo, error) {
 		TookMS: time.Since(start).Milliseconds(),
 	})
 	if err != nil {
-		return ServerInfo{}, err
+		return ServerInfo{}, safeErr(err)
 	}
 	return out, nil
 }
@@ -200,7 +207,10 @@ func (c *Client) DeleteConnector(ctx context.Context, name string) error {
 	defer cancel()
 	path := "/connectors/" + url.PathEscape(name)
 	if err := c.do(ctx, http.MethodDelete, path, nil); err != nil {
-		return fmt.Errorf("connect: delete connector %q: %w", name, err)
+		if rebalancing(err) {
+			return fmt.Errorf("connect: delete connector %q: %w", name, ErrRebalancing)
+		}
+		return fmt.Errorf("connect: delete connector %q: %w", name, safeErr(err))
 	}
 	return nil
 }
@@ -219,6 +229,9 @@ func (c *Client) StopConnector(ctx context.Context, name string) error {
 	defer cancel()
 	path := "/connectors/" + url.PathEscape(name) + "/stop"
 	if err := c.do(ctx, http.MethodPut, path, nil); err != nil {
+		if rebalancing(err) {
+			return fmt.Errorf("connect: stop connector %q: %w", name, ErrRebalancing)
+		}
 		return c.kip875Error(ctx, name, "stop connector (PUT "+path+")", kip875ReadVersion, err)
 	}
 	return nil
@@ -240,6 +253,9 @@ func (c *Client) ResetSourceOffsets(ctx context.Context, name string) error {
 	path := "/connectors/" + url.PathEscape(name) + "/offsets"
 	err := c.do(ctx, http.MethodDelete, path, nil)
 	if err != nil {
+		if rebalancing(err) {
+			return fmt.Errorf("connect: reset source offsets %q: %w", name, ErrRebalancing)
+		}
 		if notStopped(err) {
 			return fmt.Errorf("connect: reset source offsets %q: %w", name, ErrConnectorNotStopped)
 		}
@@ -287,6 +303,9 @@ func (c *Client) AlterSourceOffsets(ctx context.Context, name string, offsets []
 	}
 	err = c.doBody(ctx, http.MethodPatch, path, json.RawMessage(b), nil)
 	if err != nil {
+		if rebalancing(err) {
+			return fmt.Errorf("connect: alter source offsets %q: %w", name, ErrRebalancing)
+		}
 		if notStopped(err) {
 			return fmt.Errorf("connect: alter source offsets %q: %w", name, ErrConnectorNotStopped)
 		}
@@ -299,21 +318,25 @@ func (c *Client) AlterSourceOffsets(ctx context.Context, name string, offsets []
 // error the caller needs: a 405, or a 404 on a Connect where the connector
 // itself exists, means the endpoint is missing and becomes ErrNotSupported
 // with the Kafka version that adds it. A 404 for a connector that also answers
-// 404 on GET /connectors/{name} stays ErrNotFound.
+// 404 on GET /connectors/{name} stays ErrNotFound — including when the exists
+// probe itself fails (a 500 or a rebalance mid-probe must not turn a missing
+// connector into "not supported"). The two requests are not atomic: a
+// connector created between them can read as ErrNotSupported once; the next
+// call answers correctly.
 func (c *Client) kip875Error(ctx context.Context, connector, call, added string, err error) error {
 	var se *statusError
 	if errors.As(err, &se) && se.Code == http.StatusMethodNotAllowed {
 		return kip875NotSupported(call, added)
 	}
 	if !errors.Is(err, clients.ErrNotFound) {
-		return fmt.Errorf("connect: %s: %w", call, err)
+		return fmt.Errorf("connect: %s: %w", call, safeErr(err))
 	}
 	exists, xerr := c.connectorExists(ctx, connector)
 	if xerr != nil {
-		return fmt.Errorf("connect: %s: %w", call, err)
+		return fmt.Errorf("connect: %s: %w", call, safeErr(err))
 	}
 	if !exists {
-		return fmt.Errorf("connect: %s: %w", call, err)
+		return fmt.Errorf("connect: %s: %w", call, safeErr(err))
 	}
 	return kip875NotSupported(call, added)
 }
@@ -325,22 +348,53 @@ func kip875NotSupported(call, added string) error {
 		call, added, clients.ErrNotSupported)
 }
 
-// notStopped reports whether err is Connect's refusal to modify the offsets of
-// a connector that is not STOPPED. Kafka 3.6 through 4.2 answer 400 with
+// connectMessage returns the message of Connect's JSON error envelope
+// ({"error_code":..,"message":..}), or "" when the body is not that shape.
+// Matching the decoded message rather than the raw body keeps an echoed
+// request value (Connect quotes the offending input in deserialization
+// errors) from passing for Connect's own words.
+func connectMessage(se *statusError) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(se.Body), &out) != nil {
+		return ""
+	}
+	return out.Message
+}
+
+// notStopped reports whether err is Connect's refusal to modify the offsets
+// of a connector that is not STOPPED. Kafka 3.6 through 4.2 answer 400 with
 // BadRequestException ("Connectors must be in the STOPPED state before their
 // offsets can be modified", DistributedHerder.modifyConnectorOffsetsChecks);
-// 409 covers the same state conflict on a rebalance and is what the Q-board
-// names. The phrase is the only machine-readable signal Connect offers, so it
-// is matched on the response body, never on a Go error string.
+// the prefix match on the decoded envelope message keeps a 400 that merely
+// echoes that phrase inside a request value out. A 409 is the Q-board's state
+// conflict — unless its message names a rebalance, a different and transient
+// condition (the connector may already be stopped) that the callers report as
+// retryable via rebalancing().
 func notStopped(err error) bool {
 	var se *statusError
 	if !errors.As(err, &se) {
 		return false
 	}
 	if se.Code == http.StatusConflict {
-		return true
+		return !rebalanceMessage(se)
 	}
-	return se.Code == http.StatusBadRequest && strings.Contains(se.Body, "must be in the STOPPED state")
+	return se.Code == http.StatusBadRequest && strings.HasPrefix(connectMessage(se), "Connectors must be in the STOPPED state")
+}
+
+// rebalancing reports whether err is Connect's 409 for a worker-group
+// rebalance ("Cannot complete request momentarily due to stale configuration
+// (typically caused by a worker rebalance)", "rebalance is expected"): a
+// transient condition to retry, not a statement about the connector's state
+// or name.
+func rebalancing(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.Code == http.StatusConflict && rebalanceMessage(se)
+}
+
+func rebalanceMessage(se *statusError) bool {
+	return strings.Contains(strings.ToLower(connectMessage(se)), "rebalance")
 }
 
 // connectorExists asks GET /connectors/{name}; it is used only to tell a
@@ -361,26 +415,58 @@ func (c *Client) connectorExists(ctx context.Context, name string) (bool, error)
 
 // createError keeps the config out of a create error: Connect echoes request
 // values in a validation error, and a config can hold a password. The status
-// stays; the body is redacted and capped.
+// stays; the body is redacted, folded and capped. A 409 is ErrConnectorExists
+// only when Connect says the name is taken; the same status during a worker
+// rebalance is a transient conflict, and reporting it as "already exists"
+// would make a caller silently skip the create.
 func createError(name string, err error) error {
 	var se *statusError
 	if !errors.As(err, &se) {
 		return fmt.Errorf("connect: create connector %q: %w", name, err)
 	}
 	if se.Code == http.StatusConflict {
+		if rebalanceMessage(se) {
+			return fmt.Errorf("connect: create connector %q: %w", name, ErrRebalancing)
+		}
 		return fmt.Errorf("connect: create connector %q: %w", name, ErrConnectorExists)
 	}
-	body := redactText(se.Body)
-	if len(body) > maxCreateErrorBody {
+	return fmt.Errorf("connect: create connector %q: status %d: %s", name, se.Code, sanitizeBody(se.Body))
+}
+
+// safeErr rewraps a Connect error for a lifecycle path: a statusError's body
+// is redacted, folded and capped before it can reach an error string, a log
+// or a prompt — Connect echoes request values (which can hold credentials)
+// and arbitrary server text (which can hold control characters) in its error
+// bodies. Everything else passes through untouched.
+func safeErr(err error) error {
+	var se *statusError
+	if !errors.As(err, &se) || se.Body == "" {
+		return err
+	}
+	return &statusError{Method: se.Method, Path: se.Path, Code: se.Code, Body: sanitizeBody(se.Body)}
+}
+
+// sanitizeBody redacts credentials in a Connect error body, folds control
+// characters and other unprintable runes (terminal escapes, Unicode line and
+// direction controls) to spaces, and caps the result on a rune boundary.
+func sanitizeBody(s string) string {
+	s = redactText(s)
+	s = strings.Map(func(r rune) rune {
+		if r != ' ' && !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	if len(s) > maxCreateErrorBody {
 		// Cut on a rune boundary: a byte slice can split a UTF-8 rune and put
 		// invalid UTF-8 into the error.
 		cut := maxCreateErrorBody
-		for cut > 0 && !utf8.RuneStart(body[cut]) {
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
-		body = body[:cut] + "…"
+		s = s[:cut] + "…"
 	}
-	return fmt.Errorf("connect: create connector %q: status %d: %s", name, se.Code, body)
+	return s
 }
 
 // redactText masks credentials in a Connect error body before it reaches an

@@ -268,12 +268,15 @@ func positionValue(v any) (any, bool) {
 		return nil, true
 	case string:
 		s, _ := redact.Text(x)
-		// A position must stay on one summary line: a line break in an
-		// untrusted value could forge a second row, and a control character
-		// (an ANSI escape, a NEL) could do the same in a log or terminal.
-		// U+2028/U+2029 are line breaks too but are not unicode.IsControl.
+		// A position must stay on one summary line and must not steer how the
+		// line renders: a line break in an untrusted value could forge a
+		// second row; a control character (an ANSI escape, a NEL) could do the
+		// same in a log or terminal; and a format rune (a bidi override such
+		// as U+202E, a zero-width character) can visually reorder or hide
+		// parts of the line for a human reader. !IsPrint folds all of them,
+		// plus U+2028/U+2029, which are line breaks yet count as printable.
 		s = strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			if (r != ' ' && !unicode.IsPrint(r)) || r == '\u2028' || r == '\u2029' {
 				return ' '
 			}
 			return r
@@ -291,15 +294,15 @@ func positionValue(v any) (any, bool) {
 	}
 }
 
-// offsetKeyOK accepts a short, printable key and no line break: a key is
-// untrusted text from the connector.
+// offsetKeyOK accepts a short, printable key: a key is untrusted text from
+// the connector, so a line break, a control character or a format rune (a
+// bidi override, a zero-width character) rejects it \u2014 see positionValue.
 func offsetKeyOK(k string) bool {
 	if k == "" || len(k) > maxOffsetKeyBytes {
 		return false
 	}
 	return !strings.ContainsFunc(k, func(r rune) bool {
-		// U+2028/U+2029 break lines but are not unicode.IsControl.
-		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+		return (r != ' ' && !unicode.IsPrint(r)) || r == '\u2028' || r == '\u2029'
 	})
 }
 
