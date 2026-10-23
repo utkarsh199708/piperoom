@@ -7,8 +7,6 @@ package forge
 // a clients.ForgeWriter with no adapter.
 
 import (
-	"context"
-
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 )
@@ -27,17 +25,10 @@ type (
 	PullRequestChecks  = clients.PullRequestChecks
 )
 
-// Reader is the read side of this package's forges (*Client and the fake):
-// the contract ForgeReader plus PullRequestHead, which pr_status needs to
-// refuse a PR from a fork's piperoom/ branch. clients.PullRequest has no head
-// repository (the Q7c follow-up asks the leads for one); until it does, the
-// head repository is this package's own answer.
-type Reader interface {
-	clients.ForgeReader
-	// PullRequestHead is PullRequest plus the "owner/name" of the repository
-	// the head branch is in: the PR's own repository, or a fork's. "" when
-	// GitHub no longer knows it (a deleted fork).
-	PullRequestHead(ctx context.Context, repo RepoRef, number int) (pr PullRequest, headRepo string, err error)
+// RefOf is the forge reference of an owners.yaml repo reference, Host
+// included, so the client's host check sees the url's host.
+func RefOf(r owners.RepoRef) RepoRef {
+	return RepoRef{ID: r.ID, Owner: r.Owner, Name: r.Name, Base: r.Base, Host: r.Host}
 }
 
 // Pull request and check states (clients.go).

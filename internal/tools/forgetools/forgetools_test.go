@@ -40,33 +40,29 @@ func testOwners() *owners.Owners {
 // counting wraps a ForgeReader and counts calls, to prove refusals come
 // before any I/O.
 type counting struct {
-	forge.Reader
+	forge.ForgeReader
 	n atomic.Int32
 }
 
 func (c *counting) RepoInfo(ctx context.Context, r forge.RepoRef) (forge.RepoInfo, error) {
 	c.n.Add(1)
-	return c.Reader.RepoInfo(ctx, r)
+	return c.ForgeReader.RepoInfo(ctx, r)
 }
 func (c *counting) BaseHead(ctx context.Context, r forge.RepoRef) (string, error) {
 	c.n.Add(1)
-	return c.Reader.BaseHead(ctx, r)
+	return c.ForgeReader.BaseHead(ctx, r)
 }
 func (c *counting) File(ctx context.Context, r forge.RepoRef, sha, p string) (forge.RepoFile, error) {
 	c.n.Add(1)
-	return c.Reader.File(ctx, r, sha, p)
+	return c.ForgeReader.File(ctx, r, sha, p)
 }
 func (c *counting) ListFiles(ctx context.Context, r forge.RepoRef, sha string) ([]forge.RepoEntry, bool, error) {
 	c.n.Add(1)
-	return c.Reader.ListFiles(ctx, r, sha)
+	return c.ForgeReader.ListFiles(ctx, r, sha)
 }
 func (c *counting) PullRequest(ctx context.Context, r forge.RepoRef, n int) (forge.PullRequest, error) {
 	c.n.Add(1)
-	return c.Reader.PullRequest(ctx, r, n)
-}
-func (c *counting) PullRequestHead(ctx context.Context, r forge.RepoRef, n int) (forge.PullRequest, string, error) {
-	c.n.Add(1)
-	return c.Reader.PullRequestHead(ctx, r, n)
+	return c.ForgeReader.PullRequest(ctx, r, n)
 }
 
 const injected = `{
@@ -81,7 +77,7 @@ func setup(t *testing.T, files map[string]string) (*fake.Forge, string, *tools.R
 	t.Helper()
 	f := fake.New()
 	base := f.AddRepo(ref, forge.RepoInfo{Visibility: "private", DefaultBranch: "main"}, files)
-	c := &counting{Reader: f}
+	c := &counting{ForgeReader: f}
 	reg := tools.NewReadOnlyRegistry()
 	if err := Register(reg, Deps{Forge: c, Owners: testOwners(), Repos: testRepos()}); err != nil {
 		t.Fatal(err)
@@ -386,11 +382,6 @@ func (notOurs) PullRequest(context.Context, forge.RepoRef, int) (forge.PullReque
 	return forge.PullRequest{Number: 3, State: forge.PRStateOpen, HeadRef: "feature/x", HeadSHA: strings.Repeat("a", 40)}, nil
 }
 
-func (n notOurs) PullRequestHead(ctx context.Context, r forge.RepoRef, num int) (forge.PullRequest, string, error) {
-	pr, err := n.PullRequest(ctx, r, num)
-	return pr, "acme/connect-config", err
-}
-
 func TestLayerOf(t *testing.T) {
 	r := testRepos().Repos(owners.Pipeline{ID: "orders"})[0]
 	cases := map[string]string{
@@ -475,8 +466,8 @@ func TestPRStatusOnlyOwnPRs(t *testing.T) {
 		return pr
 	}
 	ours, other := open("p_1"), open("p_2")
-	if _, head, err := f.PullRequestHead(ctx, ref, ours.Number); err != nil || head != "acme/connect-config" {
-		t.Fatalf("fake head repo = %q, %v", head, err)
+	if ours.HeadRepo != "acme/connect-config" {
+		t.Fatalf("fake HeadRepo = %q", ours.HeadRepo)
 	}
 
 	// No record of openings: any same-repo piperoom/ PR, but never a fork's.

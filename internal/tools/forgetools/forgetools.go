@@ -53,11 +53,9 @@ const (
 
 // Deps are the collaborators of the tools.
 type Deps struct {
-	// Forge reads the repositories: the contract clients.ForgeReader plus
-	// PullRequestHead (forge.Reader; *forge.Client and the fake are both).
-	// Required: the tools are registered only when a forge is configured
-	// (design §12).
-	Forge forge.Reader
+	// Forge reads the repositories. Required: the tools are registered only
+	// when a forge is configured (design §12).
+	Forge clients.ForgeReader
 	// Owners resolves the room's pipeline (tools.ScopeFor). Required.
 	Owners *owners.Owners
 	// Repos gives each pipeline's repos: block. Required.
@@ -91,9 +89,9 @@ type returnedSHAs struct {
 	m  map[string][]string
 }
 
-// refKey keys a repository by owner and name: one server has one forge, and
-// cmd/server refuses a repos[].url on another host (owners.CheckRepoHosts).
-func refKey(r forge.RepoRef) string { return strings.ToLower(r.Owner + "/" + r.Name) }
+// refKey keys a repository by host, owner and name (Host from owners.yaml's
+// repos[].url; "" when the source left it out).
+func refKey(r forge.RepoRef) string { return strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name) }
 
 func (s *returnedSHAs) add(r forge.RepoRef, sha string) {
 	if s == nil {
@@ -407,7 +405,7 @@ func (t *prTool) Run(ctx context.Context, raw json.RawMessage) (tools.Result, er
 	}
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	pr, headRepo, err := t.d.Forge.PullRequestHead(ctx, repo.Ref, *in.Number)
+	pr, err := t.d.Forge.PullRequest(ctx, repo.Ref, *in.Number)
 	if errors.Is(err, clients.ErrNotFound) {
 		return tools.Result{}, fmt.Errorf("%w: pull request #%d does not exist in %s", tools.ErrBadInput, *in.Number, repo.Ref.ID)
 	}
@@ -419,7 +417,7 @@ func (t *prTool) Run(ctx context.Context, raw json.RawMessage) (tools.Result, er
 	// anyone can open a PR from a fork's branch of that name, so the head
 	// must be in the repository itself, and when the room recorded its
 	// openings, this PR must be one of them.
-	if !strings.HasPrefix(pr.HeadRef, forge.FixBranchPrefix) || !strings.EqualFold(headRepo, repo.Ref.Owner+"/"+repo.Ref.Name) {
+	if !strings.HasPrefix(pr.HeadRef, forge.FixBranchPrefix) || !strings.EqualFold(pr.HeadRepo, repo.Ref.Owner+"/"+repo.Ref.Name) {
 		return tools.Result{}, fmt.Errorf("%w: pull request #%d in %s is not from a %s branch of the repository itself; pr_status reads only pull requests Piperoom opened",
 			tools.ErrOutOfScope, *in.Number, repo.Ref.ID, forge.FixBranchPrefix)
 	}

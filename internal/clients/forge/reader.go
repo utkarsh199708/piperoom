@@ -299,6 +299,9 @@ func (c *Client) pull(repo RepoRef, a pullAnswer) (PullRequest, error) {
 		URL:     "https://" + c.webHost + "/" + repo.Owner + "/" + repo.Name + "/pull/" + strconv.Itoa(a.Number),
 		HeadRef: oneLine(a.Head.Ref, 255), HeadSHA: a.Head.SHA,
 	}
+	if a.Head.Repo != nil {
+		pr.HeadRepo = oneLine(a.Head.Repo.FullName, 201)
+	}
 	switch {
 	case a.Merged || (a.MergedAt != nil && !a.MergedAt.IsZero()):
 		pr.State = PRStateMerged
@@ -318,47 +321,32 @@ func (c *Client) pull(repo RepoRef, a pullAnswer) (PullRequest, error) {
 	return pr, nil
 }
 
-// headRepo is the "owner/name" of the repository a PR's head is in, "" when
-// the answer names none (a deleted fork).
-func headRepo(a pullAnswer) string {
-	if a.Head.Repo == nil {
-		return ""
-	}
-	return oneLine(a.Head.Repo.FullName, 201)
-}
-
-// PullRequest reads one pull request with its head checks.
+// PullRequest reads one pull request with its head checks. HeadRepo is the
+// answer's head.repo.full_name ("" for a deleted fork).
 func (c *Client) PullRequest(ctx context.Context, repo RepoRef, number int) (PullRequest, error) {
-	pr, _, err := c.PullRequestHead(ctx, repo, number)
-	return pr, err
-}
-
-// PullRequestHead is PullRequest plus the repository the head branch is in
-// (Reader).
-func (c *Client) PullRequestHead(ctx context.Context, repo RepoRef, number int) (PullRequest, string, error) {
 	if err := checkRepo(repo); err != nil {
-		return PullRequest{}, "", err
+		return PullRequest{}, err
 	}
 	if number <= 0 {
-		return PullRequest{}, "", fmt.Errorf("%w: pull request number must be positive", ErrRefused)
+		return PullRequest{}, fmt.Errorf("%w: pull request number must be positive", ErrRefused)
 	}
 	tok, err := c.token(ctx, repo, scopeRead)
 	if err != nil {
-		return PullRequest{}, "", err
+		return PullRequest{}, err
 	}
 	var a pullAnswer
 	if err := c.do(ctx, tok, request{ep: epPull, method: http.MethodGet, path: repoPath(repo) + "/pulls/" + strconv.Itoa(number)}, &a); err != nil {
-		return PullRequest{}, "", err
+		return PullRequest{}, err
 	}
 	pr, err := c.pull(repo, a)
 	if err != nil {
-		return PullRequest{}, "", err
+		return PullRequest{}, err
 	}
 	pr.Checks, err = c.checks(ctx, tok, repo, pr.HeadSHA)
 	if err != nil {
-		return PullRequest{}, "", err
+		return PullRequest{}, err
 	}
-	return pr, headRepo(a), nil
+	return pr, nil
 }
 
 // maxCheckPages caps the pages of check runs and of commit statuses read

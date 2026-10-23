@@ -349,8 +349,7 @@ func inScope(pl owners.Pipeline, p params) (resolved, error) {
 		}
 		return resolved{}, fmt.Errorf("%w: repo %q is not in pipeline %q's repos (%s)", tools.ErrOutOfScope, oneLine(p.Repo, 80), pl.ID, allowed)
 	}
-	or := r.Ref()
-	ref := forge.RepoRef{ID: or.ID, Owner: or.Owner, Name: or.Name, Base: or.Base}
+	ref := forge.RefOf(r.Ref())
 	if ref.Owner == "" || ref.Name == "" || !forge.ValidBranchName(ref.Base) || strings.HasPrefix(ref.Base, forge.FixBranchPrefix) {
 		return resolved{}, fmt.Errorf("%w: repo %q of pipeline %q has no valid url or base in owners.yaml", tools.ErrOutOfScope, r.ID, pl.ID)
 	}

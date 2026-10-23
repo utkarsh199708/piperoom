@@ -274,17 +274,14 @@ func TestPullRequestStatesAndChecks(t *testing.T) {
 		{number: 2, state: "closed", headRef: "piperoom/r_1-p_2-0", headSHA: base},
 		{number: 3, state: "closed", merged: true, mergedAt: "2026-10-23T14:02:00Z", mergeSHA: strings.Repeat("a", 40), headRef: "piperoom/r_1-p_3-0", headSHA: base},
 	}
-	pr, head, err := c.PullRequestHead(ctx, tRepo, 1)
+	pr, err := c.PullRequest(ctx, tRepo, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := PullRequest{Repo: tRepo.ID, Number: 1, URL: "https://" + c.WebHost() + "/acme/connect-config/pull/1", State: PRStateOpen,
-		HeadRef: "piperoom/r_1-p_1-0", HeadSHA: base, Checks: PullRequestChecks{State: ChecksNone}}
-	if fmt.Sprint(pr) != fmt.Sprint(want) || head != "acme/connect-config" {
-		t.Fatalf("pr =\n%+v (head %q)\nwant\n%+v", pr, head, want)
-	}
-	if plain, err := c.PullRequest(ctx, tRepo, 1); err != nil || fmt.Sprint(plain) != fmt.Sprint(want) {
-		t.Fatalf("PullRequest = %+v, %v; want PullRequestHead's", plain, err)
+		HeadRef: "piperoom/r_1-p_1-0", HeadSHA: base, HeadRepo: "acme/connect-config", Checks: PullRequestChecks{State: ChecksNone}}
+	if fmt.Sprint(pr) != fmt.Sprint(want) {
+		t.Fatalf("pr =\n%+v\nwant\n%+v", pr, want)
 	}
 	if pr, _ := c.PullRequest(ctx, tRepo, 2); pr.State != PRStateClosed {
 		t.Fatalf("closed: %+v", pr)

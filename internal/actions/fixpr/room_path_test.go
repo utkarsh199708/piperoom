@@ -83,3 +83,20 @@ func TestRoomShapedPath(t *testing.T) {
 		t.Fatalf("no step: %v", err)
 	}
 }
+
+// The step's repo reference carries the url's host from owners.yaml, so the
+// forge client's per-call host check sees it.
+func TestRefCarriesHost(t *testing.T) {
+	e := newEnv(t)
+	p, err := parse(raw(t, e.good()), []string{"github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := inScope(e.pl, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ref.Host != "github.com" || r.ref.Owner != "acme" || r.ref.Name != "connect-config" || r.ref.Base != "main" {
+		t.Fatalf("ref = %+v", r.ref)
+	}
+}

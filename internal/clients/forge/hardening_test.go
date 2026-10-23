@@ -169,6 +169,26 @@ func TestWriterReuseRequiresApp(t *testing.T) {
 	}
 }
 
+// A repo whose Host is not the forge's web host is refused before any
+// request; the forge's own host, in any case, is accepted.
+func TestRepoHostMismatchRefused(t *testing.T) {
+	g, _ := newGH(t, baseFiles())
+	c := g.client(t)
+	evil := tRepo
+	evil.Host = "github.com.evil.example"
+	if _, err := c.RepoInfo(ctx10(t), evil); !errors.Is(err, ErrRefused) {
+		t.Fatalf("other host: %v", err)
+	}
+	if n := len(g.requests()); n != 0 {
+		t.Fatalf("%d requests sent for a repo on another host", n)
+	}
+	same := tRepo
+	same.Host = strings.ToUpper(c.WebHost())
+	if _, err := c.RepoInfo(ctx10(t), same); err != nil {
+		t.Fatalf("the forge's host: %v", err)
+	}
+}
+
 // A slow token mint for one repo does not hold up a mint for another: the
 // cache lock is per repo and scope, not held across the request.
 func TestTokenMintPerKeyLock(t *testing.T) {

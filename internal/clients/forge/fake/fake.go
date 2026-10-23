@@ -1,4 +1,4 @@
-// Package fake is an in-memory forge (clients.ForgeReader, forge.Reader and
+// Package fake is an in-memory forge (clients.ForgeReader and
 // clients.ForgeWriter) with repositories, commits, branches and pull requests,
 // for the demo, the eval replay and the room, tool and agent tests. Its
 // writer keeps the real one's rules: a new piperoom/ branch from BaseSHA,
@@ -28,9 +28,8 @@ type commit struct {
 }
 
 type pull struct {
-	pr       forge.PullRequest
-	base     string
-	headRepo string // "owner/name" of the head's repository (PullRequestHead)
+	pr   forge.PullRequest
+	base string
 }
 
 type repo struct {
@@ -57,7 +56,6 @@ type Forge struct {
 var (
 	_ clients.ForgeReader = (*Forge)(nil)
 	_ clients.ForgeWriter = (*Forge)(nil)
-	_ forge.Reader        = (*Forge)(nil)
 )
 
 // New returns an empty forge.
@@ -235,7 +233,7 @@ func (f *Forge) SetHeadRepo(ref forge.RepoRef, number int, headRepo string) erro
 	if err != nil {
 		return err
 	}
-	p.headRepo = headRepo
+	p.pr.HeadRepo = headRepo
 	return nil
 }
 
@@ -346,24 +344,18 @@ func (f *Forge) ListFiles(_ context.Context, ref forge.RepoRef, sha string) ([]f
 	return out, false, nil
 }
 
-// PullRequest implements clients.ForgeReader.
-func (f *Forge) PullRequest(ctx context.Context, ref forge.RepoRef, number int) (forge.PullRequest, error) {
-	pr, _, err := f.PullRequestHead(ctx, ref, number)
-	return pr, err
-}
-
-// PullRequestHead implements forge.Reader: a PR the fake opened has its head
-// in the repository itself until SetHeadRepo says otherwise.
-func (f *Forge) PullRequestHead(_ context.Context, ref forge.RepoRef, number int) (forge.PullRequest, string, error) {
+// PullRequest implements clients.ForgeReader. A PR the fake opened has its
+// head in the repository itself until SetHeadRepo says otherwise.
+func (f *Forge) PullRequest(_ context.Context, ref forge.RepoRef, number int) (forge.PullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, err := f.findPull(ref, number)
 	if err != nil {
-		return forge.PullRequest{}, "", err
+		return forge.PullRequest{}, err
 	}
 	pr := p.pr
 	pr.Checks.Failed = append([]string(nil), pr.Checks.Failed...)
-	return pr, p.headRepo, nil
+	return pr, nil
 }
 
 // OpenPullRequest implements forge.ForgeWriter with the real writer's rules.
@@ -429,9 +421,9 @@ func (f *Forge) OpenPullRequest(_ context.Context, ref forge.RepoRef, req forge.
 	n := len(r.pulls) + 1
 	p := &pull{base: ref.Base, pr: forge.PullRequest{
 		Repo: ref.ID, Number: n, URL: "https://" + host + "/" + key(ref) + "/pull/" + strconv.Itoa(n),
-		State: forge.PRStateOpen, HeadRef: req.Branch, HeadSHA: r.branches[req.Branch],
+		State: forge.PRStateOpen, HeadRef: req.Branch, HeadSHA: r.branches[req.Branch], HeadRepo: key(ref),
 		Checks: forge.PullRequestChecks{State: forge.ChecksNone},
-	}, headRepo: key(ref)}
+	}}
 	r.pulls = append(r.pulls, p)
 	f.opened = append(f.opened, req)
 	return p.pr, nil
