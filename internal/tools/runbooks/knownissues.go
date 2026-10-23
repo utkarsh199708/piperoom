@@ -30,7 +30,10 @@ var issueComponents = []string{
 // Themes are the five groups of the plan (docs/product/so-gaps-2026-10.md §6).
 var issueThemes = []string{"renamed", "removed", "plugin-mismatch", "fixed-bug", "db-limit"}
 
-// Rename is a config key (or value) that a release renamed.
+// Rename is a config key (or value) that a release renamed. A renamed key
+// keeps its value's meaning; a key whose value changes form, or whose old
+// name is still valid on another component (database.dbname), is not listed
+// as a rename, since RenamedKey is not per component.
 type Rename struct {
 	Old string `yaml:"old" json:"old"`
 	New string `yaml:"new" json:"new"`

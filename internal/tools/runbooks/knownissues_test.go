@@ -96,10 +96,6 @@ func TestRenamedKeysResolve(t *testing.T) {
 		{"database.history.kafka.recovery.poll.interval.ms", "schema.history.internal.kafka.recovery.poll.interval.ms", "dbz-schema-history-internal"},
 		{"heartbeat.topics.prefix", "topic.heartbeat.prefix", "dbz-topic-heartbeat-transaction"},
 		{"transaction.topic", "topic.transaction", "dbz-topic-heartbeat-transaction"},
-		{"database.dbname", "database.names", "dbz-sqlserver-database-names"},
-		{"mongodb.hosts", "mongodb.connection.string", "dbz-mongodb-connection-string"},
-		{"drop.tombstones", "delete.tombstone.handling.mode", "dbz-unwrap-tombstone-handling"},
-		{"delete.handling.mode", "delete.tombstone.handling.mode", "dbz-unwrap-tombstone-handling"},
 	}
 	for _, tc := range cases {
 		got, e, ok := ki.RenamedKey(tc.old)
@@ -145,6 +141,8 @@ func TestRenamedValuesResolve(t *testing.T) {
 		"wal2json_rds_streaming": "pgoutput",
 		"io.debezium.transforms.UnwrapFromEnvelope":                          "io.debezium.transforms.ExtractNewRecordState",
 		"io.debezium.connector.mongodb.transforms.UnwrapFromMongoDbEnvelope": "io.debezium.connector.mongodb.transforms.ExtractNewDocumentState",
+		"io.debezium.relational.history.KafkaDatabaseHistory":                "io.debezium.storage.kafka.history.KafkaSchemaHistory",
+		"io.debezium.relational.history.FileDatabaseHistory":                 "io.debezium.storage.file.history.FileSchemaHistory",
 	}
 	for old, want := range cases {
 		if got, _, ok := ki.RenamedValue(old); !ok || got != want {

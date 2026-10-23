@@ -71,7 +71,7 @@
   title: The old unwrap SMT classes UnwrapFromEnvelope and UnwrapFromMongoDbEnvelope do not exist
   component: debezium
   theme: removed
-  affected: ">=2.0.0.Final"
+  affected: ">=1.2.0.Alpha1"
   symptoms: [UnwrapFromEnvelope, UnwrapFromMongoDbEnvelope, ClassNotFoundException, transforms, unwrap]
   workaround: >-
     Use io.debezium.transforms.ExtractNewRecordState for relational connectors and
@@ -79,7 +79,7 @@
   renamed_values:
     - {old: io.debezium.transforms.UnwrapFromEnvelope, new: io.debezium.transforms.ExtractNewRecordState}
     - {old: io.debezium.connector.mongodb.transforms.UnwrapFromMongoDbEnvelope, new: io.debezium.connector.mongodb.transforms.ExtractNewDocumentState}
-  source: https://debezium.io/documentation/reference/stable/transformations/event-flattening.html
+  source: https://issues.redhat.com/browse/DBZ-1968
 
 - id: dbz-schema-name-adjustment-none
   title: The default schema.name.adjustment.mode changed from avro to none

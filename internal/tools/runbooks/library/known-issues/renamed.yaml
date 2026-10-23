@@ -57,6 +57,9 @@
     - {old: database.history.consumer.*, new: schema.history.internal.consumer.*}
     - {old: database.history.*, new: schema.history.internal.*}
     - {old: database.history, new: schema.history.internal}
+  renamed_values:
+    - {old: io.debezium.relational.history.KafkaDatabaseHistory, new: io.debezium.storage.kafka.history.KafkaSchemaHistory}
+    - {old: io.debezium.relational.history.FileDatabaseHistory, new: io.debezium.storage.file.history.FileSchemaHistory}
   source: https://issues.redhat.com/browse/DBZ-5043
 
 - id: dbz-table-include-list
@@ -148,8 +151,8 @@
   workaround: >-
     Replace database.dbname with database.names (a comma-separated list; one connector can now
     capture several databases of one instance).
-  renamed_keys:
-    - {old: database.dbname, new: database.names}
+  # No renamed_keys: database.dbname is still the key of the Postgres, MySQL and
+  # Oracle connectors, and RenamedKey is not per component.
   source: https://debezium.io/documentation/reference/2.0/connectors/sqlserver.html
 
 - id: dbz-mongodb-connection-string
@@ -161,8 +164,7 @@
   workaround: >-
     Replace mongodb.hosts (and mongodb.members.autodiscover) with mongodb.connection.string, a
     standard mongodb:// URI that names the replica set or the mongos routers.
-  renamed_keys:
-    - {old: mongodb.hosts, new: mongodb.connection.string}
+  # No renamed_keys: the value changes form (a mongodb:// URI, not rs/host:port).
   source: https://issues.redhat.com/browse/DBZ-6892
 
 - id: dbz-snapshot-mode-no-data
@@ -189,7 +191,6 @@
     Configure transforms.<name>.delete.tombstone.handling.mode (tombstone, drop, rewrite,
     rewrite-with-tombstone, delete-to-tombstone) instead of the two older options; current docs list only
     the new one.
-  renamed_keys:
-    - {old: drop.tombstones, new: delete.tombstone.handling.mode}
-    - {old: delete.handling.mode, new: delete.tombstone.handling.mode}
+  # No renamed_keys: two options with other values became one; the value does
+  # not carry over (drop.tombstones=true is not a delete.tombstone.handling.mode).
   source: https://issues.redhat.com/browse/DBZ-7062
