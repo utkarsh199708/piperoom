@@ -222,10 +222,12 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	id, step, parsed := actionResultFields(in)
 	switch {
 	case in.OK == nil:
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	}
 	if !parsed {
 		return actionOutcome{}
@@ -237,7 +239,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	if step >= 0 && step < len(rec.steps) && r.isDeferredAction(rec.steps[step].Action) {
 		// A fix-PR step only opened its PR: nothing to verify yet (Q7f).
-		return r.deferredOpened(ctx, id, rec.steps, step, false)
+		return r.deferredOpened(ctx, id, rec.steps, step, events.ProposalOriginAgent)
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.

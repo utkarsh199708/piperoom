@@ -39,6 +39,13 @@ import (
 //     verification runs; when one is not seen in time, the outcome is
 //     not_deployed and a later steer restarts the wait.
 //
+// The waits live in the run: a restart or a lease move ends them. The room
+// sends pr_merged and pr_closed again when a new run starts for a PR with no
+// verdict yet; the new run rebuilds the proposal from the room's stored steps
+// (or from the input's step alone), takes who wrote it from its origin, and
+// waits again. A step whose action_result failed or is unknown stops the
+// proposal: once the PRs that did open are seen, the verdict is not_applied.
+//
 // The repository tools, the action and the prompt's repo section are offered
 // only in a room whose pipeline lists repos (forgeOffered): with the forge
 // off, or for a pipeline without repos:, the room is byte-identical to before.
@@ -257,6 +264,11 @@ const (
 	dsApplied     = "applied"      // applied_when seen
 	dsNotDeployed = "not_deployed" // merged, not seen in time
 	dsClosed      = "closed"       // closed without merge
+	// dsStopped is a step whose action_result failed or is unknown, or one
+	// after it that never ran: no PR of it is expected, so the wait does not
+	// hold the proposal's verdict for it. A pr_* input for it still counts
+	// (an unknown outcome may have opened its PR).
+	dsStopped = "stopped"
 )
 
 // deferredStep is one fix-PR step the run follows.
@@ -268,44 +280,117 @@ type deferredStep struct {
 	number   int  // the PR number from the room's text, 0 when unknown
 	edited   bool // the merged change was edited after approval
 	detail   string
+	// unheard marks a step of a proposal rebuilt after a restart that no
+	// action_result or pr_* input of this run has named: whether its PR
+	// opened is not known here.
+	unheard bool
 }
 
 // deferredProposal is one proposal of fix-PR steps the run follows, the
 // agent's own or the driver's. Only the run's own goroutine touches it.
 type deferredProposal struct {
-	id     string
-	steps  []events.ProposalStep
-	driver bool
-	byStep map[int]*deferredStep
+	id    string
+	steps []events.ProposalStep
+	// origin is events.ProposalOriginAgent or ProposalOriginDriver, or ""
+	// when a run rebuilt the proposal after a restart and could not learn
+	// who wrote it.
+	origin string
+	// stepsUnknown is set when a run rebuilt the proposal after a restart
+	// and even the room's stored steps were not readable: it holds only the
+	// step a pr_* input named, without params.
+	stepsUnknown bool
+	// stoppedFrom is the first step (any action) whose action_result failed
+	// or is unknown, -1 when none: the fix then never runs as approved.
+	stoppedFrom int
+	byStep      map[int]*deferredStep
 	// final is set once a final verdict was written: not_applied, or the
 	// F4 verification after every step was seen. not_deployed is not final.
 	final bool
 }
 
-// deferredProposalFor returns the followed proposal id, building it from the
-// agent's own record or the driver's stored steps on first use. Nil when the
-// run knows no steps of it, or none of them is a fix-PR step.
-func (r *runner) deferredProposalFor(ctx context.Context, id string) *deferredProposal {
+func (p *deferredProposal) driver() bool { return p.origin == events.ProposalOriginDriver }
+
+// ProposalOriginReader is an optional interface of Deps.Proposals: who wrote
+// a proposal the room stored (events.ProposalCreatedPayload.Origin, "" read
+// as the agent). The runner uses it only for a fix-PR proposal it rebuilds
+// after a restart, when the pr_* input carries no Origin.
+type ProposalOriginReader interface {
+	ProposalOrigin(ctx context.Context, proposalID string) (string, error)
+}
+
+// proposalOrigin is who wrote proposal id: the input's Origin when the room
+// set it, else the room's stored origin, else "" (unknown).
+func (r *runner) proposalOrigin(ctx context.Context, id, hint string) string {
+	if hint == events.ProposalOriginAgent || hint == events.ProposalOriginDriver {
+		return hint
+	}
+	or, ok := r.deps.Proposals.(ProposalOriginReader)
+	if !ok {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.timing.roomToolTimeout)
+	defer cancel()
+	o, err := or.ProposalOrigin(ctx, id)
+	if err != nil {
+		r.log.Warn("agent: reading a proposal's origin failed", "proposal", id, "err", err)
+		return ""
+	}
+	switch o {
+	case "", events.ProposalOriginAgent:
+		return events.ProposalOriginAgent
+	case events.ProposalOriginDriver:
+		return o
+	}
+	return ""
+}
+
+// deferredProposalFor returns the followed proposal of a pr_* input. A
+// proposal the run does not follow yet is the agent's own record when it has
+// one; otherwise (a restart or a lease move lost the run's state) it is
+// rebuilt from the room's stored steps, or from the input's step alone when
+// those are not readable, so the merge still gets its apply wait and a
+// verdict. Who wrote it comes from the proposal's origin, never from whether
+// this run has a record. Nil when the stored steps hold no fix-PR step.
+func (r *runner) deferredProposalFor(ctx context.Context, in HumanInput) *deferredProposal {
+	id := in.ProposalID
 	if p, ok := r.deferred[id]; ok {
 		return p
 	}
-	var steps []events.ProposalStep
-	driver := false
 	if rec, ok := r.proposals.get(id); ok {
-		steps = rec.steps
-	} else {
-		steps, driver = r.driverSteps(ctx, id), true
+		return r.followDeferred(id, rec.steps, events.ProposalOriginAgent)
 	}
-	return r.followDeferred(id, steps, driver)
+	steps := r.driverSteps(ctx, id)
+	origin := r.proposalOrigin(ctx, id, in.Origin)
+	var p *deferredProposal
+	if len(steps) > 0 {
+		if p = r.followDeferred(id, steps, origin); p == nil {
+			return nil
+		}
+	} else {
+		// The room sends pr_* only for a Deferred step (the contract), so the
+		// named step is one; its applied_when is unknown, and the wait stands
+		// in the default settle time for it.
+		p = &deferredProposal{id: id, origin: origin, stepsUnknown: true, stoppedFrom: -1, byStep: map[int]*deferredStep{
+			*in.StepIndex: {index: *in.StepIndex, state: dsOpened},
+		}}
+		if r.deferred == nil {
+			r.deferred = map[string]*deferredProposal{}
+		}
+		r.deferred[id] = p
+	}
+	for _, st := range p.byStep {
+		st.unheard = true
+	}
+	return p
 }
 
 // followDeferred starts following proposal id when any of steps is a fix-PR
 // step; nil otherwise.
-func (r *runner) followDeferred(id string, steps []events.ProposalStep, driver bool) *deferredProposal {
+func (r *runner) followDeferred(id string, steps []events.ProposalStep, origin string) *deferredProposal {
 	if p, ok := r.deferred[id]; ok {
 		return p
 	}
-	p := &deferredProposal{id: id, steps: steps, driver: driver, byStep: map[int]*deferredStep{}}
+	p := &deferredProposal{id: id, steps: steps, origin: origin, stoppedFrom: -1, byStep: map[int]*deferredStep{}}
 	for i, s := range steps {
 		if r.isDeferredAction(s.Action) {
 			p.byStep[i] = &deferredStep{index: i, step: s, state: dsOpened}
@@ -323,10 +408,13 @@ func (r *runner) followDeferred(id string, steps []events.ProposalStep, driver b
 
 // deferredOpened handles the successful action_result of a fix-PR step: the
 // PR is open, nothing is verified (design §8.2).
-func (r *runner) deferredOpened(ctx context.Context, id string, steps []events.ProposalStep, step int, driver bool) actionOutcome {
-	p := r.followDeferred(id, steps, driver)
+func (r *runner) deferredOpened(ctx context.Context, id string, steps []events.ProposalStep, step int, origin string) actionOutcome {
+	p := r.followDeferred(id, steps, origin)
 	if p == nil {
 		return actionOutcome{}
+	}
+	if st, ok := p.byStep[step]; ok {
+		st.unheard = false
 	}
 	if st, ok := p.byStep[step]; ok && st.state == dsOpened && st.detail == "" {
 		// detail marks that the room was told once.
@@ -372,7 +460,7 @@ func (r *runner) deferredInput(ctx context.Context, in HumanInput) (*deferredPro
 	if in.ProposalID == "" || in.StepIndex == nil {
 		return nil, nil, "not verified: a pull request changed state but the room did not name its proposal step; recovery is not claimed."
 	}
-	p := r.deferredProposalFor(ctx, in.ProposalID)
+	p := r.deferredProposalFor(ctx, in)
 	if p == nil {
 		return nil, nil, fmt.Sprintf("not verified: proposal %q is not a fix-PR proposal this run knows the steps of; recovery is not claimed.", in.ProposalID)
 	}
@@ -380,6 +468,7 @@ func (r *runner) deferredInput(ctx context.Context, in HumanInput) (*deferredPro
 	if !ok {
 		return nil, nil, fmt.Sprintf("not verified: proposal %q step %d is not a pull-request step; recovery is not claimed.", in.ProposalID, *in.StepIndex+1)
 	}
+	st.unheard = false
 	return p, st, ""
 }
 
@@ -511,19 +600,145 @@ func (r *runner) applyChecked(ctx context.Context, in HumanInput) actionOutcome 
 			"proposal %q: NOT recovered: %s. A steer starts the check again.", p.id, verdict)}}
 	}
 	st.state, st.detail = dsApplied, done.detail
-	var waiting []string
+	waiting, unheard := pendingSteps(p)
+	switch {
+	case len(waiting) == 0:
+		return r.finishDeferred(ctx, p)
+	case len(unheard) == len(waiting):
+		// Rebuilt after a restart: the steps left were never named in this
+		// run, so whether their PRs opened is not known. A verdict that claims
+		// nothing ends "verifying"; it is not final, so a later pr_merged of
+		// those steps still leads to the full verification.
+		verdict := fmt.Sprintf("not verified: %s reached the system, but after an agent restart this run does not know whether the pull request of step(s) %s opened; recovery is not claimed until it merges and is seen",
+			st.prName(), strings.Join(unheard, ", "))
+		r.emitVerification(ctx, events.AgentVerificationPayload{
+			ProposalID: p.id,
+			Checks:     appliedChecks(p),
+			Recovered:  false,
+			Verdict:    verdict,
+		})
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q: %s.", p.id, verdict)}}
+	}
+	return actionOutcome{notes: []string{verifyTag + fmt.Sprintf(
+		"not verified yet: proposal %q step %d reached the system (%s); waiting for its pull-request step(s) %s.",
+		p.id, st.index+1, wrapUntrusted(done.detail), strings.Join(waiting, ", "))}}
+}
+
+// pendingSteps are the 1-based numbers of p's PR steps the verdict still
+// waits for (neither applied nor stopped), and those of them no input of this
+// run named (a rebuilt proposal's unheard steps).
+func pendingSteps(p *deferredProposal) (waiting, unheard []string) {
 	for _, i := range sortedSteps(p.byStep) {
-		if p.byStep[i].state != dsApplied {
-			waiting = append(waiting, strconv.Itoa(i+1))
+		st := p.byStep[i]
+		if st.state == dsApplied || st.state == dsStopped {
+			continue
+		}
+		waiting = append(waiting, strconv.Itoa(i+1))
+		if st.unheard && st.state == dsOpened {
+			unheard = append(unheard, strconv.Itoa(i+1))
 		}
 	}
-	if len(waiting) > 0 {
-		return actionOutcome{notes: []string{verifyTag + fmt.Sprintf(
-			"not verified yet: proposal %q step %d reached the system (%s); waiting for its pull-request step(s) %s.",
-			p.id, st.index+1, wrapUntrusted(done.detail), strings.Join(waiting, ", "))}}
+	return waiting, unheard
+}
+
+// appliedChecks are the applied_when checks of p's steps seen in the system.
+func appliedChecks(p *deferredProposal) []events.VerificationCheck {
+	out := []events.VerificationCheck{}
+	for _, i := range sortedSteps(p.byStep) {
+		if st := p.byStep[i]; st.state == dsApplied {
+			out = append(out, events.VerificationCheck{Layer: st.step.Layer, Name: "applied_when", OK: true, Detail: clipLine(st.detail)})
+		}
 	}
+	return out
+}
+
+// finishDeferred writes the final verdict of p once nothing is pending: the
+// F4 verification when every PR step was seen in the system, not_applied when
+// a step stopped (its change never reaches the system, so the fix did not run
+// as approved).
+func (r *runner) finishDeferred(ctx context.Context, p *deferredProposal) actionOutcome {
 	p.final = true
-	return r.verifyDeferred(ctx, p)
+	if p.stoppedFrom < 0 {
+		return r.verifyDeferred(ctx, p)
+	}
+	r.applies.cancelProposal(p.id)
+	checks := appliedChecks(p)
+	if len(checks) == 0 {
+		// No PR of the proposal opened: the failed step's own note told the
+		// model; there is nothing to verify.
+		return actionOutcome{}
+	}
+	from := p.stoppedFrom
+	layer := ""
+	if from < len(p.steps) {
+		layer = p.steps[from].Layer
+	}
+	checks = append(checks, events.VerificationCheck{Layer: layer, Name: "step_result", OK: false,
+		Detail: clipLine(fmt.Sprintf("step %d did not succeed (or its outcome is unknown); the steps after it never ran", from+1))})
+	verdict := fmt.Sprintf("NOT recovered: the merged pull request(s) reached the system, but step %d did not succeed, so the fix was not applied as approved", from+1)
+	r.emitVerification(ctx, events.AgentVerificationPayload{
+		ProposalID: p.id,
+		Checks:     checks,
+		Recovered:  false,
+		Outcome:    events.DeferredNotApplied,
+		Verdict:    verdict,
+	})
+	r.markDeferredVerdict(p, false)
+	return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + r.originHead(p) + fmt.Sprintf("proposal %q: %s.", p.id, verdict)}}
+}
+
+// stoppedDeferred is deferredStepsStopped for a parsed action_result.
+func (r *runner) stoppedDeferred(ctx context.Context, id string, step int, parsed bool) actionOutcome {
+	if !parsed {
+		return actionOutcome{}
+	}
+	return r.deferredStepsStopped(ctx, id, step)
+}
+
+// mergeOutcome folds b into a.
+func mergeOutcome(a, b actionOutcome) actionOutcome {
+	a.recovered = a.recovered || b.recovered
+	a.broken = a.broken || b.broken
+	a.needsModel = a.needsModel || b.needsModel
+	a.statusSet = a.statusSet || b.statusSet
+	a.notes = append(a.notes, b.notes...)
+	return a
+}
+
+// deferredStepsStopped records that step from of a followed proposal failed
+// or has an unknown outcome (the executor stops there): that step, when it
+// is a PR step, and every later PR step (they never ran) are stopped, and the
+// final verdict is written when nothing else is pending. Without it the wait
+// would hold the verdict for PRs that are never opened.
+func (r *runner) deferredStepsStopped(ctx context.Context, id string, from int) actionOutcome {
+	p := r.deferred[id]
+	if p == nil || p.final || from < 0 {
+		return actionOutcome{}
+	}
+	if p.stoppedFrom < 0 || from < p.stoppedFrom {
+		p.stoppedFrom = from
+	}
+	for _, i := range sortedSteps(p.byStep) {
+		if st := p.byStep[i]; i >= from && st.state == dsOpened && st.detail == "" {
+			st.state, st.unheard = dsStopped, false
+		}
+	}
+	if waiting, _ := pendingSteps(p); len(waiting) > 0 {
+		return actionOutcome{}
+	}
+	return r.finishDeferred(ctx, p)
+}
+
+// originHead is the note's first line about who wrote p, "" for the agent's
+// own.
+func (r *runner) originHead(p *deferredProposal) string {
+	switch {
+	case p.driver():
+		return fmt.Sprintf("proposal %q is the driver's fix, not yours.\n", p.id)
+	case p.origin == "":
+		return fmt.Sprintf("proposal %q was picked up again after an agent restart; this run cannot tell whether you or the driver wrote it.\n", p.id)
+	}
+	return ""
 }
 
 // verifyDeferred runs the F4 verification of a fix-PR proposal whose every
@@ -554,10 +769,13 @@ func (r *runner) verifyDeferred(ctx context.Context, p *deferredProposal) action
 	if edited {
 		note += "\nThe merged change was edited after approval: it is not exactly the approved diff."
 	}
-	if p.driver {
-		note = verifyTag + fmt.Sprintf("proposal %q is the driver's fix, not yours.", p.id) + "\n" + note
+	if p.stepsUnknown {
+		note += "\nThe proposal's stored steps were not readable after an agent restart, so no layer check was built; the verdict rests on the data-flow check."
 	}
-	out := actionOutcome{recovered: vr.recovered, broken: !vr.recovered, needsModel: p.driver, notes: []string{note}}
+	if head := r.originHead(p); head != "" {
+		note = verifyTag + head + note
+	}
+	out := actionOutcome{recovered: vr.recovered, broken: !vr.recovered, needsModel: p.origin != events.ProposalOriginAgent, notes: []string{note}}
 	if vr.recovered {
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
@@ -565,12 +783,18 @@ func (r *runner) verifyDeferred(ctx context.Context, p *deferredProposal) action
 }
 
 // markDeferredVerdict stores a verdict where the run keeps its proposals'.
+// A proposal of unknown origin is stored nowhere: p.final alone keeps it
+// from being judged twice in this run.
 func (r *runner) markDeferredVerdict(p *deferredProposal, recovered bool) {
-	if p.driver {
+	switch p.origin {
+	case events.ProposalOriginDriver:
 		r.setDriverVerdict(p.id, recovered)
-		return
+	case events.ProposalOriginAgent:
+		// A no-op for the agent's own proposal rebuilt after a restart: the
+		// tracker has no record of it, and none is added (it would count as
+		// awaiting approval).
+		r.proposals.markVerified(p.id, recovered)
 	}
-	r.proposals.markVerified(p.id, recovered)
 }
 
 // ---- the apply wait ----
@@ -697,7 +921,11 @@ func (r *runner) readApplied(ctx context.Context, job applyJob) (bool, string, e
 			return false, err.Error(), err
 		}
 		for _, c := range d.Changes {
-			if !c.At.After(job.mergedAt) || !contains(w.Kinds, c.Kind) {
+			// The room records a pull_request change on every fix-PR merge
+			// itself (this one included), so it never shows a deploy; the
+			// action refuses the kind, and an older proposal's params that
+			// still name it never match.
+			if c.Kind == clients.ChangePullRequest || !c.At.After(job.mergedAt) || !contains(w.Kinds, c.Kind) {
 				continue
 			}
 			if w.Service != "" {
