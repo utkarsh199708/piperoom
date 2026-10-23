@@ -157,7 +157,12 @@ func TestReview383LinearTime(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing check; runs without -race")
 	}
-	const ceiling = 200 * time.Millisecond
+	// The quadratic versions of these finders took 0.85 s and up (see
+	// TestReviewLinearTime); the linear ones take ~15 ms. 200 ms flaked on a
+	// loaded CI runner (eq-token measured a genuinely linear 220.9 ms best of
+	// five while the full dev stack ran beside it), so the ceiling leaves
+	// room for scheduler noise and still fails anything superlinear.
+	const ceiling = 500 * time.Millisecond
 	for name, mk := range slowLines383 {
 		s := mk(MaxScan)
 		best := time.Duration(1 << 62)
