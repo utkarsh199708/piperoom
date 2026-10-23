@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 )
 
@@ -18,47 +19,32 @@ import (
 //
 // BinlogReader, BinlogStatus and BinlogFile are the Q0 item 7 contract items
 // of design §5.2 (clients.BinlogReader and friends), not in internal/clients
-// yet. They are mirrored here with the design's fields and JSON tags, so the
-// contract PR turns them into aliases (Q8d's contract change request). The
-// MySQL client (Q8b) implements the method; the builder asserts it on the
-// source client and never calls ReplicationSlots for a MySQL pipeline.
+// yet. Until they land there they are aliases of the MySQL client's own
+// declarations, so the builder's type assertion on the source client sees
+// exactly the method *mysql.DB has (a mirrored struct of the same shape is a
+// different type, and the assertion would never match). The contract PR
+// re-points the aliases at clients. The builder asserts it on the source
+// client and never calls ReplicationSlots for a MySQL pipeline.
 
 // BinlogReader is the optional binlog reader of a MySQL source client. Read
 // only; 10 s per call.
-type BinlogReader interface {
-	BinlogStatus(ctx context.Context) (BinlogStatus, error)
-}
+type BinlogReader = mysql.BinlogReader
 
 // BinlogStatus is the binlog state of a MySQL server: positions and names
 // only, never event contents (design §5.2).
-type BinlogStatus struct {
-	// File and Pos are the current write position.
-	File string `json:"file"`
-	Pos  int64  `json:"pos"`
-	// GTIDMode is @@gtid_mode (OFF, OFF_PERMISSIVE, ON_PERMISSIVE, ON).
-	GTIDMode string `json:"gtid_mode"`
-	// GTIDExecuted and GTIDPurged are the server's GTID sets; "" with GTIDs off.
-	GTIDExecuted string `json:"gtid_executed"`
-	GTIDPurged   string `json:"gtid_purged"`
-	// ServerID and ServerUUID identify the server.
-	ServerID   int64  `json:"server_id"`
-	ServerUUID string `json:"server_uuid"`
-	// Binlogs are the files the server still has, oldest first; BinlogsOmitted
-	// counts the newest ones left out.
-	Binlogs        []BinlogFile `json:"binlogs"`
-	BinlogsOmitted int          `json:"binlogs_omitted,omitempty"`
-	// ExpireSeconds is binlog_expire_logs_seconds; 0 = never purged by age.
-	// RetentionHours is RDS/Aurora's binlog retention hours; nil when not on
-	// RDS or not readable.
-	ExpireSeconds  int64  `json:"expire_seconds"`
-	RetentionHours *int64 `json:"retention_hours,omitempty"`
-}
+type BinlogStatus = mysql.BinlogStatus
 
 // BinlogFile is one binlog file the server still has.
-type BinlogFile struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
+type BinlogFile = mysql.BinlogFile
+
+// The MySQL client is the source client the builder asserts BinlogReader
+// (and pkColumner, for a trace's key) on: if either method set drifts, the
+// build fails here instead of the binlog node or the trace's key silently
+// falling back.
+var (
+	_ BinlogReader = (*mysql.DB)(nil)
+	_ pkColumner   = (*mysql.DB)(nil)
+)
 
 // Node id prefixes of a source table, by source kind (graph.go's Node doc
 // lists pg:; the mysql: prefix is the doc-only item of design §5.4).

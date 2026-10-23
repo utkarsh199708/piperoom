@@ -184,6 +184,73 @@ func (d *DB) resolveColumn(ctx context.Context, table, db, name, column string) 
 	return sdb, sname, scol, nil
 }
 
+// primaryKeySQL lists the primary key columns of one table, in key order.
+// Every name is a bound parameter. LIMIT 2 is enough to tell a one-column key
+// from a composite one.
+const primaryKeySQL = `
+		SELECT k.COLUMN_NAME
+		FROM information_schema.KEY_COLUMN_USAGE k
+		WHERE k.TABLE_SCHEMA = ? AND k.TABLE_NAME = ? AND k.CONSTRAINT_NAME = 'PRIMARY'
+		ORDER BY k.ORDINAL_POSITION
+		LIMIT 2`
+
+// tableExistsSQL tells a table without a primary key from a missing one.
+const tableExistsSQL = `
+		SELECT 1 FROM information_schema.TABLES t
+		WHERE t.TABLE_SCHEMA = ? AND t.TABLE_NAME = ?
+		LIMIT 1`
+
+// PrimaryKeyColumn returns the one primary key column of table ("db.table"),
+// by the server's own name, so a trace reads the row by its real key and
+// never by a guessed "id". A composite key, a table without a primary key, or
+// a key column named outside the identifier rule is clients.ErrNotSupported:
+// a lookup by one value would not be one row (#483). A missing or invisible
+// table is clients.ErrNotFound. Read only; 10 s per call.
+func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
+	db, name, err := splitTable(table)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+
+	rows, err := d.query(ctx, primaryKeySQL, db, name)
+	if err != nil {
+		return "", fail("look up the primary key of "+table, "SELECT on "+table, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return "", fmt.Errorf("mysql: primary key of %s: %w", table, err)
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fail("look up the primary key of "+table, "SELECT on "+table, err)
+	}
+	switch len(cols) {
+	case 0:
+		var one int
+		err := d.queryRow(ctx, tableExistsSQL, db, name).Scan(&one)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return "", fmt.Errorf("mysql: primary key of %s: table missing, or not visible to the read user: %w", table, clients.ErrNotFound)
+		case err != nil:
+			return "", fail("look up the primary key of "+table, "SELECT on "+table, err)
+		}
+		return "", fmt.Errorf("mysql: %s has no primary key: a lookup by one column is not one row: %w", table, clients.ErrNotSupported)
+	case 1:
+	default:
+		return "", fmt.Errorf("mysql: primary key of %s is composite: a lookup by %q alone is not one row: %w", table, cutText(cols[0], 70), clients.ErrNotSupported)
+	}
+	if !validIdent(cols[0]) {
+		return "", fmt.Errorf("mysql: primary key of %s: the server names the key column outside %s; refusing to use it: %w", table, identRe, clients.ErrNotSupported)
+	}
+	return cols[0], nil
+}
+
 // toJSON converts a value database/sql decoded from the driver into a
 // JSON-friendly one (the pgconv.ToJSON rules for MySQL's types).
 func toJSON(v any) any {

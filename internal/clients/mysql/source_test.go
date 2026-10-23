@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -449,5 +450,100 @@ func TestSmallHelpers(t *testing.T) {
 		if got := renderArg(tt.in); got != tt.want {
 			t.Errorf("renderArg(%v) = %q", tt.in, got)
 		}
+	}
+}
+
+// onPrimaryKey answers PrimaryKeyColumn's KEY_COLUMN_USAGE lookup from keys
+// ("db.table" mapped to its key columns in order) and its TABLES check from
+// the same map: a table listed with no columns exists without a key.
+func (f *fakeServer) onPrimaryKey(keys map[string][]string) *fakeServer {
+	find := func(args []driver.NamedValue) ([]string, bool) {
+		db, _ := args[0].Value.(string)
+		name, _ := args[1].Value.(string)
+		for t, cols := range keys {
+			sdb, sname, _ := strings.Cut(t, ".")
+			if strings.EqualFold(sdb, db) && strings.EqualFold(sname, name) {
+				return cols, true
+			}
+		}
+		return nil, false
+	}
+	return f.onFunc("information_schema.KEY_COLUMN_USAGE", func(args []driver.NamedValue) result {
+		if len(args) != 2 {
+			return result{err: fmt.Errorf("fake: key lookup with %d args", len(args))}
+		}
+		cols, _ := find(args)
+		res := result{cols: []string{"COLUMN_NAME"}}
+		for i, c := range cols {
+			if i == 2 {
+				break // LIMIT 2
+			}
+			res.rows = append(res.rows, row([]byte(c)))
+		}
+		return res
+	}).onFunc("information_schema.TABLES", func(args []driver.NamedValue) result {
+		if len(args) != 2 {
+			return result{err: fmt.Errorf("fake: table lookup with %d args", len(args))}
+		}
+		if _, ok := find(args); ok {
+			return result{cols: []string{"1"}, rows: [][]driver.Value{row(int64(1))}}
+		}
+		return result{cols: []string{"1"}}
+	})
+}
+
+// PrimaryKeyColumn reads the real key column with bound names, and refuses a
+// composite key, a table without one, and a key column named outside the
+// identifier rule as ErrNotSupported, so a trace never reads by a guessed
+// column (#483).
+func TestPrimaryKeyColumn(t *testing.T) {
+	srv := (&fakeServer{}).onPrimaryKey(map[string][]string{
+		"shop.orders":    {"order_no"},
+		"shop.lines":     {"tenant_id", "line_id", "seq"},
+		"shop.heap":      {},
+		"shop.weird":     {"key`col"},
+		"shop.withid_pk": {"uuid"},
+	})
+	d := newFake(t, srv)
+	ctx := context.Background()
+
+	col, err := d.PrimaryKeyColumn(ctx, "shop.orders")
+	if err != nil || col != "order_no" {
+		t.Fatalf("single key: %q %v", col, err)
+	}
+	q := srv.queries()[len(srv.queries())-1]
+	if !strings.Contains(q.query, "CONSTRAINT_NAME = 'PRIMARY'") || len(q.args) != 2 || q.args[0] != "shop" || q.args[1] != "orders" {
+		t.Errorf("lookup not bound: %+v", q)
+	}
+	if strings.Contains(q.query, "orders") {
+		t.Errorf("table name spliced into the lookup: %s", q.query)
+	}
+
+	for _, tc := range []struct{ table, want string }{
+		{"shop.lines", "composite"},
+		{"shop.heap", "no primary key"},
+		{"shop.weird", "refusing"},
+	} {
+		col, err := d.PrimaryKeyColumn(ctx, tc.table)
+		if col != "" || !errors.Is(err, clients.ErrNotSupported) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: col=%q err=%v, want ErrNotSupported (%s)", tc.table, col, err, tc.want)
+		}
+	}
+	if _, err := d.PrimaryKeyColumn(ctx, "shop.nope"); !errors.Is(err, clients.ErrNotFound) {
+		t.Errorf("missing table: %v", err)
+	}
+	if _, err := d.PrimaryKeyColumn(ctx, "shop.orders; DROP TABLE x"); err == nil {
+		t.Error("bad identifier accepted")
+	}
+}
+
+// A refused or failed dictionary read is an error, never a key.
+func TestPrimaryKeyColumnLookupRefused(t *testing.T) {
+	srv := (&fakeServer{}).
+		onErr("information_schema.KEY_COLUMN_USAGE", &gomysql.MySQLError{Number: 1044, Message: "Access denied for user to database 'information_schema'"})
+	d := newFake(t, srv)
+	col, err := d.PrimaryKeyColumn(context.Background(), "shop.orders")
+	if col != "" || !errors.Is(err, ErrPrivilege) {
+		t.Fatalf("refused lookup: %q %v", col, err)
 	}
 }

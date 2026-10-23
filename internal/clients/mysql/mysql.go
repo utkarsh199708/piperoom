@@ -364,4 +364,7 @@ var (
 	_ SourceSettingsReader = (*DB)(nil)
 	_ ScopedBlockerReader  = (*DB)(nil)
 	_ BinlogReader         = (*DB)(nil)
+	_ interface {
+		PrimaryKeyColumn(ctx context.Context, table string) (string, error)
+	} = (*DB)(nil)
 )
