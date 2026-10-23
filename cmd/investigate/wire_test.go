@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -28,6 +30,7 @@ type fakeClients struct {
 	slotsCalls     atomic.Int64
 	statusCalls    atomic.Int64
 	findByKeyCalls atomic.Int64
+	validateCalls  atomic.Int64
 }
 
 func newFakeClients() *fakeClients { return &fakeClients{now: time.Now()} }
@@ -62,6 +65,13 @@ func (f *fakeClients) Status(context.Context, string) (clients.ConnectorStatus, 
 }
 func (f *fakeClients) Config(context.Context, string) (map[string]string, error) {
 	return map[string]string{"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "debezium"}, nil
+}
+func (f *fakeClients) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	f.validateCalls.Add(1)
+	return connect.ValidateResult{}, nil
+}
+func (f *fakeClients) PluginConfigDef(context.Context, string) ([]connect.ConfigKeyDef, error) {
+	return []connect.ConfigKeyDef{{Name: "topic.prefix", Type: "STRING"}}, nil
 }
 func (f *fakeClients) RestartTask(context.Context, string, int) error { return nil }
 func (f *fakeClients) RestartConnector(context.Context, string) error { return nil }
@@ -162,6 +172,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
 		"kafka_topic_config",
 		"dlq_peek",
+		// Q4b: registered because the fake Connect client validates configs.
+		"connect_validate_config",
 		"debezium_metrics", "debezium_snapshot_progress",
 		"runbook_lookup",
 		"what_changed",
@@ -254,6 +266,33 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	}
 	if f.findByKeyCalls.Load() == 0 {
 		t.Error("FindByKey never called: trace not wired to the kafka client")
+	}
+}
+
+// TestConnectValidateConfigUsesRealClients covers Q4b: the wiring hands
+// connect_validate_config a Connect client that really validates, so the
+// tool is reachable in a room; the call creates nothing (the fake counts the
+// validate request and nothing else).
+func TestConnectValidateConfigUsesRealClients(t *testing.T) {
+	reg, _, f := wireFakes(t)
+
+	tool, ok := reg.Get("connect_validate_config")
+	if !ok {
+		t.Fatal("connect_validate_config not registered")
+	}
+	if tool.Kind() != tools.KindRead {
+		t.Fatalf("connect_validate_config kind = %s, want %s", tool.Kind(), tools.KindRead)
+	}
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"),
+		json.RawMessage(`{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"topic.prefix":"pg","table.include.list":"public.orders"}}`))
+	if err != nil {
+		t.Fatalf("connect_validate_config run: %v", err)
+	}
+	if !strings.Contains(res.Summary, "0 errors") {
+		t.Errorf("summary = %q, want the fake's 0-error verdict", res.Summary)
+	}
+	if got := f.validateCalls.Load(); got != 1 {
+		t.Errorf("ValidateConfig calls = %d, want 1: the tool is not wired to the client", got)
 	}
 }
 

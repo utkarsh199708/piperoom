@@ -57,20 +57,33 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // read that lists one (externalcause.go), so a room without external changes
 // reads the prompt as before but for these words. To stay at 1335 words,
 // rule 7 reads "stop reading; call propose_fix or say" and the tools rule
-// lost its "also". Q2e moved it a ninth time: rule 2 ends "Read database
-// settings before proposing a config change." (the Q2a settings tools); to
-// stay at 1335 words, two ", and" joins became ";", the rule-3 example lost
-// "task 0" and the schema bullet ends "high-risk: last resort only."
+// lost its "also".
+// Q4b moved it a ninth time, on purpose: the "connector does not exist yet"
+// path validates the full config with connect_validate_config before a create
+// is proposed, proposes nothing on a validation error, validates from scratch
+// when there is no base connector, and names a known-issue id for a renamed
+// key. The new rule is ~30 words; to stay under the 1335-word ceiling
+// (LEAD-ARCH ruling on #659) repeated wording was tightened (the scheduling
+// and write-off notes, the reply_to and action-result phrasings, the id
+// examples) and three rule words were traded away: the pause bullet lost
+// "report backlog and retention headroom", the similar-incidents rule now
+// asks for the step id without "and reads", and Style lost "Short
+// sentences.". Restoring those needs the ceiling moved.
+// Q2e moved it a tenth time: rule 2 ends "Read database settings before
+// proposing a config change." (the Q2a settings tools); to stay at the
+// ceiling, two ", and" joins became ";", the rule-3 example lost "task 0"
+// and the schema bullet ends "high-risk: last resort only."
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "e273420b28da576a9d08f445daf3a6226f11493a0489719b9d3d31433f3e98d4"
+const cdcPromptSHA256 = "abde809a00b4ce53b2482839fd3d23bb1055339e302211bbbbf7650489bcaaae"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
-// snapshot cannot silently move it. X4c and Q2e moved it with cdcPromptSHA256.
-const cdcPromptWriteOffSHA256 = "d7e4215afeda11a5b30a1d2e4ad28341f4339556337799540c80dca1b6ae9b96"
+// snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
+// did Q4b and Q2e.
+const cdcPromptWriteOffSHA256 = "dd10be48b9b24ccd3639997c98146f19c5ae354355ec10ff18af163a2d55681c"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
