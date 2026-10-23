@@ -36,8 +36,14 @@ type stack struct {
 
 	// Test seams; nil or zero means the real thing. Unit tests play Postgres
 	// and docker compose with them, since neither runs without Docker.
-	sqlFn            func(ctx context.Context, db string, sql ...string) (string, error)
-	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
+	sqlFn     func(ctx context.Context, db string, sql ...string) (string, error)
+	composeFn func(ctx context.Context, env map[string]string, args ...string) error
+	// composeOverrideFn replaces `docker compose` with an extra override file
+	// (the wal-level-replica break) in unit tests.
+	composeOverrideFn func(ctx context.Context, override string, args ...string) error
+	// execInFn replaces `docker exec` output reads (the setup-break plugin
+	// layout and reachability checks) in unit tests.
+	execInFn         func(ctx context.Context, container string, argv ...string) (string, int, error)
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
 	// detachFn replaces runDetached (`docker exec -d …`, a session that
@@ -132,6 +138,63 @@ func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, err
 		return out.String(), fmt.Errorf("devctl: psql: %w: %s", err, strings.TrimSpace(out.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// execIn runs argv inside a container and returns its combined output and
+// exit code. A non-zero exit code is a result, not an error: callers read it
+// (a missing directory, a name that does not resolve). err means docker
+// itself could not run the command.
+func (s *stack) execIn(ctx context.Context, container string, argv ...string) (string, int, error) {
+	return s.execInUser(ctx, "", container, argv...)
+}
+
+// execInUser is execIn as a user ("" = the image's user, "0" = root). The
+// setup breaks write /etc/hosts in the Connect container, which is root-owned
+// while the worker runs unprivileged.
+func (s *stack) execInUser(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+	if s.execInFn != nil {
+		return s.execInFn(ctx, container, argv...)
+	}
+	args := []string{"exec"}
+	if user != "" {
+		args = append(args, "-u", user)
+	}
+	args = append(args, container)
+	args = append(args, argv...)
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	if err == nil {
+		return out.String(), 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return out.String(), exitErr.ExitCode(), nil
+	}
+	return out.String(), -1, fmt.Errorf("devctl: docker exec %s %s: %w", container, strings.Join(argv, " "), err)
+}
+
+// composeWith runs docker compose with an extra override file before the
+// subcommand (override "" = the base dev file alone). The wal-level-replica
+// break needs it: postgres command-line settings only change by recreating
+// the container with a different command, and Compose merges the override's
+// command over the base one.
+func (s *stack) composeWith(ctx context.Context, override string, args ...string) error {
+	if s.composeOverrideFn != nil {
+		return s.composeOverrideFn(ctx, override, args...)
+	}
+	full := []string{"compose", "-f", filepath.Join(s.root, "dev", "docker-compose.yml")}
+	if override != "" {
+		full = append(full, "-f", override)
+	}
+	full = append(full, args...)
+	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("devctl: docker %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 func (s *stack) up(ctx context.Context) error { return s.upWith(ctx, false) }
