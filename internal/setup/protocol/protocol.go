@@ -465,7 +465,7 @@ const (
 	RefuseDuplicateStep   = "duplicate_step"   // (ProposalID, StepIndex) already started
 	RefuseGuard           = "guard"            // the guard table forbids the op on this class
 	RefuseTarget          = "target"           // the op would reach a host outside the registered targets, or a denylisted address
-	RefuseNotConfirmed    = "not_confirmed"    // the person answered "N" on the runner's terminal (T3)
+	RefuseNotConfirmed    = "not_confirmed"    // the person answered "N" on the runner's terminal (T3), or the server cancelled the op before it started
 	RefuseProtocolVersion = "protocol_version" // RunnerAccepts refused the Welcome's version; the runner closes after it
 	RefuseSecretsRead     = "secrets_read"     // a file op touched the secret store or a materialised path
 	RefuseCredentials     = "credentials"      // RegisterCredentials declined on the terminal or the names are unknown

@@ -303,7 +303,7 @@ func (o *Owners) InTenant(tenant, userID string, groups []string) bool {
 		if o.Pipelines[i].TenantName() != tenant {
 			continue
 		}
-		for _, layer := range events.Layers {
+		for _, layer := range KnownLayers() {
 			if _, ok := o.CanApprove(o.Pipelines[i].ID, layer, userID, groups); ok {
 				return true
 			}
@@ -367,7 +367,7 @@ func (o *Owners) VisiblePipelines(userID string, groups []string) (set map[strin
 
 // InheritedLayers returns the layers of a pipeline whose owners come from the
 // top-level layers: block because the pipeline's owners: block does not set
-// them, in events.Layers order. With the tenant filter on, those owners are in
+// them, in KnownLayers order. With the tenant filter on, those owners are in
 // this pipeline's tenant (InTenant), so the server warns about each.
 func (o *Owners) InheritedLayers(pipelineID string) []string {
 	p, ok := o.Pipeline(pipelineID)
@@ -375,7 +375,7 @@ func (o *Owners) InheritedLayers(pipelineID string) []string {
 		return nil
 	}
 	var out []string
-	for _, l := range events.Layers {
+	for _, l := range KnownLayers() {
 		if _, over := p.Owners[l]; over {
 			continue
 		}

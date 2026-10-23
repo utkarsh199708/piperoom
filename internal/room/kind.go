@@ -2,12 +2,12 @@ package room
 
 import (
 	"encoding/json"
-	"slices"
 	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 )
 
 // pipelineKind returns the owners.yaml kind of the pipeline for
@@ -15,6 +15,19 @@ import (
 // owners.yaml does not know, or no owners config at all, gives "": the
 // contract reads empty as cdc, and the runner can still tell "the file did not
 // say" from "the file said cdc".
+// pipelineLayers returns the layers of the pipeline, upstream first: the
+// owners.yaml pipeline's Layers (its source_kind's source layer first, so
+// "mysql" for a MySQL pipeline), or the layers of its kind for a pipeline
+// owners.yaml does not know. New slice per call.
+func (s *Service) pipelineLayers(pipelineID string) []string {
+	if s.owners != nil {
+		if p, ok := s.owners.Pipeline(pipelineID); ok {
+			return p.Layers()
+		}
+	}
+	return events.LayersOf(s.pipelineKind(pipelineID))
+}
+
 func (s *Service) pipelineKind(pipelineID string) string {
 	if s.owners == nil {
 		return ""
@@ -55,29 +68,30 @@ func (s *Service) alertTeams(pipelineID string) []agent.Team {
 	return out
 }
 
-// knownLayers returns the layers of the pipeline kinds owners.yaml uses
-// (events.LayersOf of each pipeline's kind), in events.Layers order, never
-// nil. With no owners config, or a file without pipelines, that is the cdc
+// knownLayers returns the layers of the pipelines owners.yaml lists (each
+// pipeline's Layers: its kind's layers with its source_kind's source layer),
+// in owners.KnownLayers order, never nil. With no owners config, or a file without pipelines, that is the cdc
 // layers: every room then has a pipeline owners.yaml does not know, and such a
 // room reads as cdc. LayersFor lists no layer outside this set, so a CDC-only
 // install never offers orchestrator or transform. (P4a-4)
 func (s *Service) knownLayers() []string {
-	kinds := map[string]bool{}
+	used := map[string]bool{}
 	if s.owners != nil {
 		for i := range s.owners.Pipelines {
-			kinds[s.owners.Pipelines[i].KindOrDefault()] = true
+			for _, l := range s.owners.Pipelines[i].Layers() {
+				used[l] = true
+			}
 		}
 	}
-	if len(kinds) == 0 {
-		kinds[events.PipelineKindCDC] = true
+	if len(used) == 0 {
+		for _, l := range events.LayersOf(events.PipelineKindCDC) {
+			used[l] = true
+		}
 	}
 	out := []string{}
-	for _, l := range events.Layers {
-		for k := range kinds {
-			if slices.Contains(events.LayersOf(k), l) {
-				out = append(out, l)
-				break
-			}
+	for _, l := range owners.KnownLayers() {
+		if used[l] {
+			out = append(out, l)
 		}
 	}
 	return out

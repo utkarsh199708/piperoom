@@ -182,7 +182,7 @@ func TestScenarioNamesListed(t *testing.T) {
 	if !slices.IsSorted(names) {
 		t.Errorf("scenarioNames() not sorted: %v", names)
 	}
-	if got := alertScenarios(); !slices.Equal(got, []string{"blocked-slot", "consumer-bad-deploy", "consumer-skipped-range", "dag-failed", "dbt-model-broken", "late-batch", "missed-table", "missed-table-kafka-signal", "no-replica-identity", "rows-lost-after-retention"}) {
+	if got := alertScenarios(); !slices.Equal(got, []string{"blocked-slot", "consumer-bad-deploy", "consumer-skipped-range", "dag-failed", "dbt-model-broken", "late-batch", "missed-table", "missed-table-kafka-signal", "no-replica-identity", "rows-lost-after-retention", "server-id-clash"}) {
 		t.Errorf("alertScenarios() = %v", got)
 	}
 }

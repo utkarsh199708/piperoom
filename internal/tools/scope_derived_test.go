@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"piperoom/internal/owners"
 )
 
 const engineGroup = "piperoom-clickhouse-orders"
@@ -107,5 +109,85 @@ func TestScopeWriteGuardRefusesDerivedGroupEvenWithOwners(t *testing.T) {
 		if err := sc.CheckGroup(engineGroup); !errors.Is(err, ErrOutOfScope) {
 			t.Fatalf("%s: write guard err = %v, want ErrOutOfScope", name, err)
 		}
+	}
+}
+
+// Q8d: the scope rules are the same for both source kinds. A MySQL
+// source_tables entry is db.table and its topic <topic_prefix>.<db>.<table>;
+// a MySQL pipeline has no replication slot.
+func TestScopeSourceKinds(t *testing.T) {
+	o := &owners.Owners{Pipelines: []owners.Pipeline{
+		{ID: "pg", TopicPrefix: "pg", SourceTables: []string{"public.orders"}, Connectors: []string{"pg-c"}},
+		{ID: "my", SourceKind: owners.SourceKindMySQL, TopicPrefix: "shop", SourceTables: []string{"shop.orders", "shop.order_items"}, Connectors: []string{"my-c"}},
+		{ID: "nightly", Kind: "batch", DAGs: []string{"nightly"}},
+	}}
+	for _, tc := range []struct {
+		pipeline, kind string
+		tables         []string
+		topics         []string
+		outTables      []string
+		outTopics      []string
+	}{
+		{"pg", owners.SourceKindPostgres, []string{"public.orders"}, []string{"pg.public.orders"},
+			[]string{"shop.orders", "public.users", "orders"}, []string{"shop.shop.orders", "pg.public.users"}},
+		{"my", owners.SourceKindMySQL, []string{"shop.orders", "shop.order_items"}, []string{"shop.shop.orders", "shop.shop.order_items"},
+			[]string{"public.orders", "shop.users", "crm.orders", "shop"}, []string{"pg.public.orders", "shop.shop.users", "shop.orders"}},
+	} {
+		t.Run(tc.pipeline, func(t *testing.T) {
+			sc, err := ScopeFor(WithPipelineID(context.Background(), tc.pipeline), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sc.SourceKind() != tc.kind {
+				t.Fatalf("SourceKind = %q, want %q", sc.SourceKind(), tc.kind)
+			}
+			if got := sc.Topics(); !slices.Equal(got, tc.topics) {
+				t.Fatalf("Topics = %v, want %v", got, tc.topics)
+			}
+			for _, tb := range tc.tables {
+				if err := sc.CheckSourceTable(tb); err != nil || !sc.SourceTableInScope(tb) {
+					t.Errorf("table %s refused: %v", tb, err)
+				}
+			}
+			for _, tp := range tc.topics {
+				if err := sc.CheckTopic(tp); err != nil {
+					t.Errorf("topic %s refused: %v", tp, err)
+				}
+			}
+			for _, tb := range tc.outTables {
+				if err := sc.CheckSourceTable(tb); !errors.Is(err, ErrOutOfScope) {
+					t.Errorf("table %s: err = %v, want ErrOutOfScope", tb, err)
+				}
+			}
+			for _, tp := range tc.outTopics {
+				if err := sc.CheckTopic(tp); !errors.Is(err, ErrOutOfScope) {
+					t.Errorf("topic %s: err = %v, want ErrOutOfScope", tp, err)
+				}
+			}
+		})
+	}
+
+	// A MySQL pipeline has no slot and Slots asks Connect nothing, even for a
+	// connector config that would give Postgres's default slot.
+	sc, _ := ScopeFor(WithPipelineID(context.Background(), "my"), o)
+	cr := &configs{cfg: map[string]map[string]string{"my-c": {"connector.class": "io.debezium.connector.postgresql.PostgresConnector"}}}
+	slots, err := sc.Slots(context.Background(), cr)
+	if err != nil || slots != nil || len(cr.calls) != 0 {
+		t.Fatalf("MySQL Slots = %v, %v (calls %v)", slots, err, cr.calls)
+	}
+	// Postgres is unchanged.
+	sc, _ = ScopeFor(WithPipelineID(context.Background(), "pg"), o)
+	cr = &configs{cfg: map[string]map[string]string{"pg-c": {"connector.class": "io.debezium.connector.postgresql.PostgresConnector"}}}
+	if slots, err := sc.Slots(context.Background(), cr); err != nil || !slices.Equal(slots, []string{owners.DefaultSlot}) {
+		t.Fatalf("Postgres Slots = %v, %v", slots, err)
+	}
+
+	sc, _ = ScopeFor(WithPipelineID(context.Background(), "nightly"), o)
+	if sc.SourceKind() != "" {
+		t.Fatalf("batch SourceKind = %q", sc.SourceKind())
+	}
+	sc, _ = ScopeFor(WithUnscoped(context.Background()), o)
+	if sc.SourceKind() != "" {
+		t.Fatalf("unscoped SourceKind = %q", sc.SourceKind())
 	}
 }
