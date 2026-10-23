@@ -93,6 +93,9 @@ func TestForbiddenExoneration(t *testing.T) {
 		{[][]string{{"plugin"}}, "The plugin path cache theory is wrong.", false},
 		{[][]string{{"plugin"}}, "The plugin big path cache theory is wrong.", true},
 		{[][]string{{"plugin"}}, "The plugin failed theory is wrong.", true},
+		// A theory clears nothing after it.
+		{[][]string{{"slot", "lost"}}, "The network theory is wrong and the slot was lost.", true},
+		{[][]string{{"slot", "lost"}}, "The network theory is wrong, the slot was lost.", true},
 	}
 	for _, c := range cases {
 		if got := matchForbidden(c.rows, c.text); got != c.told {
