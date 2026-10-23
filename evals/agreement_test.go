@@ -381,6 +381,15 @@ var syntheticLabels = map[string]Label{
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
 	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
+	// The U1-19 setup scenarios: the label terms name the cause; the alert
+	// titles name the failing check, which is why the check names are not
+	// terms here (a title that names its own check is not a diagnosis).
+	"setup/compose-postgres-clean":      {"postgres", []string{"credential", "postgres_password", "plain text"}},
+	"setup/compose-privileged-refused":  {"kafka-connect", []string{"privileged", "host privileges"}},
+	"setup/flat-plugin-dir":             {"kafka-connect", []string{"plugin root", "own directory", "flat"}},
+	"setup/wal-level-replica":           {"kafka-connect", []string{"wal_level", "replica"}},
+	"setup/missing-grant":               {"kafka-connect", []string{"devctl_setup_grant", "select on", "needs replication"}},
+	"setup/db-unreachable-from-connect": {"kafka-connect", []string{"192.0.2.1", "black-hole", "etc/hosts"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -487,6 +496,22 @@ var syntheticTruth = map[string]map[string]truth{
 	// layer; a layer miss on it counts against the accuracy.
 	"register-rejected-renamed-key":    {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"register-rejected-missing-plugin": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U1-19: the lazy texts are the alert titles, which name the failing check
+	// and the service it failed on. The first layer word is postgres for
+	// compose-postgres-clean (the label layer) and for wal-level-replica (a
+	// miss: the connector's task fails first; its good text leads with the
+	// postgres cause too, so its layer is a miss as well), and kafka-connect for the other
+	// four (the connect service, the connector's failed task, the Connect
+	// container). The wrong texts blame the image digest on the postgres
+	// service (postgres, the label layer) or on the connect service
+	// (kafka-connect), an invalid config (kafka-connect), a failover-lost slot
+	// (postgres) and a down database (postgres); none states a label term.
+	"setup/compose-postgres-clean":      {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/compose-privileged-refused":  {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/flat-plugin-dir":             {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
+	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.
