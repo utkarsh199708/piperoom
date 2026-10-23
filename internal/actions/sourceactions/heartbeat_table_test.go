@@ -207,7 +207,7 @@ func TestHeartbeatFollowUps(t *testing.T) {
 	if len(fus) != 2 {
 		t.Fatalf("follow-ups = %v", fus)
 	}
-	if fus[0].Action != UpdateConnectorConfigAction || fus[0].Layer != "kafka-connect" {
+	if fus[0].Action != updateConnectorConfigAction || fus[0].Layer != "kafka-connect" {
 		t.Fatalf("config step = %+v", fus[0])
 	}
 	var cp struct {

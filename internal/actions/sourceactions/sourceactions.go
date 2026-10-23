@@ -46,8 +46,8 @@ const (
 // config follow-up reuses the N-key connect_update_connector_config of
 // package actions. Neither is reimplemented here.
 const (
-	UpdateConnectorConfigAction = "connect_update_connector_config"
-	DefaultPublication          = "dbz_publication"
+	updateConnectorConfigAction = "connect_update_connector_config"
+	defaultPublication          = "dbz_publication"
 )
 
 // identRe is AGENTS.md rule 6's identifier check, capped at NAMEDATALEN - 1:
@@ -162,7 +162,7 @@ func readConnectorConfig(ctx context.Context, action string, c tools.ConfigReade
 	}
 	pub := strings.TrimSpace(cfg["publication.name"])
 	if pub == "" {
-		pub = DefaultPublication
+		pub = defaultPublication
 	}
 	return cfg, pub, nil
 }
@@ -300,7 +300,7 @@ func HeartbeatFollowUps(cfg map[string]string, connector, publication, table str
 		Changes   map[string]string `json:"changes"`
 	}{Connector: connector, Changes: map[string]string{"heartbeat.action.query": heartbeatQuery(table)}})
 	out := []FollowUp{{
-		Action: UpdateConnectorConfigAction,
+		Action: updateConnectorConfigAction,
 		Layer:  connectLayer,
 		Params: q,
 		Why: "sets the query Debezium runs on every heartbeat: heartbeat.action.query = " + heartbeatQuery(table) +
