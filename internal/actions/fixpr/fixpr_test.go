@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/forge"
 	"piperoom/internal/clients/forge/fake"
 	"piperoom/internal/owners"
@@ -360,6 +362,9 @@ func TestRefusals(t *testing.T) {
 		{"javascript link", func(m map[string]any) { m["body"] = "see [x](javascript:alert(1))" }, "scheme", true},
 		{"reference link", func(m map[string]any) { m["body"] = "see [x]\n\n[x]: https://evil.example/y" }, "host other than", true},
 		{"link in title", func(m map[string]any) { m["title"] = "fix https://evil.example" }, "host other than", true},
+		{"www autolink", func(m map[string]any) { m["body"] = "see www.evil.example/?d=orders for the log" }, "host other than", true},
+		{"www autolink at start", func(m map[string]any) { m["body"] = "WWW.evil.example." }, "host other than", true},
+		{"www autolink in title", func(m map[string]any) { m["title"] = "fix (www.evil.example)" }, "host other than", true},
 		{"secret pair", func(m map[string]any) {
 			m["changes"] = edit("connectors/other.txt", "unrelated", "database.password=hunter2")
 		}, "credential", true},
@@ -396,6 +401,9 @@ func TestRefusals(t *testing.T) {
 			m["applied_when"] = map[string]any{"kind": "connector_config", "connector": "orders-pg"}
 		}, "1 to 20 keys", true},
 		{"applied change kind", func(m map[string]any) { m["applied_when"] = map[string]any{"kind": "change", "kinds": []any{"rumour"}} }, "not one of", true},
+		{"applied pull_request kind", func(m map[string]any) {
+			m["applied_when"] = map[string]any{"kind": "change", "kinds": []any{"deploy", "pull_request"}}
+		}, "never marks a deploy", true},
 		{"applied settle", func(m map[string]any) { m["applied_when"] = map[string]any{"kind": "merge", "settle": 61} }, "settle", true},
 		{"applied mixed", func(m map[string]any) {
 			m["applied_when"] = map[string]any{"kind": "plugin", "class": "a.B", "version": "1", "settle": 3}
@@ -469,8 +477,11 @@ func TestAccepted(t *testing.T) {
 		"applied change": func(m map[string]any) {
 			m["applied_when"] = map[string]any{"kind": "change", "kinds": []any{"deploy"}, "service": "connect"}
 		},
-		"applied merge":   func(m map[string]any) { m["applied_when"] = map[string]any{"kind": "merge", "settle": 15} },
-		"a < b in body":   func(m map[string]any) { m["body"] = "lag a < b and b > c" },
+		"applied merge": func(m map[string]any) { m["applied_when"] = map[string]any{"kind": "merge", "settle": 15} },
+		"a < b in body": func(m map[string]any) { m["body"] = "lag a < b and b > c" },
+		"www inside a forge url": func(m map[string]any) {
+			m["body"] = "see https://github.com/acme/www.notes and the awww.x word"
+		},
 		"crlf in content": func(m map[string]any) { m["changes"] = edit("connectors/other.txt", "unrelated", "a\r\nb\tc") },
 	}
 	for name, mod := range cases {
@@ -629,6 +640,19 @@ func TestSchemaClosed(t *testing.T) {
 		}
 	}
 	walk("params", paramsSchema())
+}
+
+// applied_when.kinds never offers pull_request: the room records one on every
+// fix-PR merge, so it would read any later merge as applied.
+func TestSchemaKindsNoPullRequest(t *testing.T) {
+	aw := paramsSchema()["properties"].(map[string]any)["applied_when"].(map[string]any)
+	kinds := aw["properties"].(map[string]any)["kinds"].(map[string]any)["items"].(map[string]any)["enum"].([]string)
+	if slices.Contains(kinds, clients.ChangePullRequest) || !slices.Contains(kinds, clients.ChangeDeploy) {
+		t.Errorf("applied_when.kinds enum %v", kinds)
+	}
+	if len(kinds) != len(clients.ChangeKinds())-1 {
+		t.Errorf("enum %v drops more than pull_request", kinds)
+	}
 }
 
 // previewDiff is Preview with its Diff, which Preview always sets.

@@ -116,7 +116,7 @@ func paramsSchema() map[string]any {
 					"keys":      map[string]any{"type": "object", "maxProperties": maxAppliedKeys, "additionalProperties": map[string]any{"type": "string"}, "description": "connector_config: key -> value the live config must hold (no credential keys)."},
 					"class":     str("plugin: the connector plugin class Connect must list."),
 					"version":   str("plugin: the plugin version Connect must list."),
-					"kinds":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": clients.ChangeKinds()}, "description": "change: what-changed kinds that mark the deploy."},
+					"kinds":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": appliedChangeKinds()}, "description": "change: what-changed kinds that mark the deploy (not pull_request: Piperoom records one on every fix-PR merge)."},
 					"service":   str("change: optional service name of the deploy."),
 					"settle":    map[string]any{"type": "integer", "minimum": 1, "maximum": maxSettle, "description": "merge: minutes after the merge (default 10), for a change nothing in Piperoom can observe."},
 				},
@@ -127,6 +127,13 @@ func paramsSchema() map[string]any {
 		"required":             []string{"repo", "base_sha", "title", "body", "changes", "applied_when"},
 		"additionalProperties": false,
 	}
+}
+
+// appliedChangeKinds are the what-changed kinds applied_when may wait for:
+// every kind but pull_request, which the room writes itself on every fix-PR
+// merge (this one included), so it shows nothing reached the system.
+func appliedChangeKinds() []string {
+	return slices.DeleteFunc(clients.ChangeKinds(), func(k string) bool { return k == clients.ChangePullRequest })
 }
 
 // parse is rule 1 plus the per-field text rules (5, 6, 7) that need no
@@ -300,8 +307,11 @@ func checkAppliedWhen(a appliedWhen) error {
 			return bad("change needs one or more what-changed kinds")
 		}
 		for _, k := range a.Kinds {
-			if !slices.Contains(clients.ChangeKinds(), k) {
-				return bad("change kind %q is not one of %s", oneLine(k, 40), strings.Join(clients.ChangeKinds(), ", "))
+			if k == clients.ChangePullRequest {
+				return bad("change kind %q never marks a deploy: Piperoom records one on every fix-PR merge, so any later merge would read as applied", k)
+			}
+			if !slices.Contains(appliedChangeKinds(), k) {
+				return bad("change kind %q is not one of %s", oneLine(k, 40), strings.Join(appliedChangeKinds(), ", "))
 			}
 		}
 		if len(a.Service) > maxNameBytes || !empty(a.Connector, a.Class, a.Version) || len(a.Keys) > 0 || a.Settle != 0 {

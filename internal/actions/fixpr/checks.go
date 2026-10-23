@@ -142,6 +142,10 @@ func checkSecrets(field, s string) error {
 var (
 	// urlRE finds absolute URLs and protocol-relative ones.
 	urlRE = regexp.MustCompile(`(?i)(?:\b[a-z][a-z0-9+.\-]*:)?//[^\s<>()\[\]"'` + "`" + `]+`)
+	// wwwRE finds GFM's extended www autolinks ("www.host/path" renders as
+	// a link with no scheme): a www. that does not continue a word, a host
+	// or a URL already matched by urlRE.
+	wwwRE = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.@/\-])(www\.[^\s<>()\[\]"'` + "`" + `]+)`)
 	// linkTargetRE finds Markdown link targets and reference definitions.
 	linkTargetRE = regexp.MustCompile(`\]\(\s*<?([^)\s>]*)|(?m)^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*<?(\S*?)>?(?:\s|$)`)
 	imageRE      = regexp.MustCompile(`!\[[^\]\n]*\]\s*[(\[]`)
@@ -174,6 +178,12 @@ func checkLinks(field, s string, allowed []string) error {
 	}
 	for _, u := range urlRE.FindAllString(s, -1) {
 		if err := check(u); err != nil {
+			return err
+		}
+	}
+	for _, m := range wwwRE.FindAllStringSubmatch(s, -1) {
+		// GFM leaves trailing punctuation out of the link.
+		if err := check("https://" + strings.TrimRight(m[1], "?!.,:;*_~'\"")); err != nil {
 			return err
 		}
 	}
