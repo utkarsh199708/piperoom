@@ -17,6 +17,8 @@ import (
 
 	"piperoom/internal/agent/llm"
 	anthropicllm "piperoom/internal/agent/llm/anthropic"
+	"piperoom/internal/agent/llm/retry"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 )
 
@@ -78,6 +80,20 @@ type EndpointConfig struct {
 	// empty) neutralises chat-template control tokens in the text of every
 	// request; non-claude skips the Claude providers (controltokens.go).
 	NeutraliseControlTokens string
+
+	// Knobs are the typed model settings of design section 9
+	// (config.ParseModelKnobs): the roles, their providers and models, and the
+	// knobs of the new providers. Nil keeps the behaviour before V6: every
+	// role on Provider's one client, with the model of each request's
+	// Options. When set, Provider is Knobs.Roles.Main.Provider.
+	Knobs *config.ModelKnobs
+	// MaxConcurrency bounds requests in flight per new-provider endpoint
+	// (PIPEROOM_MODEL_MAX_CONCURRENCY, default PIPEROOM_MAX_AGENTS); 0 = no
+	// bound. The Claude providers keep their SDK's own behaviour.
+	MaxConcurrency int64
+	// Converse builds bedrock-converse clients (V5). Nil refuses that provider
+	// at start with "not built yet".
+	Converse ModelFactory
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -86,6 +102,8 @@ type EndpointConfig struct {
 type providerLoaders struct {
 	awsConfig   func(ctx context.Context, region string) (aws.Config, error)
 	googleCreds func(ctx context.Context) (*google.Credentials, error)
+	// readFile reads PIPEROOM_MODEL_API_KEY_FILE; nil = os.ReadFile.
+	readFile func(path string) ([]byte, error)
 }
 
 // ProviderLoaders replace the cloud-credential lookups ProviderOptions makes.
@@ -147,6 +165,9 @@ func defaultLoaders() providerLoaders {
 // normalized checks cfg and returns it with defaults filled and the token
 // budget parsed. Every error here is a startup error.
 func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
+	if c.Knobs != nil {
+		c.Provider = c.Knobs.Roles.Main.Provider
+	}
 	c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
 	if c.Provider == "" {
 		c.Provider = ProviderAnthropic
@@ -172,9 +193,11 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 		if c.VertexRegion == "" {
 			return c, 0, fmt.Errorf("agent: PIPEROOM_MODEL_PROVIDER=vertex needs VERTEX_REGION")
 		}
+	case llm.ProviderOpenAI, llm.ProviderGemini, llm.ProviderBedrockConverse:
+		// Checked when the client is built (roles.go): flavor, base URL, key.
 	default:
-		return c, 0, fmt.Errorf("agent: unknown PIPEROOM_MODEL_PROVIDER %q; allowed values: %s, %s, %s",
-			c.Provider, ProviderAnthropic, ProviderBedrock, ProviderVertex)
+		return c, 0, fmt.Errorf("agent: unknown PIPEROOM_MODEL_PROVIDER %q; allowed values: %s",
+			c.Provider, allowedProviders)
 	}
 
 	mode, err := parseNeutraliseMode(c.NeutraliseControlTokens)
@@ -263,6 +286,22 @@ type Endpoint struct {
 	model       model
 	log         *slog.Logger
 
+	// mainQuals are the price-key qualifiers of the main role (design 8.1).
+	mainQuals []string
+	// firstLook, summary and judge are the single-shot roles' clients; a
+	// nil client is the main one (roles.go).
+	firstLook, summary, judge roleClient
+	// specs are the configured roles (nil without EndpointConfig.Knobs):
+	// what the start checks, the pricing rule and the startup log read.
+	specs []roleSpec
+	// unverified is PIPEROOM_MODEL_UNVERIFIED=on; pricingStrict is
+	// PIPEROOM_MODEL_PRICING_STRICT (config.PricingStrict*).
+	unverified    bool
+	pricingStrict string
+	// gates are the supported-list results of the specs, by role name, set
+	// by CheckStart.
+	gates map[string]llm.Gate
+
 	// triageSw is shared by every run: the first rejected triage request turns
 	// triage off for all rooms (see modelTurn).
 	triageSw triageSwitch
@@ -277,6 +316,24 @@ type Endpoint struct {
 	// spend is the durable spend setup (SetSpend, spend.go); nil = in-memory
 	// budgets only.
 	spend *spendSettings
+}
+
+// maxModelConcurrency caps the requests in flight per new-provider endpoint;
+// it is far above any provider's concurrent-request limit.
+const maxModelConcurrency = 4096
+
+// modelConcurrency converts the configured bound for the limiter. It clamps
+// instead of refusing: the value can come from PIPEROOM_MAX_AGENTS, which a
+// Claude-only deployment sets freely, and it sizes a semaphore channel, so a
+// huge value must not allocate one (or overflow int on a 32-bit build).
+func modelConcurrency(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > maxModelConcurrency {
+		return maxModelConcurrency
+	}
+	return int(n)
 }
 
 // NewEndpoint checks cfg and builds the model client. It returns an error for
@@ -295,21 +352,111 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 	if err != nil {
 		return nil, err
 	}
-	opts, err := cfg.providerOptions(ctx, getenv, ld)
+	b := clientBuilder{c: cfg, getenv: getenv, ld: ld, log: log, extra: extra,
+		limits: retry.NewLimiters(retry.Limits{MaxConcurrency: modelConcurrency(cfg.MaxConcurrency), TPM: cfg.knobs().TPM}, log)}
+	mainRole := cfg.mainRole()
+	mainRole.Provider = cfg.Provider
+	m, err := b.build(ctx, "PIPEROOM_MODEL", mainRole, true)
 	if err != nil {
 		return nil, err
 	}
-	opts = append(opts, extra...)
-	return &Endpoint{
-		provider:    cfg.Provider,
-		triageModel: cfg.TriageModel,
-		triageTurns: cfg.TriageTurns,
-		triagePass:  triagePassSettings(cfg),
-		limit:       limit,
-		model:       withNeutraliser(anthropicllm.New(cfg.Provider, opts, log), cfg.NeutraliseControlTokens),
-		log:         log,
-		budgets:     map[string]*tokenBudget{},
-	}, nil
+	e := &Endpoint{
+		provider:      cfg.Provider,
+		triageModel:   cfg.TriageModel,
+		triageTurns:   cfg.TriageTurns,
+		triagePass:    triagePassSettings(cfg),
+		limit:         limit,
+		model:         withNeutraliser(m, cfg.NeutraliseControlTokens),
+		log:           log,
+		budgets:       map[string]*tokenBudget{},
+		mainQuals:     priceQualifiers(mainRole),
+		pricingStrict: config.PricingStrictNonClaude,
+	}
+	if cfg.Knobs != nil {
+		if err := e.buildRoles(ctx, cfg, b); err != nil {
+			return nil, err
+		}
+	}
+	return e, nil
+}
+
+// buildRoles builds the single-shot roles' clients and the role list from
+// cfg.Knobs. A role on the main provider shares the main client; a model id
+// equal to the main one is left to Options.Model, as before V6.
+func (e *Endpoint) buildRoles(ctx context.Context, cfg EndpointConfig, b clientBuilder) error {
+	k := cfg.Knobs
+	e.unverified, e.pricingStrict = k.Unverified, k.PricingStrict
+	if e.pricingStrict == "" {
+		e.pricingStrict = config.PricingStrictNonClaude
+	}
+	main := k.Roles.Main
+	e.specs = append(e.specs, roleSpec{name: roleMain, env: "PIPEROOM_MODEL", role: main, m: e.model, loop: true, region: regionOf(cfg, main)})
+	if k.Roles.Triage != "" {
+		tr := main
+		tr.Model = k.Roles.Triage
+		e.specs = append(e.specs, roleSpec{name: roleTriage, env: "PIPEROOM_TRIAGE_MODEL", role: tr, m: e.model, loop: true, region: regionOf(cfg, tr)})
+	}
+	for _, r := range []struct {
+		name, env string
+		role      config.ModelRole
+		dst       *roleClient
+		on, loop  bool
+	}{
+		// A first look that is off makes no model call, so its endpoint is
+		// neither built nor checked.
+		{roleFirstLook, "PIPEROOM_TRIAGE_PASS", k.Roles.FirstLook, &e.firstLook, e.triagePass.on, true},
+		{roleSummary, "PIPEROOM_SUMMARY", k.Roles.Summary, &e.summary, true, false},
+		{roleJudge, "PIPEROOM_JUDGE", k.Roles.Judge, &e.judge, true, false},
+	} {
+		if !r.on {
+			continue
+		}
+		rc := roleClient{quals: priceQualifiers(r.role)}
+		if r.name == roleFirstLook {
+			// The first look's model id is triagePass.model (the same default
+			// as ParseModelRoles); its spec names what will be sent.
+			r.role.Model = e.triagePass.model
+		} else if r.role.Model != main.Model {
+			rc.modelID = r.role.Model
+		}
+		m := e.model
+		if !sameEndpoint(main, r.role) {
+			built, err := b.build(ctx, r.env, r.role, false)
+			if err != nil {
+				return err
+			}
+			m = withNeutraliser(built, cfg.NeutraliseControlTokens)
+			rc.m = m
+		}
+		*r.dst = rc
+		e.specs = append(e.specs, roleSpec{name: r.name, env: r.env, role: r.role, m: m, loop: r.loop, region: regionOf(cfg, r.role)})
+	}
+	return nil
+}
+
+// firstLookModel is the first look's client.
+func (e *Endpoint) firstLookModel() model { return e.firstLook.client(e.model) }
+
+// summaryClient is the hand-off and post-mortem writer's client.
+func (e *Endpoint) summaryClient() model { return e.summary.client(e.model) }
+
+// judgeClient is the hand-off judge's client.
+func (e *Endpoint) judgeClient() model { return e.judge.client(e.model) }
+
+// client is rc's client, or main when the role shares the main one.
+func (rc roleClient) client(main model) model {
+	if rc.m != nil {
+		return rc.m
+	}
+	return main
+}
+
+// withModel returns opts with the role's model id when it names one.
+func (rc roleClient) withModel(opts Options) Options {
+	if rc.modelID != "" {
+		opts.Model = rc.modelID
+	}
+	return opts
 }
 
 // Provider reports the normalized provider name.
@@ -374,12 +521,12 @@ func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options
 		// hook cannot change what is reported.
 		defer func() { usage(b.Used()) }()
 	}
-	m := &budgetModel{inner: e.model, budget: b, loop: true, guard: e.guard(alert.RoomID, alert.PipelineID)}
+	m := &budgetModel{inner: e.model, budget: b, loop: true, guard: e.guardWith(alert.RoomID, alert.PipelineID, e.mainQuals)}
 	r, err := newRunnerWith(alert, deps, opts, m)
 	if err != nil {
 		return err
 	}
-	r.prices = e.prices()
+	r.prices = e.pricesFor(e.mainQuals)
 	if e.triageModel != "" && e.triageModel != opts.Model {
 		r.triageModel = e.triageModel
 		r.triageTurns = e.triageTurns
@@ -395,7 +542,7 @@ func (e *Endpoint) WriteHandoff(ctx context.Context, roomEvents []events.Event, 
 	if len(roomEvents) == 0 {
 		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write handoff from an empty room")
 	}
-	return writeHandoff(ctx, roomEvents, opts, e.handoffModel(roomEvents))
+	return writeHandoff(ctx, roomEvents, e.summary.withModel(opts), e.handoffModel(roomEvents))
 }
 
 // WritePostmortem is an agent.PostmortemWriter: the closing summary of a closed
@@ -406,5 +553,5 @@ func (e *Endpoint) WritePostmortem(ctx context.Context, roomEvents []events.Even
 	if len(roomEvents) == 0 {
 		return PostmortemDraft{}, fmt.Errorf("agent: cannot write postmortem from an empty room")
 	}
-	return writePostmortem(ctx, roomEvents, opts, e.summaryModel(roomEvents, events.UsageRolePostmortem))
+	return writePostmortem(ctx, roomEvents, e.summary.withModel(opts), e.summaryModel(roomEvents, events.UsageRolePostmortem))
 }
