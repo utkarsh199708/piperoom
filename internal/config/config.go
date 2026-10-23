@@ -1196,9 +1196,20 @@ func ParseTriagePass(c Config) (TriagePass, error) {
 	}
 	t.Model = strings.TrimSpace(c.TriagePassModel)
 	if t.Model == "" {
-		// The same default as ParseModelRoles: claude-haiku-5-5 on a Claude
-		// provider (today's value), the main model on a new one (V0).
-		t.Model = defaultFirstLookModel(firstLookProvider(c), strings.TrimSpace(c.Model))
+		// The same default and refusal as ParseModelRoles: claude-haiku-5-5
+		// on a Claude provider (today's value), the main model on a new one
+		// (V0), and none for a first-look provider other than the main one
+		// unless it is a Claude provider, so a first look moved to openai
+		// never silently runs the main Claude model instead.
+		p, main := firstLookProvider(c), mainProvider(c)
+		if p != main && !claudeProvider(p) {
+			return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL is required when PIPEROOM_TRIAGE_PASS_PROVIDER (%s) differs from PIPEROOM_MODEL_PROVIDER (%s)", p, main)
+		}
+		mainModel := strings.TrimSpace(c.Model)
+		if mainModel == "" {
+			mainModel = DefaultModel
+		}
+		t.Model = defaultFirstLookModel(p, mainModel)
 	}
 	if strings.ContainsAny(t.Model, " \t\r\n") {
 		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL=%q: want a model id without spaces", c.TriagePassModel)
@@ -1828,12 +1839,23 @@ type BaseURL struct {
 	PrivateHTTP bool
 }
 
-// String returns the URL without anything secret (it never holds any).
+// String returns the whole URL. ParseBaseURL refuses userinfo, a query and a
+// fragment, but the path is kept and some gateways put an account id or a
+// token in it, so logs, errors and API responses use Redacted.
 func (b BaseURL) String() string {
 	if b.URL == nil {
 		return ""
 	}
 	return b.URL.String()
+}
+
+// Redacted returns scheme://host[:port] only, the form that may be logged or
+// shown.
+func (b BaseURL) Redacted() string {
+	if b.URL == nil {
+		return ""
+	}
+	return b.URL.Scheme + "://" + b.URL.Host
 }
 
 // metadataHostNames are refused by name before any lookup.
@@ -1843,13 +1865,20 @@ var metadataHostNames = map[string]bool{
 }
 
 var (
-	awsIMDSv6      = netip.MustParseAddr("fd00:ec2::254")
-	alibabaMeta    = netip.MustParseAddr("100.100.100.200")
-	ipv4Broadcast  = netip.MustParseAddr("255.255.255.255")
-	thisNetwork    = netip.MustParsePrefix("0.0.0.0/8")
-	nat64Prefix    = netip.MustParsePrefix("64:ff9b::/96")
-	ulaPrefix      = netip.MustParsePrefix("fc00::/7")
-	rfc1918Prefixs = []netip.Prefix{
+	awsIMDSv6     = netip.MustParseAddr("fd00:ec2::254")
+	alibabaMeta   = netip.MustParseAddr("100.100.100.200")
+	ipv4Broadcast = netip.MustParseAddr("255.255.255.255")
+	thisNetwork   = netip.MustParsePrefix("0.0.0.0/8")
+	nat64Prefix   = netip.MustParsePrefix("64:ff9b::/96")
+	// IPv6 forms that carry an IPv4 address a host with the matching
+	// translation or tunnel reaches: IPv4-compatible (::/96, deprecated),
+	// local-use NAT64 (RFC 8215) and 6to4 (2002::/16, the IPv4 address in
+	// bits 16-47).
+	ipv4CompatPrefix = netip.MustParsePrefix("::/96")
+	nat64LocalPrefix = netip.MustParsePrefix("64:ff9b:1::/48")
+	sixToFourPrefix  = netip.MustParsePrefix("2002::/16")
+	ulaPrefix        = netip.MustParsePrefix("fc00::/7")
+	rfc1918Prefixs   = []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
 		netip.MustParsePrefix("172.16.0.0/12"),
 		netip.MustParsePrefix("192.168.0.0/16"),
@@ -1860,14 +1889,23 @@ var (
 // addr: link-local (169.254.0.0/16 and fe80::/10, every cloud's metadata
 // service and ECS task metadata), AWS IMDS over IPv6 (fd00:ec2::254), Alibaba
 // Cloud metadata (100.100.100.200), multicast, broadcast, unspecified and
-// 0.0.0.0/8; IPv4-mapped and NAT64 forms are checked as the IPv4 address.
-// It is the metadata deny list of design 10.3: no setting changes it, and the
-// adapters' dialers apply it to every dialed address.
+// 0.0.0.0/8; IPv4-mapped, IPv4-compatible, NAT64 (well-known and local-use)
+// and 6to4 forms are checked as the IPv4 address they carry, and a local-use
+// NAT64 or 6to4 address whose IPv4 address is denied is denied whatever its
+// other bits. It is the metadata deny list of design 10.3: no setting changes
+// it, and the adapters' dialers apply it to every dialed address.
 func ModelAddrDenied(addr netip.Addr) bool {
 	addr = addr.Unmap().WithZone("")
-	if addr.Is6() && nat64Prefix.Contains(addr) {
+	if addr.Is6() {
 		b := addr.As16()
-		addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		switch {
+		case nat64Prefix.Contains(addr), nat64LocalPrefix.Contains(addr):
+			addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		case sixToFourPrefix.Contains(addr):
+			addr = netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
+		case ipv4CompatPrefix.Contains(addr) && !addr.IsLoopback() && !addr.IsUnspecified():
+			addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		}
 	}
 	switch {
 	case !addr.IsValid(),
@@ -2328,8 +2366,11 @@ func ParseModelKnobs(c Config) (ModelKnobs, error) {
 
 // ChinaOperatedEndpoint returns the host of r's endpoint when it is operated
 // in the People's Republic of China (DeepSeek's API, the DashScope China
-// endpoint, any .cn host), else "". Only openai and gemini roles have a
-// configurable endpoint; the deepseek flavor's default host counts.
+// endpoint, other PRC-operated model APIs on non-.cn domains, any .cn host),
+// else "". The list is best effort: an IP literal or a provider it does not
+// name passes, so the acknowledgement is a reminder, not a compliance
+// control. Only openai and gemini roles have a configurable endpoint; the
+// deepseek flavor's default host counts.
 func ChinaOperatedEndpoint(r ModelRole) string {
 	host := ""
 	switch {
@@ -2343,7 +2384,7 @@ func ChinaOperatedEndpoint(r ModelRole) string {
 	if host == "" {
 		return ""
 	}
-	for _, d := range []string{"deepseek.com", "dashscope.aliyuncs.com"} {
+	for _, d := range []string{"deepseek.com", "dashscope.aliyuncs.com", "moonshot.ai", "minimax.chat", "minimaxi.com", "volces.com", "baichuan-ai.com", "tencentcloudapi.com"} {
 		if host == d || strings.HasSuffix(host, "."+d) {
 			return host
 		}
