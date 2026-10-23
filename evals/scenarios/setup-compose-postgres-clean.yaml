@@ -1,0 +1,118 @@
+# C7 setup scenario (U1-19): the person's own Compose file writes the Postgres password in plain
+# text in the service's environment, and the setup validator refuses the document before anything
+# starts. The label names the validator rule and the fixing ops (tasks/U-board.md row U1-19,
+# step 1). Format: evals/README.md (C6). The rule and its message are
+# internal/setup/targets/compose's (validator.go, checkEnvironment, RuleSecret).
+#
+# RECORDED: NO, and no pipeline read is replayed: this incident happens before the stack exists.
+# The stack never came up, so the room's read tools have no pipeline to answer about, and the
+# refusal is compose_write's/compose_up's own result (a *RuleError the server turns into the T2
+# preview's reason). The one replayed read is similar_incidents, the past-room lookup that answers
+# before the stack exists; it is the evidence the hypothesis cites. The harness run is scored on the
+# hypothesis. U1-20 adds the setup runner replay (evals/setup) and the setup prompt; when it lands,
+# record compose_write's refusal for this file's stack (rule secret, service postgres) and make it
+# the required fact and evidence tool. Clock: 2026-10-25T09:40:00Z.
+#
+# First failing layer: postgres (the source service the file would run). Root-cause layer:
+#   postgres. Nothing is running yet: the document is refused before compose_up.
+#
+# Expected label: validator rule secret - "compose: secret: service \"postgres\": environment
+#   \"POSTGRES_PASSWORD\" carries a credential value in plain text; use a ${secret:name} reference
+#   in the env file". The clean Postgres service is the template's: a pinned image, a 127.0.0.1
+#   port on a local target, and every credential as an interpolation from the .env the writer
+#   controls. The fix is properties_write of .env with POSTGRES_USER, POSTGRES_DB and
+#   POSTGRES_PASSWORD: ${secret:postgres_password} (the runner materialises the value from its
+#   secret store; it is never in an event or a summary), then compose_write of the
+#   source-postgres template (it renders POSTGRES_USER/PASSWORD/DB=${...}) and compose_up.
+#   file_write cannot edit either file: the compose names are refused and properties_write is
+#   the only writer for .env.
+#   No expect.fix: properties_write, compose_write and compose_up are runner ops
+#   (internal/setup/targets/compose), not room actions.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - no
+#     connector runs; the stack was never created.
+#   Forbidden: connect_update_connector_config, schema_register, schema_set_compatibility - they
+#     act on a running stack and the registry; the compose environment is the problem.
+#
+# Also refused, and not this incident: the validator's other rules (an image not in the
+#   knowledge allow-list or without its pinned digest, privileged and the other privilege fields,
+#   a bind outside the project, the Docker socket, /, extends, a build:, a port not on 127.0.0.1
+#   for a local target). Each has its own test in validator_test.go; a hypothesis that names one
+#   of them is a wrong cause.
+#
+# Sources:
+#   - internal/setup/targets/compose/validator.go: checkEnvironment refuses a credential-named key
+#     whose value is live text ("POSTGRES_PASSWORD: hunter2") with RuleSecret and the message
+#     "environment \"<key>\" carries a credential value in plain text; use a ${secret:name}
+#     reference in the env file"; an interpolation from the .env allow-list passes.
+#   - internal/setup/targets/compose/validator_test.go: {"a plain-text credential", "    environment:
+#     \n      POSTGRES_PASSWORD: hunter2\n", protocol.ClassLocal, RuleSecret} and the interpolated
+#     form's pass.
+#   - internal/setup/targets/compose/templates.go: postgresService renders
+#     POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB as ${...} interpolations from the .env, with the
+#     pinned image, a loopback port on a local target and an anonymous data volume.
+#   - internal/setup/ops/files.go and internal/setup/targets/compose/ops.go: file_write refuses the
+#     compose names and .env, and properties_write's key allow-list takes a ${secret:name}
+#     reference for a credential key.
+#   - docs/design/setup-agent.md §2.5: a credential value never reaches a compose file the model
+#     wrote; the .env holds references, the runner materialises them.
+
+name: setup/compose-postgres-clean
+description: |
+  The person wrote their own compose.yaml for the project, with a postgres service whose
+  environment holds the database password in plain text (POSTGRES_PASSWORD: orders). The setup run
+  stopped at the compose step: the validator refused the document with rule secret - "compose:
+  secret: service \"postgres\": environment \"POSTGRES_PASSWORD\" carries a credential value in
+  plain text; use a ${secret:name} reference in the env file" - before compose_up, so no container
+  was created and the orders pipeline is not running in this project.
+
+  Root cause: the compose file's postgres service carries its password as a literal instead of a
+  reference to the runner's secret store, which the setup validator refuses so that no credential
+  value ends up in a file the model can read, write or propose.
+
+  Expected label: validator rule secret. Fix by writing the .env with properties_write
+  (POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD: ${secret:postgres_password}), re-rendering the
+  source-postgres template with compose_write and starting it with compose_up; the cleaned Postgres
+  keeps the template's pinned image, loopback port and interpolated credentials.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+alert:
+  title: 'orders setup: the compose step was refused before compose_up - validator rule secret failed on the postgres service; no container started'
+  # No pipeline_map: nothing is running in this project yet, so the room has no topology to show.
+
+recordings:
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I wrote the compose file myself and the setup run refuses it, saying the postgres service has a credential in plain text. The stack must keep running with the same database password. What should the file hold instead, and which step writes it?"
+
+expect:
+  root_cause:
+    - [postgres password, password, credential, postgres_password]
+    - [plain text, plaintext, literal, interpolation, env file, reference]
+  # The wrong stories of a stack that never started.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [permission denied]
+    - [disk full]
+    - [retention, delet*]
+    - [image, digest]
+    - [privileged, cap add]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  evidence_tools: [similar_incidents]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 6

@@ -1,0 +1,412 @@
+# C7 setup scenario (U1-19): the Connect worker resolves the source's host name to a black-hole
+# address, so its task can never open the database connection although the database is healthy.
+# The label names the failing check and the fixing op (tasks/U-board.md row U1-19, step 1).
+# Format: evals/README.md (C6). Built on `devctl setup-break db-unreachable-from-connect`
+# (dev/scenarios.md, "Setup breaks", PR #880).
+#
+# RECORDED: NO. Every summary and data payload is the exact output of the real connect_config,
+# connect_status, source_settings, debezium_metrics, dbtools and kafkatools code from main,
+# composed by hand from those tools' format strings and the JDBC/DNS errors a black-holed host
+# produces (the Q2g/Q3f approach; this session has no Docker). Clock: 2026-10-25T09:40:00Z, scoped
+# like dev/owners.yaml. To re-record it on the dev stack, see evals/scenarios/README.md,
+# "Setup scenarios (U1-19)".
+#
+# First failing layer: kafka-connect (the worker's network path). Root-cause layer: kafka-connect
+#   (the container's name resolution). The database answers every read the room makes itself, so
+#   Postgres, the credentials, the schema and the topic are all fine.
+#
+# Expected label: failing check connect-source-reachable ("the Connect container cannot open a TCP
+#   connection to postgres:5432"); fixing op compose_restart {services: [connect]}. A new container
+#   regenerates /etc/hosts from the service definition and the worker's JVM starts with an empty
+#   DNS cache, so the host name resolves to the database again; Connect then brings the connector
+#   back from its config topic. A task restart alone is not the fix: /etc/hosts is a bind mount
+#   that survives it, and a long-lived JVM may keep the cached bad address.
+#   compose_restart is a runner op (internal/setup/targets/compose), not a room action, and U1-20
+#   adds the setup replay, so there is no expect.fix: the check and the op are in this label and in
+#   the alert.
+#   Forbidden: connect_restart_task, connect_restart_connector - they re-resolve through the same
+#     /etc/hosts entry (and may keep the JVM's cached address).
+#   Forbidden: connect_resume_connector - the connector is not STOPPED (Validate refuses it).
+#   Forbidden: connect_update_connector_config - database.hostname is not on its allow-list, and
+#     the config is right: the name must resolve again.
+#   Forbidden: pg_drop_replication_slot - no slot exists; the connection never reached Postgres.
+#   Forbidden: schema_register, schema_set_compatibility - the task never produced a record.
+#
+# Traps:
+#   - "connect timed out" reads like the database being down; source_settings and pg_row answer
+#     from the room's own client, so the server is up.
+#   - The absent slot invites the dead-slot story.
+#   - The config is correct (postgres:5432), so a wrong-host config story fails too: the name is
+#     right and resolves to the wrong address.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks.go: scriptBlockSource appends "192.0.2.1 <host>" to the Connect
+#     container's /etc/hosts (TEST-NET-1, a black hole); verifyConnectSourceReachable's detail "the
+#     Connect container cannot open a TCP connection to postgres:5432"; check name
+#     connect-source-reachable; fixDBUnreachable restarts the Connect container because Docker
+#     regenerates /etc/hosts and the new JVM has an empty DNS cache, and notes that a task restart
+#     keeps the cached bad address.
+#   - RFC 5737: 192.0.2.0/24 is TEST-NET-1, reserved for documentation and routed nowhere.
+#   - java.net.SocketTimeoutException "connect timed out" from the JDBC driver when the TCP
+#     handshake goes to a black hole.
+#   - internal/tools/kafkatools/connect_tools.go: connect_config shows database.hostname and
+#     database.port; connect_status keeps the "Caused by:" lines of a failed task.
+
+name: setup/db-unreachable-from-connect
+description: |
+  The person re-ran piperoom-setup after moving the project between hosts. The run stopped at its
+  reachability step: check connect-source-reachable fails, because the Connect container resolves
+  the connector's database.hostname (postgres) to 192.0.2.1, a TEST-NET-1 address that routes
+  nowhere - a stale entry in the container's /etc/hosts. pg-orders-connector task 0 FAILED with
+  "java.net.SocketTimeoutException: connect timed out" and keeps retrying; no replication slot was
+  created, order-sync is Stable at lag 0 and analytics.orders is 47 minutes stale. The database
+  itself is healthy: the room's own source reads answer, wal_level is logical, and the connector's
+  config names the right host and port.
+
+  Root cause: name resolution inside the Connect container maps postgres to the black-hole address
+  192.0.2.1, so the worker's task can never open a TCP connection to postgres:5432.
+
+  Expected label: failing check connect-source-reachable; fixing op compose_restart
+  {services: [connect]}, which regenerates the container's /etc/hosts and starts a JVM with an
+  empty DNS cache.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders setup: check connect-source-reachable failed (the Connect container cannot open a TCP connection to postgres:5432); pg-orders-connector task 0 FAILED and analytics.orders is 47m stale'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot=absent reachable_from_room=yes
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=47m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=47m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot=absent reachable_from_room=yes
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=47m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=47m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot: absent
+            reachable_from_room: "yes"
+          health: ok
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - facts:
+            tasks_failed: "1"
+          health: fail
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 47m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 47m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: The connection attempt failed.
+      Caused by: java.net.SocketTimeoutException: connect timed out
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\nCaused by: org.postgresql.util.PSQLException: The connection attempt failed.\nCaused by: java.net.SocketTimeoutException: connect timed out"
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      role_info:
+        role: piperoom
+        exists: true
+        can_login: true
+        replication: true
+        selectable:
+          public.orders: true
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: not found in pg_replication_slots
+    data: []
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: streaming connected=false, queue 0/8192; snapshot running=false, completed=false, paused=false
+    data:
+      connector: pg-orders-connector
+      topic_prefix: pg
+      metrics_found: 6
+      streaming:
+        Connected: 0
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+      snapshot:
+        SnapshotRunning: 0
+        SnapshotCompleted: 0
+        SnapshotPaused: 0
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-24T09:40:00Z)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 47 min ago
+      partition 1: 0–1417 (1417 records), newest 47 min ago
+      partition 2: 0–1403 (1403 records), newest 47 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-25T08:53:10Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-25T08:53:10Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-25T08:53:10Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-25T08:53:06Z (stale for 47m)
+    data:
+      newest: "2026-10-25T08:53:06Z"
+      stale_for: 47m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "The setup run cannot reach the database from Connect and task 0 keeps timing out, but I can query the database from my laptop. The config says postgres:5432, which is what the compose file names. What do I change on the Connect side?"
+
+expect:
+  root_cause:
+    # The worker's name resolution, and the address it lands on.
+    - [name resolution, dns, hosts, resolve*]
+    - [192.0.2.1, black hole, test net, unreachable, blocked, firewall]
+  # The wrong stories of a task that cannot connect.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [permission denied]
+    - [disk full]
+    - [retention, delet*]
+    - [slot, lost]
+    - [database, down]
+    - [wrong host, bad host]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_connect_timeout
+      tool: connect_status
+      match: [connect timed out, connection attempt failed]
+      required: true
+    - id: f_server_answers
+      tool: source_settings
+      match: [wal level logical]
+      required: true
+    - id: f_config_right
+      tool: connect_config
+      match: [database hostname postgres, database port 5432]
+    - id: f_credentials_ok
+      tool: source_role_grants
+      match: [replication yes, selectable yes]
+    - id: f_no_slot
+      tool: pg_replication_slots
+      match: [not found in pg replication slots]
+    - id: f_not_connected
+      tool: debezium_metrics
+      match: [connected false, queue]
+  claims:
+    - about: root_cause
+      facts: [f_connect_timeout, f_server_answers]
+  evidence_tools: [connect_status, source_settings]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 12
