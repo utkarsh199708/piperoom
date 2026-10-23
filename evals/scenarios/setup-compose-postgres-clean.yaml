@@ -109,7 +109,10 @@ expect:
     - [permission denied]
     - [disk full]
     - [retention, delet*]
-    - [image, digest]
+    - [unpinned]
+    - [lack*, digest]
+    - [absent, knowledge index]
+    - [digest, missing]
     - [privileged, cap add]
   first_failing_layer: postgres
   root_cause_layer: postgres

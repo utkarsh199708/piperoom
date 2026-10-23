@@ -102,7 +102,10 @@ expect:
     - [permission denied]
     - [disk full]
     - [retention, delet*]
-    - [image, digest]
+    - [unpinned]
+    - [lack*, digest]
+    - [absent, knowledge index]
+    - [digest, missing]
     - [plain text, credential]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect

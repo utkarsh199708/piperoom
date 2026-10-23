@@ -87,7 +87,7 @@ alert:
   pipeline_map: |
     pipeline orders
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.orders [postgres, owner priya] WARN slot=absent grants=missing
+    1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
     2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
       from: pg:public.orders
     3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=36m ago
@@ -103,7 +103,7 @@ recordings:
     summary: |
       pipeline orders
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.orders [postgres, owner priya] WARN slot=absent grants=missing
+      1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
       2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
         from: pg:public.orders
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=36m ago
@@ -125,9 +125,8 @@ recordings:
           to: wh:analytics.orders
       nodes:
         - facts:
-            slot: absent
-            grants: missing
-          health: warn
+            slot: missing
+          health: unknown
           id: pg:public.orders
           kind: source_table
           layer: postgres

@@ -497,7 +497,8 @@ var syntheticTruth = map[string]map[string]truth{
 	// U1-19: the lazy texts are the alert titles, which name the failing check
 	// and the service it failed on. The first layer word is postgres for
 	// compose-postgres-clean (the label layer) and for wal-level-replica (a
-	// miss: the connector's task fails first), and kafka-connect for the other
+	// miss: the connector's task fails first; its good text leads with the
+	// postgres cause too, so its layer is a miss as well), and kafka-connect for the other
 	// four (the connect service, the connector's failed task, the Connect
 	// container). The wrong texts blame the image digest on the postgres
 	// service (postgres, the label layer) or on the connect service
@@ -506,7 +507,7 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/compose-postgres-clean":      {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/compose-privileged-refused":  {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/flat-plugin-dir":             {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
-	"setup/wal-level-replica":           {"good": {true, true}, "lazy": {false, true}, "wrong": {false, false}},
+	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
 	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 }
