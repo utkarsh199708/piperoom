@@ -1,11 +1,17 @@
 package evals
 
 import (
+	"context"
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"piperoom/internal/actions"
+	"piperoom/internal/events"
+	"piperoom/internal/tools"
 )
 
 // termCase is one hypothesis read against a scenario's root-cause terms.
@@ -239,5 +245,317 @@ func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"started_at":"`+m[1]+`"}`), &p); err != nil || !p.StartedAt.Equal(started) {
 		t.Errorf("started_at does not decode as an end-session param: %v", err)
+	}
+}
+
+// w4cScenario loads one scenario by name for the W4c (KAN-494) tests.
+func w4cScenario(t *testing.T, name string) Scenario {
+	t.Helper()
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range scs {
+		if sc.Name == name {
+			return sc
+		}
+	}
+	t.Fatalf("scenario %q not found", name)
+	return Scenario{}
+}
+
+// w4cSetupRunHypotheses are the final hypotheses of setup/db-unreachable-from-connect
+// in run 39994729845 (runs 1 to 3), copied verbatim from the transcripts. Each
+// blames "the network path" and was judged wrong; none names the Connect
+// side's name resolution.
+var w4cSetupRunHypotheses = []string{
+	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFHA172ZGCXRK7BVA9RX3, s_01M5MYFRMH72C8MPHGHVGTSB4A). Root cause: the network path from the Connect container to the Postgres host. Postgres itself is up: it answers Piperoom (s_01M5MYFM99AGT9F30Q03M411J7, s_01M5MYFYPTQ1Z3WQ8VSXKKFMC7) and no DDL changed (s_01M5MYFHA1002G3P59Q3ASYNVK). The Connect-side probes returned no data (s_01M5MYFM99KVXGK3QA6ETKAX6B, s_01M5MYFYPTMBB63Y7DYV72MMW9), so the exact network fault is unconfirmed. Separately, slot debezium_orders is missing, so changes made since the failure will not be replayed. No past room matches (s_01M5MYFRMHAT8QCYG1P9SNGWQD).",
+	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFVV91G670X3J2PAQ3PXG). Root cause: the network path from the Connect container to the Postgres host is broken, not Postgres itself. Postgres answers Piperoom (s_01M5MYG41YTNJPJT10AREVT673, s_01M5MYFY7RHTPZ60QQPED9QFXK) and has had no DDL (s_01M5MYFVV973FQSM14XN7GA62M). net_probe and Connect validation returned no data, so this cannot be confirmed from Connect's side (s_01M5MYFY7RRB6S5QYNX73VYFHG, s_01M5MYGFD0NSQ4ZZK59396FH8Y). Separately, slot debezium_orders is missing (s_01M5MYFY7RHTPZ60QQPED9QFXK), so a restart would recreate the slot and change events since the failure may be lost. No similar past room, no injection seen.",
+	"First failing component: pg-orders-connector task 0 FAILED with connect timed out to postgres:5432 (s_01M5MYG8JTQCS1Z0B1Z48BB6SD). Likely root cause: the network path from the Connect container to postgres:5432; Postgres itself answers Piperoom (s_01M5MYGBN2YSRP5Q4CDGW504N6), but Connect's view is unconfirmed because net_probe and Connect validation returned no data (s_01M5MYG8JTXG979BJ4ETJVVMHT, s_01M5MYGHJ3FKRKB2QVC91YNPBD). Also, slot debezium_orders is missing (s_01M5MYGBN2YSRP5Q4CDGW504N6), so a plain restart would leave a gap. No DDL (s_01M5MYG8JT6QKWBZQNV2GTA4V5), no past match, no injection seen.",
+}
+
+// w4cIdleRunHypotheses are the final hypotheses of idle-wal-growth in run
+// 39994729845 (runs 1 to 3), verbatim. Each passed the root-cause terms and
+// failed only the root-cause layer: it puts the cause in pg-orders-connector's
+// config (kafka-connect).
+var w4cIdleRunHypotheses = []string{
+	"No component is broken. The first failing component is the slot debezium_orders on the orders-db Postgres, and the root cause is the config of pg-orders-connector (kafka-connect). public.orders has had no writes since about 09:02 (s_01M5MXMKVVBB9EF30B7DCBSGJY, s_01M5MXM80QDYBB7Y27Z1P9WRMS). The connector config lists no heartbeat setting and uses a filtered publication (s_01M5MXMGEP4VB7AEGT8148H8BT). So with nothing to emit, the active slot never confirms a newer LSN while other database writes add WAL (s_01M5MXMC79QSJVHX47S3GP8XD2), and max_slot_wal_keep_size=-1 means nothing caps it (s_01M5MXMQR2DSZCHBDDPF01FR9D). The 38m-stale warehouse is an idle source, not data loss. No past room matches, and nothing tried to inject instructions.",
+	"Nothing is broken. The first component showing a symptom is the slot debezium_orders (postgres): it is active, but its confirmed_flush_lsn stays flat because public.orders has had no writes since about 09:02 (s_01M5MXMQR79396CEX93H3SCXPZ quiet, s_01M5MXN4YNSQ6BNSCGREMQ81A0 source = topic = sink, no drift). The root cause sits in the connector config of pg-orders-connector (kafka-connect): its publication is filtered and no heartbeat is set (s_01M5MXN0PMZZYYM3PM5F92VQEF), so WAL written elsewhere on the server builds up behind the slot, with max_slot_wal_keep_size unlimited (s_01M5MXN8XZWCZ2AM53XAZ9PPY8). The warehouse looks stale only because the source table is idle. No past room matches (s_01M5MXN8XZ1GNJ2C7RQMMNHYWR).",
+	"No component is broken: first symptom is slot debezium_orders on orders-db retaining WAL (s_01M5MXNESEK99E8H4XZQ0E33SA, active, reserved) because public.orders has had no writes since 09:02 (s_01M5MXNQF46DARG8XDAH66AKGE, sink matches source, lag 0 s_01M5MXNK9X1Q830ZB2AMH203E1) and the confirmed_flush_lsn sits flat (s_01M5MXN8YMAMYTVTYDWD2YHXY7); root cause is pg-orders-connector config with a filtered publication and no heartbeat (s_01M5MXNK9XXG2PYZQE8XWAQW8H), so other database WAL piles up behind the slot with max_slot_wal_keep_size=-1 (s_01M5MXNWQ0QKJ9JCBREYPWP02B); no past room matches, no injection seen.",
+}
+
+// TestW4cSetupDBUnreachableTerms pins W4c's root-cause terms of
+// setup/db-unreachable-from-connect: one group of what net_probe's contrast lets
+// the agent observe (the Connect side's name resolution), no address group, no
+// symptom words, and firewall no longer a forbidden story.
+func TestW4cSetupDBUnreachableTerms(t *testing.T) {
+	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
+	want := [][]string{{"resolv*", "dns", "hosts"}}
+	if !reflect.DeepEqual(sc.Expect.RootCause, want) {
+		t.Fatalf("root_cause = %v, want %v", sc.Expect.RootCause, want)
+	}
+	for _, row := range sc.Expect.RootCauseForbidden {
+		for _, term := range row {
+			if strings.Contains(strings.ToLower(term), "firewall") {
+				t.Errorf("root_cause_forbidden still has %v", row)
+			}
+		}
+	}
+	cases := []struct {
+		id, text string
+		want     bool
+	}{
+		{"resolution", "Name resolution inside the Connect container maps postgres to an address that routes nowhere, so task 0 of pg-orders-connector times out while Piperoom's own dns and tcp checks reach postgres:5432.", true},
+		{"resolves", "The Connect worker resolves postgres to a dead address, so the JDBC connect times out.", true},
+		{"dns", "Connect's DNS for postgres is wrong: Piperoom reaches postgres:5432 but the worker cannot.", true},
+		{"hosts", "A stale entry in the Connect container's /etc/hosts sends postgres elsewhere.", true},
+		{"hosts file", "The Connect container's hosts file points postgres at the wrong place.", true},
+		// The symptom every run already named: not the cause.
+		{"cannot reach", "pg-orders-connector cannot reach postgres:5432.", false},
+		{"network path", "Root cause: the network path from the Connect container to the Postgres host is broken.", false},
+		{"address", "Connect connects to the wrong address for the database.", false},
+		{"route", "There is no route from Connect to the database.", false},
+		{"timeout", "Task 0 failed with java.net.SocketTimeoutException: connect timed out.", false},
+		// A firewall story names no resolution, so the terms fail it; it is no
+		// longer a forbidden row (from the room it reads like a black hole).
+		{"firewall", "A firewall between the Connect container and postgres drops the packets.", false},
+		// Still forbidden stories.
+		{"database down", "Name resolution is fine; the database is down.", false},
+		{"slot lost", "DNS is fine; the slot was lost in the move.", false},
+	}
+	for _, c := range cases {
+		if got := rootCauseMatches(sc.Expect, c.text); got != c.want {
+			t.Errorf("%s: matches = %v, want %v: %q", c.id, got, c.want, c.text)
+		}
+	}
+	for i, h := range w4cSetupRunHypotheses {
+		if rootCauseMatches(sc.Expect, h) {
+			t.Errorf("run %d's hypothesis (judged wrong) matches the terms: %q", i+1, h)
+		}
+	}
+	// The judge sees the same groups and the observable root cause.
+	p := judgePrompt(sc, "")
+	if !strings.Contains(p, "- resolv* | dns | hosts\n") || strings.Contains(p, "192.0.2.1 | ") {
+		t.Errorf("judge prompt groups:\n%s", p)
+	}
+	if !strings.Contains(sc.Description, "the address 192.0.2.1 is not required") {
+		t.Errorf("description does not say the address is not required: %q", sc.Description)
+	}
+}
+
+// TestW4cSetupDBUnreachableNetProbe pins the net_probe {target: source}
+// recording: Connect's view of the database times out while Piperoom's own
+// dns and tcp checks pass, and no read the room offers shows the bad address
+// (which is why the address group was dropped).
+func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
+	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
+	rp, err := newScenarioReplayer(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := rp.lookup("net_probe", json.RawMessage(`{"target":"source"}`))
+	if !ok {
+		t.Fatal(`net_probe {"target":"source"} is not recorded`)
+	}
+	if rec.Error != "" {
+		t.Fatalf("net_probe recording is an error: %q", rec.Error)
+	}
+	if !strings.HasPrefix(rec.Summary, "net_probe source (postgres:5432): 1 of 4 checks failed\n- connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time") {
+		t.Errorf("summary = %q", rec.Summary)
+	}
+	b, err := json.Marshal(rec.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Target string `json:"target"`
+		Kind   string `json:"kind"`
+		Checks []struct {
+			ID, Addr, Status, Problem, Detail string
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Target != "source" || data.Kind != "source_db" {
+		t.Errorf("target/kind = %q/%q", data.Target, data.Kind)
+	}
+	got := map[string]string{}
+	for _, c := range data.Checks {
+		got[c.ID] = c.Status
+		switch c.ID {
+		case "connect_view":
+			if !strings.Contains(c.Problem, "did not finish validating") {
+				t.Errorf("connect_view problem = %q, want the step timeout", c.Problem)
+			}
+		case "dns":
+			if c.Detail != "172.18.0.2" {
+				t.Errorf("dns detail = %q, want Piperoom's resolution 172.18.0.2", c.Detail)
+			}
+		}
+	}
+	if want := map[string]string{"connect_view": "fail", "dns": "ok", "tcp": "ok", "tls": "skip"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("checks = %v, want %v", got, want)
+	}
+	// Negative: no recording answers with the bad address or the hosts file.
+	for _, r := range sc.Recordings {
+		blob, _ := json.Marshal(r.Data)
+		for _, s := range []string{r.Summary, r.Error, string(blob)} {
+			if strings.Contains(s, "192.0.2.1") || strings.Contains(s, "/etc/hosts") {
+				t.Errorf("%s recording shows the bad address: %q", r.Tool, s)
+			}
+		}
+	}
+	if strings.Contains(sc.Alert.Title, "192.0.2.1") {
+		t.Errorf("alert names the bad address: %q", sc.Alert.Title)
+	}
+}
+
+// TestW4cRecordedMisses replays every call run 39994729845 missed in the two
+// W4c scenarios (results[].misses, exact tool and input): each now resolves to
+// a recording.
+func TestW4cRecordedMisses(t *testing.T) {
+	const validate = `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"database.hostname":"postgres","database.port":"5432","database.dbname":"orders","slot.name":"debezium_orders","table.include.list":"public.orders","topic.prefix":"pg"}}`
+	misses := map[string][][2]string{
+		"setup/db-unreachable-from-connect": {
+			{"net_probe", `{"target":"source"}`},
+			{"connect_validate_config", validate},
+			{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+			{"connect_worker_info", `{}`},
+			{"connect_worker_logs", `{"connector":"pg-orders-connector","limit":40,"since":"2h"}`},
+			{"connect_worker_logs", `{"connector":"pg-orders-connector","limit":50,"since":"2h"}`},
+			{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"2h"}`},
+		},
+		"idle-wal-growth": {
+			{"debezium_metrics", `{"connector":"pg-orders-connector"}`},
+		},
+	}
+	for name, calls := range misses {
+		sc := w4cScenario(t, name)
+		rp, err := newScenarioReplayer(sc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range calls {
+			if _, ok := rp.lookup(c[0], json.RawMessage(c[1])); !ok {
+				t.Errorf("%s: %s %s still misses", name, c[0], c[1])
+			}
+		}
+		// Negative: a connector outside the pipeline is still not answered.
+		if name == "idle-wal-growth" {
+			if _, ok := rp.lookup("debezium_metrics", json.RawMessage(`{"connector":"other"}`)); ok {
+				t.Errorf("%s: debezium_metrics for another connector is answered", name)
+			}
+		}
+	}
+	// The idle-wal-growth metrics show a connected connector whose last event
+	// is the topic's newest record, 38 minutes old.
+	sc := w4cScenario(t, "idle-wal-growth")
+	rp, err := newScenarioReplayer(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := rp.lookup("debezium_metrics", json.RawMessage(`{"connector":"pg-orders-connector"}`))
+	if !strings.Contains(rec.Summary, "streaming connected=true") || !strings.Contains(rec.Summary, "last event 38 min ago") {
+		t.Errorf("debezium_metrics summary = %q", rec.Summary)
+	}
+}
+
+// TestW4cIdleWALGrowthFixTargetAndLayer pins W4c's idle-wal-growth label: the
+// heartbeat fix target names no table (any heartbeat table name the agent
+// picks matches), the root-cause layer admits kafka-connect, and the run's own
+// hypotheses now pass the keyword root-cause layer as before.
+func TestW4cIdleWALGrowthFixTargetAndLayer(t *testing.T) {
+	sc := w4cScenario(t, "idle-wal-growth")
+	target, ok := sc.Expect.FixTargets["source_create_heartbeat_table"]
+	if !ok {
+		t.Fatal("no fix target for source_create_heartbeat_table")
+	}
+	if _, has := target["table"]; has {
+		t.Errorf("fix target still names a table: %v", target)
+	}
+	if !reflect.DeepEqual(sc.Expect.RootCauseLayerAlt, []string{"kafka-connect"}) {
+		t.Errorf("root_cause_layer_alt = %v, want [kafka-connect]", sc.Expect.RootCauseLayerAlt)
+	}
+	if sc.Expect.FirstFailingLayer != "postgres" || sc.Expect.RootCauseLayer != "postgres" {
+		t.Errorf("layers = %s/%s, want postgres/postgres", sc.Expect.FirstFailingLayer, sc.Expect.RootCauseLayer)
+	}
+	steps := []struct {
+		params string
+		want   bool
+	}{
+		// Run 2's proposal, exactly.
+		{`{"connector":"pg-orders-connector","table":"public.debezium_heartbeat"}`, true},
+		{`{"connector":"pg-orders-connector","table":"public.devctl_heartbeat"}`, true},
+		{`{"connector":"pg-orders-connector","table":"public.piperoom_heartbeat"}`, true},
+		// Negative: another connector is still the wrong target.
+		{`{"connector":"other-connector","table":"public.debezium_heartbeat"}`, false},
+	}
+	for _, s := range steps {
+		st := events.ProposalStep{Action: "source_create_heartbeat_table", Params: json.RawMessage(s.params)}
+		if got := stepTargets(sc.Expect.FixTargets, st); got != s.want {
+			t.Errorf("stepTargets(%s) = %v, want %v", s.params, got, s.want)
+		}
+	}
+	if p := judgePrompt(sc, ""); !strings.Contains(p, "Root-cause layer: postgres, or alternatively kafka-connect (") {
+		t.Errorf("judge prompt lacks the alternative layer:\n%s", p)
+	}
+	// The keyword pass marks these hypotheses ambiguous ("No component is
+	// broken"), so the judge grades them, with the alternative in its prompt;
+	// the deterministic halves agree.
+	for i, h := range w4cIdleRunHypotheses {
+		if !rootCauseMatches(sc.Expect, h) || !keywordRootCauseLayer(sc, h) {
+			t.Errorf("run %d: root cause %v, root-cause layer %v, want true/true: %q", i+1, rootCauseMatches(sc.Expect, h), keywordRootCauseLayer(sc, h), h)
+		}
+		if g := GradeKeywords(sc, h); g.RootCauseLayer == GradeFail {
+			t.Errorf("run %d: keyword root-cause layer fails: %q", i+1, h)
+		}
+	}
+	// Negative: a cause placed in neither layer still fails the root-cause layer.
+	if keywordRootCauseLayer(sc, "The cause is the order-sync consumer, which never commits its offsets.") {
+		t.Errorf("a consumer-only cause passes the root-cause layer")
+	}
+}
+
+// TestW4cIdleWALGrowthActionsOnReplay replays the three steps every run of
+// 39994729845 tried (action_attempts, exact params). With resources.tables and
+// resources.publications declared, pg_add_publication_table is refused by the
+// action itself (the heartbeat table does not exist yet and is not a source
+// table), no longer by the harness; the heartbeat step still validates.
+func TestW4cIdleWALGrowthActionsOnReplay(t *testing.T) {
+	sc := w4cScenario(t, "idle-wal-growth")
+	reg, err := LiveActions(sc.Resources, sc.Recordings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := tools.WithPipeline(context.Background(), sc.Pipeline)
+	validate := func(action, params string) error {
+		t.Helper()
+		a, ok := reg.Get(action)
+		if !ok {
+			t.Fatalf("no action %s", action)
+		}
+		return a.Validate(ctx, json.RawMessage(params))
+	}
+	if err := validate("source_create_heartbeat_table", `{"connector":"pg-orders-connector","table":"public.debezium_heartbeat"}`); err != nil {
+		t.Errorf("heartbeat step: %v", err)
+	}
+	const addPub = `{"connector":"pg-orders-connector","publication":"dbz_publication","table":"public.debezium_heartbeat"}`
+	err = validate("pg_add_publication_table", addPub)
+	if err == nil || strings.Contains(err.Error(), "not available in replay") || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("pg_add_publication_table Validate = %v, want the action's own refusal (table does not exist)", err)
+	}
+	a, _ := reg.Get("pg_add_publication_table")
+	scoped, ok := a.(actions.Scoped)
+	if !ok {
+		t.Fatal("pg_add_publication_table is not Scoped")
+	}
+	if err := scoped.CheckScope(sc.Pipeline, json.RawMessage(addPub)); err == nil || !strings.Contains(err.Error(), "is not one of pipeline") {
+		t.Errorf("CheckScope = %v, want the source_tables refusal", err)
+	}
+	// The declared state answers like the stack: public.orders is already in
+	// dbz_publication.
+	if err := validate("pg_add_publication_table", `{"connector":"pg-orders-connector","publication":"dbz_publication","table":"public.orders"}`); err == nil || !strings.Contains(err.Error(), "already in publication") {
+		t.Errorf("pg_add_publication_table public.orders = %v, want already published", err)
 	}
 }
