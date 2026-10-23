@@ -79,7 +79,7 @@ func SystemctlArgv(verb, operand string) ([]string, error) {
 			return nil, fmt.Errorf("%w: unit %s is not a piperoom unit name", ErrParams, q(operand))
 		}
 	case "path":
-		if err := CheckUnitPath(operand); err != nil {
+		if err := CheckTemplatePath(operand); err != nil {
 			return nil, err
 		}
 		if !fullUnitRE.MatchString(path.Base(operand)) || path.Base(path.Dir(operand)) != UnitDir {
@@ -228,7 +228,7 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 			ErrDetect, s.Unit, q(st["FragmentPath"]), q(s.UnitPath))
 	}
 	existed := requireFile(env, s.UnitFile, false) == nil
-	clean, changed, err := writeConfined(env, s.UnitFile, text, 0o644, true)
+	clean, changed, err := writeDriverFile(env, s.UnitFile, text, 0o644, UnitDir)
 	if err != nil {
 		return ops.Result{}, err
 	}

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 
@@ -21,12 +22,11 @@ import (
 // rule (ops.Confiner: the lexical check and the Lstat walk refusing any
 // symlink or reparse point) and an os.Root, atomically: an O_EXCL temporary
 // file renamed over the target, so a planted file or hard link is replaced,
-// never written through. It reports whether the bytes changed. unitFile is
-// set only for the unit file, the one file this driver writes inside a
-// directory it registered as a mount; every other write refuses mounted
-// paths the way file_write does, and every write refuses a materialised
-// secret file.
-func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unitFile bool) (string, bool, error) {
+// never written through. It reports whether the bytes changed. A path under a
+// registered mount directory is refused, the way file_write refuses it: what a
+// template executes or loads is written by writeDriverFile only. Every write
+// refuses a materialised secret file.
+func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode) (string, bool, error) {
 	if env.Confine == nil {
 		return "", false, errors.New("host: the project root is not open")
 	}
@@ -34,12 +34,35 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unit
 	if err != nil {
 		return "", false, err
 	}
-	switch {
-	case unitFile && path.Dir(clean) != UnitDir:
-		return "", false, fmt.Errorf("%w: %s is not in %s/", ErrPath, q(name), UnitDir)
-	case !unitFile && ops.MountedPath(clean, env.MountDirs):
+	if ops.MountedPath(clean, env.MountDirs) {
 		return "", false, fmt.Errorf("%w: %s is under a directory the worker executes or loads from", ops.ErrExecutedName, q(name))
 	}
+	return writeRooted(env, clean, data, mode)
+}
+
+// writeDriverFile is writeConfined for the one file kind the driver itself
+// renders into a directory it registered as a mount: the systemd unit (UnitDir)
+// and, on Windows, the copy of piperoom-setup.exe the service control manager
+// runs (BinDir) and its recorded definition (ServiceDir). dir is the one
+// directory that kind may go in, so a driver write never lands anywhere else
+// under a mount.
+func writeDriverFile(env ops.Env, name string, data []byte, mode fs.FileMode, dir string) (string, bool, error) {
+	if env.Confine == nil {
+		return "", false, errors.New("host: the project root is not open")
+	}
+	clean, err := env.Confine.Check(name)
+	if err != nil {
+		return "", false, err
+	}
+	if path.Dir(clean) != dir {
+		return "", false, fmt.Errorf("%w: %s is not in %s/", ErrPath, q(name), dir)
+	}
+	return writeRooted(env, clean, data, mode)
+}
+
+// writeRooted is the shared write: the materialised-secret refusal, then an
+// atomic replace through one os.Root rooted at the project directory.
+func writeRooted(env ops.Env, clean string, data []byte, mode fs.FileMode) (string, bool, error) {
 	// The refusal file_write applies to a file the runner materialised from
 	// the secret store: no driver write replaces one either.
 	if err := ops.MaterialisedRefusal(clean, env); err != nil {
@@ -52,13 +75,17 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unit
 	defer root.Close()
 	if fi, lerr := root.Lstat(clean); lerr == nil {
 		if !fi.Mode().IsRegular() {
-			return "", false, fmt.Errorf("%w: %s exists and is not a regular file", ops.ErrNotRegular, q(name))
+			return "", false, fmt.Errorf("%w: %s exists and is not a regular file", ops.ErrNotRegular, q(clean))
 		}
-		if old, rerr := root.ReadFile(clean); rerr == nil && bytes.Equal(old, data) && fi.Mode().Perm() == mode.Perm() {
+		// Windows does not model the POSIX permission bits (os.Chmod there
+		// only toggles the read-only attribute and Stat reports 0666), so the
+		// mode takes part in "unchanged" only where it is a mode.
+		sameMode := runtime.GOOS == "windows" || fi.Mode().Perm() == mode.Perm()
+		if old, rerr := root.ReadFile(clean); rerr == nil && bytes.Equal(old, data) && sameMode {
 			return clean, false, nil
 		}
 	} else if !errors.Is(lerr, fs.ErrNotExist) {
-		return "", false, fmt.Errorf("host: stat %s: %w", q(name), lerr)
+		return "", false, fmt.Errorf("host: stat %s: %w", q(clean), lerr)
 	}
 	if dir := path.Dir(clean); dir != "." {
 		if err := root.MkdirAll(dir, 0o755); err != nil {
@@ -72,7 +99,7 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unit
 	tmp := path.Join(path.Dir(clean), "."+path.Base(clean)+".piperoom-tmp-"+hex.EncodeToString(rnd[:]))
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
-		return "", false, fmt.Errorf("host: creating a temp file for %s: %w", q(name), err)
+		return "", false, fmt.Errorf("host: creating a temp file for %s: %w", q(clean), err)
 	}
 	_, werr := f.Write(data)
 	if werr == nil {
@@ -89,7 +116,7 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unit
 	}
 	if werr != nil {
 		_ = root.Remove(tmp)
-		return "", false, fmt.Errorf("host: writing %s: %w", q(name), werr)
+		return "", false, fmt.Errorf("host: writing %s: %w", q(clean), werr)
 	}
 	return clean, true, nil
 }

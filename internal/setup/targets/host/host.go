@@ -2,35 +2,44 @@
 // docs/design/setup-agent.md §2.5 and §5): a Kafka Connect worker that runs
 // from a Kafka distribution under the project directory as a service of the
 // host's service manager. On Linux that is a user-level systemd unit
-// (`systemctl --user`); the Windows service of row U8b slots in behind the
-// same ops as another serviceManager.
+// (`systemctl --user`); on Windows it is a service of the service control
+// manager (row U8b, file: winsvc.go), which cannot start java.exe directly:
+// the installed service is a copy of piperoom-setup itself running its
+// run-service subcommand, and it supervises the Connect JVM (file:
+// servicehost.go).
 //
 // Ops: service_status and properties_read (T0); properties_write (T1, the
 // project directory only); service_install and service_restart (T2).
 // journal_tail (T0, row U5a) is not in this package yet.
 //
-// The S1 rule of §2.5 for the unit: service_install takes a service name and
-// a worker mode, nothing else. ExecStart, WorkingDirectory and Environment
-// come from the one unit template (RenderUnit) and from what the driver
-// detects: the project directory, the distribution at kafka/ under it, the
-// worker properties file the mode names, and the JDK the java on PATH
-// resolves to. The template has no User= line (a user unit runs as the
-// runner's own user) and no op param reaches the unit text; a detected path
-// with anything outside a small safe set (a space, %, $, a quote, a backslash,
-// a control character) is refused, never escaped.
+// The S1 rule of §2.5 for the service: service_install takes a service name and
+// a worker mode, nothing else. ExecStart, WorkingDirectory and Environment (the
+// systemd unit) and the exe, its arguments and the JVM argv (the Windows
+// service) come from the driver's templates and from what it detects: the
+// project directory, the distribution at kafka/ under it, the worker properties
+// file the mode names, and the JDK the java on PATH resolves to. No op param
+// reaches the rendered text; a detected path with anything outside a small safe
+// set (a space, %, $, a quote, a backslash, a control character) is refused,
+// never escaped.
 //
-// Why user scope only: a system unit file must be root-owned and outside every
-// user-writable directory, or its owner can edit it into a root service. The
-// confinement rule (§2.3) puts every file the runner writes under the project
-// directory, so a system unit linked from there would be exactly that hole. A
-// system-scope install needs a design ruling (a root-owned unit directory
-// outside the project) and is not in this row.
+// Why user scope only on Linux: a system unit file must be root-owned and
+// outside every user-writable directory, or its owner can edit it into a root
+// service. The confinement rule (§2.3) puts every file the runner writes under
+// the project directory, so a system unit linked from there would be exactly
+// that hole. A system-scope install needs a design ruling (a root-owned unit
+// directory outside the project) and is not in this row. A Windows service
+// always installs into the machine's service database and therefore needs an
+// elevated prompt; CreateService's default account is LocalSystem, and the
+// definition service_install previews says so (row U8e documents the account
+// question).
 //
 // The unit file is written to systemd/<unit> under the project directory and
 // linked into the user's unit search path by `systemctl --user enable
-// <absolute path>`. The distribution, the plugin directory and the unit
-// directory are registered as mount directories, so file_write and
-// file_delete can never change what the unit executes or loads.
+// <absolute path>`. On Windows the project holds bin/piperoom-setup.exe (the
+// copy the SCM runs) and services/<name>.txt (the definition install
+// recorded). The distribution, the plugin directory and the unit, bin and
+// services directories are registered as mount directories, so file_write and
+// file_delete can never change what the service executes or loads.
 //
 // Wiring (one line outside this package, after ops.New(cfg), in place of
 // compose.Register for a room whose SetupRequest.Target is "host"):
@@ -45,6 +54,7 @@ package host
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -75,6 +85,18 @@ const (
 	// DefaultService is the service name when the params name none.
 	DefaultService = "connect"
 
+	// BinDir holds the copy of piperoom-setup.exe the Windows service
+	// control manager runs (row U8b).
+	BinDir = "bin"
+	// ServiceDir holds the Windows service definitions service_install
+	// records (the unit file's counterpart).
+	ServiceDir = "services"
+	// RunnerExe is that copy's fixed name.
+	RunnerExe = "piperoom-setup.exe"
+	// RunServiceSubcommand is the subcommand the installed service runs
+	// (cmd/setup dispatches it, file: servicehost.go).
+	RunServiceSubcommand = "run-service"
+
 	hostTarget = "host"
 	hostLayer  = "environment"
 )
@@ -99,8 +121,14 @@ var (
 	// ErrDetect: a path the unit needs (the distribution, the worker file,
 	// the JDK, the project directory) is missing or not safe to put in it.
 	ErrDetect = errors.New("host: detection failed")
-	// ErrUnsupported: the service ops have no manager on this OS yet.
+	// ErrUnsupported: this build has no service manager for the target's OS
+	// (the Windows binding is behind a build tag; a test that forces
+	// Options.GOOS="windows" elsewhere reaches this).
 	ErrUnsupported = errors.New("host: service ops are not supported on this OS")
+	// ErrServiceManager: a service control manager call failed or was refused
+	// (no elevated prompt, the service already exists, it is marked for
+	// deletion). The underlying error is wrapped too.
+	ErrServiceManager = errors.New("host: service manager refused")
 )
 
 // Options configures a Driver.
@@ -128,7 +156,7 @@ type Driver struct {
 	resolve func(string) (string, error)
 }
 
-// Register adds the host ops to r and registers the directories the unit
+// Register adds the host ops to r and registers the directories the service
 // executes or loads from as mount directories, so the generic file ops refuse
 // them from the start.
 func Register(r *ops.Registry, opts Options) (*Driver, error) {
@@ -147,8 +175,11 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	if d.resolve == nil {
 		d.resolve = filepath.EvalSymlinks
 	}
-	if d.goos == "linux" {
+	switch d.goos {
+	case "linux":
 		d.mgr = systemdUser{resolve: d.resolve}
+	case "windows":
+		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable)
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},
@@ -158,7 +189,13 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 			return nil, fmt.Errorf("host: registering %s: %w", op.Name(), err)
 		}
 	}
-	for _, dir := range []string{DistDir, PluginDir, UnitDir} {
+	dirs := []string{DistDir, PluginDir, UnitDir}
+	if d.goos == "windows" {
+		// The SCM runs bin/piperoom-setup.exe and install records
+		// services/<name>.txt: neither may become file_write's target.
+		dirs = []string{DistDir, PluginDir, BinDir, ServiceDir}
+	}
+	for _, dir := range dirs {
 		if err := r.RegisterMountDir(dir); err != nil {
 			return nil, fmt.Errorf("host: registering %s as a mount directory: %w", dir, err)
 		}
@@ -177,7 +214,7 @@ func (d *Driver) classOrDefault() string {
 // manager returns the platform's service manager or ErrUnsupported.
 func (d *Driver) manager() (serviceManager, error) {
 	if d.mgr == nil {
-		return nil, fmt.Errorf("%w (%s; the Windows service is row U8b)", ErrUnsupported, d.goos)
+		return nil, fmt.Errorf("%w (%s: this target has a systemd unit on Linux and a service control manager service on Windows)", ErrUnsupported, d.goos)
 	}
 	return d.mgr, nil
 }

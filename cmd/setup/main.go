@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"piperoom/internal/setup/setupcmd"
+	"piperoom/internal/setup/targets/host"
 )
 
 func main() {
@@ -20,5 +21,10 @@ func main() {
 }
 
 func runWith(args []string, stdout io.Writer) error {
+	// The Windows service (row U8b) is this binary running its own
+	// subcommand: the service control manager starts it, not a person.
+	if handled, err := host.RunServiceCommand(args, os.Stderr); handled {
+		return err
+	}
 	return setupcmd.Run(args, stdout, os.Stderr)
 }

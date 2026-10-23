@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"text/template"
 
@@ -73,8 +74,11 @@ var (
 	envNameRE     = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
 )
 
-// CheckUnitPath refuses a path a unit cannot carry verbatim: it must be
-// absolute, clean and made only of safe characters.
+// CheckUnitPath refuses a path a systemd unit's own operand cannot carry
+// verbatim: POSIX, absolute, clean and made only of safe characters. Unit file
+// paths are POSIX on every Linux host; CheckTemplatePath is the rule for a
+// value inside a rendered unit or service definition, which may also be a
+// Windows path (row U8b).
 func CheckUnitPath(p string) error {
 	switch {
 	case !safeToken.MatchString(p):
@@ -90,22 +94,22 @@ func RenderUnit(u Unit) ([]byte, error) {
 	if !descriptionRE.MatchString(u.Description) {
 		return nil, fmt.Errorf("%w: description %s", ErrParams, q(u.Description))
 	}
-	if err := CheckUnitPath(u.WorkingDirectory); err != nil {
+	if err := CheckTemplatePath(u.WorkingDirectory); err != nil {
 		return nil, fmt.Errorf("WorkingDirectory: %w", err)
 	}
 	for _, e := range u.Environment {
-		if !envNameRE.MatchString(e.Name) || !safeToken.MatchString(e.Value) {
+		if !envNameRE.MatchString(e.Name) || CheckTemplateToken(e.Value) != nil {
 			return nil, fmt.Errorf("%w: Environment %s=%s", ErrDetect, q(e.Name), q(e.Value))
 		}
 	}
 	if len(u.ExecStart) == 0 {
 		return nil, fmt.Errorf("%w: ExecStart is empty", ErrParams)
 	}
-	if err := CheckUnitPath(u.ExecStart[0]); err != nil {
+	if err := CheckTemplatePath(u.ExecStart[0]); err != nil {
 		return nil, fmt.Errorf("ExecStart program: %w", err)
 	}
 	for _, a := range u.ExecStart[1:] {
-		if !safeToken.MatchString(a) {
+		if err := CheckTemplateToken(a); err != nil {
 			return nil, fmt.Errorf("%w: ExecStart argument %s", ErrDetect, q(a))
 		}
 	}
@@ -118,26 +122,17 @@ func RenderUnit(u Unit) ([]byte, error) {
 
 // ServiceParams are service_install's typed params: a name and a mode.
 type ServiceParams struct {
-	// Name becomes the unit piperoom-<name>.service; default "connect".
+	// Name becomes the unit piperoom-<name>.service (Linux) or the service
+	// piperoom-<name> (Windows); default "connect".
 	Name string `json:"name,omitempty"`
 	// Mode is "distributed" (default) or "standalone".
 	Mode string `json:"mode,omitempty"`
 }
 
-// serviceNameRE is a unit name segment: no dot (no other unit type), no @
-// (no template instance), no leading dash (no flag), at most 40 bytes.
+// serviceNameRE is a unit or service name segment: no dot (no other unit
+// type), no @ (no template instance), no leading dash (no flag), at most 40
+// bytes.
 var serviceNameRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$`)
-
-// unitName returns piperoom-<name>.service for a valid name.
-func unitName(name string) (string, error) {
-	if name == "" {
-		name = DefaultService
-	}
-	if !serviceNameRE.MatchString(name) {
-		return "", fmt.Errorf("%w: service name %s must match %s", ErrParams, q(name), serviceNameRE)
-	}
-	return UnitPrefix + name + ".service", nil
-}
 
 // modeFiles maps a mode to its script under DistDir/bin and its worker file
 // at the project root.
@@ -147,46 +142,96 @@ var modeFiles = map[string][2]string{
 }
 
 // normalize checks the params without I/O and fills the defaults.
-func (p ServiceParams) normalize() (ServiceParams, string, error) {
-	unit, err := unitName(p.Name)
-	if err != nil {
-		return p, "", err
-	}
+func (p ServiceParams) normalize() (ServiceParams, error) {
 	if p.Name == "" {
 		p.Name = DefaultService
+	}
+	if err := checkServiceName(p.Name); err != nil {
+		return p, err
 	}
 	if p.Mode == "" {
 		p.Mode = ModeDistributed
 	}
 	if _, ok := modeFiles[p.Mode]; !ok {
-		return p, "", fmt.Errorf("%w: mode %s is not distributed or standalone", ErrParams, q(p.Mode))
+		return p, fmt.Errorf("%w: mode %s is not distributed or standalone", ErrParams, q(p.Mode))
 	}
-	return p, unit, nil
+	return p, nil
+}
+
+// checkServiceName refuses a name that is not a unit or service name segment.
+func checkServiceName(name string) error {
+	if !serviceNameRE.MatchString(name) {
+		return fmt.Errorf("%w: service name %s must match %s", ErrParams, q(name), serviceNameRE)
+	}
+	return nil
+}
+
+// serviceName returns the name the platform's service manager knows:
+// piperoom-<name>.service on Linux (a systemd unit) and piperoom-<name> on
+// Windows (a service control manager service, where a ".service" suffix would
+// name nothing).
+func (d *Driver) serviceName(name string) (string, error) {
+	if name == "" {
+		name = DefaultService
+	}
+	if err := checkServiceName(name); err != nil {
+		return "", err
+	}
+	return UnitPrefix + name + d.serviceSuffix(), nil
+}
+
+// serviceSuffix is the platform's name separator: ".service" for a systemd
+// unit, "" for a Windows service.
+func (d *Driver) serviceSuffix() string {
+	if d.goos == "windows" {
+		return ""
+	}
+	return ".service"
 }
 
 // serviceSpec is a service fully resolved from params and detection.
 type serviceSpec struct {
-	Unit     string // piperoom-<name>.service
+	Unit     string // piperoom-<name>.service on Linux, piperoom-<name> on Windows
 	Mode     string
-	UnitFile string // project-relative: systemd/<unit>
+	UnitFile string // project-relative record: systemd/<unit> or services/<unit>.txt
 	UnitPath string // absolute
-	Script   string // project-relative
+	Script   string // project-relative (Linux: the distribution's start script)
 	Worker   string // project-relative
-	Rendered Unit
+	Rendered Unit   // Linux: the rendered unit
+	// Windows (row U8b): the service control manager runs this exe with Args,
+	// and the exe runs the JVM in Java. None of them comes from an op param.
+	ProjectDir string
+	ExePath    string   // <project>\bin\piperoom-setup.exe
+	Args       []string // run-service --project ... --name ... --mode ... --java ...
+	Java       []string // the JVM argv the service host starts
+	LogFile    string   // <project>\logs\piperoom-service.log
 }
 
-// spec resolves params into a unit. Paths come from the project layout and
-// detection only; the params pick a name and one of two fixed modes.
+// spec resolves params into a service definition. Paths come from the project
+// layout and detection only; the params pick a name and one of two fixed modes.
 func (d *Driver) spec(p ServiceParams, env ops.Env) (serviceSpec, error) {
-	p, unit, err := p.normalize()
+	p, err := p.normalize()
+	if err != nil {
+		return serviceSpec{}, err
+	}
+	unit, err := d.serviceName(p.Name)
 	if err != nil {
 		return serviceSpec{}, err
 	}
 	if env.Confine == nil {
 		return serviceSpec{}, errors.New("host: the project root is not open")
 	}
+	if d.goos == "windows" {
+		return d.specWindows(p, unit, env)
+	}
+	return d.specUnix(p, unit, env)
+}
+
+// specUnix is the systemd definition: one .sh from the distribution, the worker
+// file beside it, the JDK java_version reported.
+func (d *Driver) specUnix(p ServiceParams, unit string, env ops.Env) (serviceSpec, error) {
 	dir := env.Confine.Dir()
-	if err := CheckUnitPath(dir); err != nil {
+	if err := CheckTemplatePath(dir); err != nil {
 		return serviceSpec{}, fmt.Errorf("project directory: %w", err)
 	}
 	files := modeFiles[p.Mode]
@@ -218,9 +263,77 @@ func (d *Driver) spec(p ServiceParams, env ops.Env) (serviceSpec, error) {
 	return s, nil
 }
 
+// specWindows is the service definition of row U8b. The service control manager
+// cannot run java.exe (it never answers the SCM's status handshake), so the
+// installed service is piperoom-setup itself: the copy at bin/ under the
+// project, started with the run-service subcommand and the project directory.
+// The exe then starts the Connect JVM with the argv javaArgv builds, so the
+// worker runs as a child of a process that does speak to the SCM.
+func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (serviceSpec, error) {
+	dir := env.Confine.Dir()
+	if err := CheckTemplatePath(dir); err != nil {
+		return serviceSpec{}, fmt.Errorf("project directory: %w", err)
+	}
+	files := modeFiles[p.Mode]
+	// The distribution's libs/ is the classpath; there is no .bat to run (the
+	// service starts java itself, and cmd.exe would be a shell).
+	if err := requireDir(env, DistDir+"/libs"); err != nil {
+		return serviceSpec{}, fmt.Errorf("%w (a Kafka distribution extracted at %s/ under the project directory)", err, DistDir)
+	}
+	if err := requireFile(env, files[1], false); err != nil {
+		return serviceSpec{}, fmt.Errorf("%w (properties_write writes it)", err)
+	}
+	javaHome, err := d.javaHome(env)
+	if err != nil {
+		return serviceSpec{}, err
+	}
+	java, err := javaArgv(dir, javaHome, p.Mode)
+	if err != nil {
+		return serviceSpec{}, err
+	}
+	exe := nativeJoin(dir, BinDir, RunnerExe)
+	args := []string{
+		RunServiceSubcommand, "--project", dir,
+		"--name", p.Name, "--mode", p.Mode, "--java", javaHome,
+	}
+	for _, v := range append([]string{exe}, args...) {
+		if err := CheckTemplateToken(v); err != nil {
+			return serviceSpec{}, err
+		}
+	}
+	return serviceSpec{
+		Unit: unit, Mode: p.Mode, Worker: files[1],
+		UnitFile:   ServiceDir + "/" + unit + ".txt",
+		UnitPath:   nativeJoin(dir, ServiceDir, unit+".txt"),
+		ProjectDir: dir, ExePath: exe, Args: args, Java: java,
+		LogFile: nativeJoin(dir, LogDir, ServiceLogName),
+	}, nil
+}
+
+// nativeJoin joins template path elements with the separator of the first
+// element's shape: "\" for a drive-absolute Windows path, "/" otherwise. It
+// does not call filepath.Join because the shape must be the caller's: a test
+// that builds the Windows definition from a POSIX temporary directory (or the
+// Linux one from a Windows directory) would get "\srv\p" from filepath on a
+// Windows build, which is a rooted path rather than the POSIX one named.
+func nativeJoin(elem ...string) string {
+	sep := pathSeparator(elem[0])
+	out := strings.TrimRight(elem[0], `/\`)
+	for _, e := range elem[1:] {
+		out += sep + strings.Trim(e, `/\`)
+	}
+	if out == "" {
+		return sep
+	}
+	return out
+}
+
 // requireFile checks a project file through the §2.3 rule (no symlink or
 // reparse point on the way) and requires a regular file, executable by its
-// owner when exec is set.
+// owner when exec is set. The exec bit is not modelled on Windows (os.Chmod
+// there only toggles the read-only attribute, and Stat reports 0666), so the
+// check runs where a POSIX file system provides the bit; the Linux unit is
+// exercised on the Linux leg.
 func requireFile(env ops.Env, name string, exec bool) error {
 	if env.Confine == nil {
 		return errors.New("host: the project root is not open")
@@ -242,15 +355,43 @@ func requireFile(env ops.Env, name string, exec bool) error {
 		return fmt.Errorf("host: stat %s: %w", q(name), err)
 	case !fi.Mode().IsRegular():
 		return fmt.Errorf("%w: %s is not a regular file", ErrDetect, q(name))
-	case exec && fi.Mode().Perm()&0o100 == 0:
+	case exec && runtime.GOOS != "windows" && fi.Mode().Perm()&0o100 == 0:
 		return fmt.Errorf("%w: %s is not executable", ErrDetect, q(name))
 	}
 	return nil
 }
 
+// requireDir checks a project directory through the §2.3 rule: the Windows
+// service's classpath is kafka/libs, and a missing libs/ must read as a missing
+// distribution rather than as a JVM that fails a minute later.
+func requireDir(env ops.Env, name string) error {
+	if env.Confine == nil {
+		return errors.New("host: the project root is not open")
+	}
+	clean, err := env.Confine.Check(name)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(env.Confine.Dir())
+	if err != nil {
+		return fmt.Errorf("host: opening the project root: %w", err)
+	}
+	defer root.Close()
+	fi, err := root.Lstat(clean)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: %s/ does not exist", ErrDetect, q(name))
+	case err != nil:
+		return fmt.Errorf("host: stat %s: %w", q(name), err)
+	case !fi.IsDir():
+		return fmt.Errorf("%w: %s is not a directory", ErrDetect, q(name))
+	}
+	return nil
+}
+
 // javaHome is the JDK the java on PATH resolves to: <home>/bin/java with the
-// symlinks resolved, so the unit pins the java the runner detected rather
-// than whatever PATH holds when systemd starts it.
+// symlinks resolved, so the unit or service pins the java the runner detected
+// rather than whatever PATH holds when the service manager starts it.
 func (d *Driver) javaHome(env ops.Env) (string, error) {
 	if env.LookPath == nil {
 		return "", fmt.Errorf("%w: no PATH lookup configured", ErrDetect)
@@ -263,17 +404,43 @@ func (d *Driver) javaHome(env ops.Env) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: resolving %s: %v", ErrDetect, q(found), err)
 	}
-	if filepath.Base(resolved) != "java" || filepath.Base(filepath.Dir(resolved)) != "bin" {
-		return "", fmt.Errorf("%w: java on PATH resolves to %s, which is not <JDK>/bin/java (a wrapper or shim?)", ErrDetect, q(resolved))
+	home, err := javaHomeOf(resolved)
+	if err != nil {
+		return "", err
 	}
-	home := filepath.Dir(filepath.Dir(resolved))
-	if err := CheckUnitPath(home); err != nil {
+	if err := CheckTemplatePath(home); err != nil {
 		return "", fmt.Errorf("JAVA_HOME: %w", err)
 	}
 	if err := javaHomeConfined(env, home); err != nil {
 		return "", err
 	}
 	return home, nil
+}
+
+// javaHomeOf returns the JDK home of <home>/bin/java(.exe). It walks the
+// separators itself rather than filepath.Dir: on a Windows build filepath.Dir
+// turns the POSIX path a test names ("/opt/jdk/bin/java") into "\opt\jdk\bin",
+// a rooted drive-relative path, and this package's tests exercise the Linux
+// unit on the Windows leg too.
+func javaHomeOf(resolved string) (string, error) {
+	notABinJava := func() error {
+		return fmt.Errorf("%w: java on PATH resolves to %s, which is not <JDK>/bin/java (a wrapper or shim?)", ErrDetect, q(resolved))
+	}
+	i := strings.LastIndexAny(resolved, `/\`)
+	if i < 0 || i == len(resolved)-1 {
+		return "", notABinJava()
+	}
+	switch resolved[i+1:] {
+	case "java", "java.exe":
+	default:
+		return "", notABinJava()
+	}
+	binDir := resolved[:i]
+	j := strings.LastIndexAny(binDir, `/\`)
+	if j < 0 || binDir[j+1:] != "bin" || j == 0 {
+		return "", notABinJava()
+	}
+	return binDir[:j], nil
 }
 
 // javaHomeConfined refuses a JDK inside the project directory unless it is

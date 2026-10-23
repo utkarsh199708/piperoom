@@ -48,7 +48,10 @@ func (serviceStatusOp) Name() string   { return "service_status" }
 func (serviceStatusOp) Target() string { return hostTarget }
 func (serviceStatusOp) Tier() string   { return protocol.TierT0 }
 func (serviceStatusOp) Layer() string  { return hostLayer }
-func (serviceStatusOp) Describe() string {
+func (o serviceStatusOp) Describe() string {
+	if o.d.goos == "windows" {
+		return "report the state of a piperoom service on this host (the service control manager's query)"
+	}
 	return "report the state of a piperoom service on this host (systemctl --user show)"
 }
 
@@ -78,7 +81,10 @@ func (serviceRestartOp) Name() string   { return "service_restart" }
 func (serviceRestartOp) Target() string { return hostTarget }
 func (serviceRestartOp) Tier() string   { return protocol.TierT2 }
 func (serviceRestartOp) Layer() string  { return hostLayer }
-func (serviceRestartOp) Describe() string {
+func (o serviceRestartOp) Describe() string {
+	if o.d.goos == "windows" {
+		return "start or restart a piperoom service this project installed (service control manager stop and start)"
+	}
 	return "start or restart a piperoom service this project installed (systemctl --user restart)"
 }
 
@@ -97,13 +103,13 @@ func (o serviceRestartOp) Execute(ctx context.Context, params json.RawMessage, e
 	return mgr.restart(ctx, env, unit)
 }
 
-// decodeUnit decodes UnitParams and returns the unit name and the manager.
+// decodeUnit decodes UnitParams and returns the service name and the manager.
 func (d *Driver) decodeUnit(params json.RawMessage) (string, serviceManager, error) {
 	var p UnitParams
 	if err := decodeStrict(params, &p); err != nil {
 		return "", nil, err
 	}
-	unit, err := unitName(p.Name)
+	unit, err := d.serviceName(p.Name)
 	if err != nil {
 		return "", nil, err
 	}
@@ -136,7 +142,7 @@ func (o serviceInstallOp) Validate(params json.RawMessage, _ ops.Env) error {
 	if err := decodeStrict(params, &p); err != nil {
 		return err
 	}
-	if _, _, err := p.normalize(); err != nil {
+	if _, err := p.normalize(); err != nil {
 		return err
 	}
 	_, err := o.d.manager()
@@ -215,7 +221,7 @@ func (o propertiesWriteOp) Execute(ctx context.Context, params json.RawMessage, 
 	// Every plugin.path entry is PluginDir or under it, a mount since
 	// Register, so the worker never loads from a directory file_write fills.
 	text := wp.render()
-	clean, changed, err := writeConfined(env, file, text, 0o600, false)
+	clean, changed, err := writeConfined(env, file, text, 0o600)
 	if err != nil {
 		return ops.Result{}, err
 	}

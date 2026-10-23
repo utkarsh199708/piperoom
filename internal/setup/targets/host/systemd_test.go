@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -199,33 +200,41 @@ func TestServiceInstallRefusals(t *testing.T) {
 		params  any
 		setup   func(f *fixture)
 		wantErr error
+		// windowsSkip marks a case a Windows file system cannot express: it
+		// reports 0666 for a writable file, so os.Chmod(0644) cannot make a
+		// script non-executable there (requireFile's exec check is a POSIX
+		// assertion).
+		windowsSkip bool
 	}{
-		{"unknown field exec_start", map[string]string{"exec_start": "/bin/sh -c id"}, nil, ErrParams},
-		{"unknown field user", map[string]string{"user": "root"}, nil, ErrParams},
-		{"unknown field environment", map[string]string{"environment": "LD_PRELOAD=/x.so"}, nil, ErrParams},
-		{"bad mode", ServiceParams{Mode: "cluster"}, nil, ErrParams},
+		{"unknown field exec_start", map[string]string{"exec_start": "/bin/sh -c id"}, nil, ErrParams, false},
+		{"unknown field user", map[string]string{"user": "root"}, nil, ErrParams, false},
+		{"unknown field environment", map[string]string{"environment": "LD_PRELOAD=/x.so"}, nil, ErrParams, false},
+		{"bad mode", ServiceParams{Mode: "cluster"}, nil, ErrParams, false},
 		{"distribution missing", ServiceParams{}, func(f *fixture) {
 			f.write("connect-distributed.properties", "x=y\n", 0o600)
-		}, ErrDetect},
+		}, ErrDetect, false},
 		{"script not executable", ServiceParams{}, func(f *fixture) {
 			f.distribution()
 			f.write("kafka/bin/connect-distributed.sh", "#!/bin/sh\n", 0o644)
-		}, ErrDetect},
+		}, ErrDetect, true},
 		{"worker file missing", ServiceParams{Mode: ModeStandalone}, func(f *fixture) {
 			f.write("kafka/bin/connect-standalone.sh", "#!/bin/sh\n", 0o755)
-		}, ErrDetect},
-		{"java missing", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "" }, ErrDetect},
-		{"java is a shim", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/home/u/.asdf/shims/java" }, ErrDetect},
-		{"JAVA_HOME with a space", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/my jdk/bin/java" }, ErrDetect},
-		{"JAVA_HOME with a specifier", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/%h/bin/java" }, ErrDetect},
-		{"JAVA_HOME with a variable", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/$HOME/bin/java" }, ErrDetect},
+		}, ErrDetect, false},
+		{"java missing", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "" }, ErrDetect, false},
+		{"java is a shim", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/home/u/.asdf/shims/java" }, ErrDetect, false},
+		{"JAVA_HOME with a space", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/my jdk/bin/java" }, ErrDetect, false},
+		{"JAVA_HOME with a specifier", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/%h/bin/java" }, ErrDetect, false},
+		{"JAVA_HOME with a variable", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/$HOME/bin/java" }, ErrDetect, false},
 		{"JAVA_HOME with a newline", ServiceParams{}, func(f *fixture) {
 			f.distribution()
 			f.java = "/opt/x\nExecStartPre=/bin/sh/bin/java"
-		}, ErrDetect},
+		}, ErrDetect, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if c.windowsSkip && runtime.GOOS == "windows" {
+				t.Skip("a Windows file system reports every writable file as 0666, so the exec bit cannot be cleared")
+			}
 			f := newFixture(t, Options{})
 			if c.setup != nil {
 				c.setup(f)
