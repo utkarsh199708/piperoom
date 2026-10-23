@@ -362,6 +362,11 @@ var syntheticLabels = map[string]Label{
 	"consumer-duplicates": {"kafka", []string{"same lsn", "redeliver*", "same key"}},
 	"sink-dropped-column": {"consumer", []string{"upsert", "2.16.1"}},
 	"toast-placeholder":   {"kafka-connect", []string{"replica identity", "toast*"}},
+	// The Q3f worker-visibility and Q5f stale-source-offsets scenarios.
+	"tolerance-all-skips":          {"kafka-connect", []string{"errors.tolerance", "skipp*"}},
+	"internal-topic-not-compacted": {"kafka-connect", []string{"compact*", "cleanup.policy", "offsets topic"}},
+	"rebalance-loop":               {"kafka-connect", []string{"rebalance loop", "group.id", "staging"}},
+	"stale-source-offsets":         {"kafka-connect", []string{"source offsets", "old orders database", "repointed"}},
 	// The X2e recovery scenarios (KAN-427).
 	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
 	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
@@ -445,6 +450,16 @@ var syntheticTruth = map[string]map[string]truth{
 	"consumer-duplicates": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"sink-dropped-column": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"toast-placeholder":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// Q3f/Q5f: the lazy texts are the alert titles, which name no cause. The
+	// tolerance title blames the stale warehouse next to a RUNNING connector,
+	// the not-compacted one order-sync's lag (consumer), the rebalance one the
+	// stale warehouse before the connector's flapping; the stale-offsets title
+	// names the failed task (kafka-connect). The wrong texts blame an idle source, a Kafka replay, a
+	// down broker and purged WAL.
+	"tolerance-all-skips":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// X2e: the lazy texts are the reconciliation titles, which name the
 	// source and the warehouse and no cause. The wrong texts blame the
 	// connector (kafka-connect, not kafka) and a consumer filter (the right

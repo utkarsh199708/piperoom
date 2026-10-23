@@ -46,9 +46,9 @@ type ReplicaIdentityDeps struct {
 	// clients.ToastColumnReader are optional and only size the preview.
 	Source clients.SourceDB
 	// Writer is used by Execute only. nil (untyped) when write mode is off
-	// or SOURCE_DB_WRITE_URL is empty: Validate then refuses ("write
-	// credentials present" is part of the step's validity) and Preview still
-	// works, so a reviewer can see what the step would do.
+	// or SOURCE_DB_WRITE_URL is empty: Execute then refuses, while Validate
+	// and Preview still work, so the agent can propose the step and a
+	// reviewer can see what it would do (P0 ruling #606).
 	Writer ReplicaIdentityWriter
 
 	// timeout overrides opTimeout; tests only.
@@ -177,9 +177,10 @@ func checkReplicaIdentity(p replicaIdentityParams, tr TableReplication) error {
 	return nil
 }
 
-// Validate refuses bad params, a missing writer, a table outside the room's
-// pipeline (when ctx carries it), a missing table and a change that does
-// nothing or breaks writers. It reads only TableReplication.
+// Validate refuses bad params, a table outside the room's pipeline (when ctx
+// carries it), a missing table and a change that does nothing or breaks
+// writers. It reads only TableReplication. A missing writer is refused at
+// Execute only (P0 ruling #606).
 func (a *setReplicaIdentity) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseReplicaIdentity(raw)
 	if err != nil {
@@ -187,9 +188,6 @@ func (a *setReplicaIdentity) Validate(ctx context.Context, raw json.RawMessage) 
 	}
 	if err := validateScope(ctx, func(pl owners.Pipeline) error { return replicaIdentityInScope(pl, p) }); err != nil {
 		return err
-	}
-	if a.d.Writer == nil {
-		return fmt.Errorf("sourceactions: %s: %w", SetReplicaIdentityName, errNoWriter)
 	}
 	ctx, cancel := withTimeout(ctx, a.d.timeout)
 	defer cancel()

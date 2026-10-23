@@ -788,7 +788,7 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 	// confirmed with its own read before it is blamed.
 	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
 	for _, want := range []string{
-		`Cite evidence by step id (e.g. "connect_status (s_3): task 0 FAILED"); do not assert what a tool did not return`,
+		`Cite evidence by step id (e.g. "connect_status (s_3): FAILED"); do not assert what a tool did not return`,
 		"confirm a component with its own read before blaming it",
 	} {
 		if !strings.Contains(method, want) {

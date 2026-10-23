@@ -392,8 +392,8 @@ func TestDefaultAllowListIsFreshEachCall(t *testing.T) {
 	if _, bad := second["tasks.max"]; bad {
 		t.Fatal("allow-list is shared state")
 	}
-	if len(second) != 5 {
-		t.Fatalf("allow-list %v, want the 5 default keys", sortedKeys(second))
+	if len(second) != 7 {
+		t.Fatalf("allow-list %v, want the 7 default keys", sortedKeys(second))
 	}
 	for _, k := range []string{"errors.tolerance", "errors.log.include.messages"} {
 		if _, ok := second[k]; ok {

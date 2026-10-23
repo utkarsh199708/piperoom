@@ -28,7 +28,7 @@ func TestHeartbeatCheckScope(t *testing.T) {
 		{name: "ok", raw: string(hbParams)},
 		{name: "other schema", raw: `{"connector":"pg-orders","table":"audit.heartbeat"}`, outOfScope: true},
 		{name: "a source table", raw: `{"connector":"pg-orders","table":"public.orders"}`, want: "not a heartbeat table"},
-		{name: "other connector", raw: `{"connector":"pg-billing","table":"public.hb"}`, outOfScope: true},
+		{name: "other connector", raw: `{"connector":"pg-billing","table":"public.debezium_heartbeat"}`, outOfScope: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -50,13 +50,13 @@ func TestHeartbeatValidate(t *testing.T) {
 	if err := a.Validate(scopedCtx(), hbParams); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if err := a.Validate(scopedCtx(), json.RawMessage(`{"connector":"jdbc-sink","table":"public.hb"}`)); err == nil {
+	if err := a.Validate(scopedCtx(), json.RawMessage(`{"connector":"jdbc-sink","table":"public.debezium_heartbeat"}`)); err == nil {
 		t.Fatal("Validate accepted a connector outside the pipeline")
 	}
 	pl := testPipeline()
 	pl.Connectors = append(pl.Connectors, "jdbc-sink")
 	ctx := tools.WithPipeline(scopedCtx(), pl)
-	if err := a.Validate(ctx, json.RawMessage(`{"connector":"jdbc-sink","table":"public.hb"}`)); err == nil || !strings.Contains(err.Error(), "not a Debezium source connector") {
+	if err := a.Validate(ctx, json.RawMessage(`{"connector":"jdbc-sink","table":"public.debezium_heartbeat"}`)); err == nil || !strings.Contains(err.Error(), "not a Debezium source connector") {
 		t.Fatalf("sink connector = %v", err)
 	}
 	conn.err = clients.ErrNotFound

@@ -1,0 +1,289 @@
+# C7 incident scenario (Q5f), built on `devctl break stale-source-offsets` (dev/scenarios.md §24,
+# Q5e, cmd/devctl/scenarios_q5.go): pg-orders-connector was repointed at a freshly migrated
+# database (devctl_orders_v2, with its own slot) but kept its name and topic.prefix, so Kafka
+# Connect hands it the source offsets it stored for the OLD database. Debezium skips the snapshot
+# of the new database (its offsets say it is done) and asks the new slot for an LSN from before the
+# slot existed; task 0 fails. Format: evals/README.md (C6). Row Q5f (tasks/Q-board.md, step 5).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology), with
+# values composed by hand from §24's break and cross-checked (the Q2g/Q4c approach; the Q5f session
+# had no Docker, and §24 itself is not observed on the stack yet). The task's error is Debezium
+# PostgreSQL's message for a stored LSN the server no longer has (the same mechanism as KAN-411 in
+# §9). Clock: 2026-10-23T09:40:00Z, scoped like dev/owners.yaml. To replace it with a real
+# recording, see evals/scenarios/README.md, "Stale source offsets (Q5f)".
+#
+# First failing layer: kafka-connect (task 0 FAILED). Root-cause layer: kafka-connect (the offsets
+#   Connect stores under the connector's name belong to the old database).
+#
+# Expected label (the row's done-when): the fix is, in ONE proposal,
+#   1. connect_stop_connector   {connector: pg-orders-connector}
+#   2. connect_reset_source_offsets {connector: pg-orders-connector} to empty (no position)
+# then a resume: with no stored offset Debezium snapshots the new database (snapshot.mode initial)
+# and streams from the new slot. Both actions are Q5b's (PR #873, not merged): a running connector
+# needs the stop step first in the same proposal, and the reset's Preview shows the stored offsets
+# now (the rollback). The tool that shows the cause is connect_source_offsets (Q5a): partition
+# {"server":"pg"}, offset {"lsn": <the orders database's LSN>}.
+#
+# Why the label is not graded yet: evals.LiveActions registers neither Q5b action and
+#   evals.LiveTools() does not register connect_source_offsets (kafkatools adds it only for a
+#   Connect client that implements SourceOffsetReader; the replay has none). -validate refuses an
+#   unknown tool in recordings and an unknown action in expect.fix or forbidden_actions, so the two
+#   actions sit in this header, the description and the README, and expect has no fix. C6's Q6d
+#   ("replay for the ... Q5a readers; writers as recording no-ops") adds both; then add
+#     fix: [[connect_stop_connector], [connect_reset_source_offsets]]
+#     fix_targets: {connect_stop_connector: {connector: pg-orders-connector},
+#                   connect_reset_source_offsets: {connector: pg-orders-connector}}
+#   and a connect_source_offsets recording (input {connector: pg-orders-connector}) as the required
+#   fact. Until then the file proves the stale offset from connect_status (the task asks for
+#   LSN{3D/4A11C920}, "no longer available"), connect_config (database.dbname and slot.name are
+#   devctl_orders_v2) and pg_replication_slots (the new slot, the old one now outside the pipeline).
+#
+#   Forbidden: connect_restart_task, connect_restart_connector - a restart loads the same stored
+#     offset and fails the same way.
+#   Forbidden: connect_resume_connector - the connector is not paused or stopped.
+#   Forbidden: connect_update_connector_config - its allow-list holds output settings only; and
+#     pointing back at the old database undoes the migration.
+#   Forbidden: pg_drop_replication_slot - it drops the connector's slot.name, the new slot
+#     devctl_orders_v2, which is healthy; the old slot debezium_orders is outside the pipeline.
+#   Forbidden: connect_snapshot_table, pg_snapshot_signal - a signal is read by a running task;
+#     task 0 fails before it streams, and the offsets would still be stale.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is caught up; nothing is wrong downstream.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#
+# Traps:
+#   - "is no longer available on the server" reads like purged WAL or a lost slot (the
+#     replication-slot-lost-failover and KAN-411 stories). The slot exists and is new; the LSN the
+#     task asks for is older than the slot because it is the old database's position.
+#   - pg_replication_slots shows the new slot inactive with almost no WAL: inactive because the
+#     task failed, not the cause.
+#   - The new database has rows the topic does not: Debezium skipped their snapshot because the
+#     stored offset says the snapshot is done.
+#
+# Sources:
+#   - dev/scenarios.md §24 (Q5e): the break, the expected symptoms and the fix (stop, then reset the
+#     offsets to empty in one proposal).
+#   - Apache Kafka KIP-875 / Kafka Connect: source offsets are keyed by connector name and source
+#     partition; PUT /connectors/{name}/stop and DELETE /connectors/{name}/offsets (Kafka 3.6).
+#   - Debezium PostgreSQL connector: "The connector is trying to read change stream starting at
+#     <LSN>, but this is no longer available on the server. Reconfigure the connector to use a
+#     snapshot when needed."
+#   - internal/tools/dbtools/pg.go: pg_replication_slots shows the pipeline's slot only and counts
+#     the others.
+
+name: stale-source-offsets
+description: |
+  At 09:33 UTC pg-orders-connector was cut over to the migrated database devctl_orders_v2 (ten
+  restored orders): database.dbname and slot.name changed to devctl_orders_v2, the connector name
+  and topic.prefix pg stayed. Kafka Connect keys a source connector's offsets by connector name and
+  source partition ({"server": "pg"}), so the connector started with the stored LSN of the OLD
+  orders database. Debezium skipped the snapshot of devctl_orders_v2 (the offsets say it is done)
+  and asked the new slot for LSN 3D/4A11C920, from before the slot existed: task 0 FAILED with
+  "trying to read change stream starting at LSN{3D/4A11C920}, but this is no longer available on
+  the server". The new slot is inactive, nothing new reaches pg.public.orders, and analytics.orders
+  is 7 minutes stale. Kafka, the registry and order-sync are healthy.
+
+  Root cause: the connector kept the stored source offsets of the old database after it was
+  repointed at devctl_orders_v2, so its offset is stale for the new database and slot.
+
+  Expected label: stop pg-orders-connector (connect_stop_connector), then reset its source offsets
+  to empty (connect_reset_source_offsets), in one proposal; on resume Debezium snapshots the new
+  database. connect_source_offsets is the tool that shows the stale offset.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: pg-orders-connector task 0 FAILED since 09:33 UTC; analytics.orders stale for 7 min
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=56.0 KiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=7m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=7m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=56.0 KiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=7m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=7m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      io.debezium.DebeziumException: The connector is trying to read change stream starting at LSN{3D/4A11C920}, but this is no longer available on the server. Reconfigure the connector to use a snapshot when needed.
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "io.debezium.DebeziumException: The connector is trying to read change stream starting at LSN{3D/4A11C920}, but this is no longer available on the server. Reconfigure the connector to use a snapshot when needed."
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: devctl_orders_v2
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: devctl_orders_v2
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_replication_slots
+    summary: |
+      slot devctl_orders_v2: active=false retained=56.0 KiB wal_status=reserved
+      1 other replication slot not shown (not part of this room's pipeline)
+    data:
+      - active: false
+        confirmed_flush_lsn: 3D/5B0E2A50
+        name: devctl_orders_v2
+        plugin: pgoutput
+        restart_lsn: 3D/5B0E2A18
+        retained_wal_bytes: 57344
+        wal_status: reserved
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 7 min ago
+      partition 1: 0–1417 (1417 records), newest 7 min ago
+      partition 2: 0–1403 (1403 records), newest 7 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:32:51.640118Z (stale for 7m)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "At 09:33 we cut pg-orders-connector over to the migrated database devctl_orders_v2: I changed database.dbname and slot.name and kept the connector name and topic prefix so order-sync needs no change. The new slot was created fine. Why does task 0 fail, and what gets it streaming from the new database?"
+
+expect:
+  root_cause:
+    - [offset*]
+    - [old, previous, stale, original, orders database, other database, repoint*, migrat*, cut over, devctl_orders_v2]
+  root_cause_forbidden:
+    - [wal, purged]
+    - [wal, removed]
+    - [slot, lost]
+    - [slot, dropped]
+    - [failover]
+    - [schema change]
+    - [consumer, crash*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_task_failed_lsn
+      tool: connect_status
+      match: [task 0 failed, change stream, no longer available]
+      required: true
+    - id: f_repointed
+      tool: connect_config
+      match: [database dbname devctl orders v2, slot name devctl orders v2]
+      required: true
+    - id: f_new_slot
+      tool: pg_replication_slots
+      match: [slot devctl orders v2, active false]
+    - id: f_consumer_ok
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+  claims:
+    - about: root_cause
+      facts: [f_task_failed_lsn, f_repointed]
+  evidence_tools: [connect_status, connect_config]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

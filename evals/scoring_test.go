@@ -281,6 +281,23 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "order-sync 2.15.0's new status validation rejects orders with the new status 'gift' and routes them to its DLQ devctl.order-sync.dlq (20 records, devconsumer.ValidationError), then commits them, so lag is 0 while the 20 gift orders are missing from analytics.orders. 2.15.1 accepts gift; replay the DLQ into pg.public.orders.",
 		wrong: "The Kafka Connect source task 0 failed and dropped 20 change events before they reached the topic.",
 	},
+	// Q3f worker-visibility and Q5f stale-source-offsets scenarios (C7).
+	"tolerance-all-skips": {
+		good:  "pg-orders-connector runs with errors.tolerance=all and errors.log.enable unset, so Kafka Connect silently skips every change event after the 09:12 ALTER TABLE that changed orders.amount to numeric(12,2): the Schema Registry rejects the new Avro value schema, the converter fails and the task drops the record and keeps going. Task 0 stays RUNNING and Debezium still sees events, but the newest record in pg.public.orders is 28 min old. The skipped events are lost from Kafka; set errors.tolerance back to its default, resolve the schema change and re-snapshot the rows changed since 09:12.",
+		wrong: "The pipeline is fine: public.orders simply had no new orders since 09:11, so analytics.orders has nothing new to load.",
+	},
+	"internal-topic-not-compacted": {
+		good:  "Debezium re-snapshotted public.orders (412880 rows) when pg-orders-connector was resumed at 09:05 because Kafka Connect had lost its stored source offset: the offsets topic connect-offsets was created by the Terraform module with its defaults, cleanup.policy=delete and retention.ms=86400000 as kafka_topic_config shows for pg.public.orders, while Connect needs it compacted, so retention deleted the connector's offset during the four-day pause. order-sync is re-applying the 412880 snapshot records. Compact the internal topics and let order-sync drain.",
+		wrong: "Kafka replayed the topic: order-sync was rewound to an old offset after the restart, so it re-reads weeks-old orders.",
+	},
+	"rebalance-loop": {
+		good:  "The Kafka Connect worker group is in a rebalance loop: the staging Connect workers started at 08:40 from a copy of the production worker config share the production group.id but read their own config topic, so they keep leaving and rejoining the group. pg-orders-connector task 0 flips between UNASSIGNED and RUNNING on different workers and its Debezium counters reset on each move. Give the staging workers their own group.id or stop them.",
+		wrong: "Kafka broker 2 is down and pg.public.orders lost its partition leader; restart the connector once the broker is back.",
+	},
+	"stale-source-offsets": {
+		good:  "pg-orders-connector task 0 FAILED: Debezium asks the new slot devctl_orders_v2 for LSN 3D/4A11C920, a position of the old database older than the new slot. The connector kept the stored source offsets of the old orders database after it was repointed at devctl_orders_v2 (Kafka Connect keys offsets by connector name and source partition), so it also skipped the snapshot of the new database. Stop the connector and reset its source offsets to empty in one proposal; on resume Debezium snapshots devctl_orders_v2.",
+		wrong: "The WAL was purged on the Postgres server, so the replication slot lost the position the connector needs; drop and recreate the slot.",
+	},
 	// X2e recovery scenarios (C7, KAN-427).
 	"rows-lost-after-retention": {
 		good:  "A retention.ms=1000 override on the Kafka topic pg.public.orders, set at 09:05, deleted the change events of orders 1301-1340 before order-sync, stopped for a node drain, read them: the log start moved to offsets 446/447, and key 1301 is absent from the topic. order-sync then resumed at the earliest retained offset, so its lag is 0 while the 40 rows are missing from analytics.orders.",

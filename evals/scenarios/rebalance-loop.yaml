@@ -1,0 +1,307 @@
+# C7 incident scenario (Q3f): a staging Kafka Connect cluster was started on the production Kafka
+# cluster from a copy of the production worker config, so its workers joined the production
+# worker group (same group.id) while reading their own config topic. Every leader election hands
+# out an assignment at a config offset the other cluster's workers can never reach in their own
+# config topic; they leave and rejoin, and the group rebalances without end. pg-orders-connector
+# moves between workers, sits UNASSIGNED most of the time, and Connect's REST API answers 409.
+# Format: evals/README.md (C6). Row Q3f (tasks/Q-board.md, step 3, worker visibility).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology,
+# internal/clients/connect's status error), with values composed by hand and cross-checked (the
+# Q2g/Q4c approach; the Q3f session had no Docker and no devctl break exists for this incident).
+# Clock: 2026-10-23T09:40:00Z, scoped like dev/owners.yaml. To replace it with a real recording,
+# see evals/scenarios/README.md, "Worker-visibility scenarios (Q3f)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the worker group).
+#   Postgres, Kafka, the registry, order-sync and the warehouse are healthy; they only starve.
+#
+# Expected label: the tools that show the cause are connect_worker_metrics (Q3b: "rebalance:
+#   rebalancing=true, <n> completed, epoch <n>, last <s> ago" and the flag "the worker is
+#   rebalancing now") and connect_worker_info (Q3a: the worker group connect-cluster lists five
+#   workers, connect-1..3 and connect-stg-1..2). Neither is replayable yet: evals.LiveTools() does
+#   not call debeziumtools.RegisterWorkerMetrics and has no ConnectClusterReader client (C6's Q6d
+#   adds both), and a recording naming an unregistered tool fails -validate. Until then the file
+#   proves the loop from what the replayed tools show: connect_status flipping between UNASSIGNED
+#   and RUNNING on different workers, connect_config refused with Connect's 409 "(typically caused
+#   by a worker rebalance)" on its first read (an error result, so it cannot be an expected fact),
+#   debezium_metrics counters reset by task restarts, and the kafka-connect
+#   owner's steer naming the staging cluster. When Q6d lands, add both recordings and make
+#   connect_worker_metrics the required fact and evidence tool.
+#
+# Safe automated fix: none. The staging workers must leave the group: stop them, or give them their
+#   own group.id (with their own config, offset and status topics), then the production group
+#   settles by itself.
+#   Forbidden: connect_restart_connector, connect_restart_task - each restart is another
+#     assignment change in a group that cannot settle; arjun already tried.
+#   Forbidden: connect_pause_connector, connect_resume_connector - the connector is not the
+#     problem; pausing only stops the pipeline after the loop ends.
+#   Forbidden: pg_drop_replication_slot - the slot is the connector's position; it is inactive only
+#     while no worker holds the task.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is caught up.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#
+# Traps:
+#   - The connector is RUNNING on some reads: "it recovered" is wrong; the next read is UNASSIGNED
+#     on another worker.
+#   - Slot inactive and retained WAL growing: it looks like the slot or connector-down stories, but
+#     the slot goes active again whenever a worker holds the task.
+#   - A consumer-group rebalance storm (consumer-rebalance-storm) is a different group: order-sync
+#     is Stable. The rebalancing group is Connect's worker group, which kafka_list_groups does not
+#     show (it is not the room's group).
+#
+# Sources:
+#   - Apache Kafka, Kafka Connect configs: group.id "A unique string that identifies the Connect
+#     cluster group this worker belongs to"; workers of one group must share config.storage.topic,
+#     offset.storage.topic and status.storage.topic.
+#   - Kafka Connect DistributedHerder: a member whose config log is behind the leader's assignment
+#     offset reads to the end of its config topic and, when it cannot reach that offset, leaves the
+#     group and rejoins; REST requests during a rebalance answer 409 "Cannot complete request
+#     momentarily due to stale configuration (typically caused by a worker rebalance)".
+#   - internal/clients/connect/connect.go: the "connect: <method> <path>: status <code>: <body>"
+#     error format; internal/clients/connect/lifecycle.go: rebalance 409s are transient.
+
+name: rebalance-loop
+description: |
+  At 08:40 UTC the platform team started a staging Kafka Connect cluster (connect-stg-1 and
+  connect-stg-2) on the production Kafka cluster from a copy of the production worker config: same
+  group.id connect-cluster, but its own config, offset and status topics. Its workers joined the
+  production worker group. Whichever worker leads hands out an assignment at its own config topic's
+  offset, which the other cluster's workers cannot reach in their config topic, so they leave and
+  rejoin and the group rebalances continuously. pg-orders-connector and its task 0 move between
+  workers and are UNASSIGNED most of the time; Connect's REST API answers 409 during rebalances;
+  the slot goes inactive between assignments; analytics.orders is 19 minutes stale. Postgres, Kafka,
+  the registry and order-sync are healthy.
+
+  Root cause: the staging Connect workers share the production group.id, so the Connect worker group
+  is stuck in a rebalance loop and pg-orders-connector cannot stay assigned.
+
+  Expected label: the tools that show the cause are connect_worker_metrics (rebalancing=true,
+  completed rebalances climbing) and connect_worker_info (the worker group lists the staging
+  workers). Fix by a person: take the staging workers out of the group (stop them or give them
+  their own group.id).
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale for 19m (threshold 15m); pg-orders-connector changed state 23 times since 08:41'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=212.4 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=4m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=212.4 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=4m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    sequence:
+      - summary: |-
+          pg-orders-connector (source): UNASSIGNED, 0 failed tasks
+      - summary: |-
+          pg-orders-connector (source): RUNNING, 0 failed tasks
+      - summary: |-
+          pg-orders-connector (source): UNASSIGNED, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    sequence:
+      - summary: |-
+          pg-orders-connector (source): UNASSIGNED on connect-1:8083.
+          Task 0: UNASSIGNED
+        data: {name: pg-orders-connector, state: UNASSIGNED, worker: "connect-1:8083", tasks: [{id: 0, state: UNASSIGNED}]}
+      - summary: |-
+          pg-orders-connector (source): RUNNING on connect-3:8083.
+          Task 0: RUNNING
+        data: {name: pg-orders-connector, state: RUNNING, worker: "connect-3:8083", tasks: [{id: 0, state: RUNNING}]}
+      - summary: |-
+          pg-orders-connector (source): UNASSIGNED on connect-3:8083.
+          Task 0: UNASSIGNED
+        data: {name: pg-orders-connector, state: UNASSIGNED, worker: "connect-3:8083", tasks: [{id: 0, state: UNASSIGNED}]}
+      - summary: |-
+          pg-orders-connector (source): RUNNING on connect-2:8083.
+          Task 0: RUNNING
+        data: {name: pg-orders-connector, state: RUNNING, worker: "connect-2:8083", tasks: [{id: 0, state: RUNNING}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    sequence:
+      - error: 'connect: GET /connectors/pg-orders-connector/config: status 409: {"error_code":409,"message":"Cannot complete request momentarily due to stale configuration (typically caused by a worker rebalance)"}'
+      - summary: |-
+          connector.class: io.debezium.connector.postgresql.PostgresConnector
+          database.dbname: orders
+          database.hostname: postgres
+          database.password: ***
+          database.port: 5432
+          database.user: piperoom
+          key.converter: io.confluent.connect.avro.AvroConverter
+          slot.name: debezium_orders
+          table.include.list: public.orders
+          topic.prefix: pg
+          value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    sequence:
+      - summary: |-
+          pg-orders-connector: streaming connected=true, 19 min behind source, last event 2.1 s ago, queue 8192/8192, 2214 events seen; snapshot running=false, completed=false, paused=false
+      - summary: |-
+          pg-orders-connector: streaming connected=true, 17 min behind source, last event 0.9 s ago, queue 8192/8192, 388 events seen; snapshot running=false, completed=false, paused=false
+  - tool: pg_replication_slots
+    sequence:
+      - summary: |
+          slot debezium_orders: active=false retained=212.4 MiB wal_status=reserved
+      - summary: |
+          slot debezium_orders: active=true retained=209.8 MiB wal_status=reserved
+      - summary: |
+          slot debezium_orders: active=false retained=214.0 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1373402 (1373402 records), newest 4 min ago
+      partition 1: 0–1373188 (1373188 records), newest 4 min ago
+      partition 2: 0–1373517 (1373517 records), newest 5 min ago
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 3121 records (1/s); p0 1052 (34%), p2 1040, p1 1029; median 1040, max 1052, max/median 1.0x → even
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+      3 other consumer groups not shown (not part of this room's pipeline)
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1373402, end 1373402, lag 0
+        pg.public.orders/1: committed 1373188, end 1373188, lag 0
+        pg.public.orders/2: committed 1373517, end 1373517, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:21:12.884301Z (stale for 19m)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "Task 0 keeps bouncing between the workers since about 08:40 and restarting it by hand did not stick. Nothing changed on the prod workers or the connector. Platform brought up the new staging Connect cluster this morning on the same Kafka cluster, from a copy of our worker config. What is going on?"
+
+expect:
+  root_cause:
+    - [rebalanc*]
+    - [staging, group.id, group id, same group, shared group, second cluster, two clusters, other cluster]
+  root_cause_forbidden:
+    - [slot, lost]
+    - [slot, dropped]
+    - [schema change]
+    - [broker, down]
+    - [consumer, crash*]
+    - [order-sync, rebalanc*]
+    - [poison pill]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_unassigned
+      tool: connect_status
+      match: [task 0 unassigned]
+      required: true
+    - id: f_reassigned
+      tool: connect_status
+      match: [running on connect 3, task 0 running]
+    - id: f_counters_reset
+      tool: debezium_metrics
+      match: [events seen, behind source]
+    - id: f_kafka_healthy
+      tool: kafka_cluster_health
+      match: [0 under replicated, 0 offline]
+    - id: f_consumer_stable
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_unassigned, f_reassigned]
+  evidence_tools: [connect_status, debezium_metrics]
+  forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, connect_resume_connector, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 14

@@ -43,7 +43,7 @@ func readySource() *fakeSource {
 		tables: map[string]TableReplication{"public.refunds": {Table: "public.refunds", ReplicaIdentity: "default"}},
 		role:   RoleInfo{Role: "debezium", Exists: true, CanLogin: true, Replication: true, Selectable: map[string]bool{"public.refunds": false}},
 		sessions: []DBSession{{PID: 4242, StartedAt: testStart, XactStart: testStart.Add(time.Minute), User: "app", App: "billing",
-			State: "idle in transaction", Query: "UPDATE accounts SET password = 'hunter2' WHERE id = 7"}},
+			State: "idle in transaction", Query: "UPDATE accounts SET password = 'hunter2' WHERE id = 7", InScope: true}},
 		rows: 1000,
 	}
 }
@@ -76,15 +76,16 @@ func TestPreviewNeverWrites(t *testing.T) {
 }
 
 // TestPreviewWorksWithoutWriter: write mode off still lets a reviewer see
-// the step; Validate refuses it.
+// the step and the agent propose it (Validate passes); only Execute refuses
+// (P0 ruling #606).
 func TestPreviewWorksWithoutWriter(t *testing.T) {
 	for _, tc := range allActions(readySource(), newConnect(), nil) {
 		t.Run(tc.a.Name(), func(t *testing.T) {
 			if _, err := tc.a.(actions.Preview).Preview(scopedCtx(), tc.params); err != nil {
 				t.Fatalf("Preview without writer: %v", err)
 			}
-			if err := tc.a.Validate(scopedCtx(), tc.params); err == nil || !errors.Is(err, errNoWriter) {
-				t.Fatalf("Validate without writer = %v, want errNoWriter", err)
+			if err := tc.a.Validate(scopedCtx(), tc.params); err != nil {
+				t.Fatalf("Validate without writer = %v, want nil", err)
 			}
 			if _, err := tc.a.Execute(scopedCtx(), tc.params); !errors.Is(err, errNoWriter) {
 				t.Fatalf("Execute without writer = %v, want errNoWriter", err)

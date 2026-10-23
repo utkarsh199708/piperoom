@@ -51,6 +51,8 @@ type fakeSource struct {
 	noDeadline  bool // a read ran without a deadline
 	lastOlder   time.Duration
 	lastTables  []string
+	unscoped    int    // calls of the unscoped Blockers
+	scoped      int    // calls of BlockersOnTables
 	sessionHook func() // runs on each Blockers call (to change sessions between calls)
 }
 
@@ -87,8 +89,11 @@ func (s *fakeSource) RoleInfo(ctx context.Context, role string, tables []string)
 	return s.role, nil
 }
 
+// Blockers is the unscoped read: like the real client, every session comes
+// back in full with InScope true.
 func (s *fakeSource) Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error) {
 	s.note(ctx)
+	s.unscoped++
 	s.lastOlder = olderThan
 	if s.sessionHook != nil {
 		s.sessionHook()
@@ -96,7 +101,35 @@ func (s *fakeSource) Blockers(ctx context.Context, olderThan time.Duration) ([]D
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.sessions, nil
+	out := make([]DBSession, len(s.sessions))
+	for i, x := range s.sessions {
+		x.InScope = true
+		out[i] = x
+	}
+	return out, nil
+}
+
+// BlockersOnTables is the scoped read: a session keeps the InScope the test
+// gave it, and an out-of-scope one is anonymised like the real client does.
+func (s *fakeSource) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error) {
+	s.note(ctx)
+	s.scoped++
+	s.lastOlder = olderThan
+	s.lastTables = tables
+	if s.sessionHook != nil {
+		s.sessionHook()
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make([]DBSession, len(s.sessions))
+	for i, x := range s.sessions {
+		if !x.InScope {
+			x.User, x.App, x.Query = "", "", ""
+		}
+		out[i] = x
+	}
+	return out, nil
 }
 
 func (s *fakeSource) EstimatedRows(ctx context.Context, table string) (int64, error) {
@@ -128,6 +161,7 @@ var (
 	_ TableReplicationReader    = (*fakeSource)(nil)
 	_ RoleInfoReader            = (*fakeSource)(nil)
 	_ BlockerReader             = (*fakeSource)(nil)
+	_ ScopedBlockerReader       = (*fakeSource)(nil)
 	_ rowEstimator              = (*fakeSource)(nil)
 	_ clients.ToastColumnReader = (*fakeSource)(nil)
 	_ PublicationStateReader    = (*fakeSource)(nil)

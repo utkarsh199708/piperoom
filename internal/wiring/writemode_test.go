@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/actions/sourceactions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/clients/postgres"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -42,6 +44,25 @@ func (w fakeSourceWriter) AddPublicationTables(context.Context, string, []string
 func (fakeSourceWriter) DropReplicationSlot(context.Context, string) error { return nil }
 func (fakeSourceWriter) InsertSnapshotSignal(context.Context, string, string, []string) (string, error) {
 	return "", nil
+}
+
+// The Q2b admin methods (postgres.SourceAdminWriter): the real source writer
+// has them, so the fake does too and wiring hands it to the Q2 actions.
+func (w fakeSourceWriter) SetReplicaIdentity(context.Context, string, string, string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) GrantSelect(context.Context, string, []string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) CreateHeartbeatTable(context.Context, string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) EndSession(context.Context, int64, time.Time) error {
+	w.writes.Add(1)
+	return nil
 }
 
 type fakeKafkaWriter struct{ *fakeWriter }
@@ -164,15 +185,27 @@ var readOnlyKafkaViews = map[reflect.Type]bool{
 	reflect.TypeOf(&kafka.ReplayReader{}): true,
 }
 
+// adminWriterIfaces are the Q2 source admin writes (Q2b, Q2e): the whole
+// postgres.SourceAdminWriter and each one-method interface a sourceactions
+// action holds, so a type with any one admin method is caught.
+var adminWriterIfaces = []reflect.Type{
+	ifaceOf[postgres.SourceAdminWriter](),
+	ifaceOf[sourceactions.ReplicaIdentityWriter](),
+	ifaceOf[sourceactions.HeartbeatWriter](),
+	ifaceOf[sourceactions.GrantWriter](),
+	ifaceOf[sourceactions.SessionEnder](),
+}
+
 // assertNoWriterReachable fails when any value the actions of areg can reach
 // could write: a P3 writer (SourceWriter, KafkaWriter, ConnectFixWriter, or
 // the record and offset-plan reads that only the Kafka writer has, outside
-// the read-only views above), a type with the Connect resume or one-key
+// the read-only views above), a Q2 source admin writer (adminWriterIfaces),
+// a type with the Connect resume or one-key
 // config write the actions assert for, or a ConnectWriter /
 // SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	writers := []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}
+	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}, adminWriterIfaces...)
 	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
@@ -291,6 +324,18 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 			}
 			pipe, _ := loadOwners(t, threeSetYAML()).Pipeline("pa")
 			assertP3ExecuteRefuses(t, pa.Actions, tools.WithPipeline(ctx, pipe), p3Params("pa"))
+
+			// The Q2 source admin actions too (Q2e): listed in every set, and
+			// each refuses at Execute (not Validate, P0 ruling #606) for want
+			// of the admin writer, which write mode off never builds.
+			for _, s := range st.All() {
+				for _, n := range sourceActionNames {
+					if _, ok := s.Actions.Get(n); !ok {
+						t.Errorf("set %q: %s not registered with write mode off", s.Name, n)
+					}
+				}
+			}
+			assertSourceActionsRefuse(t, pa.Actions, tools.WithPipeline(ctx, pipe), sourceActionParams("pa"))
 		})
 	}
 }

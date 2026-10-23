@@ -1,0 +1,311 @@
+# C7 incident scenario (Q3f): pg-orders-connector runs with errors.tolerance=all, so after a
+# column type change every new change event fails Avro serialization and Kafka Connect skips it
+# instead of failing the task. The connector and task 0 stay RUNNING with no trace, Debezium keeps
+# reading the WAL, the slot keeps advancing, and nothing new reaches pg.public.orders.
+# Format: evals/README.md (C6). Row Q3f (tasks/Q-board.md, step 3, worker visibility).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology), with
+# values composed by hand and cross-checked (the Q2g/Q4c approach; the Q3f session had no Docker
+# and no devctl break exists for this incident). Clock: 2026-10-23T09:40:00Z, scoped like
+# dev/owners.yaml. To replace it with a real recording, see evals/scenarios/README.md,
+# "Worker-visibility scenarios (Q3f)".
+#
+# First failing layer: kafka-connect (records enter the task and never leave it).
+# Root-cause layer: kafka-connect (errors.tolerance=all turns a serialization failure into silent
+#   loss). The trigger is the 09:12 ALTER on Postgres (as in schema-change, which fails loudly
+#   because there errors.tolerance is the default none); here the connector setting is why the
+#   failure is silent and why the skipped events are gone, so it is the cause the room must fix.
+#
+# Expected label: the tool that shows the cause is connect_worker_metrics (Q3b):
+#   "pg-orders-connector: FLAGS: <n> records skipped: errors.tolerance=all drops them unless a DLQ
+#   is set. tasks total 1 (running 1, ...). task 0: <n> record errors, <n> record failures, <n>
+#   skipped, ..." - Connect's own task-error-metrics (total-records-skipped). The eval harness
+#   cannot replay that tool yet: evals.LiveTools() does not call debeziumtools.RegisterWorkerMetrics
+#   (C6's Q6d adds it), and a recording naming an unregistered tool fails -validate. Until then
+#   the file proves the skip from what the replayed tools show: connect_config (errors.tolerance:
+#   all, no errors.log.enable), debezium_metrics (events seen keep rising, last event seconds ago),
+#   kafka_topic_offsets (newest record 28 min ago) and trace_record (the row reached Connect, not
+#   Kafka). When Q6d lands, add the connect_worker_metrics recording (input {connector:
+#   pg-orders-connector}) with the skipped count and make it the required fact and evidence tool.
+#
+# Safe automated fix: none.
+#   connect_update_connector_config with errors.log.enable=true is allowed (visibility only) but
+#     brings nothing back. errors.tolerance is deliberately not on its allow-list.
+#   Forbidden: connect_restart_task, connect_restart_connector - the task is RUNNING; a restart
+#     skips the next events the same way and the skipped ones are not re-read (their offsets were
+#     committed with the skip).
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: kafka_reset_consumer_offsets - the consumer is healthy; the events never reached
+#     the topic.
+#   Forbidden: pg_drop_replication_slot - the slot is active and healthy.
+#   Forbidden: schema_register - registering the rejected schema by hand bypasses the registry's
+#     compatibility rule the consumer relies on.
+#
+# Correct human fix: set errors.tolerance=none (or route failures to visibility with
+#   errors.log.enable=true while it is decided) so a failure stops the task instead of losing data;
+#   resolve the schema incompatibility (amount int -> decimal) the way schema-change does; then
+#   re-snapshot the rows changed since 09:12 (pg_snapshot_signal / pg_resnapshot_rows), because the
+#   skipped change events are not in Kafka and Connect will not re-read them.
+#
+# Traps:
+#   - Everything is green: connector RUNNING, task 0 RUNNING with no trace, slot active with little
+#     WAL, consumer lag 0. "Nothing is broken, the table is quiet" is wrong: pg_row shows an order
+#     updated a minute ago and Debezium counts events.
+#   - schema_registry_versions shows only version 1 and connect_status no 409: unlike schema-change
+#     the rejection never surfaces as a task error.
+#   - The slot is active and retains little WAL, so it is not the slot story either: Connect commits
+#     the source offset of a skipped record.
+#
+# Sources:
+#   - Apache Kafka, Kafka Connect configs: errors.tolerance "all" skips problematic records;
+#     errors.log.enable defaults to false (no log line for a skipped record). Kafka Connect's
+#     WorkerSourceTask drops a record that fails conversion under errors.tolerance=all and counts it
+#     in task-error-metrics total-records-skipped.
+#   - internal/tools/runbooks/library/poison-pill.md: "errors.tolerance=all without a dead-letter
+#     topic or logging drops bad records silently" (runbook_lookup runs live in the harness).
+#   - internal/tools/debeziumtools/worker.go: the connect_worker_metrics summary and its skip flag.
+#   - internal/tools/kafkatools/connect_tools.go: connect_config shows the errors.* keys.
+
+name: tolerance-all-skips
+description: |
+  At 09:12 UTC a migration ran ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2). Debezium's
+  next value schema (amount int -> bytes decimal(12,2)) is not BACKWARD compatible, so the Avro
+  converter cannot register it and every change event after 09:12 fails serialization. Because
+  pg-orders-connector runs with errors.tolerance=all (and errors.log.enable unset), Kafka Connect
+  skips each failed record and commits its offset: connector and task 0 stay RUNNING with no
+  trace, Debezium keeps reading the WAL, the slot stays active, and nothing new has reached
+  pg.public.orders for 28 minutes. order-sync is healthy at lag 0; analytics.orders is 28 min stale.
+
+  Root cause: errors.tolerance=all on pg-orders-connector silently skips (drops) every change event
+  whose new Avro value schema (the amount type change) the registry rejects; the skipped events are
+  lost from Kafka.
+
+  Expected label: the tool that shows the cause is connect_worker_metrics (task 0 records skipped,
+  "errors.tolerance=all drops them unless a DLQ is set"). Fix by a person: errors.tolerance=none,
+  resolve the schema change, re-snapshot the rows changed since 09:12.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale for 28m (threshold 15m); pg-orders-connector reports RUNNING'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.4 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=28m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=28m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.4 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=28m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=28m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-1:8083", tasks: [{id: 0, state: RUNNING}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      errors.tolerance: all
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: dlq_peek
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    sequence:
+      - summary: |-
+          pg-orders-connector: streaming connected=true, 0.6 s behind source, last event 1.2 s ago, queue 0/8192, 7412906 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
+      - summary: |-
+          pg-orders-connector: streaming connected=true, 0.5 s behind source, last event 0.8 s ago, queue 0/8192, 7413118 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      no field changes
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-23T09:12:04.551870Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-23T09:12:04.551870Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | app_migrator
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.4 MiB wal_status=reserved
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1373402 (1373402 records), newest 28 min ago
+      partition 1: 0–1373188 (1373188 records), newest 28 min ago
+      partition 2: 0–1373517 (1373517 records), newest 28 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1373402, end 1373402, lag 0
+        pg.public.orders/1: committed 1373188, end 1373188, lag 0
+        pg.public.orders/2: committed 1373517, end 1373517, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:11:58.204113Z (stale for 28m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      found: yes, updated_at=2026-10-23T09:39:02.118204Z, columns=[amount, customer_id, id=5904410, status, updated_at=2026-10-23T09:39:02.118204Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5904410'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:39:02.118204Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka pg.public.orders
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "Connect says RUNNING and there is no error on the task. We set the connector to tolerate errors last quarter so a bad row would not page us at night. Find out where the orders are going."
+
+expect:
+  root_cause:
+    - [tolerance, tolerate*]
+    - [skip*, drop*, discard*, silent*, swallow*, lost]
+    - [amount*, decimal, numeric, schema*, serializ*, convert*, avro, "409", incompatib*]
+  # The stories a green pipeline invites. A clause with a negator is skipped
+  # ("the slot is not inactive" is fine).
+  root_cause_forbidden:
+    - [slot, inactive]
+    - [consumer, crash*]
+    - [poison pill]
+    - [retention, delet*]
+    - [connector, paused]
+    - [snapshot, running]
+    - [false alarm]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_tolerance_all
+      tool: connect_config
+      match: [errors tolerance all]
+      required: true
+    - id: f_events_seen
+      tool: debezium_metrics
+      match: [last event, events seen]
+      required: true
+    - id: f_topic_stale
+      tool: kafka_topic_offsets
+      match: [newest 28 min ago]
+    - id: f_task_running
+      tool: connect_status
+      match: [task 0 running]
+    - id: f_ddl_amount
+      tool: pg_recent_ddl
+      match: [alter column amount, numeric]
+    - id: f_no_new_schema
+      tool: schema_registry_versions
+      match: [versions 1]
+  claims:
+    - about: root_cause
+      facts: [f_tolerance_all, f_events_seen, f_topic_stale]
+  evidence_tools: [connect_config, debezium_metrics]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register]
+  max_tool_calls: 14
