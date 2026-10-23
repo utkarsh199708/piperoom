@@ -176,6 +176,21 @@ func (s *Server) handleSetupMaintenanceWindow(w http.ResponseWriter, r *http.Req
 	writeEvent(w, http.StatusOK, ev)
 }
 
+// handleSetupRollback is POST /api/rooms/{id}/setup/rollback: "roll back this
+// setup" (U1-14b). It carries no body: the proposal is built from the
+// rollbacks the room recorded for the steps the current plan executed, in
+// reverse order, so there is nothing for a caller to name. Driver only, on an
+// open setup room; a step the guard forbids on its class refuses the whole
+// proposal here with the guard row's reason code.
+func (s *Server) handleSetupRollback(w http.ResponseWriter, r *http.Request) {
+	ev, err := s.svc.CreateSetupRollback(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"))
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
 // handleSetupSecret is POST /api/rooms/{id}/setup/secret: the driver typed a
 // value in the UI. It is forwarded to the paired runner in one secret frame
 // and stored nowhere on the server (docs/api.md). The value never reaches a
