@@ -158,6 +158,12 @@ func TestProviderFlags(t *testing.T) {
 	if rep.Provider != "anthropic" || rep.Flavor != "" || rep.PromptHashKind != evals.PromptKindTap {
 		t.Fatalf("recorded %q %q %q", rep.Provider, rep.Flavor, rep.PromptHashKind)
 	}
+	// V11: a run tapped in process records the neutral kind.
+	rep = evals.Report{PromptHashes: []string{evals.NeutralPromptHash("system", nil)}}
+	recordModel(&rep, cfg)
+	if rep.PromptHashKind != evals.PromptKindNeutral {
+		t.Fatalf("neutral kind %q", rep.PromptHashKind)
+	}
 	got, _ = withModelFlags(cfg, flags{provider: "openai"})
 	rep = evals.Report{}
 	recordModel(&rep, got)

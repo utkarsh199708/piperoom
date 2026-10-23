@@ -158,7 +158,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.gate, "gate", "", "REF.json: after the run, check the report against this 3-run reference with the hard gates and quality floors of -gate-config; exit 4 on a hard-gate failure, 5 on a floor miss. With one positional CANDIDATE.json, gate that saved report and exit; no model calls")
 	fs.StringVar(&f.gateConfig, "gate-config", evals.DefaultGateFile, "the gate's thresholds (repo policy; changed only by a reviewed PR)")
 	fs.StringVar(&f.modelsTable, "models-table", "", "DIR of baselines (evals/baseline): print the published per-model table, the reference first, each baseline with its gate verdict, and exit; no model calls")
-	fs.BoolVar(&f.noTap, "no-tap", false, "do not put the model tap in front of the Anthropic API; results then record prompt_hash \"untapped\"")
+	fs.BoolVar(&f.noTap, "no-tap", false, "do not tap the model (the HTTP tap in front of the Anthropic API, or the in-process tap of openai, gemini and bedrock-converse); results then record prompt_hash \"untapped\"")
 	// Go's flag package stops at the first positional argument; parse on after
 	// each one so "-compare a.json b.json -fail-on-regression" keeps its flag.
 	for {
@@ -285,11 +285,11 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	// Fail before any work rather than after the first model call; the key
-	// itself is read by the SDK and never touched or logged here. Bedrock
-	// and Vertex use their own credentials.
-	if p := strings.ToLower(strings.TrimSpace(cfg.ModelProvider)); (p == "" || p == agent.ProviderAnthropic) && os.Getenv("ANTHROPIC_API_KEY") == "" {
-		return 1, errors.New("ANTHROPIC_API_KEY is not set (use -check to validate scenarios without it)")
+	// Fail before any work rather than after the first model call: every
+	// role's key, by its provider (keys.go). Only presence is checked; a key
+	// is read by its client and never touched or logged here.
+	if err := checkModelKeys(cfg, os.Getenv, fileExists); err != nil {
+		return 1, err
 	}
 	var baseline *evals.Report
 	if f.baseline != "" {
@@ -336,20 +336,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	defer stop()
 
 	// The agent runs as in cmd/server: the room service starts the Endpoint
-	// that wiring.NewAgentEndpoint builds. The tap goes in first, because the
-	// SDK reads its base URL when the Endpoint's client is built.
-	var tap *evals.ModelTap
-	if !f.noTap {
-		if tap, err = evals.InstallModelTap(cfg.ModelProvider); err != nil {
-			return 1, err
-		}
-		if tap != nil {
-			defer tap.Close()
-		}
-	}
-	runner, err := evals.NewEndpointRunner(ctx, cfg, logger)
+	// that wiring.NewAgentEndpoint builds.
+	runner, tap, err := tappedRunner(ctx, cfg, f.noTap, logger, stderr)
 	if err != nil {
 		return 1, err
+	}
+	if c, ok := tap.(io.Closer); ok {
+		defer c.Close()
 	}
 	commit := f.commit
 	if commit == "" {
