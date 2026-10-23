@@ -69,7 +69,8 @@ Notes:
   owning the table too (the `ALTER PUBLICATION` documentation). The action never uses `FOR ALL TABLES` or
   `ADD TABLES IN SCHEMA` (the latter is superuser-only); it refuses a `FOR ALL TABLES` publication.
 - **`REPLICATION` is broad.** It also lets the role create slots and stream through the replication
-  protocol. There is no narrower slot-ownership grant: PostgreSQL 17 restricts `pg_drop_replication_slot`
+  protocol, which means it can decode every data change in the database (all of the WAL), whatever its
+  table grants. There is no narrower slot-ownership grant: PostgreSQL 17 restricts `pg_drop_replication_slot`
   (and the other replication-slot functions) to superusers and roles with the `REPLICATION` attribute, so
   owning the slot, or being a member of its owner, does not by itself permit the call. The slot is usually
   owned by Debezium's own replication user.
@@ -145,6 +146,6 @@ Notes:
 
 - [ ] Write mode stays off until your approvers have used read-only rooms; then `PIPEROOM_WRITE_MODE=on`.
 - [ ] `SOURCE_DB_WRITE_URL` is a separate write role, never the read-only `SOURCE_DB_URL` role, and never has `default_transaction_read_only = on`.
-- [ ] The source write role owns only the publication and the source tables `pg_add_publication_table` may add; it has `INSERT` on the signal table only; it has `REPLICATION` and nothing else.
+- [ ] The source write role owns only the publication and the source tables `pg_add_publication_table` may add; it has `INSERT` on the signal table only; it has `REPLICATION`; and, only for a [source admin action](source-admin.md) you enable: `SELECT ... WITH GRANT OPTION` on the captured tables it does not already own (`source_grant_select`), membership in `pg_signal_backend` (`source_end_session`), `CREATE` on the captured tables' schema (`source_create_heartbeat_table`). Each of those may stay ungranted. Nothing else.
 - [ ] The Connect proxy allow-list adds only `PUT /connectors/{name}/pause` and `PATCH /connectors/{name}/config`, on the pipeline's connectors.
 - [ ] The Kafka principal gains only `Read` on the pipeline's groups, `Write` on its CDC topics and the signal topic, and `IdempotentWrite` on the cluster.

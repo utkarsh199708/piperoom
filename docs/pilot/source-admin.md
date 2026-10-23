@@ -64,10 +64,14 @@ re-grant it (`source_admin.go:104-112`).
 
 **Minimal grant — two roles.** Piperoom's write role is the grantor, and a grantor must own the table or
 hold the privilege with grant option: `GRANT SELECT ON public.orders TO piperoom_writer WITH GRANT
-OPTION;`, repeat per captured table, or the ownership above. This is the one place the write role gets
+OPTION;`, repeat per captured table, or the ownership above. If the write role already owns the tables
+(for `pg_set_replica_identity` or `pg_add_publication_table`), grant nothing more: add the grant option
+only on tables it does not own. This is the one place the write role gets
 plain `SELECT` on data (grant option includes the privilege); keep it to those tables. It is the
 exception to write-roles.md's "do not grant `SELECT` to the writer". The connector's role is the grantee:
-it gains `SELECT` on the tables it could not read, and Piperoom's read role gets nothing.
+it gains `SELECT` on the tables it could not read, and Piperoom's read role gets nothing. If giving the
+write role read access to captured data is too much, leave this ungranted: `Execute` refuses with the
+error below and a DBA runs the `GRANT` by hand.
 
 **Missing grant.** SQLSTATE `42501` becomes `grant: the write role must own the tables or hold GRANT OPTION
 on them`; a missing table or role is `ErrNotFound` (`source_admin.go:232-239`). Nothing is granted.
@@ -96,7 +100,10 @@ WHERE a.pid = $1 AND a.backend_start = $2;       -- only the session that was re
 **Minimal grant.** A superuser, or membership in `pg_signal_backend`, on Piperoom's write role:
 `GRANT pg_signal_backend TO piperoom_writer;` (`source_admin.go:326-331`). The connector's role needs
 nothing. `pg_signal_backend` is a broad grant, like `REPLICATION` in write-roles.md: an attribute of the
-role, not a per-session right.
+role, not a per-session right. It is cluster-wide: it lets the role terminate any non-superuser session
+in every database on the server, and the protections above are Piperoom's checks, not PostgreSQL's, so a
+leaked write-role password is not bound by them. On a shared cluster, leave it ungranted: `Execute`
+refuses with the error below and a DBA runs `pg_terminate_backend` by hand.
 
 **Missing grant.** SQLSTATE `42501` becomes `terminate: needs a superuser or pg_signal_backend`, and no
 session is ended (`source_admin.go:384-388`). The other refusals come before any terminate call:
