@@ -83,7 +83,14 @@ services:
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-    ports: ["8083:8083"]
+      # Prometheus JMX exporter (dev/connect/Dockerfile, rules in
+      # dev/connect/jmx-exporter.yml): debezium_metrics_* and kafka_connect_* on
+      # :9404/metrics, the server's DEBEZIUM_METRICS_URL (dev/README.md). A JVM
+      # started with `docker exec` in this container inherits it and cannot bind
+      # 9404 again: run such a command with `-e KAFKA_OPTS=`.
+      KAFKA_OPTS: -javaagent:/kafka/etc/jmx_prometheus_javaagent.jar=9404:/kafka/etc/jmx-exporter.yml
+    # The exporter takes no login: host loopback only.
+    ports: ["8083:8083", "127.0.0.1:9404:9404"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
       interval: 5s
@@ -238,6 +245,44 @@ services:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
       interval: 5s
       retries: 40
+
+  # Worker logs (Q3d, dev/README.md "Logs profile"): Promtail tails the `connect`
+  # container's output through the Docker API and pushes it to Loki, which the
+  # server reads as WORKER_LOGS_LOKI_URL (connect_worker_logs). Profile "logs":
+  # `docker compose --profile logs up -d --wait` starts them with the default
+  # services; without the profile nothing here starts.
+  loki:
+    profiles: ["logs"]
+    image: grafana/loki:3.5.7
+    command: ["-config.file=/etc/loki/piperoom.yml"]
+    volumes:
+      - ./logs/loki.yml:/etc/loki/piperoom.yml:ro
+    # Host loopback only: Loki runs without auth (auth_enabled: false).
+    ports: ["127.0.0.1:3100:3100"]
+    healthcheck:
+      # The image is distroless with busybox under /busybox.
+      test: ["CMD", "/busybox/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+      interval: 5s
+      retries: 24
+
+  promtail:
+    profiles: ["logs"]
+    image: grafana/promtail:3.5.7
+    command: ["-config.file=/etc/promtail/piperoom.yml"]
+    depends_on:
+      loki: { condition: service_healthy }
+      connect: { condition: service_started }
+    volumes:
+      - ./logs/promtail.yml:/etc/promtail/piperoom.yml:ro
+      # Read-only Docker API access, to find the connect container and read its
+      # output (Docker Desktop provides the socket at this path on Windows too).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      # /ready answers 200 once Promtail tails at least one target, i.e. it found
+      # the connect container. The image has bash but neither curl nor wget.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9080 && printf 'GET /ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
+      interval: 5s
+      retries: 24
 
   # Staging stack (X8, dev/README.md "Staging profile"): a second Schema
   # Registry and a second Connect worker on the SAME Kafka, to try a fix on

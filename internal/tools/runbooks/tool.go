@@ -33,6 +33,7 @@ type Tool struct {
 	df    map[string]int // number of sections containing the term in any field
 	avgDL float64        // mean weighted section length
 	p     params
+	ki    issueIndex
 }
 
 var _ tools.Tool = (*Tool)(nil)
@@ -54,6 +55,14 @@ type unit struct {
 
 // New builds the tool. The runbooks are parsed already (Load/Embedded).
 func New(rbs []Runbook) *Tool { return newWithParams(rbs, defaultParams) }
+
+// NewWithKnownIssues builds the tool over runbooks and the known-issues index
+// (LoadKnownIssues/EmbeddedKnownIssues); a nil index means none.
+func NewWithKnownIssues(rbs []Runbook, ki *KnownIssues) *Tool {
+	t := newWithParams(rbs, defaultParams)
+	t.ki = newIssueIndex(ki, t.p)
+	return t
+}
 
 func newWithParams(rbs []Runbook, p params) *Tool {
 	t := &Tool{rbs: rbs, syn: newSynonyms(), df: map[string]int{}, p: p}
@@ -85,13 +94,18 @@ func newWithParams(rbs []Runbook, p params) *Tool {
 	return t
 }
 
-// Register adds runbook_lookup over the embedded library to reg.
+// Register adds runbook_lookup over the embedded library and known-issues
+// index to reg. A bad library file fails here, at start-up.
 func Register(reg *tools.Registry) error {
 	rbs, err := Embedded()
 	if err != nil {
 		return err
 	}
-	if err := reg.Register(New(rbs)); err != nil {
+	ki, err := EmbeddedKnownIssues()
+	if err != nil {
+		return err
+	}
+	if err := reg.Register(NewWithKnownIssues(rbs, ki)); err != nil {
 		return fmt.Errorf("runbooks: register: %w", err)
 	}
 	return nil
@@ -105,10 +119,10 @@ func (t *Tool) Kind() tools.Kind { return tools.KindRead }
 
 // Description implements tools.Tool.
 func (t *Tool) Description() string {
-	return "Looks up sourced runbook sections for 7 CDC/Kafka failure modes: replication slot/WAL growth, " +
-		"failed Debezium connector, schema incompatibility, consumer lag, poison pill, retention data loss and " +
-		"source DDL. Returns matching sections with official doc links. Reference text, not live data: " +
-		"confirm with the read tools."
+	return "Looks up sourced runbooks for 7 CDC/Kafka failure modes (slot/WAL growth, failed connector, schema " +
+		"incompatibility, lag, poison pill, retention loss, source DDL) and known version issues (renamed keys, " +
+		"removed plugins, fixed bugs). Pass versions to rank issues that hit them first with the fixed-in " +
+		"release. Reference text, not live data."
 }
 
 // InputSchema implements tools.Tool. Strict tool use rejects numeric and
@@ -118,7 +132,20 @@ func (t *Tool) InputSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Symptoms, error text, config or tool names to look up."},
-			"max_results": map[string]any{"type": "integer", "description": "How many sections, 1-5. Default 3."},
+			"max_results": map[string]any{"type": "integer", "description": "How many sections and known issues, 1-5. Default 3."},
+			"versions": map[string]any{
+				"type":        "array",
+				"description": "Running versions, e.g. {component: debezium-postgres, version: 2.1.4.Final}.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"component": map[string]any{"type": "string", "enum": issueComponents},
+						"version":   map[string]any{"type": "string"},
+					},
+					"required":             []string{"component", "version"},
+					"additionalProperties": false,
+				},
+			},
 		},
 		"additionalProperties": false,
 		"required":             []string{"query"},
@@ -144,8 +171,9 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		return tools.Result{}, err
 	}
 	var p struct {
-		Query      string `json:"query"`
-		MaxResults int    `json:"max_results"`
+		Query      string           `json:"query"`
+		MaxResults int              `json:"max_results"`
+		Versions   []RunningVersion `json:"versions"`
 	}
 	if len(bytes.TrimSpace(input)) == 0 {
 		return tools.Result{}, fmt.Errorf("%w: empty input", tools.ErrBadInput)
@@ -166,6 +194,10 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 	case p.MaxResults < 0:
 		return tools.Result{}, fmt.Errorf("%w: max_results must be 1-5", tools.ErrBadInput)
 	}
+	vs, err := runningVersions(p.Versions)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	n := p.MaxResults
 	if n == 0 {
 		n = defaultResults
@@ -174,7 +206,12 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 
 	hits := t.search(p.Query, n)
 	data := map[string]any{"query": p.Query, "hits": hits}
-	if len(hits) == 0 {
+	var issues []issueHit
+	if len(t.ki.list) > 0 {
+		issues = t.ki.search(t.queryTerms(p.Query), vs, t.p, n)
+		data["known_issues"] = issues
+	}
+	if len(hits) == 0 && len(issues) == 0 {
 		titles := make([]string, len(t.rbs))
 		for i, rb := range t.rbs {
 			titles[i] = rb.Title
@@ -182,15 +219,30 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		s, tr := tools.Truncate(fmt.Sprintf("No runbook section matched %q. Runbooks: %s", p.Query, strings.Join(titles, "; ")))
 		return tools.Result{Summary: s, Data: data, Truncated: tr}, nil
 	}
-	var sb strings.Builder
+	var rb, ki strings.Builder
 	for i, h := range hits {
 		if i > 0 {
-			sb.WriteString("\n\n")
+			rb.WriteString("\n\n")
 		}
-		fmt.Fprintf(&sb, "[%d] %s › %s (score %d)\n%s\nSources: %s",
+		fmt.Fprintf(&rb, "[%d] %s › %s (score %d)\n%s\nSources: %s",
 			i+1, h.Title, h.Section, h.Score, cutBytes(h.Text, maxHitTextBytes), strings.Join(h.Sources, "; "))
 	}
-	s, tr := tools.Truncate(sb.String())
+	if len(issues) > 0 {
+		ki.WriteString("Known issues:")
+		for i, h := range issues {
+			ki.WriteString("\n" + h.line(i))
+		}
+	}
+	// An issue that hits the running version is the most specific answer, so it
+	// leads (truncation cuts the end); otherwise the runbooks lead.
+	parts := []string{rb.String(), ki.String()}
+	if len(issues) > 0 && issues[0].Affects == "yes" {
+		parts[0], parts[1] = parts[1], parts[0]
+	}
+	if len(hits) == 0 {
+		parts = []string{fmt.Sprintf("No runbook section matched %q.", p.Query), ki.String()}
+	}
+	s, tr := tools.Truncate(strings.Join(slices.DeleteFunc(parts, func(x string) bool { return x == "" }), "\n\n"))
 	return tools.Result{Summary: s, Data: data, Truncated: tr}, nil
 }
 
@@ -292,4 +344,27 @@ func cutBytes(s string, n int) string {
 		n--
 	}
 	return s[:n] + "…"
+}
+
+// runningVersions checks the versions input and keys it by component. An
+// unknown component or a version that does not parse is the model's mistake,
+// so it is refused rather than ignored.
+func runningVersions(in []RunningVersion) (map[string]string, error) {
+	if len(in) > maxVersions {
+		return nil, fmt.Errorf("%w: %d versions, at most %d", tools.ErrBadInput, len(in), maxVersions)
+	}
+	vs := make(map[string]string, len(in))
+	for _, v := range in {
+		if !slices.Contains(issueComponents, v.Component) {
+			return nil, fmt.Errorf("%w: versions: component %q is not one of %s", tools.ErrBadInput, v.Component, strings.Join(issueComponents, ", "))
+		}
+		if _, err := parseVersion(v.Version); err != nil {
+			return nil, fmt.Errorf("%w: versions: %s: %v", tools.ErrBadInput, v.Component, err)
+		}
+		if _, dup := vs[v.Component]; dup {
+			return nil, fmt.Errorf("%w: versions: %s given twice", tools.ErrBadInput, v.Component)
+		}
+		vs[v.Component] = strings.TrimSpace(v.Version)
+	}
+	return vs, nil
 }

@@ -1,0 +1,186 @@
+# Known issues: bugs fixed in a later release (plan §6, theme 4).
+# "fixed_in" is the first release whose changelog lists the fix
+# (github.com/debezium/debezium CHANGELOG.md); a fix may also be backported to a
+# patch release of an older series. "affected" is every release before the fix
+# unless the issue names where the problem started.
+
+- id: dbz-pg-slot-advance-pg10
+  title: Postgres connector calls pg_replication_slot_advance, which Postgres 10 does not have
+  component: debezium-postgres
+  theme: fixed-bug
+  affected: "<2.3.0.Alpha1"
+  fixed_in: "2.3.0.Alpha1"
+  symptoms: [pg_replication_slot_advance, function does not exist, postgres 10, slot advance]
+  workaround: Upgrade the connector to the fixed release, or the database to Postgres 11 or later.
+  source: https://issues.redhat.com/browse/DBZ-6353
+
+- id: dbz-pg-null-confirmed-flush-lsn
+  title: Postgres connector gets stuck when the replication slot has no confirmed_flush_lsn
+  component: debezium-postgres
+  theme: fixed-bug
+  affected: "<2.2.0.Beta1"
+  fixed_in: "2.2.0.Beta1"
+  symptoms: [confirmed_flush_lsn, restart_lsn, connector stuck, replication slot, null lsn]
+  workaround: >-
+    Upgrade the connector. Until then, check pg_replication_slots for a null confirmed_flush_lsn on the
+    connector's slot; a slot that never confirmed a position is usually recreated with a new snapshot.
+  source: https://issues.redhat.com/browse/DBZ-6092
+
+- id: dbz-pg-toast-array-placeholder
+  title: Unchanged TOASTed array columns get the unavailable placeholder even with REPLICA IDENTITY FULL
+  component: debezium-postgres
+  theme: fixed-bug
+  affected: "<2.5.0.Beta1"
+  fixed_in: "2.5.0.Beta1"
+  symptoms: [__debezium_unavailable_value, unavailable.value.placeholder, toast, array column, REPLICA IDENTITY FULL]
+  workaround: Upgrade the connector; until then treat the placeholder in array columns as "unchanged" downstream.
+  source: https://issues.redhat.com/browse/DBZ-7193
+
+- id: dbz-adhoc-snapshot-uncaptured-schema
+  title: Ad hoc snapshot of a table whose schema was not captured fails
+  component: debezium
+  theme: fixed-bug
+  affected: "<3.0.5.Final"
+  fixed_in: "3.0.5.Final"
+  symptoms: [execute-snapshot, ad hoc snapshot, new table, schema not captured, store.only.captured.tables.ddl, signal]
+  workaround: >-
+    Upgrade to the fixed release. On older releases, a table added to table.include.list after the
+    first snapshot needs its schema in the history first: with
+    schema.history.internal.store.only.captured.tables.ddl=true, run a recovery snapshot
+    (snapshot.mode=recovery) before the ad hoc snapshot.
+  source: https://issues.redhat.com/browse/DBZ-4903
+
+- id: dbz-incremental-snapshot-restart-offset
+  title: Incremental snapshot offset fails to load on task restart
+  component: debezium
+  theme: fixed-bug
+  affected: "<3.3.0.Alpha2"
+  fixed_in: "3.3.0.Alpha2"
+  symptoms: [incremental snapshot, task restart, snapshot restarts, resume snapshot, offset load]
+  workaround: Upgrade; until then avoid restarting tasks during an incremental snapshot, or re-send the execute-snapshot signal.
+  source: https://issues.redhat.com/browse/DBZ-9209
+
+- id: dbz-sqlserver-incremental-resume
+  title: SQL Server connector cannot resume an incremental snapshot after restart
+  component: debezium-sqlserver
+  theme: fixed-bug
+  affected: "<3.4.0.Beta1"
+  fixed_in: "3.4.0.Beta1"
+  symptoms: [incremental snapshot, sql server, resume, restart, snapshot stuck]
+  workaround: Upgrade the connector; until then re-send the execute-snapshot signal after a restart.
+  source: https://issues.redhat.com/browse/DBZ-9533
+
+- id: dbz-blocking-snapshot-restart
+  title: A blocking snapshot interrupted by a restart is not reliably completed
+  component: debezium
+  theme: fixed-bug
+  affected: "<3.0.2.Final"
+  fixed_in: "3.0.2.Final"
+  symptoms: [blocking snapshot, restart, snapshot incomplete, execute-snapshot blocking]
+  workaround: Upgrade; until then check the snapshot completed (snapshot metrics, row counts) after any restart and re-send the signal.
+  source: https://issues.redhat.com/browse/DBZ-7903
+
+- id: dbz-blocking-snapshot-streaming-resume
+  title: Blocking snapshot does not always resume streaming when the task is shutting down
+  component: debezium
+  theme: fixed-bug
+  affected: "<3.2.0.Beta1"
+  fixed_in: "3.2.0.Beta1"
+  symptoms: [blocking snapshot, streaming not resumed, no events after snapshot, task shutdown]
+  workaround: Upgrade; until then restart the connector if streaming does not resume after a blocking snapshot.
+  source: https://issues.redhat.com/browse/DBZ-9055
+
+- id: dbz-no-data-restart-validation
+  title: snapshot.mode=no_data throws on restart when the snapshot did not complete
+  component: debezium
+  theme: fixed-bug
+  affected: ">=2.6.0.CR1 <2.7.0.Alpha1"
+  fixed_in: "2.7.0.Alpha1"
+  symptoms: [no_data, DebeziumException, snapshot not completed, restart, snapshot.mode validation]
+  workaround: Upgrade to 2.7; on 2.6 let the no_data snapshot finish before restarting the connector.
+  source: https://issues.redhat.com/browse/DBZ-7780
+
+- id: dbz-signal-collection-no-include-list
+  title: Snapshot captures no data when signal.data.collection is set without table.include.list
+  component: debezium
+  theme: fixed-bug
+  affected: "<2.4.0.Alpha2"
+  fixed_in: "2.4.0.Alpha2"
+  symptoms: [signal.data.collection, table.include.list, snapshot no data, empty snapshot]
+  workaround: Upgrade, or set table.include.list explicitly (including the signal table).
+  source: https://issues.redhat.com/browse/DBZ-6669
+
+- id: dbz-mysql-ddl-secondary-engine
+  title: MySQL DDL parser fails on SECONDARY_ENGINE=RAPID
+  component: debezium-mysql
+  theme: fixed-bug
+  affected: "<3.0.1.Final"
+  fixed_in: "3.0.1.Final"
+  symptoms: [DDL statement couldn't be parsed, ParsingException, SECONDARY_ENGINE, RAPID, HeatWave]
+  workaround: >-
+    Upgrade the connector. schema.history.internal.skip.unparseable.ddl=true gets past it but can leave
+    the stored schema wrong; use it only with a recovery snapshot planned.
+  source: https://issues.redhat.com/browse/DBZ-8305
+
+- id: dbz-mysql-ddl-grant-sensitive-variables
+  title: MySQL DDL parser fails on GRANT SENSITIVE_VARIABLES_OBSERVER
+  component: debezium-mysql
+  theme: fixed-bug
+  affected: "<3.1.0.Alpha2"
+  fixed_in: "3.1.0.Alpha2"
+  symptoms: [DDL statement couldn't be parsed, ParsingException, GRANT, SENSITIVE_VARIABLES_OBSERVER]
+  workaround: Upgrade the connector; a GRANT changes no table schema, so skipping it with skip.unparseable.ddl is low risk.
+  source: https://issues.redhat.com/browse/DBZ-8685
+
+- id: dbz-mysql-ddl-authentication-policy-admin
+  title: MySQL DDL parser fails on AUTHENTICATION_POLICY_ADMIN
+  component: debezium-mysql
+  theme: fixed-bug
+  affected: "<2.3.0.Beta1"
+  fixed_in: "2.3.0.Beta1"
+  symptoms: [DDL statement couldn't be parsed, ParsingException, AUTHENTICATION_POLICY_ADMIN, GRANT]
+  workaround: Upgrade the connector; a GRANT changes no table schema, so skipping it with skip.unparseable.ddl is low risk.
+  source: https://issues.redhat.com/browse/DBZ-6479
+
+- id: dbz-mysql-create-database-ignored
+  title: MySQL connector does not act on CREATE DATABASE records in the binlog
+  component: debezium-mysql
+  theme: fixed-bug
+  affected: "<3.0.5.Final"
+  fixed_in: "3.0.5.Final"
+  symptoms: [CREATE DATABASE, new database, database.include.list, schema history, binlog]
+  workaround: Upgrade; until then a database created after the connector started may need a recovery snapshot before its tables are captured.
+  source: https://issues.redhat.com/browse/DBZ-8291
+
+- id: dbz-pg-flush-lsn-backwards
+  title: pg_stat_replication.flush_lsn can move backwards with lsn.flush.mode=connector_and_driver
+  component: debezium-postgres
+  theme: fixed-bug
+  affected: "<3.5.0.Alpha1"
+  fixed_in: "3.5.0.Alpha1"
+  symptoms: [flush_lsn, lsn.flush.mode, connector_and_driver, pg_stat_replication, lsn moves backwards]
+  workaround: Upgrade, or use the default lsn.flush.mode until then.
+  source: https://github.com/debezium/dbz/issues/1489
+
+- id: dbz-mariadb-failover-schema-unknown
+  title: MariaDB failover restart reports a change event whose schema isn't known
+  component: debezium-mariadb
+  theme: fixed-bug
+  affected: ">=2.7.0.Alpha1 <3.6.0.Beta2"
+  fixed_in: "3.6.0.Beta2"
+  symptoms: [whose schema isn't known to this connector, Encountered change event, failover, mariadb, schema history]
+  workaround: Upgrade the MariaDB connector; until then a recovery snapshot (snapshot.mode=recovery) rebuilds the history.
+  source: https://github.com/debezium/dbz/issues/1672
+
+- id: dbz-tombstones-break-old-sinks
+  title: Debezium delete tombstones break sinks that do not accept null values
+  component: debezium
+  theme: fixed-bug
+  affected: "*"
+  symptoms: [tombstone, null value, NullPointerException, tombstones.on.delete, sink, delete]
+  workaround: >-
+    Keep tombstones for compacted topics and fix the sink to accept them; if the sink cannot, set
+    tombstones.on.delete=false on the connector or drop them with ExtractNewRecordState
+    (delete.tombstone.handling.mode=drop). On 3.2+ delete-to-tombstone turns deletes into tombstones
+    for sinks that delete on null.
+  source: https://issues.redhat.com/browse/DBZ-9022
