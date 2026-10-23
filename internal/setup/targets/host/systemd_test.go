@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -617,8 +618,14 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 		t.Errorf("unit:\n%s", u)
 	}
 	// The project reached through a symlink: the resolved JDK path is
-	// still recognised as inside it.
-	real := t.TempDir()
+	// still recognised as inside it. javaHome only ever sees a fully
+	// resolved path (ResolvePath is filepath.EvalSymlinks in production),
+	// so real is resolved too: t.TempDir() itself can sit under a
+	// symlinked parent (macOS /var -> /private/var).
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	link := t.TempDir() + "/p"
 	mustSymlink(t, real, link)
 	g := newFixtureIn(t, link, Options{})
@@ -626,6 +633,34 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 	g.java = real + "/jdk/bin/java"
 	if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
 		t.Errorf("JAVA_HOME inside the symlinked project: %v", err)
+	}
+}
+
+// TestJavaHomeUnderASymlinkedParent: the project directory is given through
+// a symlinked parent (as t.TempDir() is on macOS, /var -> /private/var) and
+// java is found through that unresolved path. With the production resolver
+// the JDK inside the project is still refused, whichever spelling PATH used.
+func TestJavaHomeUnderASymlinkedParent(t *testing.T) {
+	parent := t.TempDir()
+	via := t.TempDir() + "/var"
+	mustSymlink(t, parent, via)
+	project := via + "/proj"
+	if err := os.MkdirAll(parent+"/proj/jdk/bin", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parent+"/proj/jdk/bin/java", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := newFixtureIn(t, project, Options{ResolvePath: filepath.EvalSymlinks})
+	g.distribution()
+	for _, java := range []string{project + "/jdk/bin/java", parent + "/proj/jdk/bin/java"} {
+		g.java = java
+		if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
+			t.Errorf("JAVA_HOME via %s: %v, want ErrDetect", java, err)
+		}
+	}
+	if calls := g.exec.argvs(); len(calls) != 0 {
+		t.Errorf("commands ran: %q", calls)
 	}
 }
 
