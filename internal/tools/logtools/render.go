@@ -86,6 +86,20 @@ func render(lines []workerlogs.LogLine, q query, until time.Time, selector strin
 	if data.Lines == nil {
 		data.Lines = []workerlogs.LogLine{}
 	}
+	// Data is trimmed before the summary is worded, so the summary never
+	// claims lines data does not hold. The injection hits index Data.Lines, so
+	// they move with the trim.
+	data, dataCut := fitData(data)
+	if drop := len(kept) - len(data.Lines); drop > 0 && len(data.Injection) > 0 {
+		keptHits := data.Injection[:0]
+		for _, h := range data.Injection {
+			if h.Line >= drop {
+				h.Line -= drop
+				keptHits = append(keptHits, h)
+			}
+		}
+		data.Injection = keptHits
+	}
 
 	var head strings.Builder
 	if len(kept) == 0 {
@@ -130,7 +144,13 @@ func render(lines []workerlogs.LogLine, q query, until time.Time, selector strin
 		shown++
 	}
 	if shown < len(kept) {
-		fmt.Fprintf(&head, " This summary shows the newest %d line(s); all %d are in data.", shown, len(kept))
+		if dataCut {
+			fmt.Fprintf(&head, " This summary shows the newest %d of %d line(s); data holds the newest %d.", shown, len(kept), len(data.Lines))
+		} else {
+			fmt.Fprintf(&head, " This summary shows the newest %d line(s); all %d are in data.", shown, len(kept))
+		}
+	} else if dataCut {
+		fmt.Fprintf(&head, " Data holds the newest %d line(s); the rest did not fit the 64 KiB event cap.", len(data.Lines))
 	}
 	body := make([]string, 0, shown)
 	for _, r := range kept[len(kept)-shown:] {
@@ -139,7 +159,6 @@ func render(lines []workerlogs.LogLine, q query, until time.Time, selector strin
 	summary := head.String() + open + strings.Join(body, "\n") + closing
 	summary, cut := tools.Truncate(summary)
 
-	data, dataCut := fitData(data)
 	data.TextBytes = 0
 	for _, l := range data.Lines {
 		data.TextBytes += len(formatLine(l)) + 1
