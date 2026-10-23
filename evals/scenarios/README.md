@@ -415,9 +415,9 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `40 scenario(s) OK` here (38 before the two X2e
-  recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the four CH-4 ClickHouse
-  ones), and `-set heldout` 6.
+  `go run ./evals/cmd/evalrun -validate` reports `44 scenario(s) OK` here (40 before the four Q3f/Q5f
+  ones, 38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30
+  before the four CH-4 ClickHouse ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.
