@@ -24,7 +24,9 @@ import (
 // clients.SourceSettingsReader). Q0 has not moved it into clients.go yet, so
 // it lives in internal/clients/postgres (settings.go, Q2a #859). The DTOs here
 // are aliases of those types, so *postgres.DB satisfies the reader interfaces
-// below directly; each interface is the subset one action reads.
+// below directly; each interface is the subset one action reads. The MySQL
+// client (Q8b) declares its own copies of the DTOs, so the actions assert
+// these interfaces on srcneutral.Wrap(Source), which re-types it (Q8n).
 
 // TableReplication is a table's primary key presence and replica identity.
 type TableReplication = postgres.TableReplication
@@ -73,8 +75,9 @@ var (
 // (AGENTS.md §4 rule 4); the admin writer applies its own deadline.
 const opTimeout = 10 * time.Second
 
-// layerSource is the approving layer of every action here: the source
-// database's owner.
+// layerSource is Layer() of every action here: the Postgres source owner. A
+// source-neutral action is also SourceLayered, so on a MySQL pipeline its
+// step is approved by the mysql owner (LayerFor, source_kind.go).
 const layerSource = "postgres"
 
 // identRe is AGENTS.md §4 rule 6; NAMEDATALEN caps a Postgres name at 63

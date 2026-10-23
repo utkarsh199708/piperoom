@@ -12,6 +12,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -85,6 +86,17 @@ func (a *createHeartbeatTable) Describe() string {
 	return "Create the Debezium heartbeat table on the source database (CREATE TABLE IF NOT EXISTS <schema.table> (id integer PRIMARY KEY, ts timestamptz NOT NULL DEFAULT now())). " +
 		"Use it when a replication slot keeps WAL because the captured tables are quiet: with heartbeat.interval.ms and heartbeat.action.query writing to this table, the connector confirms a newer LSN. " +
 		"The table's name must contain heartbeat; it must be in a schema that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up steps: adding the table to a filtered publication (pg_add_publication_table) and setting heartbeat.action.query on the connector."
+}
+
+// DescribeFor is Describe for a MySQL pipeline (design §8.1); every other
+// kind gets Describe unchanged.
+func (a *createHeartbeatTable) DescribeFor(sourceKind string) string {
+	if !isMySQL(sourceKind) {
+		return a.Describe()
+	}
+	return "Create the Debezium heartbeat table on the source MySQL (CREATE TABLE IF NOT EXISTS `db`.`table` (id INT NOT NULL PRIMARY KEY, ts TIMESTAMP(6) NOT NULL) ENGINE=InnoDB). " +
+		"On MySQL heartbeat.interval.ms alone keeps the connector's stored position moving when the captured tables are quiet; the table is needed only for heartbeat.action.query. " +
+		"The table's name must contain heartbeat; it must be in a database that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up connect_update_connector_config step."
 }
 
 func (a *createHeartbeatTable) ParamsSchema() map[string]any {
@@ -228,6 +240,9 @@ func (a *createHeartbeatTable) Preview(ctx context.Context, raw json.RawMessage)
 	if err != nil {
 		return actions.PreviewResult{}, err
 	}
+	if isMySQL(stepKind(ctx, a.d.Source)) {
+		return mysqlHeartbeatPreview(p, cfg, a.tableState(ctx, p.Table)), nil
+	}
 	postgresSource := strings.Contains(cfg["connector.class"], "PostgresConnector")
 	var ps pubState
 	if postgresSource {
@@ -296,6 +311,84 @@ func heartbeatPreview(p heartbeatParams, cfg map[string]string, postgresSource b
 	return res
 }
 
+// tableState is whether the heartbeat table exists, read through the
+// source-neutral TableReplication (a missing table is clients.ErrNotFound):
+// "exists", "missing", or "" when it could not be read (note says why).
+type tableState struct {
+	known, exists bool
+	note          string
+}
+
+func (a *createHeartbeatTable) tableState(ctx context.Context, table string) tableState {
+	r, ok := srcneutral.Wrap(a.d.Source).(TableReplicationReader)
+	if !ok {
+		return tableState{note: "the source client cannot read tables, so whether " + table + " exists was not read"}
+	}
+	_, err := r.TableReplication(ctx, []string{table})
+	switch {
+	case errors.Is(err, clients.ErrNotFound):
+		return tableState{known: true}
+	case err != nil:
+		return tableState{note: "whether " + table + " exists was not read (" + errText(err) + ")"}
+	}
+	return tableState{known: true, exists: true}
+}
+
+// mysqlHeartbeatQuery is the MySQL form of the heartbeat query (design
+// §8.3): one row, updated in place.
+func mysqlHeartbeatQuery(table string) string {
+	return fmt.Sprintf("INSERT INTO %s (id, ts) VALUES (1, NOW(6)) ON DUPLICATE KEY UPDATE ts = NOW(6)", quoteMySQLTable(table))
+}
+
+// mysqlHeartbeatPreview is the MySQL preview (design §8.1): no publication
+// step (MySQL has none), and the follow-up connector change sets
+// heartbeat.interval.ms only; heartbeat.action.query is shown as optional.
+func mysqlHeartbeatPreview(p heartbeatParams, cfg map[string]string, ts tableState) actions.PreviewResult {
+	res := actions.PreviewResult{
+		Target:     fmt.Sprintf("heartbeat table %s on the source MySQL (connector %s)", p.Table, p.Connector),
+		Reversible: true,
+		Rollback:   fmt.Sprintf("DROP TABLE %s (by a DBA; no registered action), after removing any heartbeat.action.query from connector %s", quoteMySQLTable(p.Table), p.Connector),
+	}
+	var cur []string
+	switch {
+	case !ts.known:
+		cur = append(cur, ts.note)
+	case ts.exists:
+		cur = append(cur, p.Table+" already exists")
+	default:
+		cur = append(cur, p.Table+" does not exist")
+	}
+	interval := strings.TrimSpace(cfg["heartbeat.interval.ms"])
+	noHeartbeat := interval == "" || interval == "0"
+	if noHeartbeat {
+		cur = append(cur, "the connector sends no heartbeats (heartbeat.interval.ms unset or 0)")
+	} else {
+		cur = append(cur, "heartbeat.interval.ms is "+oneLine(interval, 20))
+	}
+	if q := strings.TrimSpace(cfg["heartbeat.action.query"]); q != "" {
+		cur = append(cur, fmt.Sprintf("heartbeat.action.query is set (%q)", oneLine(q, 120)))
+	}
+	res.Current = strings.Join(cur, "; ")
+
+	var b strings.Builder
+	if ts.exists {
+		fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s changes nothing: the table exists and its columns are not checked. ", quoteMySQLTable(p.Table))
+		res.Reversible, res.Rollback = false, ""
+	} else {
+		fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s (id INT NOT NULL PRIMARY KEY, ts TIMESTAMP(6) NOT NULL) ENGINE=InnoDB: a new empty table, no lock on any existing table. ", quoteMySQLTable(p.Table))
+	}
+	b.WriteString("On MySQL, heartbeat.interval.ms alone keeps the stored position moving when the captured tables are idle; the table is needed only for heartbeat.action.query. There is no publication step on MySQL.")
+	if noHeartbeat {
+		cj, _ := json.Marshal(map[string]any{"connector": p.Connector, "changes": map[string]string{"heartbeat.interval.ms": defaultHeartbeatIntervalMS}})
+		fmt.Fprintf(&b, " Follow-up step, proposed once this step has run: (1) connect_update_connector_config %s; Connect restarts the tasks once.", cj)
+	} else {
+		b.WriteString(" The connector already sends heartbeats, so no connector change is needed for the position to move.")
+	}
+	fmt.Fprintf(&b, " Only if heartbeat.action.query is wanted: %q.", mysqlHeartbeatQuery(p.Table))
+	res.Expected = b.String()
+	return res
+}
+
 // publicationText is the publication part of Current.
 func publicationText(ps pubState) string {
 	switch {
@@ -342,6 +435,9 @@ func (a *createHeartbeatTable) Execute(ctx context.Context, raw json.RawMessage)
 	}
 	if err := a.d.Writer.CreateHeartbeatTable(ctx, p.Table); err != nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", CreateHeartbeatTableName, err)
+	}
+	if isMySQL(stepKind(ctx, a.d.Source)) {
+		return fmt.Sprintf("heartbeat table %s exists. Next: set heartbeat.interval.ms on connector %s if it is unset; heartbeat.action.query (%s) is optional on MySQL.", p.Table, p.Connector, mysqlHeartbeatQuery(p.Table)), nil
 	}
 	return fmt.Sprintf("heartbeat table %s exists. Next: publish it if the publication is filtered, and set heartbeat.action.query (%s) on connector %s.", p.Table, heartbeatQuery(p.Table), p.Connector), nil
 }

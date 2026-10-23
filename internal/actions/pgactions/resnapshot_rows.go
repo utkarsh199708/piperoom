@@ -296,6 +296,9 @@ func (a *resnapshotRows) CheckScope(pl owners.Pipeline, raw json.RawMessage) err
 }
 
 func resnapInScope(pl owners.Pipeline, p resnapParams) error {
+	if err := refuseMySQL(ResnapshotRowsName, pl); err != nil {
+		return err
+	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {
 		return fmt.Errorf("pgactions: %s: %w: pipeline %q is not a CDC pipeline", ResnapshotRowsName, tools.ErrOutOfScope, pl.ID)
 	}

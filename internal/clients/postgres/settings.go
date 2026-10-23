@@ -53,11 +53,16 @@ type DBSetting struct {
 	PendingRestart bool   `json:"pending_restart,omitempty"`
 }
 
-// TableReplication is a table's primary key presence and replica identity.
+// TableReplication is a table's primary key presence, replica identity
+// (Postgres) and storage engine (MySQL).
 type TableReplication struct {
 	Table           string `json:"table"`
 	HasPrimaryKey   bool   `json:"has_primary_key"`
-	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none
+	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none (MySQL)
+	// Engine is the MySQL storage engine (InnoDB, MyISAM, ...); "" on
+	// Postgres. Additive, as docs/design/mysql-source.md §5.2 (b) has it
+	// (Q8n), so a MySQL read maps onto this type without loss (srcneutral).
+	Engine string `json:"engine,omitempty"`
 }
 
 // RoleInfo is a source role's login/replication rights and SELECT privilege
@@ -68,6 +73,16 @@ type RoleInfo struct {
 	CanLogin    bool            `json:"can_login"`
 	Replication bool            `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and CLIENT
 	Selectable  map[string]bool `json:"selectable"`  // table -> SELECT
+	// Accounts are the MySQL accounts ("user@host") with this user name;
+	// nil on Postgres. With more than one, every flag above and in
+	// Privileges is true only if it is true for every account. Additive
+	// (design §5.2 (b), Q8n).
+	Accounts []string `json:"accounts,omitempty"`
+	// Privileges are the further global privileges the source's CDC
+	// connector needs, by the source's own name (MySQL: RELOAD, LOCK TABLES,
+	// SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT); nil on
+	// Postgres. Additive (design §5.2 (b), Q8n).
+	Privileges map[string]bool `json:"privileges,omitempty"`
 }
 
 // DBSession is one session that can hold back logical replication. Query is

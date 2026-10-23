@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -78,6 +79,18 @@ func (a *endSession) Describe() string {
 		"Its open transaction is rolled back and its client sees a dropped connection. " +
 		"Take pid and started_at from source_blocking_sessions: the session must be listed there (with the same older_than_minutes) when the step is proposed and again right before it runs, with the same start time, and either hold or wait for a lock on one of the pipeline's source_tables (identity shown) or have blocks_slot true (it holds the oldest xid horizon, so this pipeline's slot cannot advance or be created; its identity stays withheld). " +
 		"Never ends a walsender, Piperoom's own sessions, or a session of the connector's database.user."
+}
+
+// DescribeFor is Describe for a MySQL pipeline (design §8.1); every other
+// kind gets Describe unchanged.
+func (a *endSession) DescribeFor(sourceKind string) string {
+	if !isMySQL(sourceKind) {
+		return a.Describe()
+	}
+	return "End one source MySQL session that holds the connector back (KILL CONNECTION): a long open transaction, or a session holding a metadata lock the snapshot waits for. " +
+		"KILL CONNECTION rolls back its open transaction (a large one can take as long to roll back as it ran) and its client sees a dropped connection. " +
+		"Take pid (the processlist id) and started_at (the transaction's start) from source_blocking_sessions: the session must be listed there (with the same older_than_minutes) when the step is proposed and again right before it runs, with the same start time, and hold or wait for a lock on one of the pipeline's source_tables. " +
+		"A session without an open transaction has no stable identity and is never ended. Never ends a binlog dump thread, Piperoom's own sessions, or a session of the connector's database.user."
 }
 
 func (a *endSession) ParamsSchema() map[string]any {
@@ -165,14 +178,15 @@ func (a *endSession) connectorUser(ctx context.Context, connector string) (strin
 // unscoped opt-out (pl nil). A client that cannot scope is refused, never
 // read in full.
 func (a *endSession) blockers(ctx context.Context, p endSessionParams, pl *owners.Pipeline) ([]DBSession, error) {
+	src := srcneutral.Wrap(a.d.Source)
 	if pl == nil {
-		r, ok := a.d.Source.(BlockerReader)
+		r, ok := src.(BlockerReader)
 		if !ok {
 			return nil, fmt.Errorf("sourceactions: %s: the source client cannot list blocking sessions (no Blockers)", EndSessionName)
 		}
 		return r.Blockers(ctx, p.olderThan())
 	}
-	r, ok := a.d.Source.(ScopedBlockerReader)
+	r, ok := src.(ScopedBlockerReader)
 	if !ok {
 		return nil, fmt.Errorf("sourceactions: %s: the source client cannot scope blocking sessions to pipeline %q's tables (no BlockersOnTables)", EndSessionName, pl.ID)
 	}
@@ -195,6 +209,13 @@ func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, pl *ow
 	for _, s := range sessions {
 		if s.PID != p.PID {
 			continue
+		}
+		if s.StartedAt.IsZero() {
+			// A MySQL session without an open transaction has no start time
+			// that a re-read could match, so pid alone would name it: never
+			// ended (design D3).
+			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d has no open transaction now, so it has no stable identity to re-check; nothing is ended: %w",
+				EndSessionName, p.PID, errRefused)
 		}
 		if !s.StartedAt.Equal(p.StartedAt) {
 			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d now names a session that started %s, not %s: %w: %w",
@@ -245,7 +266,7 @@ func (a *endSession) checkHiddenUser(ctx context.Context, p endSessionParams, co
 		return fmt.Errorf("sourceactions: %s: pid %d is a session of another user or database and connector %q's database.user is not readable (unset or a config provider reference), so it cannot be told apart from the connector's own session: %w",
 			EndSessionName, p.PID, p.Connector, errRefused)
 	}
-	r, ok := a.d.Source.(BlockerReader)
+	r, ok := srcneutral.Wrap(a.d.Source).(BlockerReader)
 	if !ok {
 		return fmt.Errorf("sourceactions: %s: pid %d is a session of another user or database and the source client cannot check its user (no Blockers): %w", EndSessionName, p.PID, errRefused)
 	}
@@ -340,6 +361,9 @@ func (a *endSession) Preview(ctx context.Context, raw json.RawMessage) (actions.
 		now = a.d.now
 	}
 	t := now()
+	if isMySQL(stepKind(ctx, a.d.Source)) {
+		return mysqlEndSessionPreview(res, p, s, t), nil
+	}
 	blocks := "holds a transaction older than the threshold"
 	if s.BlocksSlot {
 		blocks = "holds the server's oldest xmin, so the slot cannot advance past it"
@@ -359,6 +383,30 @@ func (a *endSession) Preview(ctx context.Context, raw json.RawMessage) (actions.
 	res.Reversible = false
 	res.Rollback = ""
 	return res, nil
+}
+
+// mysqlEndSessionPreview is the MySQL preview (design §8.1): the age, user,
+// program_name and redacted query of the session, and what KILL CONNECTION
+// does. On MySQL StartedAt is the open transaction's start, so the age is
+// the transaction's.
+func mysqlEndSessionPreview(res actions.PreviewResult, p endSessionParams, s DBSession, t time.Time) actions.PreviewResult {
+	res.Target = fmt.Sprintf("session (processlist id) %d, transaction started %s, on the source MySQL", p.PID, p.StartedAt.UTC().Format(time.RFC3339))
+	blocks := "holds a transaction older than the threshold"
+	if s.BlocksSlot {
+		blocks = "holds a metadata lock another session waits for (the connector's snapshot locking waits behind it)"
+	}
+	if s.InScope {
+		res.Current = fmt.Sprintf("pid %d: transaction age %s, user %q, program_name %q, state %q; %s; query (untrusted, redacted): %q",
+			s.PID, age(t, s.StartedAt), oneLine(s.User, 64), oneLine(s.App, 64), oneLine(s.State, 64), blocks, safeQuery(s.Query))
+	} else {
+		res.Current = fmt.Sprintf("pid %d: a session of another user or database; identity withheld. Transaction age %s, state %q; %s",
+			s.PID, age(t, s.StartedAt), oneLine(s.State, 64), blocks)
+	}
+	res.Expected = fmt.Sprintf("KILL CONNECTION %d, only if processlist id %d still runs the transaction that started at %s: KILL CONNECTION rolls back the open transaction (a large one can take as long to roll back as it ran) and its client sees a dropped connection. Re-checked against the blocking list right before it runs, and again by the writer on its own connection.",
+		p.PID, p.PID, p.StartedAt.UTC().Format(time.RFC3339Nano))
+	res.Reversible = false
+	res.Rollback = ""
+	return res
 }
 
 // age renders now - t, rounded to seconds; "unknown" for a zero time.
@@ -394,6 +442,9 @@ func (a *endSession) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	}
 	if err := a.d.Writer.EndSession(ctx, p.PID, p.StartedAt); err != nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", EndSessionName, err)
+	}
+	if isMySQL(stepKind(ctx, a.d.Source)) {
+		return fmt.Sprintf("killed connection %d (transaction started %s); its open transaction is rolling back, which can take as long as it ran. Check the connector with connect_status and source_blocking_sessions again.", p.PID, p.StartedAt.UTC().Format(time.RFC3339)), nil
 	}
 	return fmt.Sprintf("ended session pid %d (started %s); its open transaction was rolled back. Check the slot with the replication slot tools: it should advance.", p.PID, p.StartedAt.UTC().Format(time.RFC3339)), nil
 }
