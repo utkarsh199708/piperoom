@@ -17,6 +17,7 @@ import (
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/clients/postgres"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -42,6 +43,26 @@ func (w fakeSourceWriter) AddPublicationTables(context.Context, string, []string
 func (fakeSourceWriter) DropReplicationSlot(context.Context, string) error { return nil }
 func (fakeSourceWriter) InsertSnapshotSignal(context.Context, string, string, []string) (string, error) {
 	return "", nil
+}
+
+// The admin half (Q2b). It makes the fake a postgres.SourceAdminWriter, so
+// openWriters hands it to the Q2c/Q2d source actions the way the real
+// *postgres.Writer is handed over.
+func (w fakeSourceWriter) SetReplicaIdentity(context.Context, string, string, string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) GrantSelect(context.Context, string, []string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) CreateHeartbeatTable(context.Context, string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (w fakeSourceWriter) EndSession(context.Context, int64, time.Time) error {
+	w.writes.Add(1)
+	return nil
 }
 
 type fakeKafkaWriter struct{ *fakeWriter }
@@ -167,12 +188,17 @@ var readOnlyKafkaViews = map[reflect.Type]bool{
 // assertNoWriterReachable fails when any value the actions of areg can reach
 // could write: a P3 writer (SourceWriter, KafkaWriter, ConnectFixWriter, or
 // the record and offset-plan reads that only the Kafka writer has, outside
-// the read-only views above), a type with the Connect resume or one-key
-// config write the actions assert for, or a ConnectWriter /
-// SchemaRegistryWriter other than the refusing adapters.
+// the read-only views above), the source database admin writer (Q2e), a type
+// with the Connect resume or one-key config write the actions assert for, or
+// a ConnectWriter / SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	writers := []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}
+	writers := []reflect.Type{
+		ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](),
+		// Q2e: the source database admin writer the Q2c/Q2d actions Execute
+		// through; off, no action may reach one.
+		ifaceOf[postgres.SourceAdminWriter](),
+	}
 	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0

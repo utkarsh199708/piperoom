@@ -71,15 +71,18 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // sentences.". Restoring those needs the ceiling moved.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
-// CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "a3f8fbf037c533a8b2516627d729ef2d47bdfaf94c4687ab75abc9b6c04bd2be"
+// CDC evals and the prompt cache depend on these exact bytes. Q2e moved it on
+// purpose: the Fixes section now tells the model to read the source database
+// settings before a config change, paid for by tightening wording elsewhere
+// (1330 words, five under the ceiling).
+const cdcPromptSHA256 = "16adcdbdb2c14dd3d8a93bed37791a2784d76b9a5a45586cfb0df3121049f874"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
 // did Q4b.
-const cdcPromptWriteOffSHA256 = "0ca80e3aa092e00890223016f782199a6b309ed032bab43b11766c3625ccf40a"
+const cdcPromptWriteOffSHA256 = "1f2ee0cf867d34c03e04ee4626c77df509b4fa015509e70b3937ebbc4ddac776"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

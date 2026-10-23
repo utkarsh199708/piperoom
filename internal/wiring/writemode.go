@@ -38,13 +38,18 @@ type (
 	}
 )
 
-// writeClients are one set's P3 write clients, built only with write mode on.
+// writeClients are one set's write clients, built only with write mode on.
 // Only package actions may be handed them (clients.go, Reader/Writer split).
 type writeClients struct {
 	// source is nil without SOURCE_DB_WRITE_URL: the pg actions then refuse
 	// with "no write credentials".
 	source closingSourceWriter
-	kafka  closingKafkaWriter
+	// admin is the same value as source seen through the source admin methods
+	// (Q2b): the Q2c/Q2d sourceactions write only through it. It is set in the
+	// same place, so with write mode off no admin writer exists to be reached
+	// (nil, and the struct stays zero).
+	admin postgres.SourceAdminWriter
+	kafka closingKafkaWriter
 }
 
 // writerOpeners build the write clients; tests replace them so no stack is
@@ -108,6 +113,12 @@ func openWriters(ctx context.Context, cfg config.Config, awsCfg *aws.Config, op 
 		return writeClients{}, nil, fmt.Errorf("wiring: source postgres writer: %w", err)
 	}
 	wc.source = sw
+	// The admin methods are the same writer on the same pool (Q2b); a writer
+	// without them leaves admin nil, and the sourceactions then refuse
+	// Execute with "no write credentials" instead of reaching a half writer.
+	if aw, ok := sw.(postgres.SourceAdminWriter); ok {
+		wc.admin = aw
+	}
 	return wc, func() { sw.Close(); kw.Close() }, nil
 }
 
