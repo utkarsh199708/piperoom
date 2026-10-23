@@ -22,6 +22,13 @@ var sixScenarios = []string{
 	"setup/db-unreachable-from-connect",
 }
 
+// A digest of the shape the protocol produces (64 lowercase hex characters),
+// for fixtures that only need a valid one.
+var (
+	digestA = strings.Repeat("a", 64)
+	digestB = strings.Repeat("b", 64)
+)
+
 func TestLoadDirReadsTheSixSetupSessions(t *testing.T) {
 	recs, err := LoadDir("recordings")
 	if err != nil {
@@ -82,6 +89,10 @@ func TestLoadRejectsBrokenRecordings(t *testing.T) {
 		{"bad source", `{"scenario":"x","source":"sqlite","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}]}`, "not a setup source kind"},
 		{"bad target", `{"scenario":"x","target":"laptop","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}]}`, "not a setup target kind"},
 		{"bad tier", `{"scenario":"x","ops":[{"op":"env_detect","tier":"T9","refusal":{"reason":"guard"}}]}`, "not a protocol tier"},
+		{"short out_mac", `{"scenario":"x","ops":[{"op":"env_detect","result":{"ok":true,"summary":"s","receipt":{"out_mac":"abc"}}}]}`, "out_mac is not a 64-character lowercase hex digest"},
+		{"uppercase out_mac", `{"scenario":"x","ops":[{"op":"env_detect","result":{"ok":true,"summary":"s","receipt":{"out_mac":"` + strings.ToUpper(digestA) + `"}}}]}`, "out_mac is not a 64-character lowercase hex digest"},
+		{"bad params_hash", `{"scenario":"x","ops":[{"op":"compose_up","tier":"T1","params_hash":"h1","refusal":{"reason":"guard"}}]}`, "params_hash is not a 64-character lowercase hex digest"},
+		{"bad nonce_hash", `{"scenario":"x","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}],"ladder":{"plan_id":"pl_1","nonce_hash":"abc","verified":{"rungs":[{"name":"r","ok":true}]}}}`, "nonce_hash is not a 64-character lowercase hex digest"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,11 +118,11 @@ func TestLoadMissingFile(t *testing.T) {
 // refusal.
 func fixture(t *testing.T) Recording {
 	t.Helper()
-	const raw = `{
+	raw := `{
 	  "scenario": "setup/fixture",
 	  "ops": [
 	    {"op": "env_detect", "tier": "T0", "params": {},
-	     "result": {"ok": true, "summary": "docker present", "receipt": {"kind": "exec", "target": "env", "out_mac": "aa"}}},
+	     "result": {"ok": true, "summary": "docker present", "receipt": {"kind": "exec", "target": "env", "out_mac": "` + digestA + `"}}},
 	    {"op": "compose_write", "tier": "T2", "params": {"templates": ["postgres"]},
 	     "refusal": {"reason": "guard"}}
 	  ],
@@ -132,7 +143,7 @@ func TestSessionServesRecordedOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.OK || res.Summary != "docker present" || res.ID != "op_1" || res.Receipt.OutMAC != "aa" {
+	if !res.OK || res.Summary != "docker present" || res.ID != "op_1" || res.Receipt.OutMAC != digestA {
 		t.Errorf("result = %+v", res)
 	}
 	if s.Remaining() != 1 {
@@ -192,17 +203,19 @@ func TestSessionHonoursContext(t *testing.T) {
 }
 
 // TestSessionRefusesRequestsARunnerWouldRefuse: a recorded success answers
-// only the request it records. A lower tier, another proposal or params hash,
-// an extra key, a longer array or params against a {} recording is a miss.
+// only a request with the recorded semantics. A lower tier, an extra key, a
+// longer array or params against a {} recording is a miss. The proposal ID
+// and params hash are not part of that: they are per-run values, see
+// TestSessionMatchesLiveShapedRequest.
 func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
-	const raw = `{
+	raw := `{
 	  "scenario": "setup/strict",
 	  "ops": [
 	    {"op": "env_detect", "tier": "T0", "params": {},
-	     "result": {"ok": true, "summary": "docker present", "receipt": {"out_mac": "aa"}}},
-	    {"op": "compose_write", "tier": "T2", "proposal_id": "pr_1", "params_hash": "h1",
+	     "result": {"ok": true, "summary": "docker present", "receipt": {"out_mac": "` + digestA + `"}}},
+	    {"op": "compose_write", "tier": "T2", "proposal_id": "pr_1", "params_hash": "` + digestB + `",
 	     "params": {"templates": ["postgres"], "dir": "/srv"},
-	     "result": {"ok": true, "summary": "written", "receipt": {"out_mac": "bb"}}}
+	     "result": {"ok": true, "summary": "written", "receipt": {"out_mac": "` + digestA + `"}}}
 	  ]
 	}`
 	rec, err := Parse([]byte(raw), "strict.json")
@@ -210,7 +223,7 @@ func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := protocol.OpRequest{
-		Op: "compose_write", Tier: protocol.TierT2, ProposalID: "pr_1", ParamsHash: "h1",
+		Op: "compose_write", Tier: protocol.TierT2, ProposalID: "pr_1", ParamsHash: digestB,
 		Params: json.RawMessage(`{"dir":"/srv","templates":["postgres"]}`),
 	}
 	tests := []struct {
@@ -220,8 +233,6 @@ func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
 	}{
 		{"lower tier", func(r protocol.OpRequest) protocol.OpRequest { r.Tier = protocol.TierT1; return r }, "below the recorded"},
 		{"no tier", func(r protocol.OpRequest) protocol.OpRequest { r.Tier = ""; return r }, "below the recorded"},
-		{"wrong params hash", func(r protocol.OpRequest) protocol.OpRequest { r.ParamsHash = "h2"; return r }, "params_hash differs"},
-		{"wrong proposal", func(r protocol.OpRequest) protocol.OpRequest { r.ProposalID = "pr_2"; return r }, "proposal_id differs"},
 		{"extra key", func(r protocol.OpRequest) protocol.OpRequest {
 			r.Params = json.RawMessage(`{"dir":"/srv","templates":["postgres"],"privileged":true}`)
 			return r
@@ -254,5 +265,177 @@ func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
 	}
 	if _, err := s.Execute(context.Background(), "r_1", protocol.OpRequest{Op: "env_detect", Tier: protocol.TierT1, Params: json.RawMessage(`null`)}); err != nil {
 		t.Fatalf("higher tier, null params: %v", err)
+	}
+}
+
+// TestSessionMatchesLiveShapedRequest is the U1-20 follow-up: a live request
+// for a proposal op carries a proposal ID and params hash the recording never
+// held (the room mints a ULID per proposal and hashes it with the room), and
+// it must still be answered. The op, params, tier and step index are the
+// semantics; the ids are per-run.
+func TestSessionMatchesLiveShapedRequest(t *testing.T) {
+	raw := `{
+	  "scenario": "setup/live",
+	  "ops": [
+	    {"op": "source_grant_select", "tier": "T2", "proposal_id": "p_recorded",
+	     "step_index": 1, "params_hash": "` + digestA + `",
+	     "params": {"connector": "pg-orders-connector", "role": "devctl_setup_grant", "tables": ["public.orders"]},
+	     "result": {"ok": true, "summary": "granted", "receipt": {"kind": "sql", "target": "orders-db", "out_mac": "` + digestB + `"}}}
+	  ]
+	}`
+	rec, err := Parse([]byte(raw), "live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := 1
+	req := protocol.OpRequest{
+		ID: "op_live_1", Op: "source_grant_select", Tier: protocol.TierT2,
+		ProposalID: "p_01JAVERYLIVEPROPOSALID000", ParamsHash: digestB,
+		StepIndex: &step,
+		Params:    json.RawMessage(`{"connector":"pg-orders-connector","role":"devctl_setup_grant","tables":["public.orders"]}`),
+	}
+	s := NewSession(rec)
+	res, err := s.Execute(context.Background(), "r_live", req)
+	if err != nil {
+		t.Fatalf("a live-shaped request did not match: %v", err)
+	}
+	if !res.OK || res.ID != req.ID || res.Receipt.OutMAC != digestB {
+		t.Errorf("result = %+v, want the recorded success under the live request's id", res)
+	}
+	if s.Remaining() != 0 {
+		t.Errorf("remaining = %d, want 0", s.Remaining())
+	}
+}
+
+// TestSessionServesOutOfOrderRequests pins the documented matching rule: the
+// recording's order breaks ties between identical ops, it does not constrain
+// the caller's order. A model that reads the stack in another order still
+// gets the same answers.
+func TestSessionServesOutOfOrderRequests(t *testing.T) {
+	rec := fixture(t)
+	s := NewSession(rec)
+	ctx := context.Background()
+	// Ask for the recording's second op first, with the tier a live run sends.
+	_, err := s.Execute(ctx, "r_1", protocol.OpRequest{Op: "compose_write", Tier: protocol.TierT2, Params: json.RawMessage(`{"templates":["postgres"]}`)})
+	var refused *protocol.RefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("out-of-order compose_write: err = %v, want the recorded refusal", err)
+	}
+	if res, err := s.Execute(ctx, "r_1", protocol.OpRequest{Op: "env_detect"}); err != nil || !res.OK {
+		t.Fatalf("out-of-order env_detect: res %+v err %v", res, err)
+	}
+}
+
+// TestSessionServesIdenticalOpsInRecordedOrder: when two recorded ops have the
+// same name and params, one request takes the first and the next takes the
+// second, in recording order.
+func TestSessionServesIdenticalOpsInRecordedOrder(t *testing.T) {
+	raw := `{
+	  "scenario": "setup/repeated",
+	  "ops": [
+	    {"op": "net_probe", "tier": "T0", "params": {"from": "connect", "target": "postgres"},
+	     "result": {"ok": false, "summary": "timeout", "receipt": {"kind": "exec", "target": "connect", "out_mac": "` + digestA + `"}}},
+	    {"op": "net_probe", "tier": "T0", "params": {"from": "connect", "target": "postgres"},
+	     "result": {"ok": true, "summary": "ok", "receipt": {"kind": "exec", "target": "connect", "out_mac": "` + digestB + `"}}}
+	  ],
+	  "ladder": {"plan_id": "pl_1", "verified": {"rungs": [{"name": "r", "ok": true}]}}
+	}`
+	rec, err := Parse([]byte(raw), "repeated.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewSession(rec)
+	req := protocol.OpRequest{Op: "net_probe", Tier: protocol.TierT0, Params: json.RawMessage(`{"from":"connect","target":"postgres"}`)}
+	first, err := s.Execute(context.Background(), "r_1", req)
+	if err != nil || first.OK || first.Receipt.OutMAC != digestA {
+		t.Fatalf("first: res %+v err %v, want the recorded failure", first, err)
+	}
+	second, err := s.Execute(context.Background(), "r_1", req)
+	if err != nil || !second.OK || second.Receipt.OutMAC != digestB {
+		t.Fatalf("second: res %+v err %v, want the recorded success", second, err)
+	}
+}
+
+// TestVerifyReplaysTheSixRecordings is the recording-level half of the U1-20
+// scoring check: every recording answers live-shaped requests and its ladder
+// recomputes the recorded verification.
+func TestVerifyReplaysTheSixRecordings(t *testing.T) {
+	recs, err := LoadDir("recordings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range sixScenarios {
+		t.Run(name, func(t *testing.T) {
+			rec, ok := recs[name]
+			if !ok {
+				t.Fatalf("no recording")
+			}
+			c := Verify(context.Background(), rec)
+			if !c.OK() {
+				t.Fatalf("Verify failed: %v", c.Failures)
+			}
+			if c.Ops != len(rec.Ops) || c.Rungs != len(rec.Ladder.Verified.Rungs) {
+				t.Errorf("ops/rungs = %d/%d, want %d/%d", c.Ops, c.Rungs, len(rec.Ops), len(rec.Ladder.Verified.Rungs))
+			}
+		})
+	}
+}
+
+// TestVerifyFailsABrokenRecording: a ladder that does not reach the recorded
+// verdict, a missing verdict and a missing ladder are failures, never a pass.
+func TestVerifyFailsABrokenRecording(t *testing.T) {
+	recs, err := LoadDir("recordings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("rung differs", func(t *testing.T) {
+		rec := *recs["setup/flat-plugin-dir"]
+		ladder := *rec.Ladder
+		verified := *ladder.Verified
+		verified.Rungs = append([]Rung(nil), verified.Rungs...)
+		verified.Rungs[0].OK = false // the reads still say RUNNING
+		ladder.Verified = &verified
+		rec.Ladder = &ladder
+		c := Verify(context.Background(), &rec)
+		if c.OK() || !strings.Contains(strings.Join(c.Failures, ";"), "rung 0") {
+			t.Fatalf("Check = %+v, want a rung failure", c)
+		}
+	})
+	t.Run("no verdict", func(t *testing.T) {
+		rec := *recs["setup/missing-grant"]
+		ladder := *rec.Ladder
+		ladder.Verified = nil
+		rec.Ladder = &ladder
+		c := Verify(context.Background(), &rec)
+		if c.OK() || !strings.Contains(strings.Join(c.Failures, ";"), "no setup.verified verdict") {
+			t.Fatalf("Check = %+v, want a missing-verdict failure", c)
+		}
+	})
+	t.Run("no ladder", func(t *testing.T) {
+		rec := *recs["setup/wal-level-replica"]
+		rec.Ladder = nil
+		c := Verify(context.Background(), &rec)
+		if c.OK() || !strings.Contains(strings.Join(c.Failures, ";"), "records no ladder") {
+			t.Fatalf("Check = %+v, want a missing-ladder failure", c)
+		}
+	})
+	t.Run("missing read", func(t *testing.T) {
+		rec := *recs["setup/missing-grant"]
+		ladder := *rec.Ladder
+		ladder.Reads = nil // the rungs have nothing to read
+		ladder.Verified = recs["setup/missing-grant"].Ladder.Verified
+		rec.Ladder = &ladder
+		c := Verify(context.Background(), &rec)
+		if c.OK() {
+			t.Fatalf("Check = %+v, want a ladder failure with no reads", c)
+		}
+	})
+}
+
+// TestVerifyNilRecording is the defensive path: no recording is a failure, not
+// a panic and not a pass.
+func TestVerifyNilRecording(t *testing.T) {
+	if c := Verify(context.Background(), nil); c.OK() || len(c.Failures) != 1 {
+		t.Fatalf("Check = %+v, want one failure", c)
 	}
 }
