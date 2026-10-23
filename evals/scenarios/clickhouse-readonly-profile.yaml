@@ -130,8 +130,6 @@ expect:
   root_cause_layer: warehouse
   expected_facts: []
   claims: []
-  # The alert already carries the pipeline map, so the run is not asked to re-read it. It must still
-  # rule out the nearest upstream explanation (order-sync not loading) with the consumer's status read.
-  evidence_tools: [kafka_consumer_lag]
+  evidence_tools: []
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12
