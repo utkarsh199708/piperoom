@@ -1,0 +1,35 @@
+// Piperoom reference project ({{.SourceTitle}}, Debezium {{.Release}}). Piperoom never builds or runs it.
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = '{{.GroupID}}'
+version = '{{.ProjectVersion}}'
+
+repositories {
+    mavenCentral()
+}
+
+// One Debezium release for every io.debezium artifact, through the Debezium BOM.
+def debeziumVersion = '{{.Release}}'
+
+dependencies {
+    implementation platform("io.debezium:debezium-bom:${debeziumVersion}")
+    implementation 'io.debezium:debezium-api'
+    implementation 'io.debezium:debezium-embedded'
+    implementation 'io.debezium:{{.ConnectorArtifact}}'
+{{- if eq .Source "mysql"}}
+    implementation 'io.debezium:debezium-storage-file'
+{{- end}}
+    runtimeOnly 'org.slf4j:slf4j-simple:{{.SLF4JVersion}}'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = {{.JavaRelease}}
+}
+
+application {
+    mainClass = '{{.Package}}.ReferenceApp'
+}
