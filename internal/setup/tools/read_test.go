@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/room"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/tools"
 )
@@ -120,6 +119,19 @@ func TestRegisterRefusesAPlainRegistry(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresTheBoundRoom(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		reg := tools.NewReadOnlyRegistry()
+		err := Register(reg, Deps{Runner: &fakeRunner{}, RoomID: id})
+		if err == nil || !strings.Contains(err.Error(), "RoomID") {
+			t.Fatalf("Register(RoomID %q) = %v, want a refusal naming RoomID", id, err)
+		}
+		if got := len(reg.All()); got != 0 {
+			t.Fatalf("a refused Register added %d tools, want 0", got)
+		}
+	}
+}
+
 func TestReadToolsForwardOnlyTheirWhitelistedOp(t *testing.T) {
 	inputs := readInputs()
 	for name, op := range readOps {
@@ -186,7 +198,7 @@ func TestReadToolsRefuseUnknownInputFields(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeRunner{}
 			reg := tools.NewReadOnlyRegistry()
-			if err := Register(reg, Deps{Runner: f}); err != nil {
+			if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
 			tool, _ := reg.Get(name)
@@ -217,7 +229,7 @@ func TestReadToolsRefuseBadInput(t *testing.T) {
 		t.Run(tc.tool+string(tc.input), func(t *testing.T) {
 			f := &fakeRunner{}
 			reg := tools.NewReadOnlyRegistry()
-			if err := Register(reg, Deps{Runner: f}); err != nil {
+			if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
 			tool, _ := reg.Get(tc.tool)
@@ -234,7 +246,7 @@ func TestReadToolsRefuseBadInput(t *testing.T) {
 func TestReadToolsWithoutARunner(t *testing.T) {
 	inputs := readInputs()
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{}); err != nil {
+	if err := Register(reg, Deps{RoomID: "r"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	for name := range readOps {
@@ -245,14 +257,23 @@ func TestReadToolsWithoutARunner(t *testing.T) {
 	}
 }
 
+// ctxRoomKey stands in for the room package's context key: CallRoom is how
+// wiring hands this package room.RoomID without an import.
+type ctxRoomKey struct{}
+
+func callRoomFromCtx(ctx context.Context) string {
+	id, _ := ctx.Value(ctxRoomKey{}).(string)
+	return id
+}
+
 func TestReadToolRefusesAnotherRoomsCall(t *testing.T) {
 	f := &fakeRunner{}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r_one"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r_one", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tool, _ := reg.Get("env_detect")
-	ctx := room.WithRoomID(context.Background(), "r_two")
+	ctx := context.WithValue(context.Background(), ctxRoomKey{}, "r_two")
 	if _, err := tool.Run(ctx, json.RawMessage(`{}`)); !errors.Is(err, ErrNoRunner) {
 		t.Fatalf("Run for another room = %v, want ErrNoRunner", err)
 	}
@@ -261,20 +282,27 @@ func TestReadToolRefusesAnotherRoomsCall(t *testing.T) {
 	}
 }
 
-func TestReadToolTakesTheRoomsIDFromContext(t *testing.T) {
-	f := &fakeRunner{}
-	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f}); err != nil {
-		t.Fatalf("Register: %v", err)
+func TestReadToolSendsToTheBoundRoom(t *testing.T) {
+	cases := map[string]context.Context{
+		"no room in ctx":   context.Background(),
+		"same room in ctx": context.WithValue(context.Background(), ctxRoomKey{}, "r_bound"),
 	}
-	tool, _ := reg.Get("docker_info")
-	ctx := room.WithRoomID(context.Background(), "r_ctx")
-	if _, err := tool.Run(ctx, json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	calls := f.recorded()
-	if len(calls) != 1 || calls[0].roomID != "r_ctx" {
-		t.Fatalf("calls = %+v, want one to r_ctx", calls)
+	for name, ctx := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeRunner{}
+			reg := tools.NewReadOnlyRegistry()
+			if err := Register(reg, Deps{Runner: f, RoomID: "r_bound", CallRoom: callRoomFromCtx}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			tool, _ := reg.Get("docker_info")
+			if _, err := tool.Run(ctx, json.RawMessage(`{}`)); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			calls := f.recorded()
+			if len(calls) != 1 || calls[0].roomID != "r_bound" {
+				t.Fatalf("calls = %+v, want one to r_bound", calls)
+			}
+		})
 	}
 }
 

@@ -13,14 +13,13 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/room"
+	"piperoom/internal/setup/errcode"
 	"piperoom/internal/setup/protocol"
-	"piperoom/internal/setup/remoteclients"
 	"piperoom/internal/tools"
 )
 
 // ErrNoRunner reports that a tool has no paired runner to read through: the
-// executor is nil, or neither the tool nor the call's context names a room.
+// executor is nil, or the call's context names another room than the tool's.
 // It is protocol.ErrNoRunner, so a caller that already matches the protocol's
 // sentinel needs no second error to check. It is answered before any
 // OpRequest is built.
@@ -42,9 +41,18 @@ type Deps struct {
 	// Runner sends one op to the room's paired setup runner. nil makes every
 	// tool answer ErrNoRunner.
 	Runner protocol.RunnerExecutor
-	// RoomID is the room the runner is paired to. Empty is allowed: the
-	// call's context may carry the room (room.RoomID) instead.
+	// RoomID is the room the runner is paired to. Required: the read tools
+	// are built per room, and the room is bound here, at construction, so
+	// this package never imports internal/room (which imports internal/agent
+	// and, through alertin and connprobe, internal/wiring: the two packages
+	// that build these tools).
 	RoomID string
+	// CallRoom optionally reads the room a call runs for from its context
+	// (wiring passes room.RoomID). When it is set and answers a room other
+	// than RoomID, the read is refused with ErrNoRunner before any op is
+	// built: a read for another room must not reach this room's runner. An
+	// empty answer means the context names no room, and RoomID is used.
+	CallRoom func(context.Context) string
 	// Class is the class of the endpoint reads reach (protocol.ClassLocal,
 	// ClassShared, ClassProduction). Empty sends ClassLocal; the runner
 	// raises it to its own floor for the target anyway.
@@ -65,7 +73,10 @@ func Register(reg *tools.Registry, deps Deps) error {
 	if !reg.ReadOnly() {
 		return errors.New("setuptools: the read tools need a read-only registry (tools.NewReadOnlyRegistry)")
 	}
-	c := &caller{runner: deps.Runner, roomID: deps.RoomID, class: deps.Class, now: deps.Now}
+	if strings.TrimSpace(deps.RoomID) == "" {
+		return errors.New("setuptools: the read tools need the room they are bound to (Deps.RoomID)")
+	}
+	c := &caller{runner: deps.Runner, roomID: deps.RoomID, callRoom: deps.CallRoom, class: deps.Class, now: deps.Now}
 	for _, spec := range readSpecs() {
 		if err := reg.Register(&readTool{spec: spec, c: c}); err != nil {
 			return err
@@ -137,10 +148,11 @@ func (t *readTool) Run(ctx context.Context, input json.RawMessage) (tools.Result
 // caller is the one op path of this package: one T0 request to the paired
 // runner for the tool's fixed op.
 type caller struct {
-	runner protocol.RunnerExecutor
-	roomID string
-	class  string
-	now    func() time.Time
+	runner   protocol.RunnerExecutor
+	roomID   string
+	callRoom func(context.Context) string
+	class    string
+	now      func() time.Time
 }
 
 // call sends op at T0 with params (a typed struct or nil). It never sends a
@@ -150,15 +162,16 @@ func (c *caller) call(ctx context.Context, op string, params any) (protocol.OpRe
 		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
 	}
 	roomID := c.roomID
-	if ctxRoom := room.RoomID(ctx); roomID == "" {
-		roomID = ctxRoom
-	} else if ctxRoom != "" && ctxRoom != roomID {
-		// A read for another room must not reach this room's runner: the
-		// answer would name another pipeline's systems.
-		return protocol.OpResult{}, wrapOp(op, fmt.Errorf("tool is bound to another room than the call's: %w", ErrNoRunner))
-	}
 	if roomID == "" {
+		// Register refuses an empty room; a zero caller fails closed too.
 		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
+	}
+	if c.callRoom != nil {
+		if ctxRoom := c.callRoom(ctx); ctxRoom != "" && ctxRoom != roomID {
+			// A read for another room must not reach this room's runner: the
+			// answer would name another pipeline's systems.
+			return protocol.OpResult{}, wrapOp(op, fmt.Errorf("tool is bound to another room than the call's: %w", ErrNoRunner))
+		}
 	}
 	raw, err := marshalParams(params)
 	if err != nil {
@@ -483,9 +496,9 @@ func refused(res protocol.OpResult) error {
 	}
 	text = clipText(text)
 	switch errorCode(res.Data) {
-	case remoteclients.ErrorCodeOutOfScope:
+	case errcode.OutOfScope:
 		return fmt.Errorf("%s: %w", text, tools.ErrOutOfScope)
-	case remoteclients.ErrorCodeNotFound:
+	case errcode.NotFound:
 		return fmt.Errorf("%s: %w", text, clients.ErrNotFound)
 	}
 	return errors.New(text)
