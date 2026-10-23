@@ -179,9 +179,13 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// pipeline, never a pipeline owners.yaml does not define yet.
 	setupSnap := s.setupSnapshot(ctx, roomID)
 	vctx := s.actionCtx(ctx, roomID, pipelineID)
+	// The room pipeline's source kind decides the approving layer of a
+	// source-neutral source action (stepLayer).
+	sourceKind := s.pipelineSourceKind(pipelineID)
 	if setupSnap != nil {
 		if prov, ok := setupSnap.SetupProvisional(); ok {
 			vctx = tools.WithPipeline(vctx, prov)
+			sourceKind = prov.SourceKindOrDefault()
 		}
 	}
 	// Structural checks first: they do not need the room state.
@@ -200,8 +204,8 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		default:
 			p.Class = c
 		}
-		if step.Layer != a.Layer() {
-			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
+		if want := stepLayer(a, sourceKind); step.Layer != want {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, want))
 		}
 		if !isKnownLayer(step.Layer) {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
