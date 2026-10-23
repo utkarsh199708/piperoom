@@ -1,0 +1,140 @@
+# Known issues: plugin jar mismatches and a runtime too old for the plug-in (plan §6, theme 3).
+# Connect feature entries use "affected" for the releases that lack the feature and
+# "fixed_in" for the first release that has it.
+
+- id: connect-mixed-debezium-versions
+  title: Two Debezium versions in one plugin folder break class loading
+  component: connect
+  theme: plugin-mismatch
+  affected: "*"
+  symptoms: [NoSuchMethodError, NoClassDefFoundError, AbstractMethodError, debezium-core, plugin.path, two versions, upgrade]
+  workaround: >-
+    Give each connector its own folder under plugin.path and replace the whole folder on upgrade, so
+    no folder holds two debezium-core jars of different versions. Restart every worker after the change.
+  source: https://debezium.io/documentation/reference/stable/install.html
+
+- id: connect-driver-outside-plugin
+  title: A JDBC driver outside the connector's plugin folder is not visible to it
+  component: connect
+  theme: plugin-mismatch
+  affected: "*"
+  symptoms: [No suitable driver found, ClassNotFoundException, jdbc driver, CLASSPATH, plugin isolation, plugin.path]
+  workaround: >-
+    Put the JDBC driver jar in the same plugin folder as the connector that uses it. Connect loads each
+    plug-in in its own class loader, so a jar on the worker CLASSPATH or in another plug-in's folder
+    is not seen.
+  source: https://kafka.apache.org/36/documentation.html#connect_plugindiscovery
+
+- id: dbz2-needs-java11
+  title: Debezium 2.x needs Java 11 or later
+  component: debezium
+  theme: plugin-mismatch
+  affected: ">=2.0.0.Alpha1"
+  symptoms: [UnsupportedClassVersionError, class file version 55.0, java 8, java version]
+  workaround: Run the Connect workers (or Debezium Server / engine) on Java 11 or later.
+  source: https://issues.redhat.com/browse/DBZ-4949
+
+- id: dbz3-needs-java17
+  title: Debezium 3.x needs Java 17 or later
+  component: debezium
+  theme: plugin-mismatch
+  affected: ">=3.0.0.Alpha1"
+  symptoms: [UnsupportedClassVersionError, class file version 61.0, java 11, java version]
+  workaround: >-
+    Run the Connect workers on Java 17 or later before deploying a 3.x connector, or stay on the last
+    2.x release until the runtime is upgraded.
+  source: https://issues.redhat.com/browse/DBZ-7224
+
+- id: kafka4-connect-needs-java17
+  title: Kafka 4.0 Connect workers need Java 17
+  component: connect
+  theme: plugin-mismatch
+  affected: ">=4.0.0"
+  symptoms: [UnsupportedClassVersionError, java 17, kafka 4.0, connect worker start]
+  workaround: Run Kafka 4.x brokers, Connect and tools on Java 17 or later (clients need Java 11).
+  source: https://kafka.apache.org/40/documentation.html#upgrade_servers_400_notable
+
+- id: connect-plugins-connectors-only
+  title: Connect before 3.2 lists only connectors on /connector-plugins
+  component: connect
+  theme: plugin-mismatch
+  affected: "<3.2.0"
+  fixed_in: "3.2.0"
+  symptoms: [connector-plugins, connectorsOnly, transforms not listed, converters not listed, KIP-769]
+  workaround: >-
+    On older workers check transforms and converters from the worker log or the plugin.path folders;
+    GET /connector-plugins?connectorsOnly=false lists them from 3.2.
+  source: https://kafka.apache.org/32/documentation.html#connect_rest
+
+- id: connect-offsets-read-api
+  title: Connect before 3.5 cannot stop a connector or read its offsets over REST
+  component: connect
+  theme: plugin-mismatch
+  affected: "<3.5.0"
+  fixed_in: "3.5.0"
+  symptoms: ["GET /connectors/{name}/offsets", "PUT /connectors/{name}/stop", STOPPED, KIP-875, source offsets]
+  workaround: >-
+    On older workers read source offsets from the offsets topic (offset.storage.topic) with a
+    consumer; upgrade Connect to 3.5 for the stop and offsets endpoints.
+  source: https://kafka.apache.org/35/documentation.html#connect_rest
+
+- id: connect-offsets-alter-api
+  title: Connect before 3.6 cannot alter or reset connector offsets over REST
+  component: connect
+  theme: plugin-mismatch
+  affected: "<3.6.0"
+  fixed_in: "3.6.0"
+  symptoms: ["PATCH /connectors/{name}/offsets", "DELETE /connectors/{name}/offsets", reset offsets, KIP-875, repoint connector]
+  workaround: >-
+    On older workers, reset a source connector by creating it under a new name (new offsets key) or by
+    writing a tombstone for its key to the offsets topic while it is deleted; upgrade to 3.6 for
+    PATCH and DELETE on /connectors/{name}/offsets (the connector must be STOPPED).
+  source: https://kafka.apache.org/36/documentation.html#connect_rest
+
+- id: connect-eos-source-support
+  title: Exactly-once source support needs Connect 3.3
+  component: connect
+  theme: plugin-mismatch
+  affected: "<3.3.0"
+  fixed_in: "3.3.0"
+  symptoms: [exactly.once.source.support, exactly.once.support, KIP-618, duplicates after restart]
+  workaround: >-
+    Upgrade the distributed workers to 3.3 or later and roll out exactly.once.source.support in two
+    steps (preparing, then enabled); before that, consumers must tolerate duplicates.
+  source: https://kafka.apache.org/34/documentation.html#connect_exactlyoncesource
+
+- id: connect-client-override-policy
+  title: Connect before 3.0 rejects producer.override.* and consumer.override.* by default
+  component: connect
+  theme: plugin-mismatch
+  affected: "<3.0.0"
+  fixed_in: "3.0.0"
+  symptoms: [producer.override, consumer.override, connector.client.config.override.policy, KIP-722, override not allowed]
+  workaround: >-
+    Set connector.client.config.override.policy=All (or Principal) on the workers; 3.0 made All the
+    default.
+  source: https://kafka.apache.org/30/documentation.html#connect_running
+
+- id: connect-topic-creation
+  title: Connector topic.creation.* settings need Connect 2.6
+  component: connect
+  theme: plugin-mismatch
+  affected: "<2.6.0"
+  fixed_in: "2.6.0"
+  symptoms: [topic.creation.default.replication.factor, topic.creation.default.partitions, topic.creation.enable, KIP-158, topics not created]
+  workaround: >-
+    Upgrade the workers to 2.6 or later (topic.creation.enable defaults to true), or pre-create the
+    topics, or rely on broker auto-creation.
+  source: https://kafka.apache.org/26/documentation.html#connect_running
+
+- id: pgjdbc-scram-auth
+  title: pgjdbc before 42.2.0 cannot log in with SCRAM-SHA-256
+  component: pgjdbc
+  theme: plugin-mismatch
+  affected: "<42.2.0"
+  fixed_in: "42.2.0"
+  symptoms: [The authentication type 10 is not supported, scram-sha-256, password_encryption, pgjdbc]
+  workaround: >-
+    Put pgjdbc 42.2.0 or later in the plugin folder of the connector that uses it (Debezium ships a
+    current driver; old JDBC sink plug-ins may not).
+  source: https://www.postgresql.org/docs/release/10.0/
