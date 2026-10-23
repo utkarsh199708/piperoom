@@ -52,7 +52,10 @@ type fixture struct {
 	java string
 }
 
-const fakeJava = "/usr/lib/jvm/java-21-openjdk/bin/java"
+const (
+	fakeJava     = "/usr/lib/jvm/java-21-openjdk/bin/java"
+	fakeJavaHome = "/usr/lib/jvm/java-21-openjdk"
+)
 
 func newFixture(t *testing.T, opts Options) *fixture {
 	t.Helper()

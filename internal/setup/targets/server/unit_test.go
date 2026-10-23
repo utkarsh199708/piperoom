@@ -63,7 +63,9 @@ func TestUnitWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server_unit_write: %v", err)
 	}
-	want, err := host.RenderUnit(unitFor(f.dir, fakeJava))
+	// javaHome reduces the java binary to its JDK home (unit.go), so the
+	// expected unit carries the home, not the binary path.
+	want, err := host.RenderUnit(unitFor(f.dir, fakeJavaHome))
 	if err != nil {
 		t.Fatal(err)
 	}
