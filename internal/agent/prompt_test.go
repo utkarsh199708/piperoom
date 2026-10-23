@@ -74,9 +74,10 @@ func TestSystemPromptIsStable(t *testing.T) {
 // KAN-408: a read that cannot reach its component is evidence about that
 // component. The rule names the stable fact the runner stamps on the read
 // ("unreachable: <component>") and refuses a healthy verdict while the gap is
-// open. W4f (KAN-504) moved it from rule 6 into rule 4: the component it names
-// is the root-cause component, never the first failing one, so the rule no
-// longer says the component "is down"; "flowing data is no excuse" and "Auth
+// open. W4f (KAN-504) moved it from rule 6 into rule 4: like a component that
+// still answers requests, the component it names is at most the root-cause
+// component, never the first failing one, so the rule no longer says the
+// component "is down"; "flowing data is no excuse" and "Auth
 // and not-found are not outages" went with that wording (the runner still
 // refuses the healthy verdict and never lets auth or not-found block one,
 // readfailure.go). Rule 6 keeps the tool-error sentence.
@@ -85,7 +86,7 @@ func TestSystemPromptUnreachableReadRule(t *testing.T) {
 	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
 	for _, want := range []string{
 		`so is "unreachable: <component>", which forbids a healthy verdict while unresolved`,
-		"is the root-cause component, never the first failing one",
+		"is at most the root-cause component, never the first failing one",
 		"A tool error or timeout is a finding, not proof",
 		"evidence for what is unknown or blocked",
 	} {
@@ -439,7 +440,8 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
 		// W4f (KAN-504): rule 4 defines the first failing component, then
 		// asks update_hypothesis to name it and the root cause separately.
-		"The first failing component is the most upstream stage whose own status read shows it stopped",
+		"The first failing component is the most upstream stage whose own status read shows it failed",
+		"else the most upstream one that no longer does its job",
 		"update_hypothesis names both separately",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -1036,13 +1038,13 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 // connector, is the root cause (dead-slot-wal), and a steer whose ask needs a
 // fix no listed action can make, or could mean more than one action, gets a
 // question before any proposal (unclear-driver-intent, P3-W3g: the ambiguity
-// is about the action, not the component). A component that still answers
-// requests is the root-cause component, never the first failing one, so the
-// failing consumer or sink task, not the registry a schema was deleted from,
-// is the first failing component (the deleted-schema scenarios, LEAD-ARCH on
-// #691; the README's own example: a schema change fails in Connect first, the
-// cause is a Postgres DDL; W4f's wording, KAN-504). The batch prompt keeps its
-// own wording of each.
+// is about the action, not the component). If a stage failed, a component
+// that still answers requests is at most the root-cause component, never the
+// first failing one, so the failing consumer or sink task, not the registry a
+// schema was deleted from, is the first failing component (the deleted-schema
+// scenarios, LEAD-ARCH on #691; the README's own example: a schema change
+// fails in Connect first, the cause is a Postgres DDL; W4f's wording, KAN-504,
+// lead ruling on PR #931). The batch prompt keeps its own wording of each.
 func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
 	batch := systemPromptFor(events.PipelineKindBatch)
@@ -1051,7 +1053,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 		"signal_table: signal.data.collection from connect_config",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
 		"If what a driver steer asks for needs a fix no listed action can make, or could mean more than one action, ask the driver one short question with post_message and propose nothing until they answer.",
-		"A component that still answers requests, even with errors, degraded or misconfigured, is the root-cause component, never the first failing one",
+		"If a stage failed, a component that still answers requests, even degraded or misconfigured, is at most the root-cause component, never the first failing one",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC system prompt missing %q", want)

@@ -89,17 +89,20 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // 39994729845 (the agent named the component that still answered, or the one
 // an unreachable read named, as the first failing one): rule 4 now defines
 // the first failing component as the most upstream stage whose own status
-// read shows it stopped, or where a read first shows wrong or missing data in
-// a topic or sink; a component that still answers requests is the root-cause
-// component, never the first failing one, and so is the component of an
+// read shows it failed, else the most upstream one that no longer does its
+// job (the P3-W3 ruling, kept so a stage that fails no status read, as in
+// missed-table or dead-slot-wal, is still named); if a stage failed, a
+// component that still answers requests is at most the root-cause component,
+// never the first failing one, and so is the component of an
 // "unreachable: <component>" read, which still forbids a healthy verdict.
-// Rule 6's unreachable sentence moved into rule 4 and rule 6 keeps only the
-// tool-error sentence. Word-neutral: rules 4 and 6 are 93 words before and
-// after (the PR lists the words trimmed and added).
+// The rule 4 text is the lead ruling on PR #931. Rule 6's unreachable
+// sentence moved into rule 4 and rule 6 keeps only the tool-error sentence.
+// Word-neutral: rules 4 and 6 are 93 words before and after (the PR lists
+// the words trimmed and added).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "9428d45a7c2ec913571a7321c3272b7d03ada8b018ba6f328a7e730589ca5cb2"
+const cdcPromptSHA256 = "f2d1938b67db3e6cbf560ca116b8d31582a211224e0135f2331b5d94dd573b10"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -107,7 +110,7 @@ const cdcPromptSHA256 = "9428d45a7c2ec913571a7321c3272b7d03ada8b018ba6f328a7e730
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "bfc595d9dd74acf52fdc2c943fc74b2e73456b7713ae6b8ccd14856301af46f0"
+const cdcPromptWriteOffSHA256 = "104bc4a1193367974e6515a65ea854549fa4879feac7211715a92c673d30eb72"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

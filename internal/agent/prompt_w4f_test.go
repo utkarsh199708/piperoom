@@ -24,17 +24,19 @@ func cdcMethodRule(t *testing.T, prompt, n string) string {
 	return ""
 }
 
-// TestSystemPromptFirstFailingDefinition pins W4f (KAN-504): rule 4 defines
-// the first failing component as the most upstream stage whose own status
-// read shows it stopped, or where a read first shows wrong or missing data in
-// a topic or sink. A component that still answers requests is the root-cause
-// component, never the first failing one, and rule 6's unreachable sentence
-// now sits in rule 4: an "unreachable: <component>" read names the cause's
-// component and forbids a healthy verdict, but no longer says the component
-// "is down" (which made the agent name it as the first failing one, or as a
-// broker that is down). Rule 6 keeps only the tool-error sentence. The rule
-// is generic: no wording of a scenario's answer appears in rules 4 or 6.
-// Both write modes share the method, so both are checked.
+// TestSystemPromptFirstFailingDefinition pins W4f (KAN-504, rule 4 text from
+// the lead ruling on PR #931): rule 4 defines the first failing component as
+// the most upstream stage whose own status read shows it failed, else the
+// most upstream one that no longer does its job (the P3-W3 ruling, so a
+// stage that fails no status read is still named). If a stage failed, a
+// component that still answers requests is at most the root-cause component,
+// never the first failing one, and rule 6's unreachable sentence now sits in
+// rule 4: an "unreachable: <component>" read names the cause's component and
+// forbids a healthy verdict, but no longer says the component "is down"
+// (which made the agent name it as the first failing one, or as a broker
+// that is down). Rule 6 keeps only the tool-error sentence. The rule is
+// generic: no wording of a scenario's answer appears in rules 4 or 6. Both
+// write modes share the method, so both are checked.
 func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 	cases := []struct {
 		name string
@@ -42,12 +44,17 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 		text string
 		want bool
 	}{
-		{"first failing is the most upstream stopped stage", "4",
-			"4. The first failing component is the most upstream stage whose own status read shows it stopped (FAILED, crash-looping, never started)", true},
-		{"or where wrong or missing data first shows", "4",
-			"or where a read first shows wrong or missing data in a topic or sink.", true},
-		{"a component that still answers requests is the root cause", "4",
-			"A component that still answers requests, even with errors, degraded or misconfigured, is the root-cause component, never the first failing one;", true},
+		{"first failing is the most upstream failed stage", "4",
+			"4. The first failing component is the most upstream stage whose own status read shows it failed (FAILED, crash-looping, never started)", true},
+		{"else the most upstream one that no longer does its job", "4",
+			", else the most upstream one that no longer does its job.", true},
+		{"a component that still answers requests is at most the root cause", "4",
+			"If a stage failed, a component that still answers requests, even degraded or misconfigured, is at most the root-cause component, never the first failing one;", true},
+		// The ticket's draft, which the ruling replaced: it made a stage
+		// that fails no status read (a component still answering, wrong data
+		// in a topic) unnameable as the first failing one.
+		{"no unconditional root-cause sentence", "4", "is the root-cause component, never", false},
+		{"no wrong-data-in-a-topic clause", "4", "wrong or missing data", false},
 		{"unreachable names the cause and forbids a healthy verdict", "4",
 			`so is "unreachable: <component>", which forbids a healthy verdict while unresolved.`, true},
 		{"update_hypothesis names both, with its scope", "4",
