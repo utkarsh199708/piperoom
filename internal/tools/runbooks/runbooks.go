@@ -36,8 +36,9 @@ type Runbook struct {
 // headings are the required "## " headings, in order.
 var headings = []string{"Symptoms", "Find it with Piperoom tools", "Safe checks", "Fixes", "Risks", "Sources"}
 
-// allowedHosts are the documentation sites a runbook may cite.
-var allowedHosts = []string{"www.postgresql.org", "debezium.io", "kafka.apache.org", "docs.confluent.io"}
+// allowedHosts are the documentation sites and issue trackers a runbook or a
+// known issue may cite. On github.com only the debezium organisation counts.
+var allowedHosts = []string{"www.postgresql.org", "debezium.io", "kafka.apache.org", "docs.confluent.io", "issues.redhat.com", "github.com"}
 
 //go:embed library/*.md
 var library embed.FS
@@ -236,8 +237,11 @@ func listItems(text string) []string {
 
 func checkSource(raw string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || !slices.Contains(allowedHosts, u.Host) {
+	if err != nil || u.Scheme != "https" || !slices.Contains(allowedHosts, u.Host) || u.User != nil {
 		return fmt.Errorf("source %q must be https on one of %s", raw, strings.Join(allowedHosts, ", "))
+	}
+	if u.Host == "github.com" && !strings.HasPrefix(u.Path, "/debezium/") {
+		return fmt.Errorf("source %q: on github.com only github.com/debezium/... is allowed", raw)
 	}
 	return nil
 }
