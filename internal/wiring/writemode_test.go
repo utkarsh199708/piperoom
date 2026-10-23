@@ -205,7 +205,7 @@ var adminWriterIfaces = []reflect.Type{
 // SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}, adminWriterIfaces...)
+	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](), ifaceOf[connect.ConnectLifecycleWriter]()}, adminWriterIfaces...)
 	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
@@ -225,7 +225,10 @@ func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) 
 				t.Errorf("%s: an action can reach %s, which implements %s", name, ty, w)
 			}
 		}
-		for _, m := range []string{"Resume", "UpdateConfig"} {
+		// Resume and UpdateConfig are the Connect writes the actions assert
+		// for; the rest are the Q5 lifecycle writes (Q5d), any one of which
+		// is enough.
+		for _, m := range []string{"Resume", "UpdateConfig", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
 			if _, ok := ty.MethodByName(m); ok {
 				t.Errorf("%s: an action can reach %s, which has the write method %s", name, ty, m)
 			}
@@ -336,6 +339,17 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 				}
 			}
 			assertSourceActionsRefuse(t, pa.Actions, tools.WithPipeline(ctx, pipe), sourceActionParams("pa"))
+
+			// The Q5 lifecycle actions are not even listed (Q5d): with
+			// write mode off the agent cannot propose a stop, an offsets
+			// reset, a create or a delete.
+			for _, s := range append(st.All(), st.For("nope")) {
+				for _, n := range lifecycleActionNames {
+					if _, ok := s.Actions.Get(n); ok {
+						t.Errorf("set %q: %s registered with write mode off", s.Name, n)
+					}
+				}
+			}
 		})
 	}
 }

@@ -29,6 +29,9 @@ var rawClientAllow = map[string]bool{
 	// write mode on only (the read-only adapter otherwise), like the
 	// actions.Register call in registerActions.
 	"registerTuning": true,
+	// Q5d: hands the whole Connect client to the lifecycle actions, and
+	// registers nothing with write mode off.
+	"registerLifecycle": true,
 }
 
 // stubImporter gives every import an empty, complete package. The check only
