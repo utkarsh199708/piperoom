@@ -93,8 +93,9 @@ func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients
 }
 
 // LiveActions returns the production write actions, backed by replay clients
-// that know only res and what recs recorded: actions.Register's seven and
-// the P3 actions (replay_actions.go). The agent can propose them (their real
+// that know only res and what recs recorded: actions.Register's seven, the
+// P3 actions (replay_actions.go) and the Q2 source admin actions
+// (replay_source.go). The agent can propose them (their real
 // Validate runs against that) but nothing is ever written: every write of a
 // replay client is a no-op that only records the call.
 func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
@@ -117,6 +118,9 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 		return nil, nil, fmt.Errorf("evals: action definitions: %w", err)
 	}
 	if err := registerP3(reg, res, recs, wl); err != nil {
+		return nil, nil, err
+	}
+	if err := registerSourceActions(reg, res, recs, wl); err != nil {
 		return nil, nil, err
 	}
 	return reg, wl, nil
