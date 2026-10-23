@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -466,27 +465,41 @@ func (p *hbParser) update() (heartbeatQuery, error) {
 	return heartbeatQuery{table: table, literals: p.lits}, nil
 }
 
-// heartbeatQueryInScope refuses a query whose table is outside pipeline pl:
-// the table must be one of pl's source_tables or sit in a schema that holds
-// one (source_create_heartbeat_table's rule: a heartbeat table is created
-// next to the captured tables, and joins source_tables when a filtered
-// publication needs it). The match is exact: an unquoted name Postgres would
-// fold to lower case must already be written in lower case.
+// heartbeatQueryInScope refuses a query whose table is not a heartbeat table
+// of pipeline pl (HeartbeatTableInScope).
 func heartbeatQueryInScope(pl owners.Pipeline, query string) error {
 	hq, err := parseHeartbeatQuery(query)
 	if err != nil {
 		return err
 	}
-	if slices.Contains(pl.SourceTables, hq.table) {
-		return nil
+	if err := HeartbeatTableInScope(pl, hq.table); err != nil {
+		return fmt.Errorf("actions: %s: %w", keyHeartbeatQuery, err)
 	}
-	schema, _, _ := strings.Cut(hq.table, ".")
+	return nil
+}
+
+// HeartbeatTableInScope reports whether table ("schema.table", unquoted) may
+// be a Debezium heartbeat table of pipeline pl: its name contains
+// "heartbeat" (any case) and its schema holds one of pl's source_tables.
+// Debezium runs heartbeat.action.query on every heartbeat, so a query aimed
+// at a data table (UPDATE public.orders SET ...) would write literals into
+// customer rows for ever; a schema rule alone admits every table next to the
+// captured ones. The table may itself be in source_tables: a filtered
+// publication needs it listed there (source_create_heartbeat_table's
+// follow-up). source_create_heartbeat_table creates only tables this admits,
+// so the query it proposes passes. The match is exact: an unquoted name
+// Postgres would fold to lower case must already be written in lower case.
+func HeartbeatTableInScope(pl owners.Pipeline, table string) error {
+	schema, name, ok := strings.Cut(table, ".")
+	if !ok || !strings.Contains(strings.ToLower(name), "heartbeat") {
+		return fmt.Errorf("%w: table %s is not a heartbeat table: its name must contain \"heartbeat\" (e.g. %s.debezium_heartbeat)", tools.ErrOutOfScope, table, schema)
+	}
 	for _, t := range pl.SourceTables {
 		if s, _, ok := strings.Cut(t, "."); ok && s == schema {
 			return nil
 		}
 	}
-	return fmt.Errorf("actions: %s: %w: table %s is not in a schema of pipeline %q's source_tables", keyHeartbeatQuery, tools.ErrOutOfScope, hq.table, pl.ID)
+	return fmt.Errorf("%w: table %s is not in a schema of pipeline %q's source_tables", tools.ErrOutOfScope, table, pl.ID)
 }
 
 // checkScope checks the set's heartbeat query, if any, against pl.
@@ -558,7 +571,7 @@ func heartbeatSchemaText(key string) string {
 	if key == keyHeartbeatInterval {
 		return fmt.Sprintf("Debezium source connectors only: milliseconds between heartbeats, 0 (off) or %d..%d", minHeartbeatIntervalMS, maxHeartbeatIntervalMS)
 	}
-	return "Debezium source connectors only: one INSERT INTO or UPDATE of a schema.table in a schema of the pipeline's source_tables; values: integers, short string literals, NOW(), CLOCK_TIMESTAMP(), CURRENT_TIMESTAMP"
+	return "Debezium source connectors only: one INSERT INTO or UPDATE of a heartbeat table: schema.table whose name contains heartbeat, in a schema of the pipeline's source_tables; values: integers, short string literals, NOW(), CLOCK_TIMESTAMP(), CURRENT_TIMESTAMP"
 }
 
 // heartbeatRestorable reports whether value, read from the connector's

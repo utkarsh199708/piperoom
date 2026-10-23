@@ -84,7 +84,7 @@ func (a *createHeartbeatTable) Layer() string { return layerSource }
 func (a *createHeartbeatTable) Describe() string {
 	return "Create the Debezium heartbeat table on the source database (CREATE TABLE IF NOT EXISTS <schema.table> (id integer PRIMARY KEY, ts timestamptz NOT NULL DEFAULT now())). " +
 		"Use it when a replication slot keeps WAL because the captured tables are quiet: with heartbeat.interval.ms and heartbeat.action.query writing to this table, the connector confirms a newer LSN. " +
-		"The table must be in a schema that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up steps: adding the table to a filtered publication (pg_add_publication_table) and setting heartbeat.action.query on the connector."
+		"The table's name must contain heartbeat; it must be in a schema that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up steps: adding the table to a filtered publication (pg_add_publication_table) and setting heartbeat.action.query on the connector."
 }
 
 func (a *createHeartbeatTable) ParamsSchema() map[string]any {
@@ -92,7 +92,7 @@ func (a *createHeartbeatTable) ParamsSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"connector": map[string]any{"type": "string", "description": "The pipeline's Debezium source connector that will write heartbeats."},
-			"table":     map[string]any{"type": "string", "description": "The heartbeat table to create, \"schema.table\" (e.g. public.debezium_heartbeat), in a schema of the pipeline's source_tables.", "pattern": tablePattern},
+			"table":     map[string]any{"type": "string", "description": "The heartbeat table to create, \"schema.table\" (e.g. public.debezium_heartbeat): the name contains heartbeat, in a schema of the pipeline's source_tables.", "pattern": tablePattern},
 		},
 		"additionalProperties": false,
 		"required":             []string{"connector", "table"},
@@ -136,13 +136,13 @@ func heartbeatInScope(pl owners.Pipeline, p heartbeatParams) error {
 	if slices.Contains(pl.SourceTables, p.Table) {
 		return fmt.Errorf("sourceactions: %s: %s is one of pipeline %q's source_tables, not a heartbeat table", CreateHeartbeatTableName, p.Table, pl.ID)
 	}
-	schema, _, _ := strings.Cut(p.Table, ".")
-	for _, t := range pl.SourceTables {
-		if s, _, ok := strings.Cut(t, "."); ok && s == schema {
-			return nil
-		}
+	// The same rule connect_update_connector_config applies to the query's
+	// table (a name containing "heartbeat", in a schema of source_tables), so
+	// the heartbeat.action.query this action proposes next is never refused.
+	if err := actions.HeartbeatTableInScope(pl, p.Table); err != nil {
+		return fmt.Errorf("sourceactions: %s: %w", CreateHeartbeatTableName, err)
 	}
-	return fmt.Errorf("sourceactions: %s: %w: schema %q holds none of pipeline %q's source_tables", CreateHeartbeatTableName, tools.ErrOutOfScope, schema, pl.ID)
+	return nil
 }
 
 // connectorConfig reads the connector's config and refuses one that is not a

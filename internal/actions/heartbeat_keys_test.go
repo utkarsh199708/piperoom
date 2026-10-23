@@ -145,15 +145,35 @@ func TestHeartbeatQueryHostile(t *testing.T) {
 
 func TestHeartbeatQueryScope(t *testing.T) {
 	p := testPipeline() // source_tables: public.orders
-	for _, q := range []string{hbQuery, `UPDATE public.orders SET ts = now() WHERE id = 1`} {
+	// hbQuery is the exact query source_create_heartbeat_table proposes.
+	for _, q := range []string{
+		hbQuery,
+		`UPDATE public.heartbeat SET ts = now() WHERE id = 1`,
+		`INSERT INTO public.test_heartbeat_table (text) VALUES ('test_heartbeat')`,
+	} {
 		if err := heartbeatQueryInScope(p, q); err != nil {
 			t.Errorf("%s: %v", q, err)
 		}
 	}
+	// A heartbeat table listed in source_tables (a filtered publication
+	// needs it there) stays admitted.
+	withHB := p
+	withHB.SourceTables = append([]string{"public.debezium_heartbeat"}, p.SourceTables...)
+	if err := heartbeatQueryInScope(withHB, hbQuery); err != nil {
+		t.Errorf("heartbeat table in source_tables: %v", err)
+	}
 	for _, q := range []string{
+		// A captured data table: Debezium would write literals into
+		// customer rows on every heartbeat.
+		`UPDATE public.orders SET ts = now() WHERE id = 1`,
+		`INSERT INTO public.orders (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts`,
+		// Another table next to the captured ones.
+		`UPDATE public.customers SET status = 'x'`,
+		`INSERT INTO public.hb (id) VALUES (1)`,
+		`INSERT INTO inventory.heartbeat (id) VALUES (1)`,
 		`INSERT INTO inventory.hb (id) VALUES (1)`,
 		`INSERT INTO pg_catalog.pg_authid (id) VALUES (1)`,
-		`INSERT INTO "Public".hb (id) VALUES (1)`, // exact match: no folding
+		`INSERT INTO "Public".heartbeat (id) VALUES (1)`, // exact match: no folding
 	} {
 		err := heartbeatQueryInScope(p, q)
 		if !errors.Is(err, tools.ErrOutOfScope) {
@@ -301,7 +321,7 @@ func TestHeartbeatPreview(t *testing.T) {
 		}
 		return r
 	}
-	oldQ := `UPDATE public.hb SET ts = now() WHERE id = 1`
+	oldQ := `UPDATE public.heartbeat SET ts = now() WHERE id = 1`
 
 	t.Run("both unset: undo turns heartbeats off", func(t *testing.T) {
 		a := configAction(t, hbConnect(nil))
