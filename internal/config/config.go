@@ -268,6 +268,10 @@ type Config struct {
 	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 
+	// Autonomy is PIPEROOM_AUTONOMY: the AU wave's earned auto-approve.
+	// ParseAutonomy types it; write mode off makes it off whatever it says. (AU1)
+	Autonomy string // PIPEROOM_AUTONOMY: on (default) | off
+
 	// Setup rooms (docs/design/setup-agent.md §3.8, §4 item 6; U wave).
 	// Server side. Raw strings; ParseSetup types them and refuses
 	// SetupEnabled "on" while write mode is off.
@@ -438,6 +442,7 @@ func Load() Config {
 		FakeAgent: get("PIPEROOM_FAKE_AGENT", ""),
 
 		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
+		Autonomy:  get("PIPEROOM_AUTONOMY", "on"),
 
 		SetupEnabled:      get("PIPEROOM_SETUP_ENABLED", "off"),
 		SetupProdPatterns: get("PIPEROOM_SETUP_PROD_PATTERNS", ""),
@@ -1670,4 +1675,29 @@ func get(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ---- AU wave (AU1) ----
+
+// ParseAutonomy validates PIPEROOM_AUTONOMY and reports whether earned
+// autonomy (events.PolicyEarned) may run: "on" (the default, also when
+// empty) or "off", any case; anything else is an error naming the variable,
+// so the server refuses to start. With write mode off it is false whatever
+// the variable says (no autonomy of any kind without writes); a bad
+// PIPEROOM_WRITE_MODE is that error. "off" disables the whole wave: no
+// autonomy.granted is written and no policy-earned proposal is scheduled.
+func ParseAutonomy(c Config) (bool, error) {
+	var on bool
+	switch v := strings.ToLower(strings.TrimSpace(c.Autonomy)); v {
+	case "", "on":
+		on = true
+	case "off":
+	default:
+		return false, fmt.Errorf("config: PIPEROOM_AUTONOMY=%q: want on or off", c.Autonomy)
+	}
+	write, err := ParseWriteMode(c)
+	if err != nil {
+		return false, err
+	}
+	return on && write, nil
 }

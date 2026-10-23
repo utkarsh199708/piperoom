@@ -78,6 +78,11 @@ type tierAction struct {
 	lastReq  *protocol.OpRequest
 	release  chan struct{} // when set, Execute waits for it
 	execErr  error
+	// rollback is the record this fake's Preview reports as the step's undo,
+	// "<action> {json params}" (a setup action adapter takes it from the
+	// runner's preview op). Empty: nothing recorded, as for a step nothing can
+	// undo. Set before a proposal exists (setRollback).
+	rollback string
 }
 
 func (a *tierAction) Name() string                 { return a.name }
@@ -89,7 +94,17 @@ func (a *tierAction) Validate(context.Context, json.RawMessage) error {
 }
 func (a *tierAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *tierAction) Preview(context.Context, json.RawMessage) (actions.PreviewResult, error) {
-	return actions.PreviewResult{Target: a.name, Current: "absent", Expected: "present"}, nil
+	a.mu.Lock()
+	record := a.rollback
+	a.mu.Unlock()
+	res := actions.PreviewResult{Target: a.name, Current: "absent", Expected: "present"}
+	if record != "" {
+		// Reversible is what says the rollback is an action and params, as
+		// the real previews mark it (actions.Preview).
+		res.Reversible = true
+		res.Rollback = record
+	}
+	return res, nil
 }
 func (a *tierAction) Tier(_ json.RawMessage, class string) (string, error) {
 	return plan.TierOf(a.floor, class)
@@ -107,7 +122,7 @@ func (a *tierAction) Execute(ctx context.Context, _ json.RawMessage) (string, er
 			ProposalID: st.ProposalID, StepIndex: &step, ParamsHash: st.ParamsHash,
 		}
 	}
-	release := a.release
+	release, execErr := a.release, a.execErr
 	a.mu.Unlock()
 	if release != nil {
 		select {
@@ -116,10 +131,24 @@ func (a *tierAction) Execute(ctx context.Context, _ json.RawMessage) (string, er
 			return "", ctx.Err()
 		}
 	}
-	if a.execErr != nil {
-		return "", a.execErr
+	if execErr != nil {
+		return "", execErr
 	}
 	return "done", nil
+}
+
+// setRollback records the undo this fake reports in its preview.
+func (a *tierAction) setRollback(record string) {
+	a.mu.Lock()
+	a.rollback = record
+	a.mu.Unlock()
+}
+
+// setExecErr makes the next Execute fail with err ("" clears it).
+func (a *tierAction) setExecErr(err error) {
+	a.mu.Lock()
+	a.execErr = err
+	a.mu.Unlock()
 }
 
 func (a *tierAction) count() int {
@@ -407,8 +436,10 @@ func TestSetupRouteTiers(t *testing.T) {
 		{"T1 local", "compose_write", `{"target":"127.0.0.1:5432"}`, plan.TierT1, plan.ClassLocal, ""},
 		{"T2 shared", "compose_write", `{"target":"db.acme:5432"}`, plan.TierT2, plan.ClassShared, ""},
 		{"T3 production", "compose_write", `{"target":"db.prod.acme:5432"}`, plan.TierT3, plan.ClassProduction, ""},
-		{"unregistered endpoint is shared", "compose_write", `{"target":"elsewhere:5432"}`, plan.TierT2, plan.ClassShared, ""},
-		{"no target is shared", "compose_write", `{}`, plan.TierT2, plan.ClassShared, ""},
+		// A driver step (no plan) that names no registered endpoint may reach
+		// any of the room's endpoints: it routes at the room's highest class.
+		{"unregistered endpoint is the room's highest class", "compose_write", `{"target":"elsewhere:5432"}`, plan.TierT3, plan.ClassProduction, ""},
+		{"no target is the room's highest class", "compose_write", `{}`, plan.TierT3, plan.ClassProduction, ""},
 		{"not Tiered is T2", "plain_op", `{"target":"127.0.0.1:5432"}`, plan.TierT2, plan.ClassLocal, ""},
 		{"T0 is refused", "env_detect", `{"target":"127.0.0.1:5432"}`, "", "", "T0 ops are tools"},
 		{"guard on production", "source_drop_table", `{"target":"db.prod.acme:5432"}`, "", "", "(drop_table)"},
