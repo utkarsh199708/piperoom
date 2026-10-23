@@ -381,6 +381,10 @@ var syntheticLabels = map[string]Label{
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
 	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
+	// The two Q1e version-knowledge scenarios (KAN-182): each label names the
+	// known-issue id of the Q1 index and the key or value it is about.
+	"renamed-property-after-upgrade": {"kafka-connect", []string{"dbz-topic-heartbeat-transaction", "heartbeat.topics.prefix", "topic.heartbeat.prefix"}},
+	"removed-decoder-plugin":         {"kafka-connect", []string{"dbz-wal2json-removed", "wal2json"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -485,6 +489,12 @@ var syntheticTruth = map[string]map[string]truth{
 	// layer, the wrong cause).
 	"register-rejected-renamed-key":    {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"register-rejected-missing-plugin": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q1e: the renamed-property title names the stale warehouse next to a
+	// RUNNING connector, the removed-decoder one the failed task
+	// (kafka-connect); neither names a cause. The wrong texts blame a quiet
+	// table's WAL and a dropped slot (both postgres).
+	"renamed-property-after-upgrade": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"removed-decoder-plugin":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

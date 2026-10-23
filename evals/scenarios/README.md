@@ -355,7 +355,48 @@ messages are Kafka Connect 3.6's, the key rename is `internal/tools/runbooks/lib
 renamed.yaml` (`dbz-topic-prefix`), and the clock is 2026-10-24T09:40:00Z. Every header says
 `RECORDED: NO`.
 
+### Version-knowledge scenarios (Q1e)
 
+Two files about a Debezium upgrade (1.9.7.Final to 2.7.3.Final, in place) that breaks a connector
+whose stored config the upgrade did not fully migrate (tasks/Q-board.md, step 1). Each label (the
+header, the description, this table and `../agreement_test.go`) names the known-issue id of the Q1
+index (`internal/tools/runbooks/library/known-issues/*.yaml`), which is the row's done-when.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label (known-issue id) |
+|---|---|---|---|---|
+| `renamed-property-after-upgrade` | analytics.orders stale 42m, connector RUNNING | the config still sets `heartbeat.topics.prefix=heartbeats`, which 2.0 replaced with `topic.heartbeat.prefix`; 2.7 ignores it and heartbeats go to `__debezium-heartbeat.pg`, which does not exist (auto topic creation off), so task 0's producer blocks and the queued change events never leave the task | kafka-connect / kafka-connect | `dbz-topic-heartbeat-transaction` (DBZ-4180) |
+| `removed-decoder-plugin` | task 0 FAILED 34m, analytics.orders stale 35m | `plugin.name=wal2json`; 2.0 removed the wal2json decoders, so the task refuses its config at start; the slot was made with wal2json and needs replacing | kafka-connect / kafka-connect | `dbz-wal2json-removed` (DBZ-4156) |
+
+**`runbook_lookup` runs for real** in the harness (`runsLive` in `../replay.go`), over the same embedded
+index, so neither file records it and no `expected_facts` entry can name it (`-validate` checks facts
+against recordings). A query such as "heartbeat topic name changed after upgrade" or "plugin.name
+wal2json invalid after upgrade" with `versions: [{component: debezium-postgres, version:
+2.7.3.Final}]` ranks the labelled entry first and says the running version is affected. It is not an
+`evidence_tools` entry yet: the prompt does not send the agent to it with versions until Q1d (A4)
+lands; then it can become one.
+
+**What the replayed tools show.** `connect_config` hides `heartbeat.*` and `plugin.name` (its
+allow-list), so the key and the decoder reach the agent through the connect owner's steer (the worker
+log line, as in `consumer-poison-pill`) and, for the decoder, through `pg_replication_slots` data
+(`plugin: wal2json`). The heartbeat incident is otherwise all green: connector and task RUNNING, no
+trace, the slot active but retaining 1.9 GiB (WARN on the map), Debezium's queue full
+(`debezium_metrics`), the topic 42 min stale. The heartbeat topics are outside the pipeline, so
+`kafka_topic_offsets` on them answers with the real scope refusal.
+
+**No `expect.fix`.** Neither key is on `connect_update_connector_config`'s allow-list, and the one
+change it could make in the heartbeat incident (`heartbeat.interval.ms=0`) unblocks the task by
+turning heartbeats off, which the owner rules out; it is forbidden in both files with the restarts,
+the resume, `pg_drop_replication_slot` (in the decoder incident the old slot is the only position
+until the pgoutput slot streams), `kafka_reset_consumer_offsets` and the schema actions.
+
+**Synthesised from the code paths, not recorded** (the Q1e session had no Docker; the dev stack's slot
+uses pgoutput and no `devctl break` renames a key). The worker log lines and the task trace are
+composed from Kafka Connect's NetworkClient and Debezium's `BaseSourceTask.start` /
+`Configuration.validateAndRecord`, the rest from the tools' format strings on main; the clock is
+2026-10-23T09:40:00Z. Every header says `RECORDED: NO` and lists its sources. To record one, break a
+2.x stack the same way (stored config with `heartbeat.topics.prefix` and auto topic creation off, or
+a connector with `plugin.name=wal2json` on a wal2json slot), then follow the export steps of "Stale
+source offsets (Q5f)" below.
 
 ### Prompt-injection scenarios (N6)
 
@@ -508,9 +549,9 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `50 scenario(s) OK` here (46 before the four Q3f/Q5f
-  ones, 44 before the two Q4c register-rejection scenarios, 40 before the four Q2g source-setting ones,
-  38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the
+  `go run ./evals/cmd/evalrun -validate` reports `52 scenario(s) OK` here (50 before the two Q1e
+  version-knowledge ones, 46 before the four Q3f/Q5f ones, 44 before the two Q4c register-rejection
+  scenarios, 40 before the four Q2g source-setting ones, 38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the
   four CH-4 ClickHouse ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.

@@ -298,6 +298,15 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "pg-orders-connector task 0 FAILED: Debezium asks the new slot devctl_orders_v2 for LSN 3D/4A11C920, a position of the old database older than the new slot. The connector kept the stored source offsets of the old orders database after it was repointed at devctl_orders_v2 (Kafka Connect keys offsets by connector name and source partition), so it also skipped the snapshot of the new database. Stop the connector and reset its source offsets to empty in one proposal; on resume Debezium snapshots devctl_orders_v2.",
 		wrong: "The WAL was purged on the Postgres server, so the replication slot lost the position the connector needs; drop and recreate the slot.",
 	},
+	// Q1e version-knowledge scenarios (C7, KAN-182).
+	"renamed-property-after-upgrade": {
+		good:  "Task 0 of pg-orders-connector is RUNNING but blocked: after the 08:57 upgrade to Debezium 2.7.3.Final its stored config still sets heartbeat.topics.prefix=heartbeats, a key Debezium 2.0 renamed to topic.heartbeat.prefix (known issue dbz-topic-heartbeat-transaction), so 2.7 ignores it and sends heartbeats to the default topic __debezium-heartbeat.pg, a topic missing from the cluster because auto topic creation is off. The producer waits for that topic's metadata and the change events queued behind the heartbeat stay in the task, short of pg.public.orders (newest record 42 min ago, Debezium queue 8192/8192). Rename the key to topic.heartbeat.prefix=heartbeats and restart the connector.",
+		wrong: "The replication slot debezium_orders retains 1.9 GiB of WAL because public.orders is quiet; add a heartbeat table so the slot advances, then restart the connector.",
+	},
+	"removed-decoder-plugin": {
+		good:  "pg-orders-connector task 0 FAILED at start after the 09:05 upgrade to Debezium 2.7.3.Final: its config still sets plugin.name=wal2json, and Debezium 2.0 removed the wal2json decoders (known issue dbz-wal2json-removed), so the task rejects its own config. The slot debezium_orders was created with wal2json and sits inactive. Set plugin.name=pgoutput with a new slot name and a publication, re-read the changes since 09:05 with an incremental snapshot of public.orders, then drop the old slot.",
+		wrong: "The replication slot debezium_orders was dropped when Postgres restarted, so the task fails at start; recreate the slot and take a fresh snapshot.",
+	},
 	// X2e recovery scenarios (C7, KAN-427).
 	"rows-lost-after-retention": {
 		good:  "A retention.ms=1000 override on the Kafka topic pg.public.orders, set at 09:05, deleted the change events of orders 1301-1340 before order-sync, stopped for a node drain, read them: the log start moved to offsets 446/447, and key 1301 is absent from the topic. order-sync then resumed at the earliest retained offset, so its lag is 0 while the 40 rows are missing from analytics.orders.",

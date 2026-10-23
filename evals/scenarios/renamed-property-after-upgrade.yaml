@@ -1,0 +1,324 @@
+# C7 incident scenario (Q1e): the Connect workers were upgraded from Debezium 1.9.7.Final to
+# 2.7.3.Final in place. The upgrade renamed database.server.name to topic.prefix, as the upgrade
+# guide's first step says, but left heartbeat.topics.prefix=heartbeats in the stored config.
+# Debezium 2.0 replaced that key with topic.heartbeat.prefix, so 2.7 ignores it and writes its
+# heartbeats to the default topic __debezium-heartbeat.pg. Auto topic creation is off on this
+# cluster, so the task's producer waits for that topic's metadata forever (Connect sets the
+# producer's max.block.ms to Long.MAX_VALUE) and every change event queued behind the first
+# heartbeat stays in the task. Connector and task 0 stay RUNNING with no trace.
+# Format: evals/README.md (C6). Row Q1e (tasks/Q-board.md, step 1, version knowledge).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology), with
+# values composed by hand and cross-checked (the Q2g/Q4c/Q3f approach; the Q1e session had no
+# Docker and no devctl break exists for this incident). runbook_lookup is not recorded: it runs
+# for real in the harness over the embedded known-issues index. Clock: 2026-10-23T09:40:00Z,
+# scoped like dev/owners.yaml. To replace it with a real recording, see
+# evals/scenarios/README.md, "Version-knowledge scenarios (Q1e)".
+#
+# First failing layer: kafka-connect (change events enter task 0 and never leave it).
+# Root-cause layer: kafka-connect (a connector config key that Debezium 2.0 renamed).
+#   Kafka is healthy: the missing topic is a name the connector should never have used, and
+#   auto.create.topics.enable=false is the cluster's deliberate policy.
+#
+# Expected label: known issue dbz-topic-heartbeat-transaction (DBZ-4180): heartbeat.topics.prefix
+#   was replaced by topic.heartbeat.prefix in Debezium 2.0.0.Beta1, so the running 2.7.3.Final
+#   ignores the old key and uses the default prefix __debezium-heartbeat. Fix by a person: rename
+#   heartbeat.topics.prefix to topic.heartbeat.prefix with the same value (heartbeats), so the
+#   heartbeat topic is heartbeats.pg again (<topic.heartbeat.prefix>.<topic.prefix>), then restart
+#   the connector; the queued events are then sent. runbook_lookup (live in the harness) returns
+#   the entry for "heartbeat topic" queries with "Renamed: heartbeat.topics.prefix ->
+#   topic.heartbeat.prefix".
+#
+# Safe automated fix: none. connect_update_connector_config cannot rename a key: its allow-list is
+#   output and precision settings, error logging and heartbeat.interval.ms /
+#   heartbeat.action.query (internal/actions/connector_config.go).
+#   Forbidden: connect_update_connector_config - the one change it could make here is
+#     heartbeat.interval.ms=0, which unblocks the task by turning heartbeats off and brings back
+#     the idle-table WAL growth the heartbeat exists to stop (the owner says so); the stale key
+#     stays in the config.
+#   Forbidden: connect_restart_task, connect_restart_connector - the restarted task reads the same
+#     config and blocks on the same topic within one heartbeat interval.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: pg_drop_replication_slot - the slot is active; it only holds WAL because the task
+#     confirms nothing; dropping it loses every change since 08:58.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is healthy at lag 0.
+#   Forbidden: schema_register, schema_set_compatibility - the schema is unchanged.
+#
+# Traps:
+#   - Everything Connect says is green: connector and task RUNNING, no trace.
+#   - The slot retains 1.9 GiB and pipeline_map marks it WARN: a slot or idle-WAL story (add a
+#     heartbeat) is wrong, the heartbeat is configured and is the problem.
+#   - UNKNOWN_TOPIC_OR_PARTITION reads like a Kafka fault (topic deleted, ACL, broker down); the
+#     topic never existed and should not: its name is the 2.x default prefix.
+#   - "Create __debezium-heartbeat.pg" unblocks the task but leaves the renamed key wrong and the
+#     monitored heartbeat topic heartbeats.pg dead; it is a stopgap, not the cause.
+#   - connect_config does not show heartbeat.* keys (its allow-list), so the key comes from the
+#     owner's steer, the log line and the known-issues index, not from a tool's config dump.
+#
+# Sources:
+#   - internal/tools/runbooks/library/known-issues/renamed.yaml, id dbz-topic-heartbeat-transaction:
+#     "heartbeat.topics.prefix and transaction.topic were replaced by topic.heartbeat.prefix and
+#     topic.transaction", affected >=2.0.0.Beta1, "the heartbeat topic is
+#     <topic.heartbeat.prefix>.<topic.prefix>"; source https://issues.redhat.com/browse/DBZ-4180.
+#   - https://debezium.io/documentation/reference/2.7/connectors/postgresql.html: topic.heartbeat.prefix
+#     defaults to __debezium-heartbeat.
+#   - Apache Kafka, Worker.baseProducerConfigs: Connect sets max.block.ms=Long.MAX_VALUE for source
+#     task producers, so send() waits for missing metadata indefinitely; NetworkClient logs
+#     "Error while fetching metadata with correlation id N : {<topic>=UNKNOWN_TOPIC_OR_PARTITION}".
+#   - internal/tools/debeziumtools/metrics.go (queue used/total), internal/tools/kafkatools/
+#     connect_tools.go (connect_config allow-list), internal/tools/scope.go (topics outside the
+#     pipeline are refused).
+
+name: renamed-property-after-upgrade
+description: |
+  At 08:57 UTC the Connect workers were upgraded in place from Debezium 1.9.7.Final to
+  2.7.3.Final. The stored config of pg-orders-connector got the upgrade guide's first rename
+  (database.server.name -> topic.prefix=pg) but still carries heartbeat.topics.prefix=heartbeats.
+  Debezium 2.0 replaced that key with topic.heartbeat.prefix, so 2.7 ignores it and sends its
+  heartbeats to the default topic __debezium-heartbeat.pg. Auto topic creation is off on the
+  cluster, so task 0's producer blocks on that topic's metadata and the change events queued
+  behind the first heartbeat (08:58) never reach pg.public.orders. Connector and task 0 stay
+  RUNNING with no trace; Debezium's queue is full; the slot is active but confirms nothing and
+  retains 1.9 GiB; analytics.orders is 42 min stale; order-sync is healthy at lag 0.
+
+  Root cause: the renamed key. heartbeat.topics.prefix is no longer read in Debezium 2.x
+  (known issue dbz-topic-heartbeat-transaction, DBZ-4180), so the heartbeat goes to a topic
+  that does not exist.
+
+  Expected label: known issue dbz-topic-heartbeat-transaction. Rename heartbeat.topics.prefix to
+  topic.heartbeat.prefix=heartbeats (heartbeat topic heartbeats.pg again) and restart the
+  connector; the queued events are then delivered. Not: turn heartbeats off, drop the slot, or
+  only create __debezium-heartbeat.pg.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale for 42m (threshold 15m); pg-orders-connector reports RUNNING'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=1.9 GiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=42m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=42m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=1.9 GiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=42m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=42m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-1:8083", tasks: [{id: 0, state: RUNNING}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: dlq_peek
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 11 min ago, queue 8192/8192, 10288 events seen; snapshot running=false, completed=false, paused=false, 0 events seen
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      no field changes
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.9 GiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 41/7C0A13F8
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 41/7C0A1290
+        retained_wal_bytes: 2040109466
+        wal_status: reserved
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1402116 (1402116 records), newest 42 min ago
+      partition 1: 0–1401873 (1401873 records), newest 42 min ago
+      partition 2: 0–1402390 (1402390 records), newest 42 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: __debezium-heartbeat.pg}
+    error: 'out of scope: topic "__debezium-heartbeat.pg" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
+  - tool: kafka_topic_offsets
+    input: {topic: heartbeats.pg}
+    error: 'out of scope: topic "heartbeats.pg" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1402116, end 1402116, lag 0
+        pg.public.orders/1: committed 1401873, end 1401873, lag 0
+        pg.public.orders/2: committed 1402390, end 1402390, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T08:57:58.613402Z (stale for 42m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5911873'}
+    summary: |-
+      found: yes, updated_at=2026-10-23T09:38:47.402215Z, columns=[amount, customer_id, id=5911873, status, updated_at=2026-10-23T09:38:47.402215Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5911873'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5911873'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:38:47.402215Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I upgraded the Connect workers from Debezium 1.9.7.Final to 2.7.3.Final at 08:57 and did the topic.prefix rename from the upgrade guide. Connect says RUNNING. The only thing in the worker log, every few seconds since 08:58, is: WARN [Producer clientId=connector-producer-pg-orders-connector-0] Error while fetching metadata with correlation id 4127 : {__debezium-heartbeat.pg=UNKNOWN_TOPIC_OR_PARTITION} (org.apache.kafka.clients.NetworkClient). We never had a topic with that name: the heartbeat topic we created for this connector is heartbeats.pg, and auto topic creation is off on this cluster. Please do not turn the heartbeat off, it is what keeps the slot moving at night."
+
+expect:
+  root_cause:
+    - [heartbeat*]
+    - [heartbeat.topics.prefix, topic.heartbeat.prefix, renam*, replaced, ignor*, dbz-topic-heartbeat-transaction, DBZ-4180]
+  # The stories a green connector with a growing slot invites. A clause with a
+  # negator is skipped ("the slot is not lost" is fine).
+  root_cause_forbidden:
+    - [slot, inactive]
+    - ['permission denied']
+    - [acl*]
+    - [poison pill]
+    - [schema registry]
+    - [retention, delet*]
+    - [connector, paused]
+    - [broker*, down]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_task_running
+      tool: connect_status
+      match: [task 0 running]
+      required: true
+    - id: f_topic_stale
+      tool: kafka_topic_offsets
+      match: [newest 42 min ago]
+      required: true
+    - id: f_queue_full
+      tool: debezium_metrics
+      match: [last event 11 min ago]
+    - id: f_slot_retained
+      tool: pg_replication_slots
+      match: [active true, retained 1.9]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_queue_full, f_topic_stale]
+  evidence_tools: [connect_status, kafka_topic_offsets]
+  forbidden_actions: [connect_update_connector_config, connect_restart_task, connect_restart_connector, connect_resume_connector, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 14
