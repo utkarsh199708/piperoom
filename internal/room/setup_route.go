@@ -1,0 +1,614 @@
+package room
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"piperoom/internal/actions"
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
+	"piperoom/internal/setup/plan"
+)
+
+// Tiered routing for setup rooms (U1-6; docs/design/setup-agent.md §3.3,
+// §3.5, §3.6): a proposal of a setup room is routed by the tier of its steps,
+// which is the op's floor raised to the class of the endpoint the room
+// resolved from the step's params, never a label the model supplied.
+//
+//	T0  a read: refused as a proposal (tools only);
+//	T1  scheduled by the policy setup_local after PIPEROOM_SETUP_LOCAL_DELAY;
+//	T2  waits for the approver of §3.6: the owners of an overlapping pipeline,
+//	    else a tenant admin (grant "admin"); the driver's fallback only in
+//	    solo mode on the standalone server;
+//	T3  T2 plus a recorded maintenance window for the ops the guard table ties
+//	    to one (ALTER SYSTEM, a database restart).
+//
+// The guard table (plan.Forbidden) is checked at Create and again before
+// Execute, and the latest setup.plan bounds what an agent may propose at all
+// (agent.ErrNotInPlan). Every function here is pure — no I/O, no clock of its
+// own — so a fake clock drives the countdown in tests and every replica
+// reaches the same answer from the room log.
+
+// setupOpSourceRestart is the catalogue name of the restart op that needs a
+// maintenance window (plan §3.6 lists ALTER SYSTEM and a database restart).
+// It has no plan constant because the op catalogue itself is the runner's
+// (internal/setup/ops, A9); the room only needs the name for the window rule.
+const setupOpSourceRestart = "source_restart"
+
+// SetupStep is the proposal step identity and the server's routing decision
+// that the executor puts into an action call's context in a setup room. A
+// setup action adapter (U1-7) reads it to fill protocol.OpRequest: ProposalID,
+// StepIndex, ParamsHash, Tier and Class are exactly the fields the runner
+// re-checks (Class against its own target floors, Tier against the op floor,
+// the params hash over the frozen proposal). Steps outside a setup room carry
+// none.
+type SetupStep struct {
+	ProposalID string
+	StepIndex  int
+	ParamsHash string
+	Tier       string
+	Class      string
+}
+
+// setupStepKey carries a SetupStep in an action call's context.
+type setupStepKey struct{}
+
+// WithSetupStep returns ctx carrying st. It is the room's side of the
+// protocol.OpRequest contract for the setup action adapters; the executor
+// adds it to every step of a setup room.
+func WithSetupStep(ctx context.Context, st SetupStep) context.Context {
+	return context.WithValue(ctx, setupStepKey{}, st)
+}
+
+// SetupStepFrom returns the SetupStep carried by ctx, and whether it carries
+// one.
+func SetupStepFrom(ctx context.Context) (SetupStep, bool) {
+	st, ok := ctx.Value(setupStepKey{}).(SetupStep)
+	return st, ok
+}
+
+// setupRoute is the routing decision of a whole setup proposal: the highest
+// tier and class of its steps, because a proposal runs at the tier of its
+// riskiest step, plus each step's decision.
+type setupRoute struct {
+	Tier  string
+	Class string
+	Steps []setupStepRoute
+}
+
+// setupStepRoute is one step's decision.
+type setupStepRoute struct {
+	Op    string
+	Tier  string
+	Class string
+	// Plan is the plan step the proposal step executes; its zero value for a
+	// proposal that does not need to be in a plan.
+	Plan events.SetupPlanStep
+}
+
+// tierRank is plan.TierRank for a tier that plan.ValidTier accepted.
+func tierRank(tier string) int {
+	r, _ := plan.TierRank(tier)
+	return r
+}
+
+// raiseTier returns the higher of two valid tiers.
+func raiseTier(a, b string) string {
+	if tierRank(b) > tierRank(a) {
+		return b
+	}
+	return a
+}
+
+// resolveSetupRoute decides each step's op, class and tier, checks the plan
+// (when requirePlan), the guard table and the maintenance window, and returns
+// the proposal's route. A step's action that is not actions.Tiered is T2 in a
+// setup room (actions/action.go); a T0 op is a tool and never a proposal.
+// now is read once, so every step of one resolution sees the same clock.
+//
+// The returned errors are the API's: 400 not_in_plan (wrapping
+// agent.ErrNotInPlan), 400 validation for a T0 proposal and a T3 step outside
+// its window, and a 400 validation wrapping plan.ErrGuard with the guard row's
+// fixed reason code for a forbidden (op, class) pair.
+func resolveSetupRoute(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep, requirePlan bool, now time.Time) (setupRoute, error) {
+	if snap == nil || snap.Setup == nil {
+		return setupRoute{}, validation("this room is not a setup room")
+	}
+	if len(steps) == 0 {
+		return setupRoute{}, validation("a proposal needs at least one step")
+	}
+	route := setupRoute{Steps: make([]setupStepRoute, len(steps))}
+	for i, step := range steps {
+		op := setupOpOf(step)
+		target := setupStepTarget(snap.Setup, step.Params)
+		class := setupStepClass(snap.Setup, target)
+		var planStep events.SetupPlanStep
+		if requirePlan {
+			found, ok := setupPlanStepFor(snap.Setup, op, target)
+			if !ok {
+				return setupRoute{}, notInPlan(fmt.Sprintf(
+					"step %d (%s) is not in the current setup plan; record a new setup plan (setup_plan) before proposing it",
+					i, cleanPlanName(op)))
+			}
+			planStep = found
+			if target == "" && found.Target != "" {
+				// The plan's target is the server's own record of the
+				// endpoint; use it when the params name none.
+				target = found.Target
+				class = setupStepClass(snap.Setup, target)
+			}
+		}
+		tier, err := setupStepTier(acts, step, class)
+		if err != nil {
+			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", i, cleanPlanName(op), err))
+		}
+		if plan.ValidTier(planStep.Tier) {
+			// The plan step's tier is server-filled and can only be raised.
+			tier = raiseTier(tier, planStep.Tier)
+		}
+		if tier == plan.TierT0 {
+			return setupRoute{}, validation(fmt.Sprintf(
+				"step %d (%s) is a T0 read: T0 ops are tools, never proposals", i, cleanPlanName(op)))
+		}
+		if row, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: class, Facts: setupGuardFacts(op, step.Params)}); forbidden {
+			return setupRoute{}, setupGuardRefused(fmt.Sprintf(
+				"step %d (%s): the guard table forbids %s on a %s target (%s)",
+				i, cleanPlanName(op), cleanPlanName(row.Op), class, row.Reason))
+		}
+		if tier == plan.TierT3 && setupOpNeedsWindow(op) && !setupWindowAllows(snap.Setup, now) {
+			return setupRoute{}, validation(fmt.Sprintf(
+				"step %d (%s) is T3 on a %s target and needs a maintenance window: record one with POST /api/rooms/{id}/setup/maintenance-window",
+				i, cleanPlanName(op), class))
+		}
+		route.Steps[i] = setupStepRoute{Op: op, Tier: tier, Class: class, Plan: planStep}
+		if route.Tier == "" {
+			route.Tier = tier
+		} else {
+			route.Tier = raiseTier(route.Tier, tier)
+		}
+		if route.Class == "" {
+			route.Class = class
+		} else {
+			route.Class = classAtLeast(route.Class, class)
+		}
+	}
+	return route, nil
+}
+
+// setupRouteTier is the routing half of resolveSetupRoute: each step's op,
+// class and tier, with no plan, guard or window check. The approval path uses
+// it to decide who approves (T1 versus T2/T3); the guard and the window are
+// Create's and Execute's business, so raising a target's class after approval
+// does not turn a decision into a refusal — it makes the executor refuse the
+// step (design §3.5).
+func setupRouteTier(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep) (setupRoute, error) {
+	if snap == nil || snap.Setup == nil {
+		return setupRoute{}, validation("this room is not a setup room")
+	}
+	route := setupRoute{Steps: make([]setupStepRoute, len(steps))}
+	for i, step := range steps {
+		op := setupOpOf(step)
+		target := setupStepTarget(snap.Setup, step.Params)
+		class := setupStepClass(snap.Setup, target)
+		tier, err := setupStepTier(acts, step, class)
+		if err != nil {
+			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", i, cleanPlanName(op), err))
+		}
+		route.Steps[i] = setupStepRoute{Op: op, Tier: tier, Class: class}
+		if route.Tier == "" {
+			route.Tier = tier
+		} else {
+			route.Tier = raiseTier(route.Tier, tier)
+		}
+		if route.Class == "" {
+			route.Class = class
+		} else {
+			route.Class = classAtLeast(route.Class, class)
+		}
+	}
+	return route, nil
+}
+
+// setupStepTier asks the action for the step's tier at class, or answers T2
+// for an action that does not implement actions.Tiered.
+func setupStepTier(acts *actions.Registry, step events.ProposalStep, class string) (string, error) {
+	if acts == nil {
+		return "", fmt.Errorf("no action registry")
+	}
+	a, ok := acts.Get(step.Action)
+	if !ok {
+		return "", fmt.Errorf("unknown action %q", cleanPlanName(step.Action))
+	}
+	tiered, ok := a.(actions.Tiered)
+	if !ok {
+		return plan.TierT2, nil
+	}
+	tier, err := tiered.Tier(step.Params, class)
+	if err != nil {
+		return "", fmt.Errorf("tier of %q: %w", cleanPlanName(step.Action), err)
+	}
+	if !plan.ValidTier(tier) {
+		return "", fmt.Errorf("tier of %q is %q, not T0..T3", cleanPlanName(step.Action), cleanPlanName(tier))
+	}
+	return tier, nil
+}
+
+// setupOpOf is the catalogue op a proposal step executes: the params' "op"
+// field when the setup adapter forwards a typed op, else the action's name
+// (the adapters register under the op name).
+func setupOpOf(step events.ProposalStep) string {
+	var params struct {
+		Op string `json:"op"`
+	}
+	if len(step.Params) > 0 && json.Unmarshal(step.Params, &params) == nil {
+		if op := strings.TrimSpace(params.Op); op != "" {
+			return op
+		}
+	}
+	return step.Action
+}
+
+// setupStepTarget returns the room target a step's params name, "" when it
+// names none. The setup action adapters name the endpoint they reach in a
+// "target" field (or "address"/"host"/"url"); a value equal to a registered
+// target's address or host resolves to that target. Any other string in the
+// params that equals a registered target also counts, so an adapter that
+// nests the endpoint deeper still resolves; nothing is guessed from a host
+// name that is not registered.
+func setupStepTarget(setup *SetupSnapshot, params json.RawMessage) string {
+	if setup == nil || len(setup.Targets) == 0 || len(params) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(params, &obj); err != nil {
+		return ""
+	}
+	var candidates []string
+	for _, key := range []string{"target", "address", "host", "url"} {
+		if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+			candidates = append(candidates, strings.TrimSpace(v))
+		}
+	}
+	collectSetupStrings(obj, &candidates, 0)
+	for _, c := range candidates {
+		if addr := matchSetupTarget(setup, c); addr != "" {
+			return addr
+		}
+	}
+	return ""
+}
+
+// collectSetupStrings appends every string value of obj to out, up to a
+// bounded depth and count: a step's params are small, and the resolver must
+// not walk a hostile, deeply nested payload.
+func collectSetupStrings(v any, out *[]string, depth int) {
+	if depth > 4 || len(*out) >= maxSetupParamsStrings {
+		return
+	}
+	switch x := v.(type) {
+	case string:
+		if s := strings.TrimSpace(x); s != "" {
+			*out = append(*out, s)
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // stable order, so the answer never depends on map iteration
+		for _, k := range keys {
+			collectSetupStrings(x[k], out, depth+1)
+		}
+	case []any:
+		for _, item := range x {
+			collectSetupStrings(item, out, depth+1)
+		}
+	}
+}
+
+// maxSetupParamsStrings bounds collectSetupStrings.
+const maxSetupParamsStrings = 64
+
+// matchSetupTarget returns the registered address a candidate names, "" when
+// it names none. A candidate matches the same address, or the same host as a
+// registered target's address (so "db.acme" and "db.acme:5432" agree).
+func matchSetupTarget(setup *SetupSnapshot, candidate string) string {
+	host := setupTargetHost(candidate)
+	for _, t := range setup.Targets {
+		if t.Address == candidate {
+			return t.Address
+		}
+		if host != "" && setupTargetHost(t.Address) == host {
+			return t.Address
+		}
+	}
+	return ""
+}
+
+// setupStepClass is the class of the endpoint a step names: the class of the
+// registered target it resolves to, or "shared" when it resolves to none. It
+// never answers "local" for an endpoint the room did not register, so a step
+// whose target is unknown cannot be scheduled by policy; a registered target
+// whose class is not a class is read as shared, never as local.
+func setupStepClass(setup *SetupSnapshot, address string) string {
+	if setup == nil || address == "" {
+		return protocolClassShared
+	}
+	class := ""
+	for _, t := range setup.Targets {
+		if t.Address != address || !validSetupClass(t.Class) {
+			continue
+		}
+		if class == "" {
+			class = t.Class
+		} else {
+			class = classAtLeast(class, t.Class)
+		}
+	}
+	if class == "" {
+		return protocolClassShared
+	}
+	return class
+}
+
+// setupPlanStepFor finds the plan step a proposal step executes: the latest
+// plan's step with the same op that has not run yet, preferring the one whose
+// target matches the proposal's when both name one. A plan with no such step
+// means the model must re-plan (agent.ErrNotInPlan).
+func setupPlanStepFor(setup *SetupSnapshot, op, target string) (events.SetupPlanStep, bool) {
+	var first *events.SetupPlanStep
+	for pi := range setup.phases {
+		for si := range setup.phases[pi].Steps {
+			planStep := setup.phases[pi].Steps[si]
+			if planStep.Op != op || setup.executed[planStep.Index] {
+				continue
+			}
+			if target != "" && planStep.Target == target {
+				return planStep, true
+			}
+			if first == nil {
+				p := planStep
+				first = &p
+			}
+		}
+	}
+	if first != nil {
+		return *first, true
+	}
+	return events.SetupPlanStep{}, false
+}
+
+// setupGuardFacts are the guard table's per-step inputs, read from the step's
+// params: the ALTER SYSTEM parameter name, and whether a compose_down keeps
+// its volumes. Anything the params do not clearly answer reads as the
+// strictest value (plan.StepFacts), so an unreadable param never buys the
+// exception.
+func setupGuardFacts(op string, params json.RawMessage) plan.StepFacts {
+	var facts plan.StepFacts
+	if len(params) == 0 {
+		return facts
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(params, &obj); err != nil {
+		return facts
+	}
+	switch op {
+	case plan.OpSourceAlterSystem:
+		for _, key := range []string{"param", "parameter", "name"} {
+			if v, ok := obj[key].(string); ok {
+				facts.Param = strings.TrimSpace(v)
+				break
+			}
+		}
+	case plan.OpComposeDown:
+		facts.KeepsVolumes = setupKeepsVolumes(obj)
+	}
+	return facts
+}
+
+// setupKeepsVolumes reports whether a compose_down's params say volumes are
+// kept: "volumes": false, "remove_volumes": false, or an argv-style list
+// without "-v"/"--volumes". A params object that says nothing keeps nothing.
+func setupKeepsVolumes(obj map[string]any) bool {
+	answered := false
+	keeps := false
+	for _, key := range []string{"volumes", "remove_volumes"} {
+		if v, ok := obj[key].(bool); ok {
+			answered = true
+			if key == "volumes" && !v {
+				keeps = true
+			}
+			if key == "remove_volumes" && !v {
+				keeps = true
+			}
+		}
+	}
+	if answered {
+		return keeps
+	}
+	for _, key := range []string{"args", "argv"} {
+		raw, ok := obj[key].([]any)
+		if !ok {
+			continue
+		}
+		keeps = true
+		for _, item := range raw {
+			if s, ok := item.(string); ok && (s == "-v" || s == "--volumes") {
+				keeps = false
+				break
+			}
+		}
+		return keeps
+	}
+	return false
+}
+
+// setupOpNeedsWindow reports whether an op at T3 is created and executed only
+// inside a recorded maintenance window (design §3.5): changing a database
+// setting through the ALTER SYSTEM allow-list, or restarting a database.
+func setupOpNeedsWindow(op string) bool {
+	return op == plan.OpSourceAlterSystem || op == setupOpSourceRestart
+}
+
+// setupWindowAllows reports whether the room has a recorded maintenance
+// window covering now. A window that ended does not allow anything; the view
+// hides it (fillSetupRuntime) but the log keeps it.
+func setupWindowAllows(setup *SetupSnapshot, now time.Time) bool {
+	if setup == nil || setup.MaintenanceWindow == nil {
+		return false
+	}
+	w := setup.MaintenanceWindow
+	return !now.Before(w.Start) && now.Before(w.End)
+}
+
+// setupNeedsPlan reports whether a proposal of this origin must come from the
+// current setup.plan: the agent's must; the driver's own fix (POST
+// /api/rooms/{id}/proposals) and the server's own proposals (the ladder's
+// canary) carry their own reason to write.
+func setupNeedsPlan(origin string) bool {
+	return origin != events.ProposalOriginDriver
+}
+
+// setupLayers returns the required and fallback layers of a setup proposal
+// (design §3.6). A T2 or T3 proposal whose endpoint overlaps an existing
+// pipeline needs that pipeline's layers, so its owners are the approvers;
+// otherwise it needs its steps' layers, and the driver's fallback is offered
+// only in solo mode on the standalone server.
+func (s *Service) setupLayers(snap *RoomSnapshot, route setupRoute, steps []events.ProposalStep) (required, fallback []string) {
+	required = []string{}
+	seen := map[string]bool{}
+	for _, step := range steps {
+		if step.Layer == "" || seen[step.Layer] {
+			continue
+		}
+		seen[step.Layer] = true
+		required = append(required, step.Layer)
+	}
+	fallback = []string{}
+	if tierRank(route.Tier) < 2 {
+		// A T1 proposal's layers are the driver's: the provisional pipeline
+		// owns nothing, so every layer is a fallback layer.
+		return required, append(fallback, required...)
+	}
+	if owned := s.setupOverlapLayers(snap); len(owned) > 0 {
+		return owned, fallback
+	}
+	if s.setupSolo(snap) && s.setupLocal {
+		return required, append(fallback, required...)
+	}
+	return required, fallback
+}
+
+// setupOverlapLayers returns the layers of the existing pipelines whose host,
+// topic prefix, connector or table the provisional pipeline shares, in
+// events.Layers order: the proposal's approvers are those pipelines' owners
+// (design §3.6). A pipeline of another tenant is not included: its owners
+// cannot approve here, and its admins are only a contact.
+func (s *Service) setupOverlapLayers(snap *RoomSnapshot) []string {
+	pipelines := s.setupOverlapPipelines(snap)
+	if len(pipelines) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, layer := range events.Layers {
+		for _, p := range pipelines {
+			if !seen[layer] && s.owners.IsOwned(p.ID, layer) {
+				seen[layer] = true
+				out = append(out, layer)
+			}
+		}
+	}
+	return out
+}
+
+// setupOverlapPipelines returns the loaded pipelines of the room's tenant that
+// overlap the room's provisional pipeline (owners.Overlap). It is also the
+// source of the refusal's wording in pipeline_register (U1-14).
+func (s *Service) setupOverlapPipelines(snap *RoomSnapshot) []owners.Pipeline {
+	if s.owners == nil || snap == nil || snap.Setup == nil {
+		return nil
+	}
+	prov, ok := snap.SetupProvisional()
+	if !ok {
+		return nil
+	}
+	var out []owners.Pipeline
+	seen := map[string]bool{}
+	for _, ov := range s.owners.Overlap(prov, nil) {
+		if ov.PipelineID == "" || seen[ov.PipelineID] {
+			continue
+		}
+		if p, ok := s.owners.Pipeline(ov.PipelineID); ok {
+			seen[p.ID] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// setupOverlapApprover reports whether user may approve layer as an owner of
+// an overlapping pipeline, and the principal detail ("user:…", "group:…").
+func (s *Service) setupOverlapApprover(snap *RoomSnapshot, user User, layer string) (string, bool) {
+	for _, p := range s.setupOverlapPipelines(snap) {
+		if g, ok := s.owners.CanApprove(p.ID, layer, user.ID, user.Groups); ok {
+			return g, true
+		}
+	}
+	return "", false
+}
+
+// setupSolo is the setup room's own solo rule (design §3.6): one person is
+// the whole tenant, or no tenancy and one user. It replaces the generic
+// owners-based mode.solo for a setup room, whose provisional pipeline nobody
+// owns, so the room's rule overrides mode.solo for environment steps.
+func (s *Service) setupSolo(snap *RoomSnapshot) bool {
+	if snap == nil || snap.Setup == nil {
+		return false
+	}
+	// PIPEROOM_SOLO_USER is a one-person install by construction; the
+	// operator named the one person the server is for.
+	if s.soloUser != "" {
+		return true
+	}
+	if s.users == nil {
+		return false
+	}
+	n := 0
+	for _, u := range s.users.All() {
+		if s.TenancyOn() && !s.owners.InTenant(snap.SetupTenant(), u.ID, u.Groups) {
+			continue
+		}
+		n++
+		if n > 1 {
+			return false
+		}
+	}
+	return n == 1
+}
+
+// setupSnapshot returns the room's current snapshot when it is a setup room,
+// nil otherwise. It never fails the caller: the under-lock checks repeat every
+// decision with the authoritative state, so this read only lets a
+// before-the-lock Validate see the provisional pipeline.
+func (s *Service) setupSnapshot(ctx context.Context, roomID string) *RoomSnapshot {
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil || snap == nil || !snap.IsSetupRoom() {
+		return nil
+	}
+	return snap
+}
+
+// cleanPlanName quotes a name from a plan or a step for an error message,
+// clipped and stripped of control characters: the name is model text.
+func cleanPlanName(name string) string {
+	name = sanitizeAgentText(name)
+	if len(name) > plan.MaxPlanIDBytes {
+		name = name[:plan.MaxPlanIDBytes]
+	}
+	return name
+}

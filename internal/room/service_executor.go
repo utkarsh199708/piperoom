@@ -10,6 +10,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
 	"piperoom/internal/tools"
 )
@@ -389,19 +390,48 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
+		// A setup room re-checks its route here, before the write: the guard
+		// table, the maintenance window and (for an agent's proposal) the
+		// plan may have changed since Create, and the class of a target only
+		// rises (setup_route.go; design §3.5). The decision travels to the
+		// action in ctx, so an adapter's OpRequest carries the server's Class
+		// and Tier and the proposal fields the runner re-checks.
+		snap, snapErr := s.readRoom(ctx, p.RoomID)
+		if snapErr != nil {
+			// Fail closed: without the room's state neither the pipeline scope
+			// nor a setup step's route can be re-checked, and no step runs
+			// unchecked.
+			s.stopOnStep(tracker, p, i, "cannot re-read the room before this step: "+snapErr.Error())
+			return nil
+		}
+		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
+		if snap != nil && snap.IsSetupRoom() {
+			origin := ""
+			if prop, ok := openProposal(*snap, p.ProposalID); ok {
+				origin = prop.Origin
+			}
+			route, rerr := resolveSetupRoute(snap, s.actionsFor(pipelineID), []events.ProposalStep{step}, setupNeedsPlan(origin), s.now().UTC())
+			if rerr != nil {
+				s.stopOnStep(tracker, p, i, "setup: "+rerr.Error())
+				return nil
+			}
+			actx = WithSetupStep(s.actionCtxFor(ctx, p.RoomID, snap, pipelineID), SetupStep{
+				ProposalID: p.ProposalID, StepIndex: i, ParamsHash: p.ParamsHash,
+				Tier: route.Steps[0].Tier, Class: route.Steps[0].Class,
+			})
+		}
 		// Validate and Execute run under the room's whole pipeline: the
 		// write clients refuse a write without it (fail closed), and
 		// Validate sees the same scope the write will run under. The room id
 		// travels too, so a client keeping per-room state (--demo) uses this
 		// room's, not another's.
-		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
 		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
 		// Re-check the scope right before the write, per docs/api.md: an
 		// approved proposal must not write outside the room's pipeline.
-		if err := s.scopeCheck(pipelineID, action, step.Params); err != nil {
+		if err := s.scopeCheckRoom(snap, pipelineID, action, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "scope check failed: "+err.Error())
 			return nil
 		}
@@ -635,6 +665,13 @@ func (s *Service) finishOwnStep(proposalID string, i int, output string) {
 // against, so the action is refused instead of running unchecked (LEAD-ARCH
 // round 4, item 3 removed the "--demo skips scope" bypass).
 func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.RawMessage) error {
+	return s.scopeCheckRoom(nil, pipelineID, a, params)
+}
+
+// scopeCheckRoom is scopeCheck with the room's snapshot: a setup room is
+// scoped to its provisional pipeline (design §3.2), every other room to the
+// owners.yaml pipeline.
+func (s *Service) scopeCheckRoom(snap *RoomSnapshot, pipelineID string, a actions.Action, params json.RawMessage) error {
 	sc, ok := a.(actions.Scoped)
 	if !ok {
 		return fmt.Errorf("action %q does not support scope checks", a.Name())
@@ -642,7 +679,7 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 	if s.owners == nil {
 		return fmt.Errorf("action %q cannot be scope-checked: no owners config is loaded", a.Name())
 	}
-	p, ok := s.owners.Pipeline(pipelineID)
+	p, ok := s.roomPipelineDef(snap, pipelineID)
 	if !ok {
 		return fmt.Errorf("pipeline %q is not configured", pipelineID)
 	}
@@ -650,6 +687,19 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 		return fmt.Errorf("action %q: %w", a.Name(), err)
 	}
 	return nil
+}
+
+// roomPipelineDef resolves the pipeline an action call is scoped to: the
+// provisional pipeline of a setup room before registration (owners.Provisional,
+// design §3.2), else the owners.yaml pipeline.
+func (s *Service) roomPipelineDef(snap *RoomSnapshot, pipelineID string) (owners.Pipeline, bool) {
+	if snap != nil && snap.IsSetupRoom() {
+		return snap.SetupProvisional()
+	}
+	if s.owners == nil {
+		return owners.Pipeline{}, false
+	}
+	return s.owners.Pipeline(pipelineID)
 }
 
 // pipelineCtx scopes ctx to the room's pipeline for an action call. The
