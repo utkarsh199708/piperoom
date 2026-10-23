@@ -55,6 +55,15 @@ type Report struct {
 	// are additive: no existing field changes.
 	ByTarget []Breakdown `json:"by_target,omitempty"`
 	BySource []Breakdown `json:"by_source,omitempty"`
+	// Provider and Flavor are the main model's provider (anthropic,
+	// bedrock, vertex, openai, gemini, bedrock-converse) and, for openai,
+	// its flavor; PromptHashKind is PromptHashKind(PromptHashes): the
+	// Anthropic tap's "sha256", the other adapters' "neutral-sha256", or
+	// "untapped". Hashes of two kinds never compare. Set by evalrun (V10);
+	// empty in reports written before it.
+	Provider       string `json:"provider,omitempty"`
+	Flavor         string `json:"flavor,omitempty"`
+	PromptHashKind string `json:"prompt_hash_kind,omitempty"`
 }
 
 // Breakdown is one group of a report's per-target or per-source pass rate.
