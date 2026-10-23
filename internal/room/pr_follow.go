@@ -619,6 +619,85 @@ func prInput(e events.Event) *agent.HumanInput {
 	return in
 }
 
+// notePRFinal remembers, on the PR of p's step, the event that merged or
+// closed it (a later open update clears it). It never changes prs.
+func notePRFinal(prs []PullRequest, p events.PullRequestUpdatedPayload, e events.Event) []PullRequest {
+	i := slices.IndexFunc(prs, func(pr PullRequest) bool {
+		return pr.ProposalID == p.ProposalID && pr.StepIndex == p.StepIndex
+	})
+	if i < 0 {
+		return prs
+	}
+	final := p.State == clients.PRStateMerged || p.State == clients.PRStateClosed
+	if final && prs[i].final != nil {
+		return prs // already final: the first event stays, and so does verified
+	}
+	out := slices.Clone(prs)
+	out[i].final, out[i].verified = nil, false
+	if final {
+		ev := e
+		out[i].final = &ev
+	}
+	return out
+}
+
+// notePRVerified marks the merged or closed PRs of proposalID as having an
+// agent.verification after their final state. It never changes prs.
+func notePRVerified(prs []PullRequest, proposalID string) []PullRequest {
+	var out []PullRequest
+	for i, pr := range prs {
+		if pr.ProposalID != proposalID || pr.final == nil || pr.verified {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(prs)
+		}
+		out[i].verified = true
+	}
+	if out == nil {
+		return prs
+	}
+	return out
+}
+
+// prReplayInputs are the pr_merged and pr_closed inputs of the room's fix
+// PRs that merged or closed and have no agent.verification yet, rebuilt from
+// the same event (prInput), so a new run reads exactly what the first one
+// did: proposal id and step index in their fields, the PR number, repo,
+// merge SHA and head_changed in Text. The inbox is in memory and the run
+// that drained the input keeps its apply wait in memory too, so a restart or
+// a lease move would otherwise lose the verdict for ever (review of #934,
+// fix-PR Major 2).
+func prReplayInputs(snap RoomSnapshot) []agent.HumanInput {
+	var out []agent.HumanInput
+	// Oldest first: PullRequests is newest first.
+	for i := len(snap.PullRequests) - 1; i >= 0; i-- {
+		pr := snap.PullRequests[i]
+		if pr.final == nil || pr.verified {
+			continue
+		}
+		if in := prInput(*pr.final); in != nil {
+			out = append(out, *in)
+		}
+	}
+	return out
+}
+
+// queuePRReplayLocked pushes prReplayInputs into the room's inbox, skipping
+// any the inbox already holds (the pr_merged that started this run), so it
+// is safe to call at every run start. Caller holds st's lock.
+func (s *Service) queuePRReplayLocked(st *roomState) {
+	if st.inbox == nil {
+		return
+	}
+	for _, in := range prReplayInputs(st.snap) {
+		if st.inbox.holds(in.Kind, in.ProposalID, in.StepIndex) {
+			continue
+		}
+		s.feedInput(st, in)
+	}
+}
+
 func shortSHA(s string) string {
 	if len(s) > 7 {
 		return s[:7]

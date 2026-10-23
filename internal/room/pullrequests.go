@@ -37,6 +37,13 @@ type PullRequest struct {
 	wroteHead string
 	headSHA   string
 	mergeSHA  string
+	// final is the pull_request.updated that merged or closed the PR, and
+	// verified is set once an agent.verification for its proposal followed
+	// it. A run that starts while final is set and verified is not gets the
+	// pr_merged / pr_closed input again (prReplayInputs): the run that read
+	// it may have died with its apply wait (restart, lease move).
+	final    *events.Event
+	verified bool
 }
 
 // ref is the PullRequestRef of the step that opened the PR.

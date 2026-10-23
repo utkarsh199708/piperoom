@@ -952,6 +952,12 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	case events.PullRequestUpdated:
 		if p, ok := decode[events.PullRequestUpdatedPayload](e); ok {
 			snap.PullRequests = applyPRUpdate(snap.PullRequests, p, e.At)
+			snap.PullRequests = notePRFinal(snap.PullRequests, p, e)
+		}
+
+	case events.AgentVerification:
+		if p, ok := decode[events.AgentVerificationPayload](e); ok {
+			snap.PullRequests = notePRVerified(snap.PullRequests, p.ProposalID)
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1398,6 +1399,17 @@ func (in *inbox) pushFront(items []agent.HumanInput) {
 	}
 }
 
+// holds reports whether an input of kind for proposalID and step is waiting
+// to be drained.
+func (in *inbox) holds(kind, proposalID string, step *int) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return slices.ContainsFunc(in.items, func(it agent.HumanInput) bool {
+		return it.Kind == kind && it.ProposalID == proposalID &&
+			(it.StepIndex == nil) == (step == nil) && (step == nil || *it.StepIndex == *step)
+	})
+}
+
 // pending returns how many inputs are waiting to be drained.
 func (in *inbox) pending() int {
 	in.mu.Lock()
@@ -1812,6 +1824,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentRun++
 	run := st.agentRun
 	openedAt := st.snap.OpenedAt
+	// Q7: a fix PR that merged or closed with no verdict yet is told to
+	// this run again; the run that read it may be gone with its apply wait.
+	s.queuePRReplayLocked(st)
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
@@ -1864,6 +1879,15 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				// up to its deadline, so a slow pass cannot hold the slot.
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
+			}
+			if attempt > 1 {
+				// A retry is a new run with no memory of the last one: the
+				// fix PRs still waiting for a verdict are told to it again.
+				s.lockState(st)
+				if !st.gone && st.agentRun == run {
+					s.queuePRReplayLocked(st)
+				}
+				s.unlockRoom(st)
 			}
 			// X2c: the run ctx carries the room's whole pipeline, so the
 			// agent's recovery Verify calls read in its scope (actions need
