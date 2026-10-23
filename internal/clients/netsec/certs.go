@@ -79,11 +79,7 @@ func CertExpiry(ctx context.Context, addr string, cfg *tls.Config) (CertInfo, er
 // Verified verdict uses (nil = the system roots). It presents no client
 // certificate and sends no credential. The caller closes conn.
 func CertFromConn(ctx context.Context, conn net.Conn, serverName string, roots *x509.CertPool) (CertInfo, error) {
-	tc := tls.Client(conn, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // reading the certificate, not trusting it; Verified reports the real verdict
-		ServerName:         serverName,
-		MinVersion:         tls.VersionTLS12,
-	})
+	tc := tls.Client(conn, handshakeManualVerifyConfig(serverName))
 	if err := tc.HandshakeContext(ctx); err != nil {
 		return CertInfo{}, fmt.Errorf("netsec: tls handshake: %w", err)
 	}
@@ -92,6 +88,19 @@ func CertFromConn(ctx context.Context, conn net.Conn, serverName string, roots *
 		return CertInfo{}, errors.New("netsec: the server presented no certificate")
 	}
 	return certInfo(peers, serverName, roots), nil
+}
+
+// handshakeManualVerifyConfig is the handshake's TLS config: the standard
+// verification is off because the probe reads the certificate rather than
+// trusting the connection; certInfo verifies the chain and the name by hand
+// (leaf.Verify, VerifyHostname) and reports the real verdict. Nothing but
+// the handshake ever runs on the connection.
+func handshakeManualVerifyConfig(serverName string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // reading the certificate, not trusting it; Verified reports the real verdict
+		ServerName:         serverName,
+		MinVersion:         tls.VersionTLS12,
+	}
 }
 
 // certInfo builds the report for the peer chain: the leaf's names and dates,
