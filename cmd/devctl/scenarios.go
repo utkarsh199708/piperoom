@@ -88,6 +88,14 @@ var scenarios = map[string]scenario{
 	"stale-source-offsets": {breakIt: breakStaleSourceOffsets, fix: fixStaleSourceOffsets,
 		signals: []string{owners.SignalConnectorDown}},
 
+	// Q8a (dev/scenarios.md §25-§28): the MySQL source on the `mysql`
+	// profile (scenarios_mysql.go). They need the server on
+	// dev/owners.mysql.yaml (the orders-mysql pipeline).
+	"binlog-purged":             {breakIt: breakBinlogPurged, fix: fixBinlogPurged, owners: mysqlOwnersFile, signals: []string{owners.SignalConnectorDown}},
+	"history-topic-deleted":     {breakIt: breakHistoryTopicDeleted, fix: fixHistoryTopicDeleted, owners: mysqlOwnersFile, signals: []string{owners.SignalConnectorDown}},
+	"missing-replication-grant": {breakIt: breakMissingReplicationGrant, fix: fixMissingReplicationGrant, owners: mysqlOwnersFile, signals: []string{owners.SignalConnectorDown}},
+	"server-id-clash":           {breakIt: breakServerIDClash, fix: fixServerIDClash, owners: mysqlOwnersFile, alert: serverIDClashAlert},
+
 	// Batch pipeline daily-revenue (dev/batch.md). A batch pipeline has no
 	// watcher signals, so each break raises its alert instead; the pipeline is
 	// in dev/owners.yaml.

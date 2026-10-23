@@ -1,4 +1,4 @@
-//go:build !claude
+//go:build !livejudge && !claude
 
 package evals
 

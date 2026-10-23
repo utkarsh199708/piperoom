@@ -34,11 +34,14 @@ type JudgeStats struct {
 	LiveVerdicts int `json:"live_verdicts"`
 	// Unjudged counts auto-mode runs left "ambiguous (unjudged)".
 	Unjudged int `json:"unjudged"`
-	// CacheModels are the judge models of the verdicts read from the cache.
+	// CacheModels are the judge models of the verdicts read from the cache:
+	// "provider:model" (JudgeID), or the bare model of an entry recorded
+	// before V9.
 	CacheModels []string `json:"cache_models,omitempty"`
-	// LiveCalls counts every live judge call, auto and claude mode, and
+	// LiveCalls counts every live judge call, auto and llm mode, and
 	// MaxLiveCalls is the auto-mode cap (-1: no live calls allowed);
-	// ClaudeModeCalls of them were -judge claude calls, which have no cap.
+	// ClaudeModeCalls of them were -judge llm (or its alias claude) calls,
+	// which have no cap. The field keeps its name so reports compare.
 	LiveCalls       int `json:"live_calls"`
 	MaxLiveCalls    int `json:"max_live_calls"`
 	ClaudeModeCalls int `json:"claude_mode_calls,omitempty"`
@@ -147,7 +150,7 @@ func (g *judgeGate) settle(ctx context.Context, sc Scenario, hypothesis string) 
 			ErrJudgeCacheMiss, sc.Name, JudgeCacheKey(JudgePromptVersion, sc.Name, hypothesis), dir)
 	}
 	if g.live == nil {
-		return Verdict{}, "", unjudgedError{"no recorded verdict and no live judge (build evalrun with -tags claude)"}
+		return Verdict{}, "", unjudgedError{"no recorded verdict and no live judge (build evalrun with -tags livejudge)"}
 	}
 	g.mu.Lock()
 	if g.maxCalls < 0 || g.stats.LiveCalls >= g.maxCalls {
@@ -182,7 +185,7 @@ func gradeFinal(ctx context.Context, cfg Config, g *judgeGate, sc Scenario, res 
 		g.add(func(s *JudgeStats) { s.Ambiguous++ })
 	}
 	switch mode {
-	case JudgeClaude:
+	case JudgeLLM:
 		g.add(func(s *JudgeStats) { s.LiveCalls++; s.ClaudeModeCalls++ })
 		v, err := g.call(ctx, sc, res.FinalHypothesis)
 		if err != nil {

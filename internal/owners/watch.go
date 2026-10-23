@@ -345,7 +345,11 @@ func (p Pipeline) Watch() WatchConfig {
 	if p.isBatch() {
 		return batchWatch()
 	}
-	return DefaultWatch()
+	w := DefaultWatch()
+	if p.IsMySQL() {
+		noSlotSignals(&w)
+	}
+	return w
 }
 
 // resolveWatch validates spec and applies defaults. Errors name the field.

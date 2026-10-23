@@ -69,26 +69,31 @@ go run ./evals/cmd/evalrun -runs 3 -label sonnet -model claude-sonnet-5-5 -basel
 go run ./evals/cmd/evalrun -compare base.json,cand.json -fail-on-regression   # exit 2 on regression
 ```
 
-Optional LLM judge: `judge: claude` in a scenario, or `-judge claude` (overrides the scenario;
-`-judge terms` forces the default). It needs a build with `-tags claude` and the model provider's
+Optional LLM judge: `judge: llm` in a scenario, or `-judge llm` (overrides the scenario;
+`-judge terms` forces the default). `claude` is an alias of `llm` in both places. It needs a build with
+`-tags livejudge` (`-tags claude` is its alias until the workflow switches) and the model provider's
 credentials: `ANTHROPIC_API_KEY`, or Vertex or Bedrock (below). The judge uses the same provider as the
 agent (`PIPEROOM_MODEL_PROVIDER`):
 
 ```sh
-go run -tags claude ./evals/cmd/evalrun -judge claude -out report.json   # model: PIPEROOM_MODEL, or -judge-model
+go run -tags livejudge ./evals/cmd/evalrun -judge llm -out report.json   # model: PIPEROOM_MODEL, or -judge-model
 ```
 
-A model grades the final hypothesis (JSON-schema structured output, low effort, no sampling
+The judge is provider-neutral (V9): `evals.NewLLMJudge(llm.Model, model)` grades on any model adapter
+(`internal/agent/llm`); evalrun builds it on the Claude adapter for the configured provider. A model grades
+the final hypothesis (structured output with the verdict's JSON schema, low effort, no sampling
 parameters: current models reject them; the reply is still parsed strictly) against the scenario `description`,
 `first_failing_layer`, `root_cause_layer`, `root_cause` and `root_cause_forbidden`, answering
-`{layer_correct, root_cause_correct, root_cause_layer_correct, reason}`; a refusal or a cut-off reply is an error; the hypothesis is wrapped as untrusted data. Its verdict
+`{layer_correct, root_cause_correct, root_cause_layer_correct, reason}`; a refusal or a cut-off reply is an error; the hypothesis is wrapped as untrusted data. A model
+without structured output answers through its adapter's fallback (a forced tool call, read as the verdict,
+or plain text) and gets one retry when the reply is not the verdict; a second bad reply is an error. Its verdict
 replaces the terms for the root cause and both layers; the terms verdict stays in the report as `judged`.
 
-**Word grading is a floor; `-judge claude` is authoritative.** The deterministic grader reads the
+**Word grading is a floor; `-judge llm` is authoritative.** The deterministic grader reads the
 agent's words with the rules below. They catch the common ways a text mentions the right words while
 denying them, and accept the common ways a correct agent writes, but they are not an understanding of
 English: when the two disagree, trust the judge.
-`go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
+`go test -tags livejudge ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
 
 ### On Vertex AI or Bedrock
@@ -109,7 +114,7 @@ export PIPEROOM_MODEL_PROVIDER=vertex
 export VERTEX_PROJECT_ID=my-gcp-project
 export VERTEX_REGION=us-east5                  # a region the model is offered in, or global
 export PIPEROOM_MODEL=<vertex model id>
-go run -tags claude ./evals/cmd/evalrun -only missed-table -runs 1 -out vertex.json
+go run -tags livejudge ./evals/cmd/evalrun -only missed-table -runs 1 -out vertex.json
 ```
 
 `ANTHROPIC_API_KEY` is not needed. Bedrock is the same with `PIPEROOM_MODEL_PROVIDER=bedrock`, `AWS_REGION`,
@@ -117,12 +122,14 @@ AWS credentials from the usual chain (or `AWS_BEARER_TOKEN_BEDROCK`) and Bedrock
 Add `-prices` with the provider's prices to price the run.
 
 Filling the judge cache (below) works the same way: with the variables above set, the judge of `-judge-fill`
-calls Vertex (or Bedrock), and each recorded verdict names the provider model id that gave it. It is still a paid run
+calls Vertex (or Bedrock), and each recorded verdict names the judge that gave it as `provider:model`
+(for example `vertex:<model id>`; entries recorded before V9 hold the bare model id). The provider is not
+part of the cache key, so a verdict stays valid across models and providers. It is still a paid run
 that needs the owner's approval; estimate it first:
 
 ```sh
 go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
-go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+go run -tags livejudge ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
 ```
 
 ### Ambiguous answers: tri-state keyword pass and the cached judge (#454)
@@ -136,7 +143,7 @@ every term of a `root_cause_forbidden` row; a layer's words for a layer), or whe
 in a clause that has any negator. Every other text keeps exactly the keyword grade.
 
 When any item of a run's final hypothesis is ambiguous, one `HypothesisJudge` verdict replaces the
-keyword verdicts of the root cause and both layers, as `-judge claude` does; the keyword ones stay in
+keyword verdicts of the root cause and both layers, as `-judge llm` does; the keyword ones stay in
 the result (`judged`, `ambiguity`). The verdict comes from:
 
 1. the **recorded verdict cache** `evals/judgecache/` (`judgecache.go`): one file per verdict, named
@@ -145,10 +152,11 @@ the result (`judged`, `ambiguity`). The verdict comes from:
    without a bump); an entry recorded against other scenario truth (description, layers, `root_cause`,
    `root_cause_forbidden`) is stale and an error, never a verdict. **Only synthetic texts** are cached:
    the fill reads nothing but the committed manifest, and a run never writes the cache;
-2. on a miss, the **live judge** (a `-tags claude` build), at most `-judge-max-calls` (default 50) calls
+2. on a miss, the **live judge** (a `-tags livejudge` build), at most `-judge-max-calls` (default 50) calls
    per run. Past the cap the ambiguous items are reported **ambiguous (unjudged)** and count as
    **not passed**. evalrun **refuses to start** in `auto` mode when it may call the live judge but the
-   build has none (no `-tags claude`): build with `-tags claude`, or pass `-judge terms`.
+   build has none (no `-tags livejudge`): build with `-tags livejudge` (or its alias `-tags claude`), or
+   pass `-judge terms`.
 
 `-judge-cache-only` reads only the cache and **fails the run on a miss** (unit tests and CI replays):
 a miss never falls back to the keyword grade. `-judge terms` forces the keyword grade (the ambiguity is
@@ -165,7 +173,7 @@ run that needs the owner's approval**:
 
 ```sh
 go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
-go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+go run -tags livejudge ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
 ```
 
 The negation, denial and hedge heuristics in `forbidden.go` and `textmatch.go` are **frozen**: a
@@ -189,7 +197,7 @@ with its correct, judge-checked label instead.
 | `-fail-on-regression` | off | exit 2 if any scenario regressed |
 | `-commit` | VCS stamp, else `git rev-parse HEAD` (+`-dirty`) | revision recorded in every result |
 | `-no-tap` | off | skip the model tap; results record `prompt_hash: untapped` |
-| `-judge` / `-judge-model` | scenario's `judge`, else `auto` / `PIPEROOM_MODEL` | `terms`, `claude` or `auto` (above) |
+| `-judge` / `-judge-model` | scenario's `judge`, else `auto` / `PIPEROOM_MODEL` | `terms`, `llm` (alias `claude`) or `auto` (above) |
 | `-judge-cache DIR` | `evals/judgecache` | recorded verdicts `auto` reads first |
 | `-judge-cache-only` | off | `auto` reads only the cache; a miss fails the run |
 | `-judge-max-calls N` | 50 | live judge calls per run in `auto` (and per `-judge-fill`); past it, ambiguous (unjudged) |
@@ -220,7 +228,7 @@ calls a server.
 ```sh
 go run ./evals/cmd/evalrun -agreement evals/testdata/shadow-agreement/            # table
 go run ./evals/cmd/evalrun -agreement saved/ -out agreement.json                  # + JSON summary
-go run -tags claude ./evals/cmd/evalrun -agreement saved/ -judge claude           # LLM judge, needs the key
+go run -tags livejudge ./evals/cmd/evalrun -agreement saved/ -judge llm           # LLM judge, needs the key
 ```
 
 - **layer_agree**: the layer the hypothesis blames equals the label. The layer is that of the first
@@ -242,7 +250,7 @@ go run -tags claude ./evals/cmd/evalrun -agreement saved/ -judge claude         
   Labellers must pick distinctive terms: a term the whole pipeline mentions makes every run agree.
   The `Reason` says which term matched, or that terms occur only negated.
 
-**Known limits** (the deterministic mode is a screen, not a grade; use `-judge claude` or the human
+**Known limits** (the deterministic mode is a screen, not a grade; use `-judge llm` or the human
 grade where it matters):
 - A paraphrase that uses none of the label terms scores `cause_agree = no`, however right it is.
 - Negation reaches a fixed distance (5 words) and only the cross-comma patterns above; a denial far
@@ -267,7 +275,7 @@ grade where it matters):
   human's `root_cause` (`yes` = true, `no` = false; `partial` has no yes/no, so it is counted apart and
   left out of the rate) and how often `layer_agree` equals the human's `layer_correct`. Disagreements
   are split into auto-yes/human-no and auto-no/human-yes.
-- `-judge claude` (build tag `claude`) replaces both verdicts with the LLM judge's, using the label as
+- `-judge llm` (build tag `livejudge`; `-judge claude` and `-tags claude` are the aliases) replaces both verdicts with the LLM judge's, using the label as
   ground truth, the hypothesis in the untrusted wrapper, the configured model, no temperature, and the
   strict schema of the scenario judge. An empty hypothesis never reaches the model.
 
@@ -674,7 +682,8 @@ calls](#invalid-tool-calls-v9r)) grew over the scenarios both reports ran (an `-
 scenarios of the baseline, and a 3-run report with a 1-run baseline per run, not by totals). It prints the
 paired comparison and the cost-per-run delta, and never fails on cost alone.
 
-The job builds `evalrun` with `-tags claude`, which links the live LLM judge that the default `-judge auto`
+The job builds `evalrun` with `-tags claude` (the alias of `-tags livejudge`, until C1 switches the
+workflow), which links the live LLM judge that the default `-judge auto`
 needs for an ambiguous hypothesis with no verdict in `evals/judgecache`. The judge is capped by
 `-judge-max-calls`: the job sets it to 2 × scenarios × runs (at most two judge calls per episode: root cause
 and layer), since evalrun's own default of 50 ran out after about 77 of 90 episodes. Past the cap an ambiguous

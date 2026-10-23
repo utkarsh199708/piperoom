@@ -1,0 +1,8 @@
+# actionlint configuration (https://github.com/rhysd/actionlint).
+#
+# setup-nightly.yml waits for the owner's self-hosted Windows machine; its
+# label is not one of GitHub's built-in labels, so it is declared here and
+# `actionlint` checks the workflow instead of calling the label unknown.
+self-hosted-runner:
+  labels:
+    - piperoom-r1
