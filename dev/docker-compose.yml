@@ -373,3 +373,43 @@ services:
       start_period: 60s
       interval: 2s
       retries: 60
+  # MySQL source (Q8a, dev/mysql/README.md, docs/design/mysql-source.md §10.1):
+  # MySQL 8.4 LTS with GTIDs on and a ROW binlog, read by the Debezium MySQL
+  # connector orders-mysql (dev/connectors/orders-mysql.json) on the existing
+  # connect service, whose image ships the MySQL connector. The image's
+  # entrypoint runs dev/mysql/init on a fresh data directory (database shop,
+  # tables orders and order_items, the users of the design's §10.2). Profile
+  # "mysql": `docker compose -f dev/docker-compose.yml --profile mysql up -d
+  # --wait mysql` starts it next to the default services; without the profile
+  # nothing here starts. `devctl break binlog-purged | history-topic-deleted |
+  # missing-replication-grant | server-id-clash` (dev/scenarios.md §25-§28).
+  mysql:
+    profiles: ["mysql"]
+    # 8.4.13 LTS, exact release and multi-arch index digest (Docker Hub tag
+    # list, 2026-10-23).
+    image: mysql:8.4.13@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
+    command:
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --server-id=223344
+      - --binlog-expire-logs-seconds=86400
+    environment:
+      # Dev-only root password (the stack's test credentials, AGENTS.md §3).
+      MYSQL_ROOT_PASSWORD: piperoom-dev
+    # Host loopback only, and not 3306, so a MySQL installed on the dev
+    # machine keeps its port. Inside the network Connect reaches mysql:3306.
+    ports: ["127.0.0.1:13306:3306"]
+    volumes:
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP, so the entrypoint's init server (started with
+      # --skip-networking) never counts: healthy once the real server is up
+      # and the init script's last statement (the seed rows) ran.
+      # The password reaches mysql through a process-substitution option
+      # file, as the image's own entrypoint passes it (never argv).
+      test: ["CMD", "bash", "-c", "mysql --defaults-extra-file=<(printf '[client]\\npassword=%s\\n' \"$$MYSQL_ROOT_PASSWORD\") -uroot -h127.0.0.1 --protocol=TCP -N -B -e 'SELECT COUNT(*) FROM shop.orders' | grep -q '[1-9]'"]
+      start_period: 30s
+      interval: 5s
+      retries: 30
