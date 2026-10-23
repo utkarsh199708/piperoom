@@ -27,6 +27,9 @@ const maxScan = 1000
 
 // traceFacts holds the observations Trace gathers before deciding statuses.
 type traceFacts struct {
+	// sourceLayer is the layer of the source stage: the pipeline's
+	// SourceLayer ("postgres" or "mysql"); "" reads as "postgres".
+	sourceLayer    string
 	table          string
 	connector      string
 	topic          string
@@ -82,6 +85,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 
 	f := traceFacts{
+		sourceLayer:    p.SourceLayer(),
 		table:          table,
 		groupCommitted: -1,
 	}
@@ -411,6 +415,14 @@ func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
 	return "id", nil
 }
 
+// srcLayer is the layer of the trace's source stage.
+func (f traceFacts) srcLayer() string {
+	if f.sourceLayer == "" {
+		return "postgres"
+	}
+	return f.sourceLayer
+}
+
 // compositeKeyTrace is the trace of a table whose primary key has more than
 // one column: a lookup by one value would read another row (another tenant's,
 // with its timestamps), so every stage is unknown, never "seen" or "not_seen".
@@ -419,7 +431,7 @@ func compositeKeyTrace(f traceFacts) []events.TraceStage {
 		return map[string]string{"error": "composite primary key: the trace needs every key column"}
 	}
 	return []events.TraceStage{
-		{Layer: "postgres", Name: f.table, Status: "unknown", Facts: facts()},
+		{Layer: f.srcLayer(), Name: f.table, Status: "unknown", Facts: facts()},
 		{Layer: "kafka-connect", Name: f.connector, Status: "unknown", Facts: facts()},
 		{Layer: "kafka", Name: f.topic, Status: "unknown", Facts: facts()},
 		{Layer: "consumer", Name: f.group, Status: "unknown", Facts: facts()},
@@ -437,9 +449,9 @@ func decideTrace(f traceFacts) []events.TraceStage {
 
 	// 1. Source.
 	if f.sourceErr != nil {
-		stage("postgres", f.table, "unknown", map[string]string{"error": "unreachable"})
+		stage(f.srcLayer(), f.table, "unknown", map[string]string{"error": "unreachable"})
 	} else if !f.sourceFound {
-		stage("postgres", f.table, "not_seen", nil)
+		stage(f.srcLayer(), f.table, "not_seen", nil)
 		stage("kafka-connect", f.connector, "not_seen", nil)
 		stage("kafka", f.topic, "not_seen", nil)
 		stage("consumer", f.group, "not_seen", nil)
@@ -450,7 +462,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		if !f.sourceTS.IsZero() {
 			srcFacts["updated_at"] = FormatTS(f.sourceTS)
 		}
-		stage("postgres", f.table, "seen", srcFacts)
+		stage(f.srcLayer(), f.table, "seen", srcFacts)
 	}
 
 	// 2. Connector. It is "seen" only when the record actually reached the
