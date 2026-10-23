@@ -57,10 +57,15 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 		{"no wrong-data-in-a-topic clause", "4", "wrong or missing data", false},
 		{"unreachable names the cause and forbids a healthy verdict", "4",
 			`so is "unreachable: <component>", which forbids a healthy verdict while unresolved.`, true},
-		{"update_hypothesis names both, with its scope", "4",
-			"update_hypothesis names both separately; set its scope.", true},
+		// Fix round (evals-live 40029255155, 40032876094): the agent stated
+		// the root cause and either never named the first failing component
+		// or merged the two ("First failing and root-cause component: X").
+		// Rule 4's last sentence fixes the form, both labels even when the
+		// component is the same, with the scope.
+		{"a cause is named in the fixed two-label form", "4",
+			`update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical; set its scope.`, true},
 		{"rule 6 keeps the tool-error sentence", "6",
-			"6. A tool error or timeout is a finding, not proof: evidence for what is unknown or blocked.", true},
+			"6. Tool errors and timeouts are evidence for what is unknown or blocked, not proof.", true},
 		{"rule 6 no longer carries the unreachable sentence", "6", "unreachable", false},
 		{"unreachable is no longer an outage", "", "means the component is down", false},
 		{"no name-it-in-the-hypothesis order for an unreachable read", "", "name it in the hypothesis", false},
@@ -85,15 +90,25 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 		if n := strings.Count(p, `"unreachable: <component>"`); n != 1 {
 			t.Errorf("write mode %v: %d unreachable-read rules, want 1", write, n)
 		}
+		// The hypothesis form is rule 4's last sentence and is stated once.
+		const form = `"First failing: <component>. Root cause: <component>."`
+		if r4 := cdcMethodRule(t, p, "4"); !strings.HasSuffix(r4, form+" even if identical; set its scope.") {
+			t.Errorf("write mode %v: rule 4 does not end with the hypothesis form: %s", write, r4)
+		}
+		if n := strings.Count(p, form); n != 1 {
+			t.Errorf("write mode %v: hypothesis form stated %d times, want 1", write, n)
+		}
 		// No target or regression scenario's answer leaks into the changed
 		// rules (advertised-listener-wrong, broker-disk-notenoughreplicas,
 		// toast-placeholder, setup/wal-level-replica,
-		// db-unreachable-from-connect).
+		// db-unreachable-from-connect, and the fix round's
+		// long-room-compaction and dead-slot-wal).
 		changed := strings.ToLower(cdcMethodRule(t, p, "4") + "\n" + cdcMethodRule(t, p, "6"))
 		for _, answer := range []string{
 			"advertis", "listener", "disk", "min.insync", "notenoughreplicas", "isr",
 			"replica identity", "toast", "placeholder", "wal_level", "wal level",
 			"firewall", "network", "dns", "refused", "broker", "schema", "bad record",
+			"poison", "orphan", "slot", "publication",
 		} {
 			if strings.Contains(changed, answer) {
 				t.Errorf("write mode %v: rules 4 and 6 name a scenario answer (%q)", write, answer)

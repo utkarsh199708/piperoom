@@ -45,7 +45,10 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// propose_fix). KAN-408's unreachable-read rule (rule 6) also fit by
 	// trimming, so 1335 stays the ceiling. W4f (KAN-504) is word-neutral:
 	// rule 4's first-failing definition took rule 6's unreachable sentence
-	// and paid for itself from rules 4 and 6 (93 words before and after).
+	// and paid for itself from rules 4 and 6; its fix round's hypothesis
+	// form ("First failing: ... Root cause: ...") was paid by rephrasing
+	// rules 1 and 6, the resume bullet and the write-off note (the PR lists
+	// each word).
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -87,8 +90,7 @@ func TestSystemPromptUnreachableReadRule(t *testing.T) {
 	for _, want := range []string{
 		`so is "unreachable: <component>", which forbids a healthy verdict while unresolved`,
 		"is at most the root-cause component, never the first failing one",
-		"A tool error or timeout is a finding, not proof",
-		"evidence for what is unknown or blocked",
+		"Tool errors and timeouts are evidence for what is unknown or blocked, not proof.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC prompt lacks %q", want)
@@ -415,10 +417,9 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		"After a rejection or failed action, read the reason, update your hypothesis and ask the driver; never re-propose the same fix unchanged",
 		// When to stop: state what remains open and wait.
 		"what remains open and that the cause is not established; keep any hypothesis low, propose nothing and wait",
-		// Tool errors are findings, evidence for what is unknown (rule 3
+		// Tool errors are evidence for what is unknown, not proof (rule 3
 		// says to cite evidence by step id).
-		"A tool error or timeout is a finding, not proof",
-		"evidence for what is unknown or blocked",
+		"Tool errors and timeouts are evidence for what is unknown or blocked, not proof.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing guidance point %q", want)
@@ -439,10 +440,10 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		"From the most downstream symptom, walk upstream links to the root cause",
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
 		// W4f (KAN-504): rule 4 defines the first failing component, then
-		// asks update_hypothesis to name it and the root cause separately.
+		// has update_hypothesis name it and the root cause in a fixed form.
 		"The first failing component is the most upstream stage whose own status read shows it failed",
 		"else the most upstream one that no longer does its job",
-		"update_hypothesis names both separately",
+		`update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -745,7 +746,7 @@ func TestPromptMakesWhatChangedTheSecondRead(t *testing.T) {
 func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 	prompt := systemPrompt()
 	for _, want := range []string{
-		"Before proposing a resume or restart, confirm with reads that a source connector's slot still exists and holds its position, and that no maintenance or migration still runs",
+		"Before proposing a resume or restart, confirm with reads that a source connector's slot exists and holds its position, and no maintenance or migration still runs",
 		"If a needed read fails, propose nothing and say what is missing",
 		"if the checks pass, propose it, saying why it stopped (for a STOPPED or FAILED connector, that nobody recorded why), so approvers confirm",
 		"Fix the cause you established with the smallest change; say what guarantee it gives up",

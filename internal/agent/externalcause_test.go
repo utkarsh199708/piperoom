@@ -503,10 +503,10 @@ func insideWrapper(s string, at int) bool {
 // what update_hypothesis names, the CDC suspect is a change near the alert,
 // and update_hypothesis offers scope, team and change_id as optional fields
 // (a hypothesis written without them still passes). The CDC rule's wording is
-// W4f's (KAN-504): it names "both" after defining them.
+// W4f's (KAN-504): a cause is named as "First failing: ... Root cause: ...".
 func TestPromptAndSchemaAskForScope(t *testing.T) {
 	for kind, rule := range map[string]string{
-		events.PipelineKindCDC:   "update_hypothesis names both separately",
+		events.PipelineKindCDC:   "update_hypothesis names a cause:",
 		events.PipelineKindBatch: "update_hypothesis must name",
 	} {
 		p := systemPromptFor(kind)
