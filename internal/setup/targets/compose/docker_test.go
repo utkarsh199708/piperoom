@@ -83,6 +83,19 @@ func baseArgv(dir, sub string) []string {
 	}
 }
 
+// pinnedArgv is the argv a stack op runs: baseArgv with the validated
+// document's project named by -p (DefaultProject when it names none).
+func pinnedArgv(dir, sub string) []string {
+	return []string{
+		"docker", "compose",
+		"--project-directory", dir,
+		"-f", filepath.Join(dir, DefaultFile),
+		"-p", DefaultProject,
+		"--env-file", filepath.Join(dir, EnvFileName),
+		sub,
+	}
+}
+
 // assertArgv compares an argv with the pinned shape. A stack op runs docker
 // on a private snapshot of the validated compose file (stackSnapshot), so the
 // -f value it carries is that snapshot, named like the project's file; the
@@ -244,7 +257,7 @@ func TestComposePS(t *testing.T) {
 			if tc.wantCount == 0 && !strings.Contains(res.Summary, "not running") {
 				t.Errorf("summary = %q, want it to say the stack is not running", res.Summary)
 			}
-			assertArgv(t, fr.calls[0], append(baseArgv(dir, "ps"), "--format", "json"))
+			assertArgv(t, fr.calls[0], append(pinnedArgv(dir, "ps"), "--format", "json"))
 		})
 	}
 }
@@ -314,7 +327,7 @@ func TestComposeConfigMasksCredentialValues(t *testing.T) {
 			if !strings.Contains(body, "orders") {
 				t.Errorf("the mask hid a non-credential value:\n%s", body)
 			}
-			assertArgv(t, fr.calls[0], append(baseArgv(dir, "config"), "--no-interpolate"))
+			assertArgv(t, fr.calls[0], append(pinnedArgv(dir, "config"), "--no-interpolate"))
 		})
 	}
 }
@@ -408,7 +421,7 @@ func TestContainerInspectDropsEnvValues(t *testing.T) {
 	if len(fr.calls) != 2 {
 		t.Fatalf("calls = %q, want two", fr.calls)
 	}
-	assertArgv(t, fr.calls[0], append(baseArgv(dir, "ps"), "-q", "connect"))
+	assertArgv(t, fr.calls[0], append(pinnedArgv(dir, "ps"), "-q", "connect"))
 	assertArgv(t, fr.calls[1], []string{"docker", "inspect", "--type", "container", "--format", "{{json .}}", id})
 }
 

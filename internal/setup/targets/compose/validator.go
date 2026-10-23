@@ -169,8 +169,8 @@ func validateDoc(doc []byte, class string) ([]string, error) {
 		case "services":
 		case "name":
 			name, ok := root[key].(string)
-			if !ok || !serviceNameRE.MatchString(name) {
-				return nil, ruleError(RuleTopLevel, "", "name is not a compose project name")
+			if !ok || !projectNameRE.MatchString(name) {
+				return nil, ruleError(RuleTopLevel, "", "name is not a %s compose project name", ProjectPrefix)
 			}
 		case "volumes":
 			if err := checkTopVolumes(root[key]); err != nil {
@@ -882,4 +882,24 @@ func checkTopVolumes(raw any) error {
 func reachesDockerPipe(s string) bool {
 	return strings.Contains(s, `\\.\pipe`) || strings.Contains(s, `//./pipe`) ||
 		strings.Contains(s, `\pipe\docker_engine`)
+}
+
+// docProjectName is the project a validated document names, DefaultProject
+// when it names none. validateDoc has already refused a name outside the
+// piperoom- namespace; this re-checks it, since the name decides which stack
+// docker acts on.
+func docProjectName(doc []byte) (string, error) {
+	var head struct {
+		Name *string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal(doc, &head); err != nil {
+		return "", ruleError(RuleYAML, "", "the document is not valid YAML")
+	}
+	if head.Name == nil {
+		return DefaultProject, nil
+	}
+	if !projectNameRE.MatchString(*head.Name) {
+		return "", ruleError(RuleTopLevel, "", "name is not a %s compose project name", ProjectPrefix)
+	}
+	return *head.Name, nil
 }

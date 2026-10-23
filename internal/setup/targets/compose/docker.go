@@ -152,39 +152,46 @@ func stackFiles(env ops.Env, file string) (string, error) {
 // The bind sources the document mounts are checked on disk too: a component
 // that is a symlink would make a lexically local ./x bind any host path.
 //
+// It also returns the document's project name (DefaultProject when it names
+// none), which the caller passes to docker with -p.
+//
 // The caller runs docker with the returned path and then calls cleanup.
-func stackSnapshot(env ops.Env, clean, class string) (string, func(), error) {
+func stackSnapshot(env ops.Env, clean, class string) (string, string, func(), error) {
 	root, err := projectRoot(env)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	defer root.Close()
 	fi, err := root.Lstat(clean)
 	if err != nil {
-		return "", nil, fmt.Errorf("compose: stat %s: %w", q(clean), err)
+		return "", "", nil, fmt.Errorf("compose: stat %s: %w", q(clean), err)
 	}
 	if !fi.Mode().IsRegular() {
-		return "", nil, fmt.Errorf("%w: %s is not a regular file", ErrStack, q(clean))
+		return "", "", nil, fmt.Errorf("%w: %s is not a regular file", ErrStack, q(clean))
 	}
 	f, err := root.Open(clean)
 	if err != nil {
-		return "", nil, fmt.Errorf("compose: opening %s: %w", q(clean), err)
+		return "", "", nil, fmt.Errorf("compose: opening %s: %w", q(clean), err)
 	}
 	doc, err := io.ReadAll(io.LimitReader(f, maxComposeBytes+1))
 	f.Close()
 	if err != nil {
-		return "", nil, fmt.Errorf("compose: reading %s: %w", q(clean), err)
+		return "", "", nil, fmt.Errorf("compose: reading %s: %w", q(clean), err)
 	}
 	binds, err := validateDoc(doc, class)
 	if err == nil {
 		err = checkBindsOnDisk(root, binds)
 	}
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
+		return "", "", nil, fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
+	}
+	project, err := docProjectName(doc)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
 	}
 	dir, err := os.MkdirTemp("", "piperoom-compose-")
 	if err != nil {
-		return "", nil, fmt.Errorf("compose: creating the compose snapshot: %w", err)
+		return "", "", nil, fmt.Errorf("compose: creating the compose snapshot: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	snap := filepath.Join(dir, path.Base(clean))
@@ -197,9 +204,9 @@ func stackSnapshot(env ops.Env, clean, class string) (string, func(), error) {
 	}
 	if err != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("compose: writing the compose snapshot: %w", err)
+		return "", "", nil, fmt.Errorf("compose: writing the compose snapshot: %w", err)
 	}
-	return snap, cleanup, nil
+	return snap, project, cleanup, nil
 }
 
 // checkBindsOnDisk refuses a bind source any component of which is a symlink
@@ -230,13 +237,18 @@ func checkBindsOnDisk(root *os.Root, binds []string) error {
 	return nil
 }
 
-// snapshotArgv points the pinned argv's -f at the validated snapshot.
-func snapshotArgv(argv []string, snap string) ([]string, error) {
+// snapshotArgv points the pinned argv's -f at the validated snapshot and
+// names the project with -p. -p outranks both COMPOSE_PROJECT_NAME (which
+// compose also reads from the project's .env) and the directory name, so the
+// project docker acts on is exactly the validated document's piperoom-
+// project, never another stack on the host.
+func snapshotArgv(argv []string, snap, project string) ([]string, error) {
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] == "-f" {
-			out := append([]string(nil), argv...)
-			out[i+1] = snap
-			return out, nil
+			out := make([]string, 0, len(argv)+2)
+			out = append(out, argv[:i]...)
+			out = append(out, "-f", snap, "-p", project)
+			return append(out, argv[i+2:]...), nil
 		}
 	}
 	return nil, errors.New("compose: the pinned argv names no compose file")
@@ -250,11 +262,11 @@ func pinnedStackArgv(env ops.Env, file, clean, class, sub string, flags, service
 	if err != nil {
 		return nil, nil, err
 	}
-	snap, cleanup, err := stackSnapshot(env, clean, class)
+	snap, project, cleanup, err := stackSnapshot(env, clean, class)
 	if err != nil {
 		return nil, nil, err
 	}
-	argv, err = snapshotArgv(argv, snap)
+	argv, err = snapshotArgv(argv, snap, project)
 	if err != nil {
 		cleanup()
 		return nil, nil, err

@@ -140,7 +140,7 @@ func TestEveryRenderPassesAllowList(t *testing.T) {
 				}
 			}
 			for _, registry := range []bool{false, true} {
-				r, err := d.Render(WriteParams{Templates: sel, Registry: registry, Project: "proj-1", Ports: nil})
+				r, err := d.Render(WriteParams{Templates: sel, Registry: registry, Project: "piperoom-proj-1", Ports: nil})
 				if err != nil {
 					continue // a combination the driver refuses to render
 				}
@@ -318,4 +318,52 @@ func TestStackRefusesSymlinkBind(t *testing.T) {
 			t.Fatalf("docker ran %d times, want 1", len(fr.calls))
 		}
 	})
+}
+
+// TestProjectNamePinned: a compose file can only name a piperoom- project, and
+// every stack op names that project to docker with -p, so neither a tampered
+// name: nor COMPOSE_PROJECT_NAME in the project's .env can point up or down at
+// another stack on the host.
+func TestProjectNamePinned(t *testing.T) {
+	d := &Driver{class: "local"}
+	r, err := d.Render(WriteParams{Templates: []string{TemplateKafka}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The render's own services block, with the name: line taken out.
+	svc := strings.Replace(string(r.Doc), "name: "+DefaultProject+"\n", "", 1)
+	if svc == string(r.Doc) {
+		t.Fatal("the render carries no name: line")
+	}
+	for _, name := range []string{"other-app", "piperoom", "piperoomx-a", "Piperoom-a"} {
+		if _, err := validateDoc([]byte("name: "+name+"\n"+svc), "local"); err == nil {
+			t.Errorf("name %q passed validation", name)
+		}
+	}
+	for doc, want := range map[string]string{
+		svc:                             DefaultProject,
+		"name: piperoom-room-7\n" + svc: "piperoom-room-7",
+	} {
+		if _, err := validateDoc([]byte(doc), "local"); err != nil {
+			t.Fatalf("validateDoc(%q): %v", doc, err)
+		}
+		got, err := docProjectName([]byte(doc))
+		if err != nil || got != want {
+			t.Fatalf("docProjectName(%q) = %q, %v; want %q", doc, got, err, want)
+		}
+	}
+	if _, err := docProjectName([]byte("name: other-app\n" + svc)); err == nil {
+		t.Fatal("docProjectName accepted a name outside the piperoom- namespace")
+	}
+	argv, err := snapshotArgv([]string{"docker", "compose", "--project-directory", "/p", "-f", "/p/compose.yaml", "--env-file", "/p/.env", "up"}, "/s/compose.yaml", "piperoom-room-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "docker compose --project-directory /p -f /s/compose.yaml -p piperoom-room-7 --env-file /p/.env up"
+	if strings.Join(argv, " ") != want {
+		t.Fatalf("argv = %q, want %q", argv, want)
+	}
+	if _, err := d.Render(WriteParams{Templates: []string{TemplateKafka}, Project: "other-app"}); err == nil {
+		t.Fatal("compose_write rendered a project outside the piperoom- namespace")
+	}
 }

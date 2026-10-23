@@ -41,7 +41,7 @@ func TestStackArgvPerOp(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", tc.op, err)
 			}
-			assertArgv(t, fr.calls[0], append(baseArgv(dir, tc.wantTail[0]), tc.wantTail[1:]...))
+			assertArgv(t, fr.calls[0], append(pinnedArgv(dir, tc.wantTail[0]), tc.wantTail[1:]...))
 			if tc.op == "compose_down" {
 				if data(t, res)["volumes_kept"] != true {
 					t.Error("compose_down does not say its volumes were kept")
