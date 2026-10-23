@@ -3,14 +3,21 @@ package evals
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -1039,5 +1046,374 @@ func TestAsksQuestion(t *testing.T) {
 		if got := asksQuestion(tt.text); got != tt.want {
 			t.Errorf("asksQuestion(%q) = %v, want %v", tt.text, got, tt.want)
 		}
+	}
+}
+
+// W4d (KAN-500): a healthy verdict is cancelled only by an affirmed, present
+// fault; a healthy phrase beside a fault word goes to the judge.
+
+// w4dRun loads transcript n (1-3) of healthy-after-recovery from run
+// 39994729845, verbatim (evals/testdata/w4d).
+func w4dRun(t *testing.T, n int) Transcript {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "w4d", fmt.Sprintf("healthy-after-recovery-%d.json", n)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		RunID      string     `json:"run_id"`
+		Run        int        `json:"run"`
+		Transcript Transcript `json:"transcript"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.RunID != "39994729845" || f.Run != n {
+		t.Fatalf("fixture %d is run %s/%d", n, f.RunID, f.Run)
+	}
+	return f.Transcript
+}
+
+// healthyJudgeFake answers every healthy question with its verdict and
+// records the prompts.
+type healthyJudgeFake struct {
+	mu      sync.Mutex
+	healthy bool
+	texts   []string
+}
+
+func (f *healthyJudgeFake) judge() MeteredJudge {
+	return NewMeteredTextJudge(func(_ context.Context, system, user string) (string, JudgeUsage, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if system != healthyJudgeSystem {
+			return "", JudgeUsage{}, errors.New("not a healthy question")
+		}
+		f.texts = append(f.texts, user)
+		return fmt.Sprintf(`{"says_healthy":%t,"reason":"fake"}`, f.healthy), JudgeUsage{InputTokens: 300, OutputTokens: 9}, nil
+	})
+}
+
+func (f *healthyJudgeFake) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.texts)
+}
+
+// TestHealthyAfterRecoveryRun39994729845 is ticket case 2: the three final
+// messages of healthy-after-recovery in run 39994729845, which all failed
+// "final message does not say the pipeline is healthy", replayed verbatim.
+// Runs 2 and 3 are healthy on the keywords alone now ("no component is
+// currently failing", "don't prove the restart loop has stopped", "for
+// example crash or OOM logs"). Run 1 still has an unnegated fault word under
+// its "Ruled out:" heading ("A topic that stopped receiving writes"), so it is
+// ambiguous and the judge decides it: with a healthy verdict the run passes,
+// under -judge terms it keeps the keyword grade.
+func TestHealthyAfterRecoveryRun39994729845(t *testing.T) {
+	sc := loadScenario(t, "scenarios/healthy-after-recovery.yaml")
+	tests := []struct {
+		run         int
+		keywordPass bool
+		fault       string // the fault term that makes the text ambiguous
+	}{
+		{1, false, "stopped"},
+		{2, true, ""},
+		{3, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint("run ", tt.run), func(t *testing.T) {
+			res := Judge(sc, w4dRun(t, tt.run), nil, false)
+			if res.Pass != tt.keywordPass || res.SaysHealthy != tt.keywordPass {
+				t.Fatalf("keyword grade: pass %v says healthy %v, want %v; failures %v", res.Pass, res.SaysHealthy, tt.keywordPass, res.Failures)
+			}
+			_, judgeText := healthyGrade(res.LastMessage, res.FinalHypothesis)
+			if term, _, _ := faultClause(res.LastMessage); term != tt.fault || (judgeText != "") != (tt.fault != "") {
+				t.Fatalf("fault %q, judge text %d bytes; want fault %q", term, len(judgeText), tt.fault)
+			}
+			wantCalls := 0
+			if tt.fault != "" {
+				wantCalls = 1
+			}
+			// -judge terms: the keyword grade stands, the ambiguity is recorded.
+			fake := &healthyJudgeFake{healthy: true}
+			cfg := Config{Judge: JudgeTerms, JudgeClient: fake.judge()}
+			got, err := gradeFinal(context.Background(), cfg, newJudgeGate(cfg), sc, res)
+			if err != nil || got.Pass != tt.keywordPass || fake.calls() != 0 || (got.Ambiguity != nil) != (wantCalls == 1) {
+				t.Fatalf("terms: err %v pass %v calls %d ambiguity %+v", err, got.Pass, fake.calls(), got.Ambiguity)
+			}
+			// -judge auto with a live judge: every run passes, and only the
+			// ambiguous one asked the judge.
+			cfg = Config{DefaultJudge: JudgeAuto, JudgeClient: fake.judge(), JudgeCache: t.TempDir()}
+			got, err = gradeFinal(context.Background(), cfg, newJudgeGate(cfg), sc, res)
+			if err != nil || !got.Pass || !got.SaysHealthy || len(got.Failures) > 0 || fake.calls() != wantCalls {
+				t.Fatalf("auto: err %v pass %v failures %v calls %d", err, got.Pass, got.Failures, fake.calls())
+			}
+		})
+	}
+}
+
+// TestHealthyPresentFaultCancels is ticket case 3: an affirmed, present fault
+// still cancels a healthy verdict. Beside a healthy phrase the keyword grade
+// is not healthy and the text goes to the judge; with no healthy phrase there
+// is nothing to judge.
+func TestHealthyPresentFaultCancels(t *testing.T) {
+	tests := []struct {
+		last, hyp string
+		judge     bool
+	}{
+		{"The pipeline is healthy now. The connector is failing on task 0.", "", true},
+		{"Nothing to fix upstream, and the connector is failing on task 0.", "", true},
+		{"The connector is failing on task 0.", "The pipeline is healthy; nothing to fix.", true},
+		{"The connector is failing on task 0.", "", false},
+	}
+	for _, tt := range tests {
+		ok, text := healthyGrade(tt.last, tt.hyp)
+		if ok || (text != "") != tt.judge {
+			t.Errorf("healthyGrade(%q, %q) = %v, judge %v; want not healthy, judge %v", tt.last, tt.hyp, ok, text != "", tt.judge)
+		}
+	}
+	for _, text := range []string{
+		"The connector is failing on task 0.",
+		"Kafka never got the change because the connector is failing.", // a barrier ends "never"
+		"Task 0 is failing with no retries left.",                      // a negator after the fault denies something else
+		"There is no doubt the connector is failing.",                  // "no doubt" affirms
+		"The connector is failing with errors, for example timeouts.",  // the example comes after the fault
+		"order-sync is stuck on partition 1.",
+	} {
+		if !hasFault(text) {
+			t.Errorf("hasFault(%q) = false, want a present fault", text)
+		}
+	}
+}
+
+// TestFaultNegatedAcrossSub is ticket case 4: a negator anywhere before the
+// fault term in its sub negates it, not only in the three words before.
+func TestFaultNegatedAcrossSub(t *testing.T) {
+	for _, text := range []string{
+		"Pipeline is healthy now; no component is currently failing.",
+		"Two steady reads a short time apart don't prove the restart loop has stopped.",
+		"Nothing in the connector's status or its task list looks broken.",
+		"I found no sign that any consumer of pg.public.orders is lagging.",
+	} {
+		if hasFault(text) {
+			term, clause, _ := faultClause(text)
+			t.Errorf("hasFault(%q) = true (%q in %q)", text, term, clause)
+		}
+		if !healthyVerdict("Healthy now. " + text) {
+			t.Errorf("healthy verdict cancelled by %q", text)
+		}
+	}
+}
+
+// TestFaultExampleIsAMention is ticket case 5: "for example X logs" names
+// what to look for, not a fault the agent saw.
+func TestFaultExampleIsAMention(t *testing.T) {
+	for _, text := range []string{
+		"Its owner (kabir) should check why the pod restarted, for example crash or OOM logs.",
+		"kabir should check the logs from before each restart, for example out-of-memory kills or failed health checks.",
+		"check the pod's restart reason (for example running out of memory or a failing health check)",
+		"look at the worker log, for instance a stuck rebalance",
+	} {
+		if hasFault(text) {
+			term, clause, _ := faultClause(text)
+			t.Errorf("hasFault(%q) = true (%q in %q)", text, term, clause)
+		}
+	}
+}
+
+// TestHealthyAmbiguityRoutedToJudge is ticket case 6: a text that says
+// healthy and states a fault is ambiguous and goes to the judge, from the
+// recorded cache first (judgecache.go), then live within the cap; with no
+// verdict it is unjudged and not passed.
+func TestHealthyAmbiguityRoutedToJudge(t *testing.T) {
+	sc := loadScenario(t, "scenarios/healthy-after-recovery.yaml")
+	lag := step{tool: "kafka_consumer_lag", input: map[string]any{"group": "order-sync"}}
+	connect := step{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}}
+	const msg = "The pipeline is healthy now and there is nothing to fix. Ruled out:\n- A topic that stopped receiving writes: partition 1 still gets writes."
+	run := func(cfg Config) (RunResult, *JudgeStats, error) {
+		t.Helper()
+		cfg.Runner = scriptedRunner([]step{lag, connect, {message: msg}})
+		cfg.Logger = quietLogger()
+		rep, err := Evaluate(context.Background(), []Scenario{sc}, cfg)
+		if err != nil {
+			return RunResult{}, nil, err
+		}
+		return rep.Results[0], rep.Judge, nil
+	}
+
+	// The recorded cache settles it without a live call.
+	dir := t.TempDir()
+	if err := NewJudgeCache(dir).PutHealthy(sc, msg, "fake:judge", HealthyVerdict{SaysHealthy: true, Reason: "past"}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &healthyJudgeFake{healthy: false}
+	r, j, err := run(Config{DefaultJudge: JudgeAuto, JudgeClient: fake.judge(), JudgeCache: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Pass || r.Ambiguity == nil || !r.Ambiguity.Healthy || r.Ambiguity.Source != ambiguityCache ||
+		r.HealthyJudged == nil || !r.HealthyJudged.SaysHealthy || fake.calls() != 0 {
+		t.Fatalf("cache: %+v ambiguity %+v calls %d", r, r.Ambiguity, fake.calls())
+	}
+	if j == nil || j.Ambiguous != 1 || j.Judged != 1 || j.CacheHits != 1 || j.LiveCalls != 0 {
+		t.Errorf("cache stats %+v", j)
+	}
+	if !slices.Contains(r.Ambiguity.Items(), "healthy_verdict") || !strings.Contains(strings.Join(r.Ambiguity.Reasons, ";"), `"stopped"`) {
+		t.Errorf("ambiguity %+v", r.Ambiguity)
+	}
+
+	// A miss goes to the live judge; its verdict, healthy or not, decides.
+	for _, healthy := range []bool{true, false} {
+		fake = &healthyJudgeFake{healthy: healthy}
+		r, j, err = run(Config{DefaultJudge: JudgeAuto, JudgeClient: fake.judge(), JudgeCache: t.TempDir()})
+		if err != nil || r.Pass != healthy || r.Ambiguity == nil || r.Ambiguity.Source != ambiguityLive || fake.calls() != 1 ||
+			j == nil || j.LiveCalls != 1 || j.LiveVerdicts != 1 || j.Usage.InputTokens != 300 {
+			t.Fatalf("live %v: err %v pass %v ambiguity %+v calls %d stats %+v", healthy, err, r.Pass, r.Ambiguity, fake.calls(), j)
+		}
+		if !strings.Contains(fake.texts[0], "<untrusted>The pipeline is healthy now") {
+			t.Errorf("judge prompt does not wrap the text: %q", fake.texts[0])
+		}
+	}
+	if !strings.Contains(strings.Join(r.Failures, ";"), "final message does not say the pipeline is healthy") {
+		t.Errorf("a not-healthy verdict fails as before: %v", r.Failures)
+	}
+
+	// -judge llm asks live, with no cache.
+	fake = &healthyJudgeFake{healthy: true}
+	if r, j, err = run(Config{Judge: JudgeLLM, JudgeClient: fake.judge()}); err != nil || !r.Pass || fake.calls() != 1 || j == nil || j.ClaudeModeCalls != 1 {
+		t.Errorf("llm: err %v pass %v calls %d stats %+v", err, r.Pass, fake.calls(), j)
+	}
+
+	// Cache-only with no recorded verdict fails loudly, naming the key.
+	_, _, err = run(Config{DefaultJudge: JudgeAuto, JudgeCache: t.TempDir(), JudgeCacheOnly: true})
+	if !errors.Is(err, ErrJudgeCacheMiss) || !strings.Contains(err.Error(), JudgeCacheKey(HealthyJudgePromptVersion, sc.Name, msg)) {
+		t.Errorf("cache-only miss: %v", err)
+	}
+
+	// No verdict to be had: not healthy, and the failure says why.
+	for _, cfg := range []Config{
+		{DefaultJudge: JudgeAuto, JudgeMaxCalls: -1},
+		{DefaultJudge: JudgeAuto, JudgeClient: &fakeMetered{}}, // grades no healthy verdict
+	} {
+		r, j, err = run(cfg)
+		if err != nil || r.Pass || !r.Ambiguity.Unjudged() || j == nil || j.Unjudged != 1 ||
+			!strings.Contains(strings.Join(r.Failures, ";"), "healthy verdict ambiguous (unjudged)") {
+			t.Errorf("unjudged: err %v %+v failures %v", err, r.Ambiguity, r.Failures)
+		}
+	}
+
+	// A broken entry is an error, not a miss.
+	dir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, JudgeCacheKey(HealthyJudgePromptVersion, sc.Name, msg)+".json"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := newJudgeGate(Config{JudgeCache: dir})
+	if _, _, err := g.settleHealthy(context.Background(), sc, msg); err == nil {
+		t.Error("broken healthy cache entry read as a miss")
+	}
+}
+
+// TestHealthyJudgeParse: the reply is read strictly.
+func TestHealthyJudgeParse(t *testing.T) {
+	for _, tt := range []struct {
+		raw string
+		ok  bool
+	}{
+		{`{"says_healthy":true,"reason":"r"}`, true},
+		{"```json\n{\"says_healthy\":false,\"reason\":\"r\"}\n```", true},
+		{`{"says_healthy":true}`, false},
+		{`{"says_healthy":true,"reason":"r","extra":1}`, false},
+		{`{"says_healthy":true,"reason":"r"} trailing`, false},
+		{`yes`, false},
+	} {
+		if _, err := parseHealthyVerdict(tt.raw); (err == nil) != tt.ok {
+			t.Errorf("parseHealthyVerdict(%q) err = %v, want ok %v", tt.raw, err, tt.ok)
+		}
+	}
+}
+
+// TestLLMJudgeHealthyRequest: the LLM judge asks for the healthy schema and,
+// on a model without structured output, retries once with its own note.
+func TestLLMJudgeHealthyRequest(t *testing.T) {
+	m := &judgeFakeModel{answers: []judgeFakeAnswer{textReply("not json", llm.StopEndTurn),
+		textReply(`{"says_healthy":true,"reason":"past"}`, llm.StopEndTurn)}}
+	v, _, err := NewLLMJudge(m, "judge-m").JudgeHealthy(context.Background(), Scenario{Name: "s"}, "healthy now")
+	if err != nil || !v.SaysHealthy || v.Reason != "past" {
+		t.Fatalf("verdict %+v err %v", v, err)
+	}
+	if len(m.reqs) != 2 || m.reqs[0].System != healthyJudgeSystem || !reflect.DeepEqual(m.reqs[0].OutputSchema, healthyVerdictSchema) {
+		t.Fatalf("requests %+v", m.reqs)
+	}
+	last := m.reqs[1].Messages[len(m.reqs[1].Messages)-1]
+	if got := last.Parts[len(last.Parts)-1].Text; got != healthyJudgeRetryNote {
+		t.Errorf("retry note %q", got)
+	}
+}
+
+// TestHealthyJudgePromptVersionPinned fails when the healthy judge's prompt
+// changes and HealthyJudgePromptVersion does not.
+func TestHealthyJudgePromptVersionPinned(t *testing.T) {
+	const (
+		pinnedVersion = "judge-healthy-2026-10-23.1"
+		systemSHA     = "bc2d1859541fa1c850650eaf4b7cedcba3b863157c14af53cd64815dfc71c453"
+		promptSHA     = "0b8e87cec8cbf0fd945a79f2e56b8d7711849cfb740a96c8690ffc05c98a7c49"
+	)
+	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+	gotSys, gotPrompt := sum(healthyJudgeSystem), sum(healthyJudgePrompt(Scenario{Name: "pin"}, "h <x> & [verification]"))
+	if HealthyJudgePromptVersion != pinnedVersion || gotSys != systemSHA || gotPrompt != promptSHA {
+		t.Errorf("healthy judge prompt changed (system %s, prompt %s) or version changed (%s): bump HealthyJudgePromptVersion, then pin the new values here", gotSys, gotPrompt, HealthyJudgePromptVersion)
+	}
+}
+
+// missingGrantRun2Hyp is the final hypothesis of missing-grant run 2 in run
+// 39994729845, verbatim: it failed "root-cause layer not named: postgres".
+const missingGrantRun2Hyp = "First failing component: pg-orders-connector task 0 (permission denied for table orders, s_01M5MXWYCY9S8QSD4B0P562358). Root cause: the deliberate switch to the least-privilege role devctl_cdc (the connector's database.user, s_01M5MXXXQJH3RTXW4MAJJ6KSSD) left out SELECT on public.orders (s_01M5MXX3G5K133CBYER4SJ0BW6, s_01M5MXXXQJ59BY592NQBMY77C2). LOGIN and REPLICATION are present; slot debezium_orders is intact (s_01M5MXX61YDGAJNQMEG6P8PW5G)."
+
+// TestPostgresLayerSourceTables is ticket case 7: the pipeline's source
+// tables name Postgres, as its sink tables name the warehouse; a topic that
+// contains a source table does not; no grant or privilege word is a Postgres
+// word.
+func TestPostgresLayerSourceTables(t *testing.T) {
+	sc := loadScenario(t, "scenarios/missing-grant.yaml")
+	p := sc.Pipeline
+	terms := layerTermsFor(p, "postgres")
+	for _, st := range p.SourceTables {
+		if !slices.Contains(terms, st) {
+			t.Errorf("layerTermsFor(postgres) = %v, lacks source table %q", terms, st)
+		}
+	}
+	for _, term := range terms {
+		if strings.HasPrefix(term, "grant") || strings.HasPrefix(term, "privilege") {
+			t.Errorf("layerTermsFor(postgres) has %q: grants and privileges are Kafka ACL words too", term)
+		}
+	}
+	if !rootCauseLayerGraded(sc, &events.AgentHypothesisPayload{Text: missingGrantRun2Hyp}) {
+		t.Errorf("missing-grant run 2: root-cause layer postgres not named")
+	}
+	if a := ambiguityOf(sc, missingGrantRun2Hyp); a.Any() {
+		t.Errorf("missing-grant run 2 hypothesis is ambiguous: %+v", a)
+	}
+	tests := []struct {
+		layer, text string
+		want        bool
+	}{
+		{"postgres", "devctl_cdc cannot read public.orders.", true},
+		{"postgres", "pg.public.orders has had no new record for 20 minutes.", false},
+		{"postgres", "order-sync is stuck on pg.public.orders/1.", false},
+		{"kafka", "pg.public.orders has had no new record for 20 minutes.", true},
+		{"postgres", "Not a public.orders problem: the topic pg.public.orders is empty.", false},
+	}
+	for _, tt := range tests {
+		if got := namesPipelineLayer(p, tt.layer, tt.text); got != tt.want {
+			t.Errorf("namesPipelineLayer(%s, %q) = %v, want %v", tt.layer, tt.text, got, tt.want)
+		}
+	}
+	// The tri-state pass reads the same words: a topic is no Postgres word
+	// there either.
+	if got := layerPresent(p, []string{"postgres"}, tokenize("pg.public.orders is not the cause")); got != "" {
+		t.Errorf("layerPresent(postgres) = %q in a topic", got)
+	}
+	if got := layerPresent(p, []string{"postgres"}, tokenize("public.orders is not the cause")); got != "public.orders" {
+		t.Errorf("layerPresent(postgres) = %q, want public.orders", got)
 	}
 }
