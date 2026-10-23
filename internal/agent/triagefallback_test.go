@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
+	"piperoom/internal/agent/llm"
 	anthropicllm "piperoom/internal/agent/llm/anthropic"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
@@ -307,11 +309,17 @@ func TestTriageRejectionWhereMainAlsoFailsReturnsTheMainError(t *testing.T) {
 	})
 	ep := triageEndpoint(t, ms, "tri-model")
 	_, err := runOnEndpoint(t, ep, "room-1")
-	if err == nil || !strings.Contains(err.Error(), "main model failure") {
+	// The bodies are read from the structured error: its text never carries
+	// a provider body (it can echo the prompt).
+	var ae *llm.APIError
+	if !errors.As(err, &ae) || !strings.Contains(ae.Body, "main model failure") {
 		t.Fatalf("err = %v, want the main model's error", err)
 	}
-	if strings.Contains(err.Error(), "adaptive") {
-		t.Fatalf("err = %v must not be the triage model's error", err)
+	if strings.Contains(ae.Body, "adaptive") {
+		t.Fatalf("err = %v (body %s) must not be the triage model's error", err, ae.Body)
+	}
+	if strings.Contains(err.Error(), "main model failure") {
+		t.Fatalf("err.Error() = %q carries the provider's body", err.Error())
 	}
 	if ep.triageSw.isOff() {
 		t.Fatal("the main model failed too, so the switch must stay on")

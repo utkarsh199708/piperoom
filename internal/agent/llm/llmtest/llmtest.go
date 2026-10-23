@@ -50,9 +50,9 @@ type Fixture struct {
 	Provider string
 	// Model is the model id the suite sends.
 	Model string
-	// New builds the adapter pointed at baseURL. It should turn the
+	// New builds the adapter pointed at baseURL. It must turn the
 	// provider's own retries off: every error case answers the same error
-	// each time, so a retry only slows the suite.
+	// each time and counts the requests (one per Turn).
 	New func(t *testing.T, baseURL string) llm.Model
 	// Render writes a as the provider's HTTP response (status 200).
 	Render func(t *testing.T, a Answer) (contentType string, body []byte)
@@ -301,7 +301,8 @@ func sameJSON(t *testing.T, a json.RawMessage, b string) bool {
 
 func refusal(t *testing.T, f Fixture) {
 	s := newServer(t)
-	s.script(f.answer(t, Answer{Refusal: true, InputTokens: 50, OutputTokens: 1}))
+	const explanation = "The request asks for help with an attack."
+	s.script(f.answer(t, Answer{Refusal: true, Text: explanation, InputTokens: 50, OutputTokens: 1}))
 	resp, err := f.New(t, s.URL).Turn(context.Background(), f.request("Something refused."))
 	if err != nil {
 		t.Fatalf("Turn: %v", err)
@@ -309,10 +310,14 @@ func refusal(t *testing.T, f Fixture) {
 	if resp.Stop != llm.StopRefusal {
 		t.Fatalf("Stop = %q (%q), want refusal", resp.Stop, resp.ProviderStop)
 	}
+	if !strings.Contains(resp.StopDetail, explanation) {
+		t.Fatalf("StopDetail = %q, want the provider's explanation %q", resp.StopDetail, explanation)
+	}
 }
 
-// secretInBody is error body text that must never reach APIError.Error()
-// (design 10.2: a body can echo prompt content).
+// secretInBody is error body text that must never reach the error's text,
+// the APIError's or the returned error's (design 10.2: a body can echo
+// prompt content, and callers put err.Error() in room events).
 const secretInBody = "prompt-echo-7f3a"
 
 func errorKinds(t *testing.T, f Fixture) {
@@ -340,6 +345,15 @@ func errorKinds(t *testing.T, f Fixture) {
 			}
 			if strings.Contains(ae.Error(), secretInBody) {
 				t.Fatalf("the APIError's text carries the body: %q", ae.Error())
+			}
+			if strings.Contains(err.Error(), secretInBody) {
+				t.Fatalf("the error's text carries the body: %q", err.Error())
+			}
+			// The server repeats its last reply, so a retry would go unseen
+			// but for the count: an adapter built by Fixture.New must not
+			// retry, and no kind may make it send twice.
+			if n := len(s.requests()); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
 			}
 		})
 	}

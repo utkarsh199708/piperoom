@@ -15,6 +15,7 @@ package anthropic
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
@@ -101,12 +102,16 @@ func (m *Model) Capabilities(string) llm.Capabilities {
 }
 
 // Turn encodes req as a Beta Messages request, sends it and decodes the
-// answer. A failed request returns an *llm.APIError, with the partial answer
-// when one arrived (its usage was billed).
+// answer. A failed request returns an error wrapping an *llm.APIError, with
+// the partial answer when one arrived (its usage was billed); one that could
+// not be encoded was never sent and wraps llm.ErrNotSent too.
 func (m *Model) Turn(ctx context.Context, req llm.Request) (llm.Response, error) {
 	params, err := EncodeRequest(req)
 	if err != nil {
-		return llm.Response{}, &llm.APIError{Provider: m.provider, Kind: llm.ErrBadRequest, Err: err}
+		// Never sent: llm.ErrNotSent keeps the caller from reporting usage.
+		// The encoder's text can name request content, so it stays in Err.
+		ae := &llm.APIError{Provider: m.provider, Kind: llm.ErrBadRequest, Err: fmt.Errorf("%w: %w", llm.ErrNotSent, err)}
+		return llm.Response{}, &classified{api: ae, text: ae.Error() + ": the request could not be encoded"}
 	}
 	msg, err := m.turner.Turn(ctx, params)
 	resp := DecodeMessage(m.provider, req.Model, msg)

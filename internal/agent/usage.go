@@ -265,8 +265,9 @@ func detached(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // errNotSent marks an error returned before a request reached the API, so no
-// agent.usage is reported for it. A *BudgetError means the same.
-var errNotSent = errors.New("agent: request not sent")
+// agent.usage is reported for it. It is llm.ErrNotSent, which an adapter
+// wraps when it cannot encode a request. A *BudgetError means the same.
+var errNotSent = llm.ErrNotSent
 
 // wasSent reports whether a model call that returned err reached the API.
 func wasSent(err error) bool {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -97,6 +98,37 @@ func TestUsageEventOfAFailedCall(t *testing.T) {
 	got := usageEvents(t, sink)
 	if len(got) != 1 || got[0].Role != "main" || got[0].InputTokens != 40 || got[0].OutputTokens != 2 {
 		t.Fatalf("usage events = %+v, want one main event with the partial usage of the failed call", got)
+	}
+}
+
+// unencodable hands the Claude adapter a request it cannot encode (a tool
+// choice it does not know), so the request never leaves the process.
+type unencodable struct{ model }
+
+func (m unencodable) Turn(ctx context.Context, req llm.Request) (llm.Response, error) {
+	req.ToolChoice = "no-such-choice"
+	return m.model.Turn(ctx, req)
+}
+
+// neverCalled fails the test if the adapter sends anything.
+type neverCalled struct{ t *testing.T }
+
+func (m neverCalled) Turn(context.Context, anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+	m.t.Error("the adapter sent a request it could not encode")
+	return anthropic.BetaMessage{}, errors.New("sent")
+}
+
+func TestNoUsageEventForARequestTheAdapterCouldNotEncode(t *testing.T) {
+	sink := &fakeSink{}
+	rec := &recordingTool{name: "connect_status", schema: testSchema("connector")}
+	r := newTestRunnerM(t, unencodable{viaSDK(neverCalled{t})}, &fakeInbox{waitErr: context.Canceled}, sink, rec, Options{Model: "main"})
+	err := r.run(context.Background())
+	var ae *llm.APIError
+	if !errors.As(err, &ae) || ae.Kind != llm.ErrBadRequest || !errors.Is(err, llm.ErrNotSent) {
+		t.Fatalf("run: err = %v, want a bad_request APIError that was never sent", err)
+	}
+	if got := usageEvents(t, sink); len(got) != 0 {
+		t.Fatalf("usage events = %+v, want none: the request never left the process", got)
 	}
 }
 
