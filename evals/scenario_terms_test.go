@@ -3,6 +3,7 @@ package evals
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"slices"
@@ -653,8 +654,51 @@ func TestW4lSnapshotStuckRecordings(t *testing.T) {
 	}
 	if got := w4lSummary(t, sc, "reconcile", `{"since":"2026-10-14T01:00:00Z","table":"public.orders"}`); !strings.HasPrefix(got, "reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 21m0s from 2026-10-14T01:00:00Z\n") {
 		t.Errorf("reconcile = %q", got)
+	} else {
+		w4lCheckSnapshotReconcile(t, got)
 	}
 	if off := w4lSummary(t, sc, "connect_source_offsets", `{"connector":"pg-orders-connector"}`); !strings.Contains(off, "snapshot=true") {
 		t.Errorf("the stored offset of a connector in its initial snapshot lacks snapshot=true: %q", off)
+	}
+}
+
+// w4lCheckSnapshotReconcile checks snapshot-stuck's 01:00 reconcile against
+// the tool (dbtools/reconcile.go): with no until the window ends at the clock
+// (05:05) minus the 2 min settle, the last bucket counts only up to that cut,
+// the verdict adds up the short buckets, and the key note (over the 2000-key
+// cap: the Postgres source and warehouse both list keys) and the in-flight
+// note end the summary.
+func w4lCheckSnapshotReconcile(t *testing.T, got string) {
+	t.Helper()
+	const cut = "2026-10-14T05:03:00Z"
+	row := regexp.MustCompile(`(?m)^(\d\d:\d\d) \| (\d+) \| (\d+) \| (\d+) \| ([+-]\d+)$`)
+	var missing, src, topic, sink int
+	rows := row.FindAllStringSubmatch(got, -1)
+	if len(rows) != 12 || rows[11][1] != "04:51" {
+		t.Fatalf("reconcile has %d buckets, want 12 ending at 04:51:\n%s", len(rows), got)
+	}
+	for _, r := range rows {
+		s, _ := strconv.Atoi(r[2])
+		e, _ := strconv.Atoi(r[3])
+		k, _ := strconv.Atoi(r[4])
+		if d, _ := strconv.Atoi(r[5]); d != k-s {
+			t.Errorf("bucket %s: sink−source %d, want %d", r[1], d, k-s)
+		}
+		missing += s - k // every bucket is short here
+		src += s
+		topic += e
+		sink += k
+	}
+	// The last bucket runs 04:51 to the 05:03 cut: 12 minutes at 46 rows/s.
+	if s, _ := strconv.Atoi(rows[11][2]); s != 46*12*60 {
+		t.Errorf("last bucket has %d source rows, want %d (04:51 to the %s cut)", s, 46*12*60, cut)
+	}
+	want := fmt.Sprintf("verdict: sink is missing %d rows in 01:00–05:12; the topic carried %d change events for %d source rows, so the rows may be there", missing, topic, src)
+	if !strings.Contains(got, "\n"+want) {
+		t.Errorf("verdict does not add up, want %q in:\n%s", want, got)
+	}
+	tail := fmt.Sprintf("\nkeys not compared: %d source / %d sink keys exceed the 2000-key cap; narrow since/until for a key diff\nnote: rows newer than %s (the last 2m0s) are in flight and not judged", src, sink, cut)
+	if !strings.HasSuffix(got, tail) {
+		t.Errorf("reconcile does not end with the key and in-flight notes %q:\n%s", tail, got)
 	}
 }

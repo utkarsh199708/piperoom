@@ -371,10 +371,12 @@ recordings:
       stuck: confirmed_flush_lsn did not move while the source wrote 419430 bytes in 8s (slot "debezium_orders", active=true, wal_status=reserved, retains 61.4 GiB); connector pg-orders-connector state RUNNING
       the head-confirmed_flush lag grew from 61.4 GiB to 61.4 GiB in 8s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
       no open writer transaction was found; the slot is held back by something else
-  # The 01:00 variant of the reconcile above, on the tool's own grid (21 min buckets over the
-  # 4h05m window) with the same rates: 46 source rows/s, 13351 topic events/s from the 02:00
-  # snapshot start, the sink's rows (17 per second) ending at its newest row, 01:54:09. The verdict
-  # is today's wording of the tool (the 00:00 recording above predates it).
+  # The 01:00 variant of the reconcile above, on the tool's own grid: with no until the tool cuts
+  # the window at the clock minus its 2 min settle, so it is 4h03m (01:00-05:03) in 21 min buckets
+  # and the last bucket holds 12 minutes. Same rates: 46 source rows/s, 13351 topic events/s from
+  # the 02:00 snapshot start, the sink's rows (17 per second) ending at its newest row, 01:54:09.
+  # The verdict is today's wording of the tool (the 00:00 recording above predates it); the key
+  # diff is left out over the 2000-key cap and the in-flight note follows, as the tool prints them.
   - tool: reconcile
     input: {table: "public.orders", since: "2026-10-14T01:00:00Z"}
     summary: |-
@@ -391,8 +393,10 @@ recordings:
       03:48 | 57960 | 16822260 | 0 | -57960
       04:09 | 57960 | 16822260 | 0 | -57960
       04:30 | 57960 | 16822260 | 0 | -57960
-      04:51 | 38640 | 11214840 | 0 | -38640
-      verdict: sink is missing 620903 rows in 01:00–05:12; the topic carried 148196100 change events for 676200 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+      04:51 | 33120 | 9612720 | 0 | -33120
+      verdict: sink is missing 615383 rows in 01:00–05:12; the topic carried 146593980 change events for 670680 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+      keys not compared: 670680 source / 55297 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      note: rows newer than 2026-10-14T05:03:00Z (the last 2m0s) are in flight and not judged
   - tool: source_blocking_sessions
     summary: |
       (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
