@@ -1,0 +1,122 @@
+package {{.Package}};
+
+import io.debezium.engine.ChangeEvent;
+import io.debezium.engine.DebeziumEngine;
+import io.debezium.engine.format.Json;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Piperoom reference project: the smallest Debezium Engine application for a
+ * {{.SourceTitle}} source on Debezium {{.Release}}. Piperoom generated it and
+ * never builds or runs it; you do. Every change event is printed as one line
+ * that starts with "piperoom-reference event", so the log of this program
+ * shows the setup canary.
+ */
+public final class ReferenceApp {
+
+    /** The asynchronous engine: the only one left in Debezium 3.2 (DBZ-8443). */
+    private static final String ENGINE_FACTORY = "io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory";
+
+    /** A property value that is exactly ${secret:NAME}. */
+    private static final Pattern SECRET_REF = Pattern.compile("^\\$\\{secret:([A-Za-z_][A-Za-z0-9_]{0,63})\\}$");
+
+    /** The files the engine writes; their folders must exist before it starts. */
+    private static final String[] FILE_KEYS = {"offset.storage.file.filename", "schema.history.internal.file.filename"};
+
+    private ReferenceApp() {
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path config = Paths.get(args.length > 0 ? args[0] : "piperoom-reference.properties");
+        Properties props = new Properties();
+        try (InputStream in = Files.newInputStream(config)) {
+            props.load(in);
+        }
+        if (!resolveSecrets(props)) {
+            System.exit(2);
+        }
+        for (String key : FILE_KEYS) {
+            String file = props.getProperty(key);
+            if (file != null) {
+                Path parent = Paths.get(file).toAbsolutePath().getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+            }
+        }
+
+        CountDownLatch stopped = new CountDownLatch(1);
+        AtomicBoolean failed = new AtomicBoolean(false);
+        DebeziumEngine<ChangeEvent<String, String>> engine = DebeziumEngine
+                .create(Json.class, Json.class, Json.class, ENGINE_FACTORY)
+                .using(props)
+                .notifying(event -> System.out.println("piperoom-reference event destination=" + event.destination()
+                        + " key=" + event.key() + " value=" + event.value()))
+                .using((success, message, error) -> {
+                    if (!success) {
+                        failed.set(true);
+                        System.err.println("piperoom-reference engine stopped with an error: " + message);
+                        if (error != null) {
+                            error.printStackTrace();
+                        }
+                    }
+                    stopped.countDown();
+                })
+                .build();
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                engine.close();
+                stopped.await(30, TimeUnit.SECONDS);
+            } catch (IOException | InterruptedException e) {
+                System.err.println("piperoom-reference: closing the engine: " + e);
+            }
+        }));
+        executor.execute(engine);
+        System.out.println("piperoom-reference started: " + props.getProperty("connector.class"));
+        stopped.await();
+        executor.shutdown();
+        executor.awaitTermination(30, TimeUnit.SECONDS);
+        if (failed.get()) {
+            System.exit(1);
+        }
+    }
+
+    /**
+     * Replaces each ${secret:NAME} value with the environment variable
+     * PIPEROOM_SECRET_NAME, so no password is ever written into the
+     * properties file. A value that is not a reference is kept as is.
+     */
+    private static boolean resolveSecrets(Properties props) {
+        boolean ok = true;
+        for (String key : props.stringPropertyNames()) {
+            Matcher m = SECRET_REF.matcher(props.getProperty(key).trim());
+            if (!m.matches()) {
+                continue;
+            }
+            String env = "PIPEROOM_SECRET_" + m.group(1);
+            String value = System.getenv(env);
+            if (value == null || value.isEmpty()) {
+                System.err.println("piperoom-reference: " + key + " needs the environment variable " + env);
+                ok = false;
+                continue;
+            }
+            props.setProperty(key, value);
+        }
+        return ok;
+    }
+}

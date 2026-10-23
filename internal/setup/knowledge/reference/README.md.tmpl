@@ -1,0 +1,26 @@
+# {{.ArtifactID}}: Piperoom reference project
+
+The smallest Debezium Engine application for this pipeline: a {{.SourceTitle}} source on
+Debezium {{.Release}}, built with {{.BuildTitle}}, Java {{.JavaRelease}} or later. Piperoom
+generated it and never builds or runs it. Compare its build file with yours: the versions here
+are the ones Debezium {{.Release}} was released with.
+
+## Run it
+
+1. Set the database password in the environment (it is never written to a file):
+   `PIPEROOM_SECRET_{{.PasswordSecret}}=<password>`
+2. Build: `{{.BuildCommand}}`
+3. Run, from this folder: `{{.RunCommand}}`{{if .RunCommandWindows}} (Windows: `{{.RunCommandWindows}}`){{end}}
+
+Every change event prints one line that starts with `piperoom-reference event`. Save the output
+to a file (for example `piperoom-reference.log`) and give Piperoom its path: the setup check
+looks for its canary in that file.
+
+Offsets{{if eq .Source "mysql"}} and the schema history{{end}} are kept under `data/`; delete that
+folder to start again with a new snapshot.
+{{- if eq .Source "postgres"}}
+
+The engine creates the replication slot `{{.SlotName}}` and the publication
+`{{.PublicationName}}`. When you no longer need it, drop both, or the slot keeps WAL on the server:
+`SELECT pg_drop_replication_slot('{{.SlotName}}'); DROP PUBLICATION {{.PublicationName}};`
+{{- end}}
