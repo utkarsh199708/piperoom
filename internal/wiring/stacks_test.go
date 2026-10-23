@@ -155,7 +155,7 @@ type checkedSlotDropperMethods interface {
 // could write through the reader connection with write mode off.
 func TestSourceReaderHasNoWriteMethod(t *testing.T) {
 	db := reflect.TypeOf((*postgres.DB)(nil))
-	for _, iface := range []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[checkedSlotDropperMethods]()} {
+	for _, iface := range append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[checkedSlotDropperMethods]()}, adminWriterIfaces...) {
 		if db.Implements(iface) {
 			t.Errorf("*postgres.DB implements %v: the source reader must hold no write method", iface)
 		}

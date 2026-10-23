@@ -938,8 +938,8 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 }
 
 // rebuildWith is rebuild that also hands every event read to visit (nil for
-// none), in log order.
-func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(events.Event)) (loadedRoom, error) {
+// none), in log order, with the room folded through it.
+func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(RoomSnapshot, events.Event)) (loadedRoom, error) {
 	// The byte count is read before the log: an event appended meanwhile is
 	// then folded (and counted by foldLocked) but not in the count, which can
 	// trail the store, never count an event twice.
@@ -964,7 +964,7 @@ func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(eve
 			st.snap = Apply(st.snap, e)
 			trackPending(st, e)
 			if visit != nil {
-				visit(e)
+				visit(st.snap, e)
 			}
 			after = e.Seq
 		}
@@ -1034,9 +1034,14 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 		s.fillGapLocked(ctx, roomID, st, e.Seq)
 	}
 	s.foldLocked(ctx, roomID, st, e, false)
+	// Read before the cap check: its warning event folds over e.
+	wake := startsAgent(st.snap, e)
 	// Only the replica that wrote the event decides the cap warning, so the
 	// warning is written once.
 	s.checkCapLocked(ctx, st, roomID)
+	if wake {
+		s.ensureAgentLocked(roomID, st)
+	}
 	return e, nil
 }
 
@@ -1456,8 +1461,8 @@ func (in *inbox) reset(items []agent.HumanInput) {
 // it: another replica's inbox would only collect input no run here reads.
 // Caller holds st's lock.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
-	if input := inputFor(e); input != nil {
-		s.feedInput(st, *input)
+	for _, input := range inputsFor(st.snap, e) {
+		s.feedInput(st, input)
 	}
 }
 
@@ -1473,9 +1478,134 @@ func (s *Service) feedInput(st *roomState, in agent.HumanInput) {
 	st.inbox.push(in)
 }
 
+// inputsFor is every agent input one event carries, in the order the agent
+// reads them: inputFor's, then the proposal_executed of a driver-authored
+// proposal whose run the event ended (proposalExecutedInput). snap is the
+// room folded through e (Apply), which is how every fold path (live, catch-up,
+// rebuild) derives the same inputs from the log.
+func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
+	var out []agent.HumanInput
+	if in := inputFor(e); in != nil {
+		out = append(out, *in)
+	}
+	if in := proposalExecutedInput(snap, e); in != nil {
+		out = append(out, *in)
+	}
+	return out
+}
+
+// startsAgent reports whether event e (folded into snap) carries a driver
+// proposal input: "proposal_created" or "proposal_executed". Like a steer,
+// these start the room's agent when it has no run (a room restored by Load,
+// or one whose run was released after a failure), so the agent answers the
+// driver's fix and verifies it after it runs (P3e) instead of the input
+// waiting in the inbox for the next steer. Only the replica that wrote the
+// event decides it (emitLocked), as for a steer.
+func startsAgent(snap RoomSnapshot, e events.Event) bool {
+	for _, in := range inputsFor(snap, e) {
+		if in.Kind == "proposal_created" || in.Kind == "proposal_executed" {
+			return true
+		}
+	}
+	return false
+}
+
+// proposalExecutedInput is the "proposal_executed" input (P3c): sent once,
+// with the action.executed that ended a driver-authored proposal's run, so
+// the agent verifies the driver's fix as after its own. StepsOK has one entry
+// per step: true ok, false failed or never run, nil outcome unknown
+// (agent.HumanInput.StepsOK). An agent proposal yields none: the runner hears
+// of its own through action_result. snap is folded through e.
+func proposalExecutedInput(snap RoomSnapshot, e events.Event) *agent.HumanInput {
+	f := snap.finished
+	if e.Type != events.ActionExecuted || f == nil || f.seq != e.Seq {
+		return nil
+	}
+	stepsOK := make([]*bool, len(f.outcomes))
+	parts := make([]string, len(f.outcomes))
+	for i, o := range f.outcomes {
+		var word string
+		switch o {
+		case outcomeOK:
+			v := true
+			stepsOK[i], word = &v, "ok"
+		case outcomeFailed:
+			v := false
+			stepsOK[i], word = &v, "failed"
+		case outcomeUnknown:
+			word = "outcome unknown"
+		default:
+			v := false
+			stepsOK[i], word = &v, "did not run"
+		}
+		parts[i] = fmt.Sprintf("step %d %s", i+1, word)
+	}
+	return &agent.HumanInput{
+		Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "proposal_executed",
+		Text:       "the driver's proposal finished: " + strings.Join(parts, "; "),
+		ProposalID: f.proposalID, Origin: f.origin, StepsOK: stepsOK,
+	}
+}
+
+// maxDriverProposalText bounds the "proposal_created" input's Text. The route
+// caps only the request body (1 MB), so the driver's title, risk, rollback and
+// params could otherwise put a megabyte of their words into every later model
+// turn; a steer is capped at 4000 characters. Two steer's worth leaves room
+// for a few steps' params; the full proposal stays in the room for people.
+const maxDriverProposalText = 8192
+
+// driverProposalTruncated ends a proposal_created Text cut at
+// maxDriverProposalText, so the agent knows it did not read all of it.
+const driverProposalTruncated = "\n[truncated: the full proposal is in the room]"
+
+// driverProposalText renders a driver-authored proposal for the agent's
+// "proposal_created" input: title, each step's action, layer and params, the
+// risk and the rollback, at most maxDriverProposalText bytes. Everything in it
+// was typed by the driver, so the agent reads it as untrusted data
+// (agent.HumanInput.Origin).
+func driverProposalText(p events.ProposalCreatedPayload) string {
+	s := renderDriverProposal(p)
+	if len(s) <= maxDriverProposalText {
+		return s
+	}
+	return cutUTF8(s, maxDriverProposalText-len(driverProposalTruncated)) + driverProposalTruncated
+}
+
+// renderDriverProposal is driverProposalText before the size bound.
+func renderDriverProposal(p events.ProposalCreatedPayload) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "title: %s\n", p.Title)
+	for i, st := range p.Steps {
+		params := string(p.Steps[i].Params)
+		if params == "" {
+			params = "{}"
+		}
+		fmt.Fprintf(&b, "step %d: action %s, layer %s, params %s\n", i+1, st.Action, st.Layer, params)
+		if st.Description != "" {
+			fmt.Fprintf(&b, "  description: %s\n", st.Description)
+		}
+		if st.Verify != "" {
+			fmt.Fprintf(&b, "  verify: %s\n", st.Verify)
+		}
+	}
+	fmt.Fprintf(&b, "risk: %s\n", p.Risk)
+	fmt.Fprintf(&b, "rollback: %s", p.Rollback)
+	return b.String()
+}
+
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
 func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
+	case events.ProposalCreated:
+		p, ok := decode[events.ProposalCreatedPayload](e)
+		// Only a driver's proposal: the runner already knows its own.
+		if !ok || p.Origin != events.ProposalOriginDriver {
+			return nil
+		}
+		return &agent.HumanInput{
+			Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "proposal_created",
+			Text: driverProposalText(p), ProposalID: p.ProposalID, Origin: p.Origin,
+		}
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
@@ -1553,8 +1683,8 @@ func inputFor(e events.Event) *agent.HumanInput {
 		// recovery nor failure (docs/design/replicas.md section 5).
 		var okp *bool
 		if !p.OutcomeUnknown {
-			stepOK := p.OK
-			okp = &stepOK
+			outcomeOK := p.OK
+			okp = &outcomeOK
 		}
 		stepIndex := p.StepIndex
 		// At is the step's execution time, which a recovery's Verify
@@ -1595,6 +1725,26 @@ func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCrea
 		return p.s.fenceLocked(p.roomID, st, p.run)
 	})
 	return id, err
+}
+
+// ProposalSteps returns the stored steps of a proposal in this run's room, so
+// the runner can check the layers a driver's fix touched after its
+// proposal_executed (P3e, agent.ProposalStepsReader). An id that is unknown
+// or belongs to another room is a not-found error: a run never reads another
+// room's proposals.
+func (p proposalCreator) ProposalSteps(ctx context.Context, proposalID string) ([]events.ProposalStep, error) {
+	row, err := p.s.store.GetProposal(ctx, proposalID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && row.RoomID != p.roomID) {
+		return nil, fmt.Errorf("room: proposal steps of %q: %w", proposalID, notFound("unknown proposal"))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("room: read proposal %s: %w", proposalID, err)
+	}
+	var steps []events.ProposalStep
+	if err := json.Unmarshal(row.Steps, &steps); err != nil {
+		return nil, fmt.Errorf("room: decode proposal %s steps: %w", proposalID, err)
+	}
+	return steps, nil
 }
 
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed

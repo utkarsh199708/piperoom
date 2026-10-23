@@ -179,6 +179,11 @@ func (a *updateConnectorConfig) Stage(ctx context.Context, raw json.RawMessage) 
 	if err := stageScope(ctx, func(sc tools.Scope) error { return sc.CheckConnector(set.connector) }); err != nil {
 		return StageResult{}, err
 	}
+	// Staging runs the heartbeat query on the staging source database: the
+	// same scope rule as production, with the pipeline required.
+	if err := ctxHeartbeatScope(ctx, set, true); err != nil {
+		return StageResult{}, fmt.Errorf("actions: stage: %w", err)
+	}
 	res := StageResult{Target: "connector " + set.connector}
 	if a.d.Staging == nil || a.d.Staging.Connect == nil {
 		res.Detail = events.StageNoStaging

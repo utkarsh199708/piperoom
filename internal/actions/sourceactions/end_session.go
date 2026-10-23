@@ -46,10 +46,11 @@ type EndSessionDeps struct {
 	// connector's own sessions, which are never ended.
 	Connect tools.ConfigReader
 	// Source is the read-only source client; it must implement
-	// BlockerReader (Q2a), the read behind source_blocking_sessions.
+	// ScopedBlockerReader (Q2a), the read behind source_blocking_sessions in
+	// a room, and BlockerReader for the explicit unscoped opt-out.
 	Source clients.SourceDB
 	// Writer is used by Execute only; nil (untyped) when write mode is off
-	// or SOURCE_DB_WRITE_URL is empty, and then Validate refuses.
+	// or SOURCE_DB_WRITE_URL is empty, and then Execute refuses.
 	Writer SessionEnder
 
 	// now is the clock of the preview's ages; tests only (nil = time.Now).
@@ -75,7 +76,7 @@ func (a *endSession) Layer() string { return layerSource }
 func (a *endSession) Describe() string {
 	return "End one source database session that holds back the pipeline's replication slot (pg_terminate_backend): an idle or long transaction that stops the slot from advancing or keeps a slot creation waiting. " +
 		"Its open transaction is rolled back and its client sees a dropped connection. " +
-		"Take pid and started_at from source_blocking_sessions: the session must be listed there (with the same older_than_minutes) when the step is proposed and again right before it runs, with the same start time. " +
+		"Take pid and started_at from source_blocking_sessions: the session must be listed there (with the same older_than_minutes) with its identity shown, that is holding or waiting for a lock on one of the pipeline's source_tables, when the step is proposed and again right before it runs, with the same start time. " +
 		"Never ends a walsender, Piperoom's own sessions, or a session of the connector's database.user."
 }
 
@@ -158,21 +159,44 @@ func (a *endSession) connectorUser(ctx context.Context, connector string) (strin
 	return "", nil
 }
 
-// findBlocker reads the blocking sessions and returns the one p names. A
-// session no longer listed, or listed with another start time, is refused:
-// the step was approved for that session only.
-func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, connUser string) (DBSession, error) {
-	r, ok := a.d.Source.(BlockerReader)
-	if !ok {
-		return DBSession{}, fmt.Errorf("sourceactions: %s: the source client cannot list blocking sessions (no Blockers)", EndSessionName)
+// blockers reads the blocking sessions the way source_blocking_sessions
+// does: scoped to pl's source_tables when pl is set (a session touching none
+// of them comes back with InScope false), in full only for the explicit
+// unscoped opt-out (pl nil). A client that cannot scope is refused, never
+// read in full.
+func (a *endSession) blockers(ctx context.Context, p endSessionParams, pl *owners.Pipeline) ([]DBSession, error) {
+	if pl == nil {
+		r, ok := a.d.Source.(BlockerReader)
+		if !ok {
+			return nil, fmt.Errorf("sourceactions: %s: the source client cannot list blocking sessions (no Blockers)", EndSessionName)
+		}
+		return r.Blockers(ctx, p.olderThan())
 	}
-	sessions, err := r.Blockers(ctx, p.olderThan())
+	r, ok := a.d.Source.(ScopedBlockerReader)
+	if !ok {
+		return nil, fmt.Errorf("sourceactions: %s: the source client cannot scope blocking sessions to pipeline %q's tables (no BlockersOnTables)", EndSessionName, pl.ID)
+	}
+	return r.BlockersOnTables(ctx, p.olderThan(), pl.SourceTables)
+}
+
+// findBlocker reads the blocking sessions and returns the one p names. A
+// session no longer listed, listed with another start time, or listed
+// outside pl's tables (InScope false) is refused: the step was approved for
+// that session only, and a room may end only its own pipeline's blockers.
+func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, pl *owners.Pipeline, connUser string) (DBSession, error) {
+	sessions, err := a.blockers(ctx, p, pl)
 	if err != nil {
 		return DBSession{}, fmt.Errorf("sourceactions: %s: list blocking sessions: %w", EndSessionName, err)
 	}
 	for _, s := range sessions {
 		if s.PID != p.PID {
 			continue
+		}
+		if pl != nil && !s.InScope {
+			// Its identity is hidden from this room: it belongs to another
+			// pipeline, user or database, so this room cannot approve it.
+			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d holds or waits for no lock on pipeline %q's source_tables, so it is outside this room: %w: %w",
+				EndSessionName, p.PID, pl.ID, errRefused, tools.ErrOutOfScope)
 		}
 		if !s.StartedAt.Equal(p.StartedAt) {
 			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d now names a session that started %s, not %s: %w: %w",
@@ -189,21 +213,24 @@ func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, connUs
 		EndSessionName, p.PID, int(p.olderThan()/time.Minute), errRefused)
 }
 
-// check is the shared read of Validate and Execute: the connector's user and
-// the session in the blocking list.
-func (a *endSession) check(ctx context.Context, p endSessionParams) (DBSession, error) {
+// check is the shared read of Validate, Preview and Execute: the connector's
+// user and the session in the blocking list, scoped to pl (nil = unscoped).
+func (a *endSession) check(ctx context.Context, p endSessionParams, pl *owners.Pipeline) (DBSession, error) {
 	ctx, cancel := withTimeout(ctx, a.d.timeout)
 	defer cancel()
 	user, err := a.connectorUser(ctx, p.Connector)
 	if err != nil {
 		return DBSession{}, err
 	}
-	return a.findBlocker(ctx, p, user)
+	return a.findBlocker(ctx, p, pl, user)
 }
 
 // Validate refuses bad params, a connector outside the room's pipeline (when
-// ctx carries it), a missing writer and a pid that is not, with its start
-// time, in the blocking-session list now.
+// ctx carries it) and a pid that is not, with its start time, in the
+// blocking-session list now; with the room's pipeline in ctx the list is
+// scoped to its source_tables and an out-of-scope pid is refused. A missing
+// writer is refused at Execute only, so the agent can still propose the step
+// with write mode off (P0 ruling #606).
 func (a *endSession) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseEndSession(raw)
 	if err != nil {
@@ -212,11 +239,21 @@ func (a *endSession) Validate(ctx context.Context, raw json.RawMessage) error {
 	if err := validateScope(ctx, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) }); err != nil {
 		return err
 	}
-	if a.d.Writer == nil {
-		return fmt.Errorf("sourceactions: %s: %w", EndSessionName, errNoWriter)
+	var scope *owners.Pipeline
+	if pl, ok := tools.PipelineFrom(ctx); ok {
+		scope = &pl
 	}
-	_, err = a.check(ctx, p)
+	_, err = a.check(ctx, p, scope)
 	return err
+}
+
+// scopeOf is the blocking-list scope of a ctxScope result: the pipeline, or
+// nil for the explicit unscoped opt-out.
+func scopeOf(pl owners.Pipeline, scoped bool) *owners.Pipeline {
+	if !scoped {
+		return nil
+	}
+	return &pl
 }
 
 // Preview shows the session as the blocking list has it now: age,
@@ -227,13 +264,14 @@ func (a *endSession) Preview(ctx context.Context, raw json.RawMessage) (actions.
 	if err != nil {
 		return actions.PreviewResult{}, err
 	}
-	if _, _, err := ctxScope(ctx, EndSessionName, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) }); err != nil {
+	pl, scoped, err := ctxScope(ctx, EndSessionName, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) })
+	if err != nil {
 		return actions.PreviewResult{}, err
 	}
 	res := actions.PreviewResult{
 		Target: fmt.Sprintf("session pid %d (started %s) on the source database", p.PID, p.StartedAt.UTC().Format(time.RFC3339)),
 	}
-	s, err := a.check(ctx, p)
+	s, err := a.check(ctx, p, scopeOf(pl, scoped))
 	if err != nil && !errors.Is(err, errRefused) {
 		return actions.PreviewResult{}, err
 	}
@@ -273,20 +311,21 @@ func age(now, t time.Time) string {
 }
 
 // Execute re-checks that the session is still in the blocking list with the
-// same start time, then ends it through the admin writer, which re-reads pid
+// same start time (and in the pipeline's scope), then ends it through the admin writer, which re-reads pid
 // and backend_start once more in its own transaction.
 func (a *endSession) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	p, err := parseEndSession(raw)
 	if err != nil {
 		return "", err
 	}
-	if _, _, err := ctxScope(ctx, EndSessionName, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) }); err != nil {
+	pl, scoped, err := ctxScope(ctx, EndSessionName, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) })
+	if err != nil {
 		return "", err
 	}
 	if a.d.Writer == nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", EndSessionName, errNoWriter)
 	}
-	if _, err := a.check(ctx, p); err != nil {
+	if _, err := a.check(ctx, p, scopeOf(pl, scoped)); err != nil {
 		return "", err
 	}
 	if err := a.d.Writer.EndSession(ctx, p.PID, p.StartedAt); err != nil {

@@ -503,6 +503,31 @@ export interface ProposalCreatedPayload {
   fallback_layers?: string[]
   /** X2/X6: set by the room service from the action registry. Absent reads as "fix". */
   class?: ProposalClass
+  /** P3c: who wrote it. "driver" for POST /api/rooms/{id}/proposals (the event's actor is the driver); absent reads as "agent". */
+  origin?: ProposalOrigin
+}
+
+/** P3c: proposal.created.origin. */
+export type ProposalOrigin = 'agent' | 'driver'
+
+/** One registered write action (GET /api/actions, P3c). Never carries client state or credentials. */
+export interface ActionInfo {
+  name: string
+  layer: string
+  /** The action's Describe(). */
+  describe: string
+  /** The action's ParamsSchema(): a JSON Schema object (lib/paramsForm reads it). */
+  params_schema: Record<string, unknown>
+  /** Whether the action implements actions.Preview. */
+  preview: boolean
+}
+
+/** POST /api/rooms/{id}/proposals (P3c): a driver-authored fix. Only registered actions with their params. */
+export interface CreateProposalBody {
+  title: string
+  risk: string
+  rollback: string
+  steps: { action: string; layer: string; params: Record<string, unknown>; description?: string }[]
 }
 
 /**
@@ -675,6 +700,8 @@ export interface ProposalSummary {
   scheduled?: { run_at: string; cancel_until: string }
   /** X2: copied from proposal.created.class; absent reads as "fix". */
   class?: ProposalClass
+  /** P3c: copied from proposal.created.origin; absent reads as "agent". */
+  origin?: ProposalOrigin
   /** X8: step indexes whose action implements actions.Stager; [] or absent when none (and before X8c). */
   stageable?: number[]
   /** X8: a proposal.stage_started with no proposal.staged yet, before its expires_at. */

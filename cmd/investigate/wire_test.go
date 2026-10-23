@@ -199,6 +199,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
 		// X2a: the recovery action, listed the same way.
 		"pg_resnapshot_rows",
+		// Q2e: the source admin actions, listed the same way.
+		"pg_set_replica_identity", "source_create_heartbeat_table", "source_grant_select", "source_end_session",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
 	for _, a := range areg.All() {

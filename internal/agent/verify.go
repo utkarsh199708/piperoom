@@ -175,10 +175,16 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 	var out actionOutcome
 	out.needsModel = hasHumanInput(inputs)
 	for _, in := range inputs {
-		if in.Kind != "action_result" {
+		var one actionOutcome
+		switch in.Kind {
+		case "action_result":
+			one = r.verifyActionResult(ctx, in)
+		case "proposal_executed":
+			// A driver's fix ran: verify it as after the agent's own (P3e).
+			one = r.verifyDriverProposal(ctx, in)
+		default:
 			continue
 		}
-		one := r.verifyActionResult(ctx, in)
 		out.recovered = out.recovered || one.recovered
 		out.broken = out.broken || one.broken
 		out.needsModel = out.needsModel || one.needsModel
@@ -242,14 +248,24 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		}
 	}
 
+	return r.verifyExecuted(ctx, rec, r.executedAt(in, id, step))
+}
+
+// verifyExecuted runs the verification pass of a proposal whose every step
+// succeeded and emits its agent.verification: the recovery, performance or
+// layer-and-data-flow pass by the proposal's steps. The agent's own proposals
+// and a driver's (driverproposal.go) both come here. executedAt is when the
+// last step ran.
+func (r *runner) verifyExecuted(ctx context.Context, rec proposalRecord, executedAt time.Time) actionOutcome {
+	id := rec.id
 	if steps := r.recoverySteps(rec.steps); len(steps) > 0 {
 		// A recovery is verified by counts (X2c, verify_recovery.go).
-		return r.verifyRecoveryProposal(ctx, rec, steps, r.executedAt(in, id, step))
+		return r.verifyRecoveryProposal(ctx, rec, steps, executedAt)
 	}
 	if steps := r.classSteps(rec.steps, actions.ClassPerformance); len(steps) > 0 {
 		// A tuning is verified by throughput before and after (X6c,
 		// verify_performance.go).
-		return r.verifyPerformanceProposal(ctx, rec, steps, r.executedAt(in, id, step))
+		return r.verifyPerformanceProposal(ctx, rec, steps, executedAt)
 	}
 
 	vr := r.verifyProposal(ctx, rec)

@@ -651,6 +651,67 @@ placeholder (`status = status || ''` builds a new value, so the change event car
 no placeholder is left. With no placeholder row only the `ALTER` runs. The change events already on the topic
 keep the placeholder (history is not rewritten).
 
+## Setup breaks: `devctl setup-break` / `setup-fix`
+
+The six prerequisites a `piperoom-setup` run checks before it can build a
+pipeline, each broken on the dev stack and restored again. They are separate
+from the incident scenarios above: nothing in the CDC pipeline is the subject —
+the *environment* is, and each break makes exactly one named setup check fail.
+
+```
+go run ./cmd/devctl setup-break --owner <your-tag> <name>
+go run ./cmd/devctl setup-fix   --owner <your-tag> <name>
+```
+
+Both take the shared stack lock. `setup-break` first proves the check passes,
+applies the break, then proves it fails; `setup-fix` applies the recorded fix
+and proves the check passes. A stack that already fails (or already passes)
+the check is left alone, so both commands are idempotent. They never delete
+rows; `devctl reset` rebuilds the stack if a fix is interrupted.
+
+| Scenario | Named check | What the break does | What a setup run reports |
+|---|---|---|---|
+| `flat-plugin-dir` | `plugin-layout` | moves every jar of `/kafka/connect/debezium-connector-postgres` into `/kafka/connect` itself | `jar_list`: "N jar(s) directly in /kafka/connect; each connector needs its own directory" |
+| `missing-converter-jars` | `plugin-converter-jars` | moves `debezium-core-*.jar` and `debezium-api-*.jar` out of the connector directory | `jar_list`: connector missing `debezium-core` / `debezium-api` (`missing_converters`) |
+| `wal-level-replica` | `postgres-wal-level` | stops the connector, drops its slot, restarts Postgres with `wal_level=replica` (a Compose override; `-c` on the command line beats `ALTER SYSTEM`) | `source_settings`: `wal_level=replica`; a logical slot cannot be created |
+| `missing-grant` | `source-role-grants` | creates `devctl_setup_grant` (LOGIN, no REPLICATION, no SELECT) and points the connector at it | `source_role`: role is missing REPLICATION and SELECT on `public.orders` |
+| `db-unreachable-from-connect` | `connect-source-reachable` | appends `192.0.2.1 postgres` to the Connect container's `/etc/hosts` (TEST-NET-1, a black hole) and restarts the task | the worker cannot open a TCP connection to `postgres:5432` |
+| `plugin-after-scan` | `connect-plugin-scan` | takes the plugin directory out of the plugin path, restarts the worker (it scans without it), then puts the directory back without restarting | `/connector-plugins` lacks `PostgresConnector` while the jar is on disk: the scan ran before the install |
+
+**Fixes:** move the jars back; restart Postgres on its own command line
+(`fix wal-level-replica` also recreates the dropped slot, clears the
+connector's offsets and sets `snapshot.mode=when_needed`, so Debezium
+re-snapshots — the same sequence as `fix dead-slot`); re-register the baseline
+connector user and drop the grant role; restart the Connect container (Docker
+regenerates `/etc/hosts`, and the new JVM has an empty DNS cache — a mere task
+restart keeps the cached bad address); restart the worker so the scan sees the
+plugin.
+
+**Caveats:**
+- `wal-level-replica` is the invasive one on a *running* stack: Postgres
+  refuses to start with an existing logical slot at `wal_level=replica`, so the
+  break drops the dev connector's slot, and refuses when any other logical slot
+  exists (the staging connector's, a q5 scenario's). The fix re-snapshots the source (no data loss, but the
+  rows are re-emitted). A *fresh* setup has no slot, which is the state the
+  break reproduces without that cost.
+- A Connect restart reloads every plugin the Debezium image ships; on a busy
+  machine the scan takes from seconds to several minutes. `connectStartTimeout`
+  (6 min) in `cmd/devctl/setupbreaks.go` is the wait.
+- The setup agent's model turns are not replayed here. The integration test
+  (`go test -tags integration ./cmd/devctl -run TestIntegrationSetupBreaks`)
+  applies each break that leaves the shared servers and connector alone
+  (`flat-plugin-dir`, `missing-converter-jars`) and its recorded fix on the dev
+  stack and asserts the named check fails, then passes: the recorded fix *is*
+  the scenario's fix op sequence. The breaks that restart Postgres or Connect,
+  or take `pg-orders-connector` down, run only against the fake stack there,
+  since other integration packages use the same stack in parallel; their
+  real-stack run is the U1-16 job. The recordings themselves are U1-19/U1-20 (`evals/setup`).
+- A setup stack of its own (not the dev stack) is `setupstack.Setup(t)` in
+  `internal/testenv/setupstack/setup.go`: it renders kafka + connect + source-postgres in
+  a temp directory, installs the plugin, and tears the project down with the
+  compose ops. `internal/testenv/setupstack/setup_integration_test.go` also proves the
+  compose validator refuses a `privileged: true` file before `compose_up`.
+
 ## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`
 
 Two breaks where orders are missing from `analytics.orders` while order-sync runs at lag 0, each ended by one X2

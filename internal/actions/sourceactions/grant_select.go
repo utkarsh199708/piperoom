@@ -39,7 +39,7 @@ type GrantSelectDeps struct {
 	// RoleInfoReader (Q2a).
 	Source clients.SourceDB
 	// Writer is used by Execute only; nil (untyped) when write mode is off
-	// or SOURCE_DB_WRITE_URL is empty, and then Validate refuses.
+	// or SOURCE_DB_WRITE_URL is empty, and then Execute refuses.
 	Writer GrantWriter
 
 	// timeout overrides opTimeout; tests only.
@@ -199,8 +199,9 @@ func checkRole(p grantParams, info RoleInfo) error {
 }
 
 // Validate refuses bad params, a target outside the room's pipeline (when
-// ctx carries it), a missing writer, a role that is not the connector's
-// database.user, a missing role and a grant that changes nothing.
+// ctx carries it), a role that is not the connector's database.user, a
+// missing role and a grant that changes nothing. A missing writer is refused
+// at Execute only (P0 ruling #606).
 func (a *grantSelect) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseGrant(raw)
 	if err != nil {
@@ -208,9 +209,6 @@ func (a *grantSelect) Validate(ctx context.Context, raw json.RawMessage) error {
 	}
 	if err := validateScope(ctx, func(pl owners.Pipeline) error { return grantInScope(pl, p) }); err != nil {
 		return err
-	}
-	if a.d.Writer == nil {
-		return fmt.Errorf("sourceactions: %s: %w", GrantSelectName, errNoWriter)
 	}
 	ctx, cancel := withTimeout(ctx, a.d.timeout)
 	defer cancel()
