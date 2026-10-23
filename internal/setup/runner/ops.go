@@ -570,15 +570,17 @@ func (r *Runner) markStarted(req *protocol.OpRequest, target, eff string, cancel
 func (r *Runner) refuse(ctx context.Context, req *protocol.OpRequest, reason string) {
 	target := r.catalogue.Target(*req)
 	ref := &protocol.Refusal{ID: req.ID, Op: req.Op, Reason: reason, ProposalID: req.ProposalID, StepIndex: req.StepIndex}
-	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: ref}); err != nil {
-		r.log.Debug("writing refusal failed", "op", req.Op, "reason", reason, "err", err)
-	}
+	// Log before sending: once the server has the refusal it may hang up, and
+	// a Run that returns closes the op log, so a later append would be lost.
 	if lerr := r.logEntry(opLogEntry{
 		ID: req.ID, Op: req.Op, Target: target, ProposalID: req.ProposalID,
 		StepIndex: req.StepIndex, Tier: req.Tier, Class: r.effectiveClass(req, target),
 		State: opLogRefused, Reason: reason, At: r.now(),
 	}, false); lerr != nil {
 		r.log.Debug("op log write failed", "op", req.Op, "err", lerr)
+	}
+	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: ref}); err != nil {
+		r.log.Debug("writing refusal failed", "op", req.Op, "reason", reason, "err", err)
 	}
 }
 
