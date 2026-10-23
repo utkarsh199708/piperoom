@@ -85,17 +85,29 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // or unknown is not done." Q1d's upgrade rule is not in the prompt: it sits
 // beside the runbook_lookup result that shows an affected known issue
 // (versions.go), as X4c's ranking does.
+// W4f (KAN-504) moved it a twelfth time, on purpose, for evals run
+// 39994729845 (the agent named the component that still answered, or the one
+// an unreachable read named, as the first failing one): rule 4 now defines
+// the first failing component as the most upstream stage whose own status
+// read shows it stopped, or where a read first shows wrong or missing data in
+// a topic or sink; a component that still answers requests is the root-cause
+// component, never the first failing one, and so is the component of an
+// "unreachable: <component>" read, which still forbids a healthy verdict.
+// Rule 6's unreachable sentence moved into rule 4 and rule 6 keeps only the
+// tool-error sentence. Word-neutral: rules 4 and 6 are 93 words before and
+// after (the PR lists the words trimmed and added).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "fb477a7b3e01bb8429e84326cb09e6cbe32c8fb22c1f537ac8c37aec65f3d65b"
+const cdcPromptSHA256 = "9428d45a7c2ec913571a7321c3272b7d03ada8b018ba6f328a7e730589ca5cb2"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
-// did Q4b and Q2e, and Q5d (its trims and the offsets bullet).
-const cdcPromptWriteOffSHA256 = "0c351d168f2f2f14c4375f0631defff132b308f234228283d9ea6bf8aa26ab91"
+// did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
+// 4 and 6, word-neutral: still 1335 words).
+const cdcPromptWriteOffSHA256 = "bfc595d9dd74acf52fdc2c943fc74b2e73456b7713ae6b8ccd14856301af46f0"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

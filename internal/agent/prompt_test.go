@@ -43,7 +43,9 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// link kinds, the confidence enum and the propose_fix allow-list bullet
 	// went: the map and the tool schemas say them; rule 8 now names
 	// propose_fix). KAN-408's unreachable-read rule (rule 6) also fit by
-	// trimming, so 1335 stays the ceiling.
+	// trimming, so 1335 stays the ceiling. W4f (KAN-504) is word-neutral:
+	// rule 4's first-failing definition took rule 6's unreachable sentence
+	// and paid for itself from rules 4 and 6 (93 words before and after).
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -70,20 +72,22 @@ func TestSystemPromptIsStable(t *testing.T) {
 }
 
 // KAN-408: a read that cannot reach its component is evidence about that
-// component. The rule sits in method rule 6, names the stable fact the runner
-// stamps on the read ("unreachable: <component>"), refuses a healthy verdict
-// while the gap is open, rejects the "data still flows" walk-back, and keeps
-// auth and not-found failures apart from an outage.
+// component. The rule names the stable fact the runner stamps on the read
+// ("unreachable: <component>") and refuses a healthy verdict while the gap is
+// open. W4f (KAN-504) moved it from rule 6 into rule 4: the component it names
+// is the root-cause component, never the first failing one, so the rule no
+// longer says the component "is down"; "flowing data is no excuse" and "Auth
+// and not-found are not outages" went with that wording (the runner still
+// refuses the healthy verdict and never lets auth or not-found block one,
+// readfailure.go). Rule 6 keeps the tool-error sentence.
 func TestSystemPromptUnreachableReadRule(t *testing.T) {
 	prompt := systemPrompt()
 	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
 	for _, want := range []string{
-		`"unreachable: <component>" means the component is down`,
-		"name it in the hypothesis, never call the pipeline healthy while unresolved",
-		"flowing data is no excuse",
-		"Auth and not-found are not outages",
+		`so is "unreachable: <component>", which forbids a healthy verdict while unresolved`,
+		"is the root-cause component, never the first failing one",
 		"A tool error or timeout is a finding, not proof",
-		"cite it as evidence for what is unknown or blocked",
+		"evidence for what is unknown or blocked",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC prompt lacks %q", want)
@@ -410,9 +414,10 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		"After a rejection or failed action, read the reason, update your hypothesis and ask the driver; never re-propose the same fix unchanged",
 		// When to stop: state what remains open and wait.
 		"what remains open and that the cause is not established; keep any hypothesis low, propose nothing and wait",
-		// Tool errors are findings, cited as evidence.
+		// Tool errors are findings, evidence for what is unknown (rule 3
+		// says to cite evidence by step id).
 		"A tool error or timeout is a finding, not proof",
-		"cite it as evidence for what is unknown or blocked",
+		"evidence for what is unknown or blocked",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing guidance point %q", want)
@@ -432,7 +437,10 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		"Schema Registry is a dependency of connectors and consumers, not a stage",
 		"From the most downstream symptom, walk upstream links to the root cause",
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
-		"update_hypothesis must name the first failing component (the most upstream broken one, not the downstream symptom) and, separately, the root-cause component",
+		// W4f (KAN-504): rule 4 defines the first failing component, then
+		// asks update_hypothesis to name it and the root cause separately.
+		"The first failing component is the most upstream stage whose own status read shows it stopped",
+		"update_hypothesis names both separately",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -1029,11 +1037,12 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 // fix no listed action can make, or could mean more than one action, gets a
 // question before any proposal (unclear-driver-intent, P3-W3g: the ambiguity
 // is about the action, not the component). A component that still answers
-// requests is not broken even when a change there is the cause, so the
+// requests is the root-cause component, never the first failing one, so the
 // failing consumer or sink task, not the registry a schema was deleted from,
 // is the first failing component (the deleted-schema scenarios, LEAD-ARCH on
 // #691; the README's own example: a schema change fails in Connect first, the
-// cause is a Postgres DDL). The batch prompt keeps its own wording of each.
+// cause is a Postgres DDL; W4f's wording, KAN-504). The batch prompt keeps its
+// own wording of each.
 func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
 	batch := systemPromptFor(events.PipelineKindBatch)
@@ -1042,7 +1051,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 		"signal_table: signal.data.collection from connect_config",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
 		"If what a driver steer asks for needs a fix no listed action can make, or could mean more than one action, ask the driver one short question with post_message and propose nothing until they answer.",
-		"the root-cause component; a component that still answers requests is not broken even when a change there is the cause.",
+		"A component that still answers requests, even with errors, degraded or misconfigured, is the root-cause component, never the first failing one",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC system prompt missing %q", want)
@@ -1052,7 +1061,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 		"pg_snapshot_signal",
 		"needs a fix no listed action can make",
 		"could mean more than one action",
-		"still answers requests is not broken",
+		"still answers requests",
 		"orphaned slot",
 	} {
 		if strings.Contains(batch, cdcOnly) {
