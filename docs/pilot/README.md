@@ -6,7 +6,8 @@ These docs describe the code on `main` at `a91d2bd`, except the login, identity 
 which was checked against `main` at `41a2eea` (auth PR 3). The pilot gate G5 pass (restart behaviour,
 login defaults, auth PR 4, shadow rooms, scale, Kafka key decoding) was re-checked against `main` at
 `b5bbbc2`. The X-wave text (`governance.md`, the X-wave rows of `setup.md` and `data-handling.md`) was checked
-against the integration branch at `6feaf910`. Each claim names the file it comes from. If a file changes, update the claim and its citation
+against the integration branch at `6feaf910`. The Q-wave pages for code not yet built (`mysql-users.md`, and `fix-pr-github.md`) were written
+against their designs (`docs/design/mysql-source.md`, `docs/design/fix-pr.md`) at `e61d90ec` and say so at the top. Each claim names the file it comes from. If a file changes, update the claim and its citation
 in the same PR.
 
 | Doc | Read it to |
@@ -17,6 +18,7 @@ in the same PR.
 | [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions and the connector lifecycle actions (each Connect call with the Kafka version it needs), only if you turn write mode on |
 | [source-admin.md](source-admin.md) | add the source admin actions: replica identity, the connector's `SELECT` grant, ending a blocking session, the heartbeat table |
 | [fix-pr-github.md](fix-pr-github.md) | set up the GitHub App for the pull-request fix (designed, not built on this commit): exact permissions (no Workflows), selected repos only, no webhook, the key file, the proposed `GITHUB_*` settings, `repos:` in `owners.yaml`, the base-branch ruleset, GitHub Enterprise |
+| [mysql-users.md](mysql-users.md) | create the MySQL accounts (designed, not built on this commit): the Debezium connector user, Piperoom's read user (no `REPLICATION SLAVE`, no password hash) and write user, RDS/Aurora notes, the `mysql://` URL rules; MySQL 8.0 and 8.4 only |
 | [worker-visibility.md](worker-visibility.md) | let the agent read Kafka Connect worker logs (Loki) and JMX metrics: the least-privilege Loki token, the proposed `WORKER_LOGS_*` settings, the exporter rules, what reaches the model |
 | [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
