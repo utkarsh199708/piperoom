@@ -127,7 +127,11 @@ func TestOracleThinLinearTime(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing check; runs without -race")
 	}
-	const ceiling = 50 * time.Millisecond
+	// 250ms, not 50ms: on the shared CI runner the genuinely linear pass
+	// measured 52-57ms best-of-five for 63 KiB while the dev stack ran on
+	// the same machine (runs 39913868722 and 39910740046); a quadratic pass
+	// over 64 KiB sits well above this. Same deflake approach as #862/#864.
+	const ceiling = 250 * time.Millisecond
 	for name, unit := range map[string]string{
 		"glued urls":         "jdbc:oracle:thin:a/",
 		"many short urls":    "jdbc:oracle:thin:a/b@ ",
