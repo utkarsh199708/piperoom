@@ -249,6 +249,30 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_plugins
+    summary: |-
+      Kafka 3.7.1: 3 plugins
+      1 source, 2 converter
+      - source io.debezium.connector.postgresql.PostgresConnector 2.7.3.Final
+      - converter io.confluent.connect.avro.AvroConverter 7.6.1
+      - converter org.apache.kafka.connect.json.JsonConverter 3.7.1
+    data:
+      by_type:
+        converter: 2
+        source: 1
+      connect_commit: e2494e6ffb89f828
+      kafka_version: 3.7.1
+      plugin_count: 3
+      plugins:
+        - class: io.debezium.connector.postgresql.PostgresConnector
+          type: source
+          version: 2.7.3.Final
+        - class: io.confluent.connect.avro.AvroConverter
+          type: converter
+          version: 7.6.1
+        - class: org.apache.kafka.connect.json.JsonConverter
+          type: converter
+          version: 3.7.1
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -316,6 +340,9 @@ expect:
     - id: f_no_ddl
       tool: pg_recent_ddl
       match: [no ddl]
+    - id: f_debezium_version
+      tool: connect_plugins
+      match: [2.7.3.final]
   claims:
     - about: root_cause
       facts: [f_queue_full, f_topic_stale]

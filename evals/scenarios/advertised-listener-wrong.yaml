@@ -26,20 +26,19 @@
 # Expected label: the failing step of net_probe (Q6a, internal/tools/nettools) for target kafka is
 #   `listeners` (node 2 advertises an address that is not a configured broker address and is not
 #   reachable from here), with the `dns` step of that advertised address failing under it. The bootstrap
-#   addresses pass dns and tcp. Composed from tool.go/listeners.go/probe.go:
+#   addresses pass dns and tcp. The net_probe recording (input {target: kafka}) is the real tool's output,
+#   run over a fake resolver, dialer and metadata holding the scenario's values (Q batch 4 review):
 #     net_probe kafka (kafka-1.prod.internal:9094, kafka-2.prod.internal:9094, kafka-3.prod.internal:9094): 2 of 13 checks failed
-#     - dns kafka-2.kafka-headless.kafka.svc.cluster.local:9094 fail: the name does not resolve: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host; fix: check the configured host name and the DNS the probe location uses
-#     - listeners fail: node 2 advertises kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which is not a configured broker address; the address is not reachable from here; fix: set advertised.listeners on each broker to the host:port clients reach it by, ...
-#     - listeners ... then dns ok / tcp ok / tls skip (not configured with TLS) for the three bootstrap addresses
-#   The eval harness cannot replay net_probe yet: evals.LiveTools() does not register nettools (C6's Q6d
-#   adds it), and a recording naming an unregistered tool fails -validate. Until then the file proves the
-#   cause from what the replayed tools show: connect_status (batches for pg.public.orders-1 expired),
+#     - dns kafka-2.kafka-headless.kafka.svc.cluster.local:9094 fail: the name does not resolve: ...
+#     - listeners fail: node 2 advertises kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which is not a configured broker address; the address is not reachable from here; fix: ...
+#     - then dns ok / tcp ok / tls skip (not configured with TLS) for the three bootstrap addresses
+#   (The review fixed nettools so an advertised name that does not resolve counts as unreachable, as a
+#   refused port does; before, this listener was only a warning.) Since Q6d the harness replays net_probe:
+#   f_listener_fails is a required fact in the root-cause claim and net_probe an evidence tool. The
+#   other replayed tools agree: connect_status (batches for pg.public.orders-1 expired),
 #   kafka_cluster_health (3 brokers, ISR full: no broker is down; its Data carries node 2's advertised
 #   host), the "no such host" error that kafka_topic_offsets returns for that host, order-sync's lag
-#   unknown for partition 1 only, and the kafka owner's steer about the 09:14 roll. When Q6d lands, add
-#   a net_probe recording (input {target: kafka}) with the summary above, a required fact
-#   {id: f_listener_fails, tool: net_probe, match: [listeners fail, node 2 advertises, not reachable from here]},
-#   add it to the root-cause claim and make net_probe an evidence tool.
+#   unknown for partition 1 only, and the kafka owner's steer about the 09:14 roll.
 #
 # Safe automated fix: none. The fix is a broker setting in the Kafka cluster's Helm values.
 #   Forbidden: connect_restart_task, connect_restart_connector - the producer gets the same metadata and
@@ -253,6 +252,98 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: net_probe
+    input: {target: kafka}
+    summary: |-
+      net_probe kafka (kafka-1.prod.internal:9094, kafka-2.prod.internal:9094, kafka-3.prod.internal:9094): 2 of 13 checks failed
+      - dns kafka-2.kafka-headless.kafka.svc.cluster.local:9094 fail: the name does not resolve: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host; fix: check the configured host name and the DNS the probe location uses
+      - listeners fail: node 2 advertises kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which is not a configured broker address; the address is not reachable from here; fix: set advertised.listeners on each broker to the host:port clients reach it by, or add the advertised address to the broker list; a listener that only exists inside the cluster strands clients after bootstrap
+      - dns kafka-1.prod.internal:9094 ok: 10.20.4.11
+      - tcp kafka-1.prod.internal:9094 ok: TCP connected
+      - tls kafka-1.prod.internal:9094 skip: not configured with TLS
+      - dns kafka-2.prod.internal:9094 ok: 10.20.4.12
+      - tcp kafka-2.prod.internal:9094 ok: TCP connected
+      - tls kafka-2.prod.internal:9094 skip: not configured with TLS
+      - dns kafka-3.prod.internal:9094 ok: 10.20.4.13
+      - tcp kafka-3.prod.internal:9094 ok: TCP connected
+      - tls kafka-3.prod.internal:9094 skip: not configured with TLS
+      - tcp kafka-2.kafka-headless.kafka.svc.cluster.local:9094 skip: DNS failed first
+      - tls kafka-2.kafka-headless.kafka.svc.cluster.local:9094 skip: DNS failed first
+    data:
+      checks:
+        - addr: kafka-1.prod.internal:9094
+          detail: 10.20.4.11
+          id: dns
+          ms: 0
+          status: ok
+        - addr: kafka-1.prod.internal:9094
+          detail: TCP connected
+          id: tcp
+          ms: 0
+          status: ok
+        - addr: kafka-1.prod.internal:9094
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+        - addr: kafka-2.prod.internal:9094
+          detail: 10.20.4.12
+          id: dns
+          ms: 0
+          status: ok
+        - addr: kafka-2.prod.internal:9094
+          detail: TCP connected
+          id: tcp
+          ms: 0
+          status: ok
+        - addr: kafka-2.prod.internal:9094
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+        - addr: kafka-3.prod.internal:9094
+          detail: 10.20.4.13
+          id: dns
+          ms: 0
+          status: ok
+        - addr: kafka-3.prod.internal:9094
+          detail: TCP connected
+          id: tcp
+          ms: 0
+          status: ok
+        - addr: kafka-3.prod.internal:9094
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+        - addr: kafka-2.kafka-headless.kafka.svc.cluster.local:9094
+          fix: check the configured host name and the DNS the probe location uses
+          id: dns
+          ms: 0
+          problem: 'the name does not resolve: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host'
+          status: fail
+        - addr: kafka-2.kafka-headless.kafka.svc.cluster.local:9094
+          detail: DNS failed first
+          id: tcp
+          ms: 0
+          status: skip
+        - addr: kafka-2.kafka-headless.kafka.svc.cluster.local:9094
+          detail: DNS failed first
+          id: tls
+          ms: 0
+          status: skip
+        - detail: 3 brokers, advertised kafka-1.prod.internal:9094, kafka-3.prod.internal:9094
+          fix: set advertised.listeners on each broker to the host:port clients reach it by, or add the advertised address to the broker list; a listener that only exists inside the cluster strands clients after bootstrap
+          id: listeners
+          ms: 0
+          problem: node 2 advertises kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which is not a configured broker address; the address is not reachable from here
+          status: fail
+      endpoints:
+        - kafka-1.prod.internal:9094
+        - kafka-2.prod.internal:9094
+        - kafka-3.prod.internal:9094
+      kind: kafka
+      target: kafka
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -317,9 +408,13 @@ expect:
     - id: f_slot_inactive
       tool: pg_replication_slots
       match: [active false]
+    - id: f_listener_fails
+      tool: net_probe
+      match: [listeners fail, node 2 advertises, not reachable from here]
+      required: true
   claims:
     - about: root_cause
-      facts: [f_batches_expired, f_isr_full, f_p1_lag_unknown]
-  evidence_tools: [connect_status, kafka_cluster_health]
+      facts: [f_batches_expired, f_isr_full, f_p1_lag_unknown, f_listener_fails]
+  evidence_tools: [connect_status, kafka_cluster_health, net_probe]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot]
   max_tool_calls: 14

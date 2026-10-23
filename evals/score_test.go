@@ -872,6 +872,11 @@ func TestEveryScenarioCanPass(t *testing.T) {
 	for name, fix := range q2Fixes {
 		p3Fixes[name] = fix
 	}
+	// The Q5 lifecycle fix (Q6d): stale-source-offsets grades its stop and
+	// reset.
+	for name, fix := range q6Fixes {
+		p3Fixes[name] = fix
+	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)

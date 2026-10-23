@@ -928,8 +928,8 @@ check passes, so the scenario cannot test the connector-role refusal of a hidden
 The model is offered `connect_plugins` (Q1c), `connect_worker_info` (Q3a), `connect_validate_config`
 (Q4a), `connect_source_offsets` (Q5a), `connect_worker_metrics` (Q3b), `connect_worker_logs` (Q3c) and
 `net_probe` (Q6a) with their production definitions (`replay_connect.go`); like every read they are
-answered from recordings, so a scenario may now record them. The last three are offered before
-production wires them (Q3e, Q6b). Since Q1d the agent itself calls `connect_plugins` with `{}` on its
+answered from recordings, so a scenario may now record them (ten files do since the Q batch 4
+review: `q6_replay_test.go` lists them). Production registers the last three since Q3e and Q6b. Since Q1d the agent itself calls `connect_plugins` with `{}` on its
 first `runbook_lookup` and passes the versions from its `data` (`kafka_version`, `plugins[]`) to the
 lookup: record it (no input, with data) where the running versions matter; without a recording that
 read is a miss (at most two per run) and no versions are passed, as before.
