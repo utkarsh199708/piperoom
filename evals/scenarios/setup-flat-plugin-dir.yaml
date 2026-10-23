@@ -365,6 +365,7 @@ expect:
     - [retention, delet*]
     - [connector, paused]
     - [config, invalid]
+    - [version, incompatible]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:

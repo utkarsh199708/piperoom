@@ -388,6 +388,8 @@ expect:
     - [retention, delet*]
     - [slot, lost]
     - [connector, paused]
+    - [password]
+    - [publication]
   first_failing_layer: kafka-connect
   root_cause_layer: postgres
   expected_facts:

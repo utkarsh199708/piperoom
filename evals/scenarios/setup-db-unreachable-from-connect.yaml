@@ -369,7 +369,7 @@ expect:
   root_cause:
     # The worker's name resolution, and the address it lands on.
     - [name resolution, dns, hosts, resolve*]
-    - [192.0.2.1, black hole, test net, unreachable, blocked, firewall]
+    - [192.0.2.1, black hole, black-hole, test net, test-net, stale, /etc/hosts]
   # The wrong stories of a task that cannot connect.
   root_cause_forbidden:
     - ['schema change']
@@ -380,6 +380,8 @@ expect:
     - [slot, lost]
     - [database, down]
     - [wrong host, bad host]
+    - [firewall]
+    - [listen*, localhost]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:

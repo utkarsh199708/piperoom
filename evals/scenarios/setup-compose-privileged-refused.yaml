@@ -107,6 +107,8 @@ expect:
     - [absent, knowledge index]
     - [digest, missing]
     - [plain text, credential]
+    - [docker socket]
+    - [docker.sock]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   evidence_tools: [similar_incidents]
