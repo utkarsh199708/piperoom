@@ -284,6 +284,54 @@ func TestReachCheckWithoutBash(t *testing.T) {
 			t.Fatalf("ok=%v detail=%q err=%v", ok, detail, err)
 		}
 	})
+	// getent resolves the host and the task is RUNNING: the check passes.
+	t.Run("host resolves and the task runs", func(t *testing.T) {
+		w := healthySetupWorld()
+		w.taskState = "RUNNING"
+		s := testSetupStack(t, w)
+		s.execAsFn = func(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+			switch argv[0] {
+			case "bash":
+				return "bash: not found", 127, nil
+			case "getent":
+				return "10.0.0.5        postgres\n", 0, nil
+			}
+			return w.exec(ctx, container, argv...)
+		}
+		ok, detail, err := verifyConnectSourceReachable(ctx, s)
+		if err != nil || !ok {
+			t.Fatalf("ok=%v detail=%q err=%v", ok, detail, err)
+		}
+	})
+	// Either half of the lookup guard alone fails the check: a zero exit with
+	// no output, and output with a non-zero exit.
+	for _, c := range []struct {
+		name string
+		out  string
+		code int
+	}{
+		{"exit 0 with empty output", "  \n", 0},
+		{"exit 2 with output", "10.0.0.5        postgres\n", 2},
+	} {
+		t.Run("lookup "+c.name, func(t *testing.T) {
+			w := healthySetupWorld()
+			w.taskState = "RUNNING"
+			s := testSetupStack(t, w)
+			s.execAsFn = func(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+				switch argv[0] {
+				case "bash":
+					return "bash: not found", 127, nil
+				case "getent":
+					return c.out, c.code, nil
+				}
+				return w.exec(ctx, container, argv...)
+			}
+			ok, detail, err := verifyConnectSourceReachable(ctx, s)
+			if err != nil || ok || !strings.Contains(detail, "does not resolve") {
+				t.Fatalf("ok=%v detail=%q err=%v", ok, detail, err)
+			}
+		})
+	}
 	t.Run("task trace names an unknown host", func(t *testing.T) {
 		w := healthySetupWorld()
 		w.taskState, w.trace = "FAILED", "java.net.UnknownHostException: postgres"
@@ -318,24 +366,34 @@ func TestPluginAfterScanFixRestoresStash(t *testing.T) {
 }
 
 // TestDBUnreachableWritesHostsAsRoot: /etc/hosts is root-owned, so the
-// break's write runs as user 0.
+// break's write runs as user 0, and only that write: the reachability probes
+// before and after it run as the worker user.
 func TestDBUnreachableWritesHostsAsRoot(t *testing.T) {
 	w := healthySetupWorld()
 	s := testSetupStack(t, w)
-	if err := breakDBUnreachable(context.Background(), s); err != nil {
+	if err := setupBreakCmd(context.Background(), s, "db-unreachable-from-connect"); err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found, others := false, 0
 	for _, u := range w.execUsers {
 		if strings.HasSuffix(u, " sh") {
 			found = true
 			if u != "0 sh" {
 				t.Errorf("the /etc/hosts write ran as %q, want user 0", u)
 			}
+		} else {
+			others++
+			// Everything else runs as the worker user (no -u).
+			if !strings.HasPrefix(u, " ") {
+				t.Errorf("exec %q ran as a named user, want the worker user", u)
+			}
 		}
 	}
 	if !found {
 		t.Fatalf("no sh exec recorded: %v", w.execUsers)
+	}
+	if others == 0 {
+		t.Fatalf("no exec other than the hosts write recorded: %v", w.execUsers)
 	}
 }
 
