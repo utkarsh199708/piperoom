@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -105,9 +106,7 @@ func (t *connectValidateConfig) Run(ctx context.Context, input json.RawMessage) 
 	// provisional pipeline) and the hosts of the pipeline's own source
 	// connectors. A sink connector's host (the warehouse) is deliberately not
 	// a source host, so a model cannot point a source config at it.
-	if h := connectionSourceHost(sc, "source_db_url"); h != "" {
-		allowedHosts[h] = true
-	}
+	addConnectionSourceHosts(allowedHosts, sc, "source_db_url")
 	t.addSourceConnectorHosts(cctx, sc, p.BaseConnector, allowedHosts)
 
 	if err := checkConfigHosts(p.Config, merged, allowedHosts); err != nil {
@@ -153,6 +152,15 @@ func checkValidateInput(class string, cfg map[string]string) error {
 		}
 		if plaintextSecretKey(k) && v != "" && !isConfigReference(v) {
 			return fmt.Errorf("%w: %s looks like a credential; pass a ${secret:...}, ${file:...} or ${env:...} reference, or omit it and pass base_connector so the server fills it in", tools.ErrBadInput, k)
+		}
+		// A reference is only accepted where a credential belongs. On any
+		// other key Connect may resolve the reference server-side and echo
+		// the resolved value in a validation message ("Invalid value X for
+		// configuration tasks.max"), which would read a server secret back
+		// to the model. A host key's reference is refused by the host guard
+		// with its own message.
+		if isConfigReference(v) && !referenceAllowedKey(k) {
+			return fmt.Errorf("%w: %s is not a credential key; a ${...} config reference is only accepted on a credential key, so a validation message cannot echo a server-side value", tools.ErrBadInput, k)
 		}
 	}
 	return nil
@@ -213,6 +221,24 @@ func plaintextSecretKey(k string) bool {
 	return true
 }
 
+// referenceAllowedKey reports whether a ${...} config reference may be passed
+// under key k: a credential-looking key (where a reference is the only
+// accepted form), a converter key (key./value./header.converter.* carry
+// schema-registry credentials such as basic.auth.user.info), or a host key
+// (the host guard then refuses it with its literal-host message).
+func referenceAllowedKey(k string) bool {
+	if looksSecretKey(k) || isHostConfigKey(k) {
+		return true
+	}
+	lk := strings.ToLower(k)
+	for _, prefix := range []string{"key.converter", "value.converter", "header.converter"} {
+		if lk == prefix || strings.HasPrefix(lk, prefix+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // isConfigReference reports whether v is a Connect config provider reference.
 // ${secret:...} is accepted as a non-secret value (U0); ${file:...} and
 // ${env:...} are the other documented providers (design, Q5c).
@@ -257,28 +283,35 @@ func mergeBaseConfig(merged, base map[string]string) []string {
 }
 
 // addConfigHosts adds the hosts named by a (server-side) config's host keys.
+// Every host of a multi-host value (a failover JDBC URL, a bootstrap server
+// list) is added; an entry that is not a host is skipped.
 func addConfigHosts(set map[string]bool, cfg map[string]string) {
 	for k, v := range cfg {
 		if !isHostConfigKey(k) {
 			continue
 		}
-		if h := configHost(v); h != "" {
-			set[h] = true
+		for _, h := range configHosts(v) {
+			if h != "" && validHostRe.MatchString(h) {
+				set[h] = true
+			}
 		}
 	}
 }
 
-// connectionSourceHost returns the host of the pipeline's literal
+// addConnectionSourceHosts adds the hosts of the pipeline's literal
 // connections.source_db_url. A {env:} or {file:} reference is not resolved
 // here: the tool has no config and a reference is not a host. A provisional
 // pipeline writes a {value:} DSN, which is enough for the setup path.
-func connectionSourceHost(sc tools.Scope, key string) string {
-	p := sc.Pipeline()
-	r, ok := p.Connections[key]
+func addConnectionSourceHosts(set map[string]bool, sc tools.Scope, key string) {
+	r, ok := sc.Pipeline().Connections[key]
 	if !ok {
-		return ""
+		return
 	}
-	return configHost(r.Value)
+	for _, h := range configHosts(r.Value) {
+		if h != "" && validHostRe.MatchString(h) {
+			set[h] = true
+		}
+	}
 }
 
 // addSourceConnectorHosts adds the hosts of the pipeline's own source
@@ -302,61 +335,97 @@ func (t *connectValidateConfig) addSourceConnectorHosts(ctx context.Context, sc 
 	}
 }
 
-// isHostConfigKey reports whether a config key names a host Connect may be
-// asked to reach. "hostname" and "host" cover Debezium and JDBC connectors;
-// the URL and connection-string forms cover JDBC and MongoDB.
+// isHostConfigKey reports whether a config key names a host (or host list)
+// Connect may be asked to reach. It errs towards true: "host" covers
+// hostname/host/hosts (Debezium, MongoDB), "jdbc" and "connection.string" the
+// JDBC and MongoDB DSNs, "bootstrap.servers" the Kafka endpoints a connector
+// reaches itself (database.history.kafka.bootstrap.servers), and the suffix
+// forms cover connection.url/urls, connection.uri (the official MongoDB
+// connector), schema.registry.url, http.api.url, endpoints and addresses. The
+// guard is symmetric: addConfigHosts uses the same rule to collect the
+// allowed hosts from the server-side configs, so a key this flags is only
+// usable with a value whose hosts the pipeline already reaches.
 func isHostConfigKey(k string) bool {
 	lk := strings.ToLower(k)
 	switch {
-	case strings.Contains(lk, "hostname"):
-		return true
-	case lk == "host" || strings.HasSuffix(lk, ".host"):
+	case strings.Contains(lk, "host"):
 		return true
 	case strings.Contains(lk, "jdbc"):
 		return true
 	case strings.Contains(lk, "connection.string"):
 		return true
-	case lk == "connection.url" || strings.HasSuffix(lk, ".connection.url"):
+	case strings.Contains(lk, "bootstrap.servers"):
 		return true
-	case lk == "database.url" || strings.HasSuffix(lk, ".database.url"):
+	case strings.Contains(lk, "endpoint"):
 		return true
+	}
+	for _, s := range []string{"url", "urls", "uri", "uris", "address", "addresses", "servers", "dsn", "proxy"} {
+		if lk == s || strings.HasSuffix(lk, "."+s) {
+			return true
+		}
 	}
 	return false
 }
 
-// configHost reduces a host value or a DSN/JDBC URL to a normalized host name.
-// Ports are dropped: the guard is "never reach another host", and the same host
-// on another port is still the same host. A config provider reference returns
-// "" (the caller treats it as unknown, never as a host).
-func configHost(v string) string {
+// configHosts reduces a host value, a DSN/JDBC URL or a host list to its
+// normalized host names, one per list entry. Ports are dropped: the guard is
+// "never reach another host", and the same host on another port is still the
+// same host. The authority is isolated (everything after the first '/', '?'
+// or '#' is cut) BEFORE list splitting and userinfo stripping, so a path or
+// query that contains '@' cannot pose as the host
+// (jdbc:postgresql://evil/x@allowed must reduce to "evil"). Every ','- or
+// ';'-separated entry is returned, so a failover/load-balance URL or a
+// bootstrap list cannot hide a second host behind an allowed first one; an
+// entry that is not a host (jdbc:sqlserver's serverName=... property) stays in
+// the result unnormalized and fails the caller's validHostRe check, which
+// fails closed. A config provider reference returns nil (the caller treats it
+// as unknown, never as a host).
+func configHosts(v string) []string {
 	v = strings.TrimSpace(v)
 	if v == "" || isConfigReference(v) {
-		return ""
+		return nil
 	}
 	if i := strings.Index(v, "://"); i >= 0 {
 		v = v[i+3:]
 	}
-	if i := strings.LastIndex(v, "@"); i >= 0 {
-		v = v[i+1:]
-	}
-	if i := strings.IndexAny(v, "/?#,; \t"); i >= 0 {
+	if i := strings.IndexAny(v, "/?#"); i >= 0 {
 		v = v[:i]
 	}
-	if h, _, err := net.SplitHostPort(v); err == nil {
-		v = h
+	var hosts []string
+	for _, e := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' }) {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		// userinfo, within this authority entry only
+		if i := strings.LastIndex(e, "@"); i >= 0 {
+			e = e[i+1:]
+		}
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			e = h
+		}
+		e = strings.ToLower(strings.Trim(e, "[]"))
+		e = strings.TrimSuffix(e, ".")
+		if e == "" {
+			continue
+		}
+		hosts = append(hosts, e)
 	}
-	v = strings.ToLower(strings.Trim(v, "[]"))
-	return strings.TrimSuffix(v, ".")
+	return hosts
 }
 
 var validHostRe = regexp.MustCompile(`^[a-z0-9._:\[\]-]+$`)
 
-// checkConfigHosts refuses a host key that is not the pipeline's source host or
-// the base connector's host, and a host key whose value is not a literal host.
-// Only the model's keys are checked (their effective value may come from the
-// base connector); a value inherited unchanged from the server-side base config
-// is trusted. It runs before the validate request, so Connect is never asked to
-// reach an unapproved host.
+// checkConfigHosts refuses a host key whose value names any host that is not
+// the pipeline's source host or the base connector's, and a host key whose
+// value is not a literal host. Every host of a multi-host value must be
+// allowed, so a failover URL cannot hide a second host behind an allowed
+// first one. Only the model's keys are checked; a value inherited unchanged
+// from the server-side base config is trusted, and a model key whose
+// effective value the base connector overrode (a credential-looking host key)
+// is server-side too, so it is skipped and no fragment of it is ever echoed
+// in an error. It runs before the validate request, so Connect is never asked
+// to reach an unapproved host.
 func checkConfigHosts(model, merged map[string]string, allowed map[string]bool) error {
 	keys := make([]string, 0, len(model))
 	for k := range model {
@@ -366,6 +435,9 @@ func checkConfigHosts(model, merged map[string]string, allowed map[string]bool) 
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		if merged[k] != model[k] {
+			continue // overridden server-side by the base connector
+		}
 		v := strings.TrimSpace(merged[k])
 		if v == "" {
 			continue // Connect reports the missing required value
@@ -373,15 +445,20 @@ func checkConfigHosts(model, merged map[string]string, allowed map[string]bool) 
 		if isConfigReference(v) {
 			return fmt.Errorf("%w: host key %s must be a literal host, not a config reference", tools.ErrBadInput, k)
 		}
-		h := configHost(v)
-		if h == "" || !validHostRe.MatchString(h) {
+		hosts := configHosts(v)
+		if len(hosts) == 0 {
 			return fmt.Errorf("%w: host key %s does not name a host", tools.ErrBadInput, k)
 		}
-		if len(allowed) == 0 {
-			return fmt.Errorf("%w: host key %s points at %s, but the pipeline has no known source host; pass base_connector so its host can be checked", tools.ErrOutOfScope, k, h)
-		}
-		if !allowed[h] {
-			return fmt.Errorf("%w: host key %s points at %s, which is neither the pipeline's source host nor the base connector's (allowed: %s)", tools.ErrOutOfScope, k, h, strings.Join(sortedHosts(allowed), ", "))
+		for _, h := range hosts {
+			if !validHostRe.MatchString(h) {
+				return fmt.Errorf("%w: host key %s does not reduce to host names (every host of a multi-host value must be a plain host[:port])", tools.ErrBadInput, k)
+			}
+			if len(allowed) == 0 {
+				return fmt.Errorf("%w: host key %s points at %s, but the pipeline has no known source host; pass base_connector so its host can be checked", tools.ErrOutOfScope, k, h)
+			}
+			if !allowed[h] {
+				return fmt.Errorf("%w: host key %s points at %s, which is neither the pipeline's source host nor the base connector's (allowed: %s)", tools.ErrOutOfScope, k, h, strings.Join(sortedHosts(allowed), ", "))
+			}
 		}
 	}
 	return nil
@@ -547,7 +624,7 @@ func renderValidation(class, base string, cfg map[string]string, vr connect.Vali
 		UnknownKeys:   unknown,
 	}
 	if defsErr != nil {
-		data.DefsUnavailable = redactMessage(defsErr.Error(), nil)
+		data.DefsUnavailable = redactMessage(defsErr.Error(), secrets)
 	}
 
 	keys := sortedKeys2(vr.Errors)
@@ -599,13 +676,23 @@ func renderValidation(class, base string, cfg map[string]string, vr connect.Vali
 
 	// A renamed key that Connect reported an error on names the known issue too
 	// (the row's "an error on a renamed key names the Q1 known-issue id").
+	// Keys already listed as unknown are not listed twice, and the error keys
+	// are walked in order so the output is deterministic.
 	if lookup != nil && data.Errors != nil {
-		for k := range data.Errors {
+		listed := make(map[string]bool, len(data.UnknownKeys))
+		for _, u := range data.UnknownKeys {
+			listed[u.Key] = true
+		}
+		for _, k := range sortedKeys2(data.Errors) {
 			if len(data.UnknownKeys) == maxUnknownKeys {
 				break
 			}
+			if listed[k] {
+				continue
+			}
 			if newKey, issueID, ok := lookup(k); ok {
 				data.UnknownKeys = append(data.UnknownKeys, unknownConfigKey{Key: k, NewKey: newKey, IssueID: issueID})
+				listed[k] = true
 			}
 		}
 	}
@@ -650,12 +737,18 @@ func renderValidation(class, base string, cfg map[string]string, vr connect.Vali
 }
 
 // redactMessage masks credentials in one Connect message and drops the message
-// whole when it literally contains a known credential (a short one cannot be
-// substring-masked without garbling the rest).
+// whole when it contains a known credential (a short one cannot be
+// substring-masked without garbling the rest), literally or in the URL-encoded
+// form a message quoting a connection URL would carry.
 func redactMessage(m string, secrets []string) string {
 	for _, s := range secrets {
-		if s != "" && strings.Contains(m, s) {
-			return "invalid value (details redacted)"
+		if s == "" {
+			continue
+		}
+		for _, enc := range []string{s, url.QueryEscape(s), url.PathEscape(s)} {
+			if strings.Contains(m, enc) {
+				return "invalid value (details redacted)"
+			}
 		}
 	}
 	m, _ = redact.Text(m)

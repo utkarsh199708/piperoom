@@ -595,3 +595,213 @@ func TestConnectValidateConfigRegistration(t *testing.T) {
 	}
 	var _ ConfigValidator = (*connect.Client)(nil)
 }
+
+// Host-guard reductions: a URL whose path or query holds '@' must reduce to
+// the real host, every host of a multi-host value must be returned, and a
+// property segment must not be mistaken for (or hidden behind) a host.
+func TestConfigHosts(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"db.acme", []string{"db.acme"}},
+		{"db.acme:5432", []string{"db.acme"}},
+		{"DB.ACME.", []string{"db.acme"}},
+		{"[::1]:5432", []string{"::1"}},
+		{"postgres://u:p@db.acme:5432/orders?sslmode=disable", []string{"db.acme"}},
+		{"jdbc:postgresql://db.evil/x@db.acme", []string{"db.evil"}},
+		{"jdbc:postgresql://db.evil?@db.acme", []string{"db.evil"}},
+		{"jdbc:mysql://db.acme,db.evil/db", []string{"db.acme", "db.evil"}},
+		{"jdbc:mysql:loadbalance://db.acme,db.evil:3306/db", []string{"db.acme", "db.evil"}},
+		{"jdbc:sqlserver://db.acme;serverName=db.evil", []string{"db.acme", "servername=db.evil"}},
+		{"k1:9092, k2:9092", []string{"k1", "k2"}},
+		{"${env:DB_HOST}", nil},
+		{"", nil},
+	}
+	for _, tc := range tests {
+		got := configHosts(tc.in)
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("configHosts(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Every reduction trick and every host-carrying key must be refused before any
+// HTTP when it names a host outside the pipeline (db.acme is the only allowed
+// host).
+func TestConnectValidateConfigHostGuardBypasses(t *testing.T) {
+	var called atomic.Int32
+	fc := &fakeConnect{
+		validateFn: func(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+			called.Add(1)
+			return connect.ValidateResult{}, nil
+		},
+		defsFn: func(context.Context, string) ([]connect.ConfigKeyDef, error) {
+			called.Add(1)
+			return nil, nil
+		},
+	}
+	tl := newValidateTool(t, fc, validateOwners(), nil)
+	tests := []struct {
+		name, key, value string
+		wantErr          error
+	}{
+		{"userinfo in path", "connection.url", "jdbc:postgresql://db.evil/x@db.acme", tools.ErrOutOfScope},
+		{"userinfo in query", "connection.url", "jdbc:postgresql://db.evil?@db.acme", tools.ErrOutOfScope},
+		{"failover host list", "connection.url", "jdbc:mysql://db.acme,db.evil/db", tools.ErrOutOfScope},
+		{"loadbalance host list", "connection.url", "jdbc:mysql:loadbalance://db.acme,db.evil:3306/db", tools.ErrOutOfScope},
+		{"sqlserver property segment", "connection.url", "jdbc:sqlserver://db.acme;serverName=db.evil", tools.ErrBadInput},
+		{"hostname list", "database.hostname", "db.acme,db.evil", tools.ErrOutOfScope},
+		{"hostname list with space", "database.hostname", "db.acme, db.evil", tools.ErrOutOfScope},
+		{"mongodb connection.uri", "connection.uri", "mongodb://db.evil:27017/db", tools.ErrOutOfScope},
+		{"mongodb.hosts", "mongodb.hosts", "db.evil:27017", tools.ErrOutOfScope},
+		{"schema registry url", "value.converter.schema.registry.url", "http://db.evil:8081", tools.ErrOutOfScope},
+		{"history bootstrap servers", "database.history.kafka.bootstrap.servers", "db.evil:9092", tools.ErrOutOfScope},
+		{"http api url", "http.api.url", "https://db.evil/webhook", tools.ErrOutOfScope},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := fmt.Sprintf(`{"class":%q,"config":{%q:%q}}`, validateClass, tc.key, tc.value)
+			_, err := runValidate(t, tl, "orders", in)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if strings.Contains(fmt.Sprint(err), "db.evil") == (tc.wantErr == tools.ErrBadInput) {
+				// an out-of-scope refusal names the model's own host; a
+				// bad-input one names no host at all
+				t.Fatalf("err names the wrong things: %v", err)
+			}
+		})
+	}
+	if called.Load() != 0 {
+		t.Fatalf("client called %d time(s) before the host guard", called.Load())
+	}
+}
+
+// A multi-host value whose every host the base connector already reaches is
+// allowed.
+func TestConnectValidateConfigMultiHostAllowed(t *testing.T) {
+	api := newValidateAPI(t)
+	api.baseConfig = map[string]string{
+		"connector.class":                          validateClass,
+		"database.hostname":                        "db.acme",
+		"database.history.kafka.bootstrap.servers": "k1:9092,k2:9092",
+	}
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	tl := newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners("pg-orders-connector"), nil)
+	mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"database.history.kafka.bootstrap.servers":"k2:9092, k1:9092"},"base_connector":"pg-orders-connector"}`)
+	if _, _, _, put := api.counts(); put != 1 {
+		t.Fatalf("put calls = %d, want 1", put)
+	}
+}
+
+// A ${...} reference under a non-credential key is refused before any HTTP:
+// Connect could resolve it server-side and echo the resolved value in a
+// validation message. A converter credential key still takes one.
+func TestConnectValidateConfigReferenceOnlyOnCredentialKeys(t *testing.T) {
+	var called atomic.Int32
+	fc := &fakeConnect{
+		validateFn: func(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+			called.Add(1)
+			return connect.ValidateResult{}, nil
+		},
+		defsFn: func(context.Context, string) ([]connect.ConfigKeyDef, error) {
+			called.Add(1)
+			return nil, nil
+		},
+	}
+	tl := newValidateTool(t, fc, validateOwners(), nil)
+	for _, in := range []string{
+		`{"class":"` + validateClass + `","config":{"tasks.max":"${file:/etc/kafka/secret.properties:password}"}}`,
+		`{"class":"` + validateClass + `","config":{"decimal.handling.mode":"${env:ANYTHING}"}}`,
+	} {
+		_, err := runValidate(t, tl, "orders", in)
+		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "not a credential key") {
+			t.Fatalf("err = %v, want ErrBadInput refusing the reference", err)
+		}
+	}
+	if called.Load() != 0 {
+		t.Fatalf("client called %d time(s) before the reference was refused", called.Load())
+	}
+
+	api := newValidateAPI(t)
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	tl = newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners(), nil)
+	mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"value.converter.basic.auth.user.info":"${secret:sr_auth}","database.hostname":"db.acme"}}`)
+	if got := api.body()["value.converter.basic.auth.user.info"]; got != "${secret:sr_auth}" {
+		t.Errorf("converter credential sent = %q, want the reference", got)
+	}
+}
+
+// A key that is both host-looking and credential-looking takes its value from
+// the base connector; the host guard must neither refuse it nor echo any
+// fragment of the server-side value.
+func TestConnectValidateConfigSecretHostKeyNeverEchoed(t *testing.T) {
+	api := newValidateAPI(t)
+	api.baseConfig = map[string]string{
+		"connector.class":   validateClass,
+		"database.hostname": "db.acme",
+		"jdbc.password":     "s3cr3t-fragment.example",
+	}
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	tl := newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners("pg-orders-connector"), nil)
+	r := mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"jdbc.password":"${secret:x}"},"base_connector":"pg-orders-connector"}`)
+	if strings.Contains(r.Summary, "s3cr3t-fragment") || strings.Contains(dataJSON(t, r), "s3cr3t-fragment") {
+		t.Fatalf("server-side value leaked: %q", r.Summary)
+	}
+	if api.body()["jdbc.password"] != "s3cr3t-fragment.example" {
+		t.Fatalf("validate body = %+v, want the base value", api.body())
+	}
+}
+
+// A message that carries the base credential URL-encoded is dropped whole,
+// like one that carries it literally.
+func TestConnectValidateConfigDropsEncodedSecretEcho(t *testing.T) {
+	api := newValidateAPI(t)
+	api.baseConfig = map[string]string{
+		"connector.class":   validateClass,
+		"database.password": "p@ss w0rd",
+	}
+	api.validateBody = `{"error_count":1,"configs":[{"value":{"name":"database.password","errors":["could not reach jdbc:postgresql://u:p%40ss+w0rd@db.acme/orders"]}}]}`
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	tl := newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners("pg-orders-connector"), nil)
+	r := mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"database.hostname":"db.acme"},"base_connector":"pg-orders-connector"}`)
+	out := r.Summary + dataJSON(t, r)
+	if strings.Contains(out, "p%40ss+w0rd") || strings.Contains(out, "p@ss w0rd") {
+		t.Fatalf("encoded credential leaked: %q", out)
+	}
+	if !strings.Contains(r.Summary, "invalid value (details redacted)") {
+		t.Fatalf("summary did not show the redacted message: %q", r.Summary)
+	}
+}
+
+// A key that is both unknown (renamed) and error-reported appears once, not
+// twice, in unknown_keys.
+func TestConnectValidateConfigRenamedKeyListedOnce(t *testing.T) {
+	api := newValidateAPI(t)
+	api.validateBody = `{"error_count":1,"configs":[{"value":{"name":"database.server.name","errors":["unknown property"]}}]}`
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	renamed := func(k string) (string, string, bool) {
+		if k == "database.server.name" {
+			return "topic.prefix", "DBZ-1234", true
+		}
+		return "", "", false
+	}
+	tl := newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners(), renamed)
+	r := mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"database.server.name":"pg"}}`)
+	data := r.Data.(validateData)
+	n := 0
+	for _, u := range data.UnknownKeys {
+		if u.Key == "database.server.name" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("database.server.name listed %d times in unknown_keys: %+v", n, data.UnknownKeys)
+	}
+}
