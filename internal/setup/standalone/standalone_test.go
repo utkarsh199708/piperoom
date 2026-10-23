@@ -407,3 +407,113 @@ func TestWatchIntervalFloor(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal naming --watch-interval", err)
 	}
 }
+
+// TestRunWatchSurvivesBadOwnersWrite: a write that does not load (a typo, a
+// half-finished save) must not stop the serving process. The running server
+// keeps its loaded file, and the next good write restarts as usual.
+func TestRunWatchSurvivesBadOwnersWrite(t *testing.T) {
+	dir := t.TempDir()
+	ownersPath := writeOwners(t, dir, ownersBody("alice", "Orders CDC"))
+	out := newLockedBuffer()
+	logs := newLockedBuffer()
+	done, cancel := startRun(t, Options{
+		Config:        testConfig(),
+		ProjectDir:    dir,
+		Watch:         true,
+		WatchInterval: 20 * time.Millisecond,
+		Stdout:        out,
+		Log:           slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Agent:         noAgent,
+	})
+	defer stopRun(t, done, cancel)
+
+	first := out.waitURL(t, 10*time.Second)
+	if err := os.WriteFile(ownersPath, []byte("layers: [not, a, mapping\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		return strings.Contains(logs.String(), "does not load")
+	}, "the bad write was not logged")
+	// The first server still answers: the bad file restarted nothing.
+	resp, err := http.Get(first + "healthz")
+	if err != nil {
+		t.Fatalf("GET %shealthz after a bad owners write: %v", first, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz after a bad owners write: status %d", resp.StatusCode)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the watch stopped on a bad owners write: %v", err)
+	default:
+	}
+	// A good write still restarts.
+	if err := os.WriteFile(ownersPath, []byte(ownersBody("alice", "Orders CDC (fixed)")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := out.waitURL(t, 10*time.Second)
+	if second == first {
+		t.Fatalf("the restart reused the printed URL %q", first)
+	}
+}
+
+// TestRunWatchRestartsForSeveralOwners: the setup room's registration writes
+// an owners file naming several people; the restart that picks it up must
+// start (quickstart writes a users file for them) rather than die looking for
+// dev/users.yaml.
+func TestRunWatchRestartsForSeveralOwners(t *testing.T) {
+	dir := t.TempDir()
+	ownersPath := writeOwners(t, dir, ownersBody("alice", "Orders CDC"))
+	out := newLockedBuffer()
+	done, cancel := startRun(t, Options{
+		Config:        testConfig(),
+		ProjectDir:    dir,
+		Watch:         true,
+		WatchInterval: 20 * time.Millisecond,
+		Stdout:        out,
+		Log:           discardLog(),
+		Agent:         noAgent,
+	})
+	defer stopRun(t, done, cancel)
+
+	first := out.waitURL(t, 10*time.Second)
+	var multi strings.Builder
+	multi.WriteString(ownersBody("alice", "Orders CDC"))
+	// Reassign half the layers to a second person, as a registration would.
+	body := strings.Replace(multi.String(), ": alice\n", ": priya\n", 2)
+	if err := os.WriteFile(ownersPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := out.waitURL(t, 10*time.Second)
+	if second == first {
+		t.Fatalf("the restart reused the printed URL %q", first)
+	}
+	resp, err := http.Get(second + "healthz")
+	if err != nil {
+		t.Fatalf("GET %shealthz after the multi-owner restart: %v", second, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz after the multi-owner restart: status %d", resp.StatusCode)
+	}
+}
+
+// TestRunWritesGitignore: prepare names both the secrets directory and the
+// event log in the project's .gitignore before anything serves.
+func TestRunWritesGitignore(t *testing.T) {
+	dir := t.TempDir()
+	writeOwners(t, dir, ownersBody("alice", "Orders CDC"))
+	if _, err := prepare(Options{Config: testConfig(), ProjectDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".piperoom/", LogFileName} {
+		if !strings.Contains(string(raw), want+"\n") {
+			t.Errorf(".gitignore lacks %q:\n%s", want, raw)
+		}
+	}
+}

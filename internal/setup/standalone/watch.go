@@ -18,10 +18,9 @@ import (
 // plain log showing the watcher is alive without one line a second.
 const heartbeatTicks = 10
 
-// fileState is what --watch compares between ticks: the content digest, so a
-// rewrite with the same bytes restarts nothing, and the modification time and
-// size, so a write that leaves the digest readable at the same moment is still
-// seen next tick.
+// fileState is what --watch compares between ticks: the content digest, the
+// modification time and the size, so a rewrite is seen even when the digest
+// was read at the same moment the write landed.
 type fileState struct {
 	mod  time.Time
 	size int64
@@ -48,11 +47,16 @@ func statFile(path string) (fileState, error) {
 }
 
 // watchRestart runs run until ctx ends and restarts it whenever path is
-// written. A server that stops on its own is a failure and ends the watch; a
-// server stopped for a restart is not. Every poll logs a tick (debug), and
-// every heartbeatTicks polls an info line, so "the watcher ticks" is visible
-// in any log.
-func watchRestart(ctx context.Context, path string, interval time.Duration, log *slog.Logger, run func(context.Context) error) error {
+// written to a state check accepts. The watch outlives the file's bad moments:
+// a write that fails check (a half-finished save, a typo) is logged and waited
+// out while the running server keeps serving its loaded file, and a restarted
+// lifetime that fails is logged and the watch keeps polling, so the next write
+// brings the server back. Only a first lifetime that fails ends the watch with
+// its error (the person just started it and must see the refusal), and only a
+// clean stop nobody asked for ends it with nil. Every poll logs a tick
+// (debug), and every heartbeatTicks polls an info line, so "the watcher ticks"
+// is visible in any log.
+func watchRestart(ctx context.Context, path string, interval time.Duration, log *slog.Logger, run func(context.Context) error, check func() error) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -63,46 +67,79 @@ func watchRestart(ctx context.Context, path string, interval time.Duration, log 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	log.Info("setup: watching the owners file; a write restarts the standalone server", "path", path, "interval", interval.String())
-	for ticks := 1; ; {
+	ticks := 1
+	// tick polls once and reports whether the file changed to a state check
+	// accepts, so a restart is due.
+	tick := func() bool {
+		state, err := statFile(path)
+		if err != nil {
+			log.Warn("setup: watch tick could not read the owners file", "path", path, "err", err)
+			return false
+		}
+		if state == last {
+			log.Debug("setup: watch tick", "n", ticks, "path", path)
+			if ticks%heartbeatTicks == 0 {
+				log.Info("setup: watching the owners file", "ticks", ticks, "path", path)
+			}
+			ticks++
+			return false
+		}
+		last = state
+		if check != nil {
+			if err := check(); err != nil {
+				log.Warn("setup: the owners file was written but does not load; the server keeps its loaded file until the next write", "path", path, "err", err)
+				return false
+			}
+		}
+		log.Info("setup: owners file written; restarting the standalone server", "path", path, "tick", ticks)
+		return true
+	}
+lifetimes:
+	for lifetime := 1; ; lifetime++ {
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 1)
 		go func() { done <- run(runCtx) }()
 		restart := false
-		for !restart {
+		running := true
+		var runErr error
+		for running && !restart {
 			select {
 			case <-ctx.Done():
 				cancel()
 				<-done
 				return nil
-			case err := <-done:
-				cancel()
-				if err != nil {
-					return err
-				}
-				// A clean stop nobody asked for leaves nothing to watch.
-				return nil
+			case runErr = <-done:
+				running = false
 			case <-ticker.C:
-				state, err := statFile(path)
-				if err != nil {
-					log.Warn("setup: watch tick could not read the owners file", "path", path, "err", err)
-					continue
-				}
-				if state != last {
-					last = state
-					restart = true
-					log.Info("setup: owners file written; restarting the standalone server", "path", path, "tick", ticks)
-					continue
-				}
-				log.Debug("setup: watch tick", "n", ticks, "path", path)
-				if ticks%heartbeatTicks == 0 {
-					log.Info("setup: watching the owners file", "ticks", ticks, "path", path)
-				}
-				ticks++
+				restart = tick()
 			}
 		}
 		cancel()
-		if err := <-done; err != nil {
-			log.Debug("setup: the previous server lifetime ended for the restart", "err", err)
+		if restart {
+			if err := <-done; err != nil {
+				log.Debug("setup: the previous server lifetime ended for the restart", "err", err)
+			}
+			continue
+		}
+		// The server stopped on its own.
+		if runErr == nil {
+			// A clean stop nobody asked for leaves nothing to watch.
+			return nil
+		}
+		if lifetime == 1 {
+			// A first start that fails is a start failure, not a watch event.
+			return runErr
+		}
+		log.Error("setup: the restarted server failed; --watch keeps polling and restarts on the next owners write", "path", path, "err", runErr)
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				if tick() {
+					continue lifetimes
+				}
+			}
 		}
 	}
 }

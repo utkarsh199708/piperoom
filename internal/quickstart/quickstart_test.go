@@ -470,7 +470,7 @@ func TestUsersWritesOneUserFile(t *testing.T) {
 			t.Fatalf("users file mode %o, want 600", perm)
 		}
 	}
-	if !strings.Contains(buf.String(), "wrote a one-user users file") || !strings.Contains(buf.String(), files[0]) {
+	if !strings.Contains(buf.String(), "wrote a users file") || !strings.Contains(buf.String(), files[0]) {
 		t.Fatalf("the log should name the file:\n%s", buf.String())
 	}
 
@@ -511,11 +511,49 @@ func TestUsersKeepsUsersFileSetByOperator(t *testing.T) {
 	}
 }
 
-// An owners file that names several principals cannot be served by a
-// one-user file: the default users file is tried, and when it does not load
-// the error names the principals and USERS_FILE.
+// An owners file that names several users gets a users file naming each of
+// them with the layers the owners file assigns them: the setup room registers
+// multi-owner pipelines, and the --watch restart that picks the registration
+// up must not die for lack of a users file.
 func TestUsersSeveralOwners(t *testing.T) {
 	own, err := owners.Load(writeOwnersFile(t, "user:priya", "user:arjun"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	cfg := config.Config{UsersFile: defaultUsersFile, OwnersFile: "team.yaml"}
+	users, cleanup, err := usersFor(cfg, own, tmp, discardLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	layers := events.LayersOf(events.PipelineKindCDC)
+	for i, id := range []string{"priya", "arjun"} {
+		u, ok := users.Get(id)
+		if !ok {
+			t.Fatalf("user %q missing", id)
+		}
+		var want []string
+		for j, l := range layers {
+			if j%2 == i { // writeOwnersFile assigns layers round-robin
+				want = append(want, l)
+			}
+		}
+		if !slices.Equal(u.Layers, want) {
+			t.Fatalf("%s layers = %v, want %v", id, u.Layers, want)
+		}
+	}
+	if err := room.ValidateUsers(users, own); err != nil {
+		t.Fatalf("the written file must agree with the owners file: %v", err)
+	}
+}
+
+// An owners file that names a group cannot be served by a written users file
+// (the server does not know group membership at start-up): the default users
+// file is tried, and when it does not load the error names the principals and
+// USERS_FILE.
+func TestUsersGroupOwner(t *testing.T) {
+	own, err := owners.Load(writeOwnersFile(t, "user:priya", "group:data-eng"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +564,7 @@ func TestUsersSeveralOwners(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error")
 	}
-	for _, want := range []string{"USERS_FILE", "user:arjun", "user:priya", "team.yaml"} {
+	for _, want := range []string{"USERS_FILE", "group:data-eng", "user:priya", "team.yaml"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks %q", err, want)
 		}

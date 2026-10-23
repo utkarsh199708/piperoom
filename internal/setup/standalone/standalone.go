@@ -92,6 +92,15 @@ func Run(ctx context.Context, opts Options) error {
 	if stdout == nil {
 		stdout = io.Discard
 	}
+	// Flag refusals come before prepare, which writes the secrets directory,
+	// the .gitignore entries and a bootstrap owners file.
+	interval := opts.WatchInterval
+	if interval <= 0 {
+		interval = DefaultWatchInterval
+	}
+	if opts.Watch && interval < MinWatchInterval {
+		return fmt.Errorf("setup: --watch-interval %s: want at least %s", interval, MinWatchInterval)
+	}
 	p, err := prepare(opts)
 	if err != nil {
 		return err
@@ -132,14 +141,14 @@ func Run(ctx context.Context, opts Options) error {
 	if !opts.Watch {
 		return runOnce(ctx)
 	}
-	interval := opts.WatchInterval
-	if interval <= 0 {
-		interval = DefaultWatchInterval
+	// The pre-restart check: a write that does not load (a half-finished
+	// save, a typo) must not stop the serving process; the running server
+	// keeps its loaded file and the watch waits for the next write.
+	check := func() error {
+		_, err := owners.Load(p.owners)
+		return err
 	}
-	if interval < MinWatchInterval {
-		return fmt.Errorf("setup: --watch-interval %s: want at least %s", interval, MinWatchInterval)
-	}
-	return watchRestart(ctx, p.owners, interval, log, runOnce)
+	return watchRestart(ctx, p.owners, interval, log, runOnce, check)
 }
 
 // paths are a start's resolved locations.
@@ -188,6 +197,9 @@ func prepare(opts Options) (paths, error) {
 	// and quickstart.Prepare refuses anything that disagrees.
 	cfg.WriteMode = "on"
 	cfg.SetupEnabled = "on"
+	// The event log carries every room event, so the project's .gitignore
+	// names it before the first line is written.
+	gitignore := []string{LogFileName}
 	if strings.TrimSpace(cfg.SecretsDir) == "" {
 		// The pipeline's read credentials land here (U1-5d); the design keeps
 		// them next to the project, on the machine that runs the runner.
@@ -195,9 +207,10 @@ func prepare(opts Options) (paths, error) {
 		// The directory is where the secret store lives, so the project's
 		// .gitignore must name it even before a runner creates the store
 		// (U1-4's rule, the same helper).
-		if err := runner.EnsureGitignore(abs); err != nil {
-			return paths{}, err
-		}
+		gitignore = append([]string{".piperoom/"}, gitignore...)
+	}
+	if err := runner.EnsureGitignore(abs, gitignore...); err != nil {
+		return paths{}, err
 	}
 	if err := os.MkdirAll(cfg.SecretsDir, 0o700); err != nil {
 		return paths{}, fmt.Errorf("setup: create PIPEROOM_SECRETS_DIR %s: %w", cfg.SecretsDir, err)
