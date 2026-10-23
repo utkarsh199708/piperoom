@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"piperoom/internal/clients/postgres"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/redact"
@@ -20,43 +21,21 @@ import (
 )
 
 // The Q2a read-only source settings surface (Q board Q0 item 2,
-// clients.SourceSettingsReader). Neither clients.go nor the postgres client on
-// main carries it yet: Q2a (#859, internal/clients/postgres/settings.go)
-// defines it with these exact DTO shapes and JSON tags. The method sets below
-// are the subsets each action reads; once #859 (or Q0) lands, the DTOs here
-// become aliases of those types and *postgres.DB satisfies the interfaces
-// with no other change. See the contract change request of the Q2c/Q2d PR.
+// clients.SourceSettingsReader). Q0 has not moved it into clients.go yet, so
+// it lives in internal/clients/postgres (settings.go, Q2a #859). The DTOs here
+// are aliases of those types, so *postgres.DB satisfies the reader interfaces
+// below directly; each interface is the subset one action reads.
 
-// TableReplication is a table's primary key presence and replica identity
-// (postgres.TableReplication of Q2a).
-type TableReplication struct {
-	Table           string `json:"table"`
-	HasPrimaryKey   bool   `json:"has_primary_key"`
-	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none
-}
+// TableReplication is a table's primary key presence and replica identity.
+type TableReplication = postgres.TableReplication
 
 // RoleInfo is a source role's login and replication rights and its SELECT
-// privilege per table (postgres.RoleInfo of Q2a).
-type RoleInfo struct {
-	Role        string          `json:"role"`
-	Exists      bool            `json:"exists"`
-	CanLogin    bool            `json:"can_login"`
-	Replication bool            `json:"replication"`
-	Selectable  map[string]bool `json:"selectable"` // table -> SELECT
-}
+// privilege per table.
+type RoleInfo = postgres.RoleInfo
 
-// DBSession is one session that can hold back logical replication
-// (postgres.DBSession of Q2a). Query is untrusted text.
-type DBSession struct {
-	PID        int64     `json:"pid"`
-	StartedAt  time.Time `json:"started_at"`
-	XactStart  time.Time `json:"xact_start"`
-	User       string    `json:"user"`
-	App        string    `json:"application"`
-	State      string    `json:"state"`
-	Query      string    `json:"query"`
-	BlocksSlot bool      `json:"blocks_slot"`
-}
+// DBSession is one session that can hold back logical replication. Query is
+// untrusted text; InScope is false for a session a scoped read anonymised.
+type DBSession = postgres.DBSession
 
 // TableReplicationReader is SourceSettingsReader.TableReplication: one entry
 // per table, in order; a missing table is clients.ErrNotFound.
@@ -70,11 +49,25 @@ type RoleInfoReader interface {
 	RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error)
 }
 
-// BlockerReader is SourceSettingsReader.Blockers, the read behind the
-// source_blocking_sessions tool.
+// BlockerReader is SourceSettingsReader.Blockers, the unscoped read behind
+// source_blocking_sessions (every session in full, InScope true).
 type BlockerReader interface {
 	Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error)
 }
+
+// ScopedBlockerReader is the pipeline-scoped read behind
+// source_blocking_sessions in a room: a session that holds or waits for no
+// lock on one of tables comes back anonymised with InScope false.
+type ScopedBlockerReader interface {
+	BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error)
+}
+
+var (
+	_ TableReplicationReader = (*postgres.DB)(nil)
+	_ RoleInfoReader         = (*postgres.DB)(nil)
+	_ BlockerReader          = (*postgres.DB)(nil)
+	_ ScopedBlockerReader    = (*postgres.DB)(nil)
+)
 
 // opTimeout bounds every read of Validate and Preview and Execute's re-checks
 // (AGENTS.md §4 rule 4); the admin writer applies its own deadline.
