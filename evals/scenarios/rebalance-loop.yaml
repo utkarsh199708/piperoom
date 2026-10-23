@@ -392,6 +392,6 @@ expect:
   claims:
     - about: root_cause
       facts: [f_unassigned, f_reassigned]
-  evidence_tools: [connect_status, debezium_metrics, connect_worker_metrics]
+  evidence_tools: [connect_status, connect_worker_metrics]
   forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, connect_resume_connector, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 14
