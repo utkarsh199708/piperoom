@@ -176,9 +176,9 @@ var refusingAdapters = map[reflect.Type]bool{
 	reflect.TypeOf(readOnlyConnectTasksQ{}):         true,
 	reflect.TypeOf(readOnlyConnectValidateQ{}):      true,
 	reflect.TypeOf(readOnlyConnectValidateTasksQ{}): true,
-	reflect.TypeOf(readOnlyRegistry{}):             true,
-	reflect.TypeOf(readOnlyRegistryDryRun{}):       true,
-	reflect.TypeOf(noRegistry{}):                   true,
+	reflect.TypeOf(readOnlyRegistry{}):              true,
+	reflect.TypeOf(readOnlyRegistryDryRun{}):        true,
+	reflect.TypeOf(noRegistry{}):                    true,
 }
 
 // readOnlyKafkaViews are the only types reachable from the actions with write
