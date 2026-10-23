@@ -1465,6 +1465,13 @@ type ActionExecutedPayload struct {
 	// never run again, and the agent is told the outcome is unknown
 	// (HumanInput.OK nil): the target must be checked before a retry.
 	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
+	// PlanStepIndex is the setup plan step this step consumed
+	// (events.SetupPlanStep.Index), set by the executor from the route it
+	// resolved right before the write; nil for a step outside a setup plan
+	// (an incident room, a driver's own fix) and on events from before U1-6.
+	// StepIndex above is the step's index inside its PROPOSAL, so the plan
+	// fold must never key on it. (U1-6)
+	PlanStepIndex *int `json:"plan_step_index,omitempty"`
 	// Receipt is what the runner did for a setup step (actions.Receipted):
 	// the exact argv, target and output MAC, never credentials or raw output.
 	// Nil for every action that is not Receipted, so events from before the

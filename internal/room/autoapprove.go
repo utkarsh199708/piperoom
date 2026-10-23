@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/events"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/store"
 )
 
@@ -145,6 +146,17 @@ func (s *Service) autoApproveFor(pipelineID string) []string {
 	return out
 }
 
+// soloForRoom is the room view's mode.solo for one caller: a setup room uses
+// its own rule (setupSolo, design §3.6), because its provisional pipeline
+// nobody owns makes the generic per-layer reading meaningless; the room's
+// rule therefore overrides mode.solo for environment steps.
+func (s *Service) soloForRoom(u User, snap RoomSnapshot) bool {
+	if snap.IsSetupRoom() {
+		return s.setupSolo(&snap)
+	}
+	return s.soloFor(u, snap.PipelineID)
+}
+
 // soloFor is the room view's mode.solo: u may approve every layer of the
 // pipeline's kind alone (events.LayersOf), as owner or backup by the rules
 // approve applies (authorizeLayer), or is PIPEROOM_SOLO_USER. The driver's
@@ -236,10 +248,16 @@ func (s *Service) scheduleCheckLocked(st *roomState, proposalID string) error {
 }
 
 // maybeScheduleLocked appends the proposal's proposal.scheduled when it
-// qualifies (scheduleCheckLocked). previewProposal calls it right after
-// proposal.previewed, so the countdown starts once the approvers can see
+// qualifies: a setup room's T1 proposal under the policy setup_local
+// (maybeScheduleSetupLocalLocked), every other proposal under the pipeline's
+// auto_approve: list (scheduleCheckLocked). previewProposal calls it right
+// after proposal.previewed, so the countdown starts once the approvers can see
 // what the fix would do. Caller holds st's lock.
 func (s *Service) maybeScheduleLocked(ctx context.Context, st *roomState, roomID, proposalID string) {
+	if st.snap.IsSetupRoom() {
+		s.maybeScheduleSetupLocalLocked(ctx, st, roomID, proposalID)
+		return
+	}
 	if s.scheduleCheckLocked(st, proposalID) != nil {
 		return
 	}
@@ -260,6 +278,62 @@ func (s *Service) maybeScheduleLocked(ctx context.Context, st *roomState, roomID
 	}
 }
 
+// maybeScheduleSetupLocalLocked appends proposal.scheduled {policy:
+// setup_local} for a setup room's T1 agent proposal: a write under the project
+// directory on a local-class target runs after PIPEROOM_SETUP_LOCAL_DELAY,
+// cancellable like an auto_approve countdown (design §3.3). A T2 or T3
+// proposal is never scheduled; the delay "0" means every T1 step waits for a
+// click. The countdown lives in the log, exactly as the auto-approve one, so
+// the same loop and fold carry it. Caller holds st's lock.
+func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomState, roomID, proposalID string) {
+	if s.setupCfg.LocalDelay <= 0 || s.writeOff || s.scheduleSetupRefused(st) {
+		return
+	}
+	p, ok := openProposal(st.snap, proposalID)
+	if !ok || p.Origin == events.ProposalOriginDriver || p.sched.set {
+		return
+	}
+	for _, l := range p.RequiredLayers {
+		if p.Approvals[l] != "pending" {
+			return
+		}
+	}
+	route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
+	if err != nil || route.Tier != plan.TierT1 || !previewAllOK(p) {
+		return
+	}
+	runAt := s.now().UTC().Add(s.setupCfg.LocalDelay)
+	_, err = s.emitCheckedLocked(ctx, st, roomID, func() error {
+		if s.scheduleSetupRefused(st) {
+			return errNotAutoApprovable
+		}
+		p, ok := openProposal(st.snap, proposalID)
+		if !ok || p.sched.set || !previewAllOK(p) {
+			return errNotAutoApprovable
+		}
+		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
+		if err != nil || route.Tier != plan.TierT1 {
+			return errNotAutoApprovable
+		}
+		return nil
+	}, events.ProposalScheduled, systemActor, events.ProposalScheduledPayload{
+		ProposalID: proposalID, RunAt: runAt, Policy: events.PolicySetupLocal, CancelUntil: runAt,
+	})
+	switch {
+	case errors.Is(err, errNotAutoApprovable):
+	case err != nil:
+		s.log.Warn("room: setup: append proposal.scheduled failed; the T1 step waits for a click", "room", roomID, "proposal", proposalID, "err", err)
+	default:
+		s.log.Info("room: setup: T1 countdown started", "room", roomID, "proposal", proposalID, "run_at", runAt)
+	}
+}
+
+// scheduleSetupRefused is the part of the setup_local schedule check that reads
+// only the room, not the proposal.
+func (s *Service) scheduleSetupRefused(st *roomState) bool {
+	return !s.roomOpen(st) || st.deleting || st.snap.Shadow || s.proposalsDisabled(st)
+}
+
 // fireCheckLocked is the fire path's rule, run before the first approval
 // and again as the condition of each one: the room is open, the proposal open
 // with a pending countdown (not cancelled, no person's approval since) that
@@ -275,6 +349,24 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 	if !ok || !p.sched.pending() || fullyApproved(p) || s.now().Before(p.sched.runAt) {
 		return Proposal{}, errScheduleGone
 	}
+	if st.snap.IsSetupRoom() {
+		// A setup room has one policy, setup_local, and it may only run a T1
+		// proposal whose preview still passes (design §3.3).
+		if s.setupCfg.LocalDelay <= 0 {
+			return Proposal{}, errScheduleGone
+		}
+		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
+		if err != nil {
+			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step: " + err.Error()}
+		}
+		if route.Tier != plan.TierT1 {
+			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step"}
+		}
+		if !previewAllOK(p) {
+			return Proposal{}, &policyRefusal{why: "the preview no longer says every step would be accepted"}
+		}
+		return policyApprovedOnly(p)
+	}
 	if !previewAllOK(p) {
 		return Proposal{}, &policyRefusal{why: "the preview no longer says every step would be accepted"}
 	}
@@ -288,6 +380,14 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 	// the countdown on a person's approval, so this holds for any log the
 	// service writes; it keeps the policy from finishing a proposal a person
 	// half-decided should the fold ever miss one.
+	return policyApprovedOnly(p)
+}
+
+// policyApprovedOnly is fireCheckLocked's last check, shared by the
+// auto-approve and setup_local paths: every approved layer must be one the
+// policy approved, so a proposal a person half-decided is never finished by a
+// policy.
+func policyApprovedOnly(p Proposal) (Proposal, error) {
 	approved := 0
 	for _, l := range p.RequiredLayers {
 		switch p.Approvals[l] {
@@ -321,10 +421,12 @@ func (s *Service) scheduleDue(snap *RoomSnapshot) []string {
 	return out
 }
 
-// startAutoApprove starts the policy loop once, after Load, when the policy
-// is on. It stops when the service lifetime ends (Close).
+// startAutoApprove starts the policy loop once, after Load, when a policy is
+// on: the pipeline's auto-approve list or a setup room's setup_local delay
+// (a server may have setup on and auto-approve off). It stops when the
+// service lifetime ends (Close).
 func (s *Service) startAutoApprove() {
-	if s.autoDelay <= 0 {
+	if s.autoDelay <= 0 && s.setupCfg.LocalDelay <= 0 {
 		return
 	}
 	s.autoOnce.Do(func() {
@@ -370,7 +472,7 @@ func (s *Service) runAutoApprove(tick <-chan time.Time) {
 // replica gets there first, and the approvals rows plus the conditional
 // appends make sure each layer is approved once.
 func (s *Service) checkSchedules(ctx context.Context) {
-	if s.isClosed() || s.autoDelay <= 0 {
+	if s.isClosed() || (s.autoDelay <= 0 && s.setupCfg.LocalDelay <= 0) {
 		return
 	}
 	due := map[string][]string{}
@@ -450,7 +552,7 @@ func (s *Service) firePolicy(ctx context.Context, roomID, proposalID string) {
 		s.notePolicyOnce(roomID, proposalID, noteRefused, why, nil)
 		return
 	}
-	a := approver{actor: systemActor, detail: events.GrantPolicy, check: func() error {
+	a := approver{actor: systemActor, detail: events.GrantPolicy, policy: s.policyName(st), check: func() error {
 		_, err := s.fireCheckLocked(st, proposalID)
 		return err
 	}}
@@ -477,9 +579,19 @@ func (s *Service) firePolicy(ctx context.Context, roomID, proposalID string) {
 		n++
 	}
 	if allApproved(st.snap, proposalID) {
-		s.log.Info("room: auto-approve policy approved the proposal", "room", roomID, "proposal", proposalID, "layers", n)
+		s.log.Info("room: policy approved the proposal", "room", roomID, "proposal", proposalID, "policy", s.policyName(st), "layers", n)
 		s.enqueueExecutionLocked(st, row)
 	}
+}
+
+// policyName is the policy a room's countdowns run under: setup_local in a
+// setup room (proposal.scheduled.policy and approval.given.policy), the
+// pipeline's auto_approve list everywhere else.
+func (s *Service) policyName(st *roomState) string {
+	if st.snap.IsSetupRoom() {
+		return events.PolicySetupLocal
+	}
+	return events.PolicyAutoApprove
 }
 
 // policyRowMismatch re-reads the stored proposal at fire time: it must be
