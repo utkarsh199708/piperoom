@@ -320,12 +320,11 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 		path += "?map_index=" + strconv.Itoa(mapIndex)
 	}
 	// One byte more than the tail lets tailFrom see whether the window
-	// starts at a line.
-	size := MaxResponseBytes + 1
-	if maxBytes < MaxResponseBytes {
-		size = maxBytes + 1
-	}
-	tb := &tailBuffer{buf: make([]byte, size)}
+	// starts at a line. The extra byte is appended rather than added to the
+	// make size, so no allocation size is computed from the caller's value
+	// (maxBytes is already cut to MaxResponseBytes above).
+	buf := append(make([]byte, maxBytes), 0)
+	tb := &tailBuffer{buf: buf[:len(buf):len(buf)]}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
 		if _, err := io.Copy(tb, io.LimitReader(r, c.ceiling())); err != nil {
 			return fmt.Errorf("read log: %w", err)
