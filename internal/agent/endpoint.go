@@ -330,7 +330,10 @@ func modelConcurrency(n int64) int {
 	if n <= 0 {
 		return 0
 	}
-	return int(min(n, maxModelConcurrency))
+	if n > maxModelConcurrency {
+		return maxModelConcurrency
+	}
+	return int(n)
 }
 
 // NewEndpoint checks cfg and builds the model client. It returns an error for
