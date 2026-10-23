@@ -399,7 +399,7 @@ func TestRunServiceRefusals(t *testing.T) {
 			}
 		})
 	}
-	t.Run("missing worker is the JVM's failure, not a refusal", func(t *testing.T) {
+	t.Run("missing worker is the JVM's failure not a refusal", func(t *testing.T) {
 		// Only the project must exist: a missing worker file is the JVM's
 		// start failure, which reports its exit code, so the operator can fix
 		// the properties and restart.

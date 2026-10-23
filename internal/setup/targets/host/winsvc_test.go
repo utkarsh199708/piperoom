@@ -449,7 +449,7 @@ func TestWindowsServiceInstallRefusals(t *testing.T) {
 			t.Errorf("the exe copy was written without the SCM: %v", serr)
 		}
 	})
-	t.Run("create fails, files rolled back", func(t *testing.T) {
+	t.Run("create fails then files are rolled back", func(t *testing.T) {
 		f := newWindowsFixture(t)
 		f.layout()
 		f.scm.createErrs = []error{errors.New("the service database is locked")}
@@ -463,7 +463,7 @@ func TestWindowsServiceInstallRefusals(t *testing.T) {
 			}
 		}
 	})
-	t.Run("marked for deletion, retried", func(t *testing.T) {
+	t.Run("marked for deletion then retried", func(t *testing.T) {
 		f := newWindowsFixture(t)
 		f.layout()
 		f.scm.createErrs = []error{errServiceMarkedForDelete, errServiceMarkedForDelete, nil}
