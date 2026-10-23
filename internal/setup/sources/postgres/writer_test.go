@@ -63,17 +63,9 @@ func (f *fakeWriter) AlterSystem(_ context.Context, name, value string) (bool, e
 	return f.pending, f.err
 }
 
-// allTablesFake adds the optional unfiltered-publication capability.
-type allTablesFake struct {
-	fakeWriter
-	allTables string
-}
-
-func (f *allTablesFake) CreateAllTablesPublication(_ context.Context, name string) error {
-	f.calls = append(f.calls, "create_all_tables_publication")
-	f.allTables = name
-	return nil
-}
+// allTablesFake is gone: U1-9 supports only the filtered publication. This
+// assertion pins that *Writer is a clients.SetupSourceWriter.
+var _ clients.SetupSourceWriter = (*Writer)(nil)
 
 func newTestWriter(t *testing.T, f clients.SetupSourceWriter) *Writer {
 	t.Helper()
@@ -87,51 +79,28 @@ func newTestWriter(t *testing.T, f clients.SetupSourceWriter) *Writer {
 func TestCreatePublication(t *testing.T) {
 	f := &fakeWriter{}
 	w := newTestWriter(t, f)
-	if err := w.CreatePublication(context.Background(), Publication{Name: "dbz_publication", Tables: []string{"public.orders"}}); err != nil {
+	if err := w.CreatePublication(context.Background(), "dbz_publication", []string{"public.orders"}); err != nil {
 		t.Fatalf("filtered: %v", err)
 	}
 	if f.pubName != "dbz_publication" || len(f.pubTables) != 1 || f.pubTables[0] != "public.orders" {
 		t.Fatalf("call = %q %v", f.pubName, f.pubTables)
 	}
-
-	// Default mode is filtered.
-	if err := w.CreatePublication(context.Background(), Publication{Name: "p2", Mode: "", Tables: []string{"public.orders"}}); err != nil {
-		t.Fatalf("default mode: %v", err)
-	}
 	for _, tc := range []struct {
-		name string
-		p    Publication
+		name   string
+		pub    string
+		tables []string
 	}{
-		{"no tables", Publication{Name: "p", Tables: nil}},
-		{"bad name", Publication{Name: "1bad", Tables: []string{"public.orders"}}},
-		{"bad table", Publication{Name: "p", Tables: []string{"orders"}}},
-		{"all tables with a list", Publication{Name: "p", Mode: PublicationAllTables, Tables: []string{"public.orders"}}},
-		{"unknown mode", Publication{Name: "p", Mode: "everything", Tables: []string{"public.orders"}}},
+		{"no tables", "p", nil},
+		{"bad name", "1bad", []string{"public.orders"}},
+		{"bad table", "p", []string{"orders"}},
 	} {
-		if err := w.CreatePublication(context.Background(), tc.p); err == nil {
+		f.calls = nil
+		if err := w.CreatePublication(context.Background(), tc.pub, tc.tables); err == nil {
 			t.Errorf("%s: accepted", tc.name)
 		}
-	}
-}
-
-func TestCreateAllTablesPublication(t *testing.T) {
-	f := &allTablesFake{}
-	w := newTestWriter(t, f)
-	if err := w.CreatePublication(context.Background(), Publication{Name: "all_pub", Mode: PublicationAllTables}); err != nil {
-		t.Fatalf("all tables: %v", err)
-	}
-	if f.allTables != "all_pub" || len(f.pubTables) != 0 {
-		t.Fatalf("call = %q (fixed table form: %v)", f.allTables, f.pubTables)
-	}
-
-	// A writer without the capability answers ErrNotSupported, not a silent
-	// filtered publication.
-	plain := &fakeWriter{}
-	if err := newTestWriter(t, plain).CreatePublication(context.Background(), Publication{Name: "all_pub", Mode: PublicationAllTables}); !errors.Is(err, clients.ErrNotSupported) {
-		t.Fatalf("plain writer: %v, want ErrNotSupported", err)
-	}
-	if len(plain.calls) != 0 {
-		t.Fatalf("plain writer was called: %v", plain.calls)
+		if len(f.calls) != 0 {
+			t.Errorf("%s: the writer was called before the refusal: %v", tc.name, f.calls)
+		}
 	}
 }
 
@@ -227,15 +196,24 @@ func TestCreateReadRole(t *testing.T) {
 }
 
 func TestAlterSystemAllowList(t *testing.T) {
-	for _, name := range []string{"wal_level", "max_replication_slots", "max_wal_senders", "max_slot_wal_keep_size", "wal_sender_timeout"} {
+	for _, tc := range []struct{ name, value string }{
+		{"wal_level", "logical"},
+		{"wal_level", "replica"},
+		{"max_replication_slots", "10"},
+		{"max_wal_senders", "10"},
+		{"max_slot_wal_keep_size", "-1"},
+		{"max_slot_wal_keep_size", "10GB"},
+		{"wal_sender_timeout", "30s"},
+		{"wal_sender_timeout", "5min"},
+	} {
 		f := &fakeWriter{pending: true}
 		w := newTestWriter(t, f)
-		pending, err := w.AlterSystem(context.Background(), name, "logical")
+		pending, err := w.AlterSystem(context.Background(), tc.name, tc.value)
 		if err != nil || !pending {
-			t.Fatalf("%s: %v (pending %v)", name, err, pending)
+			t.Fatalf("%s=%s: %v (pending %v)", tc.name, tc.value, err, pending)
 		}
-		if f.sysName != name || f.sysValue != "logical" {
-			t.Fatalf("%s: call = %q %q", name, f.sysName, f.sysValue)
+		if f.sysName != tc.name || f.sysValue != tc.value {
+			t.Fatalf("%s: call = %q %q", tc.name, f.sysName, f.sysValue)
 		}
 	}
 
@@ -264,6 +242,40 @@ func TestAlterSystemAllowList(t *testing.T) {
 		}
 		if len(f.calls) != 0 {
 			t.Errorf("value %q reached the writer", value)
+		}
+	}
+}
+
+// TestAlterSystemRefusesValuesPostgresCannotUse pins the meaning of each
+// allow-listed parameter, not just the shape of its value: a name on the list
+// with a value Postgres refuses to start with would turn a maintenance window
+// into an outage.
+func TestAlterSystemRefusesValuesPostgresCannotUse(t *testing.T) {
+	tests := []struct{ name, value string }{
+		{"wal_level", "minimal"},
+		{"wal_level", "logical "},
+		{"wal_level", "on"},
+		{"max_wal_senders", "0"},
+		{"max_wal_senders", "-1"},
+		{"max_wal_senders", "1.5"},
+		{"max_wal_senders", "ten"},
+		{"max_replication_slots", "0"},
+		{"max_slot_wal_keep_size", "1024"}, // bare number: its unit would be a guess
+		{"max_slot_wal_keep_size", "10gb"},
+		{"max_slot_wal_keep_size", "0GB"},
+		{"wal_sender_timeout", "0"},
+		{"wal_sender_timeout", "0s"},
+		{"wal_sender_timeout", "fast"},
+		{"wal_sender_timeout", "-30s"},
+	}
+	for _, tc := range tests {
+		f := &fakeWriter{}
+		w := newTestWriter(t, f)
+		if _, err := w.AlterSystem(context.Background(), tc.name, tc.value); !errors.Is(err, ErrParams) {
+			t.Errorf("%s = %q: %v, want ErrParams", tc.name, tc.value, err)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("%s = %q reached the writer", tc.name, tc.value)
 		}
 	}
 }
@@ -324,9 +336,6 @@ func TestSQLBuilders(t *testing.T) {
 	}
 	if pub, err := CreatePublicationSQL("p", []string{"public.orders"}); err != nil || pub != `CREATE PUBLICATION "p" FOR TABLE "public"."orders"` {
 		t.Fatalf("publication SQL = %q, %v", pub, err)
-	}
-	if pub, err := CreateAllTablesPublicationSQL("p"); err != nil || pub != `CREATE PUBLICATION "p" FOR ALL TABLES` {
-		t.Fatalf("all-tables SQL = %q, %v", pub, err)
 	}
 	if _, err := CreatePublicationSQL("p", nil); err == nil {
 		t.Fatal("a publication with no tables was accepted")

@@ -91,6 +91,11 @@ func TestTableReplicationAndRoleIntegration(t *testing.T) {
 	if !info.Exists || !info.CanLogin || !info.Replication {
 		t.Fatalf("dev role = %+v, want an existing logging-in replication role", info)
 	}
+	// The dev stack is stock Postgres: no rds_replication role exists, and the
+	// guarded membership read must not raise "role does not exist".
+	if info.RDSReplication {
+		t.Fatalf("stock Postgres reported rds_replication membership: %+v", info)
+	}
 	for _, tbl := range tables {
 		if !info.Selectable[tbl] {
 			t.Fatalf("dev role cannot SELECT its own table %s: %+v", tbl, info.Selectable)

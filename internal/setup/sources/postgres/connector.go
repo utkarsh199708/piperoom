@@ -18,22 +18,30 @@ var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9
 // runner's secret store, so the config carries ${secret:<name>} and no
 // credential.
 type ConnectorOptions struct {
-	Host            string
-	Port            int
-	Database        string
-	User            string
-	PasswordSecret  string
-	TopicPrefix     string
-	Publication     string
-	Slot            string
-	Tables          []string
-	PublicationMode PublicationMode
+	Host           string
+	Port           int
+	Database       string
+	User           string
+	PasswordSecret string
+	TopicPrefix    string
+	Publication    string
+	Slot           string
+	Tables         []string
 }
 
 // ConnectorConfig builds the Debezium Postgres connector config. It contains
 // no plaintext credential: the password is a ${secret:...} reference the
 // runner materialises, and every other value is a literal the Q4a validate
 // host and key rules accept.
+//
+// publication.autocreate.mode is always "disabled", because the setup creates
+// the publication itself (CreatePublication) and the connector logs in as the
+// read role, which owns neither the publication nor the tables. Debezium 2.x
+// runs ALTER PUBLICATION ... SET TABLE for "filtered" when the publication
+// exists, and that needs ownership of the publication: the connector task
+// would fail at start with "must be owner of publication". Publication checks
+// before the connector is created guarantee the publication exists with
+// exactly these tables.
 func ConnectorConfig(o ConnectorOptions) (map[string]string, error) {
 	host := strings.TrimSpace(o.Host)
 	if host == "" || strings.ContainsAny(host, "${}\r\n\t /") || (net.ParseIP(host) == nil && !hostnameRe.MatchString(host)) {
@@ -71,13 +79,6 @@ func ConnectorConfig(o ConnectorOptions) (map[string]string, error) {
 	if _, err := quoteSlot(slot); err != nil {
 		return nil, fmt.Errorf("slot.name: %w", err)
 	}
-	mode := o.PublicationMode
-	if mode == "" {
-		mode = PublicationFiltered
-	}
-	if mode != PublicationFiltered && mode != PublicationAllTables {
-		return nil, fmt.Errorf("%w: publication.autocreate.mode %q (filtered or all_tables)", ErrParams, clipName(string(mode)))
-	}
 	return map[string]string{
 		"connector.class":             ConnectorClass,
 		"database.hostname":           host,
@@ -88,7 +89,7 @@ func ConnectorConfig(o ConnectorOptions) (map[string]string, error) {
 		"plugin.name":                 OutputPlugin,
 		"slot.name":                   slot,
 		"publication.name":            publication,
-		"publication.autocreate.mode": string(mode),
+		"publication.autocreate.mode": "disabled",
 		"topic.prefix":                o.TopicPrefix,
 		"table.include.list":          strings.Join(o.Tables, ","),
 	}, nil

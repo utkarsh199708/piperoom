@@ -35,7 +35,7 @@ func TestConnectorConfig(t *testing.T) {
 		"plugin.name":                 "pgoutput",
 		"slot.name":                   "debezium",
 		"publication.name":            "dbz_publication",
-		"publication.autocreate.mode": "filtered",
+		"publication.autocreate.mode": "disabled",
 		"topic.prefix":                "orders",
 		"table.include.list":          "public.orders,public.customers",
 	}
@@ -49,15 +49,17 @@ func TestConnectorConfig(t *testing.T) {
 	}
 }
 
-func TestConnectorConfigAllTables(t *testing.T) {
-	o := testConnectorOptions()
-	o.PublicationMode = PublicationAllTables
-	cfg, err := ConnectorConfig(o)
+// TestConnectorConfigDisablesPublicationAutocreate pins the one mode a
+// setup-created publication can use: the read role owns neither the
+// publication nor the tables, and Debezium 2.x's "filtered" runs ALTER
+// PUBLICATION ... SET TABLE, which needs that ownership.
+func TestConnectorConfigDisablesPublicationAutocreate(t *testing.T) {
+	cfg, err := ConnectorConfig(testConnectorOptions())
 	if err != nil {
 		t.Fatalf("ConnectorConfig: %v", err)
 	}
-	if cfg["publication.autocreate.mode"] != "all_tables" {
-		t.Fatalf("mode = %q", cfg["publication.autocreate.mode"])
+	if cfg["publication.autocreate.mode"] != "disabled" {
+		t.Fatalf("publication.autocreate.mode = %q, want disabled", cfg["publication.autocreate.mode"])
 	}
 }
 
@@ -120,7 +122,6 @@ func TestConnectorConfigRefusals(t *testing.T) {
 		{"table injection", func(o *ConnectorOptions) { o.Tables = []string{`public.orders"`} }},
 		{"bad publication", func(o *ConnectorOptions) { o.Publication = "1pub" }},
 		{"upper-case slot", func(o *ConnectorOptions) { o.Slot = "Debezium" }},
-		{"unknown publication mode", func(o *ConnectorOptions) { o.PublicationMode = "everything" }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

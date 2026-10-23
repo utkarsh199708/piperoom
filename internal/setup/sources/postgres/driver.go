@@ -96,6 +96,11 @@ type ReadFunc func(ctx context.Context, r Reader, d Driver) (Evidence, error)
 // (source_settings, source_table_replication, ...), FixOp the operation the
 // room proposes (see the op* constants), FixAsk the documented ask for a
 // failure no runner op can fix (the RDS parameter group).
+//
+// FixFor overrides FixOp/FixAsk for a check whose fix depends on what the read
+// returned (the read role exists but has no LOGIN: creating it cannot help).
+// FixParam is the factory default ALTER SYSTEM parameter a fix sets, so the
+// guard's allow-list exception is asked about the parameter that will run.
 type Check struct {
 	ID          string
 	Description string
@@ -103,22 +108,69 @@ type Check struct {
 	Read        ReadFunc
 	Pass        func(d Driver, ev Evidence) bool
 	FixOp       string
+	FixFor      func(d Driver, ev Evidence) (fixOp, ask string)
 	TierFloor   string
+	FixParam    string
 	FixAsk      string
+}
+
+// Fix is the operation and the ask a failure of this check needs for one
+// reading: FixFor's answer when it has one, the check's static fields
+// otherwise. Only one of the two is set.
+func (c Check) Fix(d Driver, ev Evidence) (fixOp, ask string) {
+	if c.FixFor != nil {
+		return c.FixFor(d, ev)
+	}
+	return c.FixOp, c.FixAsk
+}
+
+// guardOp is the fix's op as the guard table spells it. The drop-slot action
+// is registered under pgactions.DropSlotName and the guard row under
+// plan.OpSourceDropSlot; plan §3.6 forbids the drop on production whichever
+// name the step carries, so the check asks about the guard's name (the
+// contract change that should give the guard every registered spelling is
+// recorded in the PR, not worked around here).
+func (c Check) guardOp() string {
+	if c.FixOp == opDropSlot {
+		return plan.OpSourceDropSlot
+	}
+	return c.FixOp
 }
 
 // Tier is the tier the check's fix runs at on class: the higher of the op's
 // floor and the class (plan.TierOf), so a production target routes a T2 fix to
-// T3.
-func (c Check) Tier(class string) (string, error) { return plan.TierOf(c.TierFloor, class) }
+// T3. It returns plan.ErrGuard when the guard table forbids the fix on class
+// (plan §3.6): a production slot drop is forbidden, never merely T3, so the
+// room can never offer it as an approvable step.
+func (c Check) Tier(class string) (string, error) {
+	tier, err := plan.TierOf(c.TierFloor, class)
+	if err != nil {
+		return "", err
+	}
+	if c.guardOp() == "" {
+		return tier, nil
+	}
+	if row, forbidden := plan.Forbidden(plan.GuardRequest{
+		Op:    c.guardOp(),
+		Class: class,
+		Facts: plan.StepFacts{Param: c.FixParam},
+	}); forbidden {
+		return "", fmt.Errorf("%w: %s's fix %q on a %s target: %s", plan.ErrGuard, c.ID, c.FixOp, class, row.Reason)
+	}
+	return tier, nil
+}
 
 // Result is one check's outcome. Err is a read failure (the database was
-// unreachable, the role was refused); OK is false then too.
+// unreachable, the role was refused); OK is false then too. Note is set when
+// the check could not be read because an earlier check has to pass first (the
+// publication reads name the connector's role, which cannot be read before the
+// role exists): OK is false, Err is nil, and Note says what to do.
 type Result struct {
 	Check    Check
 	OK       bool
 	Err      error
 	Evidence Evidence
+	Note     string
 }
 
 // Driver is the Postgres prerequisite driver for one pipeline: the
@@ -172,6 +224,11 @@ func (d Driver) Validate() error {
 // Run validates the driver, then runs every check in order. A configuration
 // error is returned before any read; a read's own error is stored on its
 // Result so the other checks still run.
+//
+// The publication reads name the connector's role (has_table_privilege), so
+// when the role does not exist they are not issued: they would carry a read
+// error ("role ... does not exist") instead of a verdict. Their Results say so
+// and the room sees the read_role fix (create the role) first.
 func (d Driver) Run(ctx context.Context, r Reader) ([]Result, error) {
 	if err := d.Validate(); err != nil {
 		return nil, err
@@ -181,8 +238,16 @@ func (d Driver) Run(ctx context.Context, r Reader) ([]Result, error) {
 	}
 	checks := d.Checks()
 	out := make([]Result, 0, len(checks))
+	roleMissing := false
 	for _, c := range checks {
+		if roleMissing && c.ReadOp == "source_publication_tables" {
+			out = append(out, Result{Check: c, Note: "the connector's role does not exist yet: create it (the read_role check names the fix) and re-read"})
+			continue
+		}
 		ev, err := c.Read(ctx, r, d)
+		if c.ID == CheckReadRole && err == nil && !ev.Role.Exists {
+			roleMissing = true
+		}
 		out = append(out, Result{Check: c, OK: err == nil && c.Pass(d, ev), Err: err, Evidence: ev})
 	}
 	return out, nil
@@ -205,6 +270,7 @@ func (d Driver) Checks() []Check {
 				return ok && v == "logical"
 			},
 			FixOp:     opAlterSystem,
+			FixParam:  "wal_level",
 			TierFloor: plan.TierT3,
 			FixAsk:    "On RDS/Aurora, ALTER SYSTEM is unavailable: change wal_level and rds.logical_replication together in the DB parameter group (pending-reboot) and apply it in a maintenance window.",
 			Read:      readSettings,
@@ -218,6 +284,7 @@ func (d Driver) Checks() []Check {
 				return ok && n >= 1
 			},
 			FixOp:     opAlterSystem,
+			FixParam:  "max_wal_senders",
 			TierFloor: plan.TierT3,
 			FixAsk:    "On RDS/Aurora, change it in the DB parameter group and apply it in a maintenance window.",
 			Read:      readSettings,
@@ -231,6 +298,7 @@ func (d Driver) Checks() []Check {
 				return ok && n >= 1
 			},
 			FixOp:     opAlterSystem,
+			FixParam:  "max_replication_slots",
 			TierFloor: plan.TierT3,
 			FixAsk:    "On RDS/Aurora, change it in the DB parameter group and apply it in a maintenance window.",
 			Read:      readSettings,
@@ -251,13 +319,14 @@ func (d Driver) Checks() []Check {
 			ReadOp:      "source_replication_slots",
 			Pass:        slotRoom,
 			FixOp:       opAlterSystem,
+			FixParam:    "max_replication_slots",
 			TierFloor:   plan.TierT3,
 			FixAsk:      "On RDS/Aurora, change max_replication_slots in the DB parameter group and apply it in a maintenance window.",
 			Read:        readSlots,
 		},
 		{
 			ID:          CheckReplicaIdentity,
-			Description: "Every table needs a primary key or REPLICA IDENTITY FULL/INDEX: without one, UPDATE and DELETE fail once the table is published.",
+			Description: "Every table needs REPLICA IDENTITY FULL, a USING INDEX identity, or DEFAULT with a primary key: REPLICA IDENTITY NOTHING (or DEFAULT without a key) makes UPDATE and DELETE fail once the table is published. The fix is pg_set_replica_identity.",
 			ReadOp:      "source_table_replication",
 			Pass:        replicaIdentityReady,
 			FixOp:       opSetReplicaIdentity,
@@ -266,10 +335,11 @@ func (d Driver) Checks() []Check {
 		},
 		{
 			ID:          CheckReadRole,
-			Description: "The connector's database.user must exist, log in and hold REPLICATION.",
+			Description: "The connector's database.user must exist, log in and hold REPLICATION (or be a member of rds_replication on RDS/Aurora, which Debezium accepts in its place).",
 			ReadOp:      "source_role_info",
-			Pass:        func(d Driver, ev Evidence) bool { return ev.Role.Exists && ev.Role.CanLogin && ev.Role.Replication },
+			Pass:        readRoleReady,
 			FixOp:       opCreateReadRole,
+			FixFor:      readRoleFix,
 			TierFloor:   plan.TierT2,
 			Read:        readRole,
 		},
@@ -433,7 +503,11 @@ func publicationHasTables(d Driver, ev Evidence) bool {
 }
 
 // replicaIdentityReady reports whether every table can emit updates and
-// deletes: a primary key (DEFAULT identity) or FULL/INDEX identity.
+// deletes. REPLICA IDENTITY FULL and USING INDEX always can. DEFAULT can
+// because it publishes the primary key -- but only when the table has one:
+// under DEFAULT without a key Postgres publishes nothing, exactly as under
+// NOTHING. NOTHING ignores the primary key, so a keyed table with NOTHING
+// still fails UPDATE/DELETE once it is published and must fail here.
 func replicaIdentityReady(d Driver, ev Evidence) bool {
 	seen := make(map[string]pgclient.TableReplication, len(ev.Tables))
 	for _, t := range ev.Tables {
@@ -444,11 +518,43 @@ func replicaIdentityReady(d Driver, ev Evidence) bool {
 		if !ok {
 			return false
 		}
-		if !t.HasPrimaryKey && t.ReplicaIdentity != "full" && t.ReplicaIdentity != "index" {
+		ready := t.ReplicaIdentity == "full" || t.ReplicaIdentity == "index" ||
+			(t.ReplicaIdentity == "default" && t.HasPrimaryKey)
+		if !ready {
 			return false
 		}
 	}
 	return true
+}
+
+// readRoleReady reports whether the connector's role can log in and replicate.
+// RDS/Aurora grants replication through membership in rds_replication instead
+// of the rolreplication attribute, and Debezium's own login check accepts
+// either.
+func readRoleReady(d Driver, ev Evidence) bool {
+	return ev.Role.Exists && ev.Role.CanLogin && (ev.Role.Replication || ev.Role.RDSReplication)
+}
+
+// readRoleFix names what a failing read_role check needs. A role that does not
+// exist is created (source_create_read_role). An existing role cannot be
+// created again and must never be re-passworded (clients.SetupSourceWriter),
+// so it gets no op and an honest ask: ALTER ROLE adds the missing attribute,
+// or GRANT rds_replication on RDS/Aurora.
+func readRoleFix(d Driver, ev Evidence) (fixOp, ask string) {
+	if ev.Role.Exists {
+		return "", "The role exists but lacks LOGIN or REPLICATION: no setup op changes an existing role (it is never re-passworded). Run ALTER ROLE " +
+			quoteRoleOrName(d.Role) + " LOGIN REPLICATION, or on RDS/Aurora GRANT rds_replication TO " + quoteRoleOrName(d.Role) + ", then re-read."
+	}
+	return opCreateReadRole, ""
+}
+
+// quoteRoleOrName quotes role for the message when it is a valid identifier
+// (the driver validated it already) and falls back to the clipped name.
+func quoteRoleOrName(role string) string {
+	if q, err := quoteRole(role); err == nil {
+		return q
+	}
+	return clipName(role)
 }
 
 // roleSelectsAll reports whether the role has SELECT on every source table.

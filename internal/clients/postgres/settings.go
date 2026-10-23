@@ -63,11 +63,15 @@ type TableReplication struct {
 // RoleInfo is a source role's login/replication rights and SELECT privilege
 // per table.
 type RoleInfo struct {
-	Role        string          `json:"role"`
-	Exists      bool            `json:"exists"`
-	CanLogin    bool            `json:"can_login"`
-	Replication bool            `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and CLIENT
-	Selectable  map[string]bool `json:"selectable"`  // table -> SELECT
+	Role        string `json:"role"`
+	Exists      bool   `json:"exists"`
+	CanLogin    bool   `json:"can_login"`
+	Replication bool   `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and CLIENT
+	// RDSReplication is membership in rds_replication. RDS/Aurora grants a
+	// connector role its replication rights that way instead of the
+	// rolreplication attribute, and Debezium's own login check accepts either.
+	RDSReplication bool            `json:"rds_replication,omitempty"`
+	Selectable     map[string]bool `json:"selectable"` // table -> SELECT
 }
 
 // DBSession is one session that can hold back logical replication. Query is
@@ -250,8 +254,17 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 	defer cancel()
 
 	info := RoleInfo{Role: role, Selectable: make(map[string]bool, len(tables))}
-	err = d.queryRow(ctx, `SELECT rolcanlogin, rolreplication FROM pg_roles WHERE rolname = $1`, role).
-		Scan(&info.CanLogin, &info.Replication)
+	// The CASE guards pg_has_role: on a server without the rds_replication
+	// role (any stock Postgres) pg_has_role would raise "role does not exist",
+	// and CASE is the one place Postgres promises not to evaluate the branch
+	// it does not need.
+	err = d.queryRow(ctx, `
+		SELECT r.rolcanlogin, r.rolreplication,
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles rr WHERE rr.rolname = 'rds_replication')
+		            THEN pg_has_role(r.oid, 'rds_replication', 'MEMBER')
+		            ELSE false END
+		FROM pg_roles r WHERE r.rolname = $1`, role).
+		Scan(&info.CanLogin, &info.Replication, &info.RDSReplication)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// A role that does not exist: not an error, and no table can be read.

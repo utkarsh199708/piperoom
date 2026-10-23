@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"piperoom/internal/actions/pgactions"
@@ -109,7 +110,9 @@ func TestChecksPassAndFail(t *testing.T) {
 		}, opSetReplicaIdentity, plan.TierT2},
 		{"table missing from the read", CheckReplicaIdentity, func(f *fakeReader) { f.tables = nil }, opSetReplicaIdentity, plan.TierT2},
 		{"role missing", CheckReadRole, func(f *fakeReader) { f.role = pgclient.RoleInfo{Role: "piperoom_ro"} }, opCreateReadRole, plan.TierT2},
-		{"role cannot replicate", CheckReadRole, func(f *fakeReader) { f.role.Replication = false }, opCreateReadRole, plan.TierT2},
+		// An existing role is never re-passworded: the create op cannot fix it,
+		// so the check carries an ask instead (TestReadRoleFix...).
+		{"role cannot replicate", CheckReadRole, func(f *fakeReader) { f.role.Replication = false }, "", plan.TierT2},
 		{"role cannot select", CheckReadRoleGrants, func(f *fakeReader) { f.role.Selectable = map[string]bool{} }, opGrantSelect, plan.TierT2},
 		{"rds logical replication off", CheckRDSParameterGroup, func(f *fakeReader) {
 			f.settings = append(f.settings, pgclient.DBSetting{Name: "rds.logical_replication", Value: "0"})
@@ -130,10 +133,11 @@ func TestChecksPassAndFail(t *testing.T) {
 			if r.Err != nil {
 				t.Fatalf("%s: read error: %v", tc.id, r.Err)
 			}
-			if r.Check.FixOp != tc.fix || r.Check.TierFloor != tc.tier {
-				t.Fatalf("%s fix = %q/%q, want %q/%q", tc.id, r.Check.FixOp, r.Check.TierFloor, tc.fix, tc.tier)
+			fixOp, ask := r.Check.Fix(testDriver(), r.Evidence)
+			if fixOp != tc.fix || r.Check.TierFloor != tc.tier {
+				t.Fatalf("%s fix = %q/%q, want %q/%q", tc.id, fixOp, r.Check.TierFloor, tc.fix, tc.tier)
 			}
-			if tc.fix == "" && r.Check.FixAsk == "" {
+			if fixOp == "" && ask == "" {
 				t.Fatalf("%s names no fix and no ask", tc.id)
 			}
 		})
@@ -277,5 +281,144 @@ func TestTierFollowsTheTargetClass(t *testing.T) {
 	}
 	if _, err := c.Tier("nonsense"); err == nil {
 		t.Fatal("Tier accepted an unknown class")
+	}
+}
+
+// TestReplicaIdentity pins the predicate per identity mode: only FULL, a
+// USING INDEX identity and DEFAULT with a primary key carry enough key data
+// for UPDATE/DELETE to be published. NOTHING ignores the primary key, and
+// DEFAULT without a key publishes nothing, so both must fail even on a keyed
+// table.
+func TestReplicaIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		ident string
+		pk    bool
+		ok    bool
+	}{
+		{"full without a key", "full", false, true},
+		{"full with a key", "full", true, true},
+		{"default without a key", "default", false, false},
+		{"default with a key", "default", true, true},
+		{"index without a key", "index", false, true},
+		{"index with a key", "index", true, true},
+		{"nothing with a key", "nothing", true, false},
+		{"nothing without a key", "nothing", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := Evidence{Tables: []pgclient.TableReplication{{
+				Table: "public.orders", HasPrimaryKey: tt.pk, ReplicaIdentity: tt.ident,
+			}}}
+			if got := replicaIdentityReady(testDriver(), ev); got != tt.ok {
+				t.Fatalf("%s/pk=%v = %v, want %v", tt.ident, tt.pk, got, tt.ok)
+			}
+		})
+	}
+
+	// Through Run, a keyed table with NOTHING fails on the check and names its
+	// fix.
+	f := readyReader()
+	f.tables[0] = pgclient.TableReplication{Table: "public.orders", HasPrimaryKey: true, ReplicaIdentity: "nothing"}
+	results, err := testDriver().Run(context.Background(), f)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	r := resultOf(t, results, CheckReplicaIdentity)
+	if r.OK || r.Err != nil {
+		t.Fatalf("PK + NOTHING: %+v", r)
+	}
+	if op, _ := r.Check.Fix(testDriver(), r.Evidence); op != opSetReplicaIdentity {
+		t.Fatalf("fix = %q, want %q", op, opSetReplicaIdentity)
+	}
+}
+
+// TestReadRoleAcceptsRDSReplication: on RDS/Aurora replication comes from
+// membership in rds_replication, not the rolreplication attribute, and
+// Debezium accepts either.
+func TestReadRoleAcceptsRDSReplication(t *testing.T) {
+	f := readyReader()
+	f.role.Replication = false
+	f.role.RDSReplication = true
+	results, err := testDriver().Run(context.Background(), f)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r := resultOf(t, results, CheckReadRole); !r.OK {
+		t.Fatalf("rds_replication membership failed the read_role check: %+v", r)
+	}
+}
+
+// TestReadRoleFixDistinguishesMissingFromAttributes: a missing role is
+// created; an existing role with missing attributes cannot be created again
+// (it is never re-passworded), so it gets an honest ask and no op.
+func TestReadRoleFixDistinguishesMissingFromAttributes(t *testing.T) {
+	check := Check{}
+	for _, c := range testDriver().Checks() {
+		if c.ID == CheckReadRole {
+			check = c
+		}
+	}
+	if check.ID == "" {
+		t.Fatal("no read_role check")
+	}
+	missing := pgclient.RoleInfo{Role: "piperoom_ro"}
+	if op, ask := check.Fix(testDriver(), Evidence{Role: missing}); op != opCreateReadRole || ask != "" {
+		t.Fatalf("missing role: fix = %q, ask %q; want %q", op, ask, opCreateReadRole)
+	}
+	exists := pgclient.RoleInfo{Role: "piperoom_ro", Exists: true, CanLogin: true}
+	op, ask := check.Fix(testDriver(), Evidence{Role: exists})
+	if op != "" {
+		t.Fatalf("existing role: fix = %q, want no op (never re-passworded)", op)
+	}
+	for _, want := range []string{"ALTER ROLE", "LOGIN REPLICATION", "rds_replication", `"piperoom_ro"`} {
+		if !strings.Contains(ask, want) {
+			t.Fatalf("ask %q does not mention %q", ask, want)
+		}
+	}
+}
+
+// TestTierRoutesThroughTheGuard: Tier never offers a fix the guard table
+// forbids on the target's class. A production slot drop is plan.ErrGuard,
+// while an allow-listed ALTER SYSTEM on production stays a T3 (the guard row's
+// exception).
+func TestTierRoutesThroughTheGuard(t *testing.T) {
+	for _, c := range testDriver().Checks() {
+		if c.ID == CheckReplicationSlot {
+			if _, err := c.Tier(plan.ClassProduction); !errors.Is(err, plan.ErrGuard) {
+				t.Fatalf("slot drop on production: %v, want plan.ErrGuard", err)
+			}
+			if got, err := c.Tier(plan.ClassShared); err != nil || got != plan.TierT2 {
+				t.Fatalf("slot drop on shared: %q, %v; want %q", got, err, plan.TierT2)
+			}
+		}
+		if c.ID == CheckWALLevel {
+			if got, err := c.Tier(plan.ClassProduction); err != nil || got != plan.TierT3 {
+				t.Fatalf("wal_level on production: %q, %v; want T3 (allow-listed)", got, err)
+			}
+		}
+	}
+}
+
+// TestPublicationChecksSkipWhenTheRoleIsMissing: the publication read names
+// the connector's role and cannot answer for one that does not exist, so the
+// checks report a verdict with a note instead of a read error.
+func TestPublicationChecksSkipWhenTheRoleIsMissing(t *testing.T) {
+	f := readyReader()
+	f.role = pgclient.RoleInfo{Role: "piperoom_ro"}
+	results, err := testDriver().Run(context.Background(), f)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, id := range []string{CheckPublication, CheckPublicationTables} {
+		r := resultOf(t, results, id)
+		if r.OK || r.Err != nil || r.Note == "" {
+			t.Fatalf("%s with a missing role: %+v, want a note and no error", id, r)
+		}
+	}
+	for _, call := range f.calls {
+		if call == "publication" {
+			t.Fatalf("the publication read ran for a missing role: %v", f.calls)
+		}
 	}
 }
