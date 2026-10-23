@@ -29,7 +29,7 @@ func esParams(pid int64, started time.Time, older ...int) json.RawMessage {
 }
 
 func TestEndSessionValidate(t *testing.T) {
-	_, src, w, a := esFixture()
+	conn, src, w, a := esFixture()
 	if err := a.Validate(scopedCtx(), esParams(4242, testStart)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -48,6 +48,13 @@ func TestEndSessionValidate(t *testing.T) {
 	if err := a.Validate(scopedCtx(), esParams(77, testStart)); err == nil || !strings.Contains(err.Error(), "connector \"pg-orders\"'s own database.user") {
 		t.Fatalf("connector's own session = %v", err)
 	}
+	// Postgres folds unquoted role names to lowercase: database.user=Debezium
+	// shows as usename debezium, and the guard must still hold.
+	conn.cfg["pg-orders"]["database.user"] = "Debezium"
+	if err := a.Validate(scopedCtx(), esParams(77, testStart)); err == nil || !strings.Contains(err.Error(), "own database.user") {
+		t.Fatalf("case-folded connector user = %v, want the own-session refusal", err)
+	}
+	conn.cfg["pg-orders"]["database.user"] = "debezium"
 	src.err = errors.New("db down")
 	if err := a.Validate(scopedCtx(), esParams(4242, testStart)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Fatalf("reader error = %v", err)

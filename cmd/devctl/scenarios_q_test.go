@@ -72,8 +72,10 @@ func TestQScenariosRegistered(t *testing.T) {
 	}
 }
 
-// dev/owners.q2.yaml loads, carries the slot_wal thresholds the break and
-// fix use, and lists the heartbeat table.
+// dev/owners.q2.yaml loads, carries the slot_wal thresholds the break and fix
+// use, and does NOT list the heartbeat table: source_create_heartbeat_table
+// refuses a heartbeat table that is one of the pipeline's source_tables, so
+// listing it would make the scenario's documented fix action unreachable.
 func TestOwnersQ2File(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {
@@ -91,8 +93,11 @@ func TestOwnersQ2File(t *testing.T) {
 	if !sw.Enabled || sw.FireBytes != idleWALFire || sw.ClearBytes != idleWALClear || sw.For != 30*time.Second {
 		t.Errorf("slot_wal = %+v, want enabled, fire %d, clear %d, for 30s", sw, idleWALFire, idleWALClear)
 	}
-	if !slices.Equal(p.SourceTables, []string{"public.orders", heartbeatTable}) {
-		t.Errorf("source_tables = %v", p.SourceTables)
+	if !slices.Equal(p.SourceTables, []string{"public.orders"}) {
+		t.Errorf("source_tables = %v, want [public.orders] (the heartbeat table must not be listed)", p.SourceTables)
+	}
+	if slices.Contains(p.SourceTables, heartbeatTable) {
+		t.Errorf("source_tables lists %s, which source_create_heartbeat_table refuses", heartbeatTable)
 	}
 }
 
@@ -119,7 +124,6 @@ func TestOwnersQ2MatchesBaseline(t *testing.T) {
 	if _, ok := bp["watch"].(map[string]any)["signals"].(map[string]any)["slot_wal"]; ok {
 		t.Errorf("baseline sets slot_wal: the small threshold belongs in %s only", q2OwnersFile)
 	}
-	qp["source_tables"] = []any{"public.orders"}
 	delete(qp["watch"].(map[string]any)["signals"].(map[string]any), "slot_wal")
 	if fmt.Sprint(base) != fmt.Sprint(q2) {
 		t.Errorf("%s drifted from dev/owners.yaml beyond the Q2 additions:\nbase %v\nq2   %v", q2OwnersFile, base, q2)

@@ -240,7 +240,10 @@ func checkSource(raw string) error {
 	if err != nil || u.Scheme != "https" || !slices.Contains(allowedHosts, u.Host) || u.User != nil {
 		return fmt.Errorf("source %q must be https on one of %s", raw, strings.Join(allowedHosts, ", "))
 	}
-	if u.Host == "github.com" && !strings.HasPrefix(u.Path, "/debezium/") {
+	// path.Clean resolves "." and ".." segments first: a browser resolves
+	// github.com/debezium/../attacker to github.com/attacker, so the literal
+	// prefix alone is not the URL the reader lands on.
+	if u.Host == "github.com" && !strings.HasPrefix(path.Clean("/"+strings.TrimPrefix(u.Path, "/")), "/debezium/") {
 		return fmt.Errorf("source %q: on github.com only github.com/debezium/... is allowed", raw)
 	}
 	return nil

@@ -89,10 +89,22 @@ type issueHit struct {
 	Affects string `json:"affects"`
 }
 
-// runningFor finds the version given for a component. A connector entry
-// (debezium-postgres) also takes a plain "debezium" version, and a
-// "debezium" entry takes any connector's version.
+// runningFor finds the version to judge a component's range against. A
+// connector entry (debezium-postgres) also takes a plain "debezium" version,
+// and a "debezium" entry takes a connector's version when every connector
+// given runs the same one (judging mysql's version against a postgres
+// symptom, or the other way round, would be a confident guess). A version
+// this index cannot compare (a Confluent Platform Kafka build) reports
+// nothing, so the hit stays "unknown" instead of wrong.
 func runningFor(comp string, vs map[string]string) (string, bool) {
+	v, ok := runningRaw(comp, vs)
+	if !ok || confluentKafka(v) {
+		return "", false
+	}
+	return v, true
+}
+
+func runningRaw(comp string, vs map[string]string) (string, bool) {
 	if v, ok := vs[comp]; ok {
 		return v, true
 	}
@@ -101,18 +113,36 @@ func runningFor(comp string, vs map[string]string) (string, bool) {
 		return v, ok
 	}
 	if comp == "debezium" {
-		keys := make([]string, 0, len(vs))
-		for k := range vs {
-			if strings.HasPrefix(k, "debezium-") {
-				keys = append(keys, k)
+		var found string
+		for k, v := range vs {
+			if !strings.HasPrefix(k, "debezium-") {
+				continue
 			}
+			if found != "" && found != v {
+				return "", false // connectors on different versions: ambiguous
+			}
+			found = v
 		}
-		if len(keys) > 0 {
-			slices.Sort(keys) // deterministic when several connectors are given
-			return vs[keys[0]], true
+		if found != "" {
+			return found, true
 		}
 	}
 	return "", false
+}
+
+// confluentKafka reports whether v is a Confluent Platform build ("7.5.0-ccs",
+// "7.5.0-ce"). CP numbering is not Apache Kafka numbering (CP 7.5 ships Kafka
+// 3.5), so holding it against the index's Apache ranges would report
+// "affected"/"not affected" with confidence and be wrong; such a version is
+// treated as not comparable.
+func confluentKafka(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	for _, suf := range []string{"-ccs", ".ccs", "-ce", ".ce"} {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 // search ranks matching entries: those whose range holds the running version

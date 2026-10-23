@@ -719,8 +719,8 @@ steps are unit-tested against a fake stack (`go test ./cmd/devctl -run 'NoReplic
 but **nothing in §20-§23 has been observed yet**. Whoever runs them first: replace the "Expected" blocks with what
 you saw, as in §1-§7. Every object a break creates is named `devctl_*` / `devctl-*`; every fix removes it and is
 safe to run twice. Only `idle-wal-growth` needs another owners file: **`OWNERS_FILE=dev/owners.q2.yaml`**
-(`dev/owners.yaml` plus `slot_wal: {fire: 32MiB, clear: 16MiB, for: 30s}` and `public.devctl_heartbeat` in
-`source_tables`; `TestOwnersQ2MatchesBaseline` keeps the two in step).
+(`dev/owners.yaml` plus `slot_wal: {fire: 32MiB, clear: 16MiB, for: 30s}`;
+`TestOwnersQ2MatchesBaseline` keeps the two in step).
 
 | Scenario | How the room opens | Q2a tool that shows it | Action that ends it |
 |---|---|---|---|
@@ -814,9 +814,12 @@ source_settings   wal_level=logical, max_replication_slots=10, max_wal_senders=1
 watcher     slot_wal after 30 s (fire 32 MiB on dev/owners.q2.yaml)
 ```
 
-**Fix:** `source_create_heartbeat_table`, with its follow-up steps in the same proposal (`pg_add_publication_table`
-when the publication is filtered, and `heartbeat.interval.ms` / `heartbeat.action.query` through the config
-action). `devctl fix` creates `public.devctl_heartbeat (id integer PRIMARY KEY, ts timestamptz)`, re-registers the
+**Fix:** `source_create_heartbeat_table`, then `heartbeat.interval.ms` / `heartbeat.action.query` through the
+config action. The dev publication is filtered, so the table must also join `dbz_publication`:
+`pg_add_publication_table` accepts only the pipeline's `source_tables`, and the heartbeat action refuses a table
+listed there, so in dev that step is `devctl fix`'s own `ALTER PUBLICATION` (in production, the table is added to
+`owners.yaml` after it is created, and `pg_add_publication_table` runs then). `devctl fix` creates
+`public.devctl_heartbeat (id integer PRIMARY KEY, ts timestamptz NOT NULL DEFAULT now())`, re-registers the
 connector with the table in `table.include.list`, `heartbeat.interval.ms=5000` and `heartbeat.action.query` (an
 upsert of row 1), adds the table to `dbz_publication` if Debezium did not, and waits (up to 3 minutes: Connect
 commits offsets every 60 s) until retained WAL is below 16 MiB (`slot_wal.clear`). Then the baseline: the

@@ -18,8 +18,9 @@ import (
 
 // q2OwnersFile is the owners file idle-wal-growth needs: dev/owners.yaml plus
 // a small slot_wal threshold (the baseline fires at 1 GiB, which a dev disk
-// never reaches) and the heartbeat table in source_tables (the Q2c heartbeat
-// action and pg_add_publication_table refuse a table outside it).
+// never reaches). The heartbeat table is not in its source_tables: the Q2c
+// heartbeat action refuses a heartbeat table listed there, and devctl fix adds
+// the table to the publication itself.
 const q2OwnersFile = "dev/owners.q2.yaml"
 
 const (
@@ -78,7 +79,7 @@ const (
 	// About 50 MB of rows under the TOAST threshold, so none is compressed.
 	sqlFillWAL         = "INSERT INTO devctl_wal_filler (pad) SELECT repeat(md5(g::text), 32) FROM generate_series(1, 48000) g"
 	sqlDropBatchDB     = "DROP DATABASE IF EXISTS devctl_batch WITH (FORCE)"
-	sqlCreateHeartbeat = "CREATE TABLE IF NOT EXISTS public.devctl_heartbeat (id integer PRIMARY KEY, ts timestamptz NOT NULL)"
+	sqlCreateHeartbeat = "CREATE TABLE IF NOT EXISTS public.devctl_heartbeat (id integer PRIMARY KEY, ts timestamptz NOT NULL DEFAULT now())"
 	sqlHeartbeatExists = "SELECT to_regclass('public.devctl_heartbeat') IS NOT NULL"
 	sqlHeartbeatInPub  = "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'dbz_publication' AND schemaname = 'public' AND tablename = 'devctl_heartbeat'"
 	sqlPubAddHeartbeat = "ALTER PUBLICATION dbz_publication ADD TABLE public.devctl_heartbeat"

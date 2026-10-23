@@ -178,7 +178,9 @@ func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, connUs
 			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d now names a session that started %s, not %s: %w: %w",
 				EndSessionName, p.PID, s.StartedAt.UTC().Format(time.RFC3339Nano), p.StartedAt.UTC().Format(time.RFC3339Nano), errRefused, postgres.ErrSessionChanged)
 		}
-		if connUser != "" && s.User == connUser {
+		// EqualFold: Postgres folds an unquoted role name to lowercase, so
+		// config database.user=Debezium shows as usename debezium.
+		if connUser != "" && strings.EqualFold(s.User, connUser) {
 			return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d is a session of connector %q's own database.user; ending it would break the connector: %w", EndSessionName, p.PID, p.Connector, errRefused)
 		}
 		return s, nil

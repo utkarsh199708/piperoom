@@ -7,10 +7,11 @@ pipelines:
   - id: orders
     title: Orders CDC
     topic_prefix: pg # Debezium topic.prefix of pg-orders-connector (topics span pg.public.orders)
-    # public.devctl_heartbeat exists only while `devctl fix idle-wal-growth` runs; it is
-    # listed so source_create_heartbeat_table and pg_add_publication_table accept it.
-    # Keep orders first.
-    source_tables: [public.orders, public.devctl_heartbeat]
+    # public.devctl_heartbeat (the table `devctl fix idle-wal-growth` creates) is NOT
+    # listed here: source_create_heartbeat_table refuses a heartbeat table that is one
+    # of the pipeline's source_tables, and devctl fix adds the table to dbz_publication
+    # itself, so pg_add_publication_table is not on the dev fix path.
+    source_tables: [public.orders]
     connectors: [pg-orders-connector]
     consumer_groups: [order-sync]
     sink_tables: [analytics.orders]

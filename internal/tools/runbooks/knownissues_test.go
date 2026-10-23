@@ -188,6 +188,11 @@ func TestVersionCompareAndRange(t *testing.T) {
 		{"<10", "10.1", false},
 		{"=3.5.0", "3.5", true},
 		{">3.5.0 <=3.6.0", "3.6.0", true},
+		// Exactly at a lower bound: >= holds, > does not.
+		{">=2.0.0.Alpha1", "2.0.0.Alpha1", true},
+		{">=2.1.0.Final", "2.1.0.Final", true},
+		{">3.5.0 <=3.6.0", "3.5.0", false},
+		{">=2.0.0.Alpha2", "2.0.0.Alpha1", false},
 	}
 	for _, h := range holds {
 		r, err := parseRange(h.rng)
@@ -281,6 +286,17 @@ func TestLoadKnownIssuesRejects(t *testing.T) {
 		}
 		if err := checkSource("https://user@github.com/debezium/dbz"); err == nil {
 			t.Error("userinfo accepted")
+		}
+		// A browser resolves dot-dot segments, so the prefix must be checked
+		// on the cleaned path.
+		for _, u := range []string{
+			"https://github.com/debezium/../attacker/repo",
+			"https://github.com/debezium/./../attacker",
+			"https://github.com/./debezium-fake/x",
+		} {
+			if err := checkSource(u); err == nil {
+				t.Errorf("%s accepted: the cleaned path escapes /debezium/", u)
+			}
 		}
 	})
 }
@@ -486,5 +502,88 @@ func TestRegisterServesKnownIssues(t *testing.T) {
 	}
 	if len(res.Summary) > tools.MaxSummaryBytes {
 		t.Fatalf("summary %d bytes", len(res.Summary))
+	}
+}
+
+// starVsBounded: a "*" entry holds every version, so only the bounded entry
+// may take the version boost; without bounded() in the boost condition the
+// "*" entry would outrank every release-specific match.
+const starVsBounded = `- id: any-version
+  title: zebra stripes zebra stripes
+  component: kafka
+  theme: db-limit
+  affected: "*"
+  symptoms: [zebra, stripes]
+  workaround: Live with it.
+  source: https://kafka.apache.org/documentation/
+- id: bounded-bug
+  title: zebra stripes
+  component: kafka
+  theme: fixed-bug
+  affected: "<2.0"
+  fixed_in: "2.0"
+  symptoms: [zebra, stripes]
+  workaround: Upgrade.
+  source: https://kafka.apache.org/documentation/
+`
+
+func TestStarRangeDoesNotTakeVersionBoost(t *testing.T) {
+	ix, err := LoadKnownIssues(fstest.MapFS{"x.yaml": {Data: []byte(starVsBounded)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := NewWithKnownIssues(nil, ix)
+	ki := issuesOf(t, run(t, tl, map[string]any{"query": "zebra stripes", "max_results": 5,
+		"versions": []map[string]string{{"component": "kafka", "version": "1.5.0"}}}))
+	if len(ki) != 2 || ki[0].ID != "bounded-bug" || ki[0].Affects != "yes" {
+		t.Fatalf("the bounded affected entry must lead: %+v", ki)
+	}
+	if ki[1].ID != "any-version" || ki[1].Affects != "any" {
+		t.Fatalf("the * entry ranks by score only: %+v", ki)
+	}
+}
+
+// TestRunningForNonComparable: a Confluent Platform Kafka build and connectors
+// on different Debezium versions give no verdict (Affects stays unknown)
+// instead of a confident wrong one.
+func TestRunningForNonComparable(t *testing.T) {
+	if _, ok := runningFor("kafka", map[string]string{"kafka": "7.4.0-ccs"}); ok {
+		t.Error("a Confluent Platform build must not be compared against Apache Kafka ranges")
+	}
+	if _, ok := runningFor("connect", map[string]string{"connect": "7.5.0-ce"}); ok {
+		t.Error("a Confluent ce build must not be compared")
+	}
+	two := map[string]string{"debezium-mysql": "2.1.4.Final", "debezium-postgres": "3.0.0.Final"}
+	if _, ok := runningFor("debezium", two); ok {
+		t.Error("connectors on different versions must not pick one for a plain debezium entry")
+	}
+	same := map[string]string{"debezium-mysql": "2.1.4.Final", "debezium-postgres": "2.1.4.Final"}
+	if v, ok := runningFor("debezium", same); !ok || v != "2.1.4.Final" {
+		t.Errorf("connectors on one version: got %q, %v", v, ok)
+	}
+	if v, ok := runningFor("kafka", map[string]string{"kafka": "3.6.1"}); !ok || v != "3.6.1" {
+		t.Errorf("an Apache build still compares: got %q, %v", v, ok)
+	}
+}
+
+// TestLookupConfluentKafkaUnknown: end to end, a ccs version yields Affects
+// "unknown" and the summary makes no affected/not-affected claim.
+func TestLookupConfluentKafkaUnknown(t *testing.T) {
+	ix, err := LoadKnownIssues(fstest.MapFS{"x.yaml": {Data: []byte(rankIssues)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := NewWithKnownIssues(nil, ix)
+	res := run(t, tl, map[string]any{"query": "zebra stripes", "max_results": 5,
+		"versions": []map[string]string{{"component": "kafka", "version": "7.4.0-ccs"}}})
+	for _, h := range issuesOf(t, res) {
+		if h.Affects != "unknown" || h.Running != "" {
+			t.Errorf("%s: affects %q running %q, want unknown with no running version", h.ID, h.Affects, h.Running)
+		}
+	}
+	for _, banned := range []string{"is affected", "is not affected"} {
+		if strings.Contains(res.Summary, banned) {
+			t.Errorf("summary claims %q for a Confluent build:\n%s", banned, res.Summary)
+		}
 	}
 }

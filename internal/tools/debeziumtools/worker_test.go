@@ -278,3 +278,35 @@ func TestWorkerMetricsErrorPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkerMetricsDuplicateSamplesKeepFirst: a duplicate exposition line (or
+// a 1.x-stripped alias next to the full name) does not overwrite the first
+// sample, for worker, rebalance, connector and per-task metrics alike.
+func TestWorkerMetricsDuplicateSamplesKeepFirst(t *testing.T) {
+	const conn = "pg-orders-connector"
+	samples := []prom.Sample{
+		{Name: "kafka_connect_connect_worker_metrics_task_startup_failure_total", Value: 1},
+		{Name: "kafka_connect_connect_worker_metrics_task_startup_failure_total", Value: 7},
+		// The stripped 1.x alias of the same family maps to the same key.
+		{Name: "kafka_connect_connect_worker_metrics_task_startup_failure", Value: 9},
+		{Name: "kafka_connect_connect_worker_rebalance_metrics_completed_rebalances_total", Value: 3},
+		{Name: "kafka_connect_connect_worker_rebalance_metrics_completed_rebalances_total", Value: 8},
+		{Name: "kafka_connect_connect_worker_metrics_connector_failed_task_count", Labels: map[string]string{"connector": conn}, Value: 1},
+		{Name: "kafka_connect_connect_worker_metrics_connector_failed_task_count", Labels: map[string]string{"connector": conn}, Value: 5},
+		{Name: "kafka_connect_task_error_metrics_total_records_skipped", Labels: map[string]string{"connector": conn, "task": "0"}, Value: 12},
+		{Name: "kafka_connect_task_error_metrics_total_records_skipped", Labels: map[string]string{"connector": conn, "task": "0"}, Value: 99},
+	}
+	rep := collectWorker(samples, DefaultWorkerMetricsPrefix, conn)
+	if got := rep.Worker["task_startup_failure_total"]; got != 1 {
+		t.Errorf("worker duplicate overwrote the first sample: %v", got)
+	}
+	if got := rep.Rebalance["completed_rebalances_total"]; got != 3 {
+		t.Errorf("rebalance duplicate overwrote the first sample: %v", got)
+	}
+	if got := rep.ConnectorTasks["connector_failed_task_count"]; got != 1 {
+		t.Errorf("connector duplicate overwrote the first sample: %v", got)
+	}
+	if got := rep.Tasks[0]["total_records_skipped"]; got != 12 {
+		t.Errorf("task duplicate overwrote the first sample: %v", got)
+	}
+}

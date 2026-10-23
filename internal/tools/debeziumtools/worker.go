@@ -237,13 +237,10 @@ func collectWorker(samples []prom.Sample, prefix, connector string) WorkerReport
 			if rep.Tasks == nil {
 				rep.Tasks = map[int]map[string]float64{}
 			}
-			if rep.Tasks[id] == nil {
-				if len(rep.Tasks) >= maxWorkerTasks {
-					continue
-				}
-				rep.Tasks[id] = map[string]float64{}
+			if rep.Tasks[id] == nil && len(rep.Tasks) >= maxWorkerTasks {
+				continue
 			}
-			rep.Tasks[id][attr] = s.Value
+			rep.Tasks[id] = put(rep.Tasks[id], attr, s.Value)
 		case fam == famWorker && hasConnector:
 			if label != connector {
 				continue

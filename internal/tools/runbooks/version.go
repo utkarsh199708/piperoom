@@ -31,7 +31,10 @@ var suffixRe = regexp.MustCompile(`^[A-Za-z]+[0-9]*$`)
 
 // parseVersion accepts 1 to 4 dot-separated numbers and an optional suffix
 // after "." or "-". Alpha, Beta, CR (and RC, M for milestone) mark a
-// pre-release; anything else (Final, GA, ccs, ce) is a release.
+// pre-release; anything else (Final, GA, ccs, ce) is a release. A Confluent
+// Platform build parses (so the input is accepted), but the search never
+// holds it against an Apache Kafka range (confluentKafka,
+// knownissues_search.go): CP 7.5 ships Kafka 3.5, not Kafka 7.5.
 func parseVersion(s string) (version, error) {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "v"))
 	if s == "" || len(s) > maxVersionBytes {
