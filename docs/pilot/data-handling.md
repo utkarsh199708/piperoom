@@ -303,6 +303,7 @@ Things to know:
 - **Worker log lines are free text.** `connect_worker_logs` returns what the Connect worker logged about a connector; a
   converter or sink error can echo a record value or a SQL statement. The lines are masked of secrets and scanned, but
   the rest is shown as data. Point `WORKER_LOGS_SELECTOR` at the Connect workers' streams only, and give Loki a read-only token.
+  The token's minimum scope, Loki retention and the JMX exporter rules are in [worker-logs.md](worker-logs.md).
 - **Task logs, run notes, dbt messages and dbt SQL are free text.** `task_log_tail` returns the end
   of a task's log and `dbt_model_sql` a model's compiled SQL; both are masked of secrets and scanned
   for instruction-like text, but their content (an error message, a `SELECT`, a literal value in the
