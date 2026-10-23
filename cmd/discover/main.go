@@ -1,8 +1,8 @@
 // Command discover drafts an owners file from a live cluster. It reads Kafka
 // Connect, Kafka and the Schema Registry (and, with -source-db, the source
-// Postgres) and writes one pipeline per Debezium Postgres source connector for
-// a human to review before copying it into OWNERS_FILE. It never writes to the
-// cluster.
+// Postgres) and writes one pipeline per Debezium Postgres or MySQL source
+// connector (a MySQL one with source_kind: mysql) for a human to review before
+// copying it into OWNERS_FILE. It never writes to the cluster.
 //
 //	go run ./cmd/discover -out owners.draft.yaml
 //
@@ -247,7 +247,7 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 			for _, s := range res.Skipped {
 				fmt.Fprintln(stderr, "skipped: "+red.line(s.Connector+": "+s.Reason))
 			}
-			fmt.Fprintf(stderr, "discover: no Debezium Postgres source connector found; nothing written to %s\n", *writeOwners)
+			fmt.Fprintf(stderr, "discover: no Debezium Postgres or MySQL source connector found; nothing written to %s\n", *writeOwners)
 			return exitError
 		}
 		oc, err := installOwners(*writeOwners, ownersBuf.Bytes(), *force, red.line)
