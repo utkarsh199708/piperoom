@@ -179,6 +179,17 @@ type Config struct {
 	OpenLineageNamespace string // OPENLINEAGE_NAMESPACE: the job namespace, default "piperoom"
 	OpenLineageAPIKey    string // OPENLINEAGE_API_KEY: sent as "Authorization: Bearer <key>"; empty = no header (secret)
 
+	// Q7: the forge of the pull-request fix (docs/design/fix-pr.md §4, §5.6).
+	// FORGE_KIND "" = off: no forge client, no forge tool, no fix-PR action.
+	// ParseForge and ParseFixPRApplyTimeout type them. The App's private key
+	// lives in a file; only its path is here.
+	ForgeKind               string // FORGE_KIND: "" (off, the default) | "github"
+	GitHubAPIURL            string // GITHUB_API_URL: default https://api.github.com; GitHub Enterprise Server: https://<host>/api/v3
+	GitHubAppID             string // GITHUB_APP_ID
+	GitHubAppInstallationID string // GITHUB_APP_INSTALLATION_ID
+	GitHubAppPrivateKeyFile string // GITHUB_APP_PRIVATE_KEY_FILE: path to the App's PEM private key (secret file)
+	FixPRApplyTimeout       string // PIPEROOM_FIXPR_APPLY_TIMEOUT: how long after a merge the agent waits for the change to reach the system; default "2h", 10m to 168h
+
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
 
@@ -431,6 +442,14 @@ func Load() Config {
 		OpenLineageURL:       get("OPENLINEAGE_URL", ""),
 		OpenLineageNamespace: get("OPENLINEAGE_NAMESPACE", DefaultOpenLineageNamespace),
 		OpenLineageAPIKey:    get("OPENLINEAGE_API_KEY", ""),
+
+		// Q7
+		ForgeKind:               get("FORGE_KIND", ""),
+		GitHubAPIURL:            get("GITHUB_API_URL", DefaultGitHubAPIURL),
+		GitHubAppID:             get("GITHUB_APP_ID", ""),
+		GitHubAppInstallationID: get("GITHUB_APP_INSTALLATION_ID", ""),
+		GitHubAppPrivateKeyFile: get("GITHUB_APP_PRIVATE_KEY_FILE", ""),
+		FixPRApplyTimeout:       get("PIPEROOM_FIXPR_APPLY_TIMEOUT", ""),
 
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
 
@@ -1398,6 +1417,127 @@ func validOpenLineageNamespace(ns string) bool {
 		}
 	}
 	return true
+}
+
+// ---- Q7: the forge of the pull-request fix (docs/design/fix-pr.md §5.6) ----
+
+// Forge kinds of FORGE_KIND. (Q7)
+const (
+	ForgeKindOff    = ""
+	ForgeKindGitHub = "github"
+)
+
+// DefaultGitHubAPIURL is GITHUB_API_URL's default: github.com's API. (Q7)
+const DefaultGitHubAPIURL = "https://api.github.com"
+
+// Bounds of PIPEROOM_FIXPR_APPLY_TIMEOUT (docs/design/fix-pr.md §14 D5). (Q7)
+const (
+	DefaultFixPRApplyTimeout = 2 * time.Hour
+	MinFixPRApplyTimeout     = 10 * time.Minute
+	MaxFixPRApplyTimeout     = 168 * time.Hour
+)
+
+// Forge is the parsed forge settings. Zero when FORGE_KIND is "". (Q7)
+type Forge struct {
+	Kind           string
+	APIURL         string // validated, no trailing slash
+	WebHost        string // github.com for api.github.com, else the API URL's host
+	AppID          int64
+	InstallationID int64
+	PrivateKeyFile string
+}
+
+// ParseForge validates the forge settings. FORGE_KIND "" with any GITHUB_APP_*
+// set is an error ("set FORGE_KIND=github"); "github" needs positive integer
+// ids and a key file path; the API URL is https unless the host is loopback
+// (the netsec rule), with no user info, query or fragment. It does not read
+// the key file (wiring does, and refuses a key that is not PEM RSA). (Q7)
+//
+// GITHUB_API_URL alone does not turn anything on: GitHub Actions sets it in
+// every job, so it is read only when FORGE_KIND is github. WebHost is lower
+// case and keeps a port (a GitHub Enterprise Server on :8443 serves its web
+// pages there too); cmd/server compares every owners.yaml repos[].url host
+// with it at start.
+func ParseForge(c Config) (Forge, error) {
+	kind := strings.ToLower(strings.TrimSpace(c.ForgeKind))
+	appID := strings.TrimSpace(c.GitHubAppID)
+	instID := strings.TrimSpace(c.GitHubAppInstallationID)
+	keyFile := strings.TrimSpace(c.GitHubAppPrivateKeyFile)
+	switch kind {
+	case ForgeKindOff:
+		if appID != "" || instID != "" || keyFile != "" {
+			return Forge{}, fmt.Errorf("config: GITHUB_APP_* is set but FORGE_KIND is empty: set FORGE_KIND=github (or unset GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_FILE)")
+		}
+		return Forge{}, nil
+	case ForgeKindGitHub:
+	default:
+		return Forge{}, fmt.Errorf("config: FORGE_KIND=%q: want github, or empty for off", c.ForgeKind)
+	}
+	f := Forge{Kind: kind, PrivateKeyFile: keyFile}
+	var err error
+	if f.AppID, err = positiveID("GITHUB_APP_ID", appID); err != nil {
+		return Forge{}, err
+	}
+	if f.InstallationID, err = positiveID("GITHUB_APP_INSTALLATION_ID", instID); err != nil {
+		return Forge{}, err
+	}
+	if keyFile == "" {
+		return Forge{}, fmt.Errorf("config: GITHUB_APP_PRIVATE_KEY_FILE: required with FORGE_KIND=github (the path of the App's PEM private key)")
+	}
+	raw := strings.TrimSpace(c.GitHubAPIURL)
+	if raw == "" {
+		raw = DefaultGitHubAPIURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.Opaque != "" {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: want an https://host URL such as %s or https://<host>/api/v3", DefaultGitHubAPIURL)
+	}
+	if u.User != nil {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must not carry user info")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must not carry a query or fragment")
+	}
+	if u.Scheme == "http" && !loopbackHost(u.Hostname()) {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must be https (plain http only to a loopback host)")
+	}
+	host := strings.ToLower(u.Host)
+	f.APIURL = u.Scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
+	f.WebHost = host
+	if host == "api.github.com" {
+		f.WebHost = "github.com"
+	}
+	return f, nil
+}
+
+// positiveID parses a GitHub App or installation id: a base-10 integer
+// above zero. The error names the variable.
+func positiveID(name, v string) (int64, error) {
+	if v == "" {
+		return 0, fmt.Errorf("config: %s: required with FORGE_KIND=github", name)
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("config: %s=%q: want a positive integer id", name, v)
+	}
+	return n, nil
+}
+
+// ParseFixPRApplyTimeout: "" = 2h; a Go duration from 10m to 168h; else an
+// error naming the variable. (Q7)
+func ParseFixPRApplyTimeout(c Config) (time.Duration, error) {
+	v := strings.TrimSpace(c.FixPRApplyTimeout)
+	if v == "" {
+		return DefaultFixPRApplyTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_FIXPR_APPLY_TIMEOUT=%q: not a duration like 2h or 90m: %w", v, err)
+	}
+	if d < MinFixPRApplyTimeout || d > MaxFixPRApplyTimeout {
+		return 0, fmt.Errorf("config: PIPEROOM_FIXPR_APPLY_TIMEOUT=%q: want %s to %s", v, MinFixPRApplyTimeout, MaxFixPRApplyTimeout)
+	}
+	return d, nil
 }
 
 // loopbackHost reports whether host is localhost or a loopback IP.

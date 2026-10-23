@@ -27,6 +27,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -1613,12 +1617,13 @@ const (
 	ChangeSourceStatuspage = "statuspage" // a pipeline's owners.yaml vendor_status_url poller (X4a)
 )
 
-// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first then the
-// external ones, as a fresh slice. The room store and the "what changed" tool
-// validate kinds against it, so a new kind is added here once. (X4)
+// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first, then the
+// external ones, then ChangePullRequest (Q7), as a fresh slice. The room
+// store and the "what changed" tool validate kinds against it, so a new kind
+// is added here once. (X4)
 func ChangeKinds() []string {
 	return []string{ChangeDDL, ChangeConnectorConfig, ChangeConnectorState, ChangeSchemaVersion,
-		ChangeDeploy, ChangeMigration, ChangeVendorIncident}
+		ChangeDeploy, ChangeMigration, ChangeVendorIncident, ChangePullRequest}
 }
 
 // IsExternalChange reports whether kind is a change made outside the
@@ -2046,3 +2051,289 @@ type ConfigVersionReader interface {
 	ConfigVersions(ctx context.Context, pipelineID, connector string, limit int) ([]ConnectorConfigVersion, error)
 	ConfigVersion(ctx context.Context, pipelineID, connector, hash string) (ConnectorConfigVersion, error)
 }
+
+// ---- Q7: forge (the pull-request fix, docs/design/fix-pr.md) ----
+//
+// New interfaces and types only, so every existing fake, the eval replay and
+// the demo compile unchanged. The PR state types the room log needs are
+// defined in package events and mirrored there, not aliased: this package
+// imports nothing from piperoom/...
+
+// RepoRef is one repository of a pipeline's owners.yaml repos: block, resolved
+// by the caller (action, tool, room) from the repo id. The model only ever
+// names the id; Owner, Name and Base come from owners.yaml. (Q7)
+type RepoRef struct {
+	ID    string `json:"id"`    // owners.yaml repos[].id
+	Owner string `json:"owner"` // from repos[].url: https://<host>/<owner>/<name>
+	Name  string `json:"name"`
+	Base  string `json:"base"` // repos[].base, the branch PRs target
+}
+
+// RepoInfo is what a fix PR needs to know about the repository itself. (Q7)
+type RepoInfo struct {
+	Visibility    string `json:"visibility"` // public | private | internal
+	Archived      bool   `json:"archived"`
+	DefaultBranch string `json:"default_branch"`
+}
+
+// RepoFile is one regular file read at a commit. Content is untrusted text,
+// at most MaxRepoFileBytes, never logged and never put in an event. (Q7)
+type RepoFile struct {
+	Path    string `json:"path"`
+	SHA     string `json:"sha"`      // the commit the file was read at; never a branch name
+	BlobSHA string `json:"blob_sha"` // git blob id; equal blob ids mean equal content
+	Size    int    `json:"size"`
+	Content []byte `json:"-"`
+}
+
+// RepoEntry is one path of a tree listing. (Q7)
+type RepoEntry struct {
+	Path    string `json:"path"`
+	BlobSHA string `json:"blob_sha"`
+	Size    int    `json:"size"`
+}
+
+// ForgeReader is optional and read-only: built whenever a forge is configured,
+// write mode on or off. Every method takes a 10 s deadline from the caller and
+// scopes its token to repo alone (docs/design/fix-pr.md §4.2). (Q7)
+type ForgeReader interface {
+	// RepoInfo reads visibility, archived and the default branch.
+	RepoInfo(ctx context.Context, repo RepoRef) (RepoInfo, error)
+	// BaseHead returns the commit the base branch points at now.
+	BaseHead(ctx context.Context, repo RepoRef) (sha string, err error)
+	// File reads one regular file at commit sha. ErrNotFound when absent;
+	// ErrNotRegularFile for a directory, symlink or submodule;
+	// ErrRepoFileTooLarge above MaxRepoFileBytes (Size is still set).
+	File(ctx context.Context, repo RepoRef, sha, path string) (RepoFile, error)
+	// ListFiles lists the regular files of the tree at commit sha, at most
+	// MaxRepoListEntries; truncated reports a cut listing.
+	ListFiles(ctx context.Context, repo RepoRef, sha string) (entries []RepoEntry, truncated bool, err error)
+	// PullRequest reads one pull request with its head checks. ErrNotFound when absent.
+	PullRequest(ctx context.Context, repo RepoRef, number int) (PullRequest, error)
+}
+
+// ForgeWriter is built only with write mode on and a forge configured. It
+// writes one new branch and opens one pull request; it never pushes to an
+// existing branch, never merges, never deletes a ref it did not create in
+// the same call. (Q7)
+type ForgeWriter interface {
+	// OpenPullRequest commits req.Files on top of req.BaseSHA to the new
+	// branch req.Branch and opens a pull request into repo.Base.
+	//   - ErrBaseMoved: a file of req.Files differs between req.BaseSHA and
+	//     the base head now (a file that did not exist at BaseSHA exists now,
+	//     or the reverse). Nothing is written.
+	//   - A branch req.Branch that already holds exactly this change (same
+	//     parent, same tree) is reused, and an open pull request on it is
+	//     returned instead of a new one, so a retried call is idempotent;
+	//     a branch with other content is ErrBranchExists.
+	OpenPullRequest(ctx context.Context, repo RepoRef, req PullRequestRequest) (PullRequest, error)
+}
+
+// PullRequestRequest is one fix PR. Files hold the whole new content of each
+// file (mode 100644 always); the action computes them from the approved
+// edits (docs/design/fix-pr.md §6.1). (Q7)
+type PullRequestRequest struct {
+	BaseSHA       string
+	Branch        string // FixBranch(...)
+	Title         string
+	Body          string
+	CommitMessage string
+	Draft         bool
+	Files         []FileChange
+}
+
+// FileChange is one file of a fix PR. Content is never logged. (Q7)
+type FileChange struct {
+	Path    string
+	Content []byte
+}
+
+// PullRequest is the state of one pull request. Checks.Failed holds check
+// names written by the repository's CI: untrusted, redacted, cut. (Q7)
+type PullRequest struct {
+	Repo     string            `json:"repo"` // RepoRef.ID
+	Number   int               `json:"number"`
+	URL      string            `json:"url"`   // the html URL on the forge's web host
+	State    string            `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
+	HeadRef  string            `json:"head_ref"`
+	HeadSHA  string            `json:"head_sha"`
+	MergeSHA string            `json:"merge_sha,omitempty"`
+	MergedAt time.Time         `json:"merged_at,omitzero"`
+	Checks   PullRequestChecks `json:"checks"`
+}
+
+// PullRequestChecks folds check runs and commit statuses on the head. (Q7)
+type PullRequestChecks struct {
+	State  string   `json:"state"` // ChecksNone | ChecksPending | ChecksSuccess | ChecksFailure
+	Total  int      `json:"total"`
+	Failed []string `json:"failed,omitempty"` // at most 10 names of at most 100 bytes
+}
+
+// Pull request and check states. Merged is a state of its own: a merged PR
+// is closed on the forge, but the room must never read it as "not applied".
+const (
+	PRStateOpen   = "open"
+	PRStateMerged = "merged"
+	PRStateClosed = "closed" // closed without merge
+	ChecksNone    = "none"
+	ChecksPending = "pending"
+	ChecksSuccess = "success"
+	ChecksFailure = "failure"
+)
+
+// Caps of the PR fix. (Q7)
+const (
+	MaxRepoFileBytes   = 64 << 10  // one file, before and after the change
+	MaxFixFiles        = 10        // files per step
+	MaxFixParamsBytes  = 64 << 10  // a step's params (edits, title, body)
+	MaxFixDiffBytes    = 128 << 10 // a step's unified diff; a bigger one is refused, never cut
+	MaxRepoListEntries = 1000
+	MaxRepoPathBytes   = 255
+)
+
+// Errors of the forge clients and of CheckRepoPath. (Q7)
+var (
+	ErrBaseMoved        = errors.New("clients: a file of the change was modified on the base branch")
+	ErrBranchExists     = errors.New("clients: the fix branch exists with other content")
+	ErrNotRegularFile   = errors.New("clients: not a regular file")
+	ErrRepoFileTooLarge = errors.New("clients: repository file too large")
+	ErrRepoPathDenied   = errors.New("clients: repository path is not allowed")
+)
+
+// FixBranchPrefix starts every branch a ForgeWriter writes; owners.yaml
+// refuses a base branch under it (Q7a). (Q7)
+const FixBranchPrefix = "piperoom/"
+
+// FixBranch is the only branch name a ForgeWriter writes:
+// "piperoom/<roomID>-<proposalID>-<step>". roomID and proposalID are the
+// room's own ids (r_..., p_...). (Q7)
+func FixBranch(roomID, proposalID string, step int) string {
+	return FixBranchPrefix + roomID + "-" + proposalID + "-" + strconv.Itoa(step)
+}
+
+var branchNameRE = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+
+// ValidBranchName reports whether s is a branch name owners.yaml may use as a
+// base: ^[A-Za-z0-9._/-]{1,200}$, no "..", "//", "@{", no leading "-" or "/",
+// no trailing "/" or ".", no segment starting with "." or ending in ".lock". (Q7)
+func ValidBranchName(s string) bool {
+	if !branchNameRE.MatchString(s) {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "//") || strings.Contains(s, "@{") {
+		return false
+	}
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if strings.HasPrefix(seg, ".") || strings.HasSuffix(seg, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// deniedRepoDirs are the directories (any segment, any case) whose files run
+// with the repository's secrets on a same-repo PR or configure its hooks and
+// dev containers: no fix PR writes under them, whatever a glob says. The
+// leads' list (docs/design/fix-pr.md §6.2 rule 4); a test pins it. (Q7)
+var deniedRepoDirs = []string{
+	".github", ".git", ".gitlab", ".circleci", ".buildkite", ".azure-pipelines",
+	".woodpecker", ".husky", ".devcontainer",
+}
+
+// deniedRepoFiles are file names (the last segment, any case) that run CI or
+// decide who reviews: refused anywhere in the tree. The leads' list; a test
+// pins it. (Q7)
+var deniedRepoFiles = []string{
+	"codeowners", ".gitmodules", ".gitattributes", ".gitignore", ".gitlab-ci.yml",
+	".travis.yml", ".drone.yml", "jenkinsfile", "azure-pipelines.yml",
+	"bitbucket-pipelines.yml", ".pre-commit-config.yaml",
+}
+
+// CheckRepoPath checks one repository path (or, with glob true, a pattern of
+// owners.yaml repos[].paths) against the fixed rules of
+// docs/design/fix-pr.md §6.2: clean, relative, at most MaxRepoPathBytes, no
+// "." or ".." segment, no backslash, NUL or control character, and not under
+// the deny list (CI and repository-governance files, case-insensitive). The
+// error wraps ErrRepoPathDenied. The deny list is the leads': it changes only
+// by a contract change, and no setting relaxes it. (Q7)
+//
+// A directory on the list is refused as any segment, a file name as the last
+// one. A glob is checked segment by segment: a literal segment like a path;
+// a segment with a wildcard is refused when it is malformed (path.Match) or
+// when it matches a denied name without starting with "*" (".git*",
+// "[.]github"): a pattern spelled to reach a denied name is a mistake in
+// owners.yaml. A broad segment ("*", "**", "*.yml") passes: every concrete
+// path a step writes is checked again with glob false, so a glob never makes
+// a denied file writable.
+func CheckRepoPath(p string, glob bool) error {
+	deny := func(why string) error {
+		return fmt.Errorf("%w: %q: %s", ErrRepoPathDenied, p, why)
+	}
+	switch {
+	case p == "":
+		return deny("empty")
+	case len(p) > MaxRepoPathBytes:
+		return deny(fmt.Sprintf("longer than %d bytes", MaxRepoPathBytes))
+	case !utf8.ValidString(p):
+		return deny("not valid UTF-8")
+	case strings.ContainsRune(p, '\\'):
+		return deny("backslash")
+	case strings.HasPrefix(p, "/"):
+		return deny("absolute")
+	}
+	for _, r := range p {
+		if r == 0 || unicode.IsControl(r) {
+			return deny("control character")
+		}
+	}
+	segs := strings.Split(p, "/")
+	for _, seg := range segs {
+		if seg == "." || seg == ".." {
+			return deny("a . or .. segment")
+		}
+	}
+	if path.Clean(p) != p {
+		return deny("not a clean path")
+	}
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		lower := strings.ToLower(seg)
+		if glob && strings.ContainsAny(seg, "*?[") {
+			if _, err := path.Match(lower, ""); err != nil {
+				return deny("malformed pattern")
+			}
+			if strings.HasPrefix(seg, "*") {
+				continue
+			}
+			for _, d := range deniedRepoDirs {
+				if ok, _ := path.Match(lower, d); ok {
+					return deny("matches the denied directory " + d)
+				}
+			}
+			if last {
+				for _, f := range deniedRepoFiles {
+					if ok, _ := path.Match(lower, f); ok {
+						return deny("matches the denied file name " + f)
+					}
+				}
+			}
+			continue
+		}
+		if slices.Contains(deniedRepoDirs, lower) {
+			return deny("under the denied directory " + lower)
+		}
+		if last && slices.Contains(deniedRepoFiles, lower) {
+			return deny("the denied file name " + lower)
+		}
+	}
+	return nil
+}
+
+// ChangePullRequest is the PipelineChange kind of a fix PR that merged:
+// Object "<repo id>#<number>", Summary its title, After the merge SHA. The
+// room writes it when it sees the merge (Q7e). Not external: the agent opened
+// it. ChangeKinds lists it after ChangeVendorIncident. (Q7)
+const ChangePullRequest = "pull_request"

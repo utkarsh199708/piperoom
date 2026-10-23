@@ -185,6 +185,11 @@ const (
 	// written (or its pull request opened) and the server reloaded. The room
 	// then closes with resolution "pipeline live".
 	PipelineRegistered Type = "pipeline.registered"
+
+	// PullRequestUpdated: the state of a PR a fix step opened changed (state,
+	// head, merge or checks). System actor; written by the room's follower
+	// (Q7e), at most one per poll and only on a change. (Q7)
+	PullRequestUpdated Type = "pull_request.updated"
 )
 
 // ActorKind says who caused an event.
@@ -963,6 +968,9 @@ type PreviewResult struct {
 	// offers when the verdict is PerformanceWorse. Nil for every other
 	// action (and omitted, so other previews marshal as before).
 	Tuning []TuningChange `json:"tuning,omitempty"`
+	// Q7: the whole change of a repo_open_pull_request step; nil for every
+	// other action (and omitted, so other previews marshal as before).
+	Diff *DiffPreview `json:"diff,omitempty"`
 }
 
 // TuningChange is one allow-listed key of a performance step
@@ -1184,6 +1192,9 @@ type AgentVerificationPayload struct {
 	// missing at the last poll (counts only, never row values); pointers so a
 	// recovered After of 0 is kept and "not measured" (unverifiable) is
 	// absent. Recovered is true only when Outcome is RecoveryRecovered.
+	// Q7: a proposal of Deferred steps (a fix PR) that never reached the
+	// system sets Outcome to DeferredNotApplied or DeferredNotDeployed, with
+	// Recovered false.
 	Outcome string `json:"outcome,omitempty"`
 	Before  *int64 `json:"before,omitempty"`
 	After   *int64 `json:"after,omitempty"`
@@ -1544,7 +1555,77 @@ type ActionExecutedPayload struct {
 	// Nil for every action that is not Receipted, so events from before the
 	// U wave serialise exactly as before. (U)
 	Receipt *SetupReceipt `json:"receipt,omitempty"`
+	// Q7: the PR a PullRequestOpener step opened; nil otherwise (and
+	// omitted, so other results marshal as before).
+	PullRequest *PullRequestRef `json:"pull_request,omitempty"`
 }
+
+// ---- Q7: the pull-request fix (docs/design/fix-pr.md §5.3) ----
+
+// PullRequestRef names the PR a step opened (ActionExecutedPayload.PullRequest). (Q7)
+type PullRequestRef struct {
+	Repo    string `json:"repo"` // owners.yaml repos[].id
+	Number  int    `json:"number"`
+	URL     string `json:"url"`
+	Branch  string `json:"branch"`
+	HeadSHA string `json:"head_sha"` // the commit Piperoom wrote
+}
+
+// PullRequestUpdatedPayload is one observed change of a fix PR. (Q7)
+type PullRequestUpdatedPayload struct {
+	ProposalID string `json:"proposal_id"`
+	StepIndex  int    `json:"step_index"`
+	PullRequestRef
+	State string `json:"state"` // open | merged | closed
+	// HeadChanged: the branch head is no longer the commit Piperoom wrote
+	// (a reviewer pushed to the PR). The merged change is then not exactly
+	// the approved diff; the card says so. (Q7)
+	HeadChanged bool      `json:"head_changed,omitempty"`
+	MergeSHA    string    `json:"merge_sha,omitempty"`
+	MergedAt    time.Time `json:"merged_at,omitzero"`
+	Checks      PRChecks  `json:"checks"`
+}
+
+// PRChecks mirrors clients.PullRequestChecks (events imports no client). (Q7)
+type PRChecks struct {
+	State  string   `json:"state"`
+	Total  int      `json:"total"`
+	Failed []string `json:"failed,omitempty"`
+}
+
+// DiffPreview is a fix PR step's whole change, read by Preview at BaseSHA.
+// Every line passed redact.Text before it was stored, so a secret already in
+// the repo never enters the room log; the approved change is the step's
+// params, which params_hash covers. Never cut: a step whose diff exceeds
+// clients.MaxFixDiffBytes is refused by Validate. (Q7)
+type DiffPreview struct {
+	Repo     string     `json:"repo"`
+	RepoURL  string     `json:"repo_url"`
+	Base     string     `json:"base"`
+	BaseSHA  string     `json:"base_sha"`
+	Branch   string     `json:"branch"` // the branch Execute will create
+	Layer    string     `json:"layer"`
+	Files    []FileDiff `json:"files"`
+	Hosts    []string   `json:"hosts,omitempty"`    // hosts of URLs in added lines, sorted, unique
+	Warnings []string   `json:"warnings,omitempty"` // §6.3 risk flags, one line each
+	Draft    bool       `json:"draft,omitempty"`
+}
+
+// FileDiff is one file of a DiffPreview. (Q7)
+type FileDiff struct {
+	Path    string `json:"path"`
+	Status  string `json:"status"`  // modified | added
+	Unified string `json:"unified"` // unified diff, 3 lines of context, redacted
+	Added   int    `json:"added"`
+	Removed int    `json:"removed"`
+}
+
+// Outcomes of a proposal of Deferred steps (AgentVerificationPayload.Outcome;
+// Recovered false for both). (Q7)
+const (
+	DeferredNotApplied  = "not_applied"  // a PR closed without merge
+	DeferredNotDeployed = "not_deployed" // merged, not seen in the system within the apply timeout
+)
 
 // ---- Setup rooms (U wave; docs/design/setup-agent.md §2.2, §4 item 2) ----
 

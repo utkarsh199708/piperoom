@@ -336,9 +336,47 @@ runner, a name for a secret, a hash for the canary nonce.
   is valid too.
 - **Approving layer of a source action.** A source-neutral source action (`actions.SourceLayered`) is approved by
   the pipeline's source layer, `actions.LayerFor(a, source_kind)`: `postgres` or `mysql`. Its `Layer()` (what a
-  caller without a pipeline shows) stays `postgres`.
+  caller without a pipeline shows) stays `postgres`. The room service and the agent take a step's layer from
+  `actions.StepLayer(a, pipeline, source_kind, params)` (Q7-0c), which answers this rule and the Q7 `Layered` rule
+  in one place.
 - **Topology.** A MySQL source table is node id `mysql:<db>.<table>` (e.g. `mysql:shop.orders`), `kind:
   "source_table"`, `layer: "mysql"`; there is no new node kind.
+
+### Q7 pull-request fix (Q7-0c, Q0 item 6; payloads in `internal/events/events.go`, design `docs/design/fix-pr.md` §5)
+
+The action `repo_open_pull_request` (Q7c) proposes a fix as a pull request on a repository of the pipeline's
+`owners.yaml` `repos:`. Piperoom opens the PR and never merges it; nothing changes in any system until the
+repository's own reviewers merge it and the customer's deployment applies it.
+
+- **Approving layer.** The action is `actions.Layered`: its `Layer()` is `""` and a step's layer is the layer of
+  the `repos[].paths` globs its files match, `actions.StepLayer(a, pipeline, source_kind, params)`. The room service
+  derives it at creation and again before Execute and refuses a step whose `layer` differs, so the proposer never
+  picks the approver. Every other action answers its `Layer()` (or, for a source action, the source layer).
+- **Deferred steps.** The action is `actions.Deferred`: never approved by a policy (`auto_approve:`, `autonomy:`),
+  never scheduled, never a setup T1 step; a proposal holding one holds only deferred steps, at most 3
+  (`actions.MaxDeferredSteps`).
+- **Preview.** `proposal.previewed.steps[].preview` gains `diff?` (`events.DiffPreview`): `{repo, repo_url, base,
+  base_sha, branch, layer, files: [{path, status: "modified" | "added", unified, added, removed}], hosts?,
+  warnings?, draft?}`, the whole change at `base_sha`, every line redacted, never cut (a step whose diff exceeds
+  128 KiB is refused by `Validate`). `branch` is the branch Execute will create, `piperoom/<room>-<proposal>-<step>`.
+  Absent on every other action.
+- **Result.** `action.executed` gains `pull_request?` (`events.PullRequestRef`: `{repo, number, url, branch,
+  head_sha}`, `head_sha` the commit Piperoom wrote) on a step that opened a PR; absent otherwise.
+- **Following.** `pull_request.updated {proposal_id, step_index, repo, number, url, branch, head_sha, state: "open" |
+  "merged" | "closed", head_changed?, merge_sha?, merged_at?, checks: {state: "none" | "pending" | "success" |
+  "failure", total, failed?}}` (system actor): one per observed change of state, head, merge or checks, none while
+  nothing changes. `head_changed: true` means the branch head is no longer the commit Piperoom wrote (a reviewer
+  pushed to it), so the merged change is not exactly the approved diff. `checks.failed` holds at most 10 check
+  names written by the repository's CI: untrusted text. A merge also writes a `pull_request` pipeline change
+  (`clients.ChangePullRequest`: object `<repo id>#<number>`, summary the title, after the merge SHA).
+- **Verification.** The agent hears `pr_merged` / `pr_closed` (`HumanInput`) and does not verify on
+  `action_result`. `agent.verification.outcome` gains `not_applied` (the PR closed without merge) and
+  `not_deployed` (merged, not seen in the system within `PIPEROOM_FIXPR_APPLY_TIMEOUT`, default 2 h); `recovered` is
+  `false` for both.
+- **Settings.** `FORGE_KIND` (`""` off, `github`), `GITHUB_API_URL` (GitHub Enterprise Server allowed),
+  `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (a secret file),
+  `PIPEROOM_FIXPR_APPLY_TIMEOUT` (`config.ParseForge`, `config.ParseFixPRApplyTimeout`). With `FORGE_KIND` empty
+  there is no forge client, tool or fix-PR action.
 
 ### X2 recovery actions (X2-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
 
@@ -717,6 +755,21 @@ Additive, same rule: absent until X8c lands, and an absent field reads as its em
   one counts for `staging_required`. `staging_required` is `false` (omitted) when the pipeline has no
   `require_staging:` entry for any step. `GET /api/rooms` rows carry none of these fields.
 
+#### Q7 snapshot field (Q7-0c; implemented by A5 in Q7e)
+
+Additive, same rule: absent until Q7e lands, and an absent field reads as its empty value.
+```json
+  "pull_requests": [ { "proposal_id": "p_…", "step_index": 0, "repo": "connect-config", "number": 12,
+                       "url": "https://github.com/acme/connect-config/pull/12", "branch": "piperoom/r_…-p_…-0",
+                       "state": "open", "head_changed": false,
+                       "checks": { "state": "pending", "total": 3, "failed": [] },
+                       "merged_at": null, "updated_at": "..." } ]   // Q7: room-level, newest first, at most 20
+```
+- Room-level, not under `open_proposals`: an executed proposal leaves `open_proposals` (the snapshot's fold of
+  `action.executed`), but its PR stays followed. One entry per PR a step opened (`action.executed.pull_request`),
+  updated from each `pull_request.updated`; `updated_at` is that event's time (the `action.executed` time before
+  the first one). `merged_at` is set once merged. `GET /api/rooms` rows carry none of it.
+
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
 ### AgentStats (F11, implemented by A5)
@@ -878,7 +931,7 @@ before X7 has the same JSON and a client that ignores them reads the map as befo
 | POST | `/api/proposals/{pid}/cancel` | `{reason?}` | `Event` (`proposal.cancelled`) | P0 item 4; server P2b. The driver or an owner of any `required_layers` entry (`403 not_layer_owner` otherwise; viewers `403 viewer`); only while a `proposal.scheduled` of the proposal is pending (`409 not_scheduled` otherwise, also after the policy ran); a pending countdown the room view hides (`run_at` more than 45 s past) is still accepted. Cancellable until the policy starts (its first approval is logged); a cancel after `cancel_until` still wins if it lands first. `reason` ≤ 500 characters, typed-text rule. The proposal stays open for manual approval |
 | POST | `/api/proposals/{pid}/stage` | `{}` | `202` `Event` (`proposal.stage_started`) | X8 (X8-0 contract; server X8c by A5). The driver tries the proposal's steps on the pipeline's staging stack before approval: driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); the proposal open (`409 already_decided` once rejected or every layer approved); the pipeline declares `staging:` and write mode is on (`409 no_staging`); at least one step's action implements `actions.Stager` (`409 not_stageable`); no stage of the proposal pending (`409 stage_in_progress` while a `proposal.stage_started` has no `proposal.staged` and is before its `expires_at`); at most 5 stages per proposal (`429 rate_limited`). Each stageable step's `Validate` and `CheckScope` run again first (`400 validation` naming the step index, nothing written). Answers at once; the server then calls `Stage` once per stageable step, in order (each bounded by `actions.StageStepTimeout`, 2 min), and writes one `proposal.staged`, which reaches every client over the WebSocket. Never changes production or the executor; see **X8 staging** under Objects |
 | POST | `/api/rooms/{id}/proposals` | `{title, risk, rollback, steps: [{action, layer, params, description?}]}` | `Event` (`proposal.created`, `origin: "driver"`) | P0 item 5; server P3c. A driver-authored fix: driver only (`403 not_driver`), open rooms only (`409 room_closed`), never in a shadow room (`400 validation`: a shadow room has no proposals). Validated exactly like an agent proposal: a registered action, `layer` equal to the action's `Layer()`, `Validate`, `CheckScope` against the room's pipeline, `params_hash`, then the preview (`proposal.previewed`); a refused step answers `400 validation` naming the step index. At most 5 open driver-authored proposals per room (`429 too_many_proposals`). The agent hears of it (`HumanInput` kind `proposal_created`) and verifies after it runs (`proposal_executed`). The auto-approve policy never applies to it. There is no free-form command: only registered actions with their params |
-| GET | `/api/actions` | – | `[{name, layer, describe, params_schema, preview}]` | P0 item 5; server P3c, web P3d. The write actions the agent proposes from (the full registry, also when write mode is off), in registration order, for any logged-in member (viewers included). `describe` is the action's `Describe()`, `params_schema` its `ParamsSchema()` (a JSON Schema object), `preview` whether it implements `actions.Preview`. Never includes client state, connection settings or credentials. The P3d form is generated from `params_schema` |
+| GET | `/api/actions` | – | `[{name, layer, describe, params_schema, preview, layer_by_params?, deferred?}]` | P0 item 5; server P3c, web P3d. The write actions the agent proposes from (the full registry, also when write mode is off), in registration order, for any logged-in member (viewers included). `describe` is the action's `Describe()`, `params_schema` its `ParamsSchema()` (a JSON Schema object), `preview` whether it implements `actions.Preview`. Never includes client state, connection settings or credentials. The P3d form is generated from `params_schema`. Q7 (Q7-0c; server Q7k): an `actions.Layered` action shows `layer: ""` and `layer_by_params: true` (its step's layer comes from its params and the room's pipeline, `actions.StepLayer`); an `actions.Deferred` one shows `deferred: true`; both fields are omitted when false |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout). R0 (server R4): after its checks the server appends `handoff.requested` (see Hand-off requests below) and answers with the final `handoff.created`. While a request of the room is in flight, every further POST answers `409 handoff_in_progress`, from the driver or anyone else, before any other check but visibility. A request that ends without a hand-off appends `handoff.failed` and answers the matching error (`403 not_driver`, `409 room_closed`, else `500 internal_error`) |
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
