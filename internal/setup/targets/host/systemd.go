@@ -79,7 +79,7 @@ func SystemctlArgv(verb, operand string) ([]string, error) {
 			return nil, fmt.Errorf("%w: unit %s is not a piperoom unit name", ErrParams, q(operand))
 		}
 	case "path":
-		if err := CheckTemplatePath(operand); err != nil {
+		if err := CheckUnitPath(operand); err != nil {
 			return nil, err
 		}
 		if !fullUnitRE.MatchString(path.Base(operand)) || path.Base(path.Dir(operand)) != UnitDir {

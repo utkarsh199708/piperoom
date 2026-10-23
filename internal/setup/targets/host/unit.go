@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -76,40 +75,50 @@ var (
 
 // CheckUnitPath refuses a path a systemd unit's own operand cannot carry
 // verbatim: POSIX, absolute, clean and made only of safe characters. Unit file
-// paths are POSIX on every Linux host; CheckTemplatePath is the rule for a
-// value inside a rendered unit or service definition, which may also be a
-// Windows path (row U8b).
+// paths are POSIX on every Linux host; CheckServicePath is the Windows service
+// definition's shape, which also allows a space and parentheses (row U8b).
+//
+// A drive-absolute Windows path is accepted only in a Windows build, where
+// specUnix is reachable from this package's tests alone (no Windows host runs
+// systemd) and those tests render the Linux unit from a Windows temporary
+// directory. The check's real subject, a Linux host, sees POSIX paths; the
+// Windows path shape is still the strict one (no space).
 func CheckUnitPath(p string) error {
-	switch {
-	case !safeToken.MatchString(p):
-		return fmt.Errorf("%w: %s holds a character a unit file would interpret (space, %%, $, quote, backslash, control) or is too long", ErrDetect, q(p))
-	case !strings.HasPrefix(p, "/") || path.Clean(p) != p:
-		return fmt.Errorf("%w: %s is not an absolute clean path", ErrDetect, q(p))
+	if posixPathOK(p) {
+		return nil
 	}
-	return nil
+	if runtime.GOOS == "windows" {
+		if why := windowsPathRefusal(p, windowsComponent, "a character a unit file would interpret (space, %, $, quote, backslash, control)"); why == "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s is not an absolute clean path a unit file can carry (no space, %%, $, quote, backslash or control character)", ErrDetect, q(p))
 }
 
-// RenderUnit checks every field of u and renders the unit file.
+// RenderUnit checks every field of u and renders the unit file. The values
+// take the systemd shape: a space is refused here (systemd splits on it and
+// expands the rest), and so are the characters above. A drive-absolute path is
+// accepted only in a Windows build, for the cross-OS tests (see CheckUnitPath).
 func RenderUnit(u Unit) ([]byte, error) {
 	if !descriptionRE.MatchString(u.Description) {
 		return nil, fmt.Errorf("%w: description %s", ErrParams, q(u.Description))
 	}
-	if err := CheckTemplatePath(u.WorkingDirectory); err != nil {
+	if err := CheckUnitPath(u.WorkingDirectory); err != nil {
 		return nil, fmt.Errorf("WorkingDirectory: %w", err)
 	}
 	for _, e := range u.Environment {
-		if !envNameRE.MatchString(e.Name) || CheckTemplateToken(e.Value) != nil {
+		if !envNameRE.MatchString(e.Name) || checkUnitToken(e.Value) != nil {
 			return nil, fmt.Errorf("%w: Environment %s=%s", ErrDetect, q(e.Name), q(e.Value))
 		}
 	}
 	if len(u.ExecStart) == 0 {
 		return nil, fmt.Errorf("%w: ExecStart is empty", ErrParams)
 	}
-	if err := CheckTemplatePath(u.ExecStart[0]); err != nil {
+	if err := CheckUnitPath(u.ExecStart[0]); err != nil {
 		return nil, fmt.Errorf("ExecStart program: %w", err)
 	}
 	for _, a := range u.ExecStart[1:] {
-		if err := CheckTemplateToken(a); err != nil {
+		if err := checkUnitToken(a); err != nil {
 			return nil, fmt.Errorf("%w: ExecStart argument %s", ErrDetect, q(a))
 		}
 	}
@@ -231,7 +240,7 @@ func (d *Driver) spec(p ServiceParams, env ops.Env) (serviceSpec, error) {
 // file beside it, the JDK java_version reported.
 func (d *Driver) specUnix(p ServiceParams, unit string, env ops.Env) (serviceSpec, error) {
 	dir := env.Confine.Dir()
-	if err := CheckTemplatePath(dir); err != nil {
+	if err := CheckUnitPath(dir); err != nil {
 		return serviceSpec{}, fmt.Errorf("project directory: %w", err)
 	}
 	files := modeFiles[p.Mode]
@@ -269,9 +278,13 @@ func (d *Driver) specUnix(p ServiceParams, unit string, env ops.Env) (serviceSpe
 // project, started with the run-service subcommand and the project directory.
 // The exe then starts the Connect JVM with the argv javaArgv builds, so the
 // worker runs as a child of a process that does speak to the SCM.
+//
+// The paths take the service shape (CheckServicePath): a project directory, a
+// distribution or a JDK under `C:\Program Files` or a profile with a space in
+// it is served rather than refused, because the SCM escapes each argument.
 func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (serviceSpec, error) {
 	dir := env.Confine.Dir()
-	if err := CheckTemplatePath(dir); err != nil {
+	if err := CheckServicePath(dir); err != nil {
 		return serviceSpec{}, fmt.Errorf("project directory: %w", err)
 	}
 	files := modeFiles[p.Mode]
@@ -297,7 +310,7 @@ func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (service
 		"--name", p.Name, "--mode", p.Mode, "--java", javaHome,
 	}
 	for _, v := range append([]string{exe}, args...) {
-		if err := CheckTemplateToken(v); err != nil {
+		if err := CheckServiceToken(v); err != nil {
 			return serviceSpec{}, err
 		}
 	}
@@ -308,6 +321,16 @@ func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (service
 		ProjectDir: dir, ExePath: exe, Args: args, Java: java,
 		LogFile: nativeJoin(dir, LogDir, ServiceLogName),
 	}, nil
+}
+
+// checkPath is the path rule of the artifact this driver renders: a systemd
+// unit's POSIX rule on Linux, a Windows service definition's rule (which
+// allows a space and parentheses) on Windows.
+func (d *Driver) checkPath(p string) error {
+	if d.goos == "windows" {
+		return CheckServicePath(p)
+	}
+	return CheckUnitPath(p)
 }
 
 // nativeJoin joins template path elements with the separator of the first
@@ -408,7 +431,7 @@ func (d *Driver) javaHome(env ops.Env) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := CheckTemplatePath(home); err != nil {
+	if err := d.checkPath(home); err != nil {
 		return "", fmt.Errorf("JAVA_HOME: %w", err)
 	}
 	if err := javaHomeConfined(env, home); err != nil {

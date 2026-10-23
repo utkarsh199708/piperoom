@@ -101,8 +101,10 @@ var (
 	// pathValueRE is valueRE for a path value: a Windows path carries
 	// backslashes, and this driver rewrites every path value to the forward
 	// slash form Java reads on either OS (a backslash in a .properties value
-	// is an escape), so one more character set covers both shapes.
-	pathValueRE = regexp.MustCompile(`^[A-Za-z0-9._:/\\,+\[\]~@-]+$`)
+	// is an escape), so one more character set covers both shapes. It also
+	// allows a space, which a properties value keeps literally: a project
+	// under "C:/Program Files" or a profile with a space in it is served.
+	pathValueRE = regexp.MustCompile(`^[A-Za-z0-9._:/\\,+\[\]~@ ()-]+$`)
 	classRE     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
 	intRE       = regexp.MustCompile(`^-?[0-9]{1,9}$`)
 	nameRE      = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
@@ -322,7 +324,11 @@ func projectPath(dir, p string) (abs, rel string, err error) {
 		return "", "", fmt.Errorf("%w: %s is the project root or outside it, not a path under it", ErrProperties, q(p))
 	}
 	abs = base + "/" + rel
-	if err := CheckTemplatePath(abs); err != nil {
+	// A path value goes into a Java properties file, where a value runs to the
+	// end of the line, and (on Windows) into the service definition's argv: a
+	// space in a project under "C:/Program Files" is served, and only the
+	// systemd unit's own shape refuses it (CheckServicePath).
+	if err := CheckServicePath(abs); err != nil {
 		return "", "", fmt.Errorf("%w: %w", ErrProperties, err)
 	}
 	return abs, rel, nil

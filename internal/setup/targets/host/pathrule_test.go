@@ -2,6 +2,7 @@ package host
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -11,56 +12,124 @@ import (
 
 // The path rule tests of row U8b: both shapes are checked on every OS, because
 // the runner renders for the host it runs on and its tests exercise the other
-// shape.
+// shape. The two shapes differ exactly where the artifacts differ: systemd
+// parses the unit text (no space, no backslash), the SCM escapes each argument
+// (a space and parentheses are fine).
 
-func TestCheckTemplatePath(t *testing.T) {
+func TestCheckUnitPath(t *testing.T) {
 	ok := []string{
-		// POSIX
 		"/srv/piperoom", "/srv/piperoom/kafka", "/srv/p-1.2/connect_plugins", "/",
-		// Windows drive-absolute, either separator, a drive root, a mixed form
-		`C:\Piperoom\orders`, "C:/Piperoom/orders", `C:\`, "C:/", `C:\p\kafka\libs\*`[:0] + `C:\p\kafka\libs`,
-		`c:\users\utkarsh\appdata\local\temp\x`, `C:\Piperoom\orders\a,b`, `C:\Piperoom\orders\~tmp`,
 	}
 	for _, p := range ok {
-		if err := CheckTemplatePath(p); err != nil {
-			t.Errorf("CheckTemplatePath(%q) = %v, want nil", p, err)
+		if err := CheckUnitPath(p); err != nil {
+			t.Errorf("CheckUnitPath(%q) = %v, want nil", p, err)
+		}
+	}
+	bad := []string{
+		"", "p", "./p", "srv/p", "/p/../x", "/p/", "//p", "/p/a b", "/p/%h", "/p/$X", `/p/"x"`,
+		"/p/a\\b", "/p/a;b", "/p/\x00", "/p/" + strings.Repeat("a", maxTemplatePath),
+	}
+	for _, p := range bad {
+		if err := CheckUnitPath(p); err == nil {
+			t.Errorf("CheckUnitPath(%q) accepted", p)
+		} else if !errors.Is(err, ErrDetect) {
+			t.Errorf("CheckUnitPath(%q) = %v, want ErrDetect", p, err)
+		}
+	}
+}
+
+func TestCheckServicePath(t *testing.T) {
+	ok := []string{
+		// POSIX (the shape the Windows definition's tests use)
+		"/srv/piperoom", "/srv/piperoom/kafka", "/srv/p-1.2/connect_plugins", "/",
+		// Windows drive-absolute, either separator, a drive root, a mixed form
+		`C:\Piperoom\orders`, "C:/Piperoom/orders", `C:\`, "C:/", `C:\p\kafka\libs`,
+		`c:\users\utkarsh\appdata\local\temp\x`, `C:\Piperoom\orders\a,b`, `C:\Piperoom\orders\~tmp`,
+		// The shapes the shared rule refused before U8b's review: the default
+		// JDK under Program Files and a profile directory with a space.
+		`C:\Program Files\Eclipse Adoptium\jdk-21`,
+		`C:\Program Files (x86)\Piperoom\orders`,
+		`C:\Users\Utkarsh Kumar\AppData\Local\piperoom\orders`,
+		"C:/Program Files/Java/jdk-21/bin/java.exe",
+		`C:\Program Files\Piperoom (old)\orders`,
+	}
+	for _, p := range ok {
+		if err := CheckServicePath(p); err != nil {
+			t.Errorf("CheckServicePath(%q) = %v, want nil", p, err)
 		}
 	}
 	bad := []string{
 		"", "p", "./p", "srv/p", "/p/../x", "/p/", "//p", "/p/a b", "/p/%h", "/p/$X", `/p/"x"`,
 		"/p/a\\b", "/p/a;b", "/p/a=b", "/p/\x00", "/p/" + strings.Repeat("a", maxTemplatePath),
-		// Windows
+		// Windows a service definition still refuses
 		`C:Piperoom`, `C:`, `\\host\share`, `\\?\C:\p`, `\p`, `\`,
-		`C:\p\..\x`, `C:\p\.\x`, `C:\p\`, `C:\p\\x`, `C:\p\/x`, `C:\p\a b`, `C:\p\a%20`,
+		`C:\p\..\x`, `C:\p\.\x`, `C:\p\`, `C:\p\\x`, `C:\p\/x`, `C:\p\a%20`,
 		`C:\p\a"b`, `C:\p\*`, `C:\p\a?b`, `C:\p\a|b`, `C:\p\a;b`, `C:\p\a=b`, "C:\\p\\a\x07",
 		`C:\p\a.`, `C:\p\NUL`, `C:\p\con.txt`, `C:\p\COM1`, "C:\\p\\" + strings.Repeat("a", maxTemplatePath),
 	}
 	for _, p := range bad {
-		if err := CheckTemplatePath(p); err == nil {
-			t.Errorf("CheckTemplatePath(%q) accepted", p)
+		if err := CheckServicePath(p); err == nil {
+			t.Errorf("CheckServicePath(%q) accepted", p)
 		} else if !errors.Is(err, ErrDetect) {
-			t.Errorf("CheckTemplatePath(%q) = %v, want ErrDetect", p, err)
+			t.Errorf("CheckServicePath(%q) = %v, want ErrDetect", p, err)
 		}
 	}
 }
 
-func TestCheckTemplateToken(t *testing.T) {
+func TestCheckServiceToken(t *testing.T) {
 	for _, v := range []string{
-		"java", "-Xmx256M", "-Dkafka.logs.dir=/srv/p/logs", "/opt/jdk-21", `C:\jdk-21`, "C:/jdk-21", "/srv/p/kafka/libs/*",
+		"run-service", "--project", "--java", "-cp", "-Xms256M", "connect",
+		"org.apache.kafka.connect.cli.ConnectDistributed", "/opt/jdk-21", `C:\jdk-21`, "C:/jdk-21",
+		"-Dkafka.logs.dir=/srv/p/logs",
+		`-Dkafka.logs.dir=C:\Program Files\Piperoom\logs`,
+		`-Dlog4j2.configurationFile=C:\Program Files\Kafka\config\connect-log4j2.yaml`,
+		`C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe`,
+		`C:\Program Files\Piperoom\kafka\libs\*`, "/srv/p/kafka/libs/*",
+		`C:\Program Files\Piperoom\connect-distributed.properties`,
 	} {
-		if err := CheckTemplateToken(v); err != nil {
-			t.Errorf("CheckTemplateToken(%q) = %v", v, err)
+		if err := CheckServiceToken(v); err != nil {
+			t.Errorf("CheckServiceToken(%q) = %v", v, err)
 		}
 	}
-	for _, v := range []string{"", "a b", "a\nb", `C:\a b`, "opt/jdk", "$HOME", "%h"} {
-		if err := CheckTemplateToken(v); err == nil {
-			t.Errorf("CheckTemplateToken(%q) accepted", v)
+	for _, v := range []string{
+		"", "a b", "a\nb", "..", "../x", `C:\a%20b`, "$HOME", "%h", `C:\p\..\x`,
+		"-Dkafka.logs.dir=", `C:\Program Files\`,
+	} {
+		if err := CheckServiceToken(v); err == nil {
+			t.Errorf("CheckServiceToken(%q) accepted", v)
+		}
+	}
+}
+
+// TestCheckUnitToken: the systemd shape refuses what the service shape allows,
+// so one plan cannot render a unit systemd would split. A drive-absolute path
+// is the one shape a Windows build accepts here, for the cross-OS tests (no
+// Windows host runs systemd).
+func TestCheckUnitToken(t *testing.T) {
+	for _, v := range []string{
+		"java", "-Xmx256M", "-Dkafka.logs.dir=/srv/p/logs", "/opt/jdk-21", "JAVA_HOME=/opt/jdk",
+		"/srv/p/kafka/libs/*",
+	} {
+		if err := checkUnitToken(v); err != nil {
+			t.Errorf("checkUnitToken(%q) = %v", v, err)
+		}
+	}
+	for _, v := range []string{
+		"", "a b", "a\nb", `C:\a b`, "opt/jdk", "$HOME", "%h", "/srv/p/a b",
+	} {
+		if err := checkUnitToken(v); err == nil {
+			t.Errorf("checkUnitToken(%q) accepted", v)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		if err := checkUnitToken(`C:\jdk-21`); err == nil {
+			t.Error("checkUnitToken accepted a Windows path on a non-Windows build")
 		}
 	}
 }
 
 func TestCheckDefinitionValue(t *testing.T) {
-	for _, v := range []string{"-Dkafka.logs.dir=C:\\p\\logs", "org.apache.kafka.connect.cli.ConnectDistributed", "a"} {
+	for _, v := range []string{"-Dkafka.logs.dir=C:\\p\\logs", "org.apache.kafka.connect.cli.ConnectDistributed", "a", "-Dkafka.logs.dir=C:\\Program Files\\p\\logs"} {
 		if err := checkDefinitionValue(v); err != nil {
 			t.Errorf("checkDefinitionValue(%q) = %v", v, err)
 		}
@@ -93,12 +162,13 @@ func TestNativeJoin(t *testing.T) {
 
 func TestJavaHomeOf(t *testing.T) {
 	ok := map[string]string{
-		"/opt/jdk-21/bin/java":          "/opt/jdk-21",
-		"/opt/jdk-21/bin/java.exe":      "/opt/jdk-21",
-		`C:\jdk-21\bin\java.exe`:        `C:\jdk-21`,
-		"C:/jdk-21/bin/java.exe":        "C:/jdk-21",
-		"C:/Users/u/jdk/bin/java.exe":   "C:/Users/u/jdk",
-		"/usr/lib/jvm/java-21/bin/java": "/usr/lib/jvm/java-21",
+		"/opt/jdk-21/bin/java":                                  "/opt/jdk-21",
+		"/opt/jdk-21/bin/java.exe":                              "/opt/jdk-21",
+		`C:\jdk-21\bin\java.exe`:                                `C:\jdk-21`,
+		"C:/jdk-21/bin/java.exe":                                "C:/jdk-21",
+		"C:/Users/u/jdk/bin/java.exe":                           "C:/Users/u/jdk",
+		"/usr/lib/jvm/java-21/bin/java":                         "/usr/lib/jvm/java-21",
+		`C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe`: `C:\Program Files\Eclipse Adoptium\jdk-21`,
 	}
 	for in, want := range ok {
 		got, err := javaHomeOf(in)
@@ -119,8 +189,8 @@ func TestJavaHomeOf(t *testing.T) {
 // TestPropertiesWindowsPaths: the properties and plugin path with Windows
 // paths — a drive-letter project directory, a value written with forward
 // slashes (Java reads those on every OS; a backslash in a .properties value is
-// an escape), and the same refusals as the POSIX form. The values are pure, so
-// this runs on any OS.
+// an escape), a space in the directory, and the same refusals as the POSIX
+// form. The values are pure, so this runs on any OS.
 func TestPropertiesWindowsPaths(t *testing.T) {
 	dir := `C:\Piperoom\orders`
 	wp, err := prepareProps(ModeDistributed, distributedEntries(), dir, protocol.ClassLocal)
@@ -146,6 +216,16 @@ func TestPropertiesWindowsPaths(t *testing.T) {
 		if got := wp.entries["plugin.path"]; got != "C:/Piperoom/orders/connect-plugins/debezium" {
 			t.Errorf("plugin.path %q became %q", p, got)
 		}
+	}
+	// A project under Program Files: the worker reads a value with a space
+	// literally, and the Windows service passes the file path as one argument.
+	spaced := `C:\Program Files\Piperoom\orders`
+	wp, err = prepareProps(ModeDistributed, distributedEntries(), spaced, protocol.ClassLocal)
+	if err != nil {
+		t.Fatalf("Program Files project: %v", err)
+	}
+	if got := wp.entries["plugin.path"]; got != "C:/Program Files/Piperoom/orders/connect-plugins" {
+		t.Errorf("plugin.path %q, want the Program Files directory", got)
 	}
 	// A standalone offset file, the same shape.
 	standalone := map[string]string{

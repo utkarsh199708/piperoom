@@ -175,8 +175,10 @@ func (f *supervisorFixture) finish(t *testing.T) serveResult {
 	}
 }
 
-// TestServiceStop stops the JVM on Stop and reports Stopped inside the wait
-// hint.
+// TestServiceStop stops the JVM on Stop, reports the pending stop inside the
+// wait hint, and returns a clean exit: svc.Run reports the final Stopped
+// itself, so serve reports no Stopped of its own (a Stopped here would reach
+// the SCM with NO_ERROR before the real one).
 func TestServiceStop(t *testing.T) {
 	f := newSupervisorFixture(t, newFakeChild(0))
 	f.serve()
@@ -192,15 +194,14 @@ func TestServiceStop(t *testing.T) {
 	if pending.State != stateStopPending || pending.WaitHint < 30000 || pending.CheckPoint == 0 {
 		t.Errorf("stop pending %+v, want a wait hint of at least 30 s and a checkpoint", pending)
 	}
-	stopped := f.rec.next(t)
-	if stopped.State != stateStopped {
-		t.Errorf("state after the stop %v, want stopped", stopped.State)
-	}
-	if elapsed := time.Since(start); elapsed >= time.Duration(pending.WaitHint)*time.Millisecond {
-		t.Errorf("Stopped reported after %s, past the %d ms wait hint", elapsed, pending.WaitHint)
-	}
 	if r := f.finish(t); r.specific || r.code != 0 {
 		t.Errorf("serve returned (%v, %d), want (false, 0)", r.specific, r.code)
+	}
+	if elapsed := time.Since(start); elapsed >= time.Duration(pending.WaitHint)*time.Millisecond {
+		t.Errorf("serve returned after %s, past the %d ms wait hint", elapsed, pending.WaitHint)
+	}
+	if got := f.rec.all(); len(got) != 2 {
+		t.Errorf("reported statuses %+v, want exactly Running and stop pending", got)
 	}
 	if f.child.terminations() != 1 {
 		t.Errorf("%d Terminate calls, want 1", f.child.terminations())
@@ -216,11 +217,11 @@ func TestServiceShutdown(t *testing.T) {
 	if st := f.rec.next(t); st.State != stateStopPending {
 		t.Fatalf("after Shutdown: %v, want stop pending", st.State)
 	}
-	if st := f.rec.next(t); st.State != stateStopped {
-		t.Fatalf("state after Shutdown: %v, want stopped", st.State)
-	}
 	if r := f.finish(t); r.code != 0 {
 		t.Errorf("serve returned %d, want 0", r.code)
+	}
+	if got := f.rec.all(); len(got) != 2 {
+		t.Errorf("reported statuses %+v, want exactly Running and stop pending", got)
 	}
 	if f.child.terminations() != 1 {
 		t.Errorf("%d Terminate calls, want 1", f.child.terminations())
@@ -238,46 +239,46 @@ func TestServiceInterrogate(t *testing.T) {
 	}
 	f.reqs <- changeRequest{Cmd: controlStop}
 	f.rec.next(t)
-	f.rec.next(t)
 	f.finish(t)
 }
 
-// TestServiceChildExit: the JVM's exit code becomes the service's exit code,
-// after a Stopped report.
+// TestServiceChildExit: the JVM's exit code is reported as a service-specific
+// exit code, with no Stopped of serve's own (svc.Run reports the final Stopped
+// carrying the code).
 func TestServiceChildExit(t *testing.T) {
 	child := newFakeChild(3)
 	f := newSupervisorFixture(t, child)
 	f.serve()
 	f.rec.next(t)
 	child.exitNow()
-	if st := f.rec.next(t); st.State != stateStopped {
-		t.Errorf("state after the JVM exited: %v, want stopped", st.State)
+	if r := f.finish(t); !r.specific || r.code != 3 {
+		t.Errorf("serve returned (%v, %d), want (true, 3): svc.Run records it as ServiceSpecificExitCode", r.specific, r.code)
 	}
-	if r := f.finish(t); r.specific || r.code != 3 {
-		t.Errorf("serve returned (%v, %d), want (false, 3): svc.Run records the code as Win32ExitCode", r.specific, r.code)
+	if got := f.rec.all(); len(got) != 1 || got[0].State != stateRunning {
+		t.Errorf("reported statuses %+v, want only Running before the exit", got)
 	}
 	if f.child.terminations() != 0 {
 		t.Errorf("%d Terminate calls, want 0: the child was gone already", f.child.terminations())
 	}
 }
 
-// TestServiceStartFailure: a JVM that cannot start is a stopped service with
-// exit code 1, never a running one.
+// TestServiceStartFailure: a JVM that cannot start is a service-specific exit
+// code 1, never a running service and never a clean stop.
 func TestServiceStartFailure(t *testing.T) {
 	f := newSupervisorFixture(t, newFakeChild(0))
 	f.starter.err = errors.New("CreateProcess: the file was not found")
 	f.serve()
-	if st := f.rec.next(t); st.State != stateStopped {
-		t.Errorf("first status %v, want stopped", st.State)
+	if r := f.finish(t); !r.specific || r.code != 1 {
+		t.Errorf("serve returned (%v, %d), want (true, 1)", r.specific, r.code)
 	}
-	if r := f.finish(t); r.code != 1 {
-		t.Errorf("serve returned %d, want 1", r.code)
+	if got := f.rec.all(); len(got) != 0 {
+		t.Errorf("reported statuses %+v, want none: the SCM gets the failure in the final Stopped", got)
 	}
 }
 
-// TestServiceStopTimeout: a JVM that ignores the stop is still reported
-// Stopped inside the wait hint, so the machine's shutdown is never blocked by
-// a service stuck in "stop pending".
+// TestServiceStopTimeout: a JVM that ignores the stop still ends the handler
+// inside the wait hint, so the machine's shutdown is never blocked by a
+// service stuck in "stop pending" (svc.Run then reports Stopped).
 func TestServiceStopTimeout(t *testing.T) {
 	child := newFakeChild(0)
 	child.ignoreKill = true
@@ -288,15 +289,14 @@ func TestServiceStopTimeout(t *testing.T) {
 	start := time.Now()
 	f.reqs <- changeRequest{Cmd: controlStop}
 	pending := f.rec.next(t)
-	f.rec.next(t)
 	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("Stopped after %s, want within the test's 20 ms stop timeout plus slack", elapsed)
+		t.Errorf("serve returned after %s, want within the test's 20 ms stop timeout plus slack", elapsed)
 	}
 	if pending.WaitHint < 30000 {
 		t.Errorf("wait hint %d, want at least the 30 s serviceStopWaitHint", pending.WaitHint)
 	}
-	if r := f.finish(t); r.code != 0 {
-		t.Errorf("serve returned %d, want 0", r.code)
+	if r := f.finish(t); r.specific || r.code != 0 {
+		t.Errorf("serve returned (%v, %d), want (false, 0)", r.specific, r.code)
 	}
 	if child.terminations() != 1 {
 		t.Errorf("%d Terminate calls, want 1", child.terminations())
@@ -329,8 +329,10 @@ func TestServiceOtherControls(t *testing.T) {
 	if st := f.rec.next(t); st.State != stateStopPending {
 		t.Errorf("next status %v, want stop pending (an ignored control reports nothing)", st.State)
 	}
-	f.rec.next(t)
 	f.finish(t)
+	if got := f.rec.all(); len(got) != 2 {
+		t.Errorf("reported statuses %+v, want Running and stop pending", got)
+	}
 }
 
 // fakeServiceHost is serviceHost: the platform binding, faked.
@@ -415,13 +417,17 @@ func TestRunServiceRefusals(t *testing.T) {
 }
 
 // TestRunServiceIsTheSCMsEntryPoint: started from a console the subcommand
-// refuses, since there is no SCM channel to answer.
+// refuses, since there is no SCM channel to answer — and it refuses before it
+// opens the project log.
 func TestRunServiceIsTheSCMsEntryPoint(t *testing.T) {
 	dir := runServiceProject(t)
 	host := &fakeServiceHost{isService: false}
 	err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host)
 	if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "service control manager") {
 		t.Fatalf("err %v, want the console refusal naming the SCM", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, LogDir, ServiceLogName)); !os.IsNotExist(serr) {
+		t.Errorf("a console run wrote the service log: %v", serr)
 	}
 	host = &fakeServiceHost{isErr: errors.New("IsWindowsService: Access is denied.")}
 	if err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host); err == nil {
@@ -444,7 +450,7 @@ func TestRunServiceRuns(t *testing.T) {
 	if host.sup == nil {
 		t.Fatal("no supervisor reached the service host")
 	}
-	if got, want := host.sup.argv, wantJavaArgv(dir, ModeDistributed); !equalStrings(got, want) {
+	if got, want := host.sup.argv, wantJavaArgv(dir, ModeDistributed, ""); !equalStrings(got, want) {
 		t.Errorf("JVM argv %q, want %q", got, want)
 	}
 	logPath := filepath.Join(dir, LogDir, ServiceLogName)
@@ -465,7 +471,7 @@ func TestRunServiceRuns(t *testing.T) {
 	}
 }
 
-// TestRunServiceCommand: cmd/setup dispatches on the first argument only.
+// TestRunServiceCommand: setupcmd.Run dispatches on the first argument only.
 func TestRunServiceCommand(t *testing.T) {
 	for _, args := range [][]string{nil, {}, {"--project", "x"}, {"run-services"}} {
 		handled, err := RunServiceCommand(args, io.Discard)

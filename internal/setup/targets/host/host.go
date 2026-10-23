@@ -5,8 +5,8 @@
 // (`systemctl --user`); on Windows it is a service of the service control
 // manager (row U8b, file: winsvc.go), which cannot start java.exe directly:
 // the installed service is a copy of piperoom-setup itself running its
-// run-service subcommand, and it supervises the Connect JVM (file:
-// servicehost.go).
+// run-service subcommand (dispatched by setupcmd.Run, file: servicehost.go),
+// and it supervises the Connect JVM.
 //
 // Ops: service_status and properties_read (T0); properties_write (T1, the
 // project directory only); service_install and service_restart (T2).
@@ -18,9 +18,12 @@
 // service) come from the driver's templates and from what it detects: the
 // project directory, the distribution at kafka/ under it, the worker properties
 // file the mode names, and the JDK the java on PATH resolves to. No op param
-// reaches the rendered text; a detected path with anything outside a small safe
-// set (a space, %, $, a quote, a backslash, a control character) is refused,
-// never escaped.
+// reaches the rendered text. A detected path is checked against the shape of
+// the artifact it goes into (pathrule.go): a systemd unit takes POSIX values of
+// safe characters only (a space, %, $, a quote or a backslash is refused,
+// because systemd would split or expand it), while a Windows service definition
+// takes a drive-absolute path with a space or a parenthesis, which
+// mgr.CreateService and the argv slice pass through unchanged.
 //
 // Why user scope only on Linux: a system unit file must be root-owned and
 // outside every user-writable directory, or its owner can edit it into a root
@@ -29,9 +32,10 @@
 // that hole. A system-scope install needs a design ruling (a root-owned unit
 // directory outside the project) and is not in this row. A Windows service
 // always installs into the machine's service database and therefore needs an
-// elevated prompt; CreateService's default account is LocalSystem, and the
-// definition service_install previews says so (row U8e documents the account
-// question).
+// elevated prompt, but its files stay in the project: it runs as its own
+// virtual account (NT SERVICE\<service>), never LocalSystem, so a project file
+// the person's account can change cannot become SYSTEM code (winsvc.go,
+// serviceAccountPrefix). Row U8e documents the account and where to install.
 //
 // The unit file is written to systemd/<unit> under the project directory and
 // linked into the user's unit search path by `systemctl --user enable
@@ -93,8 +97,10 @@ const (
 	ServiceDir = "services"
 	// RunnerExe is that copy's fixed name.
 	RunnerExe = "piperoom-setup.exe"
-	// RunServiceSubcommand is the subcommand the installed service runs
-	// (cmd/setup dispatches it, file: servicehost.go).
+	// RunServiceSubcommand is the subcommand the installed service runs.
+	// setupcmd.Run dispatches it before it parses the runner's flags, and
+	// service_install refuses a binary that is not piperoom-setup, because
+	// only that binary answers it (file: servicehost.go).
 	RunServiceSubcommand = "run-service"
 
 	hostTarget = "host"

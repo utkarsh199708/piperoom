@@ -170,7 +170,18 @@ func (o serviceInstallOp) Preview(ctx context.Context, params json.RawMessage, e
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
-	return o.d.diffPreview(ctx, env, s.UnitFile, string(text), "the unit "+s.Unit+" is enabled and runs "+strings.Join(s.Rendered.ExecStart, " "))
+	return o.d.diffPreview(ctx, env, s.UnitFile, string(text), installEffect(s))
+}
+
+// installEffect is the sentence a service_install preview ends with: what the
+// step runs, in the shape the platform's artifact has. A Windows service has no
+// ExecStart to read (the SCM runs the copied runner with the recorded
+// arguments), so the unit's line would read "runs ." there.
+func installEffect(s serviceSpec) string {
+	if s.ExePath == "" {
+		return "the unit " + s.Unit + " is enabled and runs " + strings.Join(s.Rendered.ExecStart, " ")
+	}
+	return "the service " + s.Unit + " is installed (automatic start) and runs " + s.ExePath + " " + strings.Join(s.Args, " ")
 }
 
 func (o serviceInstallOp) prepare(params json.RawMessage, env ops.Env) (serviceSpec, serviceManager, error) {

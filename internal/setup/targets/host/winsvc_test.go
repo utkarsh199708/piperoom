@@ -67,7 +67,7 @@ func (f *fakeSCM) Create(name, exe string, args []string, cfg serviceConfig) (se
 		}
 	}
 	if _, dup := f.services[name]; dup {
-		return nil, errors.New("fake SCM: the service already exists")
+		return nil, errServiceExists
 	}
 	s := &fakeService{scm: f, name: name, state: stateStopped}
 	f.services[name] = s
@@ -116,6 +116,7 @@ type fakeService struct {
 	name       string
 	state      serviceState
 	exitCode   uint32
+	specificEC uint32
 	queryErr   error
 	startErr   error
 	controlErr error
@@ -147,7 +148,7 @@ func (s *fakeService) Query() (serviceStatus, error) {
 	if s.queryErr != nil {
 		return serviceStatus{}, s.queryErr
 	}
-	return serviceStatus{State: s.state, Accepts: acceptStop | acceptShutdown, Win32ExitCode: s.exitCode}, nil
+	return serviceStatus{State: s.state, Accepts: acceptStop | acceptShutdown, Win32ExitCode: s.exitCode, ServiceSpecificExitCode: s.specificEC}, nil
 }
 
 func (s *fakeService) Control(cmd serviceControl) (serviceStatus, error) {
@@ -249,9 +250,11 @@ func newWindowsFixture(t *testing.T) *winFixture {
 	return f
 }
 
-// layout writes the distribution and both worker files.
+// layout writes the distribution (with its log4j configuration, as a Kafka
+// 4 tarball has) and both worker files.
 func (f *winFixture) layout() {
 	f.write("kafka/libs/kafka-clients-4.0.0.jar", "jar\n", 0o644)
+	f.write("kafka/config/connect-log4j2.yaml", "appenders: {}\n", 0o644)
 	f.write("connect-distributed.properties", "bootstrap.servers=127.0.0.1:9092\n", 0o600)
 	f.write("connect-standalone.properties", "bootstrap.servers=127.0.0.1:9092\n", 0o600)
 }
@@ -276,6 +279,15 @@ func (f *winFixture) read(name string) string {
 	return string(b)
 }
 
+// writeFileAt writes an absolute path outside the project (the binary the
+// manager copies is found through os.Executable, not through the project).
+func (f *winFixture) writeFileAt(path string, content []byte) {
+	f.t.Helper()
+	if err := os.WriteFile(path, content, 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 func (f *winFixture) run(op string, params any) (protocol.OpResult, error) {
 	f.t.Helper()
 	raw, err := json.Marshal(params)
@@ -298,20 +310,33 @@ func wantServiceArgs(dir, mode string) []string {
 	}
 }
 
-// wantJavaArgv is the JVM argv the service host starts.
-func wantJavaArgv(dir, mode string) []string {
+// wantJavaArgv is the JVM argv the service host starts: the heap and log
+// directory the distribution's connect-<mode>.sh sets, the log4j configuration
+// from the distribution, and the wildcard classpath.
+func wantJavaArgv(dir, mode, log4j string) []string {
 	sep := "/"
 	if isDrivePath(dir) {
 		sep = `\`
 	}
-	return []string{
+	argv := []string{
 		nativeJoin(fakeJavaHome, "bin", "java.exe"),
-		"-Xmx256M", "-Xms256M",
+		"-Xms256M", "-Xmx2G",
 		"-Dkafka.logs.dir=" + nativeJoin(dir, LogDir),
-		"-cp", nativeJoin(dir, DistDir, "libs") + sep + "*",
+	}
+	if log4j != "" {
+		argv = append(argv, log4j)
+	}
+	return append(argv,
+		"-cp", nativeJoin(dir, DistDir, "libs")+sep+"*",
 		connectMain[mode],
 		nativeJoin(dir, "connect-"+mode+".properties"),
-	}
+	)
+}
+
+// wantLog4jArg is the log4j argument for the configuration the fixture's
+// distribution carries.
+func wantLog4jArg(dir string) string {
+	return "-Dlog4j2.configurationFile=" + nativeJoin(dir, DistDir, "config", "connect-log4j2.yaml")
 }
 
 func TestWindowsServiceInstall(t *testing.T) {
@@ -339,6 +364,11 @@ func TestWindowsServiceInstall(t *testing.T) {
 	if !c.cfg.Automatic || c.cfg.DisplayName != "Piperoom Kafka Connect worker (distributed)" {
 		t.Errorf("config %+v", c.cfg)
 	}
+	// The service runs as its own virtual account, never LocalSystem, and the
+	// SCM writes that account's SID into the token.
+	if c.cfg.Account != `NT SERVICE\piperoom-connect` || c.cfg.Account == "LocalSystem" || !c.cfg.ServiceSID {
+		t.Errorf("account %q (ServiceSID %v), want NT SERVICE\\piperoom-connect with the service SID", c.cfg.Account, c.cfg.ServiceSID)
+	}
 	if strings.Contains(c.cfg.Description, "services") || !strings.Contains(c.cfg.Description, f.dir) {
 		t.Errorf("description %q, want the project directory", c.cfg.Description)
 	}
@@ -350,19 +380,19 @@ func TestWindowsServiceInstall(t *testing.T) {
 	rec := f.read(ServiceDir + "/piperoom-connect.txt")
 	for _, want := range append([]string{
 		"service=piperoom-connect\n", "display=Piperoom Kafka Connect worker (distributed)\n",
-		"account=LocalSystem\n", "start=automatic\n", "exe=" + wantExe + "\n",
+		`account=NT SERVICE\piperoom-connect` + "\n", "start=automatic\n", "exe=" + wantExe + "\n",
 		"project=" + f.dir + "\n", "log=" + filepath.Join(f.dir, LogDir, ServiceLogName) + "\n",
 	}, argLines("arg", wantServiceArgs(f.dir, ModeDistributed))...) {
 		if !strings.Contains(rec, want) {
 			t.Errorf("record lacks %q:\n%s", want, rec)
 		}
 	}
-	for _, want := range argLines("java-arg", wantJavaArgv(f.dir, ModeDistributed)) {
+	for _, want := range argLines("java-arg", wantJavaArgv(f.dir, ModeDistributed, wantLog4jArg(f.dir))) {
 		if !strings.Contains(rec, want) {
 			t.Errorf("record lacks %q:\n%s", want, rec)
 		}
 	}
-	if !strings.Contains(res.Summary, "installed piperoom-connect (distributed)") || !strings.Contains(res.Summary, "account=LocalSystem") {
+	if !strings.Contains(res.Summary, "installed piperoom-connect (distributed)") || !strings.Contains(res.Summary, `account=NT SERVICE\piperoom-connect`) {
 		t.Errorf("summary %q", res.Summary)
 	}
 	if res.Receipt.Kind != "file" || res.Receipt.Target != ServiceDir+"/piperoom-connect.txt" {
@@ -372,7 +402,7 @@ func TestWindowsServiceInstall(t *testing.T) {
 	if err := json.Unmarshal(res.Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data["replaced"] != false || data["account"] != "LocalSystem" || data["start_type"] != "automatic" {
+	if data["replaced"] != false || data["account"] != `NT SERVICE\piperoom-connect` || data["start_type"] != "automatic" {
 		t.Errorf("data %v", data)
 	}
 	if f.noExec {
@@ -427,6 +457,108 @@ func TestWindowsServiceInstallRefusesAForeignName(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(f.dir, BinDir, RunnerExe)); !os.IsNotExist(serr) {
 		t.Errorf("the exe copy was written: %v", serr)
+	}
+}
+
+// TestWindowsServiceInstallRunner: the SCM runs a copy of a binary that
+// answers run-service, so install copies piperoom-setup — or the
+// piperoom-setup next to an umbrella piperoom.exe — and refuses a binary that
+// answers neither instead of installing a service that fails with 1053.
+func TestWindowsServiceInstallRunner(t *testing.T) {
+	t.Run("the umbrella finds the runner next to it", func(t *testing.T) {
+		f := newWindowsFixture(t)
+		f.layout()
+		dir := t.TempDir()
+		umbrella := filepath.Join(dir, "piperoom.exe")
+		f.writeFileAt(umbrella, []byte("MZ umbrella\n"))
+		f.writeFileAt(filepath.Join(dir, RunnerExe), []byte("MZ runner\n"))
+		f.self = umbrella
+		if _, err := f.run("service_install", ServiceParams{}); err != nil {
+			t.Fatalf("service_install: %v", err)
+		}
+		if got := f.read(BinDir + "/" + RunnerExe); got != "MZ runner\n" {
+			t.Errorf("bin copy %q, want the runner's bytes, not the umbrella's", got)
+		}
+		if calls := f.scm.createdCalls(); len(calls) != 1 || calls[0].exe != filepath.Join(f.dir, BinDir, RunnerExe) {
+			t.Errorf("create calls %+v", calls)
+		}
+	})
+	t.Run("a binary that cannot answer run-service is refused", func(t *testing.T) {
+		f := newWindowsFixture(t)
+		f.layout()
+		umbrella := filepath.Join(t.TempDir(), "piperoom.exe")
+		f.writeFileAt(umbrella, []byte("MZ umbrella\n"))
+		f.self = umbrella
+		_, err := f.run("service_install", ServiceParams{})
+		if !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "1053") {
+			t.Fatalf("err %v, want ErrDetect naming Windows error 1053", err)
+		}
+		if len(f.scm.createdCalls()) != 0 || len(f.scm.openedNames()) != 0 {
+			t.Error("the SCM was reached for a binary that cannot serve the service")
+		}
+		if _, serr := os.Stat(filepath.Join(f.dir, BinDir, RunnerExe)); !os.IsNotExist(serr) {
+			t.Errorf("the exe copy was written: %v", serr)
+		}
+	})
+}
+
+// TestWindowsServiceInstallRestoresAFailedReplace: a replacement that cannot
+// create the new service puts the previous definition back and re-creates the
+// previous service, instead of leaving none.
+func TestWindowsServiceInstallRestoresAFailedReplace(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	f.scm.add("piperoom-connect", stateStopped)
+	f.scm.createErrs = []error{errors.New("the service database is locked")}
+	_, err := f.run("service_install", ServiceParams{Mode: ModeStandalone})
+	if !errors.Is(err, ErrServiceManager) {
+		t.Fatalf("second install: %v, want ErrServiceManager", err)
+	}
+	f.scm.mu.Lock()
+	restored, ok := f.scm.services["piperoom-connect"]
+	f.scm.mu.Unlock()
+	if !ok {
+		t.Fatal("the replaced service was not restored: the project has no service now")
+	}
+	if starts, _, _ := restored.counts(); starts != 0 {
+		t.Errorf("restore started the service: %d starts", starts)
+	}
+	// The record that came back is the definition install replaced: the
+	// distributed worker, not the standalone one the failed step wanted.
+	rec := f.read(ServiceDir + "/piperoom-connect.txt")
+	if !strings.Contains(rec, "connect-distributed.properties") || strings.Contains(rec, "connect-standalone.properties") {
+		t.Errorf("record after the failed replace:\n%s", rec)
+	}
+	calls := f.scm.createdCalls()
+	if len(calls) != 3 {
+		t.Fatalf("%d Create calls, want 3 (install, failed replace, restore)", len(calls))
+	}
+	last := calls[len(calls)-1]
+	if got, want := last.args, wantServiceArgs(f.dir, ModeDistributed); !equalStrings(got, want) {
+		t.Errorf("restored args %q, want the previous definition's %q", got, want)
+	}
+	if last.cfg.Account != `NT SERVICE\piperoom-connect` || !last.cfg.ServiceSID {
+		t.Errorf("restored config %+v, want the virtual account back too", last.cfg)
+	}
+}
+
+// TestWindowsServiceCreateStopsOnCancel: the marked-for-deletion retries are
+// bounded by the step's context, so a cancelled step stops calling the SCM.
+func TestWindowsServiceCreateStopsOnCancel(t *testing.T) {
+	f := newWindowsFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.scm.createErrs = []error{errServiceMarkedForDelete, errServiceMarkedForDelete, errServiceMarkedForDelete}
+	m := f.drv.mgr.(*windowsManager)
+	_, err := m.createService(ctx, f.scm, "piperoom-connect", `C:\p\bin\piperoom-setup.exe`, nil, serviceConfig{})
+	if !errors.Is(err, ErrServiceManager) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v, want ErrServiceManager wrapping context.Canceled", err)
+	}
+	if n := len(f.scm.createdCalls()); n != 1 {
+		t.Errorf("%d Create calls, want 1: the context ended the retries", n)
 	}
 }
 
@@ -501,6 +633,33 @@ func TestWindowsServiceInstallRefusals(t *testing.T) {
 	})
 }
 
+// TestWindowsServiceInstallPreviewNamesTheService: the preview's effect
+// sentence names what the SCM starts. The unit wording reads
+// s.Rendered.ExecStart, which a Windows definition does not have, and would
+// have shown "... runs ." with nothing after it.
+func TestWindowsServiceInstallPreviewNamesTheService(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	raw, err := json.Marshal(ServiceParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := (serviceInstallOp{d: f.drv}).Preview(context.Background(), raw, f.envForTest(t))
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	exe := filepath.Join(f.dir, BinDir, RunnerExe)
+	if !strings.Contains(p.Expected, "runs "+exe+" "+RunServiceSubcommand+" --project") {
+		t.Errorf("preview %q, want the copied runner and run-service", p.Expected)
+	}
+	if strings.Contains(p.Expected, "runs .") || strings.HasSuffix(strings.TrimSpace(p.Expected), "runs") {
+		t.Errorf("preview %q ends with an empty command", p.Expected)
+	}
+	if p.Target != ServiceDir+"/piperoom-connect.txt" {
+		t.Errorf("preview target %q", p.Target)
+	}
+}
+
 func TestWindowsServiceStatus(t *testing.T) {
 	f := newWindowsFixture(t)
 	res, err := f.run("service_status", UnitParams{})
@@ -533,17 +692,39 @@ func TestWindowsServiceStatus(t *testing.T) {
 		t.Errorf("summary %q", res.Summary)
 	}
 
-	// A JVM that died: the SCM reports the exit code the service host
-	// returned (svc.Run's exitCode becomes Win32ExitCode).
+	// A JVM that died: the service host returns the JVM's code as a
+	// service-specific exit code, which is what the SCM stores (Win32ExitCode
+	// ERROR_SERVICE_SPECIFIC_ERROR plus ServiceSpecificExitCode), so
+	// service_status must read the second field.
 	svc.mu.Lock()
-	svc.state, svc.exitCode = stateStopped, 3
+	svc.state, svc.exitCode, svc.specificEC = stateStopped, win32ErrorServiceSpecific, 3
 	svc.mu.Unlock()
 	res, err = f.run("service_status", UnitParams{})
 	if err != nil {
 		t.Fatalf("service_status: %v", err)
 	}
-	if !strings.Contains(res.Summary, "stopped") || !strings.Contains(res.Summary, "last exit code 3") {
-		t.Errorf("summary %q", res.Summary)
+	if !strings.Contains(res.Summary, "stopped") || !strings.Contains(res.Summary, "last exit code 3") ||
+		strings.Contains(res.Summary, "last exit code 1066") {
+		t.Errorf("summary %q, want the service-specific code 3", res.Summary)
+	}
+	var died map[string]any
+	if err := json.Unmarshal(res.Data, &died); err != nil {
+		t.Fatal(err)
+	}
+	if died["exit_code"] != float64(3) {
+		t.Errorf("exit_code %v, want 3", died["exit_code"])
+	}
+
+	// A Win32 code (a start the SCM timed out) is still reported as it comes.
+	svc.mu.Lock()
+	svc.exitCode, svc.specificEC = 1053, 0
+	svc.mu.Unlock()
+	res, err = f.run("service_status", UnitParams{})
+	if err != nil {
+		t.Fatalf("service_status: %v", err)
+	}
+	if !strings.Contains(res.Summary, "last exit code 1053") {
+		t.Errorf("summary %q, want the Win32 code 1053", res.Summary)
 	}
 
 	// A name this project did not install: reported, never claimed.
@@ -630,6 +811,29 @@ func TestWindowsServiceRestart(t *testing.T) {
 	}
 }
 
+// TestWindowsServiceRestartReportsADeadJVM: a JVM that dies at once is
+// reported with its code at the next poll, not after the whole 30 s wait.
+func TestWindowsServiceRestartReportsADeadJVM(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	svc := f.scm.add("piperoom-connect", stateStopped)
+	// Start holds the fake's lock while it calls onStart.
+	svc.onStart = func() {
+		svc.state, svc.exitCode, svc.specificEC = stateStopped, win32ErrorServiceSpecific, 7
+	}
+	start := time.Now()
+	_, err := f.run("service_restart", UnitParams{})
+	if !errors.Is(err, ErrServiceManager) || !strings.Contains(err.Error(), "exit code 7") {
+		t.Fatalf("restart: %v, want ErrServiceManager naming the JVM's exit code 7", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the restart waited %s; a stopped service must end the wait at the next poll", elapsed)
+	}
+}
+
 func TestWindowsServiceUninstall(t *testing.T) {
 	f := newWindowsFixture(t)
 	if _, err := f.run("service_uninstall", UnitParams{}); !errors.Is(err, ops.ErrUnknownOp) {
@@ -701,7 +905,9 @@ func TestWindowsServiceNames(t *testing.T) {
 }
 
 // TestWindowsChildArgv: the JVM argv is the template's, with the detected
-// paths; no arg is ever built from an op param.
+// paths; no arg is ever built from an op param. The heap and the log4j
+// configuration match the distribution's connect-<mode>.sh, which the Linux unit
+// runs; the log4j property follows the file the distribution ships.
 func TestWindowsChildArgv(t *testing.T) {
 	for _, mode := range []string{ModeDistributed, ModeStandalone} {
 		t.Run(mode, func(t *testing.T) {
@@ -709,10 +915,40 @@ func TestWindowsChildArgv(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, want := argv, wantJavaArgv("/srv/p", mode); !equalStrings(got, want) {
+			if got, want := argv, wantJavaArgv("/srv/p", mode, ""); !equalStrings(got, want) {
 				t.Errorf("argv %q, want %q", got, want)
 			}
 		})
+	}
+	// Kafka 4 ships config/connect-log4j2.yaml; Kafka 3 ships
+	// config/connect-log4j.properties. Each is passed with its own property,
+	// because without it no file appender is configured and connect.log is
+	// never written.
+	for _, c := range []struct{ file, want string }{
+		{"kafka/config/connect-log4j2.yaml", "-Dlog4j2.configurationFile="},
+		{"kafka/config/connect-log4j.properties", "-Dlog4j.configuration=file:"},
+	} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, filepath.FromSlash(c.file))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		argv, err := javaArgv(dir, "/opt/jdk-21", ModeDistributed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, a := range argv {
+			if strings.HasPrefix(a, c.want) && strings.HasSuffix(a, filepath.Base(c.file)) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: argv %q lacks %s<path>", c.file, argv, c.want)
+		}
 	}
 	// The classpath is one wildcard token the JVM expands; a jar list is never
 	// globbed here.
@@ -730,10 +966,52 @@ func TestWindowsChildArgv(t *testing.T) {
 		t.Errorf("unknown mode: %v", err)
 	}
 	if _, err := javaArgv("/srv/my p", "/opt/jdk-21", ModeDistributed); !errors.Is(err, ErrDetect) {
-		t.Errorf("a project path with a space: %v", err)
+		t.Errorf("a POSIX project path with a space (which the SCM escapes but a POSIX host cannot carry): %v", err)
 	}
 	if _, err := javaArgv("/srv/p", "opt/jdk", ModeDistributed); !errors.Is(err, ErrDetect) {
 		t.Errorf("a relative JDK home: %v", err)
+	}
+}
+
+// TestWindowsChildArgvFromProgramFiles: the JVM the service starts comes from
+// the JDK java_version detected, which on Windows is usually under Program
+// Files; the argv slice carries the space unescaped (CreateService and
+// exec.Command escape it), so the path is served rather than refused.
+func TestWindowsChildArgvFromProgramFiles(t *testing.T) {
+	dir := `C:\Program Files\Piperoom\orders`
+	javaHome := `C:\Program Files\Eclipse Adoptium\jdk-21`
+	argv, err := javaArgv(dir, javaHome, ModeDistributed)
+	if err != nil {
+		t.Fatalf("javaArgv: %v", err)
+	}
+	if argv[0] != javaHome+`\bin\java.exe` {
+		t.Errorf("java %q, want the Program Files JDK", argv[0])
+	}
+	found := false
+	for _, a := range argv {
+		if a == "-Dkafka.logs.dir="+dir+`\logs` {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("argv %q lacks the log directory under Program Files", argv)
+	}
+	// The install definition, the record and the args take the same shape.
+	s := serviceSpec{
+		Unit: "piperoom-connect", Mode: ModeDistributed, ProjectDir: dir,
+		ExePath: dir + `\bin\piperoom-setup.exe`,
+		Args:    []string{RunServiceSubcommand, "--project", dir, "--java", javaHome},
+		Java:    argv, LogFile: dir + `\logs\` + ServiceLogName,
+	}
+	rec, err := renderServiceDefinition(s)
+	if err != nil {
+		t.Fatalf("renderServiceDefinition: %v", err)
+	}
+	for _, want := range []string{"project=" + dir + "\n", "exe=" + s.ExePath + "\n", "arg=--project\n", "arg=" + dir + "\n",
+		"java-arg=" + javaHome + `\bin\java.exe` + "\n"} {
+		if !strings.Contains(string(rec), want) {
+			t.Errorf("record lacks %q:\n%s", want, rec)
+		}
 	}
 }
 
@@ -746,7 +1024,8 @@ func (f *winFixture) envForTest(t *testing.T) ops.Env {
 		t.Fatalf("OpenConfiner: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
-	return ops.Env{ProjectDir: c.Dir(), Confine: c, MountDirs: []string{DistDir, PluginDir, BinDir, ServiceDir}}
+	return ops.Env{ProjectDir: c.Dir(), Confine: c, MountDirs: []string{DistDir, PluginDir, BinDir, ServiceDir},
+		LookPath: func(string) (string, error) { return f.java, nil }}
 }
 
 func equalStrings(a, b []string) bool {

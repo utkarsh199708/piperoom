@@ -16,7 +16,7 @@ import (
 // windows/svc/mgr for the manager, svc.Run and svc.IsWindowsService for the
 // service host. Everything the target decides lives in winsvc.go and
 // servicehost.go, which compile on every OS; this file is the thin adapter
-// (one mgr call per method, the two error mappings) and the build tag.
+// (one mgr call per method, the Win32 error mappings) and the build tag.
 
 // defaultServiceAPI connects to the local service control manager. It needs an
 // elevated prompt: installing, starting and deleting a machine service are
@@ -44,6 +44,8 @@ func mapSCMError(err error) error {
 			return fmt.Errorf("%w: %w", errServiceMarkedForDelete, err)
 		case windows.ERROR_SERVICE_NOT_ACTIVE:
 			return fmt.Errorf("%w: %w", errServiceNotActive, err)
+		case windows.ERROR_SERVICE_EXISTS:
+			return fmt.Errorf("%w: %w", errServiceExists, err)
 		}
 	}
 	return err
@@ -59,10 +61,19 @@ func (c *mgrConnection) Create(name, exe string, args []string, cfg serviceConfi
 	if cfg.Automatic {
 		start = mgr.StartAutomatic
 	}
+	// ServiceStartName and SidType are what keep the service off LocalSystem:
+	// the SCM logs it on as its own virtual account (NT SERVICE\<name>), whose
+	// SID the unrestricted SID type writes into the token.
+	sidType := uint32(windows.SERVICE_SID_TYPE_NONE)
+	if cfg.ServiceSID {
+		sidType = windows.SERVICE_SID_TYPE_UNRESTRICTED
+	}
 	s, err := c.m.CreateService(name, exe, mgr.Config{
-		DisplayName: cfg.DisplayName,
-		Description: cfg.Description,
-		StartType:   start,
+		DisplayName:      cfg.DisplayName,
+		Description:      cfg.Description,
+		StartType:        start,
+		ServiceStartName: cfg.Account,
+		SidType:          sidType,
 	}, args...)
 	if err != nil {
 		return nil, mapSCMError(err)
@@ -102,23 +113,25 @@ func (m *mgrService) Close() error { return m.s.Close() }
 // numeric values are the Windows API's own, so the conversion is a cast.
 func fromSvcStatus(st svc.Status) serviceStatus {
 	return serviceStatus{
-		State:         serviceState(st.State),
-		Accepts:       serviceAccept(st.Accepts),
-		CheckPoint:    st.CheckPoint,
-		WaitHint:      st.WaitHint,
-		ProcessID:     st.ProcessId,
-		Win32ExitCode: st.Win32ExitCode,
+		State:                   serviceState(st.State),
+		Accepts:                 serviceAccept(st.Accepts),
+		CheckPoint:              st.CheckPoint,
+		WaitHint:                st.WaitHint,
+		ProcessID:               st.ProcessId,
+		Win32ExitCode:           st.Win32ExitCode,
+		ServiceSpecificExitCode: st.ServiceSpecificExitCode,
 	}
 }
 
 func toSvcStatus(st serviceStatus) svc.Status {
 	return svc.Status{
-		State:         svc.State(st.State),
-		Accepts:       svc.Accepted(st.Accepts),
-		CheckPoint:    st.CheckPoint,
-		WaitHint:      st.WaitHint,
-		ProcessId:     st.ProcessID,
-		Win32ExitCode: st.Win32ExitCode,
+		State:                   svc.State(st.State),
+		Accepts:                 svc.Accepted(st.Accepts),
+		CheckPoint:              st.CheckPoint,
+		WaitHint:                st.WaitHint,
+		ProcessId:               st.ProcessID,
+		Win32ExitCode:           st.Win32ExitCode,
+		ServiceSpecificExitCode: st.ServiceSpecificExitCode,
 	}
 }
 
@@ -133,8 +146,10 @@ func (platformServiceHost) Run(name string, sup *serviceSupervisor) error {
 }
 
 // svcHandler bridges svc's channels to the supervisor's own types. Statuses are
-// forwarded synchronously by the report callback, so the Stopped that ends the
-// service is never dropped; only the request channel needs a forwarder, and it
+// forwarded synchronously by the report callback. The supervisor reports
+// Running, stop pending and interrogate answers, never Stopped: svc.Run sends
+// the final Stopped itself, with the code Execute returns (a JVM exit as
+// ServiceSpecificExitCode). Only the request channel needs a forwarder, and it
 // stops when Execute returns.
 type svcHandler struct{ sup *serviceSupervisor }
 

@@ -15,8 +15,9 @@ import (
 // timeout, and java.exe never does. So the installed service is a copy of
 // piperoom-setup (bin/piperoom-setup.exe under the project) started with
 // run-service; that process starts the Connect JVM as its child (file:
-// child.go), reports Running, relays Stop and Shutdown to the child and
-// reports Stopped, and turns the child's exit into the service's exit code.
+// child.go), reports Running, relays Stop and Shutdown to the child, and turns
+// the child's exit into the service's service-specific exit code (svc.Run
+// reports the final Stopped itself, with that code).
 //
 // Everything in this file is platform-independent: the SCM's types are mirrored
 // in winsvc.go, and serviceHost is the one platform binding (svc.Run and
@@ -31,9 +32,9 @@ const ServiceLogName = "piperoom-service.log"
 
 // Timing of the service host. The wait hint is what the SCM is told a pending
 // stop takes; the stop timeout is how long the handler waits for the JVM inside
-// it. The stop is reported even if the JVM outlives it: a service stuck in
-// "stop pending" blocks the machine's shutdown, and the SCM kills the process
-// at the hint anyway.
+// it. The stopped state is reported by svc.Run when the handler returns, even
+// if the JVM outlived the hint: a service stuck in "stop pending" blocks the
+// machine's shutdown, and the SCM kills the process at the hint anyway.
 const (
 	serviceStopWaitHint = 30 * time.Second
 	defaultStopTimeout  = 25 * time.Second
@@ -50,8 +51,12 @@ var connectMain = map[string]string{
 // javaArgv builds the JVM command line of the service: the detected JDK,
 // the distribution's libs/ as a wildcard classpath (the JVM expands it, so no
 // jar list is globbed or joined here), the logs directory and the worker
-// properties file the mode names. Every path is checked by CheckTemplatePath;
-// the arguments are passed to exec.Command as a slice, never as a string.
+// properties file the mode names. It mirrors what the distribution's
+// connect-<mode>.sh runs: the heap of KAFKA_HEAP_OPTS (-Xms256M -Xmx2G, not the
+// -Xmx256M an older version of this function copied from the unit), and the
+// log4j configuration without which connect.log is never written (file:
+// connectLog4jArg). Every path is checked by CheckServicePath; the arguments
+// are passed to exec.Command as a slice, never as a string.
 func javaArgv(project, javaHome, mode string) ([]string, error) {
 	files, ok := modeFiles[mode]
 	if !ok {
@@ -62,21 +67,58 @@ func javaArgv(project, javaHome, mode string) ([]string, error) {
 	worker := nativeJoin(project, files[1])
 	java := nativeJoin(javaHome, "bin", "java.exe")
 	for _, p := range []string{project, javaHome, libs, logs, worker, java} {
-		if err := CheckTemplatePath(p); err != nil {
+		if err := CheckServicePath(p); err != nil {
 			return nil, err
 		}
+	}
+	log4j, err := connectLog4jArg(project)
+	if err != nil {
+		return nil, err
 	}
 	// The classpath is one wildcard entry the JVM expands, in the shape of the
 	// project path; a jar list is never globbed or joined here.
 	sep := pathSeparator(project)
-	return []string{
+	argv := []string{
 		java,
-		"-Xmx256M", "-Xms256M",
+		"-Xms256M", "-Xmx2G",
 		"-Dkafka.logs.dir=" + logs,
-		"-cp", libs + sep + "*",
+	}
+	if log4j != "" {
+		argv = append(argv, log4j)
+	}
+	return append(argv,
+		"-cp", libs+sep+"*",
 		connectMain[mode],
 		worker,
-	}, nil
+	), nil
+}
+
+// connectLog4jArg is the JVM argument that points the worker at the
+// distribution's logging configuration, or "" when the distribution carries
+// none (log4j's default configuration then logs to the console, which the
+// service host sends to logs/piperoom-service.log). Kafka 4 names the file
+// config/connect-log4j2.yaml and selects it with -Dlog4j2.configurationFile;
+// earlier distributions use config/connect-log4j.properties with
+// -Dlog4j.configuration=file:. Without it no file appender is configured and
+// connect.log is never written.
+func connectLog4jArg(project string) (string, error) {
+	config := nativeJoin(project, DistDir, "config")
+	candidates := []struct{ file, property string }{
+		{"connect-log4j2.yaml", "-Dlog4j2.configurationFile="},
+		{"connect-log4j.properties", "-Dlog4j.configuration=file:"},
+	}
+	for _, c := range candidates {
+		p := nativeJoin(config, c.file)
+		fi, err := os.Stat(p)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if err := CheckServicePath(p); err != nil {
+			return "", err
+		}
+		return c.property + p, nil
+	}
+	return "", nil
 }
 
 // serviceHost is the platform's service control manager entry point: the
@@ -90,9 +132,9 @@ type serviceHost interface {
 }
 
 // RunServiceCommand reports whether args name the run-service subcommand and,
-// if so, runs it. cmd/setup dispatches here before setupcmd.Run: the installed
-// Windows service's command line is `<exe> run-service --project ...`, and the
-// SCM starts it with no argument of its own.
+// if so, runs it. setupcmd.Run dispatches here before it parses its own flags:
+// the installed Windows service's command line is `<exe> run-service
+// --project ...`, and the SCM starts it with no argument of its own.
 func RunServiceCommand(args []string, stderr io.Writer) (bool, error) {
 	if len(args) == 0 || args[0] != RunServiceSubcommand {
 		return false, nil
@@ -127,13 +169,13 @@ func runService(args []string, stderr io.Writer, host serviceHost) error {
 	if *project == "" {
 		return fmt.Errorf("%w: %s needs --project <directory>; service_install writes it", ErrParams, RunServiceSubcommand)
 	}
-	if err := CheckTemplatePath(*project); err != nil {
+	if err := CheckServicePath(*project); err != nil {
 		return fmt.Errorf("--project: %w", err)
 	}
 	if *javaHome == "" {
 		return fmt.Errorf("%w: %s needs --java <JDK home>; service_install writes it from the detected java", ErrParams, RunServiceSubcommand)
 	}
-	if err := CheckTemplatePath(*javaHome); err != nil {
+	if err := CheckServicePath(*javaHome); err != nil {
 		return fmt.Errorf("--java: %w", err)
 	}
 	// The project must exist: a service that cannot find its worker file should
@@ -149,18 +191,20 @@ func runService(args []string, stderr io.Writer, host serviceHost) error {
 	if err != nil {
 		return err
 	}
-	out, closeLog := serviceLog(*project)
-	defer closeLog()
-	sup := &serviceSupervisor{
-		name: UnitPrefix + p.Name, argv: argv, start: startChild, out: out,
-		log: slog.New(slog.NewTextHandler(out, nil)), stopTimeout: defaultStopTimeout,
-	}
+	// IsService comes before the project log is opened: a console run must not
+	// write a service log next to the project's worker files.
 	isService, err := host.IsService()
 	if err != nil {
 		return fmt.Errorf("host: asking the service control manager: %w", err)
 	}
 	if !isService {
 		return fmt.Errorf("%w: %s is the installed service's own entry point; the service control manager starts it (service_install installs the service, service_restart starts it), so a console run has nothing to supervise", ErrUnsupported, RunServiceSubcommand)
+	}
+	out, closeLog := serviceLog(*project)
+	defer closeLog()
+	sup := &serviceSupervisor{
+		name: UnitPrefix + p.Name, argv: argv, start: startChild, out: out,
+		log: slog.New(slog.NewTextHandler(out, nil)), stopTimeout: defaultStopTimeout,
 	}
 	sup.log.Info("host: service host starting", "service", sup.name, "project", *project, "mode", p.Mode, "argv", argv)
 	if err := host.Run(sup.name, sup); err != nil {
@@ -219,14 +263,20 @@ type exitResult struct {
 
 // serve runs the service: start the child, report Running, then watch the SCM's
 // requests and the child until one of them ends the service. It returns what
-// svc.Handler.Execute returns: svcSpecificEC false, and the exit code the SCM
-// records as the service's own (the JVM's code when the JVM exited).
+// svc.Handler.Execute returns: svcSpecificEC true and the JVM's exit code when
+// the JVM exited (svc.Run records it as Win32ExitCode=ERROR_SERVICE_SPECIFIC_ERROR
+// and ServiceSpecificExitCode=code, and service_status reads it back), false
+// and 0 for a stop the SCM asked for.
+//
+// serve never reports Stopped itself. svc.Run reports the final Stopped with
+// the returned code when Execute returns; a Stopped reported here would reach
+// the SCM first, with NO_ERROR, and the real code would only follow in a second
+// Stopped — by which time the SCM has already recorded a clean stop.
 func (s *serviceSupervisor) serve(requests <-chan changeRequest, report func(serviceStatus)) (bool, uint32) {
 	child, err := s.start(s.argv, s.out)
 	if err != nil {
 		s.log.Error("host: starting the Connect JVM failed", "service", s.name, "err", err)
-		report(serviceStatus{State: stateStopped})
-		return false, 1
+		return true, 1
 	}
 	exited := make(chan exitResult, 1)
 	go func() {
@@ -246,10 +296,7 @@ func (s *serviceSupervisor) serve(requests <-chan changeRequest, report func(ser
 				}
 			}
 			s.log.Info("host: the Connect JVM exited", "service", s.name, "exit_code", code)
-			// The return value is the code the SCM records: a JVM that died
-			// makes the service stopped with that code, never a clean stop.
-			report(serviceStatus{State: stateStopped})
-			return false, uint32(code)
+			return true, uint32(code)
 		case req, ok := <-requests:
 			if !ok {
 				s.stop(child)
@@ -266,10 +313,10 @@ func (s *serviceSupervisor) serve(requests <-chan changeRequest, report func(ser
 				s.log.Info("host: the service control manager asked for "+what, "service", s.name)
 				report(serviceStatus{State: stateStopPending, CheckPoint: 1, WaitHint: s.waitHintMS()})
 				s.stop(child)
-				// Reported even when the JVM outlived the wait hint: the SCM
-				// kills the process at the hint, and a service left in "stop
-				// pending" would block the machine's shutdown.
-				report(serviceStatus{State: stateStopped})
+				// svc.Run reports Stopped when serve returns, even when the
+				// JVM outlived the wait hint: the SCM kills the process at the
+				// hint, and a service left in "stop pending" would block the
+				// machine's shutdown.
 				return false, 0
 			}
 			// Any other control is one this service does not accept; the SCM
