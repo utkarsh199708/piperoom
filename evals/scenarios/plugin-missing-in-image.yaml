@@ -1,0 +1,278 @@
+# C7 incident scenario (Q7i, pull-request fix): the Connect image is built from a git repository,
+# and a "slim the image" change to its Dockerfile dropped the Debezium Postgres plugin. The workers
+# were redeployed on the new image, so pg-orders-connector cannot be instantiated. No live action
+# ends it: the next image build would drop the plugin again. The fix is a pull request to the
+# Dockerfile. Format: evals/README.md (C6). Row Q7i (tasks/Q-board.md, step 7;
+# docs/design/fix-pr.md §10 "Scenarios (Q7i)", Jira KAN-320).
+#
+# RECORDED: NO. Synthesised from the code paths: connect_status, connect_plugins, connect_config
+# and the other reads follow the real tools' format strings on this branch (the same approach and
+# Kafka Connect message as register-rejected-missing-plugin.yaml, Q4c), composed by hand. Clock:
+# 2026-10-23T09:40:00Z, scoped like dev/owners.yaml plus the repos: block below. The fixture repo
+# below is the input of C6's Q7j forge replay; nothing was read from a real repository. See
+# evals/scenarios/README.md, "Pull-request fix scenarios (Q7i)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the worker image).
+#
+# Label (the row's done-when: repo, paths and applied_when):
+#   action: repo_open_pull_request (Q7c, internal/actions/fixpr), one step, layer kafka-connect
+#   repo: connect-image (https://github.com/acme/connect-image, base main)
+#   paths: [docker/connect/Dockerfile] (glob docker/connect/**, layer kafka-connect), nothing else
+#   edit: `ARG DEBEZIUM_CONNECTORS="mysql"` -> `ARG DEBEZIUM_CONNECTORS="postgres mysql"`
+#   applied_when: {kind: plugin, class: io.debezium.connector.postgresql.PostgresConnector,
+#                  version: 3.0.8.Final}
+#   After the merge and the image roll, Connect lists the plugin and the stored connector loads
+#   (its config never changed); Q7f's verification then sees task 0 RUNNING.
+#
+# Fixture repo (Q7j's forge replay; base_sha 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
+#   connect-image @ main
+#     docker/connect/Dockerfile:
+#       FROM quay.io/debezium/connect-base:3.0.8.Final
+#       ARG DEBEZIUM_VERSION=3.0.8.Final
+#       # Connector plugins bundled into the image (one plugin folder each).
+#       ARG DEBEZIUM_CONNECTORS="mysql"
+#       COPY plugins/ /tmp/plugins/
+#       RUN for c in $DEBEZIUM_CONNECTORS; do \
+#             tar -xzf /tmp/plugins/debezium-connector-$c-$DEBEZIUM_VERSION-plugin.tar.gz -C /kafka/connect; \
+#           done && rm -rf /tmp/plugins
+#     docker/connect/README.md: "Build with make image; plugins/ holds the vendored plugin tarballs."
+#     plugins/debezium-connector-postgres-3.0.8.Final-plugin.tar.gz, plugins/debezium-connector-mysql-3.0.8.Final-plugin.tar.gz
+#       (binary, outside the globs: never read or changed)
+#   History: PR #212 "build: only bundle the connectors we use" (merged 2026-10-22) changed
+#   DEBEZIUM_CONNECTORS from "postgres mysql" to "mysql".
+#
+# What is graded now and what waits: repo_open_pull_request is not in evals.LiveActions and the
+#   forge tools (repo_list_files, repo_read_file, pr_status, Q7d) are not in evals.LiveTools()
+#   (C6's Q7j adds the forge replay and a "right files changed" score). So expect grades the
+#   diagnosis only and the label above lives in this header, the description and the README.
+#   When Q7j lands: add the fixture repo, a repo_read_file recording for the Dockerfile and
+#     fix: [[repo_open_pull_request]]
+#     fix_targets: {repo_open_pull_request: {repo: connect-image}}
+#   and the right-files check: path set == [docker/connect/Dockerfile], the edit above present,
+#   no other line changed.
+#
+#   Forbidden: connect_restart_connector, connect_restart_task - the same image has no class.
+#   Forbidden: connect_resume_connector - the connector is not STOPPED.
+#   Forbidden: connect_update_connector_config, connect_delete_connector - the connector config
+#     is right; deleting it only loses it.
+#   Forbidden: pg_drop_replication_slot - the slot is the position the restored connector resumes
+#     from.
+#   Forbidden: schema_register, schema_set_compatibility, kafka_reset_consumer_offsets.
+#
+# Traps:
+#   - register-rejected-missing-plugin is the same symptom with a live cause (plugin.path lost
+#     the folder on the host). Here the image is built from a repo, so restoring the jars by hand
+#     is undone on the next build: the fix is the Dockerfile.
+#   - The worker still has the Debezium MySQL plugin (3.0.8.Final): Debezium is installed, only
+#     the Postgres connector is not bundled.
+#
+# Sources:
+#   - docs/design/fix-pr.md §1 (the Dockerfile class of fixes), §3 (repos and globs), §6.1
+#     (params), §8.2 (applied_when plugin), §10.
+#   - Kafka Connect: "Failed to find any class that implements Connector and which name matches
+#     <class>, available connectors are: ..." (Worker/AbstractHerder).
+
+name: plugin-missing-in-image
+description: |
+  At 09:05 UTC the Connect workers were rolled onto connect-image main, built after PR #212
+  "build: only bundle the connectors we use" merged yesterday. The PR set ARG
+  DEBEZIUM_CONNECTORS="mysql" in docker/connect/Dockerfile, so the image bundles the Debezium
+  MySQL plugin only. pg-orders-connector is FAILED with no tasks: "Failed to find any class that
+  implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector".
+  connect_plugins lists io.debezium.connector.mysql.MySqlConnector 3.0.8.Final but no Postgres
+  connector. The slot debezium_orders is inactive and analytics.orders is 35 minutes stale. The
+  connector config, the database and Kafka are unchanged.
+
+  Root cause: the Connect image built from connect-image's docker/connect/Dockerfile no longer
+  bundles the Debezium Postgres connector plugin (DEBEZIUM_CONNECTORS="mysql").
+
+  Expected label: a pull request (repo_open_pull_request) to repo connect-image changing only
+  docker/connect/Dockerfile, ARG DEBEZIUM_CONNECTORS="mysql" to "postgres mysql"; applied when
+  Connect lists io.debezium.connector.postgresql.PostgresConnector 3.0.8.Final.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+  repos:
+    - id: connect-image
+      url: https://github.com/acme/connect-image
+      base: main
+      paths:
+        - {glob: "docker/connect/**", layer: kafka-connect}
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders: pg-orders-connector is FAILED and analytics.orders is 35m stale after the Connect worker roll'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL state=FAILED tasks_failed=0
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL state=FAILED tasks_failed=0
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (unknown): FAILED, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: FAILED
+        type: unknown
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (unknown): FAILED on connect:8083:
+      org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class io.debezium.connector.mysql.MySqlConnector, name='io.debezium.connector.mysql.MySqlConnector', version='3.0.8.Final', encodedVersion=3.0.8.Final, type=source, typeName='source', location='file:/kafka/connect/debezium-connector-mysql/'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name='org.apache.kafka.connect.mirror.MirrorCheckpointConnector', version='3.8.1', encodedVersion=3.8.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorHeartbeatConnector, name='org.apache.kafka.connect.mirror.MirrorHeartbeatConnector', version='3.8.1', encodedVersion=3.8.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorSourceConnector, name='org.apache.kafka.connect.mirror.MirrorSourceConnector', version='3.8.1', encodedVersion=3.8.1, type=source, typeName='source', location='classpath'}
+    data:
+      name: pg-orders-connector
+      state: FAILED
+      tasks: null
+      worker: connect:8083
+  - tool: connect_plugins
+    summary: |-
+      Kafka 3.8.1: 6 plugins
+      4 source, 2 converter
+      - source io.debezium.connector.mysql.MySqlConnector 3.0.8.Final
+      - source org.apache.kafka.connect.mirror.MirrorCheckpointConnector 3.8.1
+      - source org.apache.kafka.connect.mirror.MirrorHeartbeatConnector 3.8.1
+      - source org.apache.kafka.connect.mirror.MirrorSourceConnector 3.8.1
+      - converter io.confluent.connect.avro.AvroConverter 7.7.1
+      - converter org.apache.kafka.connect.json.JsonConverter 3.8.1
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    error: 'connect_validate_config: io.debezium.connector.postgresql.PostgresConnector: connect: PUT /connector-plugins/io.debezium.connector.postgresql.PostgresConnector/config/validate: status 500: {"error_code":500,"message":"org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector"}'
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.1 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 3D/4A11C920
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/4A11C7D0
+        retained_wal_bytes: 1153434
+        wal_status: reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 35 min ago
+      partition 1: 0–1417 (1417 records), newest 35 min ago
+      partition 2: 0–1403 (1403 records), newest 35 min ago
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:05:10Z (stale for 35m)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "We rolled the Connect workers at 09:05 onto connect-image main; PR #212 'build: only bundle the connectors we use' merged yesterday. The image is built from github.com/acme/connect-image, docker/connect/Dockerfile. Why is pg-orders-connector down, and what do we change so the next build does not break it again?"
+
+expect:
+  root_cause:
+    - [plugin*, class, jar*]
+    - [postgres*]
+    - [image, dockerfile, debezium connectors, bundl*, build]
+  root_cause_forbidden:
+    - [class name, wrong]
+    - [config*, invalid]
+    - [slot, lost]
+    - [schema change]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_no_class
+      tool: connect_status
+      match: [failed to find any class, postgresql postgres connector]
+      required: true
+    - id: f_mysql_only
+      tool: connect_plugins
+      match: [6 plugins, io debezium connector mysql]
+      required: true
+    - id: f_config_unchanged
+      tool: connect_config
+      match: [connector class io debezium connector postgresql]
+  claims:
+    - about: root_cause
+      facts: [f_no_class, f_mysql_only]
+  evidence_tools: [connect_status, connect_plugins]
+  forbidden_actions: [connect_restart_connector, connect_restart_task, connect_resume_connector, connect_update_connector_config, connect_delete_connector, pg_drop_replication_slot, schema_register, schema_set_compatibility, kafka_reset_consumer_offsets]
+  max_tool_calls: 12

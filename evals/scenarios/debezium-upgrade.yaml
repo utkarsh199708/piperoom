@@ -1,0 +1,252 @@
+# C7 incident scenario (Q7i, pull-request fix): a known Debezium bug, fixed in a later release,
+# stops the MySQL connector, and the version is pinned in the Connect image's repository. The fix
+# is a pull request that raises the pin to the fixed-in release of the known issue. Format:
+# evals/README.md (C6). Row Q7i (tasks/Q-board.md, step 7; docs/design/fix-pr.md §10 "Scenarios
+# (Q7i)": "version pin to the fixed-in release of a known issue", Jira KAN-320).
+#
+# RECORDED: NO. Synthesised from the code paths (the real tools' format strings on this branch, as
+# mysql-binlog-purged.yaml for the MySQL pipeline), composed by hand. The known issue is
+# dbz-mysql-ddl-grant-sensitive-variables of the Q1 index
+# (internal/tools/runbooks/library/known-issues/fixed-bugs.yaml: MySQL DDL parser fails on GRANT
+# SENSITIVE_VARIABLES_OBSERVER, affected <3.1.0.Alpha2, fixed in 3.1.0.Alpha2, DBZ-8685).
+# runbook_lookup is not recorded: the harness runs it live over that index. Clock:
+# 2026-10-23T09:40:00Z, scoped like orders-mysql in dev/owners.mysql.yaml plus the repos: block
+# below. The mysql: nodes render "owner " empty (per-pipeline mysql owner). See
+# evals/scenarios/README.md, "Pull-request fix scenarios (Q7i)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the Debezium MySQL
+#   connector 3.0.8.Final's DDL parser; the GRANT itself is valid MySQL 8.4).
+#
+# Label (the row's done-when: repo, paths and applied_when):
+#   action: repo_open_pull_request (Q7c), one step, layer kafka-connect
+#   repo: connect-image (https://github.com/acme/connect-image, base main)
+#   paths: [docker/connect/versions.env] (glob docker/connect/**, layer kafka-connect), nothing else
+#   edit: `DEBEZIUM_VERSION=3.0.8.Final` -> `DEBEZIUM_VERSION=3.1.0.Final` (the first Final at or
+#     after the fixed-in 3.1.0.Alpha2; the PR body names the known issue and DBZ-8685)
+#   applied_when: {kind: plugin, class: io.debezium.connector.mysql.MySqlConnector,
+#                  version: 3.1.0.Final}
+#   On the new image the task resumes from its stored offset, before the GRANT event, and parses
+#   it. A live stop-gap (schema.history.internal.skip.unparseable.ddl=true, low risk for a GRANT
+#   per the known issue's workaround) is a separate proposal (design §14 D4) and is not in
+#   connect_update_connector_config's allow-list.
+#
+# Fixture repo (Q7j's forge replay; base_sha 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
+#   connect-image @ main
+#     docker/connect/versions.env:
+#       # Versions baked into the Connect image (read by docker/connect/Dockerfile and the Makefile).
+#       KAFKA_VERSION=3.8.1
+#       DEBEZIUM_VERSION=3.0.8.Final
+#       AVRO_CONVERTER_VERSION=7.7.1
+#     docker/connect/Dockerfile: ARG DEBEZIUM_VERSION (set from versions.env by make image),
+#       DEBEZIUM_CONNECTORS="postgres mysql", the plugin tarballs from plugins/
+#
+# What is graded now and what waits (as plugin-missing-in-image.yaml): no repo tool or action is
+#   in the replay yet (C6's Q7j). Then add a repo_read_file recording for versions.env and
+#     fix: [[repo_open_pull_request]]
+#     fix_targets: {repo_open_pull_request: {repo: connect-image}}
+#   with the right-files check: path set == [docker/connect/versions.env], the edit above, no
+#   other line changed (KAFKA_VERSION and AVRO_CONVERTER_VERSION stay).
+#
+#   Forbidden: connect_restart_task, connect_restart_connector - the task re-reads the same GRANT
+#     event and fails again.
+#   Forbidden: connect_reset_source_offsets, connect_stop_connector - skipping past the event by
+#     a reset loses every change between; the bug is in the parser, not the position.
+#   Forbidden: connect_delete_connector, connect_resume_connector, source_grant_select,
+#     source_end_session, pg_* actions, kafka_reset_consumer_offsets, schema_register,
+#     schema_set_compatibility.
+#
+# Traps:
+#   - "DDL statement couldn't be parsed" reads like a broken migration. The statement is a GRANT
+#     for the monitoring user: no table changed.
+#   - Upgrading Debezium to any newer version is not enough as a label: the pin must reach the
+#     fixed-in release of the known issue (>= 3.1.0.Alpha2), and only the Debezium line changes.
+#
+# Sources:
+#   - docs/design/fix-pr.md §1, §6.1, §8.2 (applied_when plugin), §10.
+#   - internal/tools/runbooks/library/known-issues/fixed-bugs.yaml, id
+#     dbz-mysql-ddl-grant-sensitive-variables (https://issues.redhat.com/browse/DBZ-8685).
+#   - Debezium: "io.debezium.text.ParsingException: DDL statement couldn't be parsed. Please open a
+#     Jira issue with the statement '<statement>'" (text as reported on DBZ-8685; unconfirmed on the
+#     dev profile).
+
+name: debezium-upgrade
+description: |
+  At 09:10 UTC a DBA ran GRANT SENSITIVE_VARIABLES_OBSERVER ON *.* TO 'monitoring'@'%' on the shop
+  MySQL server for the new monitoring agent. The statement is written to the binlog, and
+  orders-mysql (Debezium MySQL connector 3.0.8.Final, pinned in connect-image's
+  docker/connect/versions.env) parses every DDL it streams: task 0 FAILED with
+  "io.debezium.text.ParsingException: DDL statement couldn't be parsed" on that GRANT. This is the
+  known issue dbz-mysql-ddl-grant-sensitive-variables (DBZ-8685), fixed in Debezium 3.1.0.Alpha2.
+  The source, the binlog position, Kafka and the registry are healthy; nothing new reaches
+  shop.shop.orders since 09:10.
+
+  Root cause: Debezium MySQL 3.0.8.Final's DDL parser does not know GRANT
+  SENSITIVE_VARIABLES_OBSERVER (a bug fixed in 3.1.0.Alpha2), so the connector fails on the GRANT
+  in the binlog.
+
+  Expected label: a pull request (repo_open_pull_request) to repo connect-image changing only
+  docker/connect/versions.env, DEBEZIUM_VERSION=3.0.8.Final to 3.1.0.Final; applied when Connect
+  lists io.debezium.connector.mysql.MySqlConnector 3.1.0.Final.
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+  repos:
+    - id: connect-image
+      url: https://github.com/acme/connect-image
+      base: main
+      paths:
+        - {glob: "docker/connect/**", layer: kafka-connect}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+
+alert:
+  title: 'orders-mysql: connector orders-mysql task 0 FAILED (no recent records in shop.shop.orders)'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=30m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=30m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=30m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=30m ago
+        from: connect:orders-mysql
+  - tool: connect_list_connectors
+    summary: |-
+      orders-mysql (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: io.debezium.text.ParsingException: DDL statement couldn't be parsed. Please open a Jira issue with the statement 'GRANT SENSITIVE_VARIABLES_OBSERVER ON *.* TO `monitoring`@`%`'
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\nCaused by: io.debezium.text.ParsingException: DDL statement couldn't be parsed. Please open a Jira issue with the statement 'GRANT SENSITIVE_VARIABLES_OBSERVER ON *.* TO `monitoring`@`%`'"
+  - tool: connect_plugins
+    summary: |-
+      Kafka 3.8.1: 7 plugins
+      5 source, 2 converter
+      - source io.debezium.connector.mysql.MySqlConnector 3.0.8.Final
+      - source io.debezium.connector.postgresql.PostgresConnector 3.0.8.Final
+      - source org.apache.kafka.connect.mirror.MirrorCheckpointConnector 3.8.1
+      - source org.apache.kafka.connect.mirror.MirrorHeartbeatConnector 3.8.1
+      - source org.apache.kafka.connect.mirror.MirrorSourceConnector 3.8.1
+      - converter io.confluent.connect.avro.AvroConverter 7.7.1
+      - converter org.apache.kafka.connect.json.JsonConverter 3.8.1
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+  - tool: connect_source_offsets
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql partition server=shop: event=3, file=binlog.000008, gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3517, pos=20944, row=1, server_id=223344, ts_sec=1792746600
+  - tool: source_settings
+    summary: |-
+      version=8.4.3
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–2390 (2390 records), newest 30 min ago
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "orders-mysql task 0 failed right after Priya's GRANT for the monitoring agent at 09:10. Debezium is pinned in github.com/acme/connect-image, docker/connect/versions.env. Is this a known Debezium problem, and what should the image pin be?"
+
+expect:
+  root_cause:
+    - [pars*, parser]
+    - [grant, sensitive variables observer]
+    - [3 0 8, debezium, bug, known issue, dbz 8685, fixed in, 3 1 0]
+  root_cause_forbidden:
+    - [table, altered]
+    - [schema change]
+    - [replication slave]
+    - [binlog*, purg*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_parse_failed
+      tool: connect_status
+      match: [task 0 failed, ddl statement couldn't be parsed, grant sensitive variables observer]
+      required: true
+    - id: f_running_version
+      tool: connect_plugins
+      match: [io debezium connector mysql, 3 0 8 final]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_parse_failed]
+  evidence_tools: [connect_status, connect_plugins]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_reset_source_offsets, connect_stop_connector, connect_delete_connector, connect_resume_connector, source_grant_select, source_end_session, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

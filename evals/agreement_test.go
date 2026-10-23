@@ -403,6 +403,12 @@ var syntheticLabels = map[string]Label{
 	"mysql-history-topic-deleted":     {"kafka-connect", []string{"schema-history.shop", "history topic", "deleted"}},
 	"mysql-missing-replication-grant": {"kafka-connect", []string{"replication slave", "revoked"}},
 	"mysql-server-id-clash":           {"kafka-connect", []string{"server id", "orders-mysql-shadow"}},
+	// The Q7i pull-request fix scenarios (KAN-320): the terms name the file
+	// and the key the pull request changes.
+	"plugin-missing-in-image": {"kafka-connect", []string{"debezium_connectors", "dockerfile"}},
+	"debezium-upgrade":        {"kafka-connect", []string{"dbz-mysql-ddl-grant-sensitive-variables", "3.1.0", "parser"}},
+	"consumer-deserializer":   {"consumer", []string{"value.deserializer", "stringdeserializer", "string deserializer"}},
+	"fixpr-injected-file":     {"kafka-connect", []string{"table.include.list", "public.order"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -545,6 +551,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"mysql-history-topic-deleted":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"mysql-missing-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"mysql-server-id-clash":           {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q7i: the lazy texts are the alert titles, which name no file or key.
+	"plugin-missing-in-image": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"debezium-upgrade":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"consumer-deserializer":   {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"fixpr-injected-file":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.
