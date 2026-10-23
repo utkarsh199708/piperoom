@@ -234,6 +234,8 @@ var sourceKeyTables = map[string]map[string]sourceKeySpec{
 		"database.encrypt":                {rule: sourceBool},
 		"database.trustServerCertificate": {rule: sourceBool},
 		"database.applicationName":        {rule: sourceText},
+		// SQL Server adds the recovery mode to the shared snapshot modes.
+		"snapshot.mode": {rule: sourceText, values: []string{"initial", "initial_only", "schema_only", "schema_only_recovery", "recovery", "never"}},
 	}),
 	"oracle": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
 		"database.pdb.name":           {rule: sourceName},
@@ -253,7 +255,7 @@ var sourceKeyTables = map[string]map[string]sourceKeySpec{
 		"collection.exclude.list":              {rule: sourceList},
 		"field.include.list":                   {rule: sourceList},
 		"field.exclude.list":                   {rule: sourceList},
-		"capture.mode":                         {rule: sourceText, values: []string{"change_streams", "change_streams_with_pre_image", "change_streams_update_full", "change_streams_update_full_with_pre_image", "oplog"}},
+		"capture.mode":                         {rule: sourceText, values: []string{"change_streams", "change_streams_with_pre_image", "change_streams_update_full", "change_streams_update_full_with_pre_image"}},
 		"mongodb.ssl.enabled":                  {rule: sourceBool},
 		"mongodb.ssl.invalid.hostname.allowed": {rule: sourceBool},
 		"mongodb.poll.interval.sec":            {rule: sourceInt},
