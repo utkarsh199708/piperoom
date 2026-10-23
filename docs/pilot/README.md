@@ -105,8 +105,8 @@ below is from the code.
   [data-handling.md](data-handling.md#2-what-each-tool-exposes). Table, topic and column names,
   and timestamps, still appear in the room.
 - **Governance facts are evidence, not attestation.** Drift signals compare counts and timestamp columns on a
-  source Postgres and a Postgres warehouse only; PII tags come from column names; the OpenLineage emitter is not
-  built; no warehouse retention is read. Value-level correctness, erasure and business metrics are out of
+  source Postgres and a Postgres warehouse only; PII tags come from column names; the OpenLineage export is
+  optional, leader only and best effort; no warehouse retention is read. Value-level correctness, erasure and business metrics are out of
   reach. Read [governance.md](governance.md) before you quote any of it.
 - **Write mode is off by default.** With `PIPEROOM_WRITE_MODE` unset or `off`, the agent still
   proposes fixes and people still approve them, but a fully approved fix never runs and no

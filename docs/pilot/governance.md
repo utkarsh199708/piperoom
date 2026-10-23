@@ -1,8 +1,8 @@
 # Governance: what Piperoom can and cannot attest
 
 For the data governance lead, platform lead or security reviewer at a pilot team who is asked "can we rely
-on this?". Checked against the integration branch at `6feaf910` (the X wave: X1 drift, X3 config drift, X7
-lineage, PII tags and retention evidence). Each claim names the file or function it comes from, so a reviewer
+on this?". Checked against the integration branch after the X wave's last batch (X1 drift, X3 config drift, X7
+lineage, PII tags, retention evidence and the OpenLineage emitter). Each claim names the file or function it comes from, so a reviewer
 can spot-check it. If the code changes, change the claim and its citation in the same PR.
 
 Piperoom is an incident room, not a data catalog and not a compliance system. The X wave puts four governance
@@ -23,7 +23,7 @@ view", "X7: column lineage and governance tags"); what each reader touches is in
 | Where does a column go? | column maps on the CDC hops (source table, topic, sink table), matched by name through the connector's SMTs | what a consumer or a SQL job does to it on the way; BI tools; batch pipelines |
 | Which columns look personal? | a `pii` tag per table: `column:class` pairs from column names and types | that a column holds personal data, or that a column with a harmless name does not |
 | Is Kafka retention as promised? | per topic: configured `retention.ms` / `cleanup.policy` against your `declared_retention`, both directions | how old the data really is; the retention of a warehouse table (no reader exists yet) |
-| Is it in our lineage catalog? | nothing: the OpenLineage emitter is **not in this build** (section 7) | |
+| Is it in our lineage catalog? | with `OPENLINEAGE_URL` set: the CDC datasets, their column lineage, PII tags and owners, and each executed fix step, sent to your Marquez or DataHub (section 7) | anything the map does not hold (section 4); whether every event arrived (delivery is best effort) |
 
 Piperoom only reads your systems for all of this. It writes nothing to Kafka, Postgres or the warehouse to
 produce these facts, and every fact carries names, classes, counts and durations, never a row value
@@ -188,13 +188,45 @@ numbers, not topic configs.
 
 ## 7. OpenLineage export
 
-**Not available in this build.** `OPENLINEAGE_URL`, `OPENLINEAGE_NAMESPACE` and `OPENLINEAGE_API_KEY` are read
-into `config.Config`, and `config.ParseOpenLineage` validates them, but nothing calls it and no code builds or
-sends an event: the emitter (X7b, mapping in `docs/design/lineage.md` section 6) has not been merged. Setting
-the variables changes nothing, and a bad value is not even rejected. Do not promise a lineage catalog feed from
-this version. The same facts are available to a script through the topology route above. When the emitter lands,
-its egress is the row "OpenLineage emitter" in [data-handling.md](data-handling.md#2-what-each-tool-exposes);
-with several tenants, `docs/design/lineage.md` section 7 says to run one lineage server per tenant.
+Optional and off by default: set `OPENLINEAGE_URL` to your lineage server's endpoint (Marquez
+`http://marquez:5000/api/v1/lineage`, DataHub `.../openapi/openlineage/api/v1/lineage`; the emitter appends no
+path), optionally `OPENLINEAGE_NAMESPACE` (the job namespace, default `piperoom`) and `OPENLINEAGE_API_KEY` (sent
+as `Authorization: Bearer`, only over https or http to a loopback host; `config.ParseOpenLineage` refuses the
+rest and a bad value stops the start). Unset, no goroutine starts and nothing is sent
+(`internal/discover/openlineage/emitter.go`, `Start`; wired in `cmd/server/main.go`).
+
+What it sends (`internal/discover/openlineage/event.go`, mapping in `docs/design/lineage.md` section 6):
+
+- **The pipeline map**, as one `RunEvent` (job `piperoom.pipeline.<id>`, `COMPLETE`): source tables as inputs,
+  topics and sink tables as outputs, with the `schema` (column names), `columnLineage`, `tags` (the `pii`
+  classes per column; `retention` when a node carries it, which none does yet, section 6) and `ownership`
+  (the layer owner's user id) facets. At most one per pipeline every 15 minutes, and only when the room service
+  builds the map on the leader (an agent or shadow run starting, a fix preview, the map page
+  `GET /api/pipelines/{pid}/topology`); a quiet pipeline nobody opens sends nothing.
+- **Each executed fix step**, as one `RunEvent` (job `piperoom.<action>`; `COMPLETE`, `FAIL`, or `OTHER` when
+  the outcome is unknown) with the pipeline and proposal ids and the step index, and as outputs the datasets of
+  that pipeline's last map that the step's topic or table params name. The step's output is cleared before the
+  emitter sees it (`room.Deps.OnActionResult`).
+
+Never a row or record value, a config value, node health or facts, room content, other step params or the API
+key. Datasets are named `<database>.<schema>.<table>` in namespaces built from the process-wide connections
+(`postgres://host:port`, `kafka://host:port`, the warehouse's), never with a user, password or DSN parameter
+(`internal/discover/openlineage/namespaces.go`).
+
+Where it stops:
+
+- **Leader only, best effort.** It runs on the elected leader replica; a map built or a step executed on
+  another replica that the leader does not fold is not sent. A POST has 10 s; a network error, 429 or 5xx is
+  retried 3 times with backoff, then the event is dropped with one warning; at most 64 events wait (the oldest
+  is dropped). A missing event in your catalog proves nothing about the pipeline.
+- **Left out:** a pipeline with its own `connections:` block (its datasets are not the process-wide ones), MySQL
+  sources, dbt models, and sink tables of a warehouse other than `WAREHOUSE_KIND`. An event over 1 MiB is sent
+  without its column facets, or dropped.
+- **One namespace per server.** Every pipeline lands in `OPENLINEAGE_NAMESPACE`; with several tenants,
+  `docs/design/lineage.md` section 7 says to run one lineage server per tenant or leave it off.
+- **Egress.** An outbound POST from the server, through a dialer that refuses link-local and cloud-metadata
+  addresses (`connprobe.Guard`), with no proxy and no redirect: add it to your egress review
+  ([data-handling.md](data-handling.md#2-what-each-tool-exposes), row "OpenLineage emitter").
 
 ## 8. What Piperoom cannot do
 
@@ -247,6 +279,7 @@ go test ./internal/owners -run 'PII|DeclaredRetention'
 go test ./internal/topology -run 'Columns|PIITags|X7'
 go test ./internal/watch -run 'CountDrift|RowDrift|DupKeys|ConfigDrift|Retention'
 go test ./internal/config -run X7
+go test ./internal/discover/openlineage
 ```
 
 With the dev stack (`docker compose -f dev/docker-compose.yml up -d`, [setup.md](setup.md)), `devctl` makes the
@@ -267,8 +300,8 @@ Set `reconcile_interval: 1m` in a local owners file to see them within minutes. 
 
 ## 11. Status and known gaps at this commit
 
-- **Emitter missing** (section 7). **Warehouse retention reader missing** and `Tags.retention` never set
-  (section 6). **Column catalogs only on Postgres** (sections 4, 5).
+- **OpenLineage is best effort and leader only** (section 7). **Warehouse retention reader missing** and
+  `Tags.retention` never set (section 6). **Column catalogs only on Postgres** (sections 4, 5).
 - **The web UI does not show** `tags`, `columns` or the retention entries (`web/src/api/types.ts` has no such
   fields). They are in the topology JSON, in the agent's `pipeline_map` text and in watcher evidence.
 - **Eval scenarios** for the four drift faults (`evals/scenarios/sink-filtered-rows.yaml`,
