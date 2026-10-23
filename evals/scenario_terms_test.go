@@ -241,3 +241,41 @@ func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
 		t.Errorf("started_at does not decode as an end-session param: %v", err)
 	}
 }
+
+// TestSetupPrivilegedRefusedTerms pins W4s (KAN-501): setup/compose-privileged-refused
+// group 1 has no "privileged" or privilege* term (the alert and the steer echo it, so
+// an echo would satisfy the group), and group 2 accepts compose, yaml and stack.
+func TestSetupPrivilegedRefusedTerms(t *testing.T) {
+	sc, err := LoadScenario("scenarios/setup-compose-privileged-refused.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Name != "setup/compose-privileged-refused" {
+		t.Fatalf("scenario name = %q", sc.Name)
+	}
+	g := sc.Expect.RootCause
+	if len(g) != 2 {
+		t.Fatalf("root_cause groups = %d, want 2", len(g))
+	}
+	for _, term := range g[0] {
+		if strings.HasPrefix(strings.ToLower(term), "privilege") {
+			t.Errorf("group 1 holds %q: the alert echoes it", term)
+		}
+	}
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"compose", "The connect service in the compose file asks for host privileges, which the validator refuses.", true},
+		{"yaml", "The yaml sets cap add on connect, a host privileges request the validator refuses.", true},
+		{"stack", "The stack copied from the blog post gives connect host privileges; the setup validator refuses it.", true},
+		{"alert echo", "The setup compose step was refused before compose_up: validator rule privilege failed on the connect service, and the privileged compose file stack never started.", false},
+		{"steer echo", "Your compose file has privileged on the connect service, in the yaml stack.", false},
+	}
+	for _, c := range cases {
+		if got := rootCauseMatches(sc.Expect, c.text); got != c.want {
+			t.Errorf("%s: matches = %v, want %v: %q", c.name, got, c.want, c.text)
+		}
+	}
+}
