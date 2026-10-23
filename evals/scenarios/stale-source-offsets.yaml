@@ -37,7 +37,9 @@
 #
 #   Forbidden: connect_restart_task, connect_restart_connector - a restart loads the same stored
 #     offset and fails the same way.
-#   Forbidden: connect_resume_connector - the connector is not paused or stopped.
+#   Not forbidden: connect_resume_connector. After connect_stop_connector and the offset reset the
+#     connector IS stopped, and the resume is the step that completes the fix (see the header); a
+#     forbidden action is a wrong remedy in every ordering, never the completion of the expected fix.
 #   Forbidden: connect_update_connector_config - its allow-list holds output settings only; and
 #     pointing back at the old database undoes the migration.
 #   Forbidden: pg_drop_replication_slot - it drops the connector's slot.name, the new slot
@@ -309,5 +311,5 @@ expect:
   fix_targets:
     connect_stop_connector: {connector: pg-orders-connector}
     connect_reset_source_offsets: {connector: pg-orders-connector}
-  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

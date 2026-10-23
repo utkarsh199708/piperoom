@@ -631,7 +631,7 @@ expect:
     - [order-sync, consumer, 2.16.1, upsert, release, build, deploy*]
     - [updated at, timestamp*, column]
     # Not 'null' or 'missing': the alert title says NULL, and title plus map would pass.
-    - [drop*, omit*, 'left out', lost, 'stopped writing', removed]
+    - [drop*, omit*, 'left out', lost, 'stopped writing', removed, 'no longer writ*', 'not writ*']
   root_cause_forbidden:
     - ['pipeline is healthy']
     - ['pipeline healthy']
@@ -669,4 +669,20 @@ expect:
     - about: root_cause
       facts: [f_sink_null, f_trace_diff]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility, connect_update_connector_config]
-  max_tool_calls: 14
+  # Budget 14 -> 18 (W4b, KAN-493; the number is the ticket's). Derivation from the input turns, by
+  # the reads each needs on the path the traps set (distinct reads first, then the re-reads):
+  #   turn 1, the alert (dbt not_null on updated_at): kafka_consumer_lag (f_lag_zero), reconcile
+  #     (f_keys_missing; its "connector side" verdict is the trap), warehouse_row (f_sink_null),
+  #     trace_record (f_trace_diff), pg_recent_ddl (f_no_ddl), warehouse_freshness, pipeline_map
+  #     (optional: the alert carries it)                                              = 7
+  #   turn 2, Kabir's comment (2.16.1 reworked the upsert): connect_status (to rule out the
+  #     connector side that reconcile names), kafka_find_by_key (the event carries updated_at, so
+  #     the column is lost after the topic), pg_row (the source still has the timestamp) = 3
+  #   turn 3, the steer ("why NULL, what puts the timestamps back?"): kafka_topic_offsets or
+  #     schema_registry_versions (the schema has the column), similar_incidents, and one re-read of
+  #     kafka_consumer_lag / reconcile to say lag is still 0 and the count is unchanged = 4
+  #   That is 14 reads (one of them a re-read); 14 + 4 for the re-reads a trap-walking run adds
+  #   after each input = 18. This is a derivation, not a
+  #   measurement: the transcripts of live run 39994729845 were not available to W4b (W4-0 is
+  #   pending), so which reads that run made, and whether it hit the old 14, is unchecked.
+  max_tool_calls: 18
