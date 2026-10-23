@@ -3,6 +3,8 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"unicode"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/connprobe"
 	"piperoom/internal/redact"
 	"piperoom/internal/setup/knowledge"
 )
@@ -197,7 +200,7 @@ func (d *Driver) BuildProperties(p PropertiesParams) (Properties, error) {
 	if err := addSinkKeys(&props, entry, d.image.Tag, p.SinkKeys); err != nil {
 		return Properties{}, err
 	}
-	if err := addSourceKeys(&props, p.Source, p.SourceKeys); err != nil {
+	if err := addSourceKeys(&props, p.SourceKeys); err != nil {
 		return Properties{}, err
 	}
 	if len(props.Entries) > maxPropertiesEntries {
@@ -283,6 +286,9 @@ func checkSinkValue(key knowledge.Key, value string) (string, error) {
 	if plaintextCredential(value) {
 		return "", fmt.Errorf("%w: key %s: the value looks like a credential", ErrSecretValue, q(key.Name))
 	}
+	if err := checkURLValue(value); err != nil {
+		return "", fmt.Errorf("key %s: %w", q(key.Name), err)
+	}
 	return value, nil
 }
 
@@ -290,7 +296,7 @@ func checkSinkValue(key knowledge.Key, value string) (string, error) {
 // (design §6: the source driver's ConnectorConfig), so their list lives with
 // that driver; this package checks the shape, refuses the keys it writes
 // itself, and holds a credential-named key to a ${secret:name} reference.
-func addSourceKeys(props *Properties, source string, given map[string]string) error {
+func addSourceKeys(props *Properties, given map[string]string) error {
 	names := make([]string, 0, len(given))
 	for name := range given {
 		names = append(names, name)
@@ -317,6 +323,9 @@ func addSourceKeys(props *Properties, source string, given map[string]string) er
 		if !secretRefOnlyRE.MatchString(value) && plaintextCredential(value) {
 			return fmt.Errorf("%w: source key %s: the value looks like a credential", ErrSecretValue, q(name))
 		}
+		if err := checkURLValue(value); err != nil {
+			return fmt.Errorf("source key %s: %w", q(name), err)
+		}
 		props.Entries["debezium.source."+name] = value
 	}
 	return nil
@@ -338,6 +347,38 @@ func checkCommon(value string) error {
 		return fmt.Errorf("%w: the value has a leading or trailing space", ErrProperties)
 	case strings.HasPrefix(value, "#"):
 		return fmt.Errorf("%w: the value starts with #, which a properties parser reads as a comment", ErrProperties)
+	}
+	return nil
+}
+
+// urlGuard classifies an IP literal in an http(s) value. Loopback and private
+// ranges are normal sinks (a dev stack, a VPC endpoint); link-local, the cloud
+// metadata addresses, multicast and the unspecified address never are, because
+// a sink pointed at one would post every change event to it.
+var urlGuard = connprobe.Guard{AllowLoopback: true, AllowPrivate: true}
+
+// checkURLValue validates an http(s) URL value: a host is required, a user or
+// password in it is refused (credentials belong in the connector's own
+// password key, as a ${secret:name} reference), and an IP literal is checked
+// against the denylist. A name is not resolved here - Validate does no I/O -
+// and the server's own dialer is what sees the resolved address at run time.
+// Values with any other scheme are connector-specific (a JDBC DSN, a Redis
+// address) and are left to the key's own checks.
+func checkURLValue(value string) error {
+	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+		return nil
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%w: the value is not a well-formed http(s) URL", ErrProperties)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: the URL carries a username or password; use the connector's user and password keys", ErrSecretValue)
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil {
+		if gerr := urlGuard.CheckAddr(ip); gerr != nil {
+			return fmt.Errorf("%w: %v", ErrProperties, gerr)
+		}
 	}
 	return nil
 }

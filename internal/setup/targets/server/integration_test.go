@@ -98,7 +98,7 @@ func TestServerHTTPSinkIntegration(t *testing.T) {
 		t.Fatalf("writing .env: %v", err)
 	}
 
-	execOp("server_compose_write", ComposeParams{}, time.Minute)
+	execOp("server_compose_write", ComposeParams{Project: project}, time.Minute)
 	execOp("server_properties_write", PropertiesParams{
 		Sink: "http",
 		SinkKeys: map[string]string{
@@ -255,7 +255,8 @@ func integrationEnv(t *testing.T, dir string) ops.Env {
 		t.Fatalf("OpenConfiner: %v", err)
 	}
 	t.Cleanup(func() { _ = confine.Close() })
-	return ops.Env{ProjectDir: confine.Dir(), Confine: confine, Now: time.Now, Exec: integrationRun}
+	return ops.Env{ProjectDir: confine.Dir(), Confine: confine, MountDirs: []string{DistDir, UnitDir},
+		Now: time.Now, Exec: integrationRun}
 }
 
 // integrationRun is the real command runner with ops.runCommand's contract: a
