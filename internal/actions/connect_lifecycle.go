@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/mysql"
 )
 
 // Q5b and Q5c: the Kafka Connect lifecycle actions. Wiring registers them in
@@ -59,9 +58,9 @@ type LifecycleDeps struct {
 	Source clients.SourceReader
 	// Binlog is optional and read-only: the MySQL source's binlog state, which
 	// connect_reset_source_offsets checks a MySQL position against (Q8e). Nil
-	// falls back to Source when that is a mysql.BinlogReader (the MySQL
+	// falls back to Source when that is a clients.BinlogReader (the MySQL
 	// client); with neither, a MySQL position is refused (clients.ErrNotSupported).
-	Binlog mysql.BinlogReader
+	Binlog clients.BinlogReader
 	// AllowedHosts are operator-configured endpoints (host[:port] or a
 	// comma-separated broker list) a created connector may point at besides
 	// the pipeline's connections and registered connectors: the Kafka

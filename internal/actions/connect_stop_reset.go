@@ -13,7 +13,6 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
-	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools"
@@ -455,7 +454,7 @@ func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) 
 // checkMySQL runs the MySQL position checks (mysql_positions.go) when cfg is
 // a Debezium MySQL connector, and returns the binlog state it checked
 // against; nil for any other connector.
-func (a *resetSourceOffsets) checkMySQL(ctx context.Context, name string, cfg map[string]string, pos sourcePosition) (*mysql.BinlogStatus, error) {
+func (a *resetSourceOffsets) checkMySQL(ctx context.Context, name string, cfg map[string]string, pos sourcePosition) (*clients.BinlogStatus, error) {
 	if !isMySQLConnector(cfg) {
 		return nil, nil
 	}
@@ -563,7 +562,7 @@ func (a *resetSourceOffsets) Preview(ctx context.Context, raw json.RawMessage) (
 			return PreviewResult{}, previewErr(a.Name(), err)
 		}
 	}
-	var binlog *mysql.BinlogStatus
+	var binlog *clients.BinlogStatus
 	if p.Position != nil {
 		if binlog, err = a.checkMySQL(ctx, p.Connector, cfg, *p.Position); err != nil {
 			return PreviewResult{}, previewErr(a.Name(), err)

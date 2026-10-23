@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
-	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -19,24 +19,24 @@ const (
 	srvUUID          = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
 )
 
-// fakeBinlog is a mysql.BinlogReader with a mutable status.
+// fakeBinlog is a clients.BinlogReader with a mutable status.
 type fakeBinlog struct {
-	st    mysql.BinlogStatus
+	st    clients.BinlogStatus
 	err   error
 	calls int
 }
 
-func (f *fakeBinlog) BinlogStatus(context.Context) (mysql.BinlogStatus, error) {
+func (f *fakeBinlog) BinlogStatus(context.Context) (clients.BinlogStatus, error) {
 	f.calls++
 	return f.st, f.err
 }
 
 func newFakeBinlog() *fakeBinlog {
-	return &fakeBinlog{st: mysql.BinlogStatus{
+	return &fakeBinlog{st: clients.BinlogStatus{
 		File: "mysql-bin.000005", Pos: 1000, GTIDMode: "ON",
 		GTIDExecuted: srvUUID + ":1-100", GTIDPurged: srvUUID + ":1-20",
 		ServerID: 1, ServerUUID: srvUUID,
-		Binlogs: []mysql.BinlogFile{{Name: "mysql-bin.000003", Size: 5000}, {Name: "mysql-bin.000004", Size: 7000}, {Name: "mysql-bin.000005", Size: 1000}},
+		Binlogs: []clients.BinlogFile{{Name: "mysql-bin.000003", Size: 5000}, {Name: "mysql-bin.000004", Size: 7000}, {Name: "mysql-bin.000005", Size: 1000}},
 	}}
 }
 
@@ -182,6 +182,55 @@ func TestResetMySQLGTIDModeRules(t *testing.T) {
 	bl.st.File = ""
 	if err := a.Validate(scoped(), json.RawMessage(onlyFile)); !errors.Is(err, ErrSourcePosition) {
 		t.Fatalf("binlog off: %v", err)
+	}
+}
+
+// With GTIDs off a file/pos position from another server (server_id differs
+// from @@server_id) is refused, and a pos inside the 4-byte file header is
+// refused whatever the mode (PR #934 review, minor 4 and nit 9).
+func TestResetMySQLServerIDAndHeaderPos(t *testing.T) {
+	cfg := map[string]string{"connector.class": mysqlSourceClass, "topic.prefix": "orders"}
+	off := func(pos int64, serverID string) sourcePosition {
+		o := map[string]any{"file": "mysql-bin.000004", "pos": json.Number(strconv.FormatInt(pos, 10))}
+		if serverID != "" {
+			o["server_id"] = json.Number(serverID)
+		}
+		return sourcePosition{Partition: map[string]any{"server": "orders"}, Offset: o}
+	}
+	off2 := func(pos int64, serverID string) sourcePosition {
+		p := off(pos, serverID)
+		p.Offset["gtids"] = srvUUID + ":1-50"
+		return p
+	}
+	gtidsOff := newFakeBinlog().st
+	gtidsOff.GTIDMode, gtidsOff.GTIDExecuted, gtidsOff.GTIDPurged = "OFF", "", ""
+	gtidsOn := newFakeBinlog().st
+	for _, tc := range []struct {
+		name string
+		pos  sourcePosition
+		st   clients.BinlogStatus
+		want string // "" = accepted
+	}{
+		{"same server, GTIDs off", off(4000, "1"), gtidsOff, ""},
+		{"no server_id, GTIDs off", off(4000, ""), gtidsOff, ""},
+		{"other server, GTIDs off", off(4000, "2"), gtidsOff, "is not the source's @@server_id 1"},
+		{"other server, GTIDs ON_PERMISSIVE", off(4000, "2"), func() clients.BinlogStatus { s := gtidsOff; s.GTIDMode = "ON_PERMISSIVE"; return s }(), "is not the source's @@server_id 1"},
+		{"other server, GTIDs on", off2(4000, "2"), gtidsOn, ""},
+		{"pos 4", off(4, "1"), gtidsOff, ""},
+		{"pos 3", off(3, "1"), gtidsOff, "binlog events start at offset 4"},
+		{"pos 0", off(0, "1"), gtidsOff, "binlog events start at offset 4"},
+		{"pos 0, GTIDs on", off2(0, "1"), gtidsOn, "binlog events start at offset 4"},
+	} {
+		err := checkMySQLPosition("c", cfg, tc.pos, tc.st)
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrSourcePosition) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want ErrSourcePosition with %q", tc.name, err, tc.want)
+		}
 	}
 }
 

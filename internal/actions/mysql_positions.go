@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/mysql"
 	"piperoom/internal/clients/mysql/gtid"
 )
 
@@ -24,9 +23,8 @@ import (
 // fails any of these makes the connector fail on start (or silently skip
 // transactions), so it is refused at Validate and again at Execute.
 //
-// The binlog state comes from mysql.BinlogReader, the Q0 item 7
-// clients.BinlogReader that the MySQL client (Q8b) declares locally until the
-// contract lands (see the Q8e contract change request).
+// The binlog state comes from clients.BinlogReader (Q0 item 7), which the
+// MySQL client (Q8b) implements.
 
 var (
 	// ErrPositionPurged refuses a MySQL position the server no longer has: the
@@ -52,23 +50,23 @@ func isMySQLConnector(cfg map[string]string) bool {
 // binlogReaderOf returns the binlog reader of a lifecycle action: the one
 // wiring passed, else the source client when it has one (a MySQL room's
 // source client is the MySQL client, which implements it).
-func binlogReaderOf(explicit mysql.BinlogReader, src any) (mysql.BinlogReader, bool) {
+func binlogReaderOf(explicit clients.BinlogReader, src any) (clients.BinlogReader, bool) {
 	if explicit != nil {
 		return explicit, true
 	}
-	br, ok := src.(mysql.BinlogReader)
+	br, ok := src.(clients.BinlogReader)
 	return br, ok
 }
 
 // readBinlog reads the MySQL server's binlog state for a position check.
-func readBinlog(ctx context.Context, br mysql.BinlogReader, ok bool, connector string) (mysql.BinlogStatus, error) {
+func readBinlog(ctx context.Context, br clients.BinlogReader, ok bool, connector string) (clients.BinlogStatus, error) {
 	if !ok || br == nil {
-		return mysql.BinlogStatus{}, fmt.Errorf("actions: %s: connector %s is a MySQL connector and no binlog reader of its source is configured, so Piperoom cannot check a MySQL position: %w",
+		return clients.BinlogStatus{}, fmt.Errorf("actions: %s: connector %s is a MySQL connector and no binlog reader of its source is configured, so Piperoom cannot check a MySQL position: %w",
 			ResetSourceOffsetsName, connector, clients.ErrNotSupported)
 	}
 	st, err := br.BinlogStatus(ctx)
 	if err != nil {
-		return mysql.BinlogStatus{}, fmt.Errorf("actions: %s: read the source's binlog status to check the position of %s: %w", ResetSourceOffsetsName, connector, err)
+		return clients.BinlogStatus{}, fmt.Errorf("actions: %s: read the source's binlog status to check the position of %s: %w", ResetSourceOffsetsName, connector, err)
 	}
 	return st, nil
 }
@@ -109,7 +107,15 @@ type mysqlPosition struct {
 	hasFile bool
 	gtids   string
 	hasGTID bool
+	// serverID is the offset's server_id (the server that wrote the event),
+	// hasServerID whether the offset carries one.
+	serverID    int64
+	hasServerID bool
 }
+
+// mysqlMinBinlogPos is the first event offset of a binlog file: bytes 0 to 3
+// are the file's magic number, so a pos below it names no event.
+const mysqlMinBinlogPos = 4
 
 // parseMySQLOffset checks the keys and types of a MySQL offset without I/O.
 func parseMySQLOffset(connector string, off map[string]any) (mysqlPosition, error) {
@@ -159,6 +165,13 @@ func parseMySQLOffset(connector string, off map[string]any) (mysqlPosition, erro
 	if mp.hasFile != (off["pos"] != nil) {
 		return refuse("file and pos go together: give both or neither")
 	}
+	if mp.hasFile && mp.pos < mysqlMinBinlogPos {
+		return refuse("pos %d names no event: binlog events start at offset %d (the first 4 bytes are the file header)", mp.pos, mysqlMinBinlogPos)
+	}
+	if n, ok := off["server_id"].(json.Number); ok {
+		mp.serverID, _ = strconv.ParseInt(n.String(), 10, 64) // checked above
+		mp.hasServerID = true
+	}
 	if s, ok := off["gtids"].(string); ok {
 		mp.gtids, mp.hasGTID = s, true
 	}
@@ -186,7 +199,7 @@ func binlogName(name string) (base string, seq int64, ok bool) {
 // topic.prefix}; with gtid_mode ON the offset carries gtids, without GTIDs it
 // carries file and pos; the file is one the server still has and pos is not
 // past its end; the GTID set holds gtid_purged and is within gtid_executed.
-func checkMySQLPosition(connector string, cfg map[string]string, pos sourcePosition, st mysql.BinlogStatus) error {
+func checkMySQLPosition(connector string, cfg map[string]string, pos sourcePosition, st clients.BinlogStatus) error {
 	refuse := func(sentinel error, format string, args ...any) error {
 		if sentinel != nil {
 			return fmt.Errorf("actions: %s: connector %s: %s: %w: %w", ResetSourceOffsetsName, connector, fmt.Sprintf(format, args...), ErrSourcePosition, sentinel)
@@ -210,6 +223,13 @@ func checkMySQLPosition(connector string, cfg map[string]string, pos sourcePosit
 	}
 	if !gtidsOn && !mp.hasFile {
 		return refuse(nil, "the server runs with gtid_mode=%s, so the position must carry file and pos", orUnknown(st.GTIDMode))
+	}
+	// Without GTIDs a file/pos position means something only on the server
+	// that wrote it: after a failover another server's mysql-bin.0000NN can
+	// fall inside this server's kept range and pass the file checks, then
+	// resume at an arbitrary event (design §7.2's other_server case).
+	if !gtidsOn && mp.hasServerID && st.ServerID != 0 && mp.serverID != st.ServerID {
+		return refuse(nil, "the position's server_id %d is not the source's @@server_id %d, and without GTIDs a binlog file and pos mean something only on the server that wrote them: a position of another server (a failover?)", mp.serverID, st.ServerID)
 	}
 	if mp.hasFile {
 		if err := checkBinlogFile(mp, st, refuse); err != nil {
@@ -243,7 +263,7 @@ func checkMySQLPosition(connector string, cfg map[string]string, pos sourcePosit
 }
 
 // checkBinlogFile checks file and pos against the server's binlog list.
-func checkBinlogFile(mp mysqlPosition, st mysql.BinlogStatus, refuse func(error, string, ...any) error) error {
+func checkBinlogFile(mp mysqlPosition, st clients.BinlogStatus, refuse func(error, string, ...any) error) error {
 	if st.File == "" {
 		return refuse(nil, "the server reports no current binlog file (binary logging off?), so a file position cannot be checked")
 	}
@@ -287,7 +307,7 @@ func checkBinlogFile(mp mysqlPosition, st mysql.BinlogStatus, refuse func(error,
 // mysqlPositionNote is the Preview line of a MySQL target position: the
 // server's current position and, with GTIDs, how many transactions the
 // target is behind the server and how it differs from the stored position.
-func mysqlPositionNote(st mysql.BinlogStatus, target sourcePosition, stored map[string]any) string {
+func mysqlPositionNote(st clients.BinlogStatus, target sourcePosition, stored map[string]any) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "MySQL source: current binlog position %s:%d", shortText(st.File), st.Pos)
 	if len(st.Binlogs) > 0 {
