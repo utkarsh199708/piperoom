@@ -43,7 +43,7 @@ func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 	pl := owners.Pipeline{ID: name, TopicPrefix: name, Connectors: []string{name}}
 	ctx := tools.WithPipeline(context.Background(), pl)
 	reg := NewRegistry()
-	if err := RegisterLifecycle(reg, LifecycleDeps{Connect: c}); err != nil {
+	if err := RegisterLifecycle(reg, LifecycleDeps{Connect: c, AllowedHosts: []string{"kafka:9092"}}); err != nil {
 		t.Fatal(err)
 	}
 	create := mustGet(t, reg, CreateConnectorName)

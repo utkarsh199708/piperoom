@@ -48,6 +48,11 @@ type LifecycleDeps struct {
 	// Preview uses it, through the tableRowEstimator assertion (the Postgres
 	// client's planner estimate), to say how large a following snapshot is.
 	Source clients.SourceReader
+	// AllowedHosts are operator-configured endpoints (host[:port] or a
+	// comma-separated broker list) a created connector may point at besides
+	// the pipeline's connections and registered connectors: the Kafka
+	// bootstrap as Connect's workers reach it, say. Empty adds none.
+	AllowedHosts []string
 	// Timeout overrides the 10 s bound of every call; tests only.
 	Timeout time.Duration
 	// PollInterval overrides the wait between stop status reads; tests only.

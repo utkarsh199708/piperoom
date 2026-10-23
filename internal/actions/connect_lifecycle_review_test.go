@@ -435,6 +435,29 @@ func TestCreateConnectorHostGuard(t *testing.T) {
 	if err := a.Validate(scoped(), json.RawMessage(mkIn("database.history.kafka.bootstrap.servers", "evil.example.com:9092"))); !errors.Is(err, tools.ErrOutOfScope) {
 		t.Fatalf("bootstrap servers: %v", err)
 	}
+	// The operator's AllowedHosts admit exactly their own hosts: the room's
+	// Kafka as Connect's workers reach it, here as a broker list with a
+	// protocol prefix. A neighbor of an allowed host stays refused.
+	f, a = newCreate()
+	a.d.AllowedHosts = []string{"SASL_SSL://kafka:9092, kafka-2:9092"}
+	if err := a.Validate(scoped(), json.RawMessage(mkIn("target.cluster.bootstrap.servers", "kafka:9092,kafka-2:9092"))); err != nil {
+		t.Fatalf("operator-allowed bootstrap refused: %v", err)
+	}
+	err = a.Validate(scoped(), json.RawMessage(mkIn("target.cluster.bootstrap.servers", "kafka:9092,kafka-3:9092")))
+	if !errors.Is(err, tools.ErrOutOfScope) || !strings.Contains(err.Error(), "kafka-3") {
+		t.Fatalf("host outside AllowedHosts: %v", err)
+	}
+	if strings.Contains(err.Error(), "kafka-2") {
+		t.Fatalf("refusal echoes the allowed set: %v", err)
+	}
+	if f.validateCalls != 0 {
+		t.Fatal("Validate reached the validate endpoint")
+	}
+	// Without AllowedHosts the same bootstrap is refused.
+	_, a = newCreate()
+	if err := a.Validate(scoped(), json.RawMessage(mkIn("target.cluster.bootstrap.servers", "kafka:9092"))); !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("bootstrap with no AllowedHosts: %v", err)
+	}
 }
 
 // Debezium 2.x documents more snapshot modes; the preview must not call them

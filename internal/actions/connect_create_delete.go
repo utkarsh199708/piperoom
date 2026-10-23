@@ -634,7 +634,8 @@ func lifecycleReferenceAllowedKey(k string) bool {
 
 // checkCreateHosts refuses a config whose host keys name any host the
 // pipeline does not already reach: the hosts of the pipeline's owners.yaml
-// connections and of its currently registered connectors' configs (the Q4a
+// connections, of the operator's AllowedHosts and of its currently registered
+// connectors' configs (the Q4a
 // reduction rules, kafkatools.ConfigHosts, so a failover URL or bootstrap
 // list cannot hide a second host behind an allowed first one). The scope
 // check constrains only the connector NAME; without this guard an in-scope
@@ -655,6 +656,13 @@ func (a *createConnector) checkCreateHosts(ctx context.Context, cfg map[string]s
 	allowed := map[string]bool{}
 	for _, r := range p.Connections {
 		for _, h := range kafkatools.ConfigHosts(r.Value) {
+			if h != "" && kafkatools.ValidHost(h) {
+				allowed[h] = true
+			}
+		}
+	}
+	for _, v := range a.d.AllowedHosts {
+		for _, h := range kafkatools.ConfigHosts(v) {
 			if h != "" && kafkatools.ValidHost(h) {
 				allowed[h] = true
 			}
@@ -690,7 +698,7 @@ func (a *createConnector) checkCreateHosts(ctx context.Context, cfg map[string]s
 				return fmt.Errorf("actions: %s: host key %s does not reduce to host names (every host of a multi-host value must be a plain host[:port])", CreateConnectorName, k)
 			}
 			if !allowed[h] {
-				return fmt.Errorf("actions: %s: %w: host key %s points at %s, which none of the pipeline's connections or registered connectors reach",
+				return fmt.Errorf("actions: %s: %w: host key %s points at %s, which none of the pipeline's connections, registered connectors or operator-allowed hosts reach",
 					CreateConnectorName, tools.ErrOutOfScope, k, h)
 			}
 		}
