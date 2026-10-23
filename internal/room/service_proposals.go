@@ -83,12 +83,23 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 // (docs/api.md: a sixth answers 429 too_many_proposals).
 const maxOpenDriverProposals = 5
 
+// driverLayerAccepted reports whether a driver's step layer sent stands for
+// the layer the server derived (want, from actions.StepLayer): empty, want
+// itself, or the room-less catalogue value GET /api/actions served for the
+// action (a.Layer()). Any other value is a different approver and is refused.
+// The agent's proposals never take this path: they must send want.
+func driverLayerAccepted(a actions.Action, sent, want string) bool {
+	return sent == "" || sent == want || sent == a.Layer()
+}
+
 // CreateDriverProposal is POST /api/rooms/{id}/proposals (P3c): the driver
 // authors a fix proposal. Driver only (403 not_driver), open rooms only
 // (409 room_closed), never in a shadow room (400 validation), at most
 // maxOpenDriverProposals open driver-authored proposals per room
 // (429 too_many_proposals). It is validated exactly like an agent proposal
-// (createProposal: registered action, layer match, Validate under the room's
+// (createProposal: registered action, layer match (the driver's step layer
+// may also be "" or the catalogue's a.Layer(); the server stores the derived
+// one, see driverLayerAccepted), Validate under the room's
 // pipeline ctx, param keys, scope, params_hash, preview); only the typed text
 // is refused rather than sanitized, and Origin is forced to
 // ProposalOriginDriver, which also keeps the auto-approve policy off it
@@ -223,6 +234,15 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		want, lerr := s.stepLayer(setupSnap, pipelineID, a, step.Params)
 		if lerr != nil {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): no approving layer: %v", i, step.Action, lerr))
+		}
+		if p.Origin == events.ProposalOriginDriver && driverLayerAccepted(a, step.Layer, want) {
+			// The driver's form only knows GET /api/actions, which has no
+			// room: it sends the catalogue's a.Layer() ("postgres" for a
+			// SourceLayered action, "" for a Layered one) or nothing. The
+			// server sets the derived layer, so the proposer still never
+			// picks the approver (review of #934, MySQL Major 2).
+			step.Layer = want
+			p.Steps[i].Layer = want
 		}
 		if step.Layer != want {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, want))

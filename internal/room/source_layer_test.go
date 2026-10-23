@@ -130,3 +130,76 @@ func TestMySQLSourceStepNeedsTheMySQLOwner(t *testing.T) {
 		t.Fatalf("the mysql owner's approval: %v", err)
 	}
 }
+
+// The driver's form sends the catalogue layer of GET /api/actions (a.Layer(),
+// "postgres" for a SourceLayered action) or nothing: the server stores the
+// layer StepLayer derives for the room's pipeline. A layer that is neither is
+// another approver and is refused.
+func TestDriverSourceStepLayerIsDerived(t *testing.T) {
+	cases := []struct {
+		name, pipeline, action, sent, want string
+	}{
+		{"mysql room, catalogue layer", "orders-mysql", "source_grant_select", "postgres", "mysql"},
+		{"mysql room, no layer", "orders-mysql", "source_grant_select", "", "mysql"},
+		{"mysql room, derived layer", "orders-mysql", "source_grant_select", "mysql", "mysql"},
+		{"mysql room, forged layer", "orders-mysql", "source_grant_select", "kafka-connect", ""},
+		{"postgres room, no layer", "orders", "source_grant_select", "", "postgres"},
+		{"postgres room, mysql layer is forged", "orders", "source_grant_select", "mysql", ""},
+		{"plain action, no layer", "orders-mysql", "connect_restart_task", "", "kafka-connect"},
+		{"plain action, forged layer", "orders-mysql", "connect_restart_task", "mysql", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := sourceLayerService(t)
+			ctx := context.Background()
+			snap, err := svc.CreateRoom(ctx, mustUser(t, svc, "arjun"), "Incident", "sev2", tc.pipeline)
+			if err != nil {
+				t.Fatalf("create room: %v", err)
+			}
+			_, err = svc.CreateDriverProposal(ctx, mustUser(t, svc, "arjun"), snap.ID, events.ProposalCreatedPayload{
+				Title: "fix", Risk: "low", Rollback: "undo",
+				Steps: []events.ProposalStep{{Action: tc.action, Layer: tc.sent, Params: json.RawMessage(`{}`)}},
+			})
+			if tc.want == "" {
+				var re *room.Error
+				if !errors.As(err, &re) || re.Code != "validation" {
+					t.Fatalf("driver proposal = %v, want a validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("driver proposal: %v", err)
+			}
+			got, err := svc.GetRoom(ctx, snap.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.OpenProposals) != 1 {
+				t.Fatalf("open proposals %+v, want one", got.OpenProposals)
+			}
+			op := got.OpenProposals[0]
+			if op.Steps[0].Layer != tc.want || !slices.Equal(op.RequiredLayers, []string{tc.want}) {
+				t.Fatalf("stored step layer %q, required %v; want %q", op.Steps[0].Layer, op.RequiredLayers, tc.want)
+			}
+		})
+	}
+}
+
+// The agent gets no such leeway: on a MySQL room it must send "mysql".
+func TestAgentSourceStepCatalogueLayerRefused(t *testing.T) {
+	svc := sourceLayerService(t)
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "Incident", "sev2", "orders-mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sent := range []string{"", "postgres"} {
+		_, err = svc.CreateProposal(context.Background(), snap.ID, events.ProposalCreatedPayload{
+			Title: "fix", Risk: "low", Rollback: "undo",
+			Steps: []events.ProposalStep{{Action: "source_grant_select", Layer: sent, Params: json.RawMessage(`{}`)}},
+		}, events.AgentActor)
+		var re *room.Error
+		if !errors.As(err, &re) {
+			t.Fatalf("agent proposal with layer %q = %v, want a validation error", sent, err)
+		}
+	}
+}

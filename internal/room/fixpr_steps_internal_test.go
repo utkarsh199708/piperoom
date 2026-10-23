@@ -170,6 +170,50 @@ func TestQ7kLayeredStepLayer(t *testing.T) {
 	}
 }
 
+// The driver's form sends layer "" for a Layered step (GET /api/actions shows
+// "" and layer_by_params): the server stores LayerFor's answer. A different
+// non-empty layer is still refused.
+func TestQ7kDriverLayeredStepLayerIsDerived(t *testing.T) {
+	cases := []struct {
+		name, sent string
+		ok         bool
+	}{
+		{"no layer", "", true},
+		{"derived layer", "kafka-connect", true},
+		{"forged layer", "consumer", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newQ7Rig(t, aaOpts{})
+			roomID := r.open()
+			_, err := r.svc.CreateDriverProposal(context.Background(), r.user("arjun"), roomID, events.ProposalCreatedPayload{
+				Title: "fix the image", Risk: "low", Rollback: "close the pull request",
+				Steps: []events.ProposalStep{prStep(tc.sent)},
+			})
+			if !tc.ok {
+				if !isValidation(err) {
+					t.Fatalf("driver proposal = %v, want a validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("driver proposal: %v", err)
+			}
+			snap, err := r.svc.GetRoom(context.Background(), roomID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snap.OpenProposals) != 1 {
+				t.Fatalf("open proposals %+v, want one", snap.OpenProposals)
+			}
+			op := snap.OpenProposals[0]
+			if op.Steps[0].Layer != "kafka-connect" || !slices.Equal(op.RequiredLayers, []string{"kafka-connect"}) {
+				t.Fatalf("stored layer %q, required %v; want kafka-connect", op.Steps[0].Layer, op.RequiredLayers)
+			}
+		})
+	}
+}
+
 // A proposal with a Deferred step holds only Deferred steps, at most
 // actions.MaxDeferredSteps.
 func TestQ7kDeferredProposalShape(t *testing.T) {

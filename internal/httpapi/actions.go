@@ -25,6 +25,11 @@ type actionResponse struct {
 
 // handleActions serves GET /api/actions: the full write-action registry in
 // registration order, listed whether or not write mode is on (docs/api.md).
+// It has no room, so Layer is a.Layer(): "postgres" for an
+// actions.SourceLayered action even where a MySQL room's step needs "mysql".
+// The room service derives a driver step's layer (actions.StepLayer) and takes
+// this catalogue value, or "", as standing for it; no per-room actions route
+// exists to serve the derived layer.
 func (s *Server) handleActions(w http.ResponseWriter, _ *http.Request) {
 	acts := s.svc.AllActions()
 	out := make([]actionResponse, 0, len(acts))
