@@ -155,8 +155,11 @@ for this stack:
 Quick checks: `curl -s localhost:9404/metrics | grep -c '^kafka_connect_'` (non-zero once the connector runs) and
 `curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode 'query={service="connect"}' --data-urlencode limit=5`.
 **Not run yet:** written without Docker (2026-10-23); the compose file passes `docker compose config` and the rules,
-the Promtail regexes and the compose structure are unit-tested (`go test ./cmd/devctl -run 'JMX|LogsProfile|ConnectJMX'`),
-but nobody has seen the profile come up healthy or the two tools return data. The first live run should record
+the Promtail regexes and the compose structure are unit-tested (`go test ./cmd/devctl -run 'JMX|LogsProfile|ConnectJMX'`).
+The rules were also run once in the real `jmx_prometheus_javaagent` 1.0.1 (same checksum) against stand-in Connect and
+Debezium MBeans: names as `connect_worker_metrics` reads them, except that exporter 1.x drops a trailing `_total`
+(`..._task_startup_failure`), which the tool accepts. Nobody has seen the profile come up healthy or the two tools
+return data on the stack. The first live run should record
 the time to healthy here (the row's target is under 2 minutes).
 
 ## The dev-only break/fix API (`devctl serve`)

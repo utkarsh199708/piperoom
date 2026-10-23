@@ -197,27 +197,33 @@ func (t *workerTool) checkInput(ctx context.Context, in json.RawMessage) (string
 // every label value but a numeric task id, is dropped.
 func collectWorker(samples []prom.Sample, prefix, connector string) WorkerReport {
 	rep := WorkerReport{Connector: connector, Prefix: prefix}
-	want := map[string]string{} // full name -> family group
-	for _, a := range taskErrorAttrs {
-		want[prefix+famTaskErrors+a] = famTaskErrors
+	type wanted struct{ fam, name string } // family group, full name as the tool knows it
+	want := map[string]wanted{}
+	add := func(fam string, attrs []string) {
+		for _, a := range attrs {
+			full := prefix + fam + a
+			want[full] = wanted{fam, full}
+			// JMX exporter 1.x (Prometheus client_java 1.x) strips a
+			// trailing _total from every name (task-startup-failure-total
+			// is served as ..._task_startup_failure); 0.x keeps it.
+			if short, ok := strings.CutSuffix(full, "_total"); ok {
+				want[short] = wanted{fam, full}
+			}
+		}
 	}
-	for _, a := range connectorAttrs {
-		want[prefix+famWorker+a] = famWorker
-	}
-	for _, a := range workerAttrs {
-		want[prefix+famWorker+a] = famWorker
-	}
-	for _, a := range rebalanceAttrs {
-		want[prefix+famRebalance+a] = famRebalance
-	}
+	add(famTaskErrors, taskErrorAttrs)
+	add(famWorker, connectorAttrs)
+	add(famWorker, workerAttrs)
+	add(famRebalance, rebalanceAttrs)
 	exported := map[string]bool{}
 	for _, s := range samples {
-		fam, ok := want[s.Name]
+		w, ok := want[s.Name]
 		if !ok {
 			continue
 		}
-		exported[s.Name] = true
-		attr := strings.TrimPrefix(s.Name, prefix+fam)
+		fam := w.fam
+		exported[w.name] = true
+		attr := strings.TrimPrefix(w.name, prefix+fam)
 		label, hasConnector := s.Labels["connector"]
 		switch {
 		case fam == famTaskErrors:

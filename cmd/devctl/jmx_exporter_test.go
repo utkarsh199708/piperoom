@@ -51,13 +51,30 @@ func exportJMX(t *testing.T, rules []jmxRule, match string, numeric bool) (jmxSa
 		if r.Value == nil && !numeric {
 			return jmxSample{}, false // "Ignoring unsupported bean"
 		}
-		s := jmxSample{name: jmxSafeName(expand(r.Name)), labels: map[string]string{}}
+		s := jmxSample{name: jmxStripSuffixes(jmxSafeName(expand(r.Name))), labels: map[string]string{}}
 		for k, v := range r.Labels {
 			s.labels[jmxSafeName(expand(k))] = expand(v)
 		}
 		return s, true
 	}
 	return jmxSample{}, false
+}
+
+// jmxStripSuffixes is Prometheus client_java 1.x's sanitizeMetricName, which
+// jmx_exporter 1.x applies to every name: reserved suffixes go
+// (task-startup-failure-total is served as ..._task_startup_failure;
+// connect_worker_metrics reads both forms).
+func jmxStripSuffixes(name string) string {
+	for {
+		trimmed := name
+		for _, suf := range []string{"_total", "_created", "_bucket", "_info"} {
+			trimmed = strings.TrimSuffix(trimmed, suf)
+		}
+		if trimmed == name {
+			return name
+		}
+		name = trimmed
+	}
 }
 
 // jmxSafeName is jmx_exporter's safeName: every character outside
@@ -116,18 +133,18 @@ func TestJMXExporterRules(t *testing.T) {
 	}{
 		// Q3b families: task errors, skips, DLQ produce failures, startup
 		// failures, rebalance state.
-		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-record-errors: 4.0", true, "kafka_connect_task_error_total_record_errors", ct},
-		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-record-failures: 4.0", true, "kafka_connect_task_error_total_record_failures", ct},
-		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-records-skipped: 12.0", true, "kafka_connect_task_error_total_records_skipped", ct},
-		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>deadletterqueue-produce-failures: 0.0", true, "kafka_connect_task_error_deadletterqueue_produce_failures", ct},
-		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>last-error-timestamp: 1.76E12", true, "kafka_connect_task_error_last_error_timestamp", ct},
-		{"kafka.connect<type=connect-worker-metrics><>task-startup-failure-total: 1.0", true, "kafka_connect_worker_task_startup_failure_total", map[string]string{}},
-		{"kafka.connect<type=connect-worker-metrics><>connector-startup-failure-total: 0.0", true, "kafka_connect_worker_connector_startup_failure_total", map[string]string{}},
-		{"kafka.connect<type=connect-worker-metrics, connector=pg-orders-connector><>connector-failed-task-count: 1.0", true, "kafka_connect_worker_connector_failed_task_count", map[string]string{"connector": conn}},
-		{"kafka.connect<type=connect-worker-rebalance-metrics><>rebalancing: 0.0", true, "kafka_connect_worker_rebalance_rebalancing", map[string]string{}},
-		{"kafka.connect<type=connect-worker-rebalance-metrics><>completed-rebalances-total: 3.0", true, "kafka_connect_worker_rebalance_completed_rebalances_total", map[string]string{}},
-		{"kafka.connect<type=source-task-metrics, connector=pg-orders-connector, task=0><>source-record-poll-total: 100.0", true, "kafka_connect_source_task_source_record_poll_total", ct},
-		{"kafka.connect<type=connector-task-metrics, connector=pg-orders-connector, task=0><>offset-commit-failure-percentage: 0.0", true, "kafka_connect_connector_task_offset_commit_failure_percentage", ct},
+		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-record-errors: 4.0", true, "kafka_connect_task_error_metrics_total_record_errors", ct},
+		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-record-failures: 4.0", true, "kafka_connect_task_error_metrics_total_record_failures", ct},
+		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>total-records-skipped: 12.0", true, "kafka_connect_task_error_metrics_total_records_skipped", ct},
+		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>deadletterqueue-produce-failures: 0.0", true, "kafka_connect_task_error_metrics_deadletterqueue_produce_failures", ct},
+		{"kafka.connect<type=task-error-metrics, connector=pg-orders-connector, task=0><>last-error-timestamp: 1.76E12", true, "kafka_connect_task_error_metrics_last_error_timestamp", ct},
+		{"kafka.connect<type=connect-worker-metrics><>task-startup-failure-total: 1.0", true, "kafka_connect_connect_worker_metrics_task_startup_failure", map[string]string{}},
+		{"kafka.connect<type=connect-worker-metrics><>connector-startup-failure-total: 0.0", true, "kafka_connect_connect_worker_metrics_connector_startup_failure", map[string]string{}},
+		{"kafka.connect<type=connect-worker-metrics, connector=pg-orders-connector><>connector-failed-task-count: 1.0", true, "kafka_connect_connect_worker_metrics_connector_failed_task_count", map[string]string{"connector": conn}},
+		{"kafka.connect<type=connect-worker-rebalance-metrics><>rebalancing: 0.0", true, "kafka_connect_connect_worker_rebalance_metrics_rebalancing", map[string]string{}},
+		{"kafka.connect<type=connect-worker-rebalance-metrics><>completed-rebalances-total: 3.0", true, "kafka_connect_connect_worker_rebalance_metrics_completed_rebalances", map[string]string{}},
+		{"kafka.connect<type=source-task-metrics, connector=pg-orders-connector, task=0><>source-record-poll-total: 100.0", true, "kafka_connect_source_task_metrics_source_record_poll", ct},
+		{"kafka.connect<type=connector-task-metrics, connector=pg-orders-connector, task=0><>offset-commit-failure-percentage: 0.0", true, "kafka_connect_connector_task_metrics_offset_commit_failure_percentage", ct},
 		// Status words, as a labelled 1.
 		{"kafka.connect<type=connector-task-metrics, connector=pg-orders-connector, task=0><>status: failed", false, "kafka_connect_connector_task_status", map[string]string{"connector": conn, "task": "0", "status": "failed"}},
 		{"kafka.connect<type=connector-metrics, connector=pg-orders-connector><>status: running", false, "kafka_connect_connector_status", map[string]string{"connector": conn, "status": "running"}},
