@@ -472,6 +472,17 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The setup check connect-source-reachable fails: the Connect container resolves the source host postgres to 192.0.2.1, a TEST-NET-1 black-hole address from a stale /etc/hosts entry, so pg-orders-connector task 0 FAILED with java.net.SocketTimeoutException: connect timed out while the database answers the room's own reads. Restart the Connect service with compose_restart so Docker regenerates /etc/hosts and the worker starts with an empty DNS cache.",
 		wrong: "The source Postgres is down, so the connector stays idle; restart the database and the connector.",
 	},
+	// The U4d SQL Server setup scenarios. The labels name the setup check and
+	// the fix with its tier; the wrong text of cdc-not-enabled-table is the
+	// right story of agent-stopped, the trap between the two.
+	"setup/agent-stopped": {
+		good:  "The setup check sqlserver-agent-running fails: SQL Server Agent is stopped on the source database since a DBA stopped it at 09:30 to hold the nightly jobs. The CDC capture job is an Agent job, so it has stopped moving changes from the transaction log into the change tables, and Debezium reads empty change tables. mssql-orders-connector and task 0 are RUNNING and the worker log is quiet; order 101 and the new canary are absent from Kafka while the snapshot and the first canary are there. Start SQL Server Agent: here that is a documented ask to the DBA (xp_servicecontrol START, or a container restart with MSSQL_AGENT_ENABLED=true); on a host target it is service_restart of the SQL Server service at T2. The running task then streams the backlog by itself.",
+		wrong: "mssql-orders-connector task 0 lost its connection to the source and quietly stopped streaming; restart the connector and reset its offsets so it takes a new snapshot.",
+	},
+	"setup/cdc-not-enabled-table": {
+		good:  "The setup check sqlserver-table-cdc fails: CDC is still on for database orders, but dbo.orders lost its capture instance (is_tracked_by_cdc = 0) when a DBA's migration script disabled CDC on the table at 09:28. Changes to dbo.orders therefore stay out of every change table in the source database, and the connector has nothing to stream for the table. The canary table keeps its own capture instance, so canary 2 arrived at 09:39, and the connector is RUNNING with dbo.orders in table.include.list. Order 101 is absent from the topic. Enable CDC on dbo.orders again with source_create_publication (T2, sp_cdc_enable_table under the orders_mssql capture instance), restart task 0, and re-snapshot or re-insert the rows written while the table was untracked.",
+		wrong: "SQL Server Agent stopped on the source, so the capture job has halted; ask the DBA to start the Agent.",
+	},
 }
 
 // TestScoringOldVsNew prints, for every scenario and each of {good,
