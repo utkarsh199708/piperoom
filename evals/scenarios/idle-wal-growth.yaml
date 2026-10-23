@@ -117,6 +117,12 @@ resources:
     public.orders: {primary_key: true, replica_identity: f}
   publications:
     dbz_publication: [public.orders]
+  # W4c: declaring the connector's config lets connect_update_connector_config's Validate read
+  # it in replay (the config step of the heartbeat fix, an allowed extra). The keys are merged
+  # over the connect_config recording; this one repeats what that recording shows.
+  connector_configs:
+    pg-orders-connector:
+      publication.autocreate.mode: filtered
 
 # In dev the built-in watcher opens this room on slot_wal (dev/owners.q2.yaml). The eval watcher
 # can see that signal, but its title is generated from a rate sample the replay cannot supply, so

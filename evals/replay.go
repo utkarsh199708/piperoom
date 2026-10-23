@@ -118,7 +118,7 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 	wl := &writeLog{}
 	reg := actions.NewRegistry()
 	if err := actions.Register(reg, actions.Deps{
-		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl},
+		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl, res: res, recs: recs},
 		Registry: replayRegistry{subjects: res.Subjects, log: wl},
 	}); err != nil {
 		return nil, nil, fmt.Errorf("evals: action definitions: %w", err)
@@ -654,12 +654,18 @@ func (t *replayTool) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 }
 
 // replayConnect answers the Connect reads that action validation needs: the
-// connector names and, where a recording gives it, each connector's status.
+// connector names, where a recording gives it each connector's status, and
+// the config of a connector the scenario declares in resources.connector_configs.
 // Its writes are recorded no-ops.
 type replayConnect struct {
 	connectors []string
 	statuses   map[string]clients.ConnectorStatus
 	log        *writeLog
+	// res and recs serve Config as replayConfig does for the P3 actions, but
+	// only for a connector in res.ConnectorConfigs: the declaration is the
+	// scenario's opt-in, so a scenario without one validates as before.
+	res  Resources
+	recs []Recording
 }
 
 var _ clients.ConnectFixWriter = replayConnect{}
@@ -673,8 +679,11 @@ func (c replayConnect) Status(_ context.Context, name string) (clients.Connector
 	}
 	return clients.ConnectorStatus{}, errNotReplayed
 }
-func (replayConnect) Config(context.Context, string) (map[string]string, error) {
-	return nil, errNotReplayed
+func (c replayConnect) Config(ctx context.Context, name string) (map[string]string, error) {
+	if _, declared := c.res.ConnectorConfigs[name]; !declared {
+		return nil, errNotReplayed
+	}
+	return replayConfig{res: c.res, recs: c.recs}.Config(ctx, name)
 }
 func (c replayConnect) RestartTask(_ context.Context, name string, task int) error {
 	c.log.record("RestartTask", map[string]any{"connector": name, "task": task})
