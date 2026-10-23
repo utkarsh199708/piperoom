@@ -45,6 +45,11 @@ type Deps struct {
 	CertTargets []CertTarget
 	// CertProbe replaces netsec.CertExpiry in tests.
 	CertProbe func(ctx context.Context, addr string, cfg *tls.Config) (netsec.CertInfo, error)
+	// RenamedKey resolves a connector config key renamed by a component
+	// upgrade to its new name and the Q1 known-issue id (the Q1a known-issues
+	// index). Nil until that index is wired: connect_validate_config then only
+	// suggests the nearest key from PluginConfigDef and cannot name an issue.
+	RenamedKey func(key string) (newKey, issueID string, ok bool)
 }
 
 const timeout = 10 * time.Second
@@ -78,6 +83,11 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	// The F12a reads are optional on a KafkaAdmin: a client (or fake, or eval
 	// replay) without them gets no tool the model could call in vain.
+	if _, ok := d.Connect.(ConfigValidator); ok {
+		if err := reg.Register(&connectValidateConfig{d: d}); err != nil {
+			return err
+		}
+	}
 	if _, ok := d.Kafka.(clients.ClusterReader); ok {
 		if err := reg.Register(&clusterHealth{d: d}); err != nil {
 			return err
