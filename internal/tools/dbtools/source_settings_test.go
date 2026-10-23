@@ -327,6 +327,76 @@ func makeSessions(n int) []postgres.DBSession {
 	return out
 }
 
+// usename and application_name are chosen by whoever connects to the source
+// (CREATE ROLE takes any quoted name, and a fake client is not bound by the
+// server's application_name filter): a name holding newlines or escape codes
+// must not be able to add lines to the summary or smuggle terminal control
+// sequences into the room.
+func TestSourceBlockingSessionsSanitizesIdentityFields(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{blockers: []postgres.DBSession{{
+		PID: 7, StartedAt: now.Add(-time.Hour), XactStart: now.Add(-30 * time.Minute),
+		User:       "evil\npid=999 user=admin state=active blocks_slot=yes",
+		App:        "app\r\ninjected line\x1b[31m",
+		State:      "free\ntext",
+		Query:      "select 1",
+		BlocksSlot: false,
+	}}}
+	r, err := runScoped(t, settingsDeps(src), "source_blocking_sessions", `{}`)
+	if err != nil {
+		t.Fatalf("source_blocking_sessions: %v", err)
+	}
+	var pidLines int
+	for _, line := range strings.Split(r.Summary, "\n") {
+		if strings.HasPrefix(line, "pid=") {
+			pidLines++
+		}
+	}
+	if pidLines != 1 {
+		t.Fatalf("a crafted name added summary lines (%d lines start with pid=): %q", pidLines, r.Summary)
+	}
+	if strings.ContainsAny(r.Summary, "\r\x1b") {
+		t.Fatalf("control characters reached the summary: %q", r.Summary)
+	}
+	data, ok := r.Data.([]postgres.DBSession)
+	if !ok || len(data) != 1 {
+		t.Fatalf("data = %T %+v", r.Data, r.Data)
+	}
+	if strings.ContainsAny(data[0].User, "\n\r\x1b") || strings.ContainsAny(data[0].App, "\n\r\x1b") {
+		t.Fatalf("control characters reached Data: user=%q app=%q", data[0].User, data[0].App)
+	}
+	if data[0].State != "?" {
+		t.Fatalf("free-text state passed the allow-list: %q", data[0].State)
+	}
+}
+
+// The connector config's database.user is external text (Kafka Connect REST):
+// a role name holding a newline must not add lines to the role-grants summary.
+func TestSourceRoleGrantsSanitizesRoleInSummary(t *testing.T) {
+	src := &fakeSource{}
+	d := settingsDeps(src)
+	d.Connect = &fakeConnect{configs: map[string]map[string]string{
+		"pg-orders-connector": {
+			"connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+			"database.user":   "piperoom\nselectable tables: 999 of 999",
+		},
+	}}
+	r, err := runScoped(t, d, "source_role_grants", `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("source_role_grants: %v", err)
+	}
+	if strings.Contains(r.Summary, "\nselectable tables: 999") {
+		t.Fatalf("a crafted role name added a summary line: %q", r.Summary)
+	}
+	if !strings.Contains(r.Summary, "role piperoom selectable tables: 999 of 999:") {
+		t.Fatalf("role not folded to one line: %q", r.Summary)
+	}
+	// The exact config value is still what the database is asked about.
+	if src.roleAsked != "piperoom\nselectable tables: 999 of 999" {
+		t.Fatalf("role asked = %q", src.roleAsked)
+	}
+}
+
 func TestSourceBlockingSessionsNoBlockers(t *testing.T) {
 	r, err := runScoped(t, settingsDeps(&fakeSource{}), "source_blocking_sessions", `{}`)
 	if err != nil {

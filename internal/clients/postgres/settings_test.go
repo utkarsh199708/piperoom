@@ -287,6 +287,21 @@ func TestBlockersRedactAndCutQuery(t *testing.T) {
 	}
 }
 
+// xid has no min() aggregate and no ordering operators in any Postgres
+// version: the horizon must be computed via age(backend_xmin), or every
+// Blockers read fails on a real server with "function min(xid) does not
+// exist" (regression: the first version used min() and <= on xid).
+func TestBlockersSQLComparesXidByAge(t *testing.T) {
+	if !strings.Contains(blockersSQL, "age(backend_xmin)") {
+		t.Fatalf("blockersSQL does not use age(backend_xmin):\n%s", blockersSQL)
+	}
+	for _, bad := range []string{"min(backend_xmin)", "backend_xmin <=", "backend_xmin >=", "backend_xmin <", "backend_xmin >"} {
+		if strings.Contains(blockersSQL, bad) {
+			t.Fatalf("blockersSQL compares xid with %q, which Postgres has no operator for:\n%s", bad, blockersSQL)
+		}
+	}
+}
+
 func TestBlockersRefuseNegativeAge(t *testing.T) {
 	q := &settingsQuerier{}
 	if _, err := testDB(q).Blockers(context.Background(), -time.Second); err == nil {

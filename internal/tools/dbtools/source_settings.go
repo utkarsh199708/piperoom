@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
@@ -41,6 +42,18 @@ func (d Deps) settingsReader(tool string) (sourceSettingsClient, error) {
 		return nil, fmt.Errorf("dbtools: %s: the source client cannot read database settings", tool)
 	}
 	return c, nil
+}
+
+// oneLineShort folds whitespace and control characters to single spaces and
+// cuts the result to at most n runes. Identity fields that reach a summary
+// (usename, application_name, a connector's database.user) are free text
+// chosen outside piperoom: a name holding a newline must not be able to add
+// lines of its own to the summary the model reads.
+func oneLineShort(s string, n int) string {
+	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " ")
+	return cutShort(s, n)
 }
 
 // optionalSetting reports whether a setting is expected only on some servers:
@@ -264,7 +277,9 @@ func sourceRoleGrantsTool(d Deps) tools.Tool {
 			}
 
 			var sb strings.Builder
-			fmt.Fprintf(&sb, "connector %s role %s: ", conn.name, conn.role)
+			// The role is the connector config's database.user: external text,
+			// folded to one line before it joins the summary.
+			fmt.Fprintf(&sb, "connector %s role %s: ", conn.name, oneLineShort(conn.role, 64))
 			if !info.Exists {
 				sb.WriteString("the role does not exist (connector config database.user)\n")
 			} else {
@@ -339,8 +354,11 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 			rows := make([]postgres.DBSession, 0, len(sessions))
 			for _, s := range sessions {
 				s.Query = postgres.RedactSessionQuery(s.Query)
-				s.User = cutShort(s.User, 64)
-				s.App = cutShort(s.App, 64)
+				// usename and application_name are chosen by whoever connects
+				// to the source: fold control characters so a crafted name
+				// cannot add lines to the summary.
+				s.User = oneLineShort(s.User, 64)
+				s.App = oneLineShort(s.App, 64)
 				if !backendStates[s.State] {
 					// State is a fixed Postgres vocabulary; anything else is
 					// free text from a client that is not the real one.

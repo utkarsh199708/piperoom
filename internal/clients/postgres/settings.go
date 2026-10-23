@@ -270,17 +270,20 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 // blockersSQL lists the sessions that hold back a slot: an open transaction
 // older than $1 seconds, or the session whose backend_xmin is the oldest on
 // the server (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT
-// waits for it). Walsenders are left out (their own xmin is not a blocker) and
-// so is this backend.
+// waits for it). xid has no min() aggregate and no ordering operators, so the
+// oldest xmin is found as the largest age(backend_xmin), which is also
+// wraparound-safe. Walsenders are left out (their own xmin is not a blocker)
+// and so is this backend.
 const blockersSQL = `
 		WITH activity AS (
-			SELECT pid, backend_start, xact_start, usename, application_name, state, query, backend_xmin,
+			SELECT pid, backend_start, xact_start, usename, application_name, state, query,
+			       age(backend_xmin) AS xmin_age,
 			       (xact_start IS NOT NULL AND xact_start < now() - make_interval(secs => $1)) AS old
 			FROM pg_stat_activity
 			WHERE pid <> pg_backend_pid()
 			  AND backend_type <> 'walsender'
 		), horizon AS (
-			SELECT min(backend_xmin) AS xmin FROM activity
+			SELECT max(xmin_age) AS max_age FROM activity
 		)
 		SELECT a.pid,
 		       a.backend_start,
@@ -289,9 +292,9 @@ const blockersSQL = `
 		       COALESCE(a.application_name, ''),
 		       COALESCE(a.state, ''),
 		       COALESCE(a.query, ''),
-		       (a.backend_xmin IS NOT NULL AND a.backend_xmin <= h.xmin) AS blocks_slot
+		       (a.xmin_age IS NOT NULL AND a.xmin_age >= h.max_age) AS blocks_slot
 		FROM activity a, horizon h
-		WHERE a.old OR (a.backend_xmin IS NOT NULL AND a.backend_xmin <= h.xmin)
+		WHERE a.old OR (a.xmin_age IS NOT NULL AND a.xmin_age >= h.max_age)
 		ORDER BY a.xact_start NULLS LAST, a.pid`
 
 // Blockers lists the sessions that can hold back logical replication. The

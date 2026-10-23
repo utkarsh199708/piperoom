@@ -53,7 +53,8 @@ func connectorScopeGapTool(d Deps) tools.Tool {
 			defer cancel()
 			conn, err := resolveConnector(ctx, "pg_connector_scope_gap", p, d.Connect)
 			if err != nil {
-				return tools.Result{}, fmt.Errorf("dbtools: pg_connector_scope_gap: %w", err)
+				// resolveConnector already names the tool and the pipeline.
+				return tools.Result{}, err
 			}
 			inc := owners.ParseConnectorInclude(conn.cfg)
 			// The union of what the pipeline declares and what its connector
