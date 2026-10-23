@@ -91,9 +91,16 @@ func validSetupClass(class string) bool {
 	return ok
 }
 
-// classAtLeast raises a class to the floor: max(rank(a), rank(b)). Both must be
-// valid.
+// classAtLeast raises a class to the floor: max(rank(a), rank(b)). An invalid
+// (empty) side reads as no class, so the other side stands; both invalid is
+// "".
 func classAtLeast(a, b string) string {
+	if !validSetupClass(a) {
+		return b
+	}
+	if !validSetupClass(b) {
+		return a
+	}
 	if setupClassRank[b] > setupClassRank[a] {
 		return b
 	}
