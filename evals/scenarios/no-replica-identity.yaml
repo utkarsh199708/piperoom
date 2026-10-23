@@ -226,13 +226,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: pg_replication_slots
     summary: |
@@ -311,14 +311,17 @@ recordings:
       versions:
         - 1
   - tool: schema_registry_diff
-    input: {subject: pg.public.orders-value}
+    input: {subject: pg.public.orders-value, from_version: 1}
     summary: |-
       no field changes
     data:
-      changes: []
+      changes: null
       from_version: 1
       subject: pg.public.orders-value
-      to_version: 2
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
@@ -444,7 +447,9 @@ expect:
     - [replica identity]
     # "omits the old tuple" is the positive phrasing of NOTHING: an answer that
     # states it with a cause term stays out of the ambiguous set (no negation).
-    - [nothing, not recorded, no old key, no key, omits the old tuple]
+    # No bare "no key": a false "the table has no primary key" story would pass
+    # (public.orders has one: has_primary_key=yes).
+    - [nothing, not recorded, no old key, omits the old tuple]
   # The wrong stories of a source write failure: the pipeline stages are healthy.
   root_cause_forbidden:
     - ['task failed']

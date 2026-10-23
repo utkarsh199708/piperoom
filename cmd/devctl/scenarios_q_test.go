@@ -271,8 +271,8 @@ func TestBlockedSlotBreakAndFix(t *testing.T) {
 		t.Fatalf("break: %v\n%s", err, logs)
 	}
 	w.with(func() {
-		if !w.blockerOpen || !w.slotWaiting || w.slotExists {
-			t.Errorf("after break: blocker %v waiting %v slot %v", w.blockerOpen, w.slotWaiting, w.slotExists)
+		if !w.blockerOpen || !w.slotWaiting || w.slotExists || !w.blockerRole {
+			t.Errorf("after break: blocker %v waiting %v slot %v role %v", w.blockerOpen, w.slotWaiting, w.slotExists, w.blockerRole)
 		}
 		if w.offsetLSN != 0 {
 			t.Error("offsets not cleared")
@@ -280,7 +280,9 @@ func TestBlockedSlotBreakAndFix(t *testing.T) {
 		if !slices.Equal(w.ops, []string{"stop", "drop-slot", "delete-offsets", "resume"}) {
 			t.Errorf("ops = %v", w.ops)
 		}
-		if len(w.detached) != 1 || !strings.Contains(strings.Join(w.detached[0], " "), "-d -e PGAPPNAME="+blockerApp+" "+pgContainer) {
+		// The blocker is not the connector's database.user (piperoom):
+		// source_end_session refuses that user's sessions.
+		if len(w.detached) != 1 || !strings.Contains(strings.Join(w.detached[0], " "), "-d -e PGAPPNAME="+blockerApp+" "+pgContainer+" psql -U "+blockerRole+" ") {
 			t.Errorf("detached = %v", w.detached)
 		}
 	})
@@ -293,8 +295,8 @@ func TestBlockedSlotBreakAndFix(t *testing.T) {
 		}
 	}
 	w.with(func() {
-		if w.blockerOpen || !w.slotExists || !w.slotActive || w.taskState != "RUNNING" {
-			t.Errorf("after fix: blocker %v slot %v/%v task %s", w.blockerOpen, w.slotExists, w.slotActive, w.taskState)
+		if w.blockerOpen || w.blockerRole || !w.slotExists || !w.slotActive || w.taskState != "RUNNING" {
+			t.Errorf("after fix: blocker %v role %v slot %v/%v task %s", w.blockerOpen, w.blockerRole, w.slotExists, w.slotActive, w.taskState)
 		}
 		for id := int64(1); id <= w.nextID; id++ {
 			if !w.loaded[id] {
