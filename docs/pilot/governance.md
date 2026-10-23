@@ -248,7 +248,8 @@ State these to your auditor as they are.
    a warehouse's retention.
 5. **It does not discover personal data.** Section 5: names and types, with the gaps listed there.
 6. **Its lineage is not complete.** Section 4: CDC hops, by name, for Postgres, no SQL parsing, no downstream
-   models or dashboards.
+   models or dashboards. The OpenLineage feed carries the same maps, sent best effort from the leader only, so
+   your catalog can miss a pipeline or a fix step (section 7).
 7. **It is not an audit log or a signed report.** There is no governance report. Signals are in the room they
    opened, in `GET /api/fleet`, and in the log; room exports carry a SHA-256 over the JCS form
    (`X-Piperoom-Export-SHA256`), which detects a change only if you keep the hash elsewhere, and are not signed.
