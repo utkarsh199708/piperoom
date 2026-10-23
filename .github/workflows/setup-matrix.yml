@@ -69,7 +69,9 @@ jobs:
             # file and os.Chmod only toggles the read-only bit, so the
             # assertion cannot pass on Windows: the test needs a
             # `//go:build !windows` or a Windows branch (A9 follow-up, reported
-            # in the U1-16 PR). Everything else in the package runs.
+            # in the U1-16 PR). Only this test is skipped by the flag; the two
+            # path-table rows that create real symlinks still skip themselves
+            # where the OS user may not, which the next step accounts for.
             skip='-skip=^TestPropertiesWriteFixesMode$'
           fi
           go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
