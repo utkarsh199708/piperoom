@@ -84,6 +84,9 @@ var setupScenarios = map[string]setupScenario{
 	"missing-grant":               {name: "missing-grant", check: checkSourceRoleGrants, breakIt: breakSetupMissingGrant, fix: fixSetupMissingGrant, verify: verifySourceRoleGrants},
 	"db-unreachable-from-connect": {name: "db-unreachable-from-connect", check: checkConnectSourceReach, breakIt: breakDBUnreachable, fix: fixDBUnreachable, verify: verifyConnectSourceReachable},
 	"plugin-after-scan":           {name: "plugin-after-scan", check: checkConnectPluginScan, breakIt: breakPluginAfterScan, fix: fixPluginAfterScan, verify: verifyConnectPluginScan},
+	// SQL Server source, profile mssql (U4c, setupbreaks_mssql.go).
+	"agent-stopped":         mssqlAgentStopped,
+	"cdc-not-enabled-table": mssqlCDCNotEnabledTable,
 }
 
 // setupScenarioNames returns the names sorted, for usage text and errors.
