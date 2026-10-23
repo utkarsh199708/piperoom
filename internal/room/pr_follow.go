@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/forge"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -330,12 +331,14 @@ func (s *Service) pollPR(ctx context.Context, roomID string, d duePR) {
 		s.log.Warn("room: pull request follower: the repo is no longer listed in the pipeline's repos:", "room", roomID, "repo", d.pr.Repo, "number", d.pr.Number, "retry_in", wait)
 		return
 	}
-	r := repo.Ref()
+	// The full ref, Host included, so the client's per-call host check runs
+	// on the poller path too (forge.RefOf, as every other call site).
+	ref := forge.RefOf(repo.Ref())
 	pctx, cancel := context.WithTimeout(ctx, prPollTimeout)
-	got, err := s.prReader.PullRequest(pctx, clients.RepoRef{ID: r.ID, Owner: r.Owner, Name: r.Name, Base: r.Base}, d.pr.Number)
+	got, err := s.prReader.PullRequest(pctx, ref, d.pr.Number)
 	cancel()
 	if err == nil {
-		err = checkFollowedPR(d.pr, got)
+		err = checkFollowedPR(d.pr, ref, got)
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -365,11 +368,15 @@ func (s *Service) pollPR(ctx context.Context, roomID string, d duePR) {
 }
 
 // checkFollowedPR refuses an answer that is not the PR the step opened: a
-// head branch other than the one Piperoom wrote, or a state the room does
-// not know.
-func checkFollowedPR(pr PullRequest, got clients.PullRequest) error {
+// head branch other than the one Piperoom wrote, a head branch in another
+// repository than ref's (a fork; "" is a deleted head repository, which
+// says nothing), or a state the room does not know.
+func checkFollowedPR(pr PullRequest, ref clients.RepoRef, got clients.PullRequest) error {
 	if got.HeadRef != "" && got.HeadRef != pr.Branch {
 		return fmt.Errorf("room: pull request #%d: head branch is not %s", pr.Number, pr.Branch)
+	}
+	if got.HeadRepo != "" && !strings.EqualFold(got.HeadRepo, ref.Owner+"/"+ref.Name) {
+		return fmt.Errorf("room: pull request #%d: head branch is in another repository", pr.Number)
 	}
 	switch got.State {
 	case clients.PRStateOpen, clients.PRStateMerged, clients.PRStateClosed:

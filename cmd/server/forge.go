@@ -62,18 +62,20 @@ func anyRepos(own *owners.Owners) bool {
 	return false
 }
 
-// forgePR is the forge client's PullRequest method (forge.ForgeReader).
+// forgePR is the forge client's PullRequest method (clients.ForgeReader;
+// forge's types are aliases of the clients ones).
 type forgePR interface {
-	PullRequest(ctx context.Context, repo forge.RepoRef, number int) (forge.PullRequest, error)
+	PullRequest(ctx context.Context, repo clients.RepoRef, number int) (clients.PullRequest, error)
 }
 
-// forgePRReader adapts the forge client (whose types are its local copies of
-// Q0 item 6) to room.PullRequestReader (the clients contract types), and
-// turns its rate-limit answer into room.PRRateLimitError.
+// forgePRReader is the forge client as a room.PullRequestReader: the ref
+// (Host included, so the client's host check runs) and the answer (HeadRepo
+// included) pass through unchanged; only the rate-limit answer becomes
+// room.PRRateLimitError, whose Reset the follower waits for.
 type forgePRReader struct{ c forgePR }
 
 func (r forgePRReader) PullRequest(ctx context.Context, repo clients.RepoRef, number int) (clients.PullRequest, error) {
-	pr, err := r.c.PullRequest(ctx, forge.RepoRef{ID: repo.ID, Owner: repo.Owner, Name: repo.Name, Base: repo.Base}, number)
+	pr, err := r.c.PullRequest(ctx, repo, number)
 	if err != nil {
 		if errors.Is(err, forge.ErrRateLimited) {
 			rl := &room.PRRateLimitError{Err: err}
@@ -85,9 +87,5 @@ func (r forgePRReader) PullRequest(ctx context.Context, repo clients.RepoRef, nu
 		}
 		return clients.PullRequest{}, err
 	}
-	return clients.PullRequest{
-		Repo: pr.Repo, Number: pr.Number, URL: pr.URL, State: pr.State,
-		HeadRef: pr.HeadRef, HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, MergedAt: pr.MergedAt,
-		Checks: clients.PullRequestChecks{State: pr.Checks.State, Total: pr.Checks.Total, Failed: pr.Checks.Failed},
-	}, nil
+	return pr, nil
 }

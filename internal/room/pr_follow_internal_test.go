@@ -208,8 +208,8 @@ func TestQ7eFollowerChangeDetection(t *testing.T) {
 	if r.prs.count() != 1 || len(r.updates(roomID)) != 0 {
 		t.Fatalf("calls %d, updates %d; want one poll and no event", r.prs.count(), len(r.updates(roomID)))
 	}
-	if got := r.prs.repos[0]; got != (clients.RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main"}) {
-		t.Fatalf("polled repo %+v, want acme/connect-config @ main from owners.yaml", got)
+	if got := r.prs.repos[0]; got != (clients.RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main", Host: "github.com"}) {
+		t.Fatalf("polled repo %+v, want acme/connect-config @ main on github.com from owners.yaml (Host: the client's host check)", got)
 	}
 	r.tick() // not due: PRPollEvery has not passed
 	if r.prs.count() != 1 {
@@ -421,8 +421,35 @@ func TestQ7eRefusesAnotherPR(t *testing.T) {
 	r.prs.set(func(p *clients.PullRequest) { p.HeadRef = ""; p.State = "draft" })
 	r.clock.Advance(PRPollEvery)
 	r.tick()
+	// The fix branch's name, but in a fork: not the step's PR.
+	branch := mustRoom(t, r.svc, roomID).PullRequests[0].Branch
+	r.prs.set(func(p *clients.PullRequest) {
+		p.HeadRef, p.HeadRepo, p.State = branch, "mallory/connect-config", clients.PRStateMerged
+	})
+	calls := r.prs.count()
+	r.clock.Advance(time.Hour)
+	r.tick()
+	if r.prs.count() != calls+1 {
+		t.Fatal("the fork answer was never polled")
+	}
 	if n := len(r.updates(roomID)); n != 0 {
 		t.Fatalf("%d events for a PR that is not the step's", n)
+	}
+}
+
+// The head repository must be the ref's own (any case); "" (a deleted head
+// repository) says nothing.
+func TestQ7eCheckFollowedPRHeadRepo(t *testing.T) {
+	pr := PullRequest{Number: 12, Branch: "piperoom/r-p-0"}
+	ref := clients.RepoRef{Owner: "acme", Name: "connect-config"}
+	for _, tc := range []struct {
+		headRepo string
+		ok       bool
+	}{{"acme/connect-config", true}, {"Acme/Connect-Config", true}, {"", true}, {"mallory/connect-config", false}} {
+		err := checkFollowedPR(pr, ref, clients.PullRequest{HeadRef: pr.Branch, HeadRepo: tc.headRepo, State: clients.PRStateOpen})
+		if (err == nil) != tc.ok {
+			t.Errorf("head repo %q: %v, want ok %v", tc.headRepo, err, tc.ok)
+		}
 	}
 }
 

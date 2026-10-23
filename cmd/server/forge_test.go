@@ -99,18 +99,36 @@ func (s *stubForgePR) PullRequest(_ context.Context, repo forge.RepoRef, _ int) 
 func TestForgePRReader(t *testing.T) {
 	at := time.Date(2026, 10, 23, 14, 2, 0, 0, time.UTC)
 	stub := &stubForgePR{pr: forge.PullRequest{Repo: "connect-config", Number: 12, State: "merged", HeadRef: "piperoom/r-p-0",
-		HeadSHA: "abc", MergeSHA: "def", MergedAt: at, Checks: forge.PullRequestChecks{State: "failure", Total: 2, Failed: []string{"build"}}}}
+		HeadSHA: "abc", HeadRepo: "acme/connect-config", MergeSHA: "def", MergedAt: at,
+		Checks: forge.PullRequestChecks{State: "failure", Total: 2, Failed: []string{"build"}}}}
 	r := forgePRReader{c: stub}
-	got, err := r.PullRequest(context.Background(), clients.RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main"}, 12)
+	// The whole ref reaches the client, Host included (its host check).
+	ref := clients.RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main", Host: "github.com"}
+	got, err := r.PullRequest(context.Background(), ref, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stub.repo != (forge.RepoRef{ID: "connect-config", Owner: "acme", Name: "connect-config", Base: "main"}) {
-		t.Fatalf("forge repo %+v", stub.repo)
+	if stub.repo != ref {
+		t.Fatalf("forge repo %+v, want %+v", stub.repo, ref)
 	}
 	if got.State != "merged" || got.MergeSHA != "def" || !got.MergedAt.Equal(at) || got.HeadRef != "piperoom/r-p-0" ||
-		got.Checks.State != "failure" || got.Checks.Total != 2 || len(got.Checks.Failed) != 1 {
+		got.HeadRepo != "acme/connect-config" || got.Checks.State != "failure" || got.Checks.Total != 2 || len(got.Checks.Failed) != 1 {
 		t.Fatalf("pull request %+v", got)
+	}
+
+	// The client's own host check answers through the adapter.
+	key, err := forge.LoadPrivateKeyFile(writeAppKey(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := forge.New(forge.Config{APIURL: "https://api.github.com", AppID: 1, InstallationID: 2, Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := ref
+	other.Host = "ghe.example.com"
+	if _, err := (forgePRReader{c: c}).PullRequest(context.Background(), other, 12); !errors.Is(err, forge.ErrRefused) || !strings.Contains(err.Error(), "ghe.example.com") {
+		t.Fatalf("a repo on another host: %v, want the client's host refusal", err)
 	}
 
 	stub.err = fmt.Errorf("forge: GET /repos/acme/connect-config/pulls/12: %w", forge.ErrRateLimited)
