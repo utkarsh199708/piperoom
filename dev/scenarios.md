@@ -102,6 +102,11 @@ Expected health per scenario, derived from the symptoms above (**not yet verifie
 | `dead-slot` (§9) | kafka-connect (STOPPED); postgres (slot inactive); kafka and warehouse after 60 s | consumer |
 | `consumer-bad-deploy` (§10) | consumer (stopped, no members) | kafka-connect, postgres, kafka; warehouse until a new change waits > 60 s |
 | `dlq-backlog` (§11) | nothing: lag stays 0, the rejected orders are committed | all |
+| `no-replica-identity` (§20) | nothing: inserts stream, only updates and deletes fail on the source | all |
+| `missing-grant` (§21) | kafka-connect (task 0 FAILED), postgres (slot inactive); kafka and warehouse after 60 s | consumer |
+| `blocked-slot` (§22) | kafka and warehouse after 60 s; kafka-connect if Connect reports task 0 not RUNNING while start() waits; postgres if the waiting slot is not listed yet | consumer |
+| `idle-wal-growth` (§23) | nothing until retained WAL passes 100 MB (the break stops past 32 MiB) | all |
+| `stale-source-offsets` (§24) | kafka-connect (task 0 FAILED), postgres (`debezium_orders` inactive); kafka and warehouse after 60 s | consumer |
 
 ---
 
@@ -703,3 +708,146 @@ consumer on it: `docker compose -f dev/docker-compose.yml run --rm -e TOPIC=pg.p
 GROUP=order-sync-reprocess devconsumer`. `devctl fix consumer-skipped-range` does not copy: it replays order-sync
 from the start of the topic (the load is an upsert by id), waits until no skipped order is missing, and restores
 the baseline (the reprocess topic is deleted).
+
+## Source settings: `no-replica-identity`, `missing-grant`, `blocked-slot`, `idle-wal-growth` (Q2f)
+
+Four database-side causes from the Q wave's Stack Overflow analysis (`docs/product/so-gaps-2026-10.md`), one per
+Q2 admin action. Each break shows in a Q2a tool (#859: `source_settings`, `source_table_replication`,
+`source_role_grants`, `source_blocking_sessions`) and opens a room through the watcher or `devctl alert <scenario>`.
+Written on 2026-10-23 **without a running stack** (no Docker in that session): the SQL, REST and detached-session
+steps are unit-tested against a fake stack (`go test ./cmd/devctl -run 'NoReplica|MissingGrant|BlockedSlot|IdleWAL'`),
+but **nothing in §20-§23 has been observed yet**. Whoever runs them first: replace the "Expected" blocks with what
+you saw, as in §1-§7. Every object a break creates is named `devctl_*` / `devctl-*`; every fix removes it and is
+safe to run twice. Only `idle-wal-growth` needs another owners file: **`OWNERS_FILE=dev/owners.q2.yaml`**
+(`dev/owners.yaml` plus `slot_wal: {fire: 32MiB, clear: 16MiB, for: 30s}` and `public.devctl_heartbeat` in
+`source_tables`; `TestOwnersQ2MatchesBaseline` keeps the two in step).
+
+| Scenario | How the room opens | Q2a tool that shows it | Action that ends it |
+|---|---|---|---|
+| `no-replica-identity` | alert (`source: app`): updates on `public.orders` fail | `source_table_replication`: `replica_identity: nothing` | `pg_set_replica_identity` (mode `full`) |
+| `missing-grant` | watcher: `connector_down` (task 0 FAILED), `slot_inactive` | `source_role_grants`: role `devctl_cdc` (the connector's `database.user`), `select: false` on `public.orders` | `source_grant_select` |
+| `blocked-slot` | alert (`source: freshness`): no new order in `analytics.orders` | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot: true` | `source_end_session` |
+| `idle-wal-growth` | watcher: `slot_wal` (on `dev/owners.q2.yaml`) | `source_settings`: `max_slot_wal_keep_size = -1` (no cap) next to an active slot whose retained WAL grows | `source_create_heartbeat_table` (+ its follow-up config step) |
+
+### 20. `no-replica-identity` — updates fail on the source
+
+**Break (`devctl break no-replica-identity`):** `ALTER TABLE public.orders REPLICA IDENTITY NOTHING` (a migration
+copied from a table that is not replicated). `dbz_publication` publishes updates and deletes, so Postgres refuses
+every `UPDATE` and `DELETE` on the table; the break proves it with a no-op update (it must fail with "does not have
+a replica identity") and proves inserts still stream with a marker order in the warehouse. Refuses when the table
+already has `NOTHING`.
+
+**Expected (not yet observed):**
+```
+app         UPDATE orders ... → ERROR: cannot update table "orders" because it does not have a replica identity and publishes updates
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING; slot active; lag 0
+source_table_replication   public.orders  has_primary_key=true  replica_identity=nothing
+```
+
+**Fix:** `pg_set_replica_identity` with mode `full` (the dev baseline, `dev/postgres-init/01-orders.sql`; `default`
+works too, the table has a primary key). `devctl fix` runs `ALTER TABLE public.orders REPLICA IDENTITY FULL` and
+proves an update succeeds; on a fixed stack it skips the `ALTER`.
+
+### 21. `missing-grant` — the connector role cannot read the table
+
+**Break (`devctl break missing-grant`):** the connector moves to a least-privilege role: `CREATE ROLE devctl_cdc
+LOGIN REPLICATION`, `CONNECT` on `orders`, `USAGE` on `public` — and no `SELECT` on `public.orders` (the grant
+request is still open). The connector is re-registered with `database.user=devctl_cdc`,
+`publication.autocreate.mode=disabled` (the DBA owns the publication; with `filtered` the role would also have to
+own the table, which is §7) and `snapshot.mode=always`, so every start reads the table. Task 0 restarts and the
+break waits for `FAILED`. Refuses when the role already exists.
+
+**Expected (not yet observed):**
+```
+connector   pg-orders-connector: RUNNING, tasks 0=FAILED  trace: ... permission denied for table orders
+slot        debezium_orders active=false
+source_role_grants   role devctl_cdc (connector pg-orders-connector config database.user): exists, login, replication, public.orders select=false
+watcher     connector_down (sev2), slot_inactive after 30 s
+```
+
+**Fix:** `source_grant_select` (SELECT on the pipeline's tables for the connector's `database.user`, nothing else).
+`devctl fix` grants it, restarts task 0 and waits for `RUNNING` (the snapshot now succeeds: the grant was the
+cause), then puts the baseline back: the connector config from `dev/connectors` (`piperoom`), task 0 `RUNNING`,
+an active slot, `DROP OWNED BY devctl_cdc; DROP ROLE devctl_cdc`, and a marker order in the warehouse.
+
+### 22. `blocked-slot` — slot creation waits for an open transaction
+
+**Break (`devctl break blocked-slot`):** an analyst's session opens a transaction and keeps it
+(`docker exec -d`, `application_name=devctl-blocker`: `BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800)`,
+so it holds an xid for 30 minutes). Then the connector is set up again as after a host move: stopped (Connect REST
+`stop`), `debezium_orders` dropped, its stored offsets deleted, resumed. Debezium's `CREATE_REPLICATION_SLOT` has
+to wait for every transaction that held an xid when it started, so the task never gets past `start()`. The break
+waits until a walsender waits on a `transactionid` lock (`pg_stat_activity`). Refuses when the slot is missing or
+inactive, or a `devctl-blocker` session is already open.
+
+**Expected (not yet observed):**
+```
+pg_stat_activity   walsender  wait_event_type=Lock wait_event=transactionid
+source_blocking_sessions   pid … application devctl-blocker state "active" blocks_slot=true query "SELECT pg_sleep(1800)"
+connector   RUNNING; task 0 RUNNING or UNASSIGNED (start() has not returned) — not observed which
+warehouse   no new order after the break
+```
+The watcher may fire `connector_down` if Connect reports task 0 as not `RUNNING`; the room is opened by
+`devctl alert blocked-slot` either way.
+
+**Fix:** `source_end_session` on the blocker (the pid is in `source_blocking_sessions` at Validate and Execute).
+`devctl fix` terminates every `devctl-blocker` session; the slot creation finishes, Debezium snapshots (no
+offsets: every row is re-emitted, the load is an upsert) and streams. It resumes a connector a half-run break left
+`STOPPED`, then waits for task 0 `RUNNING`, an active slot, a marker order in the warehouse and order-sync lag 0.
+
+### 23. `idle-wal-growth` — an active slot that confirms nothing
+
+**Needs `OWNERS_FILE=dev/owners.q2.yaml`.** Do not run `devctl load` during this break: any order change lets
+Debezium confirm and release the WAL.
+
+**Break (`devctl break idle-wal-growth`):** `public.orders` is idle while another database on the same server
+(`devctl_batch`, a nightly batch) writes about 50 MB per batch into `devctl_wal_filler`. Logical decoding is per
+database, so Debezium receives nothing, commits no offset and never confirms the WAL: the slot stays **active** and
+its retained WAL grows. The break inserts up to four batches until `debezium_orders` retains at least 32 MiB
+(`slot_wal.fire`) and checks the slot is still active.
+
+**Expected (not yet observed):**
+```
+slot        debezium_orders active=true, retained ≥ 32 MiB and growing with every batch
+connector   RUNNING; lag 0; warehouse fresh
+source_settings   wal_level=logical, max_replication_slots=10, max_wal_senders=10, max_slot_wal_keep_size=-1 (no cap)
+watcher     slot_wal after 30 s (fire 32 MiB on dev/owners.q2.yaml)
+```
+
+**Fix:** `source_create_heartbeat_table`, with its follow-up steps in the same proposal (`pg_add_publication_table`
+when the publication is filtered, and `heartbeat.interval.ms` / `heartbeat.action.query` through the config
+action). `devctl fix` creates `public.devctl_heartbeat (id integer PRIMARY KEY, ts timestamptz)`, re-registers the
+connector with the table in `table.include.list`, `heartbeat.interval.ms=5000` and `heartbeat.action.query` (an
+upsert of row 1), adds the table to `dbz_publication` if Debezium did not, and waits (up to 3 minutes: Connect
+commits offsets every 60 s) until retained WAL is below 16 MiB (`slot_wal.clear`). Then the baseline: the
+connector config from `dev/connectors`, `devctl_heartbeat` and `devctl_batch` dropped, the topics
+`pg.public.devctl_heartbeat` and `__debezium-heartbeat.pg` and the table's subjects deleted. A slot already
+below `clear` skips the heartbeat step.
+
+## 24. `stale-source-offsets` — a repointed connector keeps its old offsets (Q5e)
+
+Written on 2026-10-23 **without a running stack**, unit-tested against the same fake
+(`go test ./cmd/devctl -run StaleSourceOffsets`); not observed yet.
+
+**Break (`devctl break stale-source-offsets`):** a migration target `devctl_orders_v2` is created with the orders
+table and ten restored rows, and `pg-orders-connector` is repointed at it (`database.dbname` and `slot.name`
+`devctl_orders_v2`; a logical slot belongs to one database). The name and `topic.prefix` stay, and Kafka Connect
+keys a source connector's offsets by connector name and source partition (`{"server": "pg"}`), so the connector
+starts with the **old database's** stored LSN: Debezium skips the snapshot of the new database (its offsets say it
+is done) and asks the new slot for a position from before the slot existed. The break reads the stored offsets
+before (refuses when there are none) and after, and waits for task 0 `FAILED`. If this Debezium version streams
+from the new slot instead of failing, the break says so and stops (the ten rows would then never reach Kafka).
+
+**Expected (not yet observed; the failure is the same mechanism as KAN-411 in §9):**
+```
+connect_source_offsets   pg-orders-connector  partition {"server":"pg"}  offset {"lsn": <the orders database's LSN>, ...}
+connector   RUNNING, tasks 0=FAILED  (offset before the new slot's start)
+watcher     connector_down (sev2)
+```
+
+**Fix:** `connect_stop_connector`, then `connect_reset_source_offsets` to empty, in one proposal; on resume
+Debezium snapshots the new database. `devctl fix` stops the connector and deletes its offsets the same way, but
+then puts the dev baseline back instead of resuming on the new database: the connector config from
+`dev/connectors` (`orders`, `debezium_orders`), `devctl_orders_v2` and its slot dropped, resume with no offsets
+(Debezium snapshots `orders`; the load is an upsert), and waits for an active slot, a marker order in the warehouse
+and order-sync lag 0. On a healthy stack without `devctl_orders_v2` it does nothing.

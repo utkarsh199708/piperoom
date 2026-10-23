@@ -75,6 +75,19 @@ var scenarios = map[string]scenario{
 	"rows-lost-after-retention": {breakIt: breakRowsLostAfterRetention, fix: fixRowsLostAfterRetention, alert: rowsLostAlert, owners: recoveryOwnersFile},
 	"consumer-skipped-range":    {breakIt: breakConsumerSkippedRange, fix: fixConsumerSkippedRange, alert: skippedRangeAlert, owners: recoveryOwnersFile},
 
+	// Q2f (dev/scenarios.md §20-§23): source-database settings, each shown by
+	// a Q2a tool and ended by a Q2c/Q2d action. idle-wal-growth needs the
+	// server on dev/owners.q2.yaml (a slot_wal fire a dev slot can reach).
+	"no-replica-identity": {breakIt: breakNoReplicaIdentity, fix: fixNoReplicaIdentity, alert: noReplicaIdentityAlert},
+	"missing-grant": {breakIt: breakMissingGrant, fix: fixMissingGrant,
+		signals: []string{owners.SignalConnectorDown, owners.SignalSlotInactive}},
+	"blocked-slot":    {breakIt: breakBlockedSlot, fix: fixBlockedSlot, alert: blockedSlotAlert},
+	"idle-wal-growth": {breakIt: breakIdleWALGrowth, fix: fixIdleWALGrowth, owners: q2OwnersFile, signals: []string{owners.SignalSlotWAL}},
+
+	// Q5e (dev/scenarios.md §24): a repointed connector keeps its offsets.
+	"stale-source-offsets": {breakIt: breakStaleSourceOffsets, fix: fixStaleSourceOffsets,
+		signals: []string{owners.SignalConnectorDown}},
+
 	// Batch pipeline daily-revenue (dev/batch.md). A batch pipeline has no
 	// watcher signals, so each break raises its alert instead; the pipeline is
 	// in dev/owners.yaml.

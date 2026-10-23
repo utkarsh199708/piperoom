@@ -40,6 +40,9 @@ type stack struct {
 	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// detachFn replaces runDetached (`docker exec -d …`, a session that
+	// outlives devctl) in unit tests.
+	detachFn func(ctx context.Context, name string, args ...string) error
 	// airflowCLIFn replaces `docker exec … airflow …` in unit tests.
 	airflowCLIFn func(ctx context.Context, args ...string) (string, error)
 	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
@@ -103,6 +106,14 @@ func (s *stack) compose(ctx context.Context, env map[string]string, args ...stri
 		return fmt.Errorf("devctl: docker %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+// detached starts a command that keeps running after devctl exits.
+func (s *stack) detached(ctx context.Context, name string, args ...string) error {
+	if s.detachFn != nil {
+		return s.detachFn(ctx, name, args...)
+	}
+	return runDetached(ctx, name, args...)
 }
 
 // psql runs SQL inside the Postgres container as the superuser.

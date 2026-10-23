@@ -59,7 +59,8 @@ const usage = `devctl — local pipeline control
   devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix HTTP API for the dev web menu (no auth)
 
 missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
-started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios).
+started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios);
+idle-wal-growth needs OWNERS_FILE=dev/owners.q2.yaml (dev/scenarios.md §23).
 
 up/down/reset/load/break/fix/serve mutate the shared stack and require --owner <tag>
 (or PIPEROOM_STACK_OWNER) to match the current lock holder.
