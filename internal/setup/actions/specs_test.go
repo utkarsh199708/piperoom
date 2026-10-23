@@ -1,14 +1,18 @@
 package setupactions
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/targets/compose"
+	"piperoom/internal/tools"
 )
 
 func TestEnvironmentSpecsAreSafe(t *testing.T) {
@@ -117,18 +121,18 @@ func TestEnvironmentActionsTier(t *testing.T) {
 	}
 }
 
-// previewOpsPendingRunner lists the preview ops EnvironmentSpecs names that the
-// runner catalogue does not register yet. Until a runner op exists for one,
-// the runner refuses it as unknown_op and that action's Preview fails closed.
-// Registering one of these ops must remove it from this list, and a spec that
-// names any other unregistered preview op fails
-// TestSpecOpsAreInTheRunnerCatalogue.
-var previewOpsPendingRunner = map[string]bool{
-	"preview_file_write":       true,
-	"preview_file_delete":      true,
-	"preview_compose_write":    true,
-	"preview_properties_write": true,
-	"preview_plugin_install":   true,
+// previewPendingRunner lists the actions of EnvironmentSpecs whose preview op
+// (PreviewOpName of the action) the runner catalogue does not register yet.
+// Their specs leave PreviewOp empty, so Preview answers "no preview" without a
+// runner round trip (no unknown_op refusal, no setup.runner_refused event).
+// Once the runner registers one of these ops this test fails, and the spec is
+// switched to PreviewOpName and removed from this list.
+var previewPendingRunner = map[string]bool{
+	"file_write":       true,
+	"file_delete":      true,
+	"compose_write":    true,
+	"properties_write": true,
+	"plugin_install":   true,
 }
 
 // runnerCatalogue builds the runner's real op catalogue the way the runner
@@ -155,17 +159,24 @@ func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
 		} else if floor != spec.Tier {
 			t.Errorf("%s: spec tier %q, runner floor %q", spec.Name, spec.Tier, floor)
 		}
+		_, ownRegistered := reg.Floor(PreviewOpName(spec.Name))
+		if previewPendingRunner[spec.Name] {
+			if spec.PreviewOp != "" {
+				t.Errorf("%s: pending a runner preview op, but names preview op %q", spec.Name, spec.PreviewOp)
+			}
+			if ownRegistered {
+				t.Errorf("%s: the runner now registers %q; set PreviewOp and remove it from previewPendingRunner", spec.Name, PreviewOpName(spec.Name))
+			}
+			continue
+		}
 		if spec.PreviewOp == "" {
+			t.Errorf("%s: no preview op and not in previewPendingRunner", spec.Name)
 			continue
 		}
 		pfloor, registered := reg.Floor(spec.PreviewOp)
 		switch {
-		case previewOpsPendingRunner[spec.PreviewOp] && registered:
-			t.Errorf("%s: preview op %q is now registered; remove it from previewOpsPendingRunner", spec.Name, spec.PreviewOp)
-		case previewOpsPendingRunner[spec.PreviewOp]:
-			// Known missing: the preview fails closed until the runner has it.
 		case !registered:
-			t.Errorf("%s: preview op %q is not in the runner catalogue nor in previewOpsPendingRunner", spec.Name, spec.PreviewOp)
+			t.Errorf("%s: preview op %q is not in the runner catalogue", spec.Name, spec.PreviewOp)
 		case pfloor != protocol.TierT0:
 			t.Errorf("%s: preview op %q has floor %q, want T0", spec.Name, spec.PreviewOp, pfloor)
 		case spec.PreviewOp != PreviewOpName(spec.Name) && spec.PreviewDecode == nil:
@@ -174,13 +185,56 @@ func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
 			t.Errorf("%s: preview op %q needs a PreviewDecode", spec.Name, spec.PreviewOp)
 		}
 	}
-	for op := range previewOpsPendingRunner {
-		used := false
+	for name := range previewPendingRunner {
+		found := false
 		for _, spec := range EnvironmentSpecs() {
-			used = used || spec.PreviewOp == op
+			found = found || spec.Name == name
 		}
-		if !used {
-			t.Errorf("previewOpsPendingRunner lists %q, which no spec names", op)
+		if !found {
+			t.Errorf("previewPendingRunner lists %q, which is not an environment action", name)
 		}
+	}
+}
+
+func TestPendingPreviewsMakeNoRunnerCall(t *testing.T) {
+	inputs := map[string]json.RawMessage{
+		"file_write":       json.RawMessage(`{"path":"notes.txt","content":"hi"}`),
+		"file_delete":      json.RawMessage(`{"path":"notes.txt"}`),
+		"compose_write":    json.RawMessage(`{"templates":["kafka-kraft"]}`),
+		"properties_write": json.RawMessage(`{"file":".env","entries":{"A":"b"}}`),
+		"plugin_install":   json.RawMessage(`{"release":"2.7.0","connector":"postgres"}`),
+	}
+	for _, spec := range EnvironmentSpecs() {
+		if !previewPendingRunner[spec.Name] {
+			continue
+		}
+		f := &fakeRunner{}
+		a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+		if err != nil {
+			t.Fatalf("New(%s): %v", spec.Name, err)
+		}
+		params := inputs[spec.Name]
+		ctx := tools.WithPipeline(testContext(t, params), testPipeline())
+		_, err = a.Preview(ctx, params)
+		if err == nil || !strings.Contains(err.Error(), "no preview") {
+			t.Errorf("%s: Preview = %v, want a no-preview error", spec.Name, err)
+		}
+		if got := len(f.recorded()); got != 0 {
+			t.Errorf("%s: Preview sent %d ops, want 0", spec.Name, got)
+		}
+	}
+}
+
+func TestLongOpsGetASpecTimeout(t *testing.T) {
+	want := map[string]time.Duration{"compose_up": longOpTimeout, "plugin_install": longOpTimeout}
+	for _, spec := range EnvironmentSpecs() {
+		if spec.Timeout != want[spec.Name] {
+			t.Errorf("%s: timeout %s, want %s", spec.Name, spec.Timeout, want[spec.Name])
+		}
+	}
+	// plugin_install must outlast the runner's own download budget
+	// (targets/compose downloadTimeout, 5 minutes).
+	if longOpTimeout <= 5*time.Minute || longOpTimeout > maxSpecTimeout {
+		t.Fatalf("longOpTimeout = %s, want above 5m and within %s", longOpTimeout, maxSpecTimeout)
 	}
 }

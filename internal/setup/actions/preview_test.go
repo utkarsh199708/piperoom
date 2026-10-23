@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
@@ -171,8 +172,20 @@ func TestPreviewMapsParamsForARealPreviewOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
-	if res.Target != "compose.yaml" || !strings.Contains(res.Expected, "image: debezium/connect") {
-		t.Fatalf("preview = %+v, want target = the file and expected = the render", res)
+	if res.Target != "compose.yaml" {
+		t.Fatalf("preview = %+v, want target = the file", res)
+	}
+	if res.Expected != "start services connect from compose.yaml in the background" {
+		t.Fatalf("expected = %q, want one sentence naming the services and the file", res.Expected)
+	}
+	if res.Current != "compose config --no-interpolate of compose.yaml" {
+		t.Fatalf("current = %q, want the read named", res.Current)
+	}
+	if strings.Contains(res.Expected, "image:") || strings.Contains(res.Current, "image:") {
+		t.Fatalf("the render leaked into a sentence: %+v", res)
+	}
+	if res.DryRun == nil || !res.DryRun.OK || res.DryRun.Source != "compose config" || !strings.Contains(res.DryRun.Text, "image: debezium/connect") {
+		t.Fatalf("dry run = %+v, want the render under DryRun", res.DryRun)
 	}
 	if res.Reversible {
 		t.Fatalf("preview = %+v, a compose_config render says nothing about reversibility", res)
@@ -223,5 +236,120 @@ func TestComposePreviewRefusesAnUnusableRender(t *testing.T) {
 				t.Fatalf("Preview(%s) = %v, want ErrBadPreview", data, err)
 			}
 		})
+	}
+}
+
+func composeSpec(t *testing.T, name string) Spec {
+	t.Helper()
+	for _, s := range EnvironmentSpecs() {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("%s is not in EnvironmentSpecs", name)
+	return Spec{}
+}
+
+func TestComposePreviewSentencesPerOp(t *testing.T) {
+	cases := []struct {
+		action string
+		params string
+		want   string
+	}{
+		{"compose_up", `{}`, "start every service of compose.yaml in the background"},
+		{"compose_up", `{"services":["kafka","connect"]}`, "start services kafka, connect from compose.yaml in the background"},
+		{"compose_restart", `{}`, "restart every service of compose.yaml in place; volumes kept"},
+		{"compose_restart", `{"services":["connect"]}`, "restart services connect of compose.yaml in place; volumes kept"},
+		{"compose_down", `{}`, "stop the stack of compose.yaml; volumes kept"},
+		{"compose_down", `{"file":"compose.yaml","services":["registry"]}`, "stop services registry of compose.yaml; volumes kept"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action+tc.params, func(t *testing.T) {
+			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+				return protocol.OpResult{ID: req.ID, OK: true, Data: realComposeConfigData}, nil
+			}}
+			a, err := New(composeSpec(t, tc.action), Deps{Runner: f, RoomID: "r_setup"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			params := json.RawMessage(tc.params)
+			res, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params)
+			if err != nil {
+				t.Fatalf("Preview: %v", err)
+			}
+			if res.Expected != tc.want {
+				t.Fatalf("expected = %q, want %q", res.Expected, tc.want)
+			}
+			if res.Current != "compose config --no-interpolate of compose.yaml" {
+				t.Fatalf("current = %q", res.Current)
+			}
+		})
+	}
+}
+
+func TestComposePreviewCapsTheDryRunText(t *testing.T) {
+	// A render well over 2 KiB, with a multi-byte rune straddling the cap.
+	body := "services:\n" + strings.Repeat("a", maxDryRunText-12) + strings.Repeat("é", 400)
+	data, err := json.Marshal(map[string]any{"file": "compose.yaml", "body": body, "bytes": len(body)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: true, Data: data}, nil
+	}}
+	a, err := New(composeSpec(t, "compose_down"), Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	params := json.RawMessage(`{}`)
+	res, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params)
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if res.DryRun == nil || len(res.DryRun.Text) > maxDryRunText || len(res.DryRun.Text) < maxDryRunText-4 {
+		t.Fatalf("dry run text is %d bytes, want just under %d", len(res.DryRun.Text), maxDryRunText)
+	}
+	if !utf8.ValidString(res.DryRun.Text) {
+		t.Fatal("dry run text was cut inside a rune")
+	}
+	if len(res.Expected) > 200 || len(res.Current) > 200 {
+		t.Fatalf("sentences are not short: %q / %q", res.Expected, res.Current)
+	}
+}
+
+func TestComposePreviewSanitisesTheRunnerFileName(t *testing.T) {
+	data := json.RawMessage(`{"file":"comp\u001b[31mose.yaml\n","body":"services: {}","bytes":12}`)
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: true, Data: data}, nil
+	}}
+	a, err := New(composeSpec(t, "compose_up"), Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	params := json.RawMessage(`{}`)
+	res, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params)
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	for _, s := range []string{res.Target, res.Current, res.Expected} {
+		if strings.ContainsAny(s, "\x1b\n") {
+			t.Fatalf("a control character reached a preview sentence: %q", s)
+		}
+	}
+}
+
+func TestComposePreviewRefusesABadServiceName(t *testing.T) {
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: true, Data: realComposeConfigData}, nil
+	}}
+	a, err := New(composeSpec(t, "compose_up"), Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, svc := range []string{"<b>x</b>", "a b", "-x", "x\\u0007"} {
+		params := json.RawMessage(`{"services":["` + svc + `"]}`)
+		if _, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params); !errors.Is(err, ErrBadPreview) {
+			t.Fatalf("Preview(services %q) = %v, want ErrBadPreview", svc, err)
+		}
 	}
 }

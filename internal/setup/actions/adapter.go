@@ -18,6 +18,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
+	"piperoom/internal/setup/errcode"
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/remoteclients"
@@ -60,6 +61,14 @@ const (
 	// still wins when it is shorter.
 	writeTimeout = 30 * time.Second
 	t3Timeout    = 5 * time.Minute
+	// longOpTimeout is Spec.Timeout of the long environment ops
+	// (compose_up, plugin_install): above the runner's own 5 minute download
+	// budget for one plugin archive (targets/compose downloadTimeout), so
+	// that budget is reachable, and long enough for a first image pull.
+	longOpTimeout = 10 * time.Minute
+	// maxSpecTimeout caps Spec.Timeout: no setup write holds a request open
+	// longer than this.
+	maxSpecTimeout = 15 * time.Minute
 	// previewTimeout bounds one preview call (the room allows 10 s per step).
 	previewTimeout = 10 * time.Second
 	// maxParamsBytes caps one params object before it is decoded.
@@ -104,11 +113,20 @@ type Spec struct {
 	// PreviewParams maps the step's params to the preview op's params. Nil
 	// sends the step's params unchanged.
 	PreviewParams func(json.RawMessage) (json.RawMessage, error)
-	// PreviewDecode maps the preview op's result Data to an
-	// events.PreviewResult. Nil decodes Data as an events.PreviewResult
+	// PreviewDecode maps the step's params and the preview op's result Data
+	// to an events.PreviewResult. Nil decodes Data as an events.PreviewResult
 	// itself; an op whose Data has another shape (compose_config) must set
 	// it, or its preview is refused as empty.
-	PreviewDecode func(json.RawMessage) (events.PreviewResult, error)
+	PreviewDecode func(params, data json.RawMessage) (events.PreviewResult, error)
+	// Timeout bounds one write request of this action (OpRequest.Deadline,
+	// the time at which the runner stops the op). Zero uses the tier's
+	// default (writeTimeout for T1/T2, t3Timeout for T3); a T3 step gets the
+	// larger of the two. It is for ops that legitimately run for minutes
+	// (compose_up pulling images, plugin_install downloading an archive) and
+	// is capped at maxSpecTimeout. The room's own step bound still applies
+	// on top of it, so a longer Timeout takes effect only once the room
+	// honours it for setup steps (a known gap of U1-7).
+	Timeout time.Duration
 }
 
 // Deps are the collaborators of an Adapter.
@@ -172,6 +190,9 @@ func checkSpec(spec Spec) error {
 	}
 	if err := checkSchema(spec.Schema); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrBadSpec, spec.Name, err)
+	}
+	if spec.Timeout < 0 || spec.Timeout > maxSpecTimeout {
+		return fmt.Errorf("%w: %s: timeout %s is outside 0..%s", ErrBadSpec, spec.Name, spec.Timeout, maxSpecTimeout)
 	}
 	if spec.PreviewOp != "" {
 		if !actionNameRE.MatchString(spec.PreviewOp) {
@@ -339,9 +360,14 @@ func (a *Adapter) sendStepRequest(ctx context.Context, step room.SetupStep, para
 		ParamsHash: step.ParamsHash,
 	}
 	if prop := remoteclients.ProposalFrom(ctx); len(prop) > 0 {
-		// The runner recomputes ParamsHash over the frozen proposal it was
-		// shown with the first request of a proposal. The room puts it in ctx
-		// through remoteclients.WithProposal beside the setup step.
+		// The runner recomputes ParamsHash over the frozen proposal it is
+		// shown with the first request of a proposal, so the bytes travel
+		// unchanged. A caller must put them in ctx with
+		// remoteclients.WithProposal beside the setup step. The room's
+		// executor does not do that yet (it adds only WithSetupStep), so
+		// today the runner refuses the first write of a proposal for want of
+		// a frozen proposal; that is the executor's ask in the U1-7 PR's
+		// known gaps (U1-10/U1-8b), not something this adapter can supply.
 		req.Proposal = prop
 	}
 	return a.send(ctx, req)
@@ -459,15 +485,21 @@ func rankOf(t string) int {
 	return rank
 }
 
-// timeoutFor is the deadline of one request by tier.
+// timeoutFor is the deadline of one request by tier: a T0 request (a
+// preview) always gets previewTimeout; a write gets the spec's Timeout when
+// it sets one, never less than its tier's default.
 func (a *Adapter) timeoutFor(tier string) time.Duration {
-	if tier == protocol.TierT3 {
-		return t3Timeout
-	}
 	if tier == protocol.TierT0 {
 		return previewTimeout
 	}
-	return writeTimeout
+	d := writeTimeout
+	if tier == protocol.TierT3 {
+		d = t3Timeout
+	}
+	if a.spec.Timeout > d {
+		d = a.spec.Timeout
+	}
+	return d
 }
 
 // summaryOf is the action's short result: the runner's summary, capped, or a
@@ -489,11 +521,11 @@ func refused(res protocol.OpResult) error {
 	}
 	text = clipText(text)
 	switch errorCode(res.Data) {
-	case remoteclients.ErrorCodeOutOfScope:
+	case errcode.OutOfScope:
 		return fmt.Errorf("%s: %w", text, tools.ErrOutOfScope)
-	case remoteclients.ErrorCodeNotFound:
+	case errcode.NotFound:
 		return fmt.Errorf("%s: %w", text, clients.ErrNotFound)
-	case remoteclients.ErrorCodeNotSupported:
+	case errcode.NotSupported:
 		return fmt.Errorf("%s: %w", text, clients.ErrNotSupported)
 	}
 	return errors.New(text)

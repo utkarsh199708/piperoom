@@ -31,8 +31,9 @@ func EnvironmentSpecs() []Spec {
 				"path":    map[string]any{"type": "string", "minLength": 1, "maxLength": 512},
 				"content": map[string]any{"type": "string", "maxLength": maxFileWriteBytes},
 			}, "path", "content"),
-			Scope:     ScopeFree,
-			PreviewOp: PreviewOpName("file_write"),
+			Scope: ScopeFree,
+			// No PreviewOp until the runner registers preview_file_write:
+			// Preview answers "no preview" without a runner round trip.
 		},
 		{
 			Name:     "file_delete",
@@ -42,8 +43,9 @@ func EnvironmentSpecs() []Spec {
 			Schema: objectSchema(map[string]any{
 				"path": map[string]any{"type": "string", "minLength": 1, "maxLength": 512},
 			}, "path"),
-			Scope:     ScopeFree,
-			PreviewOp: PreviewOpName("file_delete"),
+			Scope: ScopeFree,
+			// No PreviewOp until the runner registers preview_file_delete:
+			// Preview answers "no preview" without a runner round trip.
 		},
 		{
 			Name:     "compose_write",
@@ -62,8 +64,9 @@ func EnvironmentSpecs() []Spec {
 				"registry": map[string]any{"type": "boolean"},
 				"file":     map[string]any{"type": "string", "maxLength": 512},
 			}, "templates"),
-			Scope:     ScopeFree,
-			PreviewOp: PreviewOpName("compose_write"),
+			Scope: ScopeFree,
+			// No PreviewOp until the runner registers preview_compose_write:
+			// Preview answers "no preview" without a runner round trip.
 		},
 		{
 			Name:     "properties_write",
@@ -77,8 +80,9 @@ func EnvironmentSpecs() []Spec {
 					"additionalProperties": map[string]any{"type": "string", "maxLength": 4096},
 				},
 			}, "file", "entries"),
-			Scope:     ScopeFree,
-			PreviewOp: PreviewOpName("properties_write"),
+			Scope: ScopeFree,
+			// No PreviewOp until the runner registers preview_properties_write:
+			// Preview answers "no preview" without a runner round trip.
 		},
 		{
 			Name:     "compose_up",
@@ -91,7 +95,9 @@ func EnvironmentSpecs() []Spec {
 			// preview shows the effective services before they start.
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
-			PreviewDecode: composeConfigPreview,
+			PreviewDecode: composeConfigPreview("up"),
+			// The first up pulls the Kafka and Connect images.
+			Timeout: longOpTimeout,
 		},
 		{
 			Name:          "compose_restart",
@@ -102,7 +108,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
-			PreviewDecode: composeConfigPreview,
+			PreviewDecode: composeConfigPreview("restart"),
 		},
 		{
 			Name:          "compose_down",
@@ -113,7 +119,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
-			PreviewDecode: composeConfigPreview,
+			PreviewDecode: composeConfigPreview("down"),
 		},
 		{
 			Name:     "plugin_install",
@@ -124,8 +130,12 @@ func EnvironmentSpecs() []Spec {
 				"release":   map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$`},
 				"connector": map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[a-z][a-z0-9-]{0,31}$`},
 			}, "release", "connector"),
-			Scope:     ScopeFree,
-			PreviewOp: PreviewOpName("plugin_install"),
+			Scope: ScopeFree,
+			// One archive download alone may take the runner's 5 minute
+			// downloadTimeout.
+			Timeout: longOpTimeout,
+			// No PreviewOp until the runner registers preview_plugin_install:
+			// Preview answers "no preview" without a runner round trip.
 		},
 	}
 }
