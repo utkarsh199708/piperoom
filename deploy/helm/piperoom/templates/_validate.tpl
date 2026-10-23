@@ -54,6 +54,21 @@
   {{- end -}}
 {{- end -}}
 {{- /* A PDB that keeps every replica would block every node drain. */ -}}
+{{- $setup := .Values.setupSecrets -}}
+{{- if $setup.enabled -}}
+  {{- if eq (toString (default "" $setup.existingClaim)) "" -}}
+  {{- fail "setupSecrets.enabled needs setupSecrets.existingClaim: a ReadWriteMany claim every replica mounts at setupSecrets.mountPath" -}}
+  {{- end -}}
+  {{- if eq (toString (default "" $setup.mountPath)) "" -}}
+  {{- fail "setupSecrets.enabled needs setupSecrets.mountPath (where PIPEROOM_SECRETS_DIR points in the container)" -}}
+  {{- end -}}
+  {{- if eq (toString (default "on" .Values.env.PIPEROOM_WRITE_MODE)) "off" -}}
+  {{- fail "setupSecrets.enabled needs env.PIPEROOM_WRITE_MODE=on: the server refuses setup while write mode is off" -}}
+  {{- end -}}
+  {{- if ne (toString (default "" .Values.env.PIPEROOM_SETUP_ENABLED)) "" -}}
+  {{- fail "env.PIPEROOM_SETUP_ENABLED is set by setupSecrets.enabled: remove it from env" -}}
+  {{- end -}}
+{{- end -}}
 {{- $replicas := int .Values.replicaCount -}}
 {{- if and (gt $replicas 1) .Values.podDisruptionBudget.enabled (ge (int .Values.podDisruptionBudget.minAvailable) $replicas) -}}
   {{- fail (printf "podDisruptionBudget.minAvailable=%d must be below replicaCount=%d, or no node could ever be drained" (int .Values.podDisruptionBudget.minAvailable) $replicas) -}}

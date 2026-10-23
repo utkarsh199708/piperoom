@@ -40,6 +40,25 @@ type fakeSource struct {
 	freshCalls  int
 	freshTable  string
 	freshColumn string
+
+	// The Q2a source-settings reads (SourceSettingsReader). A nil field means
+	// the healthy default; err fails every read.
+	settings    []postgres.DBSetting
+	repl        []postgres.TableReplication
+	roleInfo    *postgres.RoleInfo
+	blockers    []postgres.DBSession
+	settingsErr error
+	replErr     error
+	roleErr     error
+	blockErr    error
+	// Q2a read accounting: calls, arguments, and whether the read carried a
+	// context deadline.
+	settingsCalls, replCalls, roleCalls, blockCalls int
+	tablesAsked                                     []string
+	blockTables                                     []string
+	roleAsked                                       string
+	olderThan                                       time.Duration
+	settingsDeadline                                bool
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
@@ -84,6 +103,88 @@ func (f *fakeSource) Freshness(_ context.Context, table, tsColumn string) (time.
 	f.freshCalls++
 	f.freshTable, f.freshColumn = table, tsColumn
 	return f.fresh, f.freshErr
+}
+
+// Settings reports the fixed list with wal_level logical, like a healthy dev
+// source; settings, when non-nil, replaces it.
+func (f *fakeSource) Settings(ctx context.Context) ([]postgres.DBSetting, error) {
+	f.settingsCalls++
+	f.noteDeadline(ctx)
+	if f.settingsErr != nil {
+		return nil, f.settingsErr
+	}
+	if f.settings != nil {
+		return f.settings, nil
+	}
+	return []postgres.DBSetting{
+		{Name: "wal_level", Value: "logical"},
+		{Name: "max_replication_slots", Value: "10"},
+		{Name: "max_wal_senders", Value: "10"},
+		{Name: "max_slot_wal_keep_size", Value: "-1", Unit: "MB"},
+		{Name: "wal_sender_timeout", Value: "60000", Unit: "ms"},
+	}, nil
+}
+
+// TableReplication reports every asked table with a primary key and the
+// default replica identity; repl, when non-nil, replaces that.
+func (f *fakeSource) TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error) {
+	f.replCalls++
+	f.tablesAsked = tables
+	f.noteDeadline(ctx)
+	if f.replErr != nil {
+		return nil, f.replErr
+	}
+	if f.repl != nil {
+		return f.repl, nil
+	}
+	out := make([]postgres.TableReplication, 0, len(tables))
+	for _, t := range tables {
+		out = append(out, postgres.TableReplication{Table: t, HasPrimaryKey: true, ReplicaIdentity: "default"})
+	}
+	return out, nil
+}
+
+// RoleInfo reports an existing, logging-in, replicating role with SELECT on
+// every table; roleInfo, when non-nil, replaces that.
+func (f *fakeSource) RoleInfo(ctx context.Context, role string, tables []string) (postgres.RoleInfo, error) {
+	f.roleCalls++
+	f.roleAsked = role
+	f.noteDeadline(ctx)
+	if f.roleErr != nil {
+		return postgres.RoleInfo{}, f.roleErr
+	}
+	if f.roleInfo != nil {
+		return *f.roleInfo, nil
+	}
+	sel := make(map[string]bool, len(tables))
+	for _, t := range tables {
+		sel[t] = true
+	}
+	return postgres.RoleInfo{Role: role, Exists: true, CanLogin: true, Replication: true, Selectable: sel}, nil
+}
+
+// Blockers reports no blockers; blockers, when non-nil, replaces that.
+func (f *fakeSource) Blockers(ctx context.Context, olderThan time.Duration) ([]postgres.DBSession, error) {
+	f.blockCalls++
+	f.olderThan = olderThan
+	f.noteDeadline(ctx)
+	if f.blockErr != nil {
+		return nil, f.blockErr
+	}
+	return f.blockers, nil
+}
+
+// BlockersOnTables is the scoped Blockers: it records the tables it was
+// limited to and returns the same scripted sessions.
+func (f *fakeSource) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error) {
+	f.blockTables = tables
+	return f.Blockers(ctx, olderThan)
+}
+
+func (f *fakeSource) noteDeadline(ctx context.Context) {
+	if _, ok := ctx.Deadline(); ok {
+		f.settingsDeadline = true
+	}
 }
 
 // fakeConnect implements clients.ConnectClient. Config looks up the connector
@@ -197,10 +298,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 14 {
-		t.Fatalf("registered %d tools, want 14", len(all))
+	if len(all) != 18 {
+		t.Fatalf("registered %d tools, want 18", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "pg_connector_scope_gap", "pg_toast_risk", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "pg_connector_scope_gap", "pg_toast_risk", "source_settings", "source_table_replication", "source_role_grants", "source_blocking_sessions", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)

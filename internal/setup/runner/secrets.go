@@ -191,7 +191,7 @@ func OpenStore(projectDir, file string) (*Store, error) {
 	if err := s.loadMaterialised(); err != nil {
 		return nil, err
 	}
-	if err := ensureGitignore(dir); err != nil {
+	if err := EnsureGitignore(dir); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -262,10 +262,16 @@ func ensureRegularOrMissing(file string) error {
 	return nil
 }
 
-// ensureGitignore appends .piperoom/ to the project's .gitignore, creating it
-// when missing. It never follows a symlinked .gitignore (the entry would be
-// written into a file outside the project) and never rewrites the file.
-func ensureGitignore(projectDir string) error {
+// EnsureGitignore appends the given entries, defaulting to .piperoom/, to the
+// project's .gitignore, creating it when missing. It never follows a symlinked
+// .gitignore (the entry would be written into a file outside the project) and
+// never rewrites existing lines. The standalone server
+// (internal/setup/standalone) creates the same directory for the registered
+// credentials, so it makes the same entry, plus one for its event log.
+func EnsureGitignore(projectDir string, entries ...string) error {
+	if len(entries) == 0 {
+		entries = []string{".piperoom/"}
+	}
 	p := filepath.Join(projectDir, ".gitignore")
 	if fi, err := os.Lstat(p); err == nil {
 		if fi.Mode()&fs.ModeSymlink != 0 || !fi.Mode().IsRegular() {
@@ -276,13 +282,20 @@ func ensureGitignore(projectDir string) error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("setup: reading .gitignore: %w", err)
 	}
+	have := map[string]bool{}
 	for _, line := range strings.Split(string(raw), "\n") {
-		switch strings.TrimSpace(line) {
-		case ".piperoom", ".piperoom/", "/.piperoom", "/.piperoom/":
-			return nil
+		have[strings.TrimSpace(line)] = true
+	}
+	var add []string
+	for _, e := range entries {
+		if !gitignoreListed(have, e) {
+			add = append(add, e)
 		}
 	}
-	entry := ".piperoom/\n"
+	if len(add) == 0 {
+		return nil
+	}
+	entry := strings.Join(add, "\n") + "\n"
 	if len(raw) > 0 && !bytes.HasSuffix(raw, []byte("\n")) {
 		entry = "\n" + entry
 	}
@@ -298,6 +311,21 @@ func ensureGitignore(projectDir string) error {
 		return fmt.Errorf("setup: writing .gitignore: %w", err)
 	}
 	return nil
+}
+
+// gitignoreListed reports whether .gitignore already names entry in an
+// equivalent spelling. A directory entry (trailing slash) is also covered by
+// its slash-less and root-anchored forms; a file entry only by the forms that
+// match a file.
+func gitignoreListed(have map[string]bool, entry string) bool {
+	base := strings.TrimSuffix(entry, "/")
+	if have[base] || have["/"+base] {
+		return true
+	}
+	if strings.HasSuffix(entry, "/") {
+		return have[base+"/"] || have["/"+base+"/"]
+	}
+	return false
 }
 
 // load parses the store file. It refuses a duplicate name (an ambiguous store

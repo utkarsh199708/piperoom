@@ -448,6 +448,10 @@ type Service struct {
 	// runnerExec dispatches OpRequests to the attached runner and reconciles
 	// its results and Resume frames (runner_exec.go; U1-5a).
 	runnerExec *RunnerExecutor
+	// credMu guards credPending: at most one RegisterCredentials request per
+	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
+	credMu      sync.Mutex
+	credPending map[string]pendingCredentials
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -557,6 +561,7 @@ func New(d Deps) *Service {
 		Result:  s.applyRunnerResult,
 		Unknown: s.applyRunnerUnknown,
 	}, log)
+	s.credPending = map[string]pendingCredentials{}
 	return s
 }
 

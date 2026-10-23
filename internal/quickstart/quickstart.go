@@ -320,11 +320,11 @@ type usersEntry struct {
 	Layers []string `yaml:"layers,flow"`
 }
 
-// writeUsers writes a one-user users.yaml for id, owning layers, into a new
-// private directory under tmpRoot ("" is the OS temp directory). The returned
-// cleanup removes the directory; it is safe to call more than once.
-func writeUsers(tmpRoot, id string, layers []string, log *slog.Logger) (string, func(), error) {
-	data, err := yaml.Marshal(usersDoc{Users: []usersEntry{{ID: id, Name: id, Layers: layers}}})
+// writeUsers writes a users.yaml for the given entries into a new private
+// directory under tmpRoot ("" is the OS temp directory). The returned cleanup
+// removes the directory; it is safe to call more than once.
+func writeUsers(tmpRoot string, entries []usersEntry, log *slog.Logger) (string, func(), error) {
+	data, err := yaml.Marshal(usersDoc{Users: entries})
 	if err != nil {
 		return "", nil, fmt.Errorf("server: --quickstart: encode users file: %w", err)
 	}
@@ -350,11 +350,14 @@ func writeUsers(tmpRoot, id string, layers []string, log *slog.Logger) (string, 
 // run when the server stops.
 //
 //   - USERS_FILE set: that file, as in a normal start.
-//   - Otherwise, an owners file that names one user (what `discover
-//     -write-owners` writes, for the OS user by default): a temp users.yaml
-//     where that user owns every layer of the owners file.
-//   - Otherwise (several owners, or groups): the default users file, with an
-//     error that says to set USERS_FILE when it does not load.
+//   - Otherwise, an owners file whose principals are all users (what
+//     `discover -write-owners` and the setup room's registration write): a
+//     temp users.yaml naming each of them with the layers the owners file
+//     assigns them. The sole-owner file is the one-user case of the same
+//     rule.
+//   - Otherwise (a group principal, whose members the server cannot know at
+//     start-up): the default users file, with an error that says to set
+//     USERS_FILE when it does not load.
 func usersFor(cfg config.Config, own *owners.Owners, tmpRoot string, log *slog.Logger) (*room.Users, func(), error) {
 	noop := func() {}
 	if cfg.UsersFile != defaultUsersFile {
@@ -365,28 +368,57 @@ func usersFor(cfg config.Config, own *owners.Owners, tmpRoot string, log *slog.L
 		log.Info("server: --quickstart uses USERS_FILE", "path", cfg.UsersFile)
 		return users, noop, nil
 	}
-	id, ok := SoleUser(own)
+	entries, ok := userEntries(own)
 	if !ok {
 		users, err := room.LoadUsers(cfg.UsersFile)
 		if err != nil {
-			return nil, noop, fmt.Errorf("server: --quickstart writes a users file only when the owners file names one user, and %s names %s; set USERS_FILE to a users file that lists them: %w",
+			return nil, noop, fmt.Errorf("server: --quickstart writes a users file only when the owners file names users alone, and %s names %s; set USERS_FILE to a users file that lists them: %w",
 				cfg.OwnersFile, principalList(own), err)
 		}
-		log.Info("server: --quickstart: the owners file names several principals, using the default users file", "path", cfg.UsersFile)
+		log.Info("server: --quickstart: the owners file names a group, using the default users file", "path", cfg.UsersFile)
 		return users, noop, nil
 	}
-	layers := ownedLayers(own)
-	path, cleanup, err := writeUsers(tmpRoot, id, layers, log)
+	path, cleanup, err := writeUsers(tmpRoot, entries, log)
 	if err != nil {
 		return nil, noop, err
 	}
 	users, err := room.LoadUsers(path)
 	if err != nil {
 		cleanup()
-		return nil, noop, fmt.Errorf("server: --quickstart: users file for %q, the owner named by %s: %w", id, cfg.OwnersFile, err)
+		return nil, noop, fmt.Errorf("server: --quickstart: users file for the owners named by %s: %w", cfg.OwnersFile, err)
 	}
-	log.Info("server: --quickstart wrote a one-user users file", "path", path, "user", id, "layers", layers)
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.ID
+	}
+	log.Info("server: --quickstart wrote a users file for the owners file's users", "path", path, "users", ids)
 	return users, cleanup, nil
+}
+
+// userEntries builds the users.yaml entries for an owners file whose
+// principals are all users: each user, with the top-level layers the owners
+// file assigns them (the exact set room.ValidateUsers requires in both
+// directions). It reports false when the file names no one or names a group.
+func userEntries(own *owners.Owners) ([]usersEntry, bool) {
+	ps := own.NamedPrincipals()
+	if len(ps) == 0 {
+		return nil, false
+	}
+	layers := ownedLayers(own)
+	entries := make([]usersEntry, len(ps))
+	for i, p := range ps {
+		if p.Kind != owners.KindUser {
+			return nil, false
+		}
+		mine := []string{}
+		for _, layer := range layers {
+			if own.Layers[layer].Contains(p) {
+				mine = append(mine, layer)
+			}
+		}
+		entries[i] = usersEntry{ID: p.Name, Name: p.Name, Layers: mine}
+	}
+	return entries, true
 }
 
 // principalList names the owners file's principals for an error message.

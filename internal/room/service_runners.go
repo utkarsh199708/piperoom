@@ -63,6 +63,9 @@ func (s *Service) AttachRunner(ctx context.Context, code string, rn Runner) erro
 		return err
 	}
 	s.runnerExec.DropRoom(rn.RoomID)
+	// A new attachment replaces the runner the request was sent to; its answer
+	// can never arrive, so the room may ask again (setup_secrets.go).
+	s.forgetCredentialRequests(rn.RoomID)
 	return nil
 }
 
@@ -94,6 +97,13 @@ func (s *Service) RunnerLookup(tenant, roomID, creatorID string) (*Runner, bool)
 // that expires.
 func (s *Service) RunnerLost(ctx context.Context, tenant, roomID, creatorID, token string) {
 	s.runners.Lost(ctx, tenant, roomID, creatorID, token)
+	// The runner that owed the answer is gone: the pending request is
+	// forgotten (protocol.RegisterCredentials), so a driver can ask again once
+	// a runner is back. A superseded socket's loss changes nothing: when a
+	// reconnected socket is attached, the request stays pending for it.
+	if !s.runners.ConnectedForRoom(roomID) {
+		s.forgetCredentialRequests(roomID)
+	}
 }
 
 // RunnerTouch updates the runner's last-seen time after a frame arrives.
@@ -115,6 +125,13 @@ func (s *Service) RunnerRefused(ctx context.Context, tenant, roomID, creatorID, 
 	}
 	if !s.runners.Refuse(ctx, tenant, roomID, creatorID, token, payload) {
 		return
+	}
+	// A terminal refusal of a RegisterCredentials releases the room's pending
+	// request (matched by id), per the protocol contract: the server forgets
+	// it when answered, refused, or the runner is lost. The driver may then
+	// ask again.
+	if ref.Op == setupOpRegisterCredentials {
+		s.dropCredentialRequest(roomID, ref.ID)
 	}
 	s.runnerExec.DeliverRefusal(roomID, ref)
 }
