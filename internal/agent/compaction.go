@@ -70,16 +70,6 @@ const (
 	compactMaxDriver        = 20
 )
 
-// claudeProvider reports a provider served by the Claude adapter, which
-// compacts on the server.
-func claudeProvider(p string) bool {
-	switch p {
-	case llm.ProviderAnthropic, llm.ProviderBedrock, llm.ProviderVertex:
-		return true
-	}
-	return false
-}
-
 // compactionNote opens the compacted message. It is the agent's own text.
 const compactionNote = "[compacted history] The oldest part of this investigation was compacted to fit the model's context window. " +
 	"The block below holds a summary of that part, the step ids it ran with a short excerpt of each, the latest hypothesis and the proposals it made. " +
@@ -130,7 +120,7 @@ type compactedStep struct{ id, tool, excerpt string }
 func (r *runner) initCompaction() {
 	caps := r.model.Capabilities(r.opts.Model)
 	r.compact = compactor{}
-	if caps.Compaction || claudeProvider(r.model.Provider()) {
+	if caps.Compaction || isClaudeProvider(r.model.Provider()) {
 		return
 	}
 	r.compact.on = true
