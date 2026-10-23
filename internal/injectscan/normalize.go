@@ -64,7 +64,7 @@ func prealloc(n int) int {
 func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, hadCf bool) {
 	var b strings.Builder
 	b.Grow(len(s))
-	origin = make([]int, 0, prealloc(len(s))+1)
+	origin = make([]int, 0, prealloc(len(s)))
 	inSpace, newlines := false, 0
 	for i, r := range s {
 		m, keep := mapRune(r)

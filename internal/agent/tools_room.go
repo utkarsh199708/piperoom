@@ -179,13 +179,9 @@ func (t *updateHypothesisTool) unbacked(in hypothesisInput) []string {
 	// with (the model named the connector or topic there), and the alert text and
 	// pipeline map it was handed up front. Naming a component from those is not
 	// inventing it; the note must not push the model to drop it.
-	// The model chooses how many steps to cite: bound the capacity hint (append
-	// still grows past it) so the size arithmetic cannot overflow.
-	hint := len(in.BasedOnSteps)
-	if hint > 64 {
-		hint = 64
-	}
-	backing := make([]string, 0, 2*hint+1)
+	// The capacity is a hint only (append grows past it); no arithmetic on the
+	// model-chosen length, so the allocation size cannot overflow.
+	backing := make([]string, 0, len(in.BasedOnSteps))
 	for _, id := range in.BasedOnSteps {
 		if f, ok := t.steps.get(id); ok {
 			backing = append(backing, f.summary, f.input)

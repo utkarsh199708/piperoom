@@ -321,7 +321,11 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	}
 	// One byte more than the tail lets tailFrom see whether the window
 	// starts at a line.
-	tb := &tailBuffer{buf: make([]byte, maxBytes+1)}
+	size := MaxResponseBytes + 1
+	if maxBytes < MaxResponseBytes {
+		size = maxBytes + 1
+	}
+	tb := &tailBuffer{buf: make([]byte, size)}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
 		if _, err := io.Copy(tb, io.LimitReader(r, c.ceiling())); err != nil {
 			return fmt.Errorf("read log: %w", err)
