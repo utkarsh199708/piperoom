@@ -11,6 +11,9 @@ import "testing"
 var q2gTermCases = map[string][]termCase{
 	"blocked-slot": {
 		{id: "good-pid", want: true, text: "pid 48213 has an open transaction, so CREATE_REPLICATION_SLOT for debezium_orders waits on it; end that session with source_end_session."},
+		{id: "good-idle-session", want: true, text: "The analyst's idle session is blocking slot creation; terminate it with pg_terminate_backend."},
+		{id: "review-restart-okay", want: false, text: "An open transaction blocks the slot creation; restarting the consumer is okay too."},
+		{id: "review-restart-correct", want: false, text: "An open transaction blocks creating the slot; restarting the consumer is correct."},
 		{id: "wrong-query", text: "A long-running query on order-sync blocks the slot and the warehouse; restart the consumer."},
 		{id: "wrong-slots-full", text: "The connector's session could not create the replication slot because max_replication_slots is exhausted; raise it."},
 		{id: "forbidden-order-sync-holds", text: "order-sync holds an open transaction that keeps the slot from being created."},
@@ -24,6 +27,14 @@ var q2gTermCases = map[string][]termCase{
 	},
 	"idle-wal-growth": {
 		{id: "good-no-writes", want: true, text: "There are no writes on public.orders while the batch database writes, so the active slot debezium_orders confirms nothing and holds 34.6 MiB of WAL. Add a heartbeat table."},
+		{id: "good-per-database", want: true, text: "Logical decoding is per database: the batch writes in devctl_batch, orders has no changes, so Debezium never confirms and the slot retains WAL."},
+		{id: "review-drop-fine", want: false, text: "public.orders has no writes, so the slot debezium_orders retains WAL; dropping the slot is fine."},
+		{id: "review-dead-okay", want: false, text: "public.orders has no writes, so the slot debezium_orders retains WAL. The dead slot is okay to drop."},
+		{id: "review-dead-fine-to", want: false, text: "public.orders has no writes, so the slot debezium_orders retains WAL. The dead slot is fine to drop."},
+		{id: "review-restart-fine", want: false, text: "public.orders has no writes, so the slot debezium_orders retains WAL; restarting the connector is fine."},
+		{id: "review-restart-correct", want: false, text: "public.orders has no writes, so the slot debezium_orders retains WAL. Restarting the connector is correct."},
+		{id: "review-theory-reach", want: false, text: "The slot debezium_orders holds WAL and the heartbeat is slow, the other theory is wrong."},
+		{id: "review-theory-runon", want: false, text: "The slot debezium_orders holds WAL and the heartbeat is lagging the theory is wrong."},
 		{id: "good-registry", want: true, text: "public.orders stays idle, so Debezium's heartbeat never confirms and the slot debezium_orders retains WAL; max_slot_wal_keep_size is unlimited. Retention is fine."},
 		// "Nothing" is not a negator for forbidden rows: making it one sends
 		// dozens of pinned corpus texts ("compatibility NONE") to the judge.
@@ -48,6 +59,8 @@ var q2gTermCases = map[string][]termCase{
 	},
 	"register-rejected-missing-plugin": {
 		{id: "good-not-installed", want: true, text: "The Debezium Postgres connector plugin isn't installed on the Connect workers any more: the redeploy's plugin.path no longer contains it. Restore the plugin jars and restart the workers."},
+		{id: "good-config-rejected", want: true, text: "The new image dropped the Debezium connector plugin from plugin.path, so Connect rejects the config: the plugin is missing."},
+		{id: "review-theory-comma", want: false, text: "The connector plugin config is missing topic.prefix, the plugin path theory is wrong."},
 		{id: "good-prefix-fine", want: true, text: "The Debezium plugin is missing from plugin.path on the workers; the config, including topic.prefix, is fine."},
 		{id: "wrong-paste", text: "org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name='org.apache.kafka.connect.mirror.MirrorCheckpointConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}"},
 		{id: "wrong-hostname", text: "The Postgres connector plugin's config is missing database.hostname after the redeploy; add it back."},
@@ -64,6 +77,9 @@ var q2gTermCases = map[string][]termCase{
 	},
 	"missing-grant": {
 		{id: "good-lacks", want: true, text: "The connector's database.user devctl_cdc lacks SELECT on public.orders, so the snapshot fails with permission denied. The Schema Registry is untouched."},
+		{id: "good-least-privilege-user", want: true, text: "The new least-privilege user lacks SELECT on public.orders; grant it and restart task 0."},
+		{id: "good-read-access", want: true, text: "devctl_cdc cannot read public.orders: permission denied for table orders. Grant it read access and restart the task."},
+		{id: "review-correct", want: false, text: "The diagnosis that devctl_cdc lacks replication is correct; grant SELECT on public.orders."},
 		{id: "good-theory", want: true, text: "devctl_cdc lacks SELECT on public.orders; the network partition theory is wrong."},
 		{id: "wrong-rotated", text: "The replication slot is inactive because the connector role password was rotated and the grant expired; revert database.user to piperoom."},
 		{id: "wrong-replication", text: "devctl_cdc lacks the REPLICATION privilege, so the snapshot fails; grant it."},
@@ -82,6 +98,8 @@ var q2gTermCases = map[string][]termCase{
 	},
 	"no-replica-identity": {
 		{id: "good-nothing", want: true, text: "A migration set the replica identity of public.orders to NOTHING, so Postgres rejects updates and deletes while the publication publishes them; set it to FULL."},
+		{id: "good-app-updates", want: true, text: "Updates in the app fail because a migration set REPLICA IDENTITY NOTHING on public.orders."},
+		{id: "review-pk-correct", want: false, text: "The suspicion of no primary key is correct: a migration set REPLICA IDENTITY NOTHING on public.orders."},
 		{id: "good-none", want: true, text: "The replica identity of public.orders was set to none by the migration; set it to FULL."},
 		{id: "good-changed", want: true, text: "The migration changed the replica identity of public.orders, so updates fail; set it to FULL."},
 		{id: "wrong-no-pk", text: "public.orders has no primary key, so its default replica identity has no key. Add a primary key."},
@@ -97,6 +115,8 @@ var q2gTermCases = map[string][]termCase{
 	},
 	"register-rejected-renamed-key": {
 		{id: "good-new-key", want: true, text: "The connector config lacks topic.prefix, which Debezium 2.0 made required; add topic.prefix=pg and restart."},
+		{id: "good-needs-instead", want: true, text: "The connector config still uses database.server.name from 1.x; Debezium 3.2 needs topic.prefix instead. Set topic.prefix=pg."},
+		{id: "review-theory-comma", want: false, text: "A schema change broke the connector, the plugin theory is wrong; topic.prefix is required after the rename."},
 		{id: "good-plugin-fine", want: true, text: "database.server.name was renamed to topic.prefix in Debezium 2.0, so the upgraded Debezium Postgres connector rejects the 1.x config. The connector plugin itself loaded fine."},
 		{id: "good-registry", want: true, text: "database.server.name was renamed to topic.prefix in Debezium 2.0, so task 0 fails to configure. Schema Registry is healthy."},
 		{id: "wrong-vague", text: "Debezium was upgraded and a setting was renamed."},

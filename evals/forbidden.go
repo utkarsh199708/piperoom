@@ -34,14 +34,19 @@ package evals
 // so anything the pre-#17 rule skipped because of a negator in scope is still
 // skipped; only negators that do not reach the term stopped counting.
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
 		"instead of", "rather than", "neither", "nor"}
 	// forbiddenExonerators say that the thing named before their copula is in order.
-	forbiddenExonerators = []string{"healthy", "fine", "ok", "okay", "untouched", "unaffected", "unchanged", "intact",
-		"unrelated", "correct", "working normally", "running normally"}
+	// No "ok" or "correct": "restarting the connector is ok" and "the
+	// diagnosis that X is correct" endorse X.
+	forbiddenExonerators = []string{"healthy", "fine", "untouched", "unaffected", "unchanged", "intact",
+		"unrelated", "working normally", "running normally"}
 	// exonerationCopulas link a subject to an exonerator: the auxiliaries
 	// plus verbs of state.
 	exonerationCopulas = []string{"look", "looks", "looked", "seem", "seems", "seemed", "stay", "stays",
@@ -157,7 +162,9 @@ func exonerationAt(toks []string, i int) (denialSpan, bool) {
 	if l == 0 {
 		return denialSpan{}, false
 	}
-	if k := j + l; k < len(toks) && (toks[k] == "if" || toks[k] == "except" || toks[k] == "until") {
+	// "fine if", "fine except", "fine until" are partial verdicts; "fine to
+	// drop" endorses an action.
+	if k := j + l; k < len(toks) && (toks[k] == "if" || toks[k] == "except" || toks[k] == "until" || toks[k] == "to") {
 		return denialSpan{}, false
 	}
 	return denialSpan{start: i, end: j + l, exonerate: true}, true
@@ -167,16 +174,22 @@ func isCopula(t string) bool {
 	return auxVerbs[t] || phraseAt([]string{t}, 0, exonerationCopulas) > 0
 }
 
-// exonerationReaches reports whether the exoneration d clears the term that
-// ends at e: a theory clears the words before it up to a contrast, a clause
-// marker or "and"; a copula only a term right before it, or one filler away.
-func exonerationReaches(toks []string, d denialSpan, e int) bool {
+// exonerationReaches reports whether the exoneration d clears the term
+// toks[s:e]. A theory clears the nouns that name it ("the network partition
+// theory"): at most two words between, none of them a determiner, verb or
+// conjunction. A copula clears a term right before it, or one filler away,
+// unless the term is the object of an action ("dropping the slot is fine",
+// "restart the connector, it is fine"): then the verdict endorses the action.
+func exonerationReaches(toks []string, d denialSpan, s, e int) bool {
 	if d.start < e {
 		return false
 	}
 	if d.theory {
+		if d.start-e > 2 {
+			return false
+		}
 		for i := e; i < d.start; i++ {
-			if toks[i] == "and" || toks[i] == "or" || forbiddenContrast[toks[i]] || predicateMarkers[toks[i]] {
+			if !theoryModifier(toks[i]) {
 				return false
 			}
 		}
@@ -184,9 +197,44 @@ func exonerationReaches(toks []string, d denialSpan, e int) bool {
 	}
 	switch d.start - e {
 	case 0:
-		return true
 	case 1:
-		return exonerationFillers[toks[e]]
+		if !exonerationFillers[toks[e]] {
+			return false
+		}
+	default:
+		return false
+	}
+	return !actionSubject(toks, s, e)
+}
+
+// nonGerunds end in "ing" and name no action.
+var nonGerunds = map[string]bool{"nothing": true, "something": true, "everything": true, "anything": true,
+	"including": true, "existing": true, "remaining": true, "during": true, "string": true, "thing": true}
+
+// theoryModifier reports whether t may stand between a term and the theory
+// noun it names: a plain word, not a determiner, auxiliary, conjunction,
+// negator or verb form ("-ing", "-ed").
+func theoryModifier(t string) bool {
+	switch t {
+	case "the", "a", "an", "this", "that", "and", "or", "but", "so", "because":
+		return false
+	}
+	return !auxVerbs[t] && !strings.HasSuffix(t, "ing") && !strings.HasSuffix(t, "ed") &&
+		phraseAt([]string{t}, 0, forbiddenNegators) == 0
+}
+
+// actionSubject reports whether the term toks[s:e] is or names an action: a
+// gerund in it or in the three words before it ("dropping the slot"), or a
+// "to" before it ("to restart the connector").
+func actionSubject(toks []string, s, e int) bool {
+	for i := max(0, s-3); i < e; i++ {
+		t := toks[i]
+		if strings.HasSuffix(t, "ing") && !nonGerunds[t] {
+			return true
+		}
+		if t == "to" {
+			return true
+		}
 	}
 	return false
 }
@@ -195,7 +243,7 @@ func exonerationReaches(toks []string, d denialSpan, e int) bool {
 func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 	for _, d := range spans {
 		if d.exonerate {
-			if exonerationReaches(toks, d, e) {
+			if exonerationReaches(toks, d, s, e) {
 				return true
 			}
 			continue

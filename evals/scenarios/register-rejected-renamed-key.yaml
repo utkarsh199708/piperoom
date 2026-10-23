@@ -442,7 +442,7 @@ expect:
   root_cause:
     # Either key names the fix: the old one, or the new one Debezium 2.0 requires.
     - [database server name, topic prefix]
-    - [rename*, replaced, removed, require*]
+    - [rename*, replaced, removed, require*, instead]
   # The wrong stories of a connector that will not start. The Debezium
   # connector is itself a plugin, so the plugin row names a missing plugin.
   root_cause_forbidden:

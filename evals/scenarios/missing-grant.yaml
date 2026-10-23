@@ -458,8 +458,9 @@ expect:
   root_cause:
     # Not a bare "role", and the privilege is SELECT: "lacks REPLICATION" and
     # "the role's grant expired" are wrong stories.
-    - [devctl cdc, database user, connector role, connector s role, least privilege role]
-    - [select, selectable]
+    - [devctl cdc, database user, connector role, connector s role, connector user, least privilege role,
+       least privilege user]
+    - [select, selectable, read access, cannot read, permission denied for table]
   # The wrong stories of a failed task: only the grant is missing. The role
   # move is deliberate (the steer forbids reverting it) and the role has
   # REPLICATION.

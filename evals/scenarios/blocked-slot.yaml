@@ -452,7 +452,7 @@ expect:
   root_cause:
     # The blocker is an open transaction; a bare "session" or "query" names
     # any slot story ("the connector's session could not create the slot").
-    - [transaction, blocker, blocking session, xid, open transaction, idle in transaction, '48213']
+    - [transaction, blocker, blocking session, idle session, xid, open transaction, idle in transaction, '48213']
     - [slot, replication slot]
     - [wait*, block*, hold*, creat*]
   # The wrong stories of a stale warehouse with a RUNNING connector, and the
