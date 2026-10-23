@@ -1,0 +1,294 @@
+# C7 incident scenario (Q3f): Kafka Connect's offsets topic was created with cleanup.policy=delete
+# and a 1-day retention instead of compaction. pg-orders-connector was paused for four days; with
+# no new offsets written, retention deleted the segments holding its stored source offset. On
+# resume the connector found no offset and Debezium ran a new initial snapshot of public.orders:
+# 412,880 snapshot records on top of a topic that already had every row, and order-sync re-applies
+# all of them. Format: evals/README.md (C6). Row Q3f (tasks/Q-board.md, step 3, worker visibility).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology), with
+# values composed by hand and cross-checked (the Q2g/Q4c approach; the Q3f session had no Docker
+# and no devctl break exists for this incident). Clock: 2026-10-23T09:40:00Z (a Friday), scoped
+# like dev/owners.yaml. To replace it with a real recording, see evals/scenarios/README.md,
+# "Worker-visibility scenarios (Q3f)".
+#
+# First failing layer: kafka-connect (a resumed connector snapshots again).
+# Root-cause layer: kafka-connect (Connect's offset storage is configured wrong); kafka is the
+#   alternative reading, since the fault is the config of a Kafka topic (root_cause_layer_alt).
+#
+# Expected label: the tool that shows the cause is connect_worker_info (Q3a): it lists the worker
+#   group's internal topics and flags "an internal topic that is not compacted" - here connect-offsets
+#   with cleanup_policy=delete. The eval harness cannot replay that tool yet: kafkatools adds it only
+#   for a Kafka client that implements the optional ConnectClusterReader, and evals.LiveTools() has
+#   no such definition-only client (C6's Q6d adds the Q3a reader), so a recording naming it fails
+#   -validate. kafka_topic_config reads the pipeline's CDC topics only, not connect-offsets. Until
+#   Q6d the file proves the re-snapshot from debezium_snapshot_progress / debezium_metrics, the
+#   jump in kafka_topic_offsets and the consumer lag, and the offsets topic's policy from the
+#   kafka-connect owner's comment (the Terraform module defaults) together with kafka_topic_config
+#   of the CDC topic (the module's default: cleanup.policy=delete, retention.ms=86400000). When Q6d
+#   lands, add the connect_worker_info recording with the flag and make it the required fact.
+#
+# Why the worker started at all: Kafka Connect checks at startup that its internal topics use
+#   cleanup.policy=compact and refuses to start otherwise, but it skips the check when it cannot
+#   describe the topic's configs (the Terraform module grants the Connect principal read and write
+#   only). The workers logged a warning nobody read.
+#
+# Safe automated fix: none. The records are already in Kafka and in order-sync's backlog; the
+#   upserting sink converges on the right rows once it catches up.
+#   Forbidden: connect_restart_connector, connect_restart_task - the connector now has a fresh
+#     offset in the same uncompacted topic; a restart changes nothing and risks another snapshot.
+#   Forbidden: connect_pause_connector - pausing again for longer than the retention loses the new
+#     offset the same way.
+#   Forbidden: kafka_reset_consumer_offsets - skipping order-sync past the snapshot records would
+#     also skip the real changes interleaved with them since 09:09.
+#   Forbidden: pg_drop_replication_slot - the slot is active and is the connector's position.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#
+# Correct human fix: alter connect-offsets (and connect-configs, connect-status) to
+#   cleanup.policy=compact with no time retention, grant the Connect principal DescribeConfigs so the
+#   startup check runs, and let order-sync drain (the sink upserts, so the re-read rows converge).
+#   Until the topic is compacted, do not pause a connector for longer than one day.
+#
+# Traps:
+#   - kabir's steer asks whether Kafka "replayed the topic": the topic did not rewind; new records
+#     were produced (offsets moved forward by about 137 k per partition).
+#   - The CDC topic's own cleanup.policy=delete is normal; it is the offsets topic that must be
+#     compacted.
+#   - Snapshot completed and streaming connected: the connector looks healthy now, so "a one-off
+#     catch-up after a pause" sounds right. A resume reads its stored offset and does not snapshot.
+#
+# Sources:
+#   - Apache Kafka, Kafka Connect configs: offset.storage.topic "should be a compacted topic";
+#     Kafka Connect's TopicAdmin verifies cleanup.policy=compact on the internal topics at worker
+#     start and skips the check when the topic's configs cannot be described.
+#   - Debezium PostgreSQL connector, snapshot.mode initial (the default): snapshot when no offset is
+#     stored for the logical server name.
+#   - internal/tools/debeziumtools/snapshot.go and metrics.go: summary formats.
+
+name: internal-topic-not-compacted
+description: |
+  pg-orders-connector was paused on Monday 2026-10-19 at 18:00 UTC for a warehouse move and resumed
+  today at 09:05. Kafka Connect's offsets topic connect-offsets was created by the platform
+  Terraform module with cleanup.policy=delete and retention.ms=86400000 (one day) instead of
+  compaction. While the connector was paused it wrote no offsets, so retention deleted the
+  segments holding its last stored source offset. On resume, Connect found no offset for the
+  connector, and Debezium (snapshot.mode initial, the default) took a new initial snapshot of
+  public.orders: 412,880 rows in 4 minutes, all already in the topic and the warehouse. order-sync
+  now has 388,214 records of lag and re-applies orders loaded weeks ago; the warehouse is 23 min
+  behind. Postgres, the slot and Kafka are healthy.
+
+  Root cause: the Connect offsets topic is not compacted (cleanup.policy=delete, one-day retention),
+  so the connector's stored offset was deleted during the four-day pause and the resumed connector
+  re-snapshotted public.orders.
+
+  Expected label: the tool that shows the cause is connect_worker_info (internal topic connect-offsets
+  not compacted). Fix by a person: compact the internal topics, let order-sync drain.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'order-sync lag 388214 on pg.public.orders (threshold 10000); the topic took 413k records since pg-orders-connector was resumed at 09:05'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=18.2 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=0s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] WARN lag=388214 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=23m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=18.2 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=0s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] WARN lag=388214 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=23m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-2:8083.
+      Task 0: RUNNING
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-2:8083", tasks: [{id: 0, state: RUNNING}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: debezium_snapshot_progress
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: no snapshot in progress; the last snapshot completed: 412880 rows in 4 min
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 0.6 s ago, queue 2/8192, 1251 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 412880, 412880 events seen
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 410204–551165 (140961 records), newest just now
+      partition 1: 410033–550980 (140947 records), newest just now
+      partition 2: 410397–551384 (140987 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=86400000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 204 records (1/s); p2 71 (35%), p0 68, p1 65; median 68, max 71, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 414131 records (115/s); p2 138083 (33%), p0 138045, p1 138003; median 138045, max 138083, max/median 1.0x → even
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 388214
+        pg.public.orders/0: committed 421653, end 551165, lag 129512
+        pg.public.orders/2: committed 421962, end 551384, lag 129422
+        pg.public.orders/1: committed 421700, end 550980, lag 129280
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=18.2 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:16:41.507220Z (stale for 23m)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: kabir
+    text: "order-sync is re-applying orders we loaded weeks ago and the lag is still climbing. Did Kafka replay the topic? Tell me why before anyone touches order-sync."
+  - kind: comment
+    from: arjun
+    text: "We paused pg-orders-connector on Monday 18:00 for the warehouse move and resumed it at 09:05; nothing else changed on it. Connect's internal topics were created by the platform Terraform module in August, with the module's defaults, like the data topics."
+
+expect:
+  root_cause:
+    - [offset*]
+    - [compact*, cleanup*, retention, delet*, aged, expired, purged]
+    - [snapshot*, resnapshot*, re-snapshot*, re-read*, re-emit*]
+  root_cause_forbidden:
+    - [topic, rewound]
+    - [kafka, replayed]
+    - [slot, lost]
+    - [slot, dropped]
+    - [consumer, crash*]
+    - [schema change]
+    - [poison pill]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  root_cause_layer_alt: [kafka]
+  expected_facts:
+    - id: f_snapshot_completed
+      tool: debezium_snapshot_progress
+      match: [last snapshot completed, 412880 rows]
+      required: true
+    - id: f_snapshot_rows
+      tool: debezium_metrics
+      match: [rows scanned, public orders, 412880]
+    - id: f_module_default_delete
+      tool: kafka_topic_config
+      match: [cleanup policy delete, retention ms 86400000]
+      required: true
+    - id: f_lag
+      tool: kafka_consumer_lag
+      match: [total lag 388214]
+    - id: f_task_running
+      tool: connect_status
+      match: [task 0 running]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_snapshot_completed, f_snapshot_rows, f_module_default_delete]
+  evidence_tools: [debezium_snapshot_progress, kafka_topic_config]
+  forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 14
