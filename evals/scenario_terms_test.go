@@ -1,6 +1,12 @@
 package evals
 
-import "testing"
+import (
+	"encoding/json"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+)
 
 // termCase is one hypothesis read against a scenario's root-cause terms.
 type termCase struct {
@@ -287,5 +293,64 @@ func TestW4aRelaxedFacts(t *testing.T) {
 		if rootCauseMatches(e, h.wrong) {
 			t.Errorf("%s: the wrong hypothesis matches", name)
 		}
+	}
+}
+
+// TestBlockedSlotRecordingPrintsStartedAt pins W4e-2 (KAN-503): the blocked-slot
+// source_blocking_sessions recording prints started_at (RFC3339Nano UTC, after
+// blocks_slot=) as source_blocking_sessions now does, and that exact string is
+// the start time source_end_session accepts and the recorded data carries (the
+// action refuses a pid whose start differs).
+func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc *Scenario
+	for i := range scs {
+		if scs[i].Name == "blocked-slot" {
+			sc = &scs[i]
+		}
+	}
+	if sc == nil {
+		t.Fatal("scenario blocked-slot not found")
+	}
+	var rec *Recording
+	for i := range sc.Recordings {
+		if sc.Recordings[i].Tool == "source_blocking_sessions" {
+			rec = &sc.Recordings[i]
+		}
+	}
+	if rec == nil {
+		t.Fatal("blocked-slot has no source_blocking_sessions recording")
+	}
+	m := regexp.MustCompile(`^pid=48213 state=active age=25m blocks_slot=yes started_at=(\S+) \(outside the pipeline's tables; identity hidden\)$`).FindStringSubmatch(rec.Summary)
+	if m == nil {
+		t.Fatalf("summary does not match the W4e format: %q", rec.Summary)
+	}
+	started, err := time.Parse(time.RFC3339Nano, m[1])
+	if err != nil {
+		t.Fatalf("started_at %q is not RFC3339: %v", m[1], err)
+	}
+	if want := time.Date(2026, 10, 23, 9, 14, 12, 0, time.UTC); !started.Equal(want) || !strings.HasSuffix(m[1], "Z") {
+		t.Errorf("started_at = %q, want %s in UTC", m[1], want.Format(time.RFC3339Nano))
+	}
+	rows, ok := rec.Data.([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("recorded data = %#v, want one row", rec.Data)
+	}
+	row, _ := rows[0].(map[string]any)
+	if got, _ := row["started_at"].(string); got != m[1] {
+		t.Errorf("data started_at = %q, summary started_at = %q", got, m[1])
+	}
+	if age := time.Date(2026, 10, 23, 9, 40, 0, 0, time.UTC).Sub(started); age < 25*time.Minute || age >= 26*time.Minute {
+		t.Errorf("age at the scenario clock = %s, want 25m", age)
+	}
+	// source_end_session decodes started_at into a time.Time.
+	var p struct {
+		StartedAt time.Time `json:"started_at"`
+	}
+	if err := json.Unmarshal([]byte(`{"started_at":"`+m[1]+`"}`), &p); err != nil || !p.StartedAt.Equal(started) {
+		t.Errorf("started_at does not decode as an end-session param: %v", err)
 	}
 }

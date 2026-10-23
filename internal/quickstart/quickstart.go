@@ -28,7 +28,6 @@ import (
 
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
-	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 )
@@ -288,12 +287,12 @@ func SoleUser(own *owners.Owners) (string, bool) {
 }
 
 // ownedLayers lists the layers of the owners file's layers: block, in
-// events.Layers order and then any other name sorted, so the users file lists
+// owners.KnownLayers order (so the mysql source layer is a known one) and then any other name sorted, so the users file lists
 // exactly what the owners file assigns.
 func ownedLayers(own *owners.Owners) []string {
 	out := []string{}
 	seen := map[string]bool{}
-	for _, l := range events.Layers {
+	for _, l := range owners.KnownLayers() {
 		if _, ok := own.Layers[l]; ok {
 			out = append(out, l)
 			seen[l] = true

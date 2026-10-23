@@ -1,0 +1,158 @@
+name: Setup nightly (Windows)
+
+# U1-16 (tasks/U-board.md; plan docs/product/setup-2026-10.md section 7, item 7;
+# design docs/design/setup-agent.md section 8): the Compose integration on a
+# Windows machine running Docker Desktop in Linux-container mode. GitHub's
+# hosted Windows runners run Windows containers only, so this run happens on
+# the owner's dev machine (the R1 machine) through a self-hosted runner.
+#
+# Trigger: schedule and workflow_dispatch only. It is deliberately NOT a
+# required check: this workflow never runs on pull_request or push, so a fork
+# (or any checkout without that runner) never shows it as a pending check and
+# a merge is never blocked. Without the runner the scheduled run simply waits
+# for a runner that is not there; that is acceptable and it is why the label
+# below names one machine:
+#
+#   runs-on: [self-hosted, windows, x64, piperoom-r1]
+#
+# `piperoom-r1` is a label only the owner's runner carries. Register it with,
+# in the runner's directory:
+#   ./config.cmd --url https://github.com/<owner>/<repo> --token <token> \
+#       --name piperoom-r1 --labels piperoom-r1
+# Run it from the owner's signed-in desktop session (`./run.cmd`), not as a
+# Windows service: Docker Desktop's Linux engine is only available to the
+# interactive user that started it.
+#
+# Security: this repository is public, and a runner is picked by its labels,
+# not by workflow, so a pull request that adds a workflow with
+# `runs-on: [self-hosted, ...]` would run on this machine once its workflows
+# are allowed to run. Before registering the runner, set Settings > Actions >
+# General > "Require approval for all external contributors" (not only
+# first-time ones) and never approve a fork PR's run that changes
+# .github/workflows. Run it under a dedicated, unprivileged Windows account
+# with its own Docker Desktop, not the owner's daily account and browser
+# sessions. The job below also refuses to run outside this repository and
+# outside main, so a workflow_dispatch of an unreviewed branch never reaches
+# the runner.
+# The runner needs: Go 1.27 (or let setup-go install it), Docker Desktop
+# running Linux containers, git, and network access to repo1.maven.org (the
+# connector plugin download) and to the container registries the rendered
+# stack pulls (kafka, debezium/connect).
+#
+# The artifact is the run's export: the go test -json stream of the Compose
+# integration, one JSON event per line, kept 30 days.
+
+on:
+  schedule:
+    - cron: "41 4 * * *"   # nightly, 04:41 UTC (after ci's flaky hunt at 02:30)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time on the one machine: a run that arrives while one is
+  # going waits its turn instead of starting a second Compose project beside
+  # it, and nothing cancels a run in progress. (GitHub keeps one pending run
+  # per group, so a newer queued run replaces an older queued one; that is the
+  # intended behaviour for a nightly that a runner outage left waiting.)
+  group: setup-nightly
+  cancel-in-progress: false
+
+jobs:
+  compose-integration:
+    name: Compose integration (Windows, Docker Desktop)
+    runs-on: [self-hosted, windows, x64, piperoom-r1]
+    if: github.repository == 'utkarsh199708/piperoom' && github.ref == 'refs/heads/main'
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Docker Desktop must be running (Linux containers)
+        shell: powershell
+        run: |
+          # The whole point of this machine is the Linux-container run: a
+          # missing daemon is a failure, never a skip.
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::docker is not on PATH on the self-hosted Windows runner"
+            exit 1
+          }
+          # Windows PowerShell 5.1 runs with $ErrorActionPreference = 'Stop'
+          # here, and docker's stderr would throw before the message below.
+          $ErrorActionPreference = 'Continue'
+          $out = docker info --format '{{.ServerVersion}} {{.OSType}}' 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::docker info failed on the self-hosted Windows runner: start Docker Desktop (Linux containers)"
+            $out
+            exit 1
+          }
+          Write-Host "docker: $out"
+          if ("$out" -notmatch 'linux') {
+            Write-Host "::error::Docker Desktop is not in Linux-container mode: $out"
+            exit 1
+          }
+      - name: go test -tags integration TestComposeStackToHealthyConnect
+        shell: powershell
+        run: |
+          # -json is the export: one JSON event per line, uploaded below. The
+          # test renders its own Compose project on free ports, installs the
+          # pinned connector plugin and removes the project again, so no dev
+          # stack and no stack lock are involved. Only the integration test
+          # runs: the setup unit tests run in setup-matrix.yml, which skips the
+          # three that cannot pass on Windows, and a symlink-privilege skip of
+          # a unit test would fail this job for the wrong reason.
+          go test -count=1 -timeout 45m -json -tags integration -run '^TestComposeStackToHealthyConnect$' ./internal/setup/targets/compose/ |
+            Out-File -FilePath test.json -Encoding utf8
+          $rc = $LASTEXITCODE
+
+          $events = @(Get-Content -LiteralPath test.json | ConvertFrom-Json)
+          $failed = @($events | Where-Object { $_.Action -eq 'fail' -and $_.Test })
+          $skipped = @($events | Where-Object { $_.Action -eq 'skip' -and $_.Test })
+          $passed = @($events | Where-Object { $_.Action -eq 'pass' -and $_.Test })
+
+          # Readable failures in the log: the whole output of every failed test
+          # (the diagnostics of a stack that did not come up are in there).
+          foreach ($t in $failed) {
+            Write-Host "::group::FAIL $($t.Package) $($t.Test)"
+            $events |
+              Where-Object { $_.Action -eq 'output' -and $_.Test -eq $t.Test } |
+              ForEach-Object { Write-Host $_.Output }
+            Write-Host "::endgroup::"
+          }
+
+          # A skip means Docker was unreachable or the test never ran: this job
+          # exists to run it for real.
+          if ($skipped.Count -gt 0) {
+            foreach ($t in $skipped) {
+              Write-Host "::error::integration test skipped: $($t.Package) $($t.Test)"
+            }
+            exit 1
+          }
+          if ($passed.Count -eq 0) {
+            Write-Host "::error::no integration test passed: nothing ran (see test.json)"
+            exit 1
+          }
+          Write-Host "$($passed.Count) integration test(s) passed"
+          if ($rc -ne 0) { exit $rc }
+          "### Setup nightly: $($passed.Count) integration test(s) passed" |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+      - name: Upload the export (go test -json)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-compose-integration-windows-${{ github.run_id }}
+          path: test.json
+          # Nothing to post when the preflight stopped before go test ran; the
+          # red job above is the signal then.
+          if-no-files-found: warn
+          retention-days: 30

@@ -21,6 +21,9 @@ const (
 	maxReplicationLines = 100
 	maxBlockerSessions  = 100
 	maxBlockerLines     = 20
+	// blockerSummaryBudget is where source_blocking_sessions stops adding rows,
+	// leaving room for its closing count lines under tools.MaxSummaryBytes.
+	blockerSummaryBudget = tools.MaxSummaryBytes - 400
 )
 
 // sourceSettingsClient is the read side of the Q2a source reader. The
@@ -328,12 +331,25 @@ func sourceRoleGrantsTool(d Deps) tools.Tool {
 	}
 }
 
+// sessionStartedAt renders the session's backend start as the string
+// source_end_session takes in its started_at param. The model never sees
+// Data, so the summary must carry it. It is RFC3339 with the fractional
+// seconds Postgres keeps (backend_start has microseconds): the action matches
+// pid and start time exactly, so a start cut to whole seconds would never
+// match. "-" when the client gave none.
+func sessionStartedAt(s postgres.DBSession) string {
+	if s.StartedAt.IsZero() {
+		return "-"
+	}
+	return s.StartedAt.UTC().Format(time.RFC3339Nano)
+}
+
 // sourceBlockingSessionsTool lists the sessions that can hold back logical
 // replication, with the query redacted and cut.
 func sourceBlockingSessionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "source_blocking_sessions",
-		desc: "List the source Postgres sessions that hold back logical replication: an open transaction older than older_than_minutes, or a session holding the server's oldest xid horizon (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits for it). Each row has pid, start times, user, application, state, whether it blocks a slot, and its query redacted and cut to 200 bytes as untrusted text; a session outside the pipeline's tables is listed with identity hidden. Prepared transactions and sessions the connecting role may not see (pg_read_all_stats) are not listed. Use it when a slot keeps WAL or a slot creation hangs; ending a session is an action, not this tool.",
+		desc: "List the source Postgres sessions that hold back logical replication: an open transaction older than older_than_minutes, or a session holding the server's oldest xid horizon (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits for it). Each row has pid, started_at (copy it exactly into source_end_session), user, application, state, whether it blocks a slot, and its query redacted and cut to 200 bytes as untrusted text; a session outside the pipeline's tables is listed with identity hidden. Prepared transactions and sessions the connecting role may not see (pg_read_all_stats) are not listed. Use it when a slot keeps WAL or a slot creation hangs; ending a session is an action, not this tool.",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes, 1-43200. Default 5."),
 		}),
@@ -408,22 +424,34 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 
 			total := len(rows)
 			data := rows[:min(total, maxBlockerSessions)]
-			shown := min(len(data), maxBlockerLines)
+			candidates := data[:min(len(data), maxBlockerLines)]
 
 			var sb strings.Builder
 			now := time.Now()
-			for _, s := range data[:shown] {
+			shown := 0
+			for _, s := range candidates {
 				age := now.Sub(s.XactStart)
 				if s.XactStart.IsZero() {
 					age = now.Sub(s.StartedAt)
 				}
+				var line string
 				if !s.InScope {
-					fmt.Fprintf(&sb, "pid=%d state=%s age=%s blocks_slot=%s (outside the pipeline's tables; identity hidden)\n",
-						s.PID, orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot))
-					continue
+					line = fmt.Sprintf("pid=%d state=%s age=%s blocks_slot=%s started_at=%s (outside the pipeline's tables; identity hidden)\n",
+						s.PID, orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot), sessionStartedAt(s))
+				} else {
+					line = fmt.Sprintf("pid=%d user=%s app=%s state=%s age=%s blocks_slot=%s started_at=%s query=%q\n",
+						s.PID, orDash(s.User), orDash(s.App), orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot), sessionStartedAt(s), s.Query)
 				}
-				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s blocks_slot=%s query=%q\n",
-					s.PID, orDash(s.User), orDash(s.App), orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot), s.Query)
+				// A row is shown whole or not at all: tools.Truncate cutting
+				// through a line could leave a pid without its started_at, and the
+				// model needs both to propose source_end_session. %q can expand a
+				// 200-byte query of control characters four-fold, so 20 lines can
+				// pass MaxSummaryBytes.
+				if sb.Len()+len(line) > blockerSummaryBudget {
+					break
+				}
+				sb.WriteString(line)
+				shown++
 			}
 			if total == 0 {
 				sb.WriteString("(no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)\n")
