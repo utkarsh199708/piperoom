@@ -3,6 +3,7 @@ package host
 import (
 	"fmt"
 	"net"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -133,9 +134,10 @@ type workerProps struct {
 // prepareProps validates entries for mode, rewrites path values to absolute
 // paths under dir and adds the defaults a safe worker needs: plugin.path (the
 // project plugin directory; an unset plugin.path is the classic "connector
-// class not found"), a loopback REST listener on a local target (Connect's
-// own default binds every interface, and its REST API is unauthenticated),
-// and a standalone offset file.
+// class not found"), a loopback REST listener on every class (Connect's own
+// default binds every interface, and its REST API is unauthenticated; a
+// shared or production worker that must be reachable names its listeners
+// explicitly), and a standalone offset file.
 func prepareProps(mode string, entries map[string]string, dir, class string) (workerProps, error) {
 	if len(entries) == 0 {
 		return workerProps{}, fmt.Errorf("%w: entries is empty", ErrProperties)
@@ -165,9 +167,7 @@ func prepareProps(mode string, entries map[string]string, dir, class string) (wo
 		}
 	}
 	add("plugin.path", dir+"/"+PluginDir)
-	if loopbackOnly(class) {
-		add("listeners", "http://127.0.0.1:8083")
-	}
+	add("listeners", "http://127.0.0.1:8083")
 	if mode == ModeStandalone {
 		add("offset.storage.file.filename", dir+"/"+OffsetsFile)
 	}
@@ -290,9 +290,15 @@ func projectPath(dir, p string) (abs, rel string, err error) {
 	if err := ops.CheckName(rel); err != nil {
 		return "", "", err
 	}
+	// A trailing slash ("connect-plugins/") names the same directory; the
+	// unit-safe check below wants the clean form.
+	rel = path.Clean(rel)
+	if rel == "." || rel == "" {
+		return "", "", fmt.Errorf("%w: %s is the project root, not a path under it", ErrProperties, q(p))
+	}
 	abs = dir + "/" + rel
 	if err := CheckUnitPath(abs); err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%w: %w", ErrProperties, err)
 	}
 	return abs, rel, nil
 }
@@ -324,8 +330,9 @@ func loopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// loopbackOnly reports whether the class keeps the worker's REST API on
-// loopback (a local target does; a class the person raised does not).
+// loopbackOnly reports whether the class refuses a non-loopback REST
+// listener (a local target does; a class the person raised may name one
+// explicitly, though its default is loopback too).
 func loopbackOnly(class string) bool {
 	return class != protocol.ClassShared && class != protocol.ClassProduction
 }

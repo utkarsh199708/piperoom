@@ -7,7 +7,7 @@
 //
 // Ops: service_status and properties_read (T0); properties_write (T1, the
 // project directory only); service_install and service_restart (T2).
-// journal_tail (T0, row U5a) lives in journal.go.
+// journal_tail (T0, row U5a) is not in this package yet.
 //
 // The S1 rule of §2.5 for the unit: service_install takes a service name and
 // a worker mode, nothing else. ExecStart, WorkingDirectory and Environment
@@ -106,8 +106,9 @@ var (
 // Options configures a Driver.
 type Options struct {
 	// Class is the host target's class (protocol.ClassLocal, ClassShared,
-	// ClassProduction); "" means local. A local worker's REST listener must
-	// bind loopback.
+	// ClassProduction); "" means local. Every class's worker gets a
+	// loopback REST listener by default; a local worker's must bind
+	// loopback, a raised class may name another one explicitly.
 	Class string
 	// GOOS is the platform the runner is on; "" means runtime.GOOS. Tests
 	// pass another one to check the unsupported path.
@@ -147,7 +148,7 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 		d.resolve = filepath.EvalSymlinks
 	}
 	if d.goos == "linux" {
-		d.mgr = systemdUser{}
+		d.mgr = systemdUser{resolve: d.resolve}
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},

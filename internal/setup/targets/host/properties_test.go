@@ -132,12 +132,16 @@ func TestPropertiesWriteRaisedClassListener(t *testing.T) {
 		Entries: with(distributedEntries(), "listeners", "http://0.0.0.0:8083")}); err != nil {
 		t.Fatalf("shared class listener: %v", err)
 	}
-	g := newFixture(t, Options{Class: protocol.ClassShared})
-	if _, err := g.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(g.read("connect-distributed.properties"), "listeners=") {
-		t.Error("a raised class got the loopback listener default")
+	// Without a listeners entry a raised class is loopback too: widening
+	// the unauthenticated REST API takes an explicit entry.
+	for _, class := range []string{protocol.ClassShared, protocol.ClassProduction} {
+		g := newFixture(t, Options{Class: class})
+		if _, err := g.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(g.read("connect-distributed.properties"), "\nlisteners=http://127.0.0.1:8083\n") {
+			t.Errorf("%s class without listeners did not get the loopback default", class)
+		}
 	}
 }
 
@@ -188,6 +192,7 @@ func TestPropertiesWriteRefusals(t *testing.T) {
 		{"plugin.path piperoom", "", with(d, "plugin.path", ".piperoom"), ErrPath},
 		{"plugin.path project root", "", with(d, "plugin.path", "."), ErrProperties},
 		{"plugin.path empty entry", "", with(d, "plugin.path", "a,,b"), ErrProperties},
+		{"plugin.path outside, trailing slash", "", with(d, "plugin.path", "extra-plugins/"), ErrProperties},
 		{"offset file outside", "connect-standalone.properties", map[string]string{"bootstrap.servers": "a:1", "key.converter": "a.B", "value.converter": "a.B", "offset.storage.file.filename": "/var/lib/x.offsets"}, ErrProperties},
 		{"file outside project", "/etc/kafka/connect-distributed.properties", d, ErrProperties},
 		{"file traversal", "../connect-distributed.properties", d, ErrProperties},
@@ -218,6 +223,112 @@ func TestPropertiesWriteRefusals(t *testing.T) {
 	f := newFixture(t, Options{})
 	if _, err := f.run("properties_write", map[string]any{"file": "connect-distributed.properties", "entries": distributedEntries(), "path": "/etc/x"}); !errors.Is(err, ErrParams) {
 		t.Errorf("unknown field: %v", err)
+	}
+}
+
+func TestPropertiesWritePluginPathTrailingSlash(t *testing.T) {
+	f := newFixture(t, Options{})
+	if _, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties",
+		Entries: with(distributedEntries(), "plugin.path", "connect-plugins/,connect-plugins/debezium/")}); err != nil {
+		t.Fatalf("trailing slash: %v", err)
+	}
+	if got := f.read("connect-distributed.properties"); !strings.Contains(got, "\nplugin.path="+f.dir+"/connect-plugins,"+f.dir+"/connect-plugins/debezium\n") {
+		t.Errorf("file:\n%s", got)
+	}
+}
+
+// TestPropertiesWriteReplacesAHardLink: a worker file hard-linked to a file
+// outside the project is replaced by the rename, never written through.
+func TestPropertiesWriteReplacesAHardLink(t *testing.T) {
+	f := newFixture(t, Options{})
+	outside := t.TempDir() + "/victim"
+	if err := os.WriteFile(outside, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, f.dir+"/connect-distributed.properties"); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if _, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}); err != nil {
+		t.Fatalf("properties_write: %v", err)
+	}
+	if b, _ := os.ReadFile(outside); string(b) != "keep\n" {
+		t.Errorf("the file outside the project changed: %q", b)
+	}
+	if !strings.Contains(f.read("connect-distributed.properties"), "group.id=piperoom-connect") {
+		t.Error("the worker file was not written")
+	}
+}
+
+// TestPropertiesWriteFixesTheMode: the same bytes at a wider mode are
+// rewritten at 0600.
+func TestPropertiesWriteFixesTheMode(t *testing.T) {
+	f := newFixture(t, Options{})
+	params := PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}
+	if _, err := f.run("properties_write", params); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.dir+"/connect-distributed.properties", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.run("properties_write", params)
+	if err != nil || strings.HasPrefix(res.Summary, "unchanged") {
+		t.Fatalf("rewrite: %v %q", err, res.Summary)
+	}
+	if fi, err := os.Stat(f.dir + "/connect-distributed.properties"); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v %v", fi.Mode(), err)
+	}
+}
+
+// TestOversizedWorkerFile: a file larger than file_read returns is refused
+// by properties_read and the preview, not shown cut.
+func TestOversizedWorkerFile(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.write("connect-distributed.properties", strings.Repeat("group.id=piperoom-connect\n", 4<<10), 0o600)
+	if _, err := f.run("properties_read", PropertiesReadParams{File: "connect-distributed.properties"}); !errors.Is(err, ops.ErrTooLarge) {
+		t.Errorf("properties_read: %v, want ErrTooLarge", err)
+	}
+	raw, _ := json.Marshal(PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()})
+	if _, err := (propertiesWriteOp{d: f.drv}).Preview(context.Background(), raw, f.env()); !errors.Is(err, ops.ErrTooLarge) {
+		t.Errorf("preview: %v, want ErrTooLarge", err)
+	}
+}
+
+// TestWriteConfinedRules: the unit file goes only in systemd/, and no write
+// replaces a materialised secret file.
+func TestWriteConfinedRules(t *testing.T) {
+	f := newFixture(t, Options{})
+	env := f.env()
+	for _, name := range []string{"kafka/bin/x", "connect-distributed.properties", "systemd/sub/piperoom-x.service"} {
+		if _, _, err := writeConfined(env, name, []byte("x\n"), 0o644, true); !errors.Is(err, ErrPath) {
+			t.Errorf("unit file at %s: %v, want ErrPath", name, err)
+		}
+	}
+	env.MountDirs = []string{DistDir}
+	if _, _, err := writeConfined(env, "kafka/config/x.properties", []byte("x\n"), 0o600, false); !errors.Is(err, ops.ErrExecutedName) {
+		t.Errorf("mounted path: %v", err)
+	}
+	f.write("connect-distributed.properties", "secret\n", 0o600)
+	env.Materialised = []string{"connect-distributed.properties"}
+	for _, unit := range []bool{false, true} {
+		name := "connect-distributed.properties"
+		if unit {
+			env.Materialised = []string{UnitDir}
+			name = UnitDir + "/piperoom-connect.service"
+		}
+		if _, _, err := writeConfined(env, name, []byte("x\n"), 0o600, unit); !errors.Is(err, ops.ErrSecretPath) {
+			t.Errorf("materialised %s: %v, want ErrSecretPath", name, err)
+		}
+	}
+	if got := f.read("connect-distributed.properties"); got != "secret\n" {
+		t.Errorf("the materialised file was overwritten: %q", got)
+	}
+	// The list the store persists counts as well, through properties_write.
+	f.write(".piperoom/materialised", "connect-distributed.properties\n", 0o600)
+	if _, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}); !errors.Is(err, ops.ErrSecretPath) {
+		t.Errorf("properties_write over a materialised file: %v", err)
+	}
+	if got := f.read("connect-distributed.properties"); got != "secret\n" {
+		t.Errorf("the materialised file was overwritten: %q", got)
 	}
 }
 

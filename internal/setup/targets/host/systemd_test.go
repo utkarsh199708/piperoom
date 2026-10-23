@@ -51,7 +51,7 @@ func TestServiceStatus(t *testing.T) {
 	f := newFixture(t, Options{})
 	f.exec.respond = func(args []string) ([]byte, int, error) {
 		return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nResult=success\n" +
-			"MainPID=4242\nExecMainStatus=0\nNRestarts=1\nFragmentPath=/p/systemd/piperoom-connect.service\nUnrelated=x\n"), 0, nil
+			"MainPID=4242\nExecMainStatus=0\nNRestarts=1\nFragmentPath=" + f.dir + "/systemd/piperoom-connect.service\nUnrelated=x\n"), 0, nil
 	}
 	res, err := f.run("service_status", UnitParams{})
 	if err != nil {
@@ -68,7 +68,7 @@ func TestServiceStatus(t *testing.T) {
 	if err := json.Unmarshal(res.Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data["running"] != true || data["installed"] != true || data["main_pid"] != "4242" || data["unit_file_state"] != "enabled" {
+	if data["running"] != true || data["installed"] != true || data["main_pid"] != "4242" || data["unit_file_state"] != "enabled" || data["this_project"] != true {
 		t.Errorf("data %v", data)
 	}
 	if _, leaked := data["Unrelated"]; leaked {
@@ -83,6 +83,23 @@ func TestServiceStatus(t *testing.T) {
 	}
 	if res, _ := f.run("service_status", UnitParams{Name: "other"}); res.Summary != "piperoom-other.service is not installed" {
 		t.Errorf("not installed: %q", res.Summary)
+	}
+
+	// The same unit name installed by another project is reported as such,
+	// not as this project's worker.
+	f.exec.respond = func([]string) ([]byte, int, error) {
+		return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nFragmentPath=/srv/other/systemd/piperoom-connect.service\n"), 0, nil
+	}
+	res, err = f.run("service_status", UnitParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = nil
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["this_project"] != false || !strings.Contains(res.Summary, "not this project's") || !strings.Contains(res.Summary, "/srv/other/") {
+		t.Errorf("foreign unit: %q %v", res.Summary, data)
 	}
 }
 
@@ -141,9 +158,10 @@ func TestServiceInstall(t *testing.T) {
 			if got := f.read("systemd/piperoom-connect.service"); got != wantUnit(f.dir, mode) {
 				t.Errorf("unit file:\n%s\nwant:\n%s", got, wantUnit(f.dir, mode))
 			}
+			show, _ := SystemctlArgv("show", "piperoom-connect.service")
 			enable := []string{"systemctl", "--user", "enable", f.dir + "/systemd/piperoom-connect.service"}
 			reload := []string{"systemctl", "--user", "daemon-reload"}
-			if calls := f.exec.argvs(); !reflect.DeepEqual(calls, [][]string{enable, reload}) {
+			if calls := f.exec.argvs(); !reflect.DeepEqual(calls, [][]string{show, enable, reload}) {
 				t.Errorf("commands %q", calls)
 			}
 			if !reflect.DeepEqual(res.Receipt.Argv, enable) {
@@ -295,7 +313,8 @@ func TestServiceRestart(t *testing.T) {
 	f.write("systemd/piperoom-connect.service", wantUnit(f.dir, ModeDistributed), 0o644)
 	f.exec.respond = func(args []string) ([]byte, int, error) {
 		if args[1] == "show" {
-			return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\n"), 0, nil
+			return []byte("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\n" +
+				"FragmentPath=" + f.dir + "/systemd/piperoom-connect.service\n"), 0, nil
 		}
 		return nil, 0, nil
 	}
@@ -305,14 +324,17 @@ func TestServiceRestart(t *testing.T) {
 	}
 	restart := []string{"systemctl", "--user", "restart", "piperoom-connect.service"}
 	show, _ := SystemctlArgv("show", "piperoom-connect.service")
-	if calls := f.exec.argvs(); !reflect.DeepEqual(calls, [][]string{restart, show}) {
+	if calls := f.exec.argvs(); !reflect.DeepEqual(calls, [][]string{show, restart, show}) {
 		t.Errorf("commands %q", calls)
 	}
 	if !reflect.DeepEqual(res.Receipt.Argv, restart) || !strings.Contains(res.Summary, "active (running)") {
 		t.Errorf("result %q %+v", res.Summary, res.Receipt)
 	}
 
-	f.exec.respond = func([]string) ([]byte, int, error) {
+	f.exec.respond = func(args []string) ([]byte, int, error) {
+		if args[1] == "show" {
+			return []byte("LoadState=loaded\nFragmentPath=" + f.dir + "/systemd/piperoom-connect.service\n"), 0, nil
+		}
 		return []byte("Job for piperoom-connect.service failed because the control process exited with error code.\n"), 1, nil
 	}
 	res, err = f.run("service_restart", UnitParams{})
@@ -433,5 +455,182 @@ func TestRenderUnitRefusesUnsafeValues(t *testing.T) {
 		if out, err := RenderUnit(u); err == nil {
 			t.Errorf("unit %+v rendered:\n%s", u, out)
 		}
+	}
+}
+
+// TestServiceRestartRefusesAnotherProjectsUnit: unit names are per OS user,
+// so project B's systemd/<unit> file does not make the unit B's. A restart
+// whose unit systemd loads from another file (or does not load) runs only
+// the show, never the restart.
+func TestServiceRestartRefusesAnotherProjectsUnit(t *testing.T) {
+	for name, show := range map[string]string{
+		"other project":   "LoadState=loaded\nFragmentPath=/srv/a/systemd/piperoom-connect.service\n",
+		"masked":          "LoadState=masked\nFragmentPath=/dev/null\n",
+		"not loaded":      "LoadState=not-found\n",
+		"look-alike path": "LoadState=loaded\nFragmentPath=/systemd/piperoom-connect.service\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, Options{})
+			f.write("systemd/piperoom-connect.service", wantUnit(f.dir, ModeDistributed), 0o644)
+			f.exec.respond = func([]string) ([]byte, int, error) { return []byte(show), 0, nil }
+			if _, err := f.run("service_restart", UnitParams{}); !errors.Is(err, ErrDetect) {
+				t.Fatalf("restart: %v, want ErrDetect", err)
+			}
+			for _, argv := range f.exec.argvs() {
+				if argv[2] != "show" {
+					t.Errorf("ran %q", argv)
+				}
+			}
+		})
+	}
+	// A FragmentPath that is a link to this project's unit file is this
+	// project's unit.
+	f := newFixture(t, Options{ResolvePath: func(p string) (string, error) {
+		if p == "/home/u/.config/systemd/user/piperoom-connect.service" {
+			return "/real/systemd/piperoom-connect.service", nil
+		}
+		if strings.HasSuffix(p, "/systemd/piperoom-connect.service") {
+			return "/real/systemd/piperoom-connect.service", nil
+		}
+		return p, nil
+	}})
+	f.write("systemd/piperoom-connect.service", wantUnit(f.dir, ModeDistributed), 0o644)
+	f.exec.respond = func([]string) ([]byte, int, error) {
+		return []byte("LoadState=loaded\nFragmentPath=/home/u/.config/systemd/user/piperoom-connect.service\n"), 0, nil
+	}
+	if _, err := f.run("service_restart", UnitParams{}); err != nil {
+		t.Errorf("linked unit: %v", err)
+	}
+}
+
+// TestServiceInstallRefusesATakenName: a unit name systemd already loads
+// from another file is refused before the unit file is written or enable
+// runs.
+func TestServiceInstallRefusesATakenName(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.distribution()
+	f.exec.respond = func([]string) ([]byte, int, error) {
+		return []byte("LoadState=loaded\nFragmentPath=/srv/a/systemd/piperoom-connect.service\n"), 0, nil
+	}
+	_, err := f.run("service_install", ServiceParams{})
+	if !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "/srv/a/") {
+		t.Fatalf("install over another project's unit: %v", err)
+	}
+	if _, serr := os.Stat(f.dir + "/systemd/piperoom-connect.service"); !errors.Is(serr, os.ErrNotExist) {
+		t.Errorf("the unit file was written: %v", serr)
+	}
+	show, _ := SystemctlArgv("show", "piperoom-connect.service")
+	if calls := f.exec.argvs(); !reflect.DeepEqual(calls, [][]string{show}) {
+		t.Errorf("commands %q", calls)
+	}
+	// Reinstalling this project's own unit is fine.
+	g := newFixture(t, Options{})
+	g.distribution()
+	g.exec.respond = func(args []string) ([]byte, int, error) {
+		if args[1] == "show" {
+			return []byte("LoadState=loaded\nFragmentPath=" + g.dir + "/systemd/piperoom-connect.service\n"), 0, nil
+		}
+		return nil, 0, nil
+	}
+	if _, err := g.run("service_install", ServiceParams{}); err != nil {
+		t.Errorf("reinstall: %v", err)
+	}
+}
+
+// TestServiceInstallCommandFailures: a failed enable stops before
+// daemon-reload and removes the unit file it created; a failed daemon-reload
+// is reported the same way.
+func TestServiceInstallCommandFailures(t *testing.T) {
+	show, _ := SystemctlArgv("show", "piperoom-connect.service")
+	for _, c := range []struct {
+		verb     string
+		want     int // commands run
+		keepFile bool
+	}{
+		{"enable", 2, false},
+		{"daemon-reload", 3, true},
+	} {
+		t.Run(c.verb, func(t *testing.T) {
+			f := newFixture(t, Options{})
+			f.distribution()
+			f.exec.respond = func(args []string) ([]byte, int, error) {
+				if args[1] == c.verb {
+					return []byte("Failed to " + c.verb + ": Access denied\n"), 1, nil
+				}
+				return nil, 0, nil
+			}
+			res, err := f.run("service_install", ServiceParams{})
+			if !errors.Is(err, ops.ErrExec) {
+				t.Fatalf("err %v, want ErrExec", err)
+			}
+			if !strings.Contains(res.Summary, "systemctl --user "+c.verb+" failed (exit 1)") || !strings.Contains(res.Summary, "Access denied") || res.Receipt.ExitCode != 1 {
+				t.Errorf("result %q %+v", res.Summary, res.Receipt)
+			}
+			calls := f.exec.argvs()
+			if len(calls) != c.want || !reflect.DeepEqual(calls[0], show) || calls[len(calls)-1][2] != c.verb {
+				t.Errorf("commands %q", calls)
+			}
+			_, serr := os.Stat(f.dir + "/systemd/piperoom-connect.service")
+			if c.keepFile != (serr == nil) {
+				t.Errorf("unit file after a failed %s: %v", c.verb, serr)
+			}
+		})
+	}
+	// A failed enable leaves a unit file that existed before in place.
+	f := newFixture(t, Options{})
+	f.distribution()
+	f.write("systemd/piperoom-connect.service", "old\n", 0o644)
+	f.exec.respond = func(args []string) ([]byte, int, error) {
+		if args[1] == "enable" {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}
+	if _, err := f.run("service_install", ServiceParams{}); !errors.Is(err, ops.ErrExec) {
+		t.Fatalf("err %v", err)
+	}
+	if _, serr := os.Stat(f.dir + "/systemd/piperoom-connect.service"); serr != nil {
+		t.Errorf("an existing unit file was removed: %v", serr)
+	}
+}
+
+// TestJavaHomeInsideTheProject: a JDK under the project directory is what
+// the unit runs, so it must be under a mount directory file_write cannot
+// change.
+func TestJavaHomeInsideTheProject(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.distribution()
+	for _, java := range []string{f.dir + "/jdk/bin/java", f.dir + "/bin/java", f.dir + "/logs/jdk/bin/java"} {
+		f.java = java
+		if _, err := f.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
+			t.Errorf("JAVA_HOME of %s: %v, want ErrDetect", java, err)
+		}
+	}
+	if calls := f.exec.argvs(); len(calls) != 0 {
+		t.Errorf("commands ran: %q", calls)
+	}
+	f.java = f.dir + "/kafka/jdk/bin/java"
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatalf("JDK under kafka/: %v", err)
+	}
+	if u := f.read("systemd/piperoom-connect.service"); !strings.Contains(u, "\nEnvironment=JAVA_HOME="+f.dir+"/kafka/jdk\n") {
+		t.Errorf("unit:\n%s", u)
+	}
+	// The project reached through a symlink: the resolved JDK path is
+	// still recognised as inside it.
+	real := t.TempDir()
+	link := t.TempDir() + "/p"
+	mustSymlink(t, real, link)
+	g := newFixtureIn(t, link, Options{})
+	g.distribution()
+	g.java = real + "/jdk/bin/java"
+	if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
+		t.Errorf("JAVA_HOME inside the symlinked project: %v", err)
+	}
+}
+
+func TestRequireFileWithoutRoot(t *testing.T) {
+	if err := requireFile(ops.Env{}, "connect-distributed.properties", false); err == nil || !strings.Contains(err.Error(), "not open") {
+		t.Errorf("nil Confine: %v", err)
 	}
 }

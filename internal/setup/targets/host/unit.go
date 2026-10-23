@@ -222,6 +222,9 @@ func (d *Driver) spec(p ServiceParams, env ops.Env) (serviceSpec, error) {
 // reparse point on the way) and requires a regular file, executable by its
 // owner when exec is set.
 func requireFile(env ops.Env, name string, exec bool) error {
+	if env.Confine == nil {
+		return errors.New("host: the project root is not open")
+	}
 	clean, err := env.Confine.Check(name)
 	if err != nil {
 		return err
@@ -267,5 +270,34 @@ func (d *Driver) javaHome(env ops.Env) (string, error) {
 	if err := CheckUnitPath(home); err != nil {
 		return "", fmt.Errorf("JAVA_HOME: %w", err)
 	}
+	if err := javaHomeConfined(env, home); err != nil {
+		return "", err
+	}
 	return home, nil
+}
+
+// javaHomeConfined refuses a JDK inside the project directory unless it is
+// under a registered mount directory. The unit runs that JDK on every start,
+// so a JDK file_write could change (jdk/conf/security/java.security, a
+// jdk/lib jar) would let a T1 write alter what the T2-approved service loads.
+// The project directory is compared both as given and with its symlinks
+// resolved, since home is a resolved path.
+func javaHomeConfined(env ops.Env, home string) error {
+	if env.Confine == nil {
+		return errors.New("host: the project root is not open")
+	}
+	dirs := []string{env.Confine.Dir()}
+	if real, err := filepath.EvalSymlinks(dirs[0]); err == nil && real != dirs[0] {
+		dirs = append(dirs, real)
+	}
+	for _, dir := range dirs {
+		rel, err := filepath.Rel(dir, home)
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		if rel == "." || !ops.MountedPath(filepath.ToSlash(rel), env.MountDirs) {
+			return fmt.Errorf("%w: JAVA_HOME %s is inside the project directory but not under %s/ or another directory file_write cannot change; install the JDK there or outside the project", ErrDetect, q(home), DistDir)
+		}
+	}
+	return nil
 }

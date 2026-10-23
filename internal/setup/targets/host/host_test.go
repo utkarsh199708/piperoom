@@ -168,10 +168,15 @@ func TestCatalogue(t *testing.T) {
 	// What the unit executes or loads is out of file_write's and
 	// file_delete's reach from the start.
 	for _, p := range []string{"kafka/config/x.txt", "connect-plugins/a/b.txt", "systemd/notes.txt"} {
-		for _, op := range []string{"file_write", "file_delete"} {
-			if _, err := f.run(op, map[string]string{"path": p, "content": "x"}); err == nil {
-				t.Errorf("%s %s was allowed", op, p)
-			}
+		f.write(p, "keep\n", 0o644)
+		if _, err := f.run("file_write", map[string]string{"path": p, "content": "x"}); !errors.Is(err, ops.ErrExecutedName) {
+			t.Errorf("file_write %s: %v, want ErrExecutedName", p, err)
+		}
+		if _, err := f.run("file_delete", map[string]string{"path": p}); !errors.Is(err, ops.ErrExecutedName) {
+			t.Errorf("file_delete %s: %v, want ErrExecutedName", p, err)
+		}
+		if got := f.read(p); got != "keep\n" {
+			t.Errorf("%s changed: %q", p, got)
 		}
 	}
 	// One room has one target: the Compose driver cannot join this registry.

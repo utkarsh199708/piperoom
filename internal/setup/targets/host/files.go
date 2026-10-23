@@ -24,7 +24,8 @@ import (
 // never written through. It reports whether the bytes changed. unitFile is
 // set only for the unit file, the one file this driver writes inside a
 // directory it registered as a mount; every other write refuses mounted
-// paths the way file_write does.
+// paths the way file_write does, and every write refuses a materialised
+// secret file.
 func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unitFile bool) (string, bool, error) {
 	if env.Confine == nil {
 		return "", false, errors.New("host: the project root is not open")
@@ -38,6 +39,11 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode, unit
 		return "", false, fmt.Errorf("%w: %s is not in %s/", ErrPath, q(name), UnitDir)
 	case !unitFile && ops.MountedPath(clean, env.MountDirs):
 		return "", false, fmt.Errorf("%w: %s is under a directory the worker executes or loads from", ops.ErrExecutedName, q(name))
+	}
+	// The refusal file_write applies to a file the runner materialised from
+	// the secret store: no driver write replaces one either.
+	if err := ops.MaterialisedRefusal(clean, env); err != nil {
+		return "", false, err
 	}
 	root, err := os.OpenRoot(env.Confine.Dir())
 	if err != nil {

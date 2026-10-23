@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -132,28 +133,74 @@ func failed(what string, res cmdResult, unit string) (ops.Result, error) {
 }
 
 // systemdUser manages user-level units through `systemctl --user`.
-type systemdUser struct{}
+type systemdUser struct {
+	// resolve resolves symlinks (Options.ResolvePath), to match a
+	// FragmentPath with this project's unit file.
+	resolve func(string) (string, error)
+}
 
 func (systemdUser) artifact(s serviceSpec) ([]byte, error) { return RenderUnit(s.Rendered) }
 
-func (systemdUser) status(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
-	argv, err := SystemctlArgv("show", unit)
-	if err != nil {
-		return ops.Result{}, err
-	}
-	res, err := runSystemctl(ctx, env, argv)
+func (m systemdUser) status(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
+	st, res, err := show(ctx, env, unit)
 	if err != nil {
 		return ops.Result{}, err
 	}
 	if res.code != 0 {
 		return failed("systemctl show", res, unit)
 	}
-	st := parseShow(res.out)
+	data := st.data(unit)
+	summary := statusSummary(unit, st)
+	// Unit names are per OS user, not per project: another project's
+	// service_install may own this name. Say so rather than report its
+	// worker as this project's.
+	if own, want := m.ownFragment(env, unit, st); !own && st["FragmentPath"] != "" {
+		data["this_project"] = false
+		summary += fmt.Sprintf("; loaded from %s, not this project's %s", q(st["FragmentPath"]), q(want))
+	} else {
+		data["this_project"] = own
+	}
 	return ops.Result{
-		Summary: statusSummary(unit, st),
-		Data:    st.data(unit),
-		Receipt: events.SetupReceipt{Kind: "exec", Argv: argv, Target: unit},
+		Summary: summary,
+		Data:    data,
+		Receipt: events.SetupReceipt{Kind: "exec", Argv: res.argv, Target: unit},
 	}, nil
+}
+
+// show runs `systemctl --user show` for unit and parses it.
+func show(ctx context.Context, env ops.Env, unit string) (unitState, cmdResult, error) {
+	argv, err := SystemctlArgv("show", unit)
+	if err != nil {
+		return nil, cmdResult{}, err
+	}
+	res, err := runSystemctl(ctx, env, argv)
+	if err != nil {
+		return nil, res, err
+	}
+	return parseShow(res.out), res, nil
+}
+
+// ownFragment reports whether systemd loads unit from this project's unit
+// file, and returns that file's absolute path. A FragmentPath that is a
+// symlink to it (a linked unit seen through the user's search path) counts.
+func (m systemdUser) ownFragment(env ops.Env, unit string, st unitState) (bool, string) {
+	if env.Confine == nil {
+		return false, ""
+	}
+	want := env.Confine.Dir() + "/" + UnitDir + "/" + unit
+	got := st["FragmentPath"]
+	if got == "" {
+		return false, want
+	}
+	if got == want {
+		return true, want
+	}
+	if m.resolve == nil {
+		return false, want
+	}
+	a, aerr := m.resolve(got)
+	b, berr := m.resolve(want)
+	return aerr == nil && berr == nil && a == b, want
 }
 
 func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error) {
@@ -161,6 +208,26 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 	if err != nil {
 		return ops.Result{}, err
 	}
+	// The path rule first, so an unsafe unit directory runs no command.
+	if _, err := env.Confine.Check(s.UnitFile); err != nil {
+		return ops.Result{}, err
+	}
+	// Unit names are per OS user: refuse, before writing anything, a name
+	// systemd already loads from another file (another project's unit, a
+	// hand-written one, a mask), or enable would fail after the write and a
+	// later service_restart would reach that other worker.
+	st, res, err := show(ctx, env, s.Unit)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	if res.code != 0 {
+		return failed("systemctl show", res, s.Unit)
+	}
+	if own, _ := m.ownFragment(env, s.Unit, st); !own && st["FragmentPath"] != "" {
+		return ops.Result{}, fmt.Errorf("%w: %s is already loaded from %s, not this project's %s; pick another service name",
+			ErrDetect, s.Unit, q(st["FragmentPath"]), q(s.UnitPath))
+	}
+	existed := requireFile(env, s.UnitFile, false) == nil
 	clean, changed, err := writeConfined(env, s.UnitFile, text, 0o644, true)
 	if err != nil {
 		return ops.Result{}, err
@@ -176,13 +243,19 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 	// enable links the unit file into the user's search path and enables
 	// it; daemon-reload makes a changed unit file the definition the next
 	// (re)start uses even when the link already existed.
-	for _, argv := range [][]string{enable, reload} {
+	for i, argv := range [][]string{enable, reload} {
 		res, err := runSystemctl(ctx, env, argv)
-		if err != nil {
-			return ops.Result{}, err
+		var out ops.Result
+		if err == nil && res.code != 0 {
+			out, err = failed(strings.Join(argv[:3], " "), res, s.Unit)
 		}
-		if res.code != 0 {
-			return failed(strings.Join(argv[:3], " "), res, s.Unit)
+		if err != nil {
+			// A unit file this install created and could not enable is
+			// removed: the project keeps no unit systemd never linked.
+			if i == 0 && !existed {
+				removeUnitFile(env, clean)
+			}
+			return out, err
 		}
 	}
 	state := "written"
@@ -201,15 +274,31 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 }
 
 func (m systemdUser) restart(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
-	// Only a unit this project installed: service_install wrote its file.
+	// Only a unit this project installed: service_install wrote its file,
+	// and systemd loads the unit from that file. Unit names are per OS
+	// user, so the file alone does not prove the name is this project's.
 	if err := requireFile(env, UnitDir+"/"+unit, false); err != nil {
 		return ops.Result{}, fmt.Errorf("%w; run service_install first", err)
+	}
+	st, res, err := show(ctx, env, unit)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	if res.code != 0 {
+		return failed("systemctl show", res, unit)
+	}
+	if own, want := m.ownFragment(env, unit, st); !own {
+		if st["FragmentPath"] == "" {
+			return ops.Result{}, fmt.Errorf("%w: systemd has no unit file for %s; run service_install first", ErrDetect, unit)
+		}
+		return ops.Result{}, fmt.Errorf("%w: systemd loads %s from %s, not this project's %s; refusing to restart it",
+			ErrDetect, unit, q(st["FragmentPath"]), q(want))
 	}
 	argv, err := SystemctlArgv("restart", unit)
 	if err != nil {
 		return ops.Result{}, err
 	}
-	res, err := runSystemctl(ctx, env, argv)
+	res, err = runSystemctl(ctx, env, argv)
 	if err != nil {
 		return ops.Result{}, err
 	}
@@ -234,6 +323,17 @@ func (m systemdUser) restart(ctx context.Context, env ops.Env, unit string) (ops
 		summary += "; the state read after it failed: " + clipText(err.Error(), maxQuoted)
 	}
 	return ops.Result{Summary: summary, Data: data, Receipt: receipt}, nil
+}
+
+// removeUnitFile removes a unit file install wrote, best effort: the op
+// already failed, and its error is what the caller reports.
+func removeUnitFile(env ops.Env, clean string) {
+	root, err := os.OpenRoot(env.Confine.Dir())
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	_ = root.Remove(clean)
 }
 
 // unitState is the parsed `systemctl show` output.
