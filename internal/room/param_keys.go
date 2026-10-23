@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"unicode"
+
+	"piperoom/internal/setup/protocol"
 )
 
 // Go's encoding/json matches object keys to struct fields without regard to
@@ -21,6 +22,11 @@ import (
 // (or an object with no schema at all, deeper down) is only checked for case
 // folded duplicates.
 func checkParamKeys(schema map[string]any, params json.RawMessage) error {
+	// The token-level check first: a map decode below would collapse two
+	// exactly equal keys into one before the walk could see them.
+	if err := protocol.CheckParamKeys(params); err != nil {
+		return fmt.Errorf("params: %w; use exactly one", err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(params))
 	dec.UseNumber()
 	var v any
@@ -69,19 +75,6 @@ func walkParamKeys(schema map[string]any, v any, path string) error {
 	return nil
 }
 
-// foldKey maps a key to a representative of its Unicode case-folding orbit, so
-// two keys that strings.EqualFold treats as equal (including the Kelvin sign
-// and the long s) get the same string. It is linear in the key length.
-func foldKey(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		min := r
-		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
-			if f < min {
-				min = f
-			}
-		}
-		out = append(out, min)
-	}
-	return string(out)
-}
+// foldKey is protocol.FoldKey: the room, the setup clients and the runner fold
+// keys the same way.
+func foldKey(s string) string { return protocol.FoldKey(s) }

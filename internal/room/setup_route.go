@@ -13,6 +13,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/setup/plan"
+	"piperoom/internal/setup/protocol"
 )
 
 // Tiered routing for setup rooms (U1-6; docs/design/setup-agent.md §3.3,
@@ -45,14 +46,19 @@ const setupOpSourceRestart = "source_restart"
 // setup action adapter (U1-7) reads it to fill protocol.OpRequest: ProposalID,
 // StepIndex, ParamsHash, Tier and Class are exactly the fields the runner
 // re-checks (Class against its own target floors, Tier against the op floor,
-// the params hash over the frozen proposal). Steps outside a setup room carry
-// none.
+// the params hash over the frozen proposal). Action and Params are the frozen
+// step itself, exactly as approved: the runner refuses a request whose op is
+// not the step's action or whose params are not canonically the step's
+// params, so a client sends Params unchanged rather than rebuilding them from
+// its own arguments. Steps outside a setup room carry none.
 type SetupStep struct {
 	ProposalID string
 	StepIndex  int
 	ParamsHash string
 	Tier       string
 	Class      string
+	Action     string
+	Params     json.RawMessage
 }
 
 // setupStepKey carries a SetupStep in an action call's context.
@@ -253,6 +259,11 @@ func setupOpOf(step events.ProposalStep) (string, error) {
 	var params struct {
 		Op string `json:"op"`
 	}
+	if err := protocol.CheckParamKeys(step.Params); err != nil {
+		// Two keys the decoder folds together: which "op" runs is the
+		// decoder's choice, so none is believed.
+		return "", fmt.Errorf("params: %w", err)
+	}
 	if len(step.Params) > 0 && json.Unmarshal(step.Params, &params) == nil {
 		if op := strings.TrimSpace(params.Op); op != "" && op != step.Action {
 			return "", fmt.Errorf("params name op %q but the step's action is %q; the op field may only repeat the action",
@@ -281,13 +292,16 @@ func setupStepResolve(setup *SetupSnapshot, params json.RawMessage) (string, str
 	if setup == nil || len(setup.Targets) == 0 || len(params) == 0 {
 		return "", protocolClassShared
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(params, &obj); err != nil {
-		return "", protocolClassShared
+	obj, ok := setupParamsObject(params)
+	if !ok {
+		// Unreadable, or keys the executor's decoder would fold together:
+		// no target is believed, and the step routes at the room's highest
+		// class.
+		return "", classAtLeast(protocolClassShared, setupRoomClass(setup))
 	}
 	var candidates []string
 	for _, key := range []string{"target", "address", "host", "url"} {
-		if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+		if v, ok := obj[foldKey(key)].(string); ok && strings.TrimSpace(v) != "" {
 			candidates = append(candidates, strings.TrimSpace(v))
 		}
 	}
@@ -452,27 +466,54 @@ func (s *Service) setupPlanIndexOf(ctx context.Context, roomID, proposalID strin
 // its volumes. Anything the params do not clearly answer reads as the
 // strictest value (plan.StepFacts), so an unreadable param never buys the
 // exception.
+//
+// Every read goes through the decode the executor uses, never a separate
+// exact-key map read: the ALTER SYSTEM name through
+// plan.DecodeAlterSystemStep (the struct the setup client binds its write
+// to), and the compose_down flags through setupParamsObject, whose keys are
+// case folded as encoding/json folds them. Params with two keys that fold
+// together are refused by both, so the value the guard judged is the value
+// that runs.
 func setupGuardFacts(op string, params json.RawMessage) plan.StepFacts {
 	var facts plan.StepFacts
 	if len(params) == 0 {
 		return facts
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(params, &obj); err != nil {
-		return facts
-	}
 	switch op {
 	case plan.OpSourceAlterSystem:
-		for _, key := range []string{"param", "parameter", "name"} {
-			if v, ok := obj[key].(string); ok {
-				facts.Param = strings.TrimSpace(v)
-				break
-			}
+		p, err := plan.DecodeAlterSystemStep(params)
+		if err != nil {
+			return facts
 		}
+		facts.Param = p.Name
 	case plan.OpComposeDown:
+		obj, ok := setupParamsObject(params)
+		if !ok {
+			return facts
+		}
 		facts.KeepsVolumes = setupKeepsVolumes(obj)
 	}
 	return facts
+}
+
+// setupParamsObject decodes step params as an object whose top-level keys are
+// folded (foldKey), so a lookup of foldKey(name) finds the value
+// encoding/json would decode into a field tagged name, whatever its case.
+// Params whose keys fold together at any depth, or that are not an object,
+// are refused (ok false).
+func setupParamsObject(params json.RawMessage) (map[string]any, bool) {
+	if protocol.CheckParamKeys(params) != nil {
+		return nil, false
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(params, &raw); err != nil {
+		return nil, false
+	}
+	obj := make(map[string]any, len(raw))
+	for k, v := range raw {
+		obj[foldKey(k)] = v
+	}
+	return obj, true
 }
 
 // setupKeepsVolumes reports whether a compose_down's params say volumes are
@@ -492,7 +533,7 @@ func setupKeepsVolumes(obj map[string]any) bool {
 	kept := false
 	removed := false
 	for _, key := range []string{"volumes", "remove_volumes"} {
-		if v, ok := obj[key].(bool); ok {
+		if v, ok := obj[foldKey(key)].(bool); ok {
 			if v {
 				removed = true
 			} else {
@@ -500,11 +541,11 @@ func setupKeepsVolumes(obj map[string]any) bool {
 			}
 		}
 	}
-	if v, ok := obj["volumes_kept"].(bool); ok && v {
+	if v, ok := obj[foldKey("volumes_kept")].(bool); ok && v {
 		kept = true
 	}
 	for _, key := range []string{"args", "argv"} {
-		raw, ok := obj[key].([]any)
+		raw, ok := obj[foldKey(key)].([]any)
 		if !ok {
 			continue
 		}
@@ -687,4 +728,19 @@ func cleanPlanName(name string) string {
 		}
 	}
 	return name
+}
+
+// setupStepBound is the bound of one setup step: the T3 bound when the tier
+// the setup client will send it at is T3, which is the routed tier raised to
+// the op's client floor (plan.ClientFloor: source_alter_system is always sent
+// T3, even on a step routed T2), and stepTimeout otherwise.
+func setupStepBound(op, routedTier string) time.Duration {
+	tier := routedTier
+	if floor := plan.ClientFloor(op); floor != "" {
+		tier = raiseTier(tier, floor)
+	}
+	if tier == plan.TierT3 {
+		return setupT3StepTimeout
+	}
+	return stepTimeout
 }

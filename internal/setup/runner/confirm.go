@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 
 	"piperoom/internal/setup/protocol"
@@ -65,21 +66,24 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 }
 
 // stdinLine is one line (or the reader's terminal error) from the runner's
-// terminal, as the single stdin-reader goroutine hands it to a prompt.
+// terminal, as the single stdin-reader goroutine hands it to a prompt, with
+// the (monotonic, wall) time the reader got it.
 type stdinLine struct {
 	line string
 	err  error
+	at   time.Time
 }
 
 // stdinCh returns the channel the runner's one stdin-reader goroutine feeds,
 // starting that goroutine on first use. stdinMu must be held. Exactly one
 // goroutine ever reads r.stdin: a prompt whose ctx ends abandons only its
 // channel receive, never a ReadString, so a later prompt cannot race a live
-// orphaned read on the same reader (a data race) and a line typed for an
-// abandoned prompt is not swallowed by a dead channel — it answers the next
-// prompt instead. After a read error (EOF included) the goroutine hands the
-// same terminal result to every later prompt, exactly as a fresh ReadString
-// on an exhausted reader would.
+// orphaned read on the same reader (a data race). A line typed for an
+// abandoned prompt (a T3 confirmation whose op deadline passed) waits in this
+// channel; nextLine discards it rather than let it answer the next prompt,
+// which it was never typed for. After a read error (EOF included) the
+// goroutine hands the same terminal result to every later prompt, exactly as
+// a fresh ReadString on an exhausted reader would.
 func (r *Runner) stdinCh() <-chan stdinLine {
 	if r.stdinLines == nil {
 		ch := make(chan stdinLine)
@@ -88,10 +92,10 @@ func (r *Runner) stdinCh() <-chan stdinLine {
 		go func() {
 			for {
 				line, err := reader.ReadString('\n')
-				ch <- stdinLine{line: line, err: err}
+				ch <- stdinLine{line: line, err: err, at: time.Now()}
 				if err != nil {
 					for {
-						ch <- stdinLine{err: err}
+						ch <- stdinLine{err: err, at: time.Now()}
 					}
 				}
 			}
@@ -111,28 +115,51 @@ func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
 	defer r.stdinMu.Unlock()
 
 	// An op whose ctx already ended has nothing to confirm; return before
-	// printing a prompt.
+	// printing a prompt (nothing was asked, so nothing is abandoned).
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
 	default:
 	}
 
-	ch := r.stdinCh()
+	shown := time.Now()
 	fmt.Fprint(r.stdout, prompt)
 
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case res := <-ch:
-		if res.err != nil && res.err != io.EOF {
-			return false, fmt.Errorf("setup: reading answer: %w", res.err)
-		}
-		switch strings.ToLower(strings.TrimSpace(res.line)) {
-		case "y", "yes":
-			return true, nil
-		default:
-			return false, nil
+	res, err := r.nextLine(ctx, shown)
+	if err != nil {
+		return false, err
+	}
+	if res.err != nil && res.err != io.EOF {
+		return false, fmt.Errorf("setup: reading answer: %w", res.err)
+	}
+	switch strings.ToLower(strings.TrimSpace(res.line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// nextLine returns this prompt's line, or ctx's error. When the previous
+// prompt was abandoned (its ctx ended first: a T3 op whose deadline passed),
+// a line the reader got before this prompt was printed (shown) was typed for
+// that abandoned prompt: it is discarded, never taken as this prompt's answer,
+// so a late "y" for an expired T3 op cannot confirm the next one. After an
+// answered prompt, a line read ahead (piped answers) is kept. stdinMu must be
+// held.
+func (r *Runner) nextLine(ctx context.Context, shown time.Time) (stdinLine, error) {
+	ch := r.stdinCh()
+	for {
+		select {
+		case <-ctx.Done():
+			r.stdinAbandoned = true
+			return stdinLine{}, ctx.Err()
+		case res := <-ch:
+			if r.stdinAbandoned && res.at.Before(shown) {
+				continue
+			}
+			r.stdinAbandoned = false
+			return res, nil
 		}
 	}
 }

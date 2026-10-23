@@ -1,8 +1,12 @@
 package plan
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+
+	"piperoom/internal/setup/protocol"
 )
 
 // ErrGuard is returned (wrapped, with the row's reason) when the guard table
@@ -167,3 +171,38 @@ func AlterSystemParams() []string {
 func AlterSystemAllowed(param string) bool {
 	return slices.Contains(alterSystemParams, param)
 }
+
+// AlterSystemStep is the params of a source_alter_system step exactly as its
+// executor decodes them (the setup Source client binds its write to these
+// fields). The guard reads the parameter name through DecodeAlterSystemStep
+// too, so the name the allow-list judged is the name that runs.
+type AlterSystemStep struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// DecodeAlterSystemStep decodes a source_alter_system step's params the way
+// the executor does (encoding/json, other fields ignored), after refusing keys
+// that differ only in letter case (protocol.CheckParamKeys), which the decoder
+// would fold into Name with the last one winning.
+func DecodeAlterSystemStep(raw json.RawMessage) (AlterSystemStep, error) {
+	var p AlterSystemStep
+	if err := protocol.CheckParamKeys(raw); err != nil {
+		return p, err
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return p, fmt.Errorf("plan: source_alter_system params: %w", err)
+	}
+	return p, nil
+}
+
+// clientFloors are the ops whose setup client sends them above T2 whatever
+// the step's routed tier (remoteclients raises a request to its method's
+// floor). The room bounds such a step by that tier, not the routed one.
+var clientFloors = map[string]string{
+	OpSourceAlterSystem: TierT3,
+}
+
+// ClientFloor returns the tier the setup clients send op at least at, and ""
+// for an op they send at the step's routed tier.
+func ClientFloor(op string) string { return clientFloors[op] }

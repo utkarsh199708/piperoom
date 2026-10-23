@@ -518,11 +518,15 @@ func TestSetupKeepsVolumesMark(t *testing.T) {
 		{`{"volumes_kept": true, "args": ["down"]}`, true},
 		{`{"target": "db.prod.acme:5432"}`, false},
 		{`{"volumes": false}`, true},
+		// A removal signal in another letter case is the one the executor's
+		// decoder reads: it still wins over a keep flag.
+		{`{"remove_volumes": false, "Volumes": true}`, false},
+		{`{"VOLUMES_KEPT": true, "ARGS": ["-v"]}`, false},
 	}
 	for _, c := range cases {
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(c.params), &obj); err != nil {
-			t.Fatal(err)
+		obj, ok := setupParamsObject(json.RawMessage(c.params))
+		if !ok {
+			t.Fatalf("setupParamsObject(%s) refused", c.params)
 		}
 		if got := setupKeepsVolumes(obj); got != c.want {
 			t.Fatalf("setupKeepsVolumes(%s) = %v, want %v", c.params, got, c.want)

@@ -472,11 +472,16 @@ func (r *Registry) Close() error {
 	return r.env.Confine.Close()
 }
 
-// decodeParams fills dst from params, rejecting unknown fields and trailing
-// JSON. A nil params value is the empty object.
+// decodeParams fills dst from params, rejecting unknown fields, trailing JSON
+// and keys that differ only in letter case (the decoder would fold them and
+// let the last win, protocol.CheckParamKeys). A nil params value is the empty
+// object.
 func decodeParams(raw json.RawMessage, dst any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
+	}
+	if err := protocol.CheckParamKeys(raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrParams, err)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()

@@ -406,6 +406,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
 		var planIdx *int
+		bound := stepTimeout
 		if snap != nil && snap.IsSetupRoom() {
 			origin := ""
 			policyApproved := false
@@ -435,7 +436,11 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			actx = WithSetupStep(s.actionCtxFor(ctx, p.RoomID, snap, pipelineID), SetupStep{
 				ProposalID: p.ProposalID, StepIndex: i, ParamsHash: p.ParamsHash,
 				Tier: route.Steps[0].Tier, Class: route.Steps[0].Class,
+				Action: step.Action, Params: append(json.RawMessage(nil), step.Params...),
 			})
+			// A step the client sends T3 waits for a person's "y": its
+			// bound must not cut the op's own T3 deadline short.
+			bound = setupStepBound(route.Steps[0].Op, route.Steps[0].Tier)
 		}
 		// Validate and Execute run under the room's whole pipeline: the
 		// write clients refuse a write without it (fail closed), and
@@ -453,9 +458,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		sctx, cancel := context.WithTimeout(actx, stepTimeout)
-		out, err := action.Execute(sctx, step.Params)
-		cancel()
+		out, err := s.executeStep(actx, p.ProposalID, action, step.Params, bound)
 		output := out
 		if err != nil {
 			output = err.Error()
@@ -571,6 +574,19 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 		return events.ProposalStep{}, notApprovedOutput
 	}
 	return steps[i], ""
+}
+
+// executeStep runs one step's action within bound. A bound longer than
+// stepTimeout outruns the stale-claim window, so the claim is kept fresh while
+// the step runs, and a claim taken by the stale sweep cancels the step. The
+// refresher is stopped by defer, so a panicking action cannot leak it.
+func (s *Service) executeStep(actx context.Context, proposalID string, action actions.Action, params json.RawMessage, bound time.Duration) (string, error) {
+	sctx, cancel := context.WithTimeout(actx, bound)
+	defer cancel()
+	if bound > stepTimeout {
+		defer s.keepClaimFresh(proposalID, cancel)()
+	}
+	return action.Execute(sctx, params)
 }
 
 // finishStep checks the local transition, records the step result in the store
