@@ -68,6 +68,9 @@ type stack struct {
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
 	// retry (default every 2 s for up to 60 s).
 	clickhouseRetryEvery, clickhouseRetryFor time.Duration
+	// mongoFn replaces the mongo profile's client (the checks of the MongoDB
+	// setup breaks, setupbreaks_mongo.go) in unit tests.
+	mongoFn func(ctx context.Context) (mongoSource, error)
 }
 
 func newStack(log *slog.Logger) (*stack, error) {

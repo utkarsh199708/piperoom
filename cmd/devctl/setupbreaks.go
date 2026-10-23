@@ -96,13 +96,45 @@ func setupScenarioNames() []string {
 	return names
 }
 
+// setupScenarioSets are the registries `devctl setup-break` looks a name up
+// in: the dev stack's Postgres breaks above, then one set per optional source
+// profile (setupbreaks_<source>.go). Names are unique across the sets (a test
+// asserts it).
+var setupScenarioSets = []map[string]setupScenario{
+	setupScenarios,
+	mongoSetupScenarios,
+}
+
+// findSetupScenario looks name up in every set.
+func findSetupScenario(name string) (setupScenario, bool) {
+	for _, set := range setupScenarioSets {
+		if sc, ok := set[name]; ok {
+			return sc, true
+		}
+	}
+	return setupScenario{}, false
+}
+
+// allSetupScenarioNames returns every set's names sorted, for usage text and
+// errors.
+func allSetupScenarioNames() []string {
+	var names []string
+	for _, set := range setupScenarioSets {
+		for n := range set {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // setupBreakCmd is `devctl setup-break <scenario>`: make the named check
 // fail. A stack that already fails the check is left alone, so a repeated
 // break is a no-op rather than an error.
 func setupBreakCmd(ctx context.Context, s *stack, name string) error {
-	sc, ok := setupScenarios[name]
+	sc, ok := findSetupScenario(name)
 	if !ok {
-		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(setupScenarioNames(), ", "))
+		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(allSetupScenarioNames(), ", "))
 	}
 	okNow, detail, err := sc.verify(ctx, s)
 	if err != nil {
@@ -129,9 +161,9 @@ func setupBreakCmd(ctx context.Context, s *stack, name string) error {
 // setupFixCmd is `devctl setup-fix <scenario>`: restore the stack and prove
 // the named check passes again. Idempotent when the stack is already healthy.
 func setupFixCmd(ctx context.Context, s *stack, name string) error {
-	sc, ok := setupScenarios[name]
+	sc, ok := findSetupScenario(name)
 	if !ok {
-		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(setupScenarioNames(), ", "))
+		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(allSetupScenarioNames(), ", "))
 	}
 	// A check that cannot run (the component it reads is down, often because
 	// of the break) does not block the fix: the fix restarts that component,
