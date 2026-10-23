@@ -1,4 +1,4 @@
 {
-  "_note": "Models admitted on the new providers (openai, gemini, bedrock-converse) by their own eval gate run (docs/design/model-providers.md 5.3, 5.4). One row per model, added by a V13 PR with its baseline evals/baseline/<provider>-<model>.json. Claude providers never read this list. Fields: provider, flavor (openai only), model (a pinned id), status (supported | experimental), baseline, gated_at (YYYY-MM-DD), alias (true for a floating id; experimental only), sunset (YYYY-MM-DD, optional).",
+  "_note": "Models admitted on the new providers (openai, gemini, bedrock-converse) by their own eval gate run (docs/design/model-providers.md 5.3, 5.4). One row per model, added by a V13 PR with its baseline evals/baseline/<provider>-<model>.json. Claude providers never read this list. Fields: provider, flavor (openai only), model (a pinned id), status (supported | experimental), baseline, gated_at (YYYY-MM-DD), alias (true for a floating id; experimental only), sunset (YYYY-MM-DD, optional), pass_rate and root_cause_rate (0 to 1, optional), cost_per_run_usd (optional).",
   "models": []
 }
