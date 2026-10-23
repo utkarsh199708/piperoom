@@ -250,6 +250,11 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/setup/targets/{t}/class", visible(s.handleSetupRaiseClass))
 				short.Post("/rooms/{id}/setup/pipeline", visible(s.handleSetupExtendPipeline))
 				short.Post("/rooms/{id}/setup/maintenance-window", visible(s.handleSetupMaintenanceWindow))
+				// The secret route's body is a value: it is excluded from
+				// request logging (setupSecretPath), and the service stores the
+				// value nowhere (setup.go, U1-5d).
+				short.Post("/rooms/{id}/setup/secret", visible(s.handleSetupSecret))
+				short.Post("/rooms/{id}/setup/credentials", visible(s.handleSetupCredentials))
 				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
@@ -372,6 +377,12 @@ func userFrom(ctx context.Context) room.User {
 func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if setupSecretPath(r.URL.Path) {
+				// A secret value is in this body: no request line is written
+				// for it (docs/api.md, POST /api/rooms/{id}/setup/secret).
+				next.ServeHTTP(w, r)
+				return
+			}
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)

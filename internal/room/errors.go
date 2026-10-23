@@ -151,6 +151,12 @@ func setupDisabled() *Error {
 	return &Error{Status: http.StatusNotFound, Code: "setup_disabled", Msg: "setup is not enabled on this server"}
 }
 
+// noRunner is 409 no_runner: a setup route needs the room's paired runner and
+// none is connected (docs/api.md error table).
+func noRunner() *Error {
+	return &Error{Status: http.StatusConflict, Code: "no_runner", Msg: "no setup runner is paired to this room right now"}
+}
+
 // notTenantMember is 403 not_tenant_member: POST /api/setup for a tenant the
 // caller is not in (or one no tenants: block declares, which is the same
 // answer so a tenant name does not leak).

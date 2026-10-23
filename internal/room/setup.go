@@ -92,6 +92,11 @@ func (s *Service) CreateSetupRoom(ctx context.Context, user User, req events.Set
 	if !pipelineIDRe.MatchString(req.PipelineID) {
 		return SetupRoom{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", req.PipelineID))
 	}
+	// The id names <PIPEROOM_SECRETS_DIR>/<pipeline> later: "." and ".." are
+	// path syntax, not names ("." would open the secrets root itself).
+	if !secretsPipelineID(req.PipelineID) {
+		return SetupRoom{}, validation(fmt.Sprintf("pipeline_id %q must contain a character other than '.'", req.PipelineID))
+	}
 	if s.owners.HasPipeline(req.PipelineID) {
 		return SetupRoom{}, pipelineExists(req.PipelineID)
 	}

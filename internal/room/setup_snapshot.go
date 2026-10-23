@@ -63,6 +63,11 @@ type SetupSnapshot struct {
 	// list marks the trimmed form GET /api/rooms rows carry: mode, phase and
 	// runner.connected only (MarshalJSON, trimSetupForList).
 	list bool
+	// secretNames are the setup.secret_set names in the order they were set,
+	// each once. Unexported: docs/api.md's snapshot has no secret list, but
+	// POST /api/rooms/{id}/setup/credentials asks the runner for exactly these
+	// names (setup_secrets.go; U1-5d).
+	secretNames []string
 }
 
 // setupListRow is the "setup" member of a GET /api/rooms row (docs/api.md: the
@@ -263,6 +268,7 @@ func (s *SetupSnapshot) clone() *SetupSnapshot {
 			c.executed[k] = v
 		}
 	}
+	c.secretNames = append([]string{}, s.secretNames...)
 	return &c
 }
 
@@ -424,6 +430,14 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		snap.Setup = snap.Setup.clone()
 		snap.Setup.MaintenanceWindow = &SetupWindowState{Start: p.Start.UTC(), End: p.End.UTC()}
+
+	case events.SetupSecretSet:
+		p, ok := decode[events.SetupSecretSetPayload](e)
+		if !ok || snap.Setup == nil || !setupSecretNameRe.MatchString(p.Name) {
+			return snap
+		}
+		snap.Setup = snap.Setup.clone()
+		snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
 
 	case events.SetupVerified:
 		p, ok := decode[events.SetupVerifiedPayload](e)

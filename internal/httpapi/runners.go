@@ -278,6 +278,11 @@ func (s *Server) runnerLoop(ctx context.Context, conn *websocket.Conn, tenant, r
 			s.svc.RunnerResult(ctx, tenant, roomID, creatorID, token, *f.Result)
 		case protocol.FrameResume:
 			s.svc.RunnerResume(ctx, tenant, roomID, creatorID, token, *f.Resume)
+		case protocol.FrameCredentials:
+			// The one frame that carries secret values: the service validates
+			// the pending request and the names, writes the files and emits
+			// the names only (room.RunnerCredentials).
+			s.svc.RunnerCredentials(ctx, tenant, roomID, creatorID, token, *f.Credentials)
 		}
 		// Server-only types and unknown ones are dropped: Frame.Check already
 		// refused a known type with the wrong payload, and a newer peer's
