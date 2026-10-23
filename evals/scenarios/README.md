@@ -276,7 +276,7 @@ with one Q2 admin action, which the label names. `idle-wal-growth` is scoped lik
 |---|---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
 | `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
-| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot=yes` | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes` (identity hidden: it locks no pipeline table) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
 | `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
 
 **Grading waits for Q2h (C6).** `evals.LiveActions` registers neither the Q2a readers nor the
@@ -328,16 +328,20 @@ worker. Both labels name what has to change, which is the row's done-when.
 
 | Scenario | Alert | Root cause | First failing / root-cause layer | Label names |
 |---|---|---|---|---|
-| `register-rejected-renamed-key` | pg-orders-connector FAILED after the Debezium 3.2 upgrade, re-registered from the 1.x export | the config carries `database.server.name=pg` and no `topic.prefix`, which 2.0 made required | kafka-connect / kafka-connect | the key: `database.server.name`, renamed to `topic.prefix` (known issue `dbz-topic-prefix`, DBZ-4180) |
-| `register-rejected-missing-plugin` | connector FAILED after the worker redeploy; re-register refused with "Connector plugin ... not found" | the Debezium Postgres plugin is not loaded on the worker (plugin.path lost it) | kafka-connect / kafka-connect | the plugin: `io.debezium.connector.postgresql.PostgresConnector` |
+| `register-rejected-renamed-key` | pg-orders-connector task 0 FAILED after the Debezium 3.2 in-place upgrade; re-registering the 1.x export is refused (HTTP 400, not stored) | the config carries `database.server.name=pg` and no `topic.prefix`, which 2.0 made required | kafka-connect / kafka-connect | the key: `database.server.name`, renamed to `topic.prefix` (known issue `dbz-topic-prefix`, DBZ-4180) |
+| `register-rejected-missing-plugin` | connector FAILED after the worker redeploy; re-register refused with Connect's "Failed to find any class that implements Connector ..." | the Debezium Postgres plugin is not loaded on the worker (plugin.path lost it) | kafka-connect / kafka-connect | the plugin: `io.debezium.connector.postgresql.PostgresConnector` |
 
 **`connect_validate_config` is not replayable yet.** Q4a's tool names both faults on its own, but
 `evals.LiveTools()` has no definition-only Connect client, and `kafkatools.Register` adds the tool
 only for a `Deps.Connect` that implements `ConfigValidator`, so a recording naming it fails
 `-validate`. C6's Q6d ("replay for the Q1c, Q3a, Q3c, Q4a and Q5a readers") adds that client.
 Until then the two files prove the key and the plugin from `connect_config` (the stored config
-keeps `database.server.name`), `connect_status` (the connector trace names `topic.prefix` or the
-missing class) and `connect_list_connectors` (an empty type is the tell of an unloadable plugin) -
+keeps `database.server.name` and has no `topic.prefix`), `connect_status` (task 0's condensed
+trace "Error configuring an instance of PostgresConnectorTask", or the connector trace naming the
+missing class) and `connect_list_connectors` (type `unknown`: Connect cannot load the class to
+tell source from sink). `connect_status` keeps only a trace's first line and its "Caused by:"
+lines, so Connect's "The 'topic.prefix' value is invalid" (the HTTP 400 body of the refused
+re-register) reaches the room only through the owner's steer -
 the reads Q4b's prompt sends the agent to before it proposes a registration. Each header says
 which `connect_validate_config` recording and fact to add when Q6d lands. `runbook_lookup` runs
 for real in the harness, so the known-issue id in the first label is reachable today.

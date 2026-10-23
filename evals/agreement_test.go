@@ -376,7 +376,7 @@ var syntheticLabels = map[string]Label{
 	// the failed task, the missing slot or the retained WAL, never the cause.
 	"no-replica-identity": {"postgres", []string{"omits the old tuple"}},
 	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
-	"blocked-slot":        {"postgres", []string{"devctl-blocker", "blocks_slot"}},
+	"blocked-slot":        {"postgres", []string{"48213", "blocks_slot"}},
 	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
