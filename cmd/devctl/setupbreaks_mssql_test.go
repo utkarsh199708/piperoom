@@ -37,6 +37,10 @@ type mssqlWorld struct {
 	dbCDC       bool
 	tableExists bool
 	tracked     bool
+	// instances are dbo.orders' capture instances; recorded is the break's
+	// record of the ones it dropped (extended properties on dbo.orders).
+	instances []string
+	recorded  []string
 	// stuckAgent ignores xp_servicecontrol (the wait must time out).
 	stuckAgent bool
 	// exitCode/output/dockerErr fail every call (container down, docker down).
@@ -102,10 +106,21 @@ func (w *mssqlWorld) exec(_ context.Context, container string, argv ...string) (
 			w.dbCDC = true
 			out = "Job 'cdc.orders_capture' started successfully.\nJob 'cdc.orders_cleanup' started successfully.\n"
 		}
+		w.recorded = nil
+		if w.tracked {
+			w.recorded, w.instances = w.instances, nil
+		}
 		w.tracked = false
 		return out, 0, nil
 	case sqlMSSQLFixTableCDC:
-		w.tracked = true
+		if !w.tracked {
+			w.instances = w.recorded
+			if len(w.instances) == 0 {
+				w.instances = []string{"dbo_orders"}
+			}
+			w.tracked = true
+		}
+		w.recorded = nil
 		return "Update mask evaluation will be disabled in net_changes_function because the CLR configuration option is disabled.\n", 0, nil
 	}
 	w.t.Fatalf("unexpected statement %q", q)
@@ -359,6 +374,60 @@ func TestMSSQLStatementsAreFixed(t *testing.T) {
 	if strings.Contains(sqlMSSQLBreakTableCDC, "sp_cdc_disable_db") {
 		t.Error("the break disables CDC on the database; only the table must be off")
 	}
+	// The break records the capture instances it drops, before it drops them,
+	// and the fix recreates them under the recorded names.
+	rec := strings.Index(sqlMSSQLBreakTableCDC, "sp_addextendedproperty @name = @prop, @value = @inst")
+	read := strings.Index(sqlMSSQLBreakTableCDC, "SELECT capture_instance FROM cdc.change_tables WHERE source_object_id = OBJECT_ID(N'dbo.orders')")
+	drop := strings.Index(sqlMSSQLBreakTableCDC, "sp_cdc_disable_table")
+	if rec < 0 || read < 0 || drop < 0 || read > rec || rec > drop {
+		t.Errorf("the break must read and record the capture instances before sp_cdc_disable_table: %s", sqlMSSQLBreakTableCDC)
+	}
+	for _, want := range []string{"FROM sys.extended_properties " + sqlMSSQLInstanceRecordWhere, "@capture_instance = @inst", sqlMSSQLDropInstanceRecord} {
+		if !strings.Contains(sqlMSSQLFixTableCDC, want) {
+			t.Errorf("the fix lacks %q: %s", want, sqlMSSQLFixTableCDC)
+		}
+	}
+	if !strings.HasPrefix(sqlMSSQLBreakTableCDC[strings.Index(sqlMSSQLBreakTableCDC, "sp_cdc_enable_db;")+len("sp_cdc_enable_db; "):], sqlMSSQLDropInstanceRecord) {
+		t.Error("the break must drop an earlier record before it writes its own")
+	}
+}
+
+// TestMSSQLTableCDCFixRestoresCaptureInstances: the fix brings back the
+// capture instances the break dropped, under their names (the setup writer
+// names them after the publication), and falls back to SQL Server's default
+// name only when nothing was recorded.
+func TestMSSQLTableCDCFixRestoresCaptureInstances(t *testing.T) {
+	ctx := context.Background()
+	t.Run("recorded", func(t *testing.T) {
+		w := freshMSSQLWorld(t)
+		w.dbCDC, w.tracked, w.instances = true, true, []string{"piperoom"}
+		s := testMSSQLStack(w)
+		if err := setupBreakCmd(ctx, s, "cdc-not-enabled-table"); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.instances) != 0 || strings.Join(w.recorded, ",") != "piperoom" {
+			t.Fatalf("after the break: instances=%q recorded=%q, want none and [piperoom]", w.instances, w.recorded)
+		}
+		if err := setupFixCmd(ctx, s, "cdc-not-enabled-table"); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(w.instances, ",") != "piperoom" || len(w.recorded) != 0 {
+			t.Fatalf("after the fix: instances=%q recorded=%q, want [piperoom] and no record", w.instances, w.recorded)
+		}
+	})
+	t.Run("nothing recorded", func(t *testing.T) {
+		w := freshMSSQLWorld(t)
+		s := testMSSQLStack(w)
+		if err := setupBreakCmd(ctx, s, "cdc-not-enabled-table"); err != nil {
+			t.Fatal(err)
+		}
+		if err := setupFixCmd(ctx, s, "cdc-not-enabled-table"); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(w.instances, ",") != "dbo_orders" {
+			t.Fatalf("after the fix: instances=%q, want [dbo_orders]", w.instances)
+		}
+	})
 }
 
 // mssqlComposeService is the part of the mssql service the tests read.
@@ -417,7 +486,7 @@ func TestMSSQLComposeProfile(t *testing.T) {
 		t.Errorf("volumes = %v, want the init scripts on the image's setup hook", svc.Volumes)
 	}
 	hc := strings.Join(svc.Healthcheck.Test, " ")
-	for _, want := range []string{"/opt/mssql-tools18/bin/sqlcmd", " -C ", " -b ", "$$MSSQL_SA_PASSWORD", "orders.dbo.orders"} {
+	for _, want := range []string{"/opt/mssql-tools18/bin/sqlcmd", " -C ", " -b ", "$$MSSQL_SA_PASSWORD", "orders.dbo.orders", "program_name LIKE N'SQLAgent - %'"} {
 		if !strings.Contains(hc, want) {
 			t.Errorf("healthcheck %q lacks %q", hc, want)
 		}

@@ -367,9 +367,12 @@ services:
     volumes:
       - ./mssql/init:/mssql-server-setup-scripts.d:ro
     healthcheck:
-      # Healthy once the init script ran: the seeded table answers. tools18's
-      # sqlcmd encrypts by default; -C trusts the image's self-signed cert.
-      test: ["CMD-SHELL", "SQLCMDPASSWORD=\"$$MSSQL_SA_PASSWORD\" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -h -1 -Q \"SET NOCOUNT ON; SELECT COUNT(*) FROM orders.dbo.orders\" | grep -q '[1-9]'"]
+      # Healthy once the init script ran (the seeded table answers) and SQL
+      # Server Agent is connected (its sessions exist), so the Agent check
+      # and `devctl setup-break agent-stopped` never see the Agent still
+      # starting. tools18's sqlcmd encrypts by default; -C trusts the image's
+      # self-signed cert.
+      test: ["CMD-SHELL", "SQLCMDPASSWORD=\"$$MSSQL_SA_PASSWORD\" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -h -1 -Q \"SET NOCOUNT ON; SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE program_name LIKE N'SQLAgent - %') THEN (SELECT COUNT(*) FROM orders.dbo.orders) ELSE 0 END\" | grep -q '[1-9]'"]
       start_period: 30s
       interval: 5s
       retries: 36

@@ -16,7 +16,8 @@ package main
 // is defined for a CDC-enabled database: with CDC off on the database the
 // database check is the one that fails, and the table check has nothing to
 // say yet. The break therefore turns CDC on for the database before it takes
-// the table out, and the fix turns the table back on.
+// the table out, and the fix turns the table back on under the capture
+// instance names the break dropped (recorded on dbo.orders in between).
 //
 // Every statement is a fixed constant below; nothing from a request reaches
 // sqlcmd. sqlcmd runs inside the container with the container's own sa
@@ -69,17 +70,51 @@ const (
 		`JOIN orders.sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'orders'), -1) ` +
 		`FROM sys.databases d WHERE d.name = N'orders'`
 	// sqlMSSQLBreakTableCDC enables CDC on the database (a no-op when it is
-	// on) and disables it on dbo.orders (a no-op when it is off).
+	// on) and disables it on dbo.orders (a no-op when it is off). Before it
+	// drops the table's capture instances it records their names as extended
+	// properties on dbo.orders (piperoom_devctl_capture_instance_<n>), so the
+	// fix recreates the same instances: the setup writer names them after the
+	// publication (internal/clients/sqlserver CreatePublication), not with
+	// SQL Server's default schema_table. A record from an earlier break is
+	// dropped first, so the record is always this break's.
 	sqlMSSQLBreakTableCDC = `SET NOCOUNT ON; USE orders; ` +
 		`IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = N'orders') = 0 EXEC sys.sp_cdc_enable_db; ` +
-		`IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'orders' AND t.is_tracked_by_cdc = 1) ` +
-		`EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'orders', @capture_instance = N'all'`
+		sqlMSSQLDropInstanceRecord +
+		`IF EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'orders' AND t.is_tracked_by_cdc = 1) BEGIN ` +
+		`DECLARE @inst sysname, @prop sysname, @n int = 0; ` +
+		`DECLARE insts CURSOR LOCAL FAST_FORWARD FOR SELECT capture_instance FROM cdc.change_tables WHERE source_object_id = OBJECT_ID(N'dbo.orders') ORDER BY create_date, capture_instance; ` +
+		`OPEN insts; FETCH NEXT FROM insts INTO @inst; ` +
+		`WHILE @@FETCH_STATUS = 0 BEGIN SET @n += 1; SET @prop = N'piperoom_devctl_capture_instance_' + CAST(@n AS nvarchar(10)); ` +
+		`EXEC sys.sp_addextendedproperty @name = @prop, @value = @inst, @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'orders'; ` +
+		`FETCH NEXT FROM insts INTO @inst; END; CLOSE insts; DEALLOCATE insts; ` +
+		`EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'orders', @capture_instance = N'all'; END`
 	// sqlMSSQLFixTableCDC enables CDC on dbo.orders when it is off, with the
-	// arguments the setup writer's sp_cdc_enable_table uses for a dev table:
-	// no gating role, net changes on (the table has a primary key).
+	// arguments the setup writer's sp_cdc_enable_table uses (no gating role,
+	// net changes on: the table has a primary key), once for each capture
+	// instance the break recorded and under the recorded name. Without a
+	// record (the table was turned off some other way) it creates one instance
+	// with SQL Server's default name, dbo_orders. The record is dropped
+	// afterwards.
 	sqlMSSQLFixTableCDC = `SET NOCOUNT ON; USE orders; ` +
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'orders' AND t.is_tracked_by_cdc = 1) ` +
-		`EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @supports_net_changes = 1`
+		`IF NOT EXISTS (SELECT 1 FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id WHERE s.name = N'dbo' AND t.name = N'orders' AND t.is_tracked_by_cdc = 1) BEGIN ` +
+		`DECLARE @inst sysname, @restored int = 0; ` +
+		`DECLARE insts CURSOR LOCAL FAST_FORWARD FOR SELECT CAST(value AS sysname) FROM sys.extended_properties ` + sqlMSSQLInstanceRecordWhere + ` ORDER BY name; ` +
+		`OPEN insts; FETCH NEXT FROM insts INTO @inst; ` +
+		`WHILE @@FETCH_STATUS = 0 BEGIN ` +
+		`IF NOT EXISTS (SELECT 1 FROM cdc.change_tables WHERE capture_instance = @inst) ` +
+		`EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @supports_net_changes = 1, @capture_instance = @inst; ` +
+		`SET @restored += 1; FETCH NEXT FROM insts INTO @inst; END; CLOSE insts; DEALLOCATE insts; ` +
+		`IF @restored = 0 EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL, @supports_net_changes = 1; END; ` +
+		sqlMSSQLDropInstanceRecord
+
+	// sqlMSSQLInstanceRecordWhere selects the break's record among the
+	// extended properties of dbo.orders (the current database is orders).
+	sqlMSSQLInstanceRecordWhere = `WHERE class = 1 AND major_id = OBJECT_ID(N'dbo.orders') AND minor_id = 0 AND name LIKE N'piperoom[_]devctl[_]capture[_]instance[_]%'`
+	// sqlMSSQLDropInstanceRecord drops every recorded capture instance name.
+	sqlMSSQLDropInstanceRecord = `DECLARE @rec sysname; ` +
+		`WHILE 1 = 1 BEGIN SET @rec = (SELECT TOP (1) name FROM sys.extended_properties ` + sqlMSSQLInstanceRecordWhere + `); ` +
+		`IF @rec IS NULL BREAK; ` +
+		`EXEC sys.sp_dropextendedproperty @name = @rec, @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'TABLE', @level1name = N'orders'; END; `
 )
 
 // mssqlAgentStopped and mssqlCDCNotEnabledTable are registered in
