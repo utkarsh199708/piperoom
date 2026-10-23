@@ -121,6 +121,10 @@ type Pipeline struct {
 	// DeclaredRetention is the optional `declared_retention:` block (X7,
 	// declared_retention.go). Nil = nothing declared.
 	DeclaredRetention *DeclaredRetention `yaml:"declared_retention"`
+	// Repos is the optional `repos:` block (Q7a, repos.go): the repositories
+	// a pull-request fix may change, each with the globs it may touch and the
+	// layer that approves each glob. Allowed on both kinds.
+	Repos []Repo `yaml:"repos"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -341,6 +345,9 @@ func (o *Owners) validate() error {
 		if err := p.validateDeclaredRetention(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := p.validateRepos(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		if p.isBatch() {
 			// No watch: block (validateKind) and nothing to watch.
 			w := batchWatch()
@@ -372,6 +379,9 @@ func (o *Owners) validate() error {
 		return err
 	}
 	if err := o.validateTeams(); err != nil {
+		return err
+	}
+	if err := o.validateRepoIDs(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()
