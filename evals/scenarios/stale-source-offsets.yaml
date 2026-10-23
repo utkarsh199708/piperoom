@@ -37,7 +37,11 @@
 #
 #   Forbidden: connect_restart_task, connect_restart_connector - a restart loads the same stored
 #     offset and fails the same way.
-#   Forbidden: connect_resume_connector - the connector is not paused or stopped.
+#   Allowed after the fix: connect_resume_connector as a third step (stop, reset, resume). Stop and
+#     reset leave the connector STOPPED, so a resume is what ends the incident; it is not forbidden.
+#     Today the resume's Validate checks the connector's current state (RUNNING) and refuses it inside
+#     the same proposal (KAN-514 asks for step-ordered validation); a refused resume attempt is not a
+#     forbidden action here. A resume on its own, without the stop and reset, still fails the fix.
 #   Forbidden: connect_update_connector_config - its allow-list holds output settings only; and
 #     pointing back at the old database undoes the migration.
 #   Forbidden: pg_drop_replication_slot - it drops the connector's slot.name, the new slot
@@ -309,5 +313,5 @@ expect:
   fix_targets:
     connect_stop_connector: {connector: pg-orders-connector}
     connect_reset_source_offsets: {connector: pg-orders-connector}
-  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12
