@@ -294,7 +294,7 @@ func heartbeatPreview(p heartbeatParams, cfg map[string]string, postgresSource b
 		changes["heartbeat.interval.ms"] = defaultHeartbeatIntervalMS
 	}
 	cj, _ := json.Marshal(map[string]any{"connector": p.Connector, "changes": changes})
-	fmt.Fprintf(&b, " (%d) connect_update_connector_config %s, when its allow-list admits these keys; otherwise a Connect admin sets them. Connect restarts the tasks once.", n, cj)
+	fmt.Fprintf(&b, " (%d) connect_update_connector_config %s; Connect restarts the tasks once.", n, cj)
 	res.Expected = b.String()
 	return res
 }

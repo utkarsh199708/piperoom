@@ -146,9 +146,21 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := ctxHeartbeatScope(ctx, set, false); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
 	cfg, err := a.d.Connect.Config(ctx, set.connector)
 	if err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	// A heartbeat key on a connector that is not a Debezium source would be
+	// refused at Execute: the preview must not promise it.
+	for _, k := range set.keys() {
+		if isHeartbeatKey(k) {
+			if err := checkHeartbeatGuard(set.connector, k, cfg); err != nil {
+				return PreviewResult{}, previewErr(a.Name(), err)
+			}
+		}
 	}
 	keys := set.keys()
 	todo, same := set.plan(cfg)
@@ -182,22 +194,14 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 	if len(sameText) > 0 {
 		res.Expected += " (unchanged: " + strings.Join(sameText, ", ") + ")"
 	}
-	// Undo needs, for every key written, a stored value the allow-list would
-	// accept again; an unset key (or a value we truncated or do not offer)
-	// cannot be restored by an action, and a partial undo is not offered.
-	prev := make(map[string]string, len(todoKeys))
-	for _, k := range todoKeys {
-		v, set := cfg[k]
-		if !set || !a.allowList()[k][v] {
-			prev = nil
-			break
-		}
-		prev[k] = v
-	}
+	prev, note := a.undoValues(ctx, cfg, todoKeys)
 	if prev != nil {
 		res.Reversible = true
-		if set.legacy {
-			k := todoKeys[0]
+		if note != "" {
+			res.Expected += "; undo: " + note
+		}
+		if set.legacy && len(prev) == 1 {
+			k := sortedStringKeys(prev)[0] // not todoKeys[0]: undo may write another key
 			res.Rollback = rollbackText(a.Name(), map[string]string{"connector": set.connector, "key": k, "value": prev[k]})
 		} else {
 			b, _ := json.Marshal(map[string]any{"connector": set.connector, "changes": prev}) // strings only: cannot fail
