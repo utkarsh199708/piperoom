@@ -163,6 +163,35 @@ Debezium MBeans: names as `connect_worker_metrics` reads them, except that expor
 return data on the stack. The first live run should record
 the time to healthy here (the row's target is under 2 minutes).
 
+## Local models: the `llm` profile (V17)
+
+Run Piperoom's agent on a free local model. Profile `llm` adds Ollama (`ollama/ollama:0.12.6`, pinned) with
+`OLLAMA_CONTEXT_LENGTH=131072`: Ollama cuts a prompt past its context window without an error, and its default
+window (2k to 4k tokens) is far under one investigation turn (`docs/design/model-providers.md` §6.2). It listens on
+`127.0.0.1:11434` only and keeps models in the named volume `ollama-models`. Without the profile nothing changes.
+
+```
+docker compose -f dev/docker-compose.yml --profile llm up -d    # the server only
+go run ./cmd/devctl llm-up                                       # the same, then pulls llama3.1:8b (about 5 GB, once)
+```
+
+`llama3.1:8b` is tool-capable and has a 131072-token window. The endpoint is `http://localhost:11434/v1`. Point the
+server (or `cmd/investigate`) at it:
+
+| Variable | Value |
+|---|---|
+| `PIPEROOM_MODEL_PROVIDER` | `openai` |
+| `PIPEROOM_MODEL_FLAVOR` | `ollama` (its default base URL is the endpoint above; `PIPEROOM_MODEL_BASE_URL` overrides it) |
+| `PIPEROOM_MODEL` | `llama3.1:8b` |
+| `PIPEROOM_MODEL_CONTEXT_TOKENS` | `131072` (Ollama reports none the client can read) |
+| `PIPEROOM_MODEL_UNVERIFIED` | `on`: required until the model is in `supported.json` |
+
+Planned eval run, available once V10 lands: `go run ./evals/cmd/evalrun -provider openai -flavor ollama -model
+llama3.1:8b -only schema-change`. A local run is valid for development, not as a gate result.
+**Not run yet:** written without Docker (2026-10-23). The compose structure and the pull call are unit-tested
+(`go test ./cmd/devctl -run 'LLM|Ollama'`); nobody has seen the profile come up healthy, `llm-up` finish a pull, or
+the start probe and `evalrun` pass against it.
+
 ## The dev-only break/fix API (`devctl serve`)
 
 For the web "Break something" menu (A6) there is a tiny local HTTP API:
