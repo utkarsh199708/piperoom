@@ -186,23 +186,30 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// pipeline, never a pipeline owners.yaml does not define yet.
 	setupSnap := s.setupSnapshot(ctx, roomID)
 	vctx := s.actionCtx(ctx, roomID, pipelineID)
-	// The room pipeline's source kind decides the approving layer of a
-	// source-neutral source action (stepLayer).
-	sourceKind := s.pipelineSourceKind(pipelineID)
 	if setupSnap != nil {
 		if prov, ok := setupSnap.SetupProvisional(); ok {
 			vctx = tools.WithPipeline(vctx, prov)
-			sourceKind = prov.SourceKindOrDefault()
 		}
 	}
 	// Structural checks first: they do not need the room state.
-	// The class comes from the registry, never from the proposer (X2, X6).
-	p.Class = ""
-	for i, step := range p.Steps {
+	stepActs := make([]actions.Action, 0, len(p.Steps))
+	for _, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
 			return "", events.Event{}, validation(fmt.Sprintf("unknown action %q", step.Action))
 		}
+		stepActs = append(stepActs, a)
+	}
+	// Q7k: a proposal with a Deferred (pull-request) step holds only
+	// Deferred steps, at most actions.MaxDeferredSteps.
+	deferredSteps, err := checkDeferredSteps(stepActs)
+	if err != nil {
+		return "", events.Event{}, err
+	}
+	// The class comes from the registry, never from the proposer (X2, X6).
+	p.Class = ""
+	for i, step := range p.Steps {
+		a := stepActs[i]
 		switch c := actions.ClassOf(a); {
 		case c == actions.ClassFix:
 		case p.Class != "" && p.Class != c:
@@ -211,7 +218,13 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		default:
 			p.Class = c
 		}
-		if want := stepLayer(a, sourceKind); step.Layer != want {
+		// The one layer rule (actions.StepLayer): the room's pipeline and the
+		// step's params decide the approver, never the proposer (Q7k, Q8o).
+		want, lerr := s.stepLayer(setupSnap, pipelineID, a, step.Params)
+		if lerr != nil {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): no approving layer: %v", i, step.Action, lerr))
+		}
+		if step.Layer != want {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, want))
 		}
 		if !isKnownLayer(step.Layer) {
@@ -247,6 +260,14 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// pipeline nothing can be scoped to.
 	if s.proposalsDisabled(st) {
 		return "", events.Event{}, errProposalsDisabled(st.snap.PipelineID)
+	}
+
+	// Q7k: at most maxOpenFixPRs fix PRs open (or about to open) per room.
+	if deferredSteps > 0 {
+		if n := s.pendingFixPRs(&st.snap); n+deferredSteps > maxOpenFixPRs {
+			return "", events.Event{}, validation(fmt.Sprintf(
+				"a room holds at most %d open fix pull requests (%d open or proposed); wait until one merges or closes", maxOpenFixPRs, n))
+		}
 	}
 
 	// Scope check against the room's pipeline (docs/api.md): a step must
