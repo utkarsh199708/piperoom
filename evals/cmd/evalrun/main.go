@@ -117,12 +117,12 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
 	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
-	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (keyword grade only), "claude" (LLM judge on every hypothesis, needs a -tags claude build) or "auto" (the LLM judge only where the keyword pass is ambiguous: recorded verdicts first, then live calls up to -judge-max-calls); default: each scenario's judge field, else auto`)
+	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (keyword grade only), "llm" (LLM judge on every hypothesis, needs a -tags livejudge build; "claude" is its alias) or "auto" (the LLM judge only where the keyword pass is ambiguous: recorded verdicts first, then live calls up to -judge-max-calls); default: each scenario's judge field, else auto`)
 	fs.StringVar(&f.judgeModel, "judge-model", "", "model for the LLM judge (default: the configured model, PIPEROOM_MODEL)")
 	fs.StringVar(&f.judgeCache, "judge-cache", evals.DefaultJudgeCacheDir, "directory of recorded judge verdicts that -judge auto reads first (empty: none)")
 	fs.BoolVar(&f.cacheOnly, "judge-cache-only", false, "-judge auto reads only the recorded verdicts and fails on a miss; never a live judge call (replays in CI)")
 	fs.IntVar(&f.maxCalls, "judge-max-calls", evals.DefaultJudgeMaxCalls, "at most this many live judge calls per run in -judge auto, and per -judge-fill; past it an ambiguous hypothesis is reported ambiguous (unjudged) and counts as not passed (negative: no live calls)")
-	fs.StringVar(&f.judgeFill, "judge-fill", "", "MANIFEST (evals/judgecache/ambiguous.json): record a live judge verdict into -judge-cache for every listed corpus text that lacks one, up to -judge-max-calls, and exit. PAID: needs the owner's approval, a -tags claude build and the model provider's credentials (ANTHROPIC_API_KEY, or Vertex/Bedrock per PIPEROOM_MODEL_PROVIDER); -dry-run prints the estimate only")
+	fs.StringVar(&f.judgeFill, "judge-fill", "", "MANIFEST (evals/judgecache/ambiguous.json): record a live judge verdict into -judge-cache for every listed corpus text that lacks one, up to -judge-max-calls, and exit. PAID: needs the owner's approval, a -tags livejudge build and the model provider's credentials (ANTHROPIC_API_KEY, or Vertex/Bedrock per PIPEROOM_MODEL_PROVIDER); -dry-run prints the estimate only")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "with -judge-fill: count the missing verdicts and estimate their tokens and cost; no model calls, nothing written")
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
@@ -230,6 +230,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		if err := evals.ValidateAll(scenarios, defs); err != nil {
 			return 1, err
 		}
+		// A run only warns about a broken setup recording (Evaluate);
+		// -check fails on it so it is fixed before it costs a grouping.
+		if d := setupRecordingsDir(f.scenarios); d != "" {
+			if _, err := evals.LoadSetupReplays(d); err != nil {
+				return 1, err
+			}
+		}
 		for _, sc := range scenarios {
 			for _, w := range sc.Warnings() {
 				fmt.Fprintf(stderr, "warning: %s: %s\n", sc.Name, w)
@@ -325,6 +332,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		JudgeCache:     f.judgeCache,
 		JudgeCacheOnly: f.cacheOnly,
 		JudgeMaxCalls:  judgeMaxCalls(f.maxCalls),
+		SetupDir:       setupRecordingsDir(f.scenarios),
 		Options:        opts,
 		Runs:           f.runs,
 		Parallel:       f.parallel,
@@ -408,14 +416,14 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 	return 0, nil
 }
 
-// liveJudge builds the live LLM judge a run needs. -judge claude (or a
-// scenario's judge: claude) must have it, and so must -judge auto (the
+// liveJudge builds the live LLM judge a run needs. -judge llm (or a
+// scenario's judge: llm; claude is the alias) must have it, and so must -judge auto (the
 // default) unless it may make no live call (-judge-cache-only, or
 // -judge-max-calls 0 or less). Without it evalrun refuses to start: in a build
-// without -tags claude every ambiguous live hypothesis would otherwise count
+// without -tags livejudge every ambiguous live hypothesis would otherwise count
 // as unjudged and not passed, and the run would read as a regression.
 func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, error) {
-	needed := f.judge == evals.JudgeClaude || (f.judge == "" && anyClaudeJudge(scenarios))
+	needed := evals.IsLLMJudge(f.judge) || (f.judge == "" && anyClaudeJudge(scenarios))
 	auto := f.judge == evals.JudgeAuto || (f.judge == "" && anyAutoJudge(scenarios))
 	if !needed && (!auto || f.cacheOnly || f.maxCalls <= 0) {
 		return nil, nil
@@ -423,7 +431,7 @@ func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, erro
 	j, err := newJudge(f.judgeModel)
 	switch {
 	case err != nil && (needed || !errors.Is(err, errNoLiveJudge)):
-		// A -tags claude build whose provider setup failed (no Vertex
+		// A -tags livejudge build whose provider setup failed (no Vertex
 		// credentials, say) reports that error, not a missing build.
 		return nil, err
 	case err != nil:
@@ -441,8 +449,8 @@ func judgeMaxCalls(n int) int {
 	return n
 }
 
-// errNoLiveJudge is newJudge's error in a build without -tags claude.
-var errNoLiveJudge = errors.New("the claude judge needs a build with -tags claude")
+// errNoLiveJudge is newJudge's error in a build without -tags livejudge.
+var errNoLiveJudge = errors.New("the live LLM judge needs a build with -tags livejudge (or its alias -tags claude)")
 
 func orNone(s string) string {
 	if s == "" {
@@ -462,10 +470,11 @@ func anyAutoJudge(scenarios []evals.Scenario) bool {
 	return false
 }
 
-// anyClaudeJudge reports whether a scenario asks for the LLM judge itself.
+// anyClaudeJudge reports whether a scenario asks for the LLM judge itself
+// (judge: llm, or its alias claude).
 func anyClaudeJudge(scenarios []evals.Scenario) bool {
 	for _, s := range scenarios {
-		if s.Judge == evals.JudgeClaude {
+		if evals.IsLLMJudge(s.Judge) {
 			return true
 		}
 	}
@@ -610,6 +619,21 @@ const (
 	setDefault = "default"
 	setHeldout = "heldout"
 )
+
+// setupRecordingsDir is the sibling setup/recordings directory of the
+// scenarios directory (U1-20), or "" when it does not exist or holds no
+// *.json: a checkout without the recordings runs exactly as before, and a run
+// with them groups the setup scenarios by source and target in the report.
+func setupRecordingsDir(scenariosDir string) string {
+	d := filepath.Join(filepath.Dir(filepath.Clean(scenariosDir)), "setup", "recordings")
+	if info, err := os.Stat(d); err != nil || !info.IsDir() {
+		return ""
+	}
+	if paths, err := filepath.Glob(filepath.Join(d, "*.json")); err != nil || len(paths) == 0 {
+		return ""
+	}
+	return d
+}
 
 // loadSet reads the scenarios a run replays and the pending ones only -check
 // validates. The default set is the scenarios directory plus, when -learned

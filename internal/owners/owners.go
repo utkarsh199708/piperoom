@@ -25,6 +25,11 @@ type Pipeline struct {
 	// value, and a field of the other kind. Read it with KindOrDefault and the
 	// pipeline's layers with Layers.
 	Kind string `yaml:"kind"`
+	// SourceKind is the optional cdc `source_kind:` (Q8d, source_kind.go):
+	// "postgres" or empty for a Postgres source, "mysql" for a MySQL one. It
+	// picks the source layer (Layers()[0]) and refuses the Postgres-only
+	// watch fields on MySQL. Read it with SourceKindOrDefault.
+	SourceKind string `yaml:"source_kind"`
 	// TopicPrefix is the Debezium topic prefix; pipeline topics are named
 	// "<TopicPrefix>.<schema>.<table>". A cdc field: a batch pipeline has none.
 	TopicPrefix string `yaml:"topic_prefix"`
@@ -121,6 +126,10 @@ type Pipeline struct {
 	// DeclaredRetention is the optional `declared_retention:` block (X7,
 	// declared_retention.go). Nil = nothing declared.
 	DeclaredRetention *DeclaredRetention `yaml:"declared_retention"`
+	// Repos is the optional `repos:` block (Q7a, repos.go): the repositories
+	// a pull-request fix may change, each with the globs it may touch and the
+	// layer that approves each glob. Allowed on both kinds.
+	Repos []Repo `yaml:"repos"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -341,6 +350,9 @@ func (o *Owners) validate() error {
 		if err := p.validateDeclaredRetention(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := p.validateRepos(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		if p.isBatch() {
 			// No watch: block (validateKind) and nothing to watch.
 			w := batchWatch()
@@ -357,6 +369,9 @@ func (o *Owners) validate() error {
 		if err := resolveReconcileTables(*p, &w); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if p.IsMySQL() {
+			noSlotSignals(&w)
+		}
 		p.watch = &w
 	}
 	if err := o.validateDLQ(); err != nil {
@@ -372,6 +387,9 @@ func (o *Owners) validate() error {
 		return err
 	}
 	if err := o.validateTeams(); err != nil {
+		return err
+	}
+	if err := o.validateRepoIDs(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()

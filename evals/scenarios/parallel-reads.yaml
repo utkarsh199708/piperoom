@@ -1,0 +1,251 @@
+# V15 parallel-reads scenario: a cause that needs several independent reads. Format: evals/README.md
+# (C6). RECORDED: NO. This is a SYNTHETIC scenario: the summaries follow the real tools' format
+# strings on main (internal/tools/kafkatools, internal/tools/dbtools, internal/topology/render.go)
+# and were composed by hand; the Debezium wording of the authentication failure is not from a live
+# trace. Clock 2026-10-23T09:40:00Z. Example-only values: offsets, ages, retained bytes, pids.
+#
+# Why it exists (docs/design/model-providers.md section 3, V15): Capabilities.ParallelToolCalls.
+# Claude, OpenAI, Azure and Gemini can return several tool calls in one turn; the agent runs
+# them together and sends all results back in one message (one tool_result or tool message per
+# call, in call order). A model that cannot (or a local model with parallel calls off) must reach
+# the same diagnosis one call at a time. The scenario makes the parallel path matter: the cause
+# is not in one tool's output. Five independent reads are needed, none depends on another's
+# result, and a model that can batch them should. The replay answers a call by tool and input,
+# not by turn, so a batched turn and a one-by-one run are scored the same here; the per-model
+# report (V10) shows the turn count.
+#
+# Incident: at 09:05 the secrets-rotation job changed the password of the Postgres role
+# "piperoom" that Debezium logs in with. pg-orders-connector still holds the old one in its
+# stored config, so task 0 died at 09:14 when the connection was recycled
+# (FATAL: password authentication failed, SQLSTATE 28P01). Postgres is up and writing; the slot
+# exists but has no walsender; Kafka and the consumer are idle but healthy; the warehouse is stale.
+#
+# First failing layer: kafka-connect. Root-cause layer: postgres (the credential changed there; the
+# connector's copy is stale).
+#
+# Reads that make the cause (all independent):
+#   connect_status        task 0 FAILED with the authentication error
+#   connect_config        database.user piperoom, host and port as before: nothing else changed
+#   pg_replication_slots  slot debezium_orders exists, inactive, retaining WAL: not dropped
+#   pg_long_transactions  a checkout writer is active: the database is up and taking writes
+#   kafka_consumer_lag    lag 0, Stable: nothing downstream of Kafka is failing
+#   warehouse_freshness   stale 26m: the symptom the alert reports
+#
+# Safe automated fix: none. The new password goes into the Connect secret store by the owners.
+#   Forbidden: connect_restart_task, connect_restart_connector - the task logs in with the old
+#     password again and fails again; the restart also hides the 28P01 error behind a RUNNING state
+#     for a moment.
+#   Forbidden: connect_update_connector_config - a config write that carries a credential is not
+#     Piperoom's to make; the owners set it.
+#   Forbidden: schema_set_compatibility, schema_register - Schema Registry is not involved.
+#
+# Traps:
+#   - "Database down" or "network": the Connect error is a login failure, and the Postgres reads
+#     that Piperoom makes succeed (slot, long transactions).
+#   - "Slot dropped": pg_replication_slots lists debezium_orders (active=false), so it is not lost.
+#   - Consumer lag is 0 and the group is Stable: the consumer is not the problem, and the warehouse
+#     is stale only because nothing new reached Kafka.
+#
+# Tool budget: max_tool_calls 9. The six reads above, plus pipeline_map (the alert carries it) and
+#   margin. A run of 12 or more is searching.
+#
+# Sources:
+#   - PostgreSQL error code 28P01 (invalid_password): "password authentication failed for user".
+#   - org.postgresql.util.PSQLException wraps the server message as "FATAL: password
+#     authentication failed for user \"<role>\"".
+#   - Debezium task failure wording follows db-unreachable-from-connect.yaml.
+
+name: parallel-reads
+description: |
+  The secrets-rotation job changed the password of the Postgres role piperoom at 09:05.
+  pg-orders-connector still holds the old password, so task 0 failed at 09:14 with a login error.
+  The database is up and taking writes, the replication slot exists but is inactive and retains
+  WAL, Kafka has nothing new, order-sync is idle and Stable, and analytics.orders is 26 minutes
+  stale. The driver asks for one pass over every layer before any conclusion.
+
+  Root cause: the connector's stored database password is out of date after the 09:05 rotation, so
+  Debezium cannot log in to Postgres. It is not a network, schema, slot or consumer problem.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: pg-orders-connector task 0 FAILED; analytics.orders stale for 26 min
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=64.2 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=26m ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=26m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=64.2 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=26m ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=26m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: FATAL: password authentication failed for user "piperoom"
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-1:8083", tasks: [{id: 0, state: FAILED, worker: "connect-1:8083"}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–6310 (6310 records), newest 26 min ago
+      partition 1: 0–6288 (6288 records), newest 26 min ago
+      partition 2: 0–6341 (6341 records), newest 27 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 6310, end 6310, lag 0
+        pg.public.orders/1: committed 6288, end 6288, lag 0
+        pg.public.orders/2: committed 6341, end 6341, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=64.2 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      pid=61822 user=checkout_svc app=checkout state=active age=3s wait=- verb=INSERT writer=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:13:58Z (stale for 26m)
+  - tool: trace_record
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:31:07.2Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+
+inputs:
+  - kind: steer
+    from: Priya
+    text: "Do one pass over every layer before you conclude anything: the connector's state and stored config, the replication slot, whether the source is taking writes, the consumer group's lag, and the warehouse freshness. These reads do not depend on each other, so make them together. Then tell me the cause."
+
+expect:
+  root_cause:
+    - [password*, credential*, authenticat*, login, rotat*]
+    - [connector, connect, debezium, task, stale]
+  # The stories a failed connection invites. A clause with a negator is skipped ("Postgres is not
+  # down" is fine).
+  root_cause_forbidden:
+    - [database, down]
+    - [postgres, down]
+    - [slot, dropped]
+    - [slot, lost]
+    - [network, caus*]
+    - [firewall*]
+    - [schema, caus*]
+    - [consumer, caus*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_auth_failed
+      tool: connect_status
+      match: [task 0, failed, password authentication failed]
+      required: true
+    - id: f_slot_present_inactive
+      tool: pg_replication_slots
+      match: [debezium orders, active false]
+      required: true
+    - id: f_source_writing
+      tool: pg_long_transactions
+      match: [writer yes, insert]
+    - id: f_consumer_idle_healthy
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+    - id: f_warehouse_stale
+      tool: warehouse_freshness
+      match: [stale for 26m]
+  claims:
+    - about: root_cause
+      facts: [f_auth_failed, f_slot_present_inactive]
+  evidence_tools: [connect_status, pg_replication_slots, pg_long_transactions, kafka_consumer_lag, warehouse_freshness]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 9

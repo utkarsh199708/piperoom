@@ -1,5 +1,9 @@
 //go:build claude
 
+// The hand-off judge is provider-neutral (V1b): it runs on any llm.Model
+// (JudgeHandoffWith). It stays behind the live-judge build tag, which links
+// it only into the live runs that call a model.
+
 package agent
 
 import (
@@ -61,13 +65,24 @@ func judgeSchema() map[string]any {
 	}
 }
 
-// JudgeHandoff asks the configured model (Options.Model, PIPEROOM_MODEL)
-// whether any claim in the summary contradicts the log. Both are passed inside
-// the untrusted wrapper. The verdict is held to a strict JSON schema; no
-// sampling parameter is sent because current models reject non-default ones.
+// JudgeHandoff is JudgeHandoffWith on the Anthropic API client from the
+// environment (ANTHROPIC_API_KEY), with the configured model (Options.Model,
+// PIPEROOM_MODEL).
 func JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options) (HandoffVerdict, error) {
 	opts = opts.withDefaults()
 	return judgeHandoff(ctx, evs, s, opts, newModel(opts, nil))
+}
+
+// JudgeHandoffWith asks m, with model Options.Model, whether any claim in the
+// summary contradicts the log. Both are passed inside the untrusted wrapper.
+// The verdict is asked for as structured output (Request.OutputSchema) and
+// always parsed strictly here; no sampling parameter is sent because current
+// models reject non-default ones.
+func JudgeHandoffWith(ctx context.Context, m llm.Model, evs []events.Event, s events.HandoffSummary, opts Options) (HandoffVerdict, error) {
+	if m == nil {
+		return HandoffVerdict{}, errors.New("agent: judge handoff: no model")
+	}
+	return judgeHandoff(ctx, evs, s, opts.withDefaults(), m)
 }
 
 // JudgeHandoff is JudgeHandoff on the endpoint's model client, so the
@@ -105,14 +120,14 @@ func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 		Effort:       judgeEffort(opts),
 		OutputSchema: judgeSchema(),
 	}
-	msg, err := m.Turn(ctx, params)
+	msg, text, err := structuredTurn(ctx, m.Turn, m.Capabilities(params.Model), params, "judge_verdict")
 	if err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: request: %w", err)
 	}
 	if msg.Stop == llm.StopRefusal {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: model refused the request")
 	}
-	dec := json.NewDecoder(strings.NewReader(extractText(msg.Message.Parts)))
+	dec := json.NewDecoder(strings.NewReader(text))
 	dec.DisallowUnknownFields()
 	var v HandoffVerdict
 	if err := dec.Decode(&v); err != nil {

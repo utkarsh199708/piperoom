@@ -69,7 +69,7 @@ func (s *Service) IsSolo(userID string) bool {
 // the users.yaml layers, the owners.yaml layers they own as a user, through a
 // group or as a backup, and every layer for the solo user. Only layers of the
 // pipeline kinds owners.yaml uses count (knownLayers, P4a-4). The result is in
-// events.Layers order and is never nil.
+// owners.KnownLayers order and is never nil.
 func (s *Service) LayersFor(u User) []string {
 	known := s.knownLayers()
 	if s.soloUser != "" && u.ID == s.soloUser {
@@ -387,7 +387,7 @@ func (s *Service) CheckExportAccess(ctx context.Context, user User, roomID strin
 	if err != nil {
 		return err
 	}
-	for _, layer := range events.Layers {
+	for _, layer := range owners.KnownLayers() {
 		if _, err := s.authorizeLayer(snap.PipelineID, user, layer, "", false); err == nil {
 			return nil
 		}

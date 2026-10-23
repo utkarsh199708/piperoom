@@ -115,3 +115,21 @@ func TestWarnIfNotBedrockModelID(t *testing.T) {
 		}
 	}
 }
+
+// PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS reaches the endpoint (V2a): it is
+// copied as is, and a value other than all or non-claude refuses start.
+func TestNewAgentEndpointNeutraliseControlTokens(t *testing.T) {
+	if got := EndpointConfig(config.Config{ModelNeutraliseControlTokens: "non-claude"}); got.NeutraliseControlTokens != "non-claude" {
+		t.Fatalf("NeutraliseControlTokens = %q, want non-claude", got.NeutraliseControlTokens)
+	}
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	for _, ok := range []string{"", "all", "non-claude"} {
+		if _, err := NewAgentEndpoint(context.Background(), config.Config{ModelProvider: "anthropic", ModelNeutraliseControlTokens: ok}, log, nil); err != nil {
+			t.Fatalf("%q: %v", ok, err)
+		}
+	}
+	_, err := NewAgentEndpoint(context.Background(), config.Config{ModelProvider: "anthropic", ModelNeutraliseControlTokens: "off"}, log, nil)
+	if err == nil || !strings.Contains(err.Error(), "PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS") {
+		t.Fatalf("err = %v, want a refusal naming the variable", err)
+	}
+}
