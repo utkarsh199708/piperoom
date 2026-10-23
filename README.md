@@ -70,10 +70,15 @@ The binary comes from this checkout (`go build -o bin/piperoom-setup ./cmd/setup
 image, which ships it as `/piperoom-setup` for runner mode:
 
 ```sh
-docker run --rm -it --mount type=tmpfs,destination=/work \
+read -rs PIPEROOM_SETUP_CODE && export PIPEROOM_SETUP_CODE   # paste the pairing code
+docker run --rm -it -e PIPEROOM_SETUP_CODE --mount type=volume,source=piperoom-orders,destination=/work \
   --entrypoint /piperoom-setup piperoom:pilot \
-  --server <origin> --code <code> --project /work
+  --server <origin> --project /work
 ```
+
+The pairing code is single-use; passing it through the environment keeps it out of shell history,
+`ps` and `docker inspect`. The named volume keeps `owners.yaml`, `setup-log.jsonl` and the secret
+store after the container exits; a tmpfs mount or no mount loses them.
 
 `--standalone` is for your own machine, because it insists on a loopback address, and the image sets
 `PIPEROOM_HTTP_ADDR=0.0.0.0`, so it refuses there by design. The setup room, the typed operations the
@@ -196,7 +201,9 @@ ubuntu (and on macOS when the runner has Colima; otherwise it is a documented sk
 self-hosted runner, label `piperoom-r1`, Docker Desktop in Linux-container mode), schedule
 and manual only: it never runs on a pull request, so it is not a required check and a
 checkout without that runner never shows it as pending. Its `go test -json` export is kept
-as an artifact for 30 days.
+as an artifact for 30 days. The repository is public, so before registering that runner set
+"Require approval for all external contributors" in the Actions settings and run it under a
+dedicated unprivileged Windows account (see the workflow's header).
 
 ### Web tooling: npm install scripts
 

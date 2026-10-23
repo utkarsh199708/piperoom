@@ -22,6 +22,18 @@ name: Setup nightly (Windows)
 # Run it from the owner's signed-in desktop session (`./run.cmd`), not as a
 # Windows service: Docker Desktop's Linux engine is only available to the
 # interactive user that started it.
+#
+# Security: this repository is public, and a runner is picked by its labels,
+# not by workflow, so a pull request that adds a workflow with
+# `runs-on: [self-hosted, ...]` would run on this machine once its workflows
+# are allowed to run. Before registering the runner, set Settings > Actions >
+# General > "Require approval for all external contributors" (not only
+# first-time ones) and never approve a fork PR's run that changes
+# .github/workflows. Run it under a dedicated, unprivileged Windows account
+# with its own Docker Desktop, not the owner's daily account and browser
+# sessions. The job below also refuses to run outside this repository and
+# outside main, so a workflow_dispatch of an unreviewed branch never reaches
+# the runner.
 # The runner needs: Go 1.27 (or let setup-go install it), Docker Desktop
 # running Linux containers, git, and network access to repo1.maven.org (the
 # connector plugin download) and to the container registries the rendered
@@ -51,6 +63,7 @@ jobs:
   compose-integration:
     name: Compose integration (Windows, Docker Desktop)
     runs-on: [self-hosted, windows, x64, piperoom-r1]
+    if: github.repository == 'utkarsh199708/piperoom' && github.ref == 'refs/heads/main'
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -74,6 +87,9 @@ jobs:
             Write-Host "::error::docker is not on PATH on the self-hosted Windows runner"
             exit 1
           }
+          # Windows PowerShell 5.1 runs with $ErrorActionPreference = 'Stop'
+          # here, and docker's stderr would throw before the message below.
+          $ErrorActionPreference = 'Continue'
           $out = docker info --format '{{.ServerVersion}} {{.OSType}}' 2>&1
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::error::docker info failed on the self-hosted Windows runner: start Docker Desktop (Linux containers)"
@@ -85,14 +101,17 @@ jobs:
             Write-Host "::error::Docker Desktop is not in Linux-container mode: $out"
             exit 1
           }
-      - name: go test -tags integration ./internal/setup/... (TestComposeStackToHealthyConnect)
+      - name: go test -tags integration TestComposeStackToHealthyConnect
         shell: powershell
         run: |
           # -json is the export: one JSON event per line, uploaded below. The
           # test renders its own Compose project on free ports, installs the
           # pinned connector plugin and removes the project again, so no dev
-          # stack and no stack lock are involved.
-          go test -count=1 -timeout 45m -json -tags integration ./internal/setup/... |
+          # stack and no stack lock are involved. Only the integration test
+          # runs: the setup unit tests run in setup-matrix.yml, which skips the
+          # three that cannot pass on Windows, and a symlink-privilege skip of
+          # a unit test would fail this job for the wrong reason.
+          go test -count=1 -timeout 45m -json -tags integration -run '^TestComposeStackToHealthyConnect$' ./internal/setup/targets/compose/ |
             Out-File -FilePath test.json -Encoding utf8
           $rc = $LASTEXITCODE
 

@@ -160,8 +160,10 @@ jobs:
         timeout-minutes: 45
         shell: bash
         run: |
+          if ! colima status >/dev/null 2>&1; then
+            colima start --cpu 2 --memory 4 --disk 20 || { echo "::error::colima start failed"; exit 1; }
+          fi
           set +e
-          colima status >/dev/null 2>&1 || colima start --cpu 2 --memory 4 --disk 20
           go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
           rc=$?
           set -e
