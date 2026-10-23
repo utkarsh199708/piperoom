@@ -298,10 +298,9 @@ the cause (`no-replica-identity` and `blocked-slot` use the devctl alert text).
 16 MiB clear, 30 s) from `dev/owners.q2.yaml`. The heartbeat table is deliberately not a
 `source_table`: `source_create_heartbeat_table` refuses one that is, and the dev fix adds it to
 `dbz_publication` itself (`pg_add_publication_table` accepts only `source_tables`). The
-action's preview lists `heartbeat.action.query` and `heartbeat.interval.ms` "when its allow-list
-admits these keys; otherwise a Connect admin sets them": in this wave
-`connect_update_connector_config`'s allow-list does not admit `heartbeat.*`, so a Connect admin
-applies them.
+action's preview lists `heartbeat.action.query` and `heartbeat.interval.ms` as a following
+`connect_update_connector_config` step, which its allow-list admits since the Q batch 2 heartbeat
+keys; `fix_targets` allows that step on the connector as an extra, it is not required.
 
 **Synthesised from the code paths, not recorded.** The Q2g session had no Docker and §20-§23 are
 not observed on the stack yet. Every summary is composed from the tools' format strings and the
