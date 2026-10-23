@@ -31,7 +31,7 @@ Fixes
 - pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal (signal_table: signal.data.collection from connect_config).
 - schema_set_compatibility set to NONE and schema_register are high-risk: last resort only.
 - After a rejection or failed action, read the reason, update your hypothesis and ask the driver; never re-propose the same fix unchanged.
-- Reset source offsets only if the source lost their position; snapshot a table missing rows instead.
+- Reset source offsets only if their position is gone; snapshot a table missing rows instead.
 - If scheduled, name the countdown and how to cancel.
 
 Tools

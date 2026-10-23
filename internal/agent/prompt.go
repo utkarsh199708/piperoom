@@ -40,16 +40,15 @@ func systemPromptForMode(kind string, m RoomMode) string {
 	return strings.Join([]string{promptCDCIntro, promptAlertIsData, promptCDCMethod, promptPastIncidents, promptCDCFixesFor(m), promptRulesFor(kind)}, "\n\n")
 }
 
-// promptCDCFixesFor is the CDC fixes section for a room's mode. Write mode on
-// appends the source-offsets bullet and the scheduling bullet; write mode
-// off appends the "will not run here" bullet instead. The offsets bullet is
-// write-on only because wiring registers connect_reset_source_offsets only
-// with write mode on (Q5d), so a write-off room has no such action to weigh.
+// promptCDCFixesFor is the CDC fixes section for a room's mode: the
+// source-offsets bullet in both modes (connect_reset_source_offsets is
+// proposable either way, Q5d and P0 ruling #606), then the scheduling bullet
+// with write mode on or the "will not run here" bullet with it off.
 func promptCDCFixesFor(m RoomMode) string {
 	if m.Write {
 		return promptCDCFixes + "\n" + promptCDCOffsetsNote + "\n" + promptCDCPolicyNote
 	}
-	return promptCDCFixes + "\n" + promptCDCWriteOffNote
+	return promptCDCFixes + "\n" + promptCDCOffsetsNote + "\n" + promptCDCWriteOffNote
 }
 
 // promptRulesFor is the shared rules block of a kind. Only the ambiguous-steer
@@ -117,7 +116,7 @@ const (
 	// it is only for a position the source no longer has (WAL or binlog
 	// purged, database repointed); rows missing from one table are re-read by
 	// a snapshot of that table.
-	promptCDCOffsetsNote = `- Reset source offsets only if the source lost their position; snapshot a table missing rows instead.`
+	promptCDCOffsetsNote = `- Reset source offsets only if their position is gone; snapshot a table missing rows instead.`
 
 	// promptRulesTools, promptRulesHumansDriver, promptRulesHumansRest and
 	// promptRulesRoomLogStyle are the rules every kind shares: tool output,

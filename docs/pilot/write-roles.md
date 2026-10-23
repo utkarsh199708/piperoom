@@ -109,9 +109,11 @@ the connector's tasks when its config changes, so the update is not free.
 ### Connector lifecycle and source offsets (Q5a, Q5b, Q5c)
 
 Four more write actions stop a connector, clear or move a source connector's stored offsets, and create or delete
-a connector (`RegisterLifecycle` in `internal/actions/connect_lifecycle.go`). **On this release they are not
-registered**: the wiring row Q5d registers them, with write mode on only (the comment above `RegisterLifecycle`;
-nothing in `internal/wiring` calls it). The read tool `connect_source_offsets` is live today on a Connect client
+a connector (`RegisterLifecycle` in `internal/actions/connect_lifecycle.go`). Wiring registers them in both write
+modes (`registerLifecycle` in `internal/wiring/actions_q5.go`, row Q5d, P0 ruling #606): with write mode off they
+hold a read-only Connect value, so the agent can propose and preview them with the read calls below, and `Execute`
+refuses before any Connect call because no lifecycle writer exists. The write calls below are made only with
+`PIPEROOM_WRITE_MODE=on`, after the approvals. The read tool `connect_source_offsets` is live today on a Connect client
 that implements the offsets read (`internal/tools/kafkatools/kafkatools.go`, the `connect.SourceOffsetReader`
 check), so its read call belongs in the read-only allow-list ([permissions.md](permissions.md#kafka-connect)).
 

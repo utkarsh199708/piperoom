@@ -170,6 +170,12 @@ var refusingAdapters = map[reflect.Type]bool{
 	reflect.TypeOf(readOnlyConnectDryRun{}):        true,
 	reflect.TypeOf(readOnlyConnectValidate{}):      true,
 	reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
+	// readConnect's values with the Q-wave reads, which the Q5 lifecycle
+	// actions hold with write mode off (Q5d).
+	reflect.TypeOf(readOnlyConnectQ{}):              true,
+	reflect.TypeOf(readOnlyConnectTasksQ{}):         true,
+	reflect.TypeOf(readOnlyConnectValidateQ{}):      true,
+	reflect.TypeOf(readOnlyConnectValidateTasksQ{}): true,
 	reflect.TypeOf(readOnlyRegistry{}):             true,
 	reflect.TypeOf(readOnlyRegistryDryRun{}):       true,
 	reflect.TypeOf(noRegistry{}):                   true,
@@ -340,14 +346,22 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 			}
 			assertSourceActionsRefuse(t, pa.Actions, tools.WithPipeline(ctx, pipe), sourceActionParams("pa"))
 
-			// The Q5 lifecycle actions are not even listed (Q5d): with
-			// write mode off the agent cannot propose a stop, an offsets
-			// reset, a create or a delete.
-			for _, s := range append(st.All(), st.For("nope")) {
+			// The Q5 lifecycle actions too (Q5d, P0 ruling #606): listed in
+			// every set so the agent can propose a stop, an offsets reset, a
+			// create or a delete, and each refuses at Execute for want of a
+			// lifecycle writer (none is reachable, assertNoWriterReachable
+			// above) before any Connect call.
+			for _, s := range st.All() {
 				for _, n := range lifecycleActionNames {
-					if _, ok := s.Actions.Get(n); ok {
-						t.Errorf("set %q: %s registered with write mode off", s.Name, n)
+					if _, ok := s.Actions.Get(n); !ok {
+						t.Errorf("set %q: %s not registered with write mode off", s.Name, n)
 					}
+				}
+			}
+			assertLifecycleExecuteRefuses(t, pa.Actions, tools.WithPipeline(ctx, pipe), "pa-connector")
+			for _, m := range []string{"StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
+				if sp.saw(m) {
+					t.Errorf("lifecycle write %s reached the client with write mode off", m)
 				}
 			}
 		})

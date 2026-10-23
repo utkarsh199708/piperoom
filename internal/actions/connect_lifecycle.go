@@ -11,8 +11,9 @@ import (
 	"piperoom/internal/clients"
 )
 
-// Q5b and Q5c: the Kafka Connect lifecycle actions. They are registered only
-// with write mode on (Q5d), so with writes off none of them is reachable:
+// Q5b and Q5c: the Kafka Connect lifecycle actions. Wiring registers them in
+// both write modes (Q5d, P0 ruling #606); with writes off they hold a
+// read-only Connect value, so Execute refuses before any I/O:
 //
 //   - connect_stop_connector stops a connector and its tasks (KIP-875);
 //   - connect_reset_source_offsets clears a stopped source connector's stored
@@ -59,8 +60,10 @@ type LifecycleDeps struct {
 	PollInterval time.Duration
 }
 
-// RegisterLifecycle adds the four Q5b/Q5c actions to reg. Wiring calls it only
-// with write mode on (Q5d): with writes off no lifecycle action is reachable.
+// RegisterLifecycle adds the four Q5b/Q5c actions to reg. Wiring calls it in
+// both write modes (Q5d); with writes off d.Connect has no
+// connect.ConnectLifecycleWriter, so the agent can propose and preview a step
+// and Execute refuses it before any I/O.
 func RegisterLifecycle(reg *Registry, d LifecycleDeps) error {
 	for _, a := range []Action{
 		&stopConnector{d: d},

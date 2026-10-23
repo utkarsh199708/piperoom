@@ -196,9 +196,10 @@ func readConnect(w *Wired) clients.ConnectClient {
 	return c
 }
 
-// readConnectBase is readConnect without the Q-wave reads. The actions with
-// write mode off use it (readOnlyActionConnect): no action needs them there,
-// since the Q5 lifecycle actions are registered only with write mode on.
+// readConnectBase is readConnect without the Q-wave reads. The P3 and Q2
+// actions with write mode off use it (readOnlyActionConnect): none of them
+// reads the offsets, version or plugins. The Q5 lifecycle actions, which do,
+// get readConnect with write mode off (registerLifecycle).
 func readConnectBase(w *Wired) clients.ConnectClient {
 	if w.Connect == nil {
 		return nil

@@ -201,6 +201,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"pg_resnapshot_rows",
 		// Q2e: the source admin actions, listed the same way.
 		"pg_set_replica_identity", "source_create_heartbeat_table", "source_grant_select", "source_end_session",
+		// Q5d: the connector lifecycle actions, listed the same way (P0 ruling #606).
+		"connect_stop_connector", "connect_reset_source_offsets", "connect_create_connector", "connect_delete_connector",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
 	for _, a := range areg.All() {
