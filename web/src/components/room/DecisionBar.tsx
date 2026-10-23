@@ -9,6 +9,7 @@ import { decisionFor } from '@/lib/decision'
 import { writeModeOff } from '@/lib/writeMode'
 import { approveAllLabel } from '@/lib/approveAll'
 import { STAGING_REQUIRED_SHORT, stagingRequired } from '@/lib/staging'
+import { focusSetupPairing, openSetupStepper, stepLabel } from '@/lib/setup'
 import type { Decision } from '@/lib/decision'
 import { cn } from '@/lib/utils'
 import { PersonName } from '@/components/VerifiedBadge'
@@ -76,7 +77,7 @@ export function DecisionBar({
   const doneId = decision?.kind === 'done' && decision.ok ? decision.proposal.proposal_id : null
   const wasSeen = doneId !== null && seen.current.has(doneId)
   useEffect(() => {
-    if (decision && decision.kind !== 'done') seen.current.add(decision.proposal.proposal_id)
+    if (decision && 'proposal' in decision && decision.kind !== 'done') seen.current.add(decision.proposal.proposal_id)
   })
   useEffect(() => {
     if (doneId === null || !wasSeen) return
@@ -92,6 +93,16 @@ export function DecisionBar({
   let actions: React.ReactNode = null
   let live = ''
 
+  // U: a setup room's bar names the plan step the ask belongs to ("Step 2 of 7 · compose_up").
+  const setupCtx = decision.kind === 'needs-you' || decision.kind === 'waiting' ? decision.setup : undefined
+  const setupPrefix = setupCtx ? `${stepLabel(setupCtx.step, setupCtx.number, setupCtx.total)} — ` : ''
+  const setupStepsButton = (
+    <Button variant="ghost" size="sm" className={sheet ? 'h-11 flex-1' : 'coarse:h-11'} onClick={openSetupStepper}>
+      View steps
+      <ArrowDown aria-hidden="true" />
+    </Button>
+  )
+
   const view = (
     <Button variant="ghost" size="sm" onClick={() => handle()?.scrollTo()}>
       View steps
@@ -106,7 +117,7 @@ export function DecisionBar({
       // X8: a healthy stage is owed first. The card says so; the bar says it too and keeps Approve off.
       const held = stagingRequired(decision.proposal)
       tone = 'bg-warning-subtle text-warning-foreground'
-      live = `Needs your approval · ${(decision.all ?? [decision.layer]).join(' · ')} — ${title}${held ? ` · ${STAGING_REQUIRED_SHORT.toLowerCase()}` : ''}`
+      live = `${setupPrefix}Needs your approval · ${(decision.all ?? [decision.layer]).join(' · ')} — ${title}${held ? ` · ${STAGING_REQUIRED_SHORT.toLowerCase()}` : ''}`
       text = (
         <>
           <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
@@ -144,7 +155,7 @@ export function DecisionBar({
       break
     }
     case 'waiting':
-      live = `Waiting for ${decision.pending.join(' · ')} · ${decision.approved} of ${decision.total} approved`
+      live = `${setupPrefix}Waiting for ${decision.pending.join(' · ')} · ${decision.approved} of ${decision.total} approved`
       text = <span aria-live="polite">{live}</span>
       actions = (
         <Button variant="ghost" size="sm" onClick={() => handle()?.scrollTo()}>
@@ -214,6 +225,106 @@ export function DecisionBar({
       )
       break
     }
+    case 'setup': {
+      // The setup room between proposals: pairing, planning, running a step, a question, or
+      // the registered pipeline. The step text is the plan's; `question` is agent text.
+      const at = stepLabel(decision.step ?? null, decision.number ?? 0, decision.total ?? 0)
+      switch (decision.status) {
+        case 'no_runner':
+          tone = 'bg-warning-subtle text-warning-foreground'
+          live = 'No runner paired — paste the pairing command in a terminal to start the setup'
+          text = (
+            <>
+              <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+              <span aria-live="polite" className="min-w-0 truncate">
+                No runner paired — paste the pairing command in a terminal
+              </span>
+            </>
+          )
+          actions = (
+            <>
+              <Button variant="outline" size="sm" className={sheet ? 'h-11 flex-1' : 'coarse:h-11'} onClick={focusSetupPairing}>
+                Pairing command
+              </Button>
+              {setupStepsButton}
+            </>
+          )
+          break
+        case 'runner_lost':
+          tone = 'bg-warning-subtle text-warning-foreground'
+          live = `Runner ${decision.label ?? ''} lost — start it again to continue the setup`
+          text = (
+            <>
+              <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+              <span aria-live="polite" className="min-w-0 truncate">
+                {live}
+              </span>
+            </>
+          )
+          actions = setupStepsButton
+          break
+        case 'paired':
+          tone = 'bg-agent-subtle text-agent-foreground'
+          live = `Runner ${decision.label ?? ''} paired — the agent is planning the setup`
+          text = (
+            <span aria-live="polite" className="min-w-0 truncate">
+              {live}
+            </span>
+          )
+          actions = setupStepsButton
+          break
+        case 'planning':
+          live = `${at} — planning the next step`
+          text = (
+            <span aria-live="polite" className="min-w-0 truncate">
+              {live}
+            </span>
+          )
+          actions = setupStepsButton
+          break
+        case 'running':
+          tone = 'bg-agent-subtle text-agent-foreground'
+          live = `${at} is running${decision.action ? ` · ${decision.action}` : ''}`
+          text = (
+            <span aria-live="polite" className="min-w-0 truncate">
+              {at}
+              {decision.action ? (
+                <>
+                  {' '}
+                  · <code className="font-mono">{decision.action}</code> is running
+                </>
+              ) : (
+                ' is running'
+              )}
+            </span>
+          )
+          actions = setupStepsButton
+          break
+        case 'blocked':
+          tone = 'bg-warning-subtle text-warning-foreground'
+          live = `${at} blocked — ${decision.question ?? decision.reason ?? ''}`
+          text = (
+            <>
+              <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+              <span aria-live="polite" className="min-w-0 truncate" title={live}>
+                {at} blocked — {decision.question || decision.reason}
+              </span>
+            </>
+          )
+          actions = setupStepsButton
+          break
+        case 'registered':
+          tone = 'bg-success-subtle text-success-foreground'
+          live = `Pipeline registered — watched by ${decision.watchedBy === 'local' ? 'the local runner' : 'the server'}`
+          text = (
+            <span aria-live="polite" className="min-w-0 truncate">
+              {live}
+            </span>
+          )
+          break
+      }
+      break
+    }
   }
 
   // The tints are translucent: an opaque base keeps the room from showing through the sticky bar.
@@ -243,8 +354,8 @@ export function DecisionBar({
             {actions}
           </div>
         )}
-        {decision.kind === 'executing' && (
-          <Progress className="h-0.5 basis-full bg-transparent" indicatorClassName="bg-agent" aria-label="Running the fix" />
+        {(decision.kind === 'executing' || (decision.kind === 'setup' && decision.status === 'running')) && (
+          <Progress className="h-0.5 basis-full bg-transparent" indicatorClassName="bg-agent" aria-label="Running the step" />
         )}
       </div>
     </div>

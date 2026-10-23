@@ -45,6 +45,8 @@ import { ShadowPanel } from './shadow/ShadowPanel'
 import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
+import { SetupPairingCard } from './room/SetupPairingCard'
+import { SetupStepper } from './room/SetupStepper'
 import { HypothesisCard } from './room/HypothesisCard'
 import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
@@ -510,6 +512,10 @@ export function RoomScreen() {
           <WriteModeBanner mode={state.mode} />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
+          {/* U1-12a: a setup room shows the pairing command until a runner attaches, then the
+              plan's stepper above the feed. Neither renders on an incident room. */}
+          <SetupPairingCard state={state} />
+          <SetupStepper state={state} />
 
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
