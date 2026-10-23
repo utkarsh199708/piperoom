@@ -218,6 +218,7 @@ func New(cfg Config) (*Registry, error) {
 	for _, op := range []Op{
 		envDetectOp{}, fileReadOp{}, dirListOp{}, jarListOp{}, javaVersionOp{},
 		httpGetOp{}, netProbeOp{}, fileWriteOp{}, fileDeleteOp{},
+		previewOp{r: r},
 	} {
 		if err := r.Register(op); err != nil {
 			return nil, err

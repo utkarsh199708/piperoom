@@ -32,6 +32,7 @@ func TestFloorsAndTargets(t *testing.T) {
 		{"net_probe", protocol.TierT0, ""},
 		{"file_write", protocol.TierT1, ""},
 		{"file_delete", protocol.TierT1, ""},
+		{OpPreview, protocol.TierT0, ""},
 	}
 	r := testRegistry(t)
 	if len(r.Names()) != len(cases) {
