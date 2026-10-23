@@ -5,6 +5,7 @@
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
+//	devctl setup-break <check-scenario> | setup-fix <check-scenario>   setup prerequisites
 //	devctl alert <scenario> [--server URL] [--as user]   for breaks the watcher cannot see
 //	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
@@ -19,6 +20,9 @@
 // the silent-corruption ones (nothing fails, health stays green): sink-filtered-rows,
 // sink-dropped-column, consumer-duplicates, toast-placeholder.
 // See dev/scenarios.md for what each one does and what it looks like.
+// `setup-break` / `setup-fix` are the setup prerequisites of dev/scenarios.md
+// "Setup breaks": each makes one named check a setup run reports fail, and
+// its fix makes it pass again.
 package main
 
 import (
@@ -45,6 +49,8 @@ const usage = `devctl — local pipeline control
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl setup-break <name> make one setup prerequisite check fail (dev/scenarios.md, setup breaks)
+  devctl setup-fix <name>   restore the stack and prove the check passes again
   devctl alert <scenario> [--server URL] [--as user]   post the scenario's alert to the dev webhook (missed-table, consumer-bad-deploy)
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
   devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
@@ -62,10 +68,13 @@ missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
 started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios);
 idle-wal-growth needs OWNERS_FILE=dev/owners.q2.yaml (dev/scenarios.md §23).
 
-up/down/reset/load/break/fix/serve mutate the shared stack and require --owner <tag>
-(or PIPEROOM_STACK_OWNER) to match the current lock holder.
+up/down/reset/load/break/fix/setup-break/setup-fix/serve mutate the shared stack and require
+--owner <tag> (or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
 scenarios: %s
+
+setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replica,
+missing-grant, db-unreachable-from-connect, plugin-after-scan
 `
 
 func main() {
@@ -199,6 +208,23 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return sc.breakIt(ctx, st)
 		}
 		return sc.fix(ctx, st)
+	case "setup-break", "setup-fix":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(setupScenarioNames(), ", "))
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
+		// Break and fix each prove the named check: the break must make it
+		// fail, the fix must make it pass (dev/scenarios.md, setup breaks).
+		if cmd == "setup-break" {
+			return setupBreakCmd(ctx, st, rest[0])
+		}
+		return setupFixCmd(ctx, st, rest[0])
 	case "alert":
 		return alertCmd(ctx, st, args, os.Stdout)
 	case "demo":
