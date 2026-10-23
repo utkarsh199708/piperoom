@@ -47,11 +47,12 @@ type Deps struct {
 	// and, through alertin and connprobe, internal/wiring: the two packages
 	// that build these tools).
 	RoomID string
-	// CallRoom optionally reads the room a call runs for from its context
-	// (wiring passes room.RoomID). When it is set and answers a room other
-	// than RoomID, the read is refused with ErrNoRunner before any op is
-	// built: a read for another room must not reach this room's runner. An
-	// empty answer means the context names no room, and RoomID is used.
+	// CallRoom reads the room a call runs for from its context (wiring
+	// passes room.RoomID). Required, like RoomID, so the cross-room check is
+	// never left out: when it answers a room other than RoomID, the read is
+	// refused with ErrNoRunner before any op is built, because a read for
+	// another room must not reach this room's runner. An empty answer means
+	// the context names no room, and RoomID is used.
 	CallRoom func(context.Context) string
 	// Class is the class of the endpoint reads reach (protocol.ClassLocal,
 	// ClassShared, ClassProduction). Empty sends ClassLocal; the runner
@@ -75,6 +76,9 @@ func Register(reg *tools.Registry, deps Deps) error {
 	}
 	if strings.TrimSpace(deps.RoomID) == "" {
 		return errors.New("setuptools: the read tools need the room they are bound to (Deps.RoomID)")
+	}
+	if deps.CallRoom == nil {
+		return errors.New("setuptools: the read tools need the call's room reader (Deps.CallRoom, room.RoomID in wiring)")
 	}
 	c := &caller{runner: deps.Runner, roomID: deps.RoomID, callRoom: deps.CallRoom, class: deps.Class, now: deps.Now}
 	for _, spec := range readSpecs() {
@@ -166,12 +170,14 @@ func (c *caller) call(ctx context.Context, op string, params any) (protocol.OpRe
 		// Register refuses an empty room; a zero caller fails closed too.
 		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
 	}
-	if c.callRoom != nil {
-		if ctxRoom := c.callRoom(ctx); ctxRoom != "" && ctxRoom != roomID {
-			// A read for another room must not reach this room's runner: the
-			// answer would name another pipeline's systems.
-			return protocol.OpResult{}, wrapOp(op, fmt.Errorf("tool is bound to another room than the call's: %w", ErrNoRunner))
-		}
+	if c.callRoom == nil {
+		// Register refuses a nil reader; a zero caller fails closed too.
+		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
+	}
+	if ctxRoom := c.callRoom(ctx); ctxRoom != "" && ctxRoom != roomID {
+		// A read for another room must not reach this room's runner: the
+		// answer would name another pipeline's systems.
+		return protocol.OpResult{}, wrapOp(op, fmt.Errorf("tool is bound to another room than the call's: %w", ErrNoRunner))
 	}
 	raw, err := marshalParams(params)
 	if err != nil {
