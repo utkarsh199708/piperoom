@@ -121,9 +121,9 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 
 | HTTP | code examples |
 |---|---|
-| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
+| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`); V0: `key_required` (`PUT /api/models` changes provider, flavor or base URL host without a key) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline; AU1: autonomy revoke by someone who is neither an owner of the action's layer nor a tenant admin), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline; AU1: autonomy revoke by someone who is neither an owner of the action's layer nor a tenant admin), `not_provisioned` (login gate); V0: `origin` (`PUT /api/models` without the server's own `Origin`, with a cross-site `Sec-Fetch-Site`, or with a non-JSON body) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB; X4: `POST /api/changes/webhook` body over 4 KB) |
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); AU1: `not_granted` (`POST …/autonomy/{action}/revoke` while the action is not granted); X3: `watch_off` (`accept-config` when this server keeps no baseline for the connector: the watcher is off, runs on another server replica, or does not watch the pipeline or connector); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
@@ -188,7 +188,9 @@ Clients that do not show cost ignore the type (the web reducer only advances `la
 { "model": "claude-opus-5-5", "role": "main",          // triage | main | handoff | compaction | judge (reserved) | postmortem (F2) | first_look (F6, the triage pass)
   "input_tokens": 1200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 41000,
   "output_tokens": 900, "latency_ms": 8123,             // 0 for compaction (its time is in the request's)
-  "cost_usd": 0.0412 }                                  // omitted when PIPEROOM_MODEL_PRICES has no price for model
+  "cost_usd": 0.0412,                                   // omitted when PIPEROOM_MODEL_PRICES has no price for model
+  "provider": "anthropic",                              // V0: the endpoint's PIPEROOM_MODEL_PROVIDER value; omitted on older events (all Claude)
+  "estimated": true }                                   // V0: omitted unless the provider reported no usage and the counts are estimated
 ```
 
 ### F-wave events (F0; payloads in `internal/events/events.go`)
@@ -520,6 +522,20 @@ pipelines:
   wins), `approve` and `approve-all` answer `409 staging_required` (the message names the step and action) and record
   nothing, and the auto-approve policy does not schedule the proposal. With write mode off no staging client exists,
   so such a proposal cannot be approved (nothing would run either).
+
+### V-wave fields (V0; payloads in `internal/events/events.go`, design `docs/design/model-providers.md`)
+
+Additive, omitted when empty, so events written before V0 and their export hashes are unchanged.
+
+- **`agent.tool_result.rejected`** (string, omitted when empty): the agent refused the tool call before running it,
+  one of `unknown_tool` (no registered tool has that name), `invalid_json` (the arguments are not valid JSON) or
+  `invalid_input` (the arguments failed schema or input validation). `is_error` is then `true` and `summary` says
+  why. A tool that ran and failed has no `rejected`. Set by A4 (V1t); the evals count it as `invalid_tool_calls`.
+- **`agent.usage.provider`** (string, omitted when empty): `anthropic | bedrock | vertex | openai | gemini |
+  bedrock-converse`, the endpoint that served the call. An event without it came from a Claude provider.
+- **`agent.usage.estimated`** (boolean, omitted when false): the provider reported no usage, so the token counts are
+  estimated from request and response sizes (3 bytes per token, rounded up). They are charged against every cap
+  like reported usage. Clients may mark the row "estimated".
 
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
@@ -1512,6 +1528,44 @@ renews the driver lease. The model never calls them: it may ask for a click in a
 | POST | `/api/rooms/{id}/setup/maintenance-window` | `{start, end}` | `Event` (`setup.maintenance_window`) | RFC 3339 times; `end − start` ≤ 4 h and `start` ≤ 24 h ahead, `end` in the future (`400 window_too_long`, `400 validation`). A T3 step whose guard row needs a window is created and executed only inside the latest window; a later window replaces it |
 | POST | `/api/rooms/{id}/setup/verify` | – | `202` | asks the server's ladder runner to run the verification ladder now (the person's equivalent of the agent's `setup_request_verification`); `409 no_runner` when no runner is paired; `409 already_decided` while a ladder run is in flight. Its outcome is `setup.verified`, written by the ladder runner only |
 | GET | `/api/pipelines` | – | rows gain `setup: {room_id, target, registered_at, watched_by}` | present for a pipeline a setup room registered (the owners.yaml `setup:` block); absent otherwise |
+
+### Models (V0 contract; server A5 in V7, web A6 in V8; design `docs/design/model-providers.md` §9 and §11)
+
+Which model serves each role, and, on a standalone or quickstart server only, the picker that sets it. **No
+response ever contains a key or a full base URL**: a base URL is shown as its host only.
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| GET | `/api/models` | – | `ModelPanel` | any logged-in user, viewers included. On a team server it is read-only data: changing the model is an operator task (environment, Helm values). A standalone or quickstart server with no usable model starts and answers with `state: "no_model"` and the `supported` list, so the web opens the picker first |
+| PUT | `/api/models` | `ModelChoice` | `ModelPanel` | **standalone and quickstart only** (`piperoom-setup --standalone`, `cmd/server --quickstart`); a team server answers `404 not_found`. Loopback requests only (a non-loopback peer gets `403 not_allowed`), from the solo user only (`403 not_allowed` otherwise; viewers `403 viewer`). **Origin rule**: the `Origin` header is required and must equal the server's own origin (scheme, host and port); a `Sec-Fetch-Site` other than `same-origin` is refused when present; the body must be `Content-Type: application/json`. Each failure is `403 origin`, checked before the body is read. **Key binding**: a stored key is bound to the provider, flavor and base URL host it was entered with. A request that changes any of the three must carry `key`, else `400 key_required`, and no request leaves for the new host; a request that changes only `model` or a role may omit it. Validation goes through the config parsers (`ParseModelRoles`, `ParseBaseURL`, `ParseModelKnobs`): an invalid provider, flavor or base URL, or a model on a new provider that is not supported (without `PIPEROOM_MODEL_UNVERIFIED=on`) or fails the start probe, is `400 validation` naming the field, never echoing `key` or the base URL. On success the server writes `.piperoom/model.env` (mode 0600, through `os.Root`), rebuilds the model endpoint and returns the panel. The route is excluded from request logging; `key` is never echoed, logged or put in an event |
+
+`ModelPanel`:
+
+```json
+{ "mode": "standalone",                 // team | standalone | quickstart
+  "state": "ready",                     // ready | no_model (standalone and quickstart only)
+  "roles": [
+    { "role": "main",                   // main | triage | first_look | summary | judge
+      "provider": "openai", "flavor": "groq",            // flavor only for provider openai
+      "model": "openai/gpt-oss-120b",
+      "base_url_host": "api.groq.com",  // host only; omitted for a provider default
+      "region": "",                     // bedrock, vertex, bedrock-converse and gemini on Vertex; omitted when unknown
+      "status": "supported",            // reference (a Claude provider: never checked against the list) | supported | experimental | unverified
+      "prompt_cache": false,
+      "price": {"input": 0.15, "output": 0.6, "cache_write": 0.15, "cache_read": 0.15},   // USD per million tokens; null when unpriced
+      "sunset": "2027-03-01",           // omitted unless supported.json sets one
+      "key_set": true } ],              // whether a key is configured for the role's provider; never the key
+  "supported": [                        // internal/agent/llm/supported.json with each entry's committed baseline
+    { "provider": "openai", "flavor": "ollama", "model": "qwen3:32b", "status": "supported", "alias": false,
+      "pass_rate": 0.81, "root_cause_rate": 0.76, "cost_per_run_usd": 0, "gated_at": "2026-11-02",
+      "sunset": "" } ] }
+```
+
+`ModelChoice` (`PUT`): `{provider, flavor?, base_url?, model, key?, roles?: {first_look?, summary?, judge?}}`, where
+each role is `{provider?, model?, base_url?}` with the same fallbacks as the `PIPEROOM_TRIAGE_PASS_*`,
+`PIPEROOM_SUMMARY_*` and `PIPEROOM_JUDGE_*` variables (a role on another provider names its model). `key` is a
+string sent only over this request; a role on a provider other than the main one reads that provider's standard key
+variable and cannot be given a key here.
 
 ## WebSocket
 
