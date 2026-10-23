@@ -316,7 +316,11 @@ func (s *Service) planSetupTarget(ctx context.Context, t events.SetupTarget) (se
 	}
 	effective := min
 	by := "server"
-	if floor != "" && classAtLeast(floor, min) != min {
+	if floor != "" {
+		// The person stated the class — even when it equals the derivation,
+		// the statement is theirs, and recording it as the server's would
+		// read as refinable server output in the fold (applyClass). A floor
+		// below min was refused above, so effective only rises here.
 		effective = floor
 		reason = "person"
 		by = "person"

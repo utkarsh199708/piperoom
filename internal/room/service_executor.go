@@ -405,15 +405,32 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
+		var planIdx *int
 		if snap != nil && snap.IsSetupRoom() {
 			origin := ""
+			policyApproved := false
 			if prop, ok := openProposal(*snap, p.ProposalID); ok {
 				origin = prop.Origin
+				policyApproved = prop.sched.policyN > 0
 			}
-			route, rerr := resolveSetupRoute(snap, s.actionsFor(pipelineID), []events.ProposalStep{step}, setupNeedsPlan(origin), s.now().UTC())
+			route, rerr := resolveSetupRoute(snap, s.actionsFor(pipelineID), []events.ProposalStep{step}, setupNeedsPlan(origin), i, s.now().UTC())
 			if rerr != nil {
 				s.stopOnStep(tracker, p, i, "setup: "+rerr.Error())
 				return nil
+			}
+			// A proposal the setup_local policy approved was approved as T1.
+			// The fire path re-checks the tier right before its approvals,
+			// but a target's class (or the plan) can still rise between the
+			// fire and this step: a step that now routes T2 or T3 needs the
+			// §3.6 approver, which the policy is not.
+			if policyApproved && tierRank(route.Steps[0].Tier) > 1 {
+				s.stopOnStep(tracker, p, i, fmt.Sprintf(
+					"setup: step %d now routes as %s but the proposal was approved by the setup_local policy as T1; propose it again for a person's approval", i, route.Steps[0].Tier))
+				return nil
+			}
+			if route.Steps[0].Plan.Op != "" {
+				idx := route.Steps[0].Plan.Index
+				planIdx = &idx
 			}
 			actx = WithSetupStep(s.actionCtxFor(ctx, p.RoomID, snap, pipelineID), SetupStep{
 				ProposalID: p.ProposalID, StepIndex: i, ParamsHash: p.ParamsHash,
@@ -449,7 +466,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		// A step whose runner socket dropped is unknown, not failed: it may
 		// have run (docs/design/setup-agent.md §2.1).
 		unknown := errors.Is(err, ErrRunnerLost)
-		if err := s.finishStepOutcome(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown); err != nil {
+		if err := s.finishStepOutcome(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown, planIdx); err != nil {
 			if errors.Is(err, store.ErrClaimLost) {
 				// The sweep declared this run dead while the step ran and
 				// has recorded the outcome; a second event would contradict
@@ -556,14 +573,17 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
 func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string) error {
-	return s.finishStepOutcome(roomID, proposalID, paramsHash, t, i, ok, output, false)
+	return s.finishStepOutcome(roomID, proposalID, paramsHash, t, i, ok, output, false, nil)
 }
 
 // finishStepOutcome is finishStep with the outcome-unknown mark: a setup step
 // whose runner socket dropped may have run, so its action.executed says
 // outcome_unknown (OK false) exactly as an interrupted executor step does
 // (events.ActionExecutedPayload.OutcomeUnknown).
-func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool) error {
+// planIdx is the setup plan step the step consumed (nil outside a plan); it
+// travels on the event so the fold marks the right plan step
+// (ActionExecutedPayload.PlanStepIndex).
+func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool, planIdx *int) error {
 	output = maskExecOutput(output) // action output is tool text and may hold secrets
 	status := "done"
 	if !ok {
@@ -580,7 +600,7 @@ func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *st
 	// The DB state is authoritative; a failed event append must not undo it.
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
-		OutcomeUnknown: unknown,
+		OutcomeUnknown: unknown, PlanStepIndex: planIdx,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}

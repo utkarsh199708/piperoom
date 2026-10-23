@@ -198,6 +198,7 @@ func (s *Service) recordRunnerOutcome(roomID string, req protocol.OpRequest, ok 
 		Output:         output,
 		ParamsHash:     req.ParamsHash,
 		OutcomeUnknown: unknown,
+		PlanStepIndex:  s.setupPlanIndexOf(rctx, roomID, req.ProposalID, i),
 		Receipt:        receipt,
 	}); err != nil {
 		s.log.Warn("room: emit reconciled action.executed failed",

@@ -117,24 +117,32 @@ type SetupTargetState struct {
 	Kind    string `json:"kind"`
 	Address string `json:"address"`
 	Class   string `json:"class"`
+	// pinned is set once a person decided the class (setup.target_classed
+	// by "person"): a server decision may then only raise it, never refine
+	// it downward. Fold state, not part of the documented shape; it is
+	// rebuilt from the log wherever the snapshot is.
+	pinned bool
 }
 
 // applyClass folds one setup.target_classed decision into the target. A
-// person raises, never lowers (design §3.5). The server's own decision raises
-// too, and it may replace the "unknown" default with "local" — env_detect is
-// what turns a loopback endpoint local after Hello — but it never lowers
-// below "shared", and never lowers a class above shared (a person's
-// production stays production). by is setup.target_classed.by.
+// person raises, never lowers (design §3.5), and pins the class: once a
+// person decided it, a later server decision may only raise it. The server's
+// own decision raises too, and may refine the server's own derived "shared"
+// down to "local" — env_detect is what turns a loopback endpoint local after
+// Hello — but never a class a person stated (planSetupTarget records a typed
+// floor as the person's even when it equals the derivation), and never a
+// class above shared. by is setup.target_classed.by.
 func (t *SetupTargetState) applyClass(class, by string) {
 	if !validSetupClass(class) {
 		return
 	}
 	if by == "person" {
 		t.Class = classAtLeast(t.Class, class)
+		t.pinned = true
 		return
 	}
 	if t.Class == "" || setupClassRank[class] > setupClassRank[t.Class] ||
-		(t.Class == protocolClassShared && class == protocolClassLocal) {
+		(!t.pinned && t.Class == protocolClassShared && class == protocolClassLocal) {
 		t.Class = class
 	}
 }
@@ -388,14 +396,20 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
-		if !ok || snap.Setup == nil || len(snap.Setup.phases) == 0 {
+		// Only PlanStepIndex may key the executed map: StepIndex is the
+		// step's index inside its PROPOSAL (service_executor emits it per
+		// proposal step), while the map and advance() are keyed by the plan's
+		// own step index (events.SetupPlanStep.Index). An event without a
+		// plan index — a driver's own fix outside the plan, a refusal that
+		// never ran, an event from before U1-6 — consumes no plan step.
+		if !ok || snap.Setup == nil || len(snap.Setup.phases) == 0 || p.PlanStepIndex == nil {
 			return snap
 		}
 		snap.Setup = snap.Setup.clone()
 		if snap.Setup.executed == nil {
 			snap.Setup.executed = map[int]bool{}
 		}
-		snap.Setup.executed[p.StepIndex] = true
+		snap.Setup.executed[*p.PlanStepIndex] = true
 		snap.Setup.advance()
 
 	case events.SetupTargetRegistered:

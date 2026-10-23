@@ -298,7 +298,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 			return
 		}
 	}
-	route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), s.now().UTC())
+	route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
 	if err != nil || route.Tier != plan.TierT1 || !previewAllOK(p) {
 		return
 	}
@@ -311,7 +311,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 		if !ok || p.sched.set || !previewAllOK(p) {
 			return errNotAutoApprovable
 		}
-		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), s.now().UTC())
+		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
 		if err != nil || route.Tier != plan.TierT1 {
 			return errNotAutoApprovable
 		}
@@ -355,7 +355,7 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 		if s.setupCfg.LocalDelay <= 0 {
 			return Proposal{}, errScheduleGone
 		}
-		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), s.now().UTC())
+		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
 		if err != nil {
 			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step: " + err.Error()}
 		}

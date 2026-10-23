@@ -263,7 +263,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		// guard table and the maintenance window are checked here for the
 		// first time, and an agent proposal must come from the latest
 		// setup.plan (setup_route.go; design §3.3, §3.5).
-		route, rerr := resolveSetupRoute(&st.snap, acts, p.Steps, setupNeedsPlan(p.Origin), s.now().UTC())
+		route, rerr := resolveSetupRoute(&st.snap, acts, p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
 		if rerr != nil {
 			return "", events.Event{}, rerr
 		}

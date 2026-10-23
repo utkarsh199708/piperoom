@@ -761,7 +761,10 @@ func TestSetupSnapshotFromRunnerEvents(t *testing.T) {
 			{Name: "connector", Steps: []events.SetupPlanStep{{Index: 2, Op: "connect_create_connector"}}},
 		},
 	})
-	mustEmit(events.ActionExecuted, events.ActionExecutedPayload{ProposalID: "p_1", StepIndex: 0, OK: true, Output: "ok"})
+	// StepIndex is the step's index inside its proposal; the plan fold keys
+	// on PlanStepIndex, which the executor fills from the resolved route.
+	planStep0 := 0
+	mustEmit(events.ActionExecuted, events.ActionExecutedPayload{ProposalID: "p_1", StepIndex: 0, PlanStepIndex: &planStep0, OK: true, Output: "ok"})
 	mustEmit(events.SetupVerified, events.SetupVerifiedPayload{
 		PlanID: "pl_1", Rungs: []events.SetupRung{{Name: "connector_running", OK: true}},
 	})

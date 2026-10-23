@@ -417,7 +417,7 @@ func TestSetupRouteTiers(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			route, err := resolveSetupRoute(snap, reg, step(c.action, c.params), false, time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+			route, err := resolveSetupRoute(snap, reg, step(c.action, c.params), false, 0, time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Fatalf("err = %v, want %q", err, c.wantErr)
@@ -446,7 +446,7 @@ func TestSetupRouteUnknownClassFailsClosed(t *testing.T) {
 	}}}
 	route, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
 		Action: "compose_write", Layer: events.LayerEnvironment, Params: json.RawMessage(`{"target":"db.acme:5432"}`),
-	}}, false, time.Now())
+	}}, false, 0, time.Now())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -477,8 +477,9 @@ func TestSetupPlanMembership(t *testing.T) {
 	r.proposeOK(roomID, "compose_up", events.LayerEnvironment, `{"target":"db.acme:5432"}`)
 
 	// After the step ran, the same plan step is no longer proposable.
+	planStep0 := 0
 	if err := r.svc.EmitSetup(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: "p_old", StepIndex: 0, OK: true, Output: "ok",
+		ProposalID: "p_old", StepIndex: 0, PlanStepIndex: &planStep0, OK: true, Output: "ok",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -853,5 +854,373 @@ func TestSetupT0Refused(t *testing.T) {
 	_, err := r.propose(roomID, "env_detect", events.LayerEnvironment, `{"target":"db.acme:5432"}`)
 	if err == nil || !strings.Contains(err.Error(), "T0 ops are tools") {
 		t.Fatalf("err = %v, want the T0 refusal", err)
+	}
+}
+
+// driverPropose creates a driver-origin proposal as who and returns its id.
+func (r *tierRig) driverPropose(roomID, who, action, layer, params string) string {
+	r.t.Helper()
+	ev, err := r.svc.CreateDriverProposal(context.Background(), r.user(who), roomID, events.ProposalCreatedPayload{
+		Title: "manual fix", Risk: "low", Rollback: "undo",
+		Steps: []events.ProposalStep{{Action: action, Layer: layer, Params: json.RawMessage(params)}},
+	})
+	if err != nil {
+		r.t.Fatalf("driver proposal: %v", err)
+	}
+	var p events.ProposalCreatedPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		r.t.Fatalf("decode proposal.created: %v", err)
+	}
+	return p.ProposalID
+}
+
+// TestSetupOpMismatchRefused: a params "op" that differs from the step's
+// action is refused — the guard table, the window rule and the plan
+// membership are keyed on the op, so a spoofed op would route one op's write
+// past another op's checks.
+func TestSetupOpMismatchRefused(t *testing.T) {
+	reg := actions.NewRegistry()
+	for _, op := range tierOps {
+		if err := reg.Register(&tierAction{name: op.name, layer: op.layer, floor: op.floor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := &RoomSnapshot{Setup: &SetupSnapshot{Mode: true, Targets: []SetupTargetState{
+		{Kind: "postgres", Address: "db.prod.acme:5432", Class: plan.ClassProduction},
+	}}}
+	_, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
+		Action: "source_alter_system", Layer: "postgres",
+		Params: json.RawMessage(`{"op":"env_detect","target":"db.prod.acme:5432","param":"wal_level"}`),
+	}}, false, 0, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "may only repeat the action") {
+		t.Fatalf("err = %v, want the op-mismatch refusal", err)
+	}
+	// An op that repeats the action is fine.
+	if _, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
+		Action: "compose_write", Layer: events.LayerEnvironment,
+		Params: json.RawMessage(`{"op":"compose_write","target":"db.prod.acme:5432"}`),
+	}}, false, 0, time.Now()); err != nil {
+		t.Fatalf("matching op refused: %v", err)
+	}
+}
+
+// TestSetupStepClassMaxOverMatches: a step's class is the highest class of
+// every registered target its params name — a decoy low-class field never
+// lowers it — an exact address match is never shadowed by another target on
+// the same host, and a bare host or a nested field still resolves.
+func TestSetupStepClassMaxOverMatches(t *testing.T) {
+	reg := actions.NewRegistry()
+	for _, op := range tierOps {
+		if err := reg.Register(&tierAction{name: op.name, layer: op.layer, floor: op.floor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := &RoomSnapshot{Setup: &SetupSnapshot{Mode: true, Targets: []SetupTargetState{
+		{Kind: "postgres", Address: "127.0.0.1:5432", Class: plan.ClassLocal},
+		{Kind: "postgres", Address: "db.acme:5432", Class: plan.ClassShared},
+		{Kind: "postgres", Address: "db.prod.acme:5432", Class: plan.ClassProduction},
+	}}}
+	cases := []struct {
+		name, params, class string
+	}{
+		{"decoy local target with a shared url", `{"target":"127.0.0.1:5432","url":"db.acme:5432"}`, plan.ClassShared},
+		{"production address nested in a config", `{"target":"127.0.0.1:5432","config":{"database.hostname":"db.prod.acme:5432"}}`, plan.ClassProduction},
+		{"bare host of a production target", `{"target":"db.prod.acme"}`, plan.ClassProduction},
+		{"local only stays local", `{"target":"127.0.0.1:5432"}`, plan.ClassLocal},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			route, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
+				Action: "compose_write", Layer: events.LayerEnvironment, Params: json.RawMessage(c.params),
+			}}, false, 0, time.Now())
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if route.Class != c.class {
+				t.Fatalf("class = %s, want %s", route.Class, c.class)
+			}
+		})
+	}
+	// Two targets on one host: the exact address match wins, so the shared
+	// pgbouncer entry cannot shadow the production primary.
+	shadow := &RoomSnapshot{Setup: &SetupSnapshot{Mode: true, Targets: []SetupTargetState{
+		{Kind: "postgres", Address: "db.acme:6432", Class: plan.ClassShared},
+		{Kind: "postgres", Address: "db.acme:5432", Class: plan.ClassProduction},
+	}}}
+	route, err := resolveSetupRoute(shadow, reg, []events.ProposalStep{{
+		Action: "compose_write", Layer: events.LayerEnvironment, Params: json.RawMessage(`{"target":"db.acme:5432"}`),
+	}}, false, 0, time.Now())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if route.Class != plan.ClassProduction {
+		t.Fatalf("class = %s, want production (exact match over host match)", route.Class)
+	}
+}
+
+// TestSetupKeepsVolumesConflict: conflicting compose_down params never buy
+// the keeps-volumes exception — any signal that volumes are removed wins —
+// while consistent keep params do.
+func TestSetupKeepsVolumesConflict(t *testing.T) {
+	reg := actions.NewRegistry()
+	for _, op := range tierOps {
+		if err := reg.Register(&tierAction{name: op.name, layer: op.layer, floor: op.floor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := &RoomSnapshot{Setup: &SetupSnapshot{Mode: true, Targets: []SetupTargetState{
+		{Kind: "postgres", Address: "db.prod.acme:5432", Class: plan.ClassProduction},
+	}}}
+	resolve := func(params string) error {
+		_, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
+			Action: "compose_down", Layer: events.LayerEnvironment, Params: json.RawMessage(params),
+		}}, false, 0, time.Now())
+		return err
+	}
+	if err := resolve(`{"target":"db.prod.acme:5432","volumes":false}`); err != nil {
+		t.Fatalf("keeps-volumes exception refused: %v", err)
+	}
+	if err := resolve(`{"target":"db.prod.acme:5432","args":["down"]}`); err != nil {
+		t.Fatalf("argv without -v refused: %v", err)
+	}
+	for _, params := range []string{
+		`{"target":"db.prod.acme:5432","volumes":false,"args":["-v"]}`,
+		`{"target":"db.prod.acme:5432","volumes":true,"remove_volumes":false}`,
+		`{"target":"db.prod.acme:5432","remove_volumes":false,"argv":["--volumes"]}`,
+	} {
+		if err := resolve(params); !errors.Is(err, plan.ErrGuard) {
+			t.Fatalf("params %s: err = %v, want plan.ErrGuard", params, err)
+		}
+	}
+}
+
+// TestSetupPersonClassNotLowered: a class the person typed at registration is
+// pinned — a later server (env_detect) decision cannot lower it to local —
+// while the server's own derived shared is still refinable to local.
+func TestSetupPersonClassNotLowered(t *testing.T) {
+	r := newTierRig(t, tierOpts{local: true})
+
+	targetClass := func(roomID, address string) string {
+		snap := mustRoom(t, r.svc, roomID)
+		for _, tg := range snap.Setup.Targets {
+			if tg.Address == address {
+				return tg.Class
+			}
+		}
+		t.Fatalf("target %s not found", address)
+		return ""
+	}
+
+	// The person typed "shared": a server "local" decision must not lower it.
+	pinned := r.openSetup("pinned-setup", "a", "alice", "127.0.0.1:5432", plan.ClassShared)
+	r.classify(pinned, "127.0.0.1:5432", plan.ClassLocal)
+	if got := targetClass(pinned, "127.0.0.1:5432"); got != plan.ClassShared {
+		t.Fatalf("class = %s, want shared (the person's class is pinned)", got)
+	}
+
+	// The server derived "shared" on its own: env_detect may refine it.
+	derived := r.openSetup("derived-setup", "a", "alice", "127.0.0.1:5432", "")
+	r.classify(derived, "127.0.0.1:5432", plan.ClassLocal)
+	if got := targetClass(derived, "127.0.0.1:5432"); got != plan.ClassLocal {
+		t.Fatalf("class = %s, want local (the server refines its own derivation)", got)
+	}
+}
+
+// TestSetupPlanProgressByPlanIndex: the executed fold is keyed by the PLAN
+// step index the executor resolved, not the step's index inside its proposal.
+// A proposal whose single step (proposal index 0) executes plan step 1 must
+// consume plan step 1 — step 0 stays proposable, step 1 does not.
+func TestSetupPlanProgressByPlanIndex(t *testing.T) {
+	r := newTierRig(t, tierOpts{})
+	roomID := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomID, "db.acme:5432", "compose_write", "compose_up")
+
+	// Propose and run plan step 1 (compose_up) alone: its proposal index is 0.
+	pid := r.proposeOK(roomID, "compose_up", events.LayerEnvironment, `{"target":"db.acme:5432"}`)
+	if err := r.approve(roomID, pid, events.LayerEnvironment, "bob"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	executed := waitPayload[events.ActionExecutedPayload](t, r.svc, roomID, events.ActionExecuted, pid)
+	if !executed.OK {
+		t.Fatalf("compose_up failed: %+v", executed)
+	}
+	if executed.PlanStepIndex == nil || *executed.PlanStepIndex != 1 {
+		t.Fatalf("plan_step_index = %v, want 1", executed.PlanStepIndex)
+	}
+
+	// Plan step 1 is consumed; plan step 0 is not.
+	if _, err := r.propose(roomID, "compose_up", events.LayerEnvironment, `{"target":"db.acme:5432"}`); !errors.Is(err, agent.ErrNotInPlan) {
+		t.Fatalf("err = %v, want agent.ErrNotInPlan for the step that ran", err)
+	}
+	r.proposeOK(roomID, "compose_write", events.LayerEnvironment, `{"target":"db.acme:5432"}`)
+}
+
+// TestSetupDriverCannotSelfApprove: a T2/T3 driver-origin proposal needs a
+// non-self approver on a team server (design §3.6) — the driver cannot
+// approve their own write, even as a tenant admin; another person with the
+// §3.6 grant can.
+func TestSetupDriverCannotSelfApprove(t *testing.T) {
+	r := newTierRig(t, tierOpts{})
+
+	// bob (tenant admin) drives the room and proposes his own fix: his admin
+	// grant must not approve his own T2 step.
+	roomID := r.openSetup("shipments-setup", "a", "bob", "db.acme:5432", "")
+	pid := r.driverPropose(roomID, "bob", "source_create_publication", "postgres", `{"target":"db.acme:5432"}`)
+	err := r.approve(roomID, pid, "postgres", "bob")
+	var re *Error
+	if !errors.As(err, &re) || re.Code != "not_admin" {
+		t.Fatalf("self-approval err = %v, want 403 not_admin", err)
+	}
+
+	// alice drives, bob approves: a non-self admin approval still works.
+	other := r.openSetup("billing2-setup", "a", "alice", "db.acme:5432", "")
+	pid2 := r.driverPropose(other, "alice", "source_create_publication", "postgres", `{"target":"db.acme:5432"}`)
+	if err := r.approve(other, pid2, "postgres", "bob"); err != nil {
+		t.Fatalf("non-self admin approval: %v", err)
+	}
+}
+
+// TestSetupMixedTierProposalRoutesMax: a proposal runs at the tier of its
+// riskiest step — a T1 step next to a T2 step makes the whole proposal T2, so
+// nothing is scheduled under setup_local and the T1-style driver approval is
+// refused.
+func TestSetupMixedTierProposalRoutesMax(t *testing.T) {
+	r := newTierRig(t, tierOpts{local: true, delay: 20 * time.Second})
+	ctx := context.Background()
+	roomID := r.openSetup("shipments-setup", "a", "alice", "127.0.0.1:5432", "")
+	r.classify(roomID, "127.0.0.1:5432", plan.ClassLocal)
+	if _, err := r.svc.AddSetupTarget(ctx, r.user("alice"), roomID, events.SetupTarget{Kind: "postgres", Address: "db.acme:5432"}); err != nil {
+		t.Fatalf("add shared target: %v", err)
+	}
+	r.plan(roomID, "127.0.0.1:5432", "compose_write", "source_create_publication")
+
+	pid, err := r.svc.CreateProposal(ctx, roomID, events.ProposalCreatedPayload{
+		Title: "two steps", Risk: "low", Rollback: "undo it",
+		Steps: []events.ProposalStep{
+			{Action: "compose_write", Layer: events.LayerEnvironment, Params: json.RawMessage(`{"target":"127.0.0.1:5432"}`)},
+			{Action: "source_create_publication", Layer: "postgres", Params: json.RawMessage(`{"target":"db.acme:5432"}`)},
+		},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+	p := r.settle(roomID, pid)
+	if p.Scheduled != nil {
+		t.Fatalf("a mixed T1+T2 proposal was scheduled under setup_local: %+v", p.Scheduled)
+	}
+	// alice is neither a tenant admin nor an overlap owner: the T2 rule holds
+	// for the whole proposal, T1 step included.
+	err = r.approve(roomID, pid, events.LayerEnvironment, "alice")
+	var re *Error
+	if !errors.As(err, &re) || re.Code != "not_admin" {
+		t.Fatalf("err = %v, want 403 not_admin for the whole proposal", err)
+	}
+}
+
+// TestSetupT1CountdownInvalidatedByClassRaise: a running setup_local countdown
+// dies when the target's class rises — at run_at the fire re-check sees the
+// step no longer routes T1 and nothing runs.
+func TestSetupT1CountdownInvalidatedByClassRaise(t *testing.T) {
+	r := newTierRig(t, tierOpts{local: true, delay: 20 * time.Second})
+	ctx := context.Background()
+	roomID := r.openSetup("shipments-setup", "a", "alice", "127.0.0.1:5432", "")
+	r.classify(roomID, "127.0.0.1:5432", plan.ClassLocal)
+	r.plan(roomID, "127.0.0.1:5432", "compose_write")
+	pid := r.proposeOK(roomID, "compose_write", events.LayerEnvironment, `{"target":"127.0.0.1:5432"}`)
+	r.settle(roomID, pid)
+	waitForCond(t, 5*time.Second, func() bool {
+		p, ok := openProposal(mustRoom(t, r.svc, roomID), pid)
+		return ok && p.Scheduled != nil
+	}, "the T1 countdown never started")
+
+	// The class rises mid-countdown: the step is T2 now.
+	if _, err := r.svc.RaiseSetupTargetClass(ctx, r.user("alice"), roomID, "127.0.0.1:5432", plan.ClassShared); err != nil {
+		t.Fatalf("raise class: %v", err)
+	}
+	r.clock.Advance(20 * time.Second)
+	r.tick()
+	if got := r.acts["compose_write"].count(); got != 0 {
+		t.Fatalf("the step ran %d times after its class rose, want 0", got)
+	}
+	p, ok := openProposal(mustRoom(t, r.svc, roomID), pid)
+	if !ok {
+		t.Fatal("proposal gone")
+	}
+	for layer, decision := range p.Approvals {
+		if decision != "pending" {
+			t.Fatalf("layer %s = %s, want pending (the policy must not approve a T2 step)", layer, decision)
+		}
+	}
+}
+
+// TestSetupDriverProposalNeverScheduled: the setup_local policy never
+// schedules a driver-origin proposal, whatever its tier.
+func TestSetupDriverProposalNeverScheduled(t *testing.T) {
+	r := newTierRig(t, tierOpts{local: true, delay: 20 * time.Second})
+
+	roomID := r.openSetup("shipments-setup", "a", "alice", "127.0.0.1:5432", "")
+	r.classify(roomID, "127.0.0.1:5432", plan.ClassLocal)
+	pid := r.driverPropose(roomID, "alice", "compose_write", events.LayerEnvironment, `{"target":"127.0.0.1:5432"}`)
+	p := r.settle(roomID, pid)
+	if p.Scheduled != nil {
+		t.Fatalf("a driver proposal was scheduled under setup_local: %+v", p.Scheduled)
+	}
+}
+
+// TestSetupWindowEdges: the maintenance window is [start, end): a T3 window
+// op is accepted at exactly start and refused at exactly end.
+func TestSetupWindowEdges(t *testing.T) {
+	r := newTierRig(t, tierOpts{})
+	ctx := context.Background()
+	roomID := r.openSetup("altsys2-setup", "a", "alice", "db.prod.acme:5432", plan.ClassProduction)
+	r.plan(roomID, "db.prod.acme:5432", "source_alter_system", "source_alter_system", "source_alter_system")
+	params := `{"target":"db.prod.acme:5432","param":"wal_level"}`
+
+	start := r.clock.Now().Add(10 * time.Minute)
+	end := start.Add(time.Hour)
+	if _, err := r.svc.RecordMaintenanceWindow(ctx, r.user("alice"), roomID, start, end); err != nil {
+		t.Fatalf("record window: %v", err)
+	}
+	// Before start: refused.
+	if _, err := r.propose(roomID, "source_alter_system", "postgres", params); err == nil ||
+		!strings.Contains(err.Error(), "maintenance window") {
+		t.Fatalf("before start: err = %v, want the window refusal", err)
+	}
+	// Exactly at start: allowed.
+	r.clock.Advance(10 * time.Minute)
+	r.proposeOK(roomID, "source_alter_system", "postgres", params)
+	// Exactly at end: refused.
+	r.clock.Advance(time.Hour)
+	if _, err := r.propose(roomID, "source_alter_system", "postgres", params); err == nil ||
+		!strings.Contains(err.Error(), "maintenance window") {
+		t.Fatalf("at end: err = %v, want the window refusal", err)
+	}
+}
+
+// TestSetupAdminGrantScopedToRoomTenant: the admin grant reads the ROOM's
+// tenant — tenant b's admin approves tenant b's setup room (nothing else
+// grants dave anything there), and cannot even see tenant a's room.
+func TestSetupAdminGrantScopedToRoomTenant(t *testing.T) {
+	own := strings.Replace(tierOwnersYAML(), "b: {members: [user:dave]}", "b: {members: [user:dave, user:carol], admins: [user:dave]}", 1)
+	r := newTierRig(t, tierOpts{own: own})
+
+	// dave, admin of tenant b, approves a T2 step of tenant b's room.
+	roomB := r.openSetup("freight-setup", "b", "dave", "db.acme:5432", "")
+	r.plan(roomB, "db.acme:5432", "source_create_publication")
+	pidB := r.proposeOK(roomB, "source_create_publication", "postgres", `{"target":"db.acme:5432"}`)
+	if err := r.approve(roomB, pidB, "postgres", "dave"); err != nil {
+		t.Fatalf("tenant b's admin refused on tenant b's room: %v", err)
+	}
+
+	// On tenant a's room, dave's admin grant counts for nothing: the room is
+	// not even visible to another tenant's user.
+	roomA := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomA, "db.acme:5432", "source_create_publication")
+	pidA := r.proposeOK(roomA, "source_create_publication", "postgres", `{"target":"db.acme:5432"}`)
+	if err := r.approve(roomA, pidA, "postgres", "dave"); err == nil {
+		t.Fatal("another tenant's admin approved tenant a's step")
+	}
+	if err := r.approve(roomA, pidA, "postgres", "bob"); err != nil {
+		t.Fatalf("own tenant's admin refused: %v", err)
 	}
 }

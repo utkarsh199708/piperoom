@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -109,12 +110,34 @@ func raiseTier(a, b string) string {
 // the proposal's route. A step's action that is not actions.Tiered is T2 in a
 // setup room (actions/action.go); a T0 op is a tool and never a proposal.
 // now is read once, so every step of one resolution sees the same clock.
+// base is the first step's index in its proposal, for error messages: the
+// executor resolves one step at a time, and its refusal must name the real
+// step, not "step 0".
 //
 // The returned errors are the API's: 400 not_in_plan (wrapping
 // agent.ErrNotInPlan), 400 validation for a T0 proposal and a T3 step outside
 // its window, and a 400 validation wrapping plan.ErrGuard with the guard row's
 // fixed reason code for a forbidden (op, class) pair.
-func resolveSetupRoute(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep, requirePlan bool, now time.Time) (setupRoute, error) {
+func resolveSetupRoute(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep, requirePlan bool, base int, now time.Time) (setupRoute, error) {
+	return routeSetupSteps(snap, acts, steps, requirePlan, true, base, now)
+}
+
+// setupRouteTier is the routing half of resolveSetupRoute: each step's op,
+// class and tier — including the plan step's server-filled tier raise and
+// target, so the approval path and Create answer the same tier for the same
+// proposal — with no plan, guard or window refusal. The approval path uses
+// it to decide who approves (T1 versus T2/T3); the guard and the window are
+// Create's and Execute's business, so raising a target's class after approval
+// does not turn a decision into a refusal — it makes the executor refuse the
+// step (design §3.5).
+func setupRouteTier(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep, origin string, now time.Time) (setupRoute, error) {
+	return routeSetupSteps(snap, acts, steps, setupNeedsPlan(origin), false, 0, now)
+}
+
+// routeSetupSteps is the one resolver behind resolveSetupRoute (enforce) and
+// setupRouteTier (route only): both must answer the same tier and class for
+// the same proposal, so neither can drift from the other.
+func routeSetupSteps(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep, requirePlan, enforce bool, base int, now time.Time) (setupRoute, error) {
 	if snap == nil || snap.Setup == nil {
 		return setupRoute{}, validation("this room is not a setup room")
 	}
@@ -123,82 +146,56 @@ func resolveSetupRoute(snap *RoomSnapshot, acts *actions.Registry, steps []event
 	}
 	route := setupRoute{Steps: make([]setupStepRoute, len(steps))}
 	for i, step := range steps {
-		op := setupOpOf(step)
-		target := setupStepTarget(snap.Setup, step.Params)
-		class := setupStepClass(snap.Setup, target)
+		op, err := setupOpOf(step)
+		if err != nil {
+			return setupRoute{}, validation(fmt.Sprintf("step %d: %v", base+i, err))
+		}
+		target, class := setupStepResolve(snap.Setup, step.Params)
 		var planStep events.SetupPlanStep
 		if requirePlan {
 			found, ok := setupPlanStepFor(snap.Setup, op, target)
-			if !ok {
+			if !ok && enforce {
 				return setupRoute{}, notInPlan(fmt.Sprintf(
 					"step %d (%s) is not in the current setup plan; record a new setup plan (setup_plan) before proposing it",
-					i, cleanPlanName(op)))
+					base+i, cleanPlanName(op)))
 			}
-			planStep = found
-			if target == "" && found.Target != "" {
-				// The plan's target is the server's own record of the
-				// endpoint; use it when the params name none.
-				target = found.Target
-				class = setupStepClass(snap.Setup, target)
+			if ok {
+				planStep = found
+				if target == "" && found.Target != "" {
+					// The plan's target is the server's own record of the
+					// endpoint; use it when the params name none. The class
+					// only rises: a plan target can never lower what the
+					// params already resolved.
+					target = found.Target
+					class = classAtLeast(class, setupStepClass(snap.Setup, target))
+				}
 			}
 		}
 		tier, err := setupStepTier(acts, step, class)
 		if err != nil {
-			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", i, cleanPlanName(op), err))
+			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", base+i, cleanPlanName(op), err))
 		}
 		if plan.ValidTier(planStep.Tier) {
 			// The plan step's tier is server-filled and can only be raised.
 			tier = raiseTier(tier, planStep.Tier)
 		}
-		if tier == plan.TierT0 {
-			return setupRoute{}, validation(fmt.Sprintf(
-				"step %d (%s) is a T0 read: T0 ops are tools, never proposals", i, cleanPlanName(op)))
-		}
-		if row, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: class, Facts: setupGuardFacts(op, step.Params)}); forbidden {
-			return setupRoute{}, setupGuardRefused(fmt.Sprintf(
-				"step %d (%s): the guard table forbids %s on a %s target (%s)",
-				i, cleanPlanName(op), cleanPlanName(row.Op), class, row.Reason))
-		}
-		if tier == plan.TierT3 && setupOpNeedsWindow(op) && !setupWindowAllows(snap.Setup, now) {
-			return setupRoute{}, validation(fmt.Sprintf(
-				"step %d (%s) is T3 on a %s target and needs a maintenance window: record one with POST /api/rooms/{id}/setup/maintenance-window",
-				i, cleanPlanName(op), class))
+		if enforce {
+			if tier == plan.TierT0 {
+				return setupRoute{}, validation(fmt.Sprintf(
+					"step %d (%s) is a T0 read: T0 ops are tools, never proposals", base+i, cleanPlanName(op)))
+			}
+			if row, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: class, Facts: setupGuardFacts(op, step.Params)}); forbidden {
+				return setupRoute{}, setupGuardRefused(fmt.Sprintf(
+					"step %d (%s): the guard table forbids %s on a %s target (%s)",
+					base+i, cleanPlanName(op), cleanPlanName(row.Op), class, row.Reason))
+			}
+			if tier == plan.TierT3 && setupOpNeedsWindow(op) && !setupWindowAllows(snap.Setup, now) {
+				return setupRoute{}, validation(fmt.Sprintf(
+					"step %d (%s) is T3 on a %s target and needs a maintenance window: record one with POST /api/rooms/{id}/setup/maintenance-window",
+					base+i, cleanPlanName(op), class))
+			}
 		}
 		route.Steps[i] = setupStepRoute{Op: op, Tier: tier, Class: class, Plan: planStep}
-		if route.Tier == "" {
-			route.Tier = tier
-		} else {
-			route.Tier = raiseTier(route.Tier, tier)
-		}
-		if route.Class == "" {
-			route.Class = class
-		} else {
-			route.Class = classAtLeast(route.Class, class)
-		}
-	}
-	return route, nil
-}
-
-// setupRouteTier is the routing half of resolveSetupRoute: each step's op,
-// class and tier, with no plan, guard or window check. The approval path uses
-// it to decide who approves (T1 versus T2/T3); the guard and the window are
-// Create's and Execute's business, so raising a target's class after approval
-// does not turn a decision into a refusal — it makes the executor refuse the
-// step (design §3.5).
-func setupRouteTier(snap *RoomSnapshot, acts *actions.Registry, steps []events.ProposalStep) (setupRoute, error) {
-	if snap == nil || snap.Setup == nil {
-		return setupRoute{}, validation("this room is not a setup room")
-	}
-	route := setupRoute{Steps: make([]setupStepRoute, len(steps))}
-	for i, step := range steps {
-		op := setupOpOf(step)
-		target := setupStepTarget(snap.Setup, step.Params)
-		class := setupStepClass(snap.Setup, target)
-		tier, err := setupStepTier(acts, step, class)
-		if err != nil {
-			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", i, cleanPlanName(op), err))
-		}
-		route.Steps[i] = setupStepRoute{Op: op, Tier: tier, Class: class}
 		if route.Tier == "" {
 			route.Tier = tier
 		} else {
@@ -229,7 +226,9 @@ func setupStepTier(acts *actions.Registry, step events.ProposalStep, class strin
 	}
 	tier, err := tiered.Tier(step.Params, class)
 	if err != nil {
-		return "", fmt.Errorf("tier of %q: %w", cleanPlanName(step.Action), err)
+		// The error text can echo model-written params; sanitize it like any
+		// other agent text before it lands in a 400 or a log line.
+		return "", fmt.Errorf("tier of %q: %s", cleanPlanName(step.Action), sanitizeAgentText(err.Error()))
 	}
 	if !plan.ValidTier(tier) {
 		return "", fmt.Errorf("tier of %q is %q, not T0..T3", cleanPlanName(step.Action), cleanPlanName(tier))
@@ -237,35 +236,46 @@ func setupStepTier(acts *actions.Registry, step events.ProposalStep, class strin
 	return tier, nil
 }
 
-// setupOpOf is the catalogue op a proposal step executes: the params' "op"
-// field when the setup adapter forwards a typed op, else the action's name
-// (the adapters register under the op name).
-func setupOpOf(step events.ProposalStep) string {
+// setupOpOf is the catalogue op a proposal step executes: the action's name
+// (the setup adapters register under the op name). A params "op" field may
+// only repeat it: the guard table, the maintenance-window rule and the plan
+// membership are keyed on the op, so a params op that differs from the action
+// would let the model route one op's write past another op's checks.
+func setupOpOf(step events.ProposalStep) (string, error) {
 	var params struct {
 		Op string `json:"op"`
 	}
 	if len(step.Params) > 0 && json.Unmarshal(step.Params, &params) == nil {
-		if op := strings.TrimSpace(params.Op); op != "" {
-			return op
+		if op := strings.TrimSpace(params.Op); op != "" && op != step.Action {
+			return "", fmt.Errorf("params name op %q but the step's action is %q; the op field may only repeat the action",
+				cleanPlanName(op), cleanPlanName(step.Action))
 		}
 	}
-	return step.Action
+	return step.Action, nil
 }
 
-// setupStepTarget returns the room target a step's params name, "" when it
-// names none. The setup action adapters name the endpoint they reach in a
-// "target" field (or "address"/"host"/"url"); a value equal to a registered
-// target's address or host resolves to that target. Any other string in the
-// params that equals a registered target also counts, so an adapter that
-// nests the endpoint deeper still resolves; nothing is guessed from a host
-// name that is not registered.
-func setupStepTarget(setup *SetupSnapshot, params json.RawMessage) string {
+// setupStepResolve returns the registered target a step's params name ("" when
+// they name none) and the class the step routes at. The setup action adapters
+// name the endpoint they reach in a "target" field (or "address"/"host"/"url");
+// a value equal to a registered target's address or host resolves to that
+// target, preferring an exact address match over a host match so a second
+// target on the same host is never shadowed. Any other string in the params
+// that equals a registered target also counts, so an adapter that nests the
+// endpoint deeper still resolves; nothing is guessed from a host name that is
+// not registered.
+//
+// The class is the HIGHEST class of every registered target any candidate
+// matches, not the first match's: a step that names two registered endpoints
+// routes at the riskier one, so a decoy low-class field can never lower the
+// class below the real endpoint's (design §3.5). No match reads as shared,
+// never local (setupStepClass).
+func setupStepResolve(setup *SetupSnapshot, params json.RawMessage) (string, string) {
 	if setup == nil || len(setup.Targets) == 0 || len(params) == 0 {
-		return ""
+		return "", protocolClassShared
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(params, &obj); err != nil {
-		return ""
+		return "", protocolClassShared
 	}
 	var candidates []string
 	for _, key := range []string{"target", "address", "host", "url"} {
@@ -274,12 +284,31 @@ func setupStepTarget(setup *SetupSnapshot, params json.RawMessage) string {
 		}
 	}
 	collectSetupStrings(obj, &candidates, 0)
+	address := ""
+	exact := false
+	class := ""
 	for _, c := range candidates {
-		if addr := matchSetupTarget(setup, c); addr != "" {
-			return addr
+		host := setupTargetHost(c)
+		for _, t := range setup.Targets {
+			exactHere := t.Address == c
+			if !exactHere && (host == "" || setupTargetHost(t.Address) != host) {
+				continue
+			}
+			if address == "" || (exactHere && !exact) {
+				address = t.Address
+				exact = exactHere
+			}
+			if validSetupClass(t.Class) {
+				class = classAtLeast(class, t.Class)
+			} else {
+				class = classAtLeast(class, protocolClassShared)
+			}
 		}
 	}
-	return ""
+	if class == "" {
+		class = protocolClassShared
+	}
+	return address, class
 }
 
 // collectSetupStrings appends every string value of obj to out, up to a
@@ -312,22 +341,6 @@ func collectSetupStrings(v any, out *[]string, depth int) {
 
 // maxSetupParamsStrings bounds collectSetupStrings.
 const maxSetupParamsStrings = 64
-
-// matchSetupTarget returns the registered address a candidate names, "" when
-// it names none. A candidate matches the same address, or the same host as a
-// registered target's address (so "db.acme" and "db.acme:5432" agree).
-func matchSetupTarget(setup *SetupSnapshot, candidate string) string {
-	host := setupTargetHost(candidate)
-	for _, t := range setup.Targets {
-		if t.Address == candidate {
-			return t.Address
-		}
-		if host != "" && setupTargetHost(t.Address) == host {
-			return t.Address
-		}
-	}
-	return ""
-}
 
 // setupStepClass is the class of the endpoint a step names: the class of the
 // registered target it resolves to, or "shared" when it resolves to none. It
@@ -382,6 +395,35 @@ func setupPlanStepFor(setup *SetupSnapshot, op, target string) (events.SetupPlan
 	return events.SetupPlanStep{}, false
 }
 
+// setupPlanIndexOf resolves, from the room's current snapshot, the plan step a
+// proposal step consumes (nil when it consumes none: a driver's own fix, a
+// non-setup room, a step that resolves to no plan step). The reconciled runner
+// result path uses it: the executor that resolved the route is gone by the
+// time the result arrives, and the action.executed event must carry the plan
+// index for the fold (ActionExecutedPayload.PlanStepIndex).
+func (s *Service) setupPlanIndexOf(ctx context.Context, roomID, proposalID string, stepIndex int) *int {
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil {
+		return nil
+	}
+	prop, ok := openProposal(*snap, proposalID)
+	if !ok || stepIndex < 0 || stepIndex >= len(prop.Steps) || !setupNeedsPlan(prop.Origin) {
+		return nil
+	}
+	step := prop.Steps[stepIndex]
+	op, err2 := setupOpOf(step)
+	if err2 != nil {
+		return nil
+	}
+	target, _ := setupStepResolve(snap.Setup, step.Params)
+	found, ok := setupPlanStepFor(snap.Setup, op, target)
+	if !ok || found.Op == "" {
+		return nil
+	}
+	idx := found.Index
+	return &idx
+}
+
 // setupGuardFacts are the guard table's per-step inputs, read from the step's
 // params: the ALTER SYSTEM parameter name, and whether a compose_down keeps
 // its volumes. Anything the params do not clearly answer reads as the
@@ -412,39 +454,36 @@ func setupGuardFacts(op string, params json.RawMessage) plan.StepFacts {
 
 // setupKeepsVolumes reports whether a compose_down's params say volumes are
 // kept: "volumes": false, "remove_volumes": false, or an argv-style list
-// without "-v"/"--volumes". A params object that says nothing keeps nothing.
+// without "-v"/"--volumes". A params object that says nothing keeps nothing,
+// and params that contradict one another ({"volumes": true, "remove_volumes":
+// false}, or a keep flag next to an argv carrying -v) keep nothing either:
+// any signal that volumes are removed wins, so a conflicting decoy key can
+// never buy the guard exception for a write that removes them.
 func setupKeepsVolumes(obj map[string]any) bool {
-	answered := false
-	keeps := false
+	kept := false
+	removed := false
 	for _, key := range []string{"volumes", "remove_volumes"} {
 		if v, ok := obj[key].(bool); ok {
-			answered = true
-			if key == "volumes" && !v {
-				keeps = true
-			}
-			if key == "remove_volumes" && !v {
-				keeps = true
+			if v {
+				removed = true
+			} else {
+				kept = true
 			}
 		}
-	}
-	if answered {
-		return keeps
 	}
 	for _, key := range []string{"args", "argv"} {
 		raw, ok := obj[key].([]any)
 		if !ok {
 			continue
 		}
-		keeps = true
+		kept = true
 		for _, item := range raw {
 			if s, ok := item.(string); ok && (s == "-v" || s == "--volumes") {
-				keeps = false
-				break
+				removed = true
 			}
 		}
-		return keeps
 	}
-	return false
+	return kept && !removed
 }
 
 // setupOpNeedsWindow reports whether an op at T3 is created and executed only
@@ -609,6 +648,11 @@ func cleanPlanName(name string) string {
 	name = sanitizeAgentText(name)
 	if len(name) > plan.MaxPlanIDBytes {
 		name = name[:plan.MaxPlanIDBytes]
+		// The clip is a byte count and may have split a rune; drop the
+		// incomplete tail so the message stays valid UTF-8.
+		for len(name) > 0 && !utf8.ValidString(name) {
+			name = name[:len(name)-1]
+		}
 	}
 	return name
 }
