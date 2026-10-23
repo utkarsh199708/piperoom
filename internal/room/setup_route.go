@@ -157,6 +157,17 @@ func routeSetupSteps(snap *RoomSnapshot, acts *actions.Registry, steps []events.
 			return setupRoute{}, validation(fmt.Sprintf("step %d: %v", base+i, err))
 		}
 		target, class := setupStepResolve(snap.Setup, step.Params)
+		if op == setupLadderOpInsertCanary && target == "" {
+			// The ladder's canary insert (U1-8b, setup_ladder.go) names no
+			// endpoint in its params — the table and the run's nonce only — so
+			// nothing in them resolves to a target. It writes into the source
+			// this setup created, and its class is that target's, never the
+			// "shared" a step naming no endpoint gets: otherwise a local
+			// setup's canary could only ever wait for a click.
+			if c := setupLadderCanaryClass(snap.Setup); c != "" {
+				class = c
+			}
+		}
 		var planStep events.SetupPlanStep
 		if requirePlan {
 			found, ok := setupPlanStepFor(snap.Setup, op, target)
@@ -363,6 +374,35 @@ func collectSetupStrings(v any, out *[]string, depth int) {
 
 // maxSetupParamsStrings bounds collectSetupStrings.
 const maxSetupParamsStrings = 64
+
+// setupLadderCanaryClass is the class the ladder's canary insert routes at: the
+// class of the room's source target — the source kind the setup request names
+// (a postgres for a postgres setup) — because the canary params hold no endpoint
+// to resolve (a table and the run's nonce only) and the row goes into the
+// source the setup created. A room whose request names no such target routes at
+// its highest class, so the canary is never taken for a lower class than a
+// target it may reach; "" when the room has no classed target at all.
+func setupLadderCanaryClass(setup *SetupSnapshot) string {
+	if setup == nil {
+		return ""
+	}
+	kind := setup.req.SourceKind
+	best := ""
+	for _, t := range setup.Targets {
+		if kind != "" && t.Kind != kind {
+			continue
+		}
+		if validSetupClass(t.Class) {
+			best = classAtLeast(best, t.Class)
+		}
+	}
+	if best == "" && kind != "" {
+		// No target of the source kind: the canary still reaches a registered
+		// endpoint, so the room's highest class is the safe answer.
+		return setupRoomClass(setup)
+	}
+	return best
+}
 
 // setupRoomClass is the highest class of the room's targets, or "" when none
 // has a valid class.
@@ -580,9 +620,9 @@ func setupWindowAllows(setup *SetupSnapshot, now time.Time) bool {
 // setupNeedsPlan reports whether a proposal of this origin must come from the
 // current setup.plan: the agent's must; the driver's own fix (POST
 // /api/rooms/{id}/proposals) and the server's own proposals (the ladder's
-// canary) carry their own reason to write.
+// canary, setup_ladder.go) carry their own reason to write.
 func setupNeedsPlan(origin string) bool {
-	return origin != events.ProposalOriginDriver
+	return origin != events.ProposalOriginDriver && origin != setupProposalOriginSystem
 }
 
 // setupLayers returns the required and fallback layers of a setup proposal

@@ -258,6 +258,9 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				// value nowhere (setup.go, U1-5d).
 				short.Post("/rooms/{id}/setup/secret", visible(s.handleSetupSecret))
 				short.Post("/rooms/{id}/setup/credentials", visible(s.handleSetupCredentials))
+				// The verification ladder's click (U1-8b): answers 202 and the
+				// run writes setup.verified itself.
+				short.Post("/rooms/{id}/setup/verify", visible(s.handleSetupVerify))
 				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
