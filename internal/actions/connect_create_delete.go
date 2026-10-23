@@ -200,7 +200,7 @@ func (a *createConnector) validate(ctx context.Context, name string, cfg map[str
 		return nil, fmt.Errorf("this Connect client cannot validate a config (PUT /connector-plugins/{class}/config/validate): %w", clients.ErrNotSupported)
 	}
 	class := strings.TrimSpace(cfg["connector.class"])
-	sent := make(map[string]string, len(cfg)+1)
+	sent := make(map[string]string, len(cfg))
 	for k, val := range cfg {
 		sent[k] = val
 	}
