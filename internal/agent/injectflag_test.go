@@ -35,7 +35,10 @@ func TestWrapReadToolOutputFlagsInstructionLikeText(t *testing.T) {
 			t.Errorf("log %q lacks %s", line, w)
 		}
 	}
-	for _, leak := range []string{"ignore previous", "4711", "connect_restart_connector"} {
+	// The sentinel is a phrase, not the bare key number: a four-digit number can
+	// occur in the log line's nanosecond timestamp ("...098344711Z"), which made
+	// this check flake on roughly one run in ten thousand.
+	for _, leak := range []string{"ignore previous", "4711 NOTE", "connect_restart_connector"} {
 		if strings.Contains(line, leak) {
 			t.Errorf("log leaks untrusted text %q: %s", leak, line)
 		}
