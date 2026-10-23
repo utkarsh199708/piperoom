@@ -353,8 +353,11 @@ func containsRun(long, short []string) bool {
 //     be anyone's and stays unattributed.
 //
 // The result maps topic name to group id; an unattributed topic is absent.
-// The caller shows a scoped room only its own groups' topics, so a wrong
-// guess can hide a topic but cannot show one that no group name points to.
+// The caller shows a scoped room only its own groups' topics. Attribution
+// is by name only: a wrong guess can hide a topic, and it can show another
+// cluster's topic only when that cluster has no live group of its own (its
+// specific topic shares the room group's words, or its generic topic falls
+// to the room's group as the one unclaimed group).
 func AttributeInternalTopics(topics, groupIDs []string) map[string]string {
 	out := map[string]string{}
 	groupWords := make([][]string, len(groupIDs))
