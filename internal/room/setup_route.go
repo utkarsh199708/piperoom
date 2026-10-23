@@ -453,12 +453,18 @@ func setupGuardFacts(op string, params json.RawMessage) plan.StepFacts {
 }
 
 // setupKeepsVolumes reports whether a compose_down's params say volumes are
-// kept: "volumes": false, "remove_volumes": false, or an argv-style list
-// without "-v"/"--volumes". A params object that says nothing keeps nothing,
-// and params that contradict one another ({"volumes": true, "remove_volumes":
-// false}, or a keep flag next to an argv carrying -v) keep nothing either:
-// any signal that volumes are removed wins, so a conflicting decoy key can
-// never buy the guard exception for a write that removes them.
+// kept: "volumes": false, "remove_volumes": false, "volumes_kept": true, or an
+// argv-style list without "-v"/"--volumes". A params object that says nothing
+// keeps nothing, and params that contradict one another ({"volumes": true,
+// "remove_volumes": false}, or a keep flag next to an argv carrying -v) keep
+// nothing either: any signal that volumes are removed wins, so a conflicting
+// decoy key can never buy the guard exception for a write that removes them.
+//
+// "volumes_kept": true is the mark the room writes on the rollback of a
+// compose_up (setup_rollback.go, U1-14b). It cannot buy an exception for a
+// write that removes volumes: the catalogue has no "compose down" form that
+// removes them (internal/setup/targets/compose, subcommandFlags), and a
+// removal signal in the same params still wins.
 func setupKeepsVolumes(obj map[string]any) bool {
 	kept := false
 	removed := false
@@ -470,6 +476,9 @@ func setupKeepsVolumes(obj map[string]any) bool {
 				kept = true
 			}
 		}
+	}
+	if v, ok := obj["volumes_kept"].(bool); ok && v {
+		kept = true
 	}
 	for _, key := range []string{"args", "argv"} {
 		raw, ok := obj[key].([]any)

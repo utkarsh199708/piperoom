@@ -106,18 +106,7 @@ func (s *Service) CreateDriverProposal(ctx context.Context, user User, roomID st
 	if err := s.precheckDriverProposal(ctx, user, roomID); err != nil {
 		return events.Event{}, err
 	}
-	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), func(st *roomState) error {
-		if !s.isDriver(st, user.ID) {
-			return ErrNotDriver()
-		}
-		if st.snap.Shadow {
-			return validation("a shadow room has no proposals")
-		}
-		if openDriverProposals(st.snap) >= maxOpenDriverProposals {
-			return tooManyProposals()
-		}
-		return nil
-	})
+	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), s.driverProposalFence(user))
 	return ev, err
 }
 
