@@ -204,6 +204,20 @@ func resnapSinceAt(at string) json.RawMessage {
 	return resnapRaw(map[string]any{"connector": "pg-orders", "table": "public.orders", "since": map[string]any{"column": "updated_at", "at": at}})
 }
 
+// KAN-502: the model must not pick a re-snapshot for records that are still on
+// the topic; those are replayed with kafka_replay_range.
+func TestResnapshotRowsDescribeNamesTheReplayBoundary(t *testing.T) {
+	d := newResnapFixture(t, nil).a.Describe()
+	for _, want := range []string{
+		"only for rows whose change events never reached Kafka or were deleted from it",
+		"records still on the topic are replayed with kafka_replay_range",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("Describe lacks %q:\n%s", want, d)
+		}
+	}
+}
+
 // TC5: the action is a recovery action with Verify, and the registry takes it.
 func TestResnapshotRowsMeta(t *testing.T) {
 	a := newResnapFixture(t, nil).a
