@@ -8,6 +8,9 @@
 # First failing layer: postgres (the replication slot is gone). Alert fired at: kafka-connect.
 #   Root-cause layer: postgres. The visible failure is the Debezium task; the cause is that
 #   debezium_orders does not exist on the new primary (orders-db-2, promoted at 06:58:12Z).
+#   R1 (tasks/W4-evals-to-100.md, 2026-10-23) reads this as first_failing_layer: kafka-connect, root cause
+#   postgres; W4l (KAN-496) did not apply it: it needs the one-line syntheticLabels/syntheticTruth edit in
+#   evals/agreement_test.go (C6's) and a judge refill, so the label waits for that grant.
 #
 # Modelling note: Debezium normally CREATES a missing slot on task start, so silent loss is the common
 #   real path. This scenario models the FAILED-on-reconnect path (the walsender connection drops and
@@ -41,6 +44,15 @@
 #   - PostgreSQL: ERROR: replication slot "x" does not exist (START_REPLICATION on a missing slot).
 #   - PostgreSQL docs, logical replication failover (17+): logical slots are not copied to standbys by default.
 #   - Debezium snapshot.mode=initial: with offsets present no new snapshot is taken.
+#
+# Tool budget (W4l, KAN-496; max_tool_calls 12 -> 13). Measured on passing runs: the two passing runs of
+#   39994729845 used 9 and 11 calls, the third 15 (11 + 4 reads asked again after the comment) and failed
+#   on budget alone; highest passing 11 + 2 = 13. One entry per input turn (the alert, then Priya's
+#   comment), from the 11-call run: turn 0, the alert, 9 calls (connect_status, pg_recent_ddl,
+#   pg_replication_slots, similar_incidents, connect_config, pg_publication_tables, and the unanswered
+#   offsets, settings and net_probe reads); turn 1, Priya's comment, 2 calls (the offsets read again,
+#   pg_long_transactions). Recording the reads above does not change that count (a miss is a call
+#   too); it changes what the agent does next, so reset it from the step-1 live run.
 
 name: replication-slot-lost-failover
 description: |
@@ -234,6 +246,38 @@ recordings:
     input: {connector: "pg-orders-connector"}
     summary: |-
       pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  # W4l (KAN-496): answers to reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{nettools,dbtools,logtools}) over this scenario's state on the clock
+  # above; orders-db.internal resolves to the promoted standby (composed address).
+  #
+  # NOT recorded on purpose: connect_source_offsets and source_settings. Any fix is forbidden here
+  # (see the header), and a stored offset or clean CDC settings read as "the resume checks pass".
+  # A call to either stays a replay miss ("no data available"); the agent then says what it cannot
+  # confirm and proposes nothing, as the two passing runs of 39994729845 did. evals/scenario_terms_test.go
+  # (TestW4lSlotLostRecordsNoPassingOffsetsOrSettings) pins the absence.
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (orders-db.internal:5432): all checks ok: dns ok, tcp ok, connect_view ok
+      - connect_view ok: Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)
+      - dns orders-db.internal:5432 ok: 10.20.6.32
+      - tcp orders-db.internal:5432 ok: TCP connected
+      - tls orders-db.internal:5432 skip: not configured with TLS
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+  # The agent asked for three days of history (since 2026-10-10T06:40:00Z): the real tool's refusal,
+  # as for the 12:30Z variant recorded above.
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-10T06:40:00Z"}
+    error: "bad tool input: the window is 72h40m0s, at most 6h0m0s"
 
 inputs:
   - kind: comment
@@ -274,4 +318,4 @@ expect:
       facts: [f_slot_does_not_exist, f_no_slots]
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
-  max_tool_calls: 12
+  max_tool_calls: 13

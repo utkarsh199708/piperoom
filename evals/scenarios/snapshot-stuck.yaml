@@ -40,21 +40,27 @@
 #   - internal/tools/debeziumtools/metrics.go: the debezium_metrics summary format.
 #   - internal/topology/health.go: slot_active and slot_retained rendering.
 #
-# Tool budget (E6b review, max_tool_calls 12, unchanged): the reads a careful on-call engineer
-#   needs, from the recordings above and the prompt's method:
-#     1 pipeline_map (the prompt starts there; the alert carries it, so a re-read is optional)
-#     2 connect_status pg-orders-connector (RUNNING, task 0 RUNNING; evidence tool)
-#     3 pg_recent_ddl and 4 schema_registry_versions pg.public.orders-value (what changed: one old
-#       index, no new schema version)
-#     5 debezium_metrics (snapshot running, streaming not started: both required facts)
-#     6 debezium_metrics again (rows per read: the rate and the ETA the owner needs)
-#     7 connect_config pg-orders-connector (snapshot.mode=initial: why a restart starts from zero)
-#     8 pg_replication_slots (the competing slot_wal story: active=true, 61.4 GiB reserved)
-#     9 kafka_consumer_lag connect-wh-orders-sink (the sink keeps up, so the rows are old)
-#   That is 9 reads; 9 + 2 margin = 11 <= 12, so the budget stays. warehouse_freshness, the sink's
-#   connect_status, trace_record and reconcile repeat what the alert, the map or read 9 show. A
-#   run that names the right cause in 14 reads (E6b) spent the extra reads on such repeats; one
-#   in 36 (baseline dd87583) read nearly every recording.
+# Tool budget (W4l, KAN-496; max_tool_calls 12 -> 15, provisional). E6b's 12 counted nine reads and
+#   was never measured: the three runs of 39994729845 made 22, 20 and 23 calls and none passed, so
+#   the budget is the standard path plus 2 (rule 7's stage reads included), not a passing run plus 2.
+#   Reset it from the passing runs of the step-1 live run. One entry per input turn (the alert,
+#   Priya's steer and Arjun's comment arrive one per idle):
+#   turn 0, the alert (10 reads):
+#     1 pg_recent_ddl (rule 2) and 2 connect_status pg-orders-connector (RUNNING; evidence tool)
+#     3 connect_status wh-orders-sink, 4 pg_replication_slots (the competing slot_wal story: active,
+#       61.4 GiB), 5 kafka_consumer_lag connect-wh-orders-sink and 6 warehouse_freshness (rule 7: each
+#       stage by its own status read)
+#     7 debezium_metrics (snapshot running, streaming not started: both required facts)
+#     8 connect_config pg-orders-connector (snapshot.mode=initial: why a restart starts from zero)
+#     9 pg_long_transactions (the nearest competing explanation for the WAL) and 10 similar_incidents
+#   turn 1, Priya's steer, "find out what the connector is doing" (2 reads): debezium_metrics again
+#     (rows per read: the rate) and debezium_snapshot_progress (the ETA against the row estimate).
+#   turn 2, Arjun's comment, "I do not know how far it is" (1 read): debezium_snapshot_progress again.
+#   10 + 2 + 1 = 13 reads; 13 + 2 = 15. trace_record, reconcile and pg_row repeat what the alert, the
+#   map and read 7 show. W4-0 found turn 0 alone at 18, 17 and 20 calls: 29 misses over 16 distinct
+#   reads (worker logs and metrics, offsets, settings, blocking sessions, throughput, liveness), all
+#   answered above now. A read that is not on this path still counts, so 15 may need a re-set after
+#   step 1; the repeats (debezium_snapshot_progress asked twice in run 1) are W4m's, not budget.
 
 name: snapshot-stuck
 description: |
@@ -302,6 +308,91 @@ recordings:
     summary: |-
       cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
       pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+  # W4l (KAN-496): answers to the reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{kafkatools,dbtools,debeziumtools,logtools}) over this scenario's state on
+  # the clock above. The snapshot is the only thing that moves: debezium_snapshot_progress is a
+  # sequence over the same two scrapes as debezium_metrics (148203110, then 149041550 rows) with the
+  # row estimate 400184320 of pg_class.reltuples. pg_streaming_liveness reports the slot as the
+  # real tool does while an initial snapshot pins it: confirmed_flush_lsn flat while the source
+  # writes (46 rows/s), "held back by something else" (no writer transaction). The stored source
+  # offset carries snapshot=true. connect_worker_logs answers as a server without
+  # WORKER_LOGS_LOKI_URL does.
+  - tool: debezium_snapshot_progress
+    input: {connector: pg-orders-connector}
+    sequence:
+      - summary: |-
+          pg-orders-connector: snapshot running for 3.1 h; 148203110 rows scanned at 13352 rows/s; ETA ~5.2 h for ~251981210 rows left of ~400184320 (pg_class.reltuples estimates); 1 of 1 tables left; per table: public.orders 148203110 of ~400184320 (37%)
+      - summary: |-
+          pg-orders-connector: snapshot running for 3.1 h; 149041550 rows scanned at 13355 rows/s; ETA ~5.2 h for ~251142770 rows left of ~400184320 (pg_class.reltuples estimates); 1 of 1 tables left; per table: public.orders 149041550 of ~400184320 (37%)
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=456273166496, lsn_proc=456273166496, snapshot=true, ts_usec=1791943202118000, txId=5188830
+  - tool: connect_worker_metrics
+    input: {connector: wh-orders-sink}
+    summary: |-
+      wh-orders-sink: tasks total 3 (running 3, failed 0, paused 0, unassigned 0, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures; task 1: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures; task 2: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 0 task startup failures of 6 attempts, 0 connector startup failures of 2 attempts, 2 connectors, 4 tasks. rebalance: rebalancing=false, 3 completed, epoch 5, last 3.1 h ago, avg 0.4 s, max 0.6 s
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1 MB
+      wal_sender_timeout=60000 ms
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 12015900 records (13351/s) over 3 partitions; median 4458/s, max p0 4475/s → even
+      connect-wh-orders-sink (Stable, 3 members): lag 2144; pg.public.orders p2 33% (716)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 24031800 records (13351/s) over 3 partitions; median 4458/s, max p0 4475/s → even
+      connect-wh-orders-sink (Stable, 3 members): lag 2144; pg.public.orders p2 33% (716)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 262144 bytes in 5s (slot "debezium_orders", active=true, wal_status=reserved, retains 61.4 GiB); connector pg-orders-connector state RUNNING
+      the head-confirmed_flush lag grew from 61.4 GiB to 61.4 GiB in 5s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders, window_seconds: 8}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 419430 bytes in 8s (slot "debezium_orders", active=true, wal_status=reserved, retains 61.4 GiB); connector pg-orders-connector state RUNNING
+      the head-confirmed_flush lag grew from 61.4 GiB to 61.4 GiB in 8s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  # The 01:00 variant of the reconcile above, on the tool's own grid (21 min buckets over the
+  # 4h05m window) with the same rates: 46 source rows/s, 13351 topic events/s from the 02:00
+  # snapshot start, the sink's rows (17 per second) ending at its newest row, 01:54:09. The verdict
+  # is today's wording of the tool (the 00:00 recording above predates it).
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-14T01:00:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 21m0s from 2026-10-14T01:00:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      01:00 | 57960 | 0 | 21445 | -36515
+      01:21 | 57960 | 0 | 21445 | -36515
+      01:42 | 57960 | 2403180 | 12407 | -45553
+      02:03 | 57960 | 16822260 | 0 | -57960
+      02:24 | 57960 | 16822260 | 0 | -57960
+      02:45 | 57960 | 16822260 | 0 | -57960
+      03:06 | 57960 | 16822260 | 0 | -57960
+      03:27 | 57960 | 16822260 | 0 | -57960
+      03:48 | 57960 | 16822260 | 0 | -57960
+      04:09 | 57960 | 16822260 | 0 | -57960
+      04:30 | 57960 | 16822260 | 0 | -57960
+      04:51 | 38640 | 11214840 | 0 | -38640
+      verdict: sink is missing 620903 rows in 01:00–05:12; the topic carried 148196100 change events for 676200 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
 
 inputs:
   - kind: steer
@@ -348,4 +439,4 @@ expect:
       facts: [f_snapshot_running, f_streaming_not_started]
   evidence_tools: [debezium_metrics, connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
-  max_tool_calls: 12
+  max_tool_calls: 15

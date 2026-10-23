@@ -1,11 +1,18 @@
 package evals
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"piperoom/internal/tools"
+	"piperoom/internal/tools/logtools"
 )
 
 // termCase is one hypothesis read against a scenario's root-cause terms.
@@ -239,5 +246,423 @@ func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"started_at":"`+m[1]+`"}`), &p); err != nil || !p.StartedAt.Equal(started) {
 		t.Errorf("started_at does not decode as an end-session param: %v", err)
+	}
+}
+
+// w4lMiss is one replay miss of run 39994729845 (the W4-0 table, reviews/evals-2026-10-23/misses.md,
+// KAN-490): a tool and its exact input.
+type w4lMiss struct{ tool, input string }
+
+// w4lMisses are the distinct misses of the six W4l scenarios (KAN-496), copied from the run's
+// results[].misses: 124 misses in all, 68 distinct tool and input pairs.
+var w4lMisses = map[string][]w4lMiss{
+	"removed-decoder-plugin": {
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"2h"}`},
+		{"net_probe", `{"target":"source"}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"orders","database.hostname":"postgres","database.port":"5432","database.user":"piperoom","key.converter":"io.confluent.connect.avro.AvroConverter","slot.name":"debezium_orders","table.include.list":"public.orders","topic.prefix":"pg","value.converter":"io.confluent.connect.avro.AvroConverter"}}`},
+		{"net_probe", `{"target":"connect"}`},
+		{"pg_publication_tables", `{"pipeline_id":"orders"}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"orders","database.hostname":"postgres","database.port":"5432","database.user":"piperoom","key.converter":"io.confluent.connect.avro.AvroConverter","plugin.name":"pgoutput","publication.autocreate.mode":"filtered","publication.name":"dbz_publication","slot.name":"debezium_orders_pgoutput","table.include.list":"public.orders","topic.prefix":"pg","value.converter":"io.confluent.connect.avro.AvroConverter"}}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"1h","task":0}`},
+		{"net_probe", `{"target":"schema-registry"}`},
+		{"connect_worker_metrics", `{"connector":"pg-orders-connector"}`},
+		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.dbname":"orders","database.hostname":"postgres","database.port":"5432","database.user":"piperoom","key.converter":"io.confluent.connect.avro.AvroConverter","plugin.name":"pgoutput","publication.autocreate.mode":"filtered","publication.name":"dbz_orders","slot.name":"debezium_orders_pgoutput","table.include.list":"public.orders","topic.prefix":"pg","value.converter":"io.confluent.connect.avro.AvroConverter"}}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"1h"}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"name":"pg-orders-connector"}}`},
+		{"connect_worker_info", `{}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"name":"pg-orders-connector","plugin.name":"pgoutput","publication.autocreate.mode":"filtered","publication.name":"dbz_orders","slot.name":"debezium_orders_pgoutput"}}`},
+	},
+	"renamed-property-after-upgrade": {
+		{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
+		{"kafka_cluster_health", `{}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"1h"}`},
+		{"net_probe", `{"target":"kafka"}`},
+		{"connect_worker_metrics", `{"connector":"pg-orders-connector"}`},
+		{"kafka_acls", `{}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"heartbeat.topics.prefix":"heartbeats","topic.heartbeat.prefix":"heartbeats"}}`},
+		{"pg_streaming_liveness", `{"pipeline_id":"orders","window_seconds":8}`},
+		{"source_blocking_sessions", `{"older_than_minutes":30}`},
+		{"source_blocking_sessions", `{}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"heartbeat.topics.prefix":"heartbeats"}}`},
+		{"connect_validate_config", `{"base_connector":"pg-orders-connector","class":"io.debezium.connector.postgresql.PostgresConnector","config":{"topic.heartbeat.prefix":"heartbeats"}}`},
+	},
+	"avro-schema-id-deleted-sink-failed": {
+		{"connect_worker_info", `{}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":50,"since":"72h"}`},
+		{"connect_worker_logs", `{"connector":"wh-orders-sink","since":"24h"}`},
+		{"connect_worker_logs", `{"connector":"wh-orders-sink","limit":30,"since":"6h"}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":50,"since":"6h"}`},
+		{"net_probe", `{"target":"schema-registry"}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":60,"since":"3h"}`},
+		{"connect_worker_logs", `{"connector":"wh-orders-sink","limit":40,"since":"3h"}`},
+	},
+	"rows-lost-after-retention": {
+		{"pg_connector_scope_gap", `{"pipeline_id":"orders"}`},
+		{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
+		{"debezium_metrics", `{"connector":"pg-orders-connector"}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"2h"}`},
+		{"kafka_topic_config", `{"pipeline_id":"orders"}`},
+		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+		{"kafka_throughput", `{"window":"1h"}`},
+		{"kafka_throughput", `{"table":"public.orders","window":"1h"}`},
+		{"source_blocking_sessions", `{"older_than_minutes":5}`},
+		{"kafka_partition_rates", `{"window":"1h"}`},
+		{"warehouse_load_errors", `{"since":"2026-10-22T08:55:00Z","table":"analytics.orders"}`},
+	},
+	"replication-slot-lost-failover": {
+		{"source_settings", `{}`},
+		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+		{"net_probe", `{"target":"source"}`},
+		{"reconcile", `{"since":"2026-10-10T06:40:00Z","table":"public.orders"}`},
+		{"source_role_grants", `{"pipeline_id":"orders"}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","since":"2h"}`},
+	},
+	"snapshot-stuck": {
+		{"connect_worker_metrics", `{"connector":"wh-orders-sink"}`},
+		{"kafka_throughput", `{"window":"30m"}`},
+		{"pg_streaming_liveness", `{"pipeline_id":"orders","window_seconds":8}`},
+		{"debezium_snapshot_progress", `{"connector":"pg-orders-connector"}`},
+		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":60,"since":"6h"}`},
+		{"source_settings", `{}`},
+		{"source_blocking_sessions", `{"older_than_minutes":5}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":100,"since":"4h"}`},
+		{"kafka_throughput", `{"window":"15m"}`},
+		{"connect_worker_logs", `{"connector":"wh-orders-sink","since":"4h"}`},
+		{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
+		{"source_blocking_sessions", `{"older_than_minutes":60}`},
+		{"reconcile", `{"since":"2026-10-14T01:00:00Z","table":"public.orders"}`},
+		{"source_blocking_sessions", `{}`},
+		{"connect_worker_logs", `{"connector":"pg-orders-connector","level":"INFO","limit":100,"since":"6h"}`},
+	},
+}
+
+// w4lUnrecorded are the reads replication-slot-lost-failover leaves as replay misses on purpose: any fix is
+// forbidden there, and a stored offset or clean CDC settings read as "the resume checks pass".
+func w4lUnrecorded(scenario, tool string) bool {
+	return scenario == "replication-slot-lost-failover" && (tool == "connect_source_offsets" || tool == "source_settings")
+}
+
+func w4lScenarioByName(t *testing.T, name string) Scenario {
+	t.Helper()
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range scs {
+		if sc.Name == name {
+			return sc
+		}
+	}
+	t.Fatalf("scenario %q not found", name)
+	return Scenario{}
+}
+
+// TestW4lMissesNowResolve replays every miss W4-0 lists for the six scenarios against the scenario's
+// recordings: each now has an answer (KAN-496 test case 2), except the two reads the slot-lost scenario
+// leaves unanswered by design.
+func TestW4lMissesNowResolve(t *testing.T) {
+	total := 0
+	for name, misses := range w4lMisses {
+		sc := w4lScenarioByName(t, name)
+		rp, err := newReplayer(sc.Recordings)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, m := range misses {
+			total++
+			_, ok := rp.lookup(m.tool, json.RawMessage(m.input))
+			switch {
+			case w4lUnrecorded(name, m.tool) && ok:
+				t.Errorf("%s: %s %s has a recording; the scenario must leave it unanswered", name, m.tool, m.input)
+			case !w4lUnrecorded(name, m.tool) && !ok:
+				t.Errorf("%s: %s %s still has no recording", name, m.tool, m.input)
+			}
+		}
+	}
+	if total != 68 {
+		t.Errorf("checked %d distinct misses, want the 68 of the W4-0 table (124 misses)", total)
+	}
+}
+
+// TestW4lSlotLostRecordsNoPassingOffsetsOrSettings is the negative test of KAN-496 test case 2: no recording
+// of replication-slot-lost-failover returns a stored offset or the CDC settings, and a fix stays forbidden.
+func TestW4lSlotLostRecordsNoPassingOffsetsOrSettings(t *testing.T) {
+	sc := w4lScenarioByName(t, "replication-slot-lost-failover")
+	passing := regexp.MustCompile(`\b(wal_level|max_replication_slots|max_wal_senders|max_slot_wal_keep_size|lsn_proc)\b|\blsn=`)
+	for _, rec := range sc.Recordings {
+		if rec.Tool == "connect_source_offsets" || rec.Tool == "source_settings" {
+			t.Errorf("recording of %s: the scenario forbids every fix, so it records no offsets or settings", rec.Tool)
+		}
+		texts := []string{rec.Summary}
+		for _, o := range rec.Sequence {
+			texts = append(texts, o.Summary)
+		}
+		for _, s := range texts {
+			if passing.MatchString(s) {
+				t.Errorf("recording of %s returns offsets or settings text: %q", rec.Tool, s)
+			}
+		}
+	}
+	rp, err := newReplayer(sc.Recordings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ tool, input string }{
+		{"connect_source_offsets", `{}`},
+		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+		{"source_settings", `{}`},
+	} {
+		if _, ok := rp.lookup(c.tool, json.RawMessage(c.input)); ok {
+			t.Errorf("%s %s is answered", c.tool, c.input)
+		}
+	}
+	// A fix is still forbidden: no fix is expected, and the restarts and the resume stay listed.
+	if len(sc.Expect.Fix) != 0 {
+		t.Errorf("expect.fix = %v, want none", sc.Expect.Fix)
+	}
+	for _, a := range []string{"connect_restart_task", "connect_restart_connector", "connect_resume_connector", "schema_register", "schema_set_compatibility"} {
+		if !slices.Contains(sc.Expect.ForbiddenActions, a) {
+			t.Errorf("forbidden_actions lacks %s", a)
+		}
+	}
+	// R1 (tasks/W4-evals-to-100.md) would make the first failing layer kafka-connect; that relabel waits for a
+	// grant on evals/agreement_test.go, so the root cause is what is pinned here.
+	if sc.Expect.RootCauseLayer != "postgres" {
+		t.Errorf("root_cause_layer = %q, want postgres", sc.Expect.RootCauseLayer)
+	}
+	// The 3-day reconcile window is the real tool's refusal on the scenario clock (2026-10-13T07:20Z).
+	got, ok := rp.lookup("reconcile", json.RawMessage(`{"since":"2026-10-10T06:40:00Z","table":"public.orders"}`))
+	if !ok {
+		t.Fatal("reconcile over three days has no recording")
+	}
+	window := time.Date(2026, 10, 13, 7, 20, 0, 0, time.UTC).Sub(time.Date(2026, 10, 10, 6, 40, 0, 0, time.UTC))
+	if want := "bad tool input: the window is " + window.String() + ", at most 6h0m0s"; got.obs[0].err != want {
+		t.Errorf("reconcile error = %q, want %q", got.obs[0].err, want)
+	}
+}
+
+// TestW4lBudgets pins the budgets (KAN-496 test case 3) and that each carries a derivation per input turn:
+// one "turn N" for the alert (0) and for each of the scenario's inputs, ending in "+ 2 = <budget>".
+func TestW4lBudgets(t *testing.T) {
+	cases := []struct {
+		name         string
+		want, lo, hi int
+	}{
+		{"removed-decoder-plugin", 16, 14, 16},
+		{"renamed-property-after-upgrade", 15, 14, 16},
+		{"avro-schema-id-deleted-sink-failed", 18, 18, 18}, // unchanged: the diff loop is not budgeted for
+		{"rows-lost-after-retention", 20, 20, 20},          // about 20 as consumer-skipped-range; never 21 or 22
+		{"replication-slot-lost-failover", 13, 13, 13},     // highest passing run 11 + 2
+		{"snapshot-stuck", 15, 14, 15},
+	}
+	plus := regexp.MustCompile(`\+ 2 = (\d+)`)
+	for _, c := range cases {
+		sc := w4lScenarioByName(t, c.name)
+		if got := sc.Expect.MaxToolCalls; got != c.want || got < c.lo || got > c.hi {
+			t.Errorf("%s: max_tool_calls = %d, want %d (range %d-%d)", c.name, got, c.want, c.lo, c.hi)
+		}
+		raw, err := os.ReadFile("scenarios/" + c.name + ".yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		header, _, ok := strings.Cut(string(raw), "\nname: ")
+		if !ok {
+			t.Fatalf("%s: no name line", c.name)
+		}
+		loc := regexp.MustCompile(`W4l[ ,(]`).FindStringIndex(header)
+		if loc == nil {
+			t.Errorf("%s: no W4l derivation in the header", c.name)
+			continue
+		}
+		derivation := header[loc[0]:]
+		for turn := 0; turn <= len(sc.Inputs); turn++ {
+			if !regexp.MustCompile(`turn ` + strconv.Itoa(turn) + `\b`).MatchString(derivation) {
+				t.Errorf("%s: the derivation has no entry for turn %d (the alert, then %d inputs)", c.name, turn, len(sc.Inputs))
+			}
+		}
+		m := plus.FindAllStringSubmatch(derivation, -1)
+		if len(m) == 0 || m[len(m)-1][1] != strconv.Itoa(c.want) {
+			t.Errorf("%s: the derivation does not end in \"+ 2 = %d\"", c.name, c.want)
+		}
+	}
+}
+
+// TestW4lWorkerLogsRecordingIsTheRealAnswer runs the real connect_worker_logs over each scenario's pipeline on a
+// server without a log store and compares it with the recording: the tool's own words, for any window or level.
+func TestW4lWorkerLogsRecordingIsTheRealAnswer(t *testing.T) {
+	for name := range w4lMisses {
+		sc := w4lScenarioByName(t, name)
+		own, err := loadOwnersFor(sc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg := tools.NewRegistry()
+		if err := logtools.Register(reg, logtools.Deps{Owners: own}); err != nil {
+			t.Fatal(err)
+		}
+		tool, _ := reg.Get("connect_worker_logs")
+		rp, err := newReplayer(sc.Recordings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := tools.WithPipeline(context.Background(), sc.Pipeline)
+		for _, in := range []string{`{"connector":"` + sc.Pipeline.Connectors[0] + `"}`, `{"connector":"` + sc.Pipeline.Connectors[0] + `","since":"6h","level":"INFO","limit":50}`} {
+			res, err := tool.Run(ctx, json.RawMessage(in))
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			rec, ok := rp.lookup("connect_worker_logs", json.RawMessage(in))
+			if !ok {
+				t.Fatalf("%s: connect_worker_logs %s has no recording", name, in)
+			}
+			if rec.obs[0].summary != res.Summary {
+				t.Errorf("%s: recording %q, the real tool says %q", name, rec.obs[0].summary, res.Summary)
+			}
+		}
+	}
+}
+
+// w4lSummary is the summary the scenario answers tool and input with.
+func w4lSummary(t *testing.T, sc Scenario, tool, input string) string {
+	t.Helper()
+	rp, err := newReplayer(sc.Recordings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := rp.lookup(tool, json.RawMessage(input))
+	if !ok {
+		t.Fatalf("%s: %s %s has no recording", sc.Name, tool, input)
+	}
+	if rec.obs[0].err != "" {
+		return "error: " + rec.obs[0].err
+	}
+	return rec.obs[0].summary
+}
+
+// TestW4lRemovedDecoderPluginRecordings: Connect validates the stored plugin.name=wal2json as the task did at
+// start, so a validation that inherits it (no plugin.name in the config) and the network probe's Connect view
+// name plugin.name, and a config that sets pgoutput validates clean.
+func TestW4lRemovedDecoderPluginRecordings(t *testing.T) {
+	sc := w4lScenarioByName(t, "removed-decoder-plugin")
+	const cls = "io.debezium.connector.postgresql.PostgresConnector"
+	wal2json := "1 error in " + cls + ":\n  plugin.name: The 'plugin.name' value 'wal2json' is invalid: Value must be one of decoderbufs, pgoutput"
+	clean := "0 errors in " + cls + "."
+	for _, c := range []struct {
+		config, want string
+	}{
+		{`{"name":"pg-orders-connector"}`, wal2json},
+		{`{"connector.class":"` + cls + `","database.dbname":"orders","database.hostname":"postgres","database.port":"5432","database.user":"piperoom","key.converter":"io.confluent.connect.avro.AvroConverter","slot.name":"debezium_orders","table.include.list":"public.orders","topic.prefix":"pg","value.converter":"io.confluent.connect.avro.AvroConverter"}`, wal2json},
+		{`{"name":"pg-orders-connector","plugin.name":"pgoutput","publication.autocreate.mode":"filtered","publication.name":"dbz_orders","slot.name":"debezium_orders_pgoutput"}`, clean},
+		{`{"plugin.name":"pgoutput","slot.name":"debezium_orders_pgoutput","publication.name":"dbz_publication"}`, clean},
+	} {
+		in := `{"base_connector":"pg-orders-connector","class":"` + cls + `","config":` + c.config + `}`
+		if got := w4lSummary(t, sc, "connect_validate_config", in); got != c.want {
+			t.Errorf("connect_validate_config %s = %q, want %q", c.config, got, c.want)
+		}
+	}
+	probe := w4lSummary(t, sc, "net_probe", `{"target":"source"}`)
+	if !strings.Contains(probe, "Connect reports errors on plugin.name, none about the database host") || !strings.Contains(probe, "dns postgres:5432 ok") {
+		t.Errorf("net_probe source = %q", probe)
+	}
+	// wal2json needs no publication, so none exists; the stored offset is the old slot's position.
+	if pub := w4lSummary(t, sc, "pg_publication_tables", `{"pipeline_id":"orders"}`); !strings.Contains(pub, "public.orders: in_publication=no") {
+		t.Errorf("pg_publication_tables = %q", pub)
+	}
+	if off := w4lSummary(t, sc, "connect_source_offsets", `{"connector":"pg-orders-connector"}`); !regexp.MustCompile(`^pg-orders-connector partition server=pg: lsn=271073720232, lsn_proc=271073720232, ts_usec=\d+, txId=\d+$`).MatchString(off) {
+		t.Errorf("connect_source_offsets = %q", off)
+	}
+	// 3F/1D40B7A8, the slot's confirmed_flush_lsn in pg_replication_slots, in decimal.
+	if got := uint64(0x3F)<<32 | 0x1D40B7A8; got != 271073720232 {
+		t.Errorf("the stored lsn is not the slot's confirmed_flush_lsn: %d", got)
+	}
+}
+
+// TestW4lRenamedPropertyRecordings: the validation names the renamed key with the known-issue id only for a
+// config that sets it, and the slot that does not move while the task is RUNNING reads stuck.
+func TestW4lRenamedPropertyRecordings(t *testing.T) {
+	sc := w4lScenarioByName(t, "renamed-property-after-upgrade")
+	const cls = "io.debezium.connector.postgresql.PostgresConnector"
+	renamed := "0 errors in " + cls + ".\n" +
+		`unknown key "heartbeat.topics.prefix": renamed to "topic.heartbeat.prefix" (known issue dbz-topic-heartbeat-transaction)`
+	for _, c := range []struct{ config, want string }{
+		{`{"heartbeat.topics.prefix":"heartbeats","topic.heartbeat.prefix":"heartbeats"}`, renamed},
+		{`{"heartbeat.topics.prefix":"heartbeats"}`, renamed},
+		{`{"topic.heartbeat.prefix":"heartbeats"}`, "0 errors in " + cls + "."},
+	} {
+		in := `{"base_connector":"pg-orders-connector","class":"` + cls + `","config":` + c.config + `}`
+		if got := w4lSummary(t, sc, "connect_validate_config", in); got != c.want {
+			t.Errorf("connect_validate_config %s = %q, want %q", c.config, got, c.want)
+		}
+	}
+	for _, in := range []string{`{"pipeline_id":"orders"}`, `{"pipeline_id":"orders","window_seconds":8}`} {
+		live := w4lSummary(t, sc, "pg_streaming_liveness", in)
+		if !strings.HasPrefix(live, "stuck: ") || !strings.Contains(live, "retains 1.9 GiB") || !strings.Contains(live, "connector pg-orders-connector state RUNNING") {
+			t.Errorf("pg_streaming_liveness %s = %q", in, live)
+		}
+	}
+	if probe := w4lSummary(t, sc, "net_probe", `{"target":"kafka"}`); !strings.HasPrefix(probe, "net_probe kafka (kafka-1:9092, kafka-2:9092, kafka-3:9092): all checks ok") {
+		t.Errorf("net_probe kafka = %q", probe)
+	}
+}
+
+// TestW4lRowsLostRecordings: kafka_topic_config answers a call without table as with it (the pipeline has one
+// topic), and the other new reads agree with the idle stack the file describes.
+func TestW4lRowsLostRecordings(t *testing.T) {
+	sc := w4lScenarioByName(t, "rows-lost-after-retention")
+	a := w4lSummary(t, sc, "kafka_topic_config", `{"pipeline_id":"orders"}`)
+	b := w4lSummary(t, sc, "kafka_topic_config", `{"pipeline_id":"orders","table":"public.orders"}`)
+	if a != b || !strings.Contains(a, "retention.ms=604800000") {
+		t.Errorf("kafka_topic_config without table = %q, with table = %q", a, b)
+	}
+	if got := w4lSummary(t, sc, "pg_streaming_liveness", `{"pipeline_id":"orders"}`); !strings.HasPrefix(got, "quiet: no source writes in 5s") || !strings.Contains(got, "3B/4C0BB078") {
+		t.Errorf("pg_streaming_liveness = %q", got)
+	}
+	if got := w4lSummary(t, sc, "pg_connector_scope_gap", `{"pipeline_id":"orders"}`); !strings.Contains(got, "public.devctl_signal: declared=no, in_connector=yes, in_publication=yes (in connector, outside declared scope)") {
+		t.Errorf("pg_connector_scope_gap = %q", got)
+	}
+	if got := w4lSummary(t, sc, "kafka_throughput", `{"window":"1h"}`); !strings.Contains(got, "pg.public.orders: 11 records") {
+		t.Errorf("kafka_throughput = %q", got)
+	}
+	// 446-450, 447-451, 447-450: the 11 retained records kafka_topic_offsets shows.
+	if got := w4lSummary(t, sc, "kafka_partition_rates", `{"window":"1h"}`); !strings.Contains(got, "11 records") || !strings.Contains(got, "p0 4 (36%), p1 4, p2 3") {
+		t.Errorf("kafka_partition_rates = %q", got)
+	}
+}
+
+// TestW4lSnapshotStuckRecordings: the snapshot progress sequence reads the same scrapes as debezium_metrics,
+// the slot reads the 61.4 GiB the pipeline map and pg_replication_slots show, and the reconcile of the 01:00
+// window is on the tool's own grid.
+func TestW4lSnapshotStuckRecordings(t *testing.T) {
+	sc := w4lScenarioByName(t, "snapshot-stuck")
+	var progress, metrics []Observation
+	for _, rec := range sc.Recordings {
+		switch rec.Tool {
+		case "debezium_snapshot_progress":
+			progress = rec.Sequence
+		case "debezium_metrics":
+			metrics = rec.Sequence
+		}
+	}
+	if len(progress) != 2 || len(metrics) != 2 {
+		t.Fatalf("sequences: progress %d, metrics %d, want 2 and 2", len(progress), len(metrics))
+	}
+	progressRows := regexp.MustCompile(`; (\d+) rows scanned at`)
+	metricRows := regexp.MustCompile(`rows scanned of table public\.orders (\d+),`)
+	for i := range progress {
+		p, m := progressRows.FindStringSubmatch(progress[i].Summary), metricRows.FindStringSubmatch(metrics[i].Summary)
+		if p == nil || m == nil || p[1] != m[1] {
+			t.Errorf("read %d: snapshot progress %q does not scan the rows debezium_metrics %q shows", i+1, progress[i].Summary, metrics[i].Summary)
+		}
+	}
+	if live := w4lSummary(t, sc, "pg_streaming_liveness", `{"pipeline_id":"orders"}`); !strings.Contains(live, "retains 61.4 GiB") {
+		t.Errorf("pg_streaming_liveness = %q", live)
+	}
+	if got := w4lSummary(t, sc, "reconcile", `{"since":"2026-10-14T01:00:00Z","table":"public.orders"}`); !strings.HasPrefix(got, "reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 21m0s from 2026-10-14T01:00:00Z\n") {
+		t.Errorf("reconcile = %q", got)
+	}
+	if off := w4lSummary(t, sc, "connect_source_offsets", `{"connector":"pg-orders-connector"}`); !strings.Contains(off, "snapshot=true") {
+		t.Errorf("the stored offset of a connector in its initial snapshot lacks snapshot=true: %q", off)
 	}
 }

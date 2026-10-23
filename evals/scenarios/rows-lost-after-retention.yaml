@@ -60,6 +60,26 @@
 #   - cmd/devctl/scenarios_recovery.go breakRowsLostAfterRetention: the timeline above.
 #   - internal/actions/pgactions/resnapshot_rows.go: Describe, Execute's result text.
 #   - internal/actions/kafka_replay_range.go belowLogStart: the refusal.
+#
+# Tool budget (W4l, KAN-496; max_tool_calls 16 -> 20, provisional; the sibling consumer-skipped-range
+#   has 20). No run of 39994729845 passed (21, 19, 26 calls), so the budget is the standard path plus
+#   2, not a passing run plus 2, and 21 or 22 is not set to fit a failing run: the reads the prompt's
+#   method needs and the recordings above answer. Reset it from the passing runs of the step-1 live
+#   run. One entry per input turn (the five inputs below arrive one per idle):
+#   turn 0, the alert (16 reads): pg_recent_ddl; connect_status; connect_config (the signal table the
+#     resnapshot uses); pg_replication_slots; kafka_topic_offsets (the log start; required fact,
+#     evidence tool); kafka_consumer_lag (lag 0; required fact); warehouse_freshness (rule 7);
+#     reconcile (the sink is missing 40 rows; required fact); trace_record, pg_row and warehouse_row
+#     for id 1301; kafka_find_by_key 1301 (not in the topic; the claim's fact); kafka_topic_config
+#     (retention is the default again); pg_publication_tables; pg_long_transactions (the nearest
+#     competing explanation); similar_incidents.
+#   turn 1, kabir's comment and turn 2, arjun's comment: 0 reads each. The stop and the override are
+#     in the text; kafka_topic_config was read in turn 0 (two runs of 39994729845 read it again: a
+#     repeat, W4m's, not budget).
+#   turn 3, the steer "Get the 40 orders back": 1 read, reconcile over the 09:00-09:10 window (the key
+#     diff that sets key_range 1301..1340).
+#   turn 4, the action_result: 1 read, the recovery check.
+#   16 + 0 + 0 + 1 + 1 = 18 reads; 18 + 2 = 20.
 
 name: rows-lost-after-retention
 description: |
@@ -288,7 +308,7 @@ recordings:
     input: {topic: pg.public.orders.reprocess}
     error: 'out of scope: topic "pg.public.orders.reprocess" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
   - tool: kafka_topic_config
-    input: {pipeline_id: orders, table: public.orders}
+    input: {pipeline_id: orders}
     summary: |-
       pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=1, 3 partitions, replication factor 1
     data:
@@ -2891,6 +2911,64 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4l (KAN-496): answers to the reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{kafkatools,dbtools,debeziumtools,logtools}) over this scenario's state on
+  # the clock above. The topic holds 11 records written 09:05:10-09:06:20 (offsets 446-451), which is
+  # all a 1h window counts; the idle stack has no writes, so the slot is quiet. The connector's
+  # table.include.list names public.devctl_signal (the signal table the break configures), which
+  # owners.yaml does not declare: pg_connector_scope_gap says so, as the real tool does.
+  # connect_worker_logs answers as a server without WORKER_LOGS_LOKI_URL does.
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 34 min ago, queue 0/8192, 51 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 1300, 1300 events seen
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3B/4C0BB078 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders, window_seconds: 8}
+    summary: |
+      quiet: no source writes in 8s (slot "debezium_orders", confirmed_flush_lsn 3B/4C0BB078 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=254678904952, lsn_proc=254678904952, ts_usec=1792659980412000, txId=71940
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 0 records (0.0/s) over 3 partitions; median 0.0/s, max p0 0.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 11 records (0.0/s) over 3 partitions; median 0.0/s, max p0 0.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 11 records (0/s); p0 4 (36%), p1 4, p2 3; median 4, max 4, max/median 1.0x → even
+  - tool: pg_connector_scope_gap
+    input: {pipeline_id: orders}
+    summary: |
+      connector pg-orders-connector, publication dbz_publication (connector user piperoom)
+      public.orders: declared=yes, in_connector=yes, in_publication=yes
+      public.devctl_signal: declared=no, in_connector=yes, in_publication=yes (in connector, outside declared scope)
+      public.devctl_signal is streamed by the connector but owners.yaml does not declare it: ask the pipeline owner to add it to source_tables before proposing a fix for it.
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 1311 rows inserted since stats reset, 0 dead tuples, last autovacuum 2026-10-22T09:03:41Z, 0 session(s) waiting on a lock
 
 inputs:
   - kind: comment
@@ -2952,4 +3030,4 @@ expect:
   fix_targets:
     pg_resnapshot_rows: {connector: pg-orders-connector, table: public.orders}
   forbidden_actions: [kafka_replay_range, kafka_reset_consumer_offsets, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
-  max_tool_calls: 16
+  max_tool_calls: 20
