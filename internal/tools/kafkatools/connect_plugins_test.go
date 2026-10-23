@@ -105,21 +105,37 @@ func TestConnectPluginsListsEveryKindWithVersions(t *testing.T) {
 	if r.Truncated {
 		t.Fatal("uncapped result marked truncated")
 	}
-	// The summary groups source before sink before the converter kinds.
-	iSource := strings.Index(r.Summary, "source io.debezium")
-	iSink := strings.Index(r.Summary, "sink org.apache")
-	iConv := strings.Index(r.Summary, "converter io.confluent")
-	if !(iSource < iSink && iSink < iConv) {
-		t.Fatalf("plugins not grouped in type order:\n%s", r.Summary)
+	// The count line is exact and in pluginTypeOrder.
+	if !strings.Contains(r.Summary, "1 source, 1 sink, 1 converter, 1 transformation, 1 predicate, 1 header_converter") {
+		t.Fatalf("count line missing or out of order:\n%s", r.Summary)
+	}
+	// Every plugin line starts with "- " (so a hostile class can never render
+	// as one of the tool's own marker lines), and the full type-order chain
+	// holds: source, sink, converter, transformation, predicate,
+	// header_converter.
+	var pluginLines []string
+	for _, line := range strings.Split(r.Summary, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			pluginLines = append(pluginLines, line)
+		}
+	}
+	if len(pluginLines) != 6 {
+		t.Fatalf("got %d \"- \" plugin lines, want 6:\n%s", len(pluginLines), r.Summary)
+	}
+	for i, wantPrefix := range []string{"- source ", "- sink ", "- converter ", "- transformation ", "- predicate ", "- header_converter "} {
+		if !strings.HasPrefix(pluginLines[i], wantPrefix) {
+			t.Fatalf("plugin line %d is %q, want prefix %q", i, pluginLines[i], wantPrefix)
+		}
 	}
 }
 
-// A pre-3.2 Connect lists connectors only and reports no versions. The tool
-// marks that instead of guessing versions.
+// A pre-3.2 Connect lists connectors only; it may well report their versions
+// (pre-3.2 workers did), so the tool keys legacy on the absence of every
+// non-connector type, never on missing versions.
 func TestConnectPluginsMarksLegacyWorker(t *testing.T) {
 	legacy := []connect.Plugin{
 		{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source"},
-		{Class: "org.apache.kafka.connect.file.FileStreamSinkConnector", Type: "sink"},
+		{Class: "org.apache.kafka.connect.file.FileStreamSinkConnector", Type: "sink", Version: "3.1.2"},
 	}
 	f := newPluginsFake(t, legacy)
 	f.infoFn = func(context.Context) (connect.ServerInfo, error) {
@@ -215,11 +231,135 @@ func TestConnectPluginsVersionUnknown(t *testing.T) {
 	}
 	tool := pluginsRegistry(t, Deps{Connect: f})
 	r := runTool(t, tool, `{}`)
-	if !strings.Contains(r.Summary, "Kafka version unknown") {
+	// The client can read GET /, so the summary blames the worker, not the
+	// client.
+	if !strings.Contains(r.Summary, "Kafka version unknown (the worker's GET / did not answer)") {
 		t.Fatalf("summary %q", r.Summary)
 	}
 	if !strings.Contains(r.Summary, "io.confluent.connect.avro.AvroConverter") {
 		t.Fatalf("plugins missing: %q", r.Summary)
+	}
+}
+
+// A GET / that succeeds but reports no version (or a hostile version that
+// safeVersion rejects) is "not reported by the worker", not "unknown": the
+// read worked, the worker just said nothing usable.
+func TestConnectPluginsVersionNotReported(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info connect.ServerInfo
+	}{
+		{"empty answer", connect.ServerInfo{}},
+		{"hostile version", connect.ServerInfo{Version: "3.6.1\x1b[31m\nX", Commit: "abc\u202e"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPluginsFake(t, allPluginKinds())
+			f.infoFn = func(context.Context) (connect.ServerInfo, error) { return tc.info, nil }
+			tool := pluginsRegistry(t, Deps{Connect: f})
+			r := runTool(t, tool, `{}`)
+			if !strings.Contains(r.Summary, "Kafka version not reported by the worker: 6 plugins") {
+				t.Fatalf("summary %q", r.Summary)
+			}
+			if strings.ContainsAny(r.Summary, "\x1b\u202e") {
+				t.Fatalf("summary carries hostile version bytes: %q", r.Summary)
+			}
+			data := r.Data.(connectPluginsData)
+			if data.KafkaVersion != "" || data.ConnectCommit != "" {
+				t.Fatalf("hostile/empty info kept in data: %+v", data)
+			}
+		})
+	}
+}
+
+// An unknown plugin type sorts after the known kinds and renders verbatim; an
+// empty type renders as "(unknown)" so the line always carries a type token.
+func TestConnectPluginsUnknownAndEmptyTypes(t *testing.T) {
+	plugins := []connect.Plugin{
+		{Class: "io.example.NoType", Version: "1.0"},
+		{Class: "io.example.Restarter", Type: "connector_restarter", Version: "2.0"},
+		{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source", Version: "3.0.0.Final"},
+	}
+	tool := pluginsRegistry(t, Deps{Connect: newPluginsFake(t, plugins)})
+	r := runTool(t, tool, `{}`)
+	for _, want := range []string{
+		"- source io.debezium.connector.postgresql.PostgresConnector 3.0.0.Final",
+		"- (unknown) io.example.NoType 1.0",
+		"- connector_restarter io.example.Restarter 2.0",
+	} {
+		if !strings.Contains(r.Summary, want) {
+			t.Fatalf("summary missing %q:\n%s", want, r.Summary)
+		}
+	}
+	// Known type first, then the unknown types ("" before "connector_restarter").
+	iSource := strings.Index(r.Summary, "- source ")
+	iEmpty := strings.Index(r.Summary, "- (unknown) ")
+	iRestarter := strings.Index(r.Summary, "- connector_restarter ")
+	if !(iSource < iEmpty && iEmpty < iRestarter) {
+		t.Fatalf("unknown types not ordered after known kinds:\n%s", r.Summary)
+	}
+	// The count line names the unknown type after the known kinds; the empty
+	// type is counted but never rendered as a nameless ", 1 " fragment.
+	if !strings.Contains(r.Summary, "1 source, 1 connector_restarter") {
+		t.Fatalf("count line missing unknown type:\n%s", r.Summary)
+	}
+}
+
+// Types are untrusted Connect text: an answer minting one type per row keeps
+// ByType and the count line at maxPluginTypes distinct keys, with the
+// overflow summed under "other" and every plugin still counted.
+func TestConnectPluginsCapsHostileTypeKeys(t *testing.T) {
+	const total = maxPluginTypes + 20
+	plugins := make([]connect.Plugin, total)
+	for i := range plugins {
+		plugins[i] = connect.Plugin{
+			Class: fmt.Sprintf("io.example.Plugin%03d", i),
+			Type:  fmt.Sprintf("minted_type_%03d", i),
+		}
+	}
+	plugins[0].Type = "source"
+	tool := pluginsRegistry(t, Deps{Connect: newPluginsFake(t, plugins)})
+	r := runTool(t, tool, `{}`)
+	data := r.Data.(connectPluginsData)
+	if len(data.ByType) > maxPluginTypes {
+		t.Fatalf("ByType holds %d keys, want <= %d", len(data.ByType), maxPluginTypes)
+	}
+	if data.ByType["source"] != 1 {
+		t.Fatalf("known type lost under the cap: %+v", data.ByType)
+	}
+	if data.ByType["other"] == 0 {
+		t.Fatalf("overflow types not summed under other: %+v", data.ByType)
+	}
+	sum := 0
+	for _, n := range data.ByType {
+		sum += n
+	}
+	if sum != total {
+		t.Fatalf("ByType sums to %d, want %d", sum, total)
+	}
+}
+
+// One row over the summary-line cap: the extra row is cut from the summary
+// (Truncated), but Data still holds every row (Omitted 0, data cap untouched).
+func TestConnectPluginsSummaryCapOnly(t *testing.T) {
+	const total = maxPluginSummaryLines + 1
+	plugins := make([]connect.Plugin, total)
+	for i := range plugins {
+		plugins[i] = connect.Plugin{Class: fmt.Sprintf("io.example.Plugin%03d", i), Type: "source", Version: "1.0"}
+	}
+	tool := pluginsRegistry(t, Deps{Connect: newPluginsFake(t, plugins)})
+	r := runTool(t, tool, `{}`)
+	if !r.Truncated {
+		t.Fatal("summary-capped result not marked truncated")
+	}
+	if got := strings.Count(r.Summary, "\n- "); got != maxPluginSummaryLines {
+		t.Fatalf("summary shows %d plugin lines, want %d", got, maxPluginSummaryLines)
+	}
+	if !strings.Contains(r.Summary, "1 more plugins not shown (cap)") {
+		t.Fatalf("cut summary not marked:\n%s", r.Summary)
+	}
+	data := r.Data.(connectPluginsData)
+	if data.Omitted != 0 || len(data.Plugins) != total || data.PluginCount != total {
+		t.Fatalf("data cut below maxPluginRows: omitted %d, rows %d, count %d", data.Omitted, len(data.Plugins), data.PluginCount)
 	}
 }
 
@@ -228,7 +368,7 @@ func TestConnectPluginsVersionUnknown(t *testing.T) {
 func TestConnectPluginsWithoutInfoReader(t *testing.T) {
 	tool := pluginsRegistry(t, Deps{Connect: &pluginOnlyConnect{fakeConnect: &fakeConnect{}}})
 	r := runTool(t, tool, `{}`)
-	if !strings.Contains(r.Summary, "Kafka version unknown") || !strings.Contains(r.Summary, "PostgresConnector 3.0.0.Final") {
+	if !strings.Contains(r.Summary, "Kafka version unknown (this client does not read GET /)") || !strings.Contains(r.Summary, "PostgresConnector 3.0.0.Final") {
 		t.Fatalf("summary %q", r.Summary)
 	}
 }
@@ -269,6 +409,11 @@ func TestConnectPluginsSanitizesAndCaps(t *testing.T) {
 	for _, p := range data.Plugins {
 		if strings.ContainsAny(p.Class, "\x1b\n\u202e") || strings.ContainsAny(p.Version, "\x1b\n\u202e") {
 			t.Fatalf("control characters kept in data: %+v", p)
+		}
+		// Data rows carry the same per-string cap as the summary: a huge class
+		// cannot blow up the result through Data instead.
+		if len(p.Class) > maxPluginTextBytes+len("\u2026") || len(p.Version) > maxPluginTextBytes+len("\u2026") {
+			t.Fatalf("uncapped string in data row: %d/%d bytes", len(p.Class), len(p.Version))
 		}
 	}
 }

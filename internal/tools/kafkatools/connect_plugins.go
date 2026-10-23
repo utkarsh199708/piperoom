@@ -20,6 +20,10 @@ const (
 	maxPluginSummaryLines = 50
 	maxPluginTextBytes    = 256
 	maxPluginRows         = 1000
+	// maxPluginTypes caps the distinct type keys of ByType and the count
+	// line: types are untrusted Connect text, and a hostile answer could
+	// otherwise mint one multi-hundred-byte type per row.
+	maxPluginTypes = 32
 )
 
 // pluginTypeOrder is the order the summary groups plugins in: the four kinds
@@ -39,7 +43,7 @@ func (t *connectPlugins) InputSchema() map[string]any {
 func (t *connectPlugins) Description() string {
 	return "Lists the Kafka Connect worker's plugins with their versions: source and sink connectors, key/value converters, transforms and predicates, plus the Kafka version the worker reports (GET /). " +
 		"Use it when an installed plugin version, or a missing converter or transform, may explain a failure. " +
-		"On a Connect older than 3.2 it lists connector plugins only, reports no versions and says so."
+		"On a Connect older than 3.2 it lists connector plugins only (no converters, transforms or predicates) and says so."
 }
 
 func (t *connectPlugins) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
@@ -62,16 +66,14 @@ func (t *connectPlugins) Run(ctx context.Context, _ json.RawMessage) (tools.Resu
 	// The Kafka version is a second, independent read: a worker that lists its
 	// plugins but fails GET / still answers the plugin question, and the tool
 	// says the version is unknown instead of failing whole.
+	_, hasInfoReader := t.d.Connect.(connect.ConnectInfoReader)
 	info, haveInfo := t.serverInfo(cctx)
 
 	rows := pluginRows(plugins)
-	counts := map[string]int{}
-	for _, r := range rows {
-		counts[r.Type]++
-	}
+	counts := cappedPluginCounts(rows)
 	legacy := connect.LegacyPlugins(plugins)
 
-	summary, shown := buildPluginsSummary(info, haveInfo, legacy, rows, counts)
+	summary, shown := buildPluginsSummary(info, hasInfoReader, haveInfo, legacy, rows, counts)
 	dataRows, omitted := rows, 0
 	if len(rows) > maxPluginRows {
 		dataRows, omitted = rows[:maxPluginRows], len(rows)-maxPluginRows
@@ -176,19 +178,23 @@ func pluginTypeRank(typ string) int {
 
 // buildPluginsSummary renders the version, the legacy marker, the per-type
 // counts and the plugin lines, until maxPluginSummaryLines lines. It returns
-// how many plugin lines it wrote so the caller can mark a cut result.
-func buildPluginsSummary(info connect.ServerInfo, haveInfo, legacy bool, rows []connectPluginRow, counts map[string]int) (string, int) {
+// how many plugin lines it wrote so the caller can mark a cut result. Every
+// plugin line starts with "- " and always carries a type token, so a hostile
+// class can never render as one of the tool's own marker lines.
+func buildPluginsSummary(info connect.ServerInfo, hasInfoReader, haveInfo, legacy bool, rows []connectPluginRow, counts map[string]int) (string, int) {
 	var sb strings.Builder
 	switch {
 	case haveInfo && info.Version != "":
 		fmt.Fprintf(&sb, "Kafka %s: %d plugins", info.Version, len(rows))
 	case haveInfo:
 		fmt.Fprintf(&sb, "Kafka version not reported by the worker: %d plugins", len(rows))
-	default:
+	case hasInfoReader:
 		fmt.Fprintf(&sb, "Kafka version unknown (the worker's GET / did not answer): %d plugins", len(rows))
+	default:
+		fmt.Fprintf(&sb, "Kafka version unknown (this client does not read GET /): %d plugins", len(rows))
 	}
 	if legacy {
-		appendLine(&sb, "pre-3.2 Connect: connector plugins only; this worker reports no converter, transform or predicate plugins and no plugin versions")
+		appendLine(&sb, "pre-3.2 Connect: this worker lists connector plugins only, so converters, transforms and predicates cannot be read from here")
 	}
 	if len(rows) > 0 {
 		appendLine(&sb, pluginCountLine(counts))
@@ -198,7 +204,11 @@ func buildPluginsSummary(info connect.ServerInfo, haveInfo, legacy bool, rows []
 		if shown >= maxPluginSummaryLines {
 			break
 		}
-		line := r.Type + " " + r.Class
+		typ := r.Type
+		if typ == "" {
+			typ = "(unknown)"
+		}
+		line := "- " + typ + " " + r.Class
 		if r.Version != "" {
 			line += " " + r.Version
 		}
@@ -209,6 +219,40 @@ func buildPluginsSummary(info connect.ServerInfo, haveInfo, legacy bool, rows []
 		appendLine(&sb, fmt.Sprintf("%d more plugins not shown (cap)", rest))
 	}
 	return sb.String(), shown
+}
+
+// cappedPluginCounts counts rows per type, keeping at most maxPluginTypes
+// distinct keys: the known types always, then unknown types alphabetically,
+// and everything past the cap under "other". Types are untrusted text, so
+// the cap keeps a hostile answer from minting one key per row.
+func cappedPluginCounts(rows []connectPluginRow) map[string]int {
+	counts := map[string]int{}
+	for _, r := range rows {
+		counts[r.Type]++
+	}
+	if len(counts) <= maxPluginTypes {
+		return counts
+	}
+	keys := make([]string, 0, len(counts))
+	for typ := range counts {
+		keys = append(keys, typ)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ri, rj := pluginTypeRank(keys[i]), pluginTypeRank(keys[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return keys[i] < keys[j]
+	})
+	capped := make(map[string]int, maxPluginTypes)
+	for i, typ := range keys {
+		if i < maxPluginTypes-1 {
+			capped[typ] = counts[typ]
+			continue
+		}
+		capped["other"] += counts[typ]
+	}
+	return capped
 }
 
 // pluginCountLine renders "1 source, 2 converter, ..." in pluginTypeOrder,

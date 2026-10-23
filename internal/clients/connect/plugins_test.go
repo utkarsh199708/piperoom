@@ -56,8 +56,10 @@ func TestPlugins(t *testing.T) {
 	}
 }
 
-// A pre-3.2 worker ignores connectorsOnly=false, lists connectors only and
-// reports no versions. The entries still decode; LegacyPlugins marks them.
+// A pre-3.2 worker ignores connectorsOnly=false and lists connectors only.
+// The entries still decode; LegacyPlugins marks the list by the absence of
+// every non-connector type, never by versions: pre-3.2 workers report
+// connector versions too, and any plugin may report none.
 func TestPluginsLegacyResponse(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"class":"io.debezium.connector.postgresql.PostgresConnector","type":"source"}]`))
@@ -70,11 +72,41 @@ func TestPluginsLegacyResponse(t *testing.T) {
 		t.Fatalf("plugins %+v", plugins)
 	}
 	if !LegacyPlugins(plugins) {
-		t.Fatal("a versionless list was not marked legacy")
+		t.Fatal("a connectors-only list was not marked legacy")
 	}
 	// An empty inventory says nothing about the worker's age.
 	if LegacyPlugins(nil) {
 		t.Fatal("empty list marked legacy")
+	}
+}
+
+// LegacyPlugins keys on type presence, not versions: a connectors-only list
+// WITH versions is still pre-3.2 (those workers reported connector versions),
+// and one non-connector entry proves 3.2+ even when every version is missing.
+func TestLegacyPluginsKeysOnTypesNotVersions(t *testing.T) {
+	versionedConnectorsOnly := []Plugin{
+		{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source", Version: "1.9.7.Final"},
+		{Class: "org.apache.kafka.connect.file.FileStreamSinkConnector", Type: "sink", Version: "3.1.2"},
+	}
+	if !LegacyPlugins(versionedConnectorsOnly) {
+		t.Fatal("a connectors-only list with versions was not marked legacy")
+	}
+	versionlessWithConverter := []Plugin{
+		{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source"},
+		{Class: "org.apache.kafka.connect.storage.StringConverter", Type: "converter"},
+	}
+	if LegacyPlugins(versionlessWithConverter) {
+		t.Fatal("a versionless list holding a converter was marked legacy")
+	}
+	// Each non-connector type on its own proves a 3.2+ worker.
+	for _, typ := range []string{"converter", "header_converter", "transformation", "predicate"} {
+		list := []Plugin{
+			{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source"},
+			{Class: "io.example.Extra", Type: typ},
+		}
+		if LegacyPlugins(list) {
+			t.Fatalf("a list holding a %s was marked legacy", typ)
+		}
 	}
 }
 
@@ -88,10 +120,13 @@ func TestPluginsNotFound(t *testing.T) {
 	}
 }
 
+// A non-2xx body is untrusted Connect text and goes through safeErr: control
+// characters are folded and credentials redacted before the body can reach an
+// error string, a log or a prompt.
 func TestPluginsServerError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"message":"boom"}`))
+		w.Write([]byte("{\"message\":\"boom\x1b[31m\nforged line, database.password=hunter2\"}"))
 	})
 	_, err := c.Plugins(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "500") {
@@ -99,6 +134,11 @@ func TestPluginsServerError(t *testing.T) {
 	}
 	if errors.Is(err, clients.ErrNotFound) || errors.Is(err, clients.ErrNotSupported) {
 		t.Fatalf("err %v misclassified a server error", err)
+	}
+	for _, banned := range []string{"\x1b", "\nforged", "hunter2"} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("error carries unsanitized body %q: %v", banned, err)
+		}
 	}
 }
 
