@@ -1,0 +1,165 @@
+{
+  "scenario": "setup/compose-privileged-refused",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-25T09:40:00Z",
+  "note": "Composed from the compose driver's own refusal text (validator.go, RulePrivilege) and the connect template's render, on the fixed clock of the U1-19 setup scenarios. No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "docker 27.3.1; docker compose v2.29.7; project dir C:\\orders",
+        "data": {
+          "os": "windows",
+          "arch": "amd64",
+          "project_dir": "C:\\orders",
+          "tools": {"docker": "27.3.1", "docker compose": "v2.29.7"}
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "version", "--short"],
+          "target": "C:\\orders",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:01Z",
+          "took_ms": 38,
+          "out_mac": "3b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f7"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6",
+      "params": {"templates": ["kafka", "connect"], "project": "piperoom-orders", "file": "compose.yaml"},
+      "result": {
+        "ok": false,
+        "summary": "refused compose_write: compose: privilege: service \"connect\": \"privileged\" runs the container with host privileges",
+        "data": {"rule": "privilege", "service": "connect", "field": "privileged"},
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 1,
+          "at": "2026-10-25T09:40:10Z",
+          "took_ms": 0,
+          "out_mac": "7c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f4"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7",
+      "params": {"templates": ["kafka", "connect"], "project": "piperoom-orders", "file": "compose.yaml"},
+      "result": {
+        "ok": true,
+        "summary": "wrote compose.yaml (3120 bytes), services: kafka, connect",
+        "data": {
+          "file": "compose.yaml",
+          "bytes": 3120,
+          "changed": true,
+          "services": ["kafka", "connect"],
+          "env_file": ".env",
+          "env_keys": ["KAFKA_CLUSTER_ID"]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:44Z",
+          "took_ms": 9,
+          "out_mac": "b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6"
+        }
+      }
+    },
+    {
+      "op": "compose_up",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9",
+      "params": {"services": ["kafka", "connect"]},
+      "result": {
+        "ok": true,
+        "summary": "compose up: kafka (healthy), connect (healthy)",
+        "data": {
+          "project": "piperoom-orders",
+          "services": [
+            {"service": "kafka", "state": "running", "health": "healthy"},
+            {"service": "connect", "state": "running", "health": "healthy"}
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "up", "-d", "--wait", "kafka", "connect"],
+          "target": "kafka,connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:42:02Z",
+          "took_ms": 58114,
+          "out_mac": "5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "29654c444daab10f544bc97271139ee943c860e9c9681e284dace9c14667ea5a",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:45:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:45:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {"topic": "pg.public.orders", "partitions": [{"partition": 0, "start": 0, "end": 2}], "total_records": 2},
+        "at": "2026-10-25T09:45:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {"connector": "pg-orders-connector", "metrics_found": 11, "snapshot": {"SnapshotCompleted": 1, "SnapshotRunning": 0}},
+        "at": "2026-10-25T09:45:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {"topic": "pg.public.orders", "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718", "found": true, "records": [{"partition": 0, "offset": 1}]},
+        "at": "2026-10-25T09:45:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {"subjects": ["pg.public.orders-key", "pg.public.orders-value"], "deleted_subjects": []},
+        "at": "2026-10-25T09:45:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
+        {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
+        {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
+        {"name": "canary_subject", "ok": true, "note": "2 subject(s) under the canary topic's prefix"},
+        {"name": "sink_row", "ok": true, "note": "no sink was set up"},
+        {"name": "person_change", "ok": false, "note": "awaiting the person's change"}
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

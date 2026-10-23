@@ -37,6 +37,10 @@ type freshSnapshot struct {
 type collected struct {
 	slots    []clients.ReplicationSlot
 	slotsErr error
+	// binlog and binlogErr are a MySQL pipeline's binlog state (mysql.go),
+	// read instead of the slots.
+	binlog    *BinlogStatus
+	binlogErr error
 
 	connect   map[string]connectSnapshot
 	groups    map[string]groupSnapshot
@@ -109,12 +113,23 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []stri
 			mu.Unlock()
 		})
 	}
-	run(func() {
-		slots, err := b.src.ReplicationSlots(ctx)
-		mu.Lock()
-		c.slots, c.slotsErr = slots, err
-		mu.Unlock()
-	})
+	if p.IsMySQL() {
+		// MySQL has no replication slots (ReplicationSlots answers
+		// ErrNotSupported): the source node reads the binlog instead.
+		run(func() {
+			st, err := b.collectBinlog(ctx)
+			mu.Lock()
+			c.binlog, c.binlogErr = st, err
+			mu.Unlock()
+		})
+	} else {
+		run(func() {
+			slots, err := b.src.ReplicationSlots(ctx)
+			mu.Lock()
+			c.slots, c.slotsErr = slots, err
+			mu.Unlock()
+		})
+	}
 	for _, cn := range p.Connectors {
 		cn := cn
 		run(func() {

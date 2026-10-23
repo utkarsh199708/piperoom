@@ -94,7 +94,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 |---|---|
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused in dev auth mode unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` **and** `PIPEROOM_DEV_ACK=dev-login-has-no-password` are both set (`cmd/server/listen.go`, `cmd/server/authsetup.go`; the deprecated `--allow-remote` flag is an alias of the first). The Docker image listens on `0.0.0.0` in `oidc` mode and sets neither dev variable (`Dockerfile`); `oidc` mode ignores both |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
-| `SOURCE_DB_URL` | source Postgres, the **read-only** role |
+| `SOURCE_DB_URL` | source Postgres, the **read-only** role. A MySQL source (`mysql://`, with `source_kind: mysql` in `owners.yaml`) is designed but not accepted on this commit: the users and the URL rules are in [mysql-users.md](mysql-users.md) |
 | `WAREHOUSE_KIND` | `postgres` (default), `snowflake`, `bigquery`, `databricks` or `clickhouse`. A value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
 | `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). With `clickhouse`: a clickhouse-go/v2 DSN, `clickhouse://<user>:<password>@<host>:<port>/<db>?secure=true` (see [clickhouse.md](clickhouse.md)). With `bigquery`: `bigquery://<project>/<location>[?...]`, no credential in the DSN (Application Default Credentials, `internal/clients/bigquery/README.md`). With `databricks`: OAuth M2M `<host>/<http-path>?catalog=<catalog>&clientId=<id>&clientSecret=<secret>&authType=OAuthM2M` (preferred), or `token:<pat>@<host>/<http-path>?catalog=<catalog>`; one credential, in the DSN (`internal/clients/databricks/README.md:15-21`; `dsn.go:185-197`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (for Snowflake, `internal/clients/snowflake/snowflake.go`; for ClickHouse, a `readonly=2` profile, `internal/clients/clickhouse/client.go`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
@@ -229,6 +229,14 @@ yet carry the variables above or `PIPEROOM_WATCH_MAX_OPEN_ROOMS` / `PIPEROOM_WAT
 (`deploy/pilot.env.example` and the Helm values do not name them either): add the ones you need to the
 `environment:` block of the compose file, or under `env:` (non-secret) or `secrets` (secret) in the Helm
 values. The deploy files belong to the C1 task.
+
+**Fix pull requests (Q7; proposed, not read on this commit)**
+
+`FORGE_KIND`, `GITHUB_API_URL`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (a
+**secret file**, never an environment value) and `PIPEROOM_FIXPR_APPLY_TIMEOUT` turn on the pull-request fix through
+one GitHub App installation. They are proposed in `docs/design/fix-pr.md` §5.6 and not in `internal/config/config.go`
+yet, and `owners.yaml` does not accept `repos:` yet, so set none of them on this commit. The App, its permissions,
+the key file, the ruleset and the `repos:` block are in [fix-pr-github.md](fix-pr-github.md).
 
 **Slack, Kafka, Connect and Registry**
 
@@ -444,7 +452,10 @@ A file that sets the governance keys, checked by `owners.Load` at this commit, i
 
 ### 3. Prepare the source database
 
-1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)).
+1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)). For a MySQL
+   source (designed, not built on this commit), create the connector, read and write users of
+   [mysql-users.md](mysql-users.md) instead; there is no DDL audit trigger on MySQL (its DDL history is the
+   connector's schema history topic, `docs/design/mysql-source.md` §1).
 2. (Optional) have your DBA install the DDL audit trigger (`dev/postgres-init/02-ddl-audit.sql`)
    so the agent can see recent schema changes.
 3. Create an empty Postgres database and a role for Piperoom's own state, and put its URL in
