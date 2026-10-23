@@ -58,9 +58,9 @@
 //
 // # Cut and redacted results
 //
-// A result whose Data the runner cut to fit the protocol
-// (OpResult.DataTruncated; Truncated alone is a Summary cut and decodes) or whose
-// Data its literal redaction changed (OpResult.Redacted) is refused with
+// A result the runner cut to fit the protocol (OpResult.Truncated, which
+// does not say whether Summary or Data was cut) or whose Data its literal
+// redaction changed (OpResult.Redacted) is refused with
 // ErrTruncated or ErrRedacted instead of being decoded: a cut list is not the
 // whole answer, and a ${secret:NAME} the runner put in place of a stored value
 // is not the endpoint's value, so a caller comparing it (a config read back

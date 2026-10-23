@@ -173,7 +173,13 @@ func TestCutOrRedactedResultIsNotAValue(t *testing.T) {
 		res  protocol.OpResult
 		want error
 	}{
-		{"data truncated", protocol.OpResult{OK: true, Data: cfg, Truncated: true, DataTruncated: true}, ErrTruncated},
+		{"truncated", protocol.OpResult{OK: true, Data: cfg, Truncated: true}, ErrTruncated},
+		// An older runner's own cut listing: Truncated, Data a valid but
+		// partial answer, no cap note. It is not the op's whole answer.
+		{"cut listing", protocol.OpResult{OK: true, Data: json.RawMessage(`{"config":{"connector.class":"c"}}`), Truncated: true}, ErrTruncated},
+		// Truncated does not say which part was cut: a long Summary with
+		// whole Data is refused too (the conservative reading).
+		{"summary cut", protocol.OpResult{OK: true, Data: cfg, Summary: "a long summary…", Truncated: true}, ErrTruncated},
 		{"withheld", protocol.OpResult{OK: true, Data: json.RawMessage(`{"truncated":true,"note":"data withheld"}`), Truncated: true}, ErrTruncated},
 		{"redacted", protocol.OpResult{OK: true, Data: cfg, Redacted: true}, ErrRedacted},
 	}
@@ -190,16 +196,10 @@ func TestCutOrRedactedResultIsNotAValue(t *testing.T) {
 		})
 	}
 	// The same Data, neither cut nor redacted, is the endpoint's value: a
-	// genuine provider reference comes back as stored. So is it when only
-	// the Summary was cut (Truncated without DataTruncated).
-	for _, res := range []protocol.OpResult{
-		{OK: true, Data: cfg},
-		{OK: true, Data: cfg, Summary: "a long summary…", Truncated: true},
-	} {
-		got, err := New(resultExecutor{res: res}, "r_setup").Connect().Config(roomCtx(t), "pg-orders-connector")
-		if err != nil || got["database.password"] != "${secret:source_password}" {
-			t.Fatalf("Config(truncated=%v) = %v, %v; want the stored reference", res.Truncated, got, err)
-		}
+	// genuine provider reference comes back as stored.
+	got, err := New(resultExecutor{res: protocol.OpResult{OK: true, Data: cfg}}, "r_setup").Connect().Config(roomCtx(t), "pg-orders-connector")
+	if err != nil || got["database.password"] != "${secret:source_password}" {
+		t.Fatalf("Config = %v, %v; want the stored reference", got, err)
 	}
 }
 

@@ -55,10 +55,11 @@ var ErrStepSpent = fmt.Errorf("remoteclients: this proposal step's write was alr
 // protocol cap, invalid JSON, or a missing field the method needs.
 var ErrBadResult = errors.New("remoteclients: unusable op result")
 
-// ErrTruncated reports a result whose Data the runner cut to fit the protocol
-// (protocol.OpResult.DataTruncated): a cut list or a withheld payload is not
-// the endpoint's answer, so it is never decoded as one. A result whose only
-// cut is the Summary decodes normally. It matches ErrBadResult.
+// ErrTruncated reports a result the runner cut to fit the protocol
+// (protocol.OpResult.Truncated): a cut list or a withheld payload is not the
+// endpoint's answer, so it is never decoded as one. Truncated does not say
+// which part was cut, so a Summary-only cut is refused too. It matches
+// ErrBadResult.
 var ErrTruncated = fmt.Errorf("remoteclients: the runner cut the op result: %w", ErrBadResult)
 
 // ErrRedacted reports a result whose Data the runner's literal redaction
@@ -473,30 +474,16 @@ func decode(res protocol.OpResult, data string, dst any) error {
 	return nil
 }
 
-// dataCut reports a result whose Data the runner cut or withheld: it says so
-// with DataTruncated, or (a runner predating that flag) Data is its
-// {"truncated": true} cap note. Truncated alone means only the Summary was
-// cut, and Data is still the op's whole answer.
-func dataCut(res protocol.OpResult) bool {
-	if res.DataTruncated {
-		return true
-	}
-	if !res.Truncated || len(res.Data) == 0 {
-		return false
-	}
-	var note struct {
-		Truncated bool `json:"truncated"`
-	}
-	return json.Unmarshal(res.Data, &note) == nil && note.Truncated
-}
-
 // field returns one named raw field of a result's Data envelope.
 //
-// A result whose Data the runner cut (dataCut) or redacted (Redacted) is
-// refused with ErrTruncated or ErrRedacted before any field is read: neither
-// is the endpoint's answer, and a caller must not compare or act on it as one.
+// A result the runner cut (Truncated) or redacted (Redacted) is refused with
+// ErrTruncated or ErrRedacted before any field is read: neither is the
+// endpoint's answer, and a caller must not compare or act on it as one.
 func field(res protocol.OpResult, name string) (json.RawMessage, error) {
-	if dataCut(res) {
+	if res.Truncated {
+		// The protocol does not say whether Summary or Data was cut (or a
+		// string masked whole), so a cut result is never read as the op's
+		// whole answer, even when only its Summary was long.
 		return nil, ErrTruncated
 	}
 	if res.Redacted {

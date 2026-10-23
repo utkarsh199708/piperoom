@@ -458,16 +458,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		stopFresh := func() {}
-		if bound > stepTimeout {
-			// Longer than the stale-claim window assumes: keep the claim
-			// fresh so no replica sweeps a step that is still running.
-			stopFresh = s.keepClaimFresh(p.ProposalID)
-		}
-		sctx, cancel := context.WithTimeout(actx, bound)
-		out, err := action.Execute(sctx, step.Params)
-		cancel()
-		stopFresh()
+		out, err := s.executeStep(actx, p.ProposalID, action, step.Params, bound)
 		output := out
 		if err != nil {
 			output = err.Error()
@@ -583,6 +574,19 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 		return events.ProposalStep{}, notApprovedOutput
 	}
 	return steps[i], ""
+}
+
+// executeStep runs one step's action within bound. A bound longer than
+// stepTimeout outruns the stale-claim window, so the claim is kept fresh while
+// the step runs, and a claim taken by the stale sweep cancels the step. The
+// refresher is stopped by defer, so a panicking action cannot leak it.
+func (s *Service) executeStep(actx context.Context, proposalID string, action actions.Action, params json.RawMessage, bound time.Duration) (string, error) {
+	sctx, cancel := context.WithTimeout(actx, bound)
+	defer cancel()
+	if bound > stepTimeout {
+		defer s.keepClaimFresh(proposalID, cancel)()
+	}
+	return action.Execute(sctx, params)
 }
 
 // finishStep checks the local transition, records the step result in the store

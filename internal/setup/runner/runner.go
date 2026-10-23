@@ -129,6 +129,9 @@ type Runner struct {
 	// leaves an orphaned read racing the next one.
 	stdinMu    sync.Mutex
 	stdinLines chan stdinLine
+	// stdinAbandoned: the last prompt ended without an answer, so a line
+	// read before the next prompt is printed belongs to it (nextLine).
+	stdinAbandoned bool
 
 	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
 	// reconnect handshake is in progress (the window between setConn and the
@@ -146,8 +149,12 @@ type Runner struct {
 	proposals map[string]events.ProposalCreatedPayload
 	floors    map[string]string
 	inflight  map[string]*inflightOp
-	opLog     *opLog
-	opLogDone bool // op log closed; late appends are no-ops
+	// confirming holds the cancel of each T3 op still waiting for its "y":
+	// such an op is not started (not in inflight), but a FrameCancel must
+	// still drop its prompt.
+	confirming map[string]*context.CancelFunc
+	opLog      *opLog
+	opLogDone  bool // op log closed; late appends are no-ops
 }
 
 // New validates the options and builds a Runner.
@@ -171,6 +178,7 @@ func New(o Options) (*Runner, error) {
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
 		inflight:   make(map[string]*inflightOp),
+		confirming: make(map[string]*context.CancelFunc),
 	}
 	if r.stdin == nil {
 		r.stdin = os.Stdin

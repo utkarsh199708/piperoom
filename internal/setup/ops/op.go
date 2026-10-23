@@ -431,10 +431,7 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 // (http_get, file_read) redact it at the source too; the pass here is the
 // backstop that makes protocol.go's "Data after redaction" true for every op.
 func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
-	// An op's own Truncated may mean Data was cut (a listing, a file body):
-	// it is reported as a Data cut, the conservative reading. Only the
-	// Summary cap below is a Summary-only cut.
-	out := protocol.OpResult{ID: id, OK: err == nil, Receipt: res.Receipt, Truncated: res.Truncated, DataTruncated: res.Truncated}
+	out := protocol.OpResult{ID: id, OK: err == nil, Receipt: res.Receipt, Truncated: res.Truncated}
 	summary, _ := redact.Text(res.Summary)
 	summary, cut := tools.Truncate(summary)
 	out.Summary = summary
@@ -443,14 +440,12 @@ func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
 		data, st := redact.JSONStats(res.Data)
 		// A string past redact.MaxScan is masked whole, never passed through
 		// unscanned; report that as a cut.
-		if st.ByKind[redact.KindOverflow] > 0 {
-			out.Truncated, out.DataTruncated = true, true
-		}
+		out.Truncated = out.Truncated || st.ByKind[redact.KindOverflow] > 0
 		raw, merr := json.Marshal(data)
 		if merr != nil {
-			out.Truncated, out.DataTruncated = true, true
+			out.Truncated = true
 		} else if len(raw) > protocol.MaxDataBytes {
-			out.Truncated, out.DataTruncated = true, true
+			out.Truncated = true
 			out.Data = json.RawMessage(`{"truncated":true,"note":"data exceeds the protocol cap"}`)
 		} else {
 			out.Data = raw

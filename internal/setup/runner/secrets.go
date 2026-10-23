@@ -892,7 +892,6 @@ func (s *Store) SanitizeResult(res protocol.OpResult) protocol.OpResult {
 		}
 		res.Data = data
 		res.Truncated = res.Truncated || withheld
-		res.DataTruncated = res.DataTruncated || withheld
 		res.Redacted = res.Redacted || redacted
 	}
 

@@ -440,11 +440,7 @@ type OpResult struct {
 	Data      json.RawMessage     `json:"data,omitempty"`
 	Receipt   events.SetupReceipt `json:"receipt"`
 	Truncated bool                `json:"truncated,omitempty"`
-	// DataTruncated narrows Truncated to Data: it was cut, withheld or
-	// replaced by a cap note, so it is not the op's whole answer. Truncated
-	// without it means only Summary was cut.
-	DataTruncated bool `json:"data_truncated,omitempty"`
-	Redacted      bool `json:"redacted,omitempty"`
+	Redacted  bool                `json:"redacted,omitempty"`
 }
 
 // Refusal says the runner did not run an OpRequest. Reason is one of the

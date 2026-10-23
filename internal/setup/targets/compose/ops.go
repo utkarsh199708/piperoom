@@ -338,11 +338,16 @@ func Argv(projectDir, file, envFile, sub string, services []string) ([]string, e
 	return append(argv, names...), nil
 }
 
-// decodeParams fills dst from params, rejecting unknown fields and trailing
-// JSON (the U1-2 rule; the server and the runner both validate the schema).
+// decodeParams fills dst from params, rejecting unknown fields, trailing JSON
+// and keys that differ only in letter case, which the decoder would fold and
+// let the last win (protocol.CheckParamKeys). This is the U1-2 rule; the
+// server and the runner both validate the schema.
 func decodeParams(raw json.RawMessage, dst any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
+	}
+	if err := protocol.CheckParamKeys(raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrParams, err)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()

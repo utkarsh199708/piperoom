@@ -168,16 +168,13 @@ func TestFinishCapsAndRedacts(t *testing.T) {
 	if !res.Truncated || !res.OK {
 		t.Fatalf("result = %+v", res)
 	}
-	if res.DataTruncated {
-		t.Fatal("a Summary-only cut was reported as a Data cut")
-	}
 	big := map[string]string{"body": strings.Repeat("b", protocol.MaxDataBytes+1)}
 	res = r.finish("op_2", Result{Data: big}, nil)
 	if len(res.Data) > protocol.MaxDataBytes {
 		t.Fatalf("Data = %d bytes, cap %d", len(res.Data), protocol.MaxDataBytes)
 	}
-	if !res.Truncated || !res.DataTruncated {
-		t.Fatal("Truncated/DataTruncated = false for cut Data")
+	if !res.Truncated {
+		t.Fatal("Truncated = false for cut Data")
 	}
 	// A failed result is OK false and keeps its summary.
 	res = r.finish("op_3", Result{Summary: "nope"}, errors.New("boom"))

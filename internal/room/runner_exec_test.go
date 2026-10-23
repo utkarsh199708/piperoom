@@ -255,6 +255,22 @@ func TestExecuteCancelSendsCancel(t *testing.T) {
 	}
 }
 
+// TestExecuteCallerCancelSendsCancel: the step context cancelled by its
+// caller (the executor's claim on the proposal was lost) also asks the runner
+// to stop the op, which drops a pending T3 prompt there.
+func TestExecuteCallerCancelSendsCancel(t *testing.T) {
+	f := newExecFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	_, err := f.ex.Execute(ctx, "r1", stepReq("op1", "p1", 0))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute = %v, want canceled", err)
+	}
+	if n := f.w.cancelFrames(); n != 1 {
+		t.Fatalf("cancel frames = %d, want 1", n)
+	}
+}
+
 // TestExecuteLostRunner: a runner that is not attached when the request ends
 // answers ErrRunnerLost together with ctx's error; the step is unknown.
 func TestExecuteLostRunner(t *testing.T) {

@@ -602,9 +602,12 @@ func layersApproved(required []string, apps []store.ApprovalRow) bool {
 // keepClaimFresh refreshes this replica's claim on proposalID every
 // LeaseRenew until the returned stop is called, so a step that may outrun
 // ClaimStale (a setup T3 step waiting for a person) is never swept as dead
-// while it runs. A claim found lost ends the refreshing; the executor's own
-// finish then sees it. With a single-process store it does nothing.
-func (s *Service) keepClaimFresh(proposalID string) (stop func()) {
+// while it runs. A claim found lost calls lost, which must cancel the running
+// step: the sweep has already recorded the run as interrupted, so the step
+// must not go on (a runner op is sent a FrameCancel, which drops a pending
+// confirmation prompt). The executor's own finish then sees the lost claim.
+// With a single-process store it does nothing.
+func (s *Service) keepClaimFresh(proposalID string, lost context.CancelFunc) (stop func()) {
 	if s.coord == nil {
 		return func() {}
 	}
@@ -627,6 +630,8 @@ func (s *Service) keepClaimFresh(proposalID string) (stop func()) {
 					continue
 				}
 				if !ok {
+					s.log.Warn("room: a running step's claim was taken by the stale sweep; cancelling the step", "proposal", proposalID)
+					lost()
 					return
 				}
 			}
