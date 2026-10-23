@@ -34,6 +34,7 @@ import (
 
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/targets/compose"
+	"piperoom/internal/testenv"
 )
 
 // SetupStack is one rendered and running setup stack.
@@ -126,7 +127,7 @@ func Setup(t *testing.T) *SetupStack {
 	})
 
 	st.exec(t, ctx, "compose_up", compose.StackParams{}, 10*time.Minute)
-	WaitFor(t, 6*time.Minute, func() (bool, error) {
+	testenv.WaitFor(t, 6*time.Minute, func() (bool, error) {
 		classes, err := connectorPluginClasses(st.ConnectURL)
 		if err != nil {
 			return false, nil

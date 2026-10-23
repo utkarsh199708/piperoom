@@ -39,7 +39,7 @@ func TestSetupStackComesUp(t *testing.T) {
 	}
 
 	// compose_ps answers for the three services.
-	ps := testenv.Data(t, st.Exec(t, time.Minute, "compose_ps", compose.StackParams{}))
+	ps := setupstack.Data(t, st.Exec(t, time.Minute, "compose_ps", compose.StackParams{}))
 	if count, _ := ps["count"].(float64); count < 3 {
 		t.Errorf("compose_ps count = %v, want kafka, connect and postgres", ps["count"])
 	}
@@ -100,7 +100,7 @@ func withPrivileged(t *testing.T, doc []byte) []byte {
 
 // connectorPlugins lists Connect's plugin classes.
 func connectorPlugins(base string) ([]string, error) {
-	// testenv.connectorPluginClasses is unexported; this test reads the same
+	// setupstack.connectorPluginClasses is unexported; this test reads the same
 	// endpoint through its own small client.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
