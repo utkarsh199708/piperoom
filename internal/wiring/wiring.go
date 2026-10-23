@@ -129,6 +129,10 @@ type Wired struct {
 	// the pipeline is registered (registerLifecycle).
 	lifecycleHosts []string
 	writers        writeClients
+	// forge is the process's forge (forge.go): the repository tools and
+	// repo_open_pull_request use it; its writer only with write mode on.
+	// Zero (no forge) unless the caller of openClients sets it.
+	forge forgeSet
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.
@@ -267,7 +271,16 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 	if err != nil {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
-	return openClients(ctx, cfg, awsCfg, o, write)
+	fs, err := openForge(cfg, write)
+	if err != nil {
+		return nil, err
+	}
+	w, err := openClients(ctx, cfg, awsCfg, o, write)
+	if err != nil {
+		return nil, err
+	}
+	w.forge = fs
+	return w, nil
 }
 
 // openClients builds one client set from the connection settings of cfg and
@@ -590,6 +603,9 @@ func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging)
 		return err
 	}
 	if err := registerLifecycle(all, w); err != nil {
+		return err
+	}
+	if err := registerFixPR(all, w); err != nil {
 		return err
 	}
 	for _, a := range all.All() {

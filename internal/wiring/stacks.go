@@ -106,6 +106,8 @@ type stackDeps struct {
 	// staging builds a pipeline's staging clients (staging.go); only called
 	// with write mode on.
 	staging stagingOpener
+	// forge builds the process's forge (forge.go); nil means none.
+	forge forgeOpener
 }
 
 // OpenStacks builds the client sets of own: one per pipeline with a
@@ -131,6 +133,7 @@ func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 			return loadAWS(ctx, c, os.Getenv, defaultAWSLoader)
 		},
 		staging: openStagingClients,
+		forge:   openForge,
 	})
 }
 
@@ -247,6 +250,15 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		awsCfg = ac
 	}
 
+	// One forge for the process (the App holds the credential, not a
+	// pipeline), its writer only with write mode on; every set shares it.
+	var fs forgeSet
+	if d.forge != nil {
+		if fs, err = d.forge(cfg, write); err != nil {
+			return nil, err
+		}
+	}
+
 	empty, err := emptyStack()
 	if err != nil {
 		return nil, err
@@ -257,6 +269,7 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		if err != nil {
 			return err
 		}
+		w.forge = fs
 		st, err := newStack(name, ids, w, opts.Prepare)
 		if err != nil {
 			w.Close()

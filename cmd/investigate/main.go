@@ -229,7 +229,14 @@ func run(o runOptions) (err error) {
 		Teams: alertTeams(own, pipeline),
 	}
 
-	err = ep.Run(ctx, alert, agent.Deps{
+	runCtx := ctx
+	if havePipe && len(pipe.Repos) > 0 {
+		// A pipeline with repos: gets the fix PR as in a room (Q7f): the
+		// action reads the repos from the whole pipeline, which the room
+		// service puts in the run ctx. Other pipelines keep the id-only scope.
+		runCtx = tools.WithPipeline(ctx, pipe)
+	}
+	err = ep.Run(runCtx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
 		Inbox:     agentInbox,

@@ -210,6 +210,10 @@ func toolPackages() []toolPackage {
 			}
 			return changes.Register(reg, chg)
 		}},
+		// The fix-PR read tools (Q7f) only with a forge configured
+		// (FORGE_KIND): without one every list stays as it was. The agent
+		// offers them only in a room whose pipeline lists repos:.
+		{name: "forge tools", kinds: cdcKind, register: registerForgeTools},
 	}
 }
 

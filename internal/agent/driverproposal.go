@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"piperoom/internal/events"
@@ -187,6 +188,18 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 	}
 
 	rec := proposalRecord{id: id, steps: r.driverSteps(ctx, id)}
+	if slices.ContainsFunc(rec.steps, func(s events.ProposalStep) bool { return r.isDeferredAction(s.Action) }) {
+		// The driver's fix PRs are open: verified after they merge (Q7f).
+		out := actionOutcome{needsModel: true}
+		for i, st := range rec.steps {
+			if !r.isDeferredAction(st.Action) {
+				continue
+			}
+			one := r.deferredOpened(ctx, id, rec.steps, i, true)
+			out.notes = append(out.notes, one.notes...)
+		}
+		return out
+	}
 	executedAt := r.nowTime()
 	if !in.At.IsZero() {
 		executedAt = minTime(in.At, executedAt)

@@ -38,6 +38,9 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, 
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
 	}
 	ec.TriagePass, ec.TriagePassModel, ec.TriagePassTimeout = tp.On, tp.Model, tp.Timeout
+	if ec.FixPRApplyTimeout, err = config.ParseFixPRApplyTimeout(cfg); err != nil {
+		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+	}
 	ep, err := agent.NewEndpoint(ctx, ec, log)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)

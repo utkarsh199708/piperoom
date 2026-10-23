@@ -73,6 +73,11 @@ type EndpointConfig struct {
 	TriagePass        bool
 	TriagePassModel   string
 	TriagePassTimeout time.Duration
+	// FixPRApplyTimeout is PIPEROOM_FIXPR_APPLY_TIMEOUT
+	// (config.ParseFixPRApplyTimeout): how long after a fix PR merged the
+	// agent waits for its applied_when before the outcome is not_deployed
+	// (Q7f). Zero means the default, 2 h.
+	FixPRApplyTimeout time.Duration
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -261,6 +266,10 @@ type Endpoint struct {
 	triagePass      triagePassConfig
 	firstLookWarned atomic.Bool
 
+	// applyTimeout is EndpointConfig.FixPRApplyTimeout; zero keeps the
+	// runner's default (Q7f).
+	applyTimeout time.Duration
+
 	mu      sync.Mutex
 	budgets map[string]*tokenBudget
 	// spend is the durable spend setup (SetSpend, spend.go); nil = in-memory
@@ -290,14 +299,15 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 	}
 	opts = append(opts, extra...)
 	return &Endpoint{
-		provider:    cfg.Provider,
-		triageModel: cfg.TriageModel,
-		triageTurns: cfg.TriageTurns,
-		triagePass:  triagePassSettings(cfg),
-		limit:       limit,
-		model:       anthropicllm.New(cfg.Provider, opts, log),
-		log:         log,
-		budgets:     map[string]*tokenBudget{},
+		provider:     cfg.Provider,
+		triageModel:  cfg.TriageModel,
+		triageTurns:  cfg.TriageTurns,
+		triagePass:   triagePassSettings(cfg),
+		applyTimeout: cfg.FixPRApplyTimeout,
+		limit:        limit,
+		model:        anthropicllm.New(cfg.Provider, opts, log),
+		log:          log,
+		budgets:      map[string]*tokenBudget{},
 	}, nil
 }
 
@@ -369,6 +379,9 @@ func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options
 		return err
 	}
 	r.prices = e.prices()
+	if e.applyTimeout > 0 {
+		r.timing.applyTimeout = e.applyTimeout
+	}
 	if e.triageModel != "" && e.triageModel != opts.Model {
 		r.triageModel = e.triageModel
 		r.triageTurns = e.triageTurns

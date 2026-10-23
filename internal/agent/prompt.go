@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"piperoom/internal/events"
@@ -521,9 +522,21 @@ func formatHumanInput(in HumanInput) string {
 		return "[alert update] " + wrapUntrusted(in.Text)
 	case "proposal_staged":
 		return formatStageResult(in)
+	case "pr_merged", "pr_closed":
+		// The room's rendering names a repo and a PR (Q7e): data, wrapped.
+		return fmt.Sprintf("[pull request %s proposal=%s step=%s] %s", strings.TrimPrefix(in.Kind, "pr_"),
+			sanitizeLabel(in.ProposalID), stepLabel(in.StepIndex), wrapUntrusted(in.Text))
 	default:
 		return fmt.Sprintf("[%s] %s", name, wrapUntrusted(in.Text))
 	}
+}
+
+// stepLabel renders a step index for a prompt label, counted from 1.
+func stepLabel(i *int) string {
+	if i == nil {
+		return "unknown"
+	}
+	return strconv.Itoa(*i + 1)
 }
 
 const (
