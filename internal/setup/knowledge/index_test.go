@@ -85,11 +85,11 @@ func TestResolveRenamedClasses(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.old, func(t *testing.T) {
-			res, err := ix.ResolveClass(c.old)
+			res, err := ix.ResolveClass(c.old, "")
 			if err != nil {
 				t.Fatalf("ResolveClass = %v", err)
 			}
-			if !res.Renamed || res.Class != c.new || res.IssueID != c.issue || res.Source == "" {
+			if !res.Renamed || res.Class != c.new || res.IssueID != c.issue || res.Source == "" || res.Affected == "" {
 				t.Errorf("ResolveClass = %+v, want %s from %s", res, c.new, c.issue)
 			}
 			switch {
@@ -101,14 +101,14 @@ func TestResolveRenamedClasses(t *testing.T) {
 		})
 	}
 	// A current class resolves to itself; a variant is kept.
-	res, err := ix.ResolveClass("org.apache.kafka.connect.transforms.ReplaceField$Value")
+	res, err := ix.ResolveClass("org.apache.kafka.connect.transforms.ReplaceField$Value", "")
 	if err != nil || res.Renamed || res.Entry == nil || res.Entry.Name != "replace-field" || res.Class != "org.apache.kafka.connect.transforms.ReplaceField$Value" {
 		t.Errorf("ResolveClass(ReplaceField$Value) = %+v, %v", res, err)
 	}
-	if _, err := ix.ResolveClass("org.apache.kafka.connect.transforms.ValueToKey$Value"); !errors.Is(err, ErrUnknownEntry) {
+	if _, err := ix.ResolveClass("org.apache.kafka.connect.transforms.ValueToKey$Value", ""); !errors.Is(err, ErrUnknownEntry) {
 		t.Errorf("ResolveClass(ValueToKey$Value) err = %v, want ErrUnknownEntry (no variants)", err)
 	}
-	if _, err := ix.ResolveClass("com.example.NoSuchTransform"); !errors.Is(err, ErrUnknownEntry) {
+	if _, err := ix.ResolveClass("com.example.NoSuchTransform", ""); !errors.Is(err, ErrUnknownEntry) {
 		t.Errorf("ResolveClass(unknown) err = %v, want ErrUnknownEntry", err)
 	}
 }
@@ -134,6 +134,15 @@ func TestLookup(t *testing.T) {
 		{KindSink, "io.confluent.connect.jdbc.JdbcSinkConnector", "confluent-jdbc-sink"},
 		{"", "kinesis", "server-kinesis"},
 		{KindSink, "NoSuchSink", ""},
+		// A $variant is checked, not dropped.
+		{KindSMT, "org.apache.kafka.connect.transforms.ValueToKey$Value", ""}, // no variants
+		{KindSMT, "ValueToKey$Key", ""},
+		{KindSMT, "org.apache.kafka.connect.transforms.ValueToKey", "value-to-key"},
+		{KindSMT, "InsertField$", ""},       // empty variant
+		{KindSMT, "InsertField$Header", ""}, // not Key or Value
+		{KindSMT, "ExtractNewRecordState$Value", ""},
+		{KindSMT, "extract-new-record-state$Value", ""}, // an index name takes no variant
+		{"", "http$Value", ""},                          // nor a sink type
 	}
 	for _, c := range cases {
 		got, err := ix.Lookup(c.kind, c.name)

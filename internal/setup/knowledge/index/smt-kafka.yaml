@@ -75,7 +75,7 @@
   install: bundled
   keys:
     - {name: fields, required: true}
-    - {name: replacement}
+    - {name: replacement, since: 2.6.0}
     - {name: replace.null.with.default, default: "true", since: 3.9.0}
   checks:
     - Masking happens in the pipeline after capture; the unmasked value is still read from the source database.
@@ -228,7 +228,7 @@
     - {name: field, default: ""}
     - {name: target.type, required: true, values: [string, unix, Date, Time, Timestamp]}
     - {name: format, default: "", check: "A java.text.SimpleDateFormat pattern; needed when either side is a string."}
-    - {name: unix.precision, default: "milliseconds", values: [seconds, milliseconds, microseconds, nanoseconds], since: 3.7.0}
+    - {name: unix.precision, default: "milliseconds", values: [seconds, milliseconds, microseconds, nanoseconds], since: 3.2.0}
     - {name: replace.null.with.default, default: "true", since: 3.9.0}
   checks:
     - Debezium emits many temporal columns as epoch integers with a semantic type (io.debezium.time.*), not as Connect Timestamp; check the source type before choosing target.type.

@@ -38,6 +38,11 @@ var (
 	// Connect worker, a connector plugin or the server image) and has no
 	// archive of its own to install.
 	ErrBundled = errors.New("setup/knowledge: ships with its runtime, no archive to install")
+	// ErrUnsupportedRelease is returned by Archive when the release is
+	// outside the entry's verified range (Supports is not Supported): an
+	// archive of that release may lack the class. It wraps
+	// ErrUnknownRelease, so errors.Is matches either.
+	ErrUnsupportedRelease = fmt.Errorf("%w: outside the entry's verified versions", ErrUnknownRelease)
 )
 
 // Kind is what an index entry configures.
@@ -70,12 +75,32 @@ type Key struct {
 	Name string `yaml:"name" json:"name"`
 	// Default is the value the component uses when the key is absent; nil
 	// when it has none or it was not verified.
-	Default  *string  `yaml:"default,omitempty" json:"default,omitempty"`
-	Required bool     `yaml:"required,omitempty" json:"required,omitempty"`
-	Values   []string `yaml:"values,omitempty" json:"values,omitempty"`
+	Default *string `yaml:"default,omitempty" json:"default,omitempty"`
+	// DefaultSince is the first release that applies Default, when that is
+	// newer than Since: before it the key has no default (Check says what
+	// happens then).
+	DefaultSince string   `yaml:"default_since,omitempty" json:"default_since,omitempty"`
+	Required     bool     `yaml:"required,omitempty" json:"required,omitempty"`
+	Values       []string `yaml:"values,omitempty" json:"values,omitempty"`
+	// ValuesSince maps a value of Values to the first release that accepts
+	// it, for values newer than the key.
+	ValuesSince map[string]string `yaml:"values_since,omitempty" json:"values_since,omitempty"`
 	// Since is the first release of the entry's component verified to have
 	// the key, when it is newer than the entry.
 	Since string `yaml:"since,omitempty" json:"since,omitempty"`
+	// Until is the first release verified not to have the key (a removed
+	// legacy key).
+	Until string `yaml:"until,omitempty" json:"until,omitempty"`
+	// Secret marks a key whose value is a credential: a config must carry it
+	// as a secret reference, never in plain text. Every Secret key is one
+	// actions.LooksSecret flags (a test holds the two together).
+	Secret bool `yaml:"secret,omitempty" json:"secret,omitempty"`
+	// CredentialsInValue marks a URL or DSN key (connection.url,
+	// mongodb.connection.string) whose value can embed a user and password.
+	// The key is not Secret: the host guard must read its value. A password
+	// inside it is caught by the value rule (redact.Text) instead, and
+	// credentials belong in the entry's own user and password keys.
+	CredentialsInValue bool `yaml:"credentials_in_value,omitempty" json:"credentials_in_value,omitempty"`
 	// Formerly lists older names of the key the component still accepts or
 	// used to accept (deprecated aliases); Check says until when.
 	Formerly []string `yaml:"formerly,omitempty" json:"formerly,omitempty"`
@@ -93,6 +118,12 @@ type Archive struct {
 	// over its bytes.
 	Source string `yaml:"source" json:"source"`
 }
+
+// DigestComputed reports whether the digest was computed over the
+// archive's bytes (Source is the archive itself) rather than read from a
+// .sha512 file Maven Central publishes: weaker provenance, since nothing
+// upstream states the SHA-512 (the .sha1 only cross-checks the bytes).
+func (a Archive) DigestComputed() bool { return a.Source == a.URL }
 
 // Entry is one SMT, predicate or sink.
 type Entry struct {
@@ -169,8 +200,11 @@ func (e Entry) Supports(rel string) (Support, error) {
 	if e.rng.holds(r) {
 		return Supported, nil
 	}
-	if low, ok := e.rng.lowest(); ok && r.compare(low) < 0 {
-		return Unverified, nil
+	// Below the lower bound, or on an exclusive one (">X" and r == X).
+	if low, op, ok := e.rng.lowest(); ok {
+		if c := r.compare(low); c < 0 || (c == 0 && op == ">") {
+			return Unverified, nil
+		}
 	}
 	return Removed, nil
 }
@@ -350,14 +384,77 @@ func (e *Entry) checkKeys() error {
 		if k.Default != nil && len(k.Values) > 0 && !slices.ContainsFunc(k.Values, func(v string) bool { return strings.EqualFold(v, *k.Default) }) {
 			return fmt.Errorf("key %s: default %q is not one of its values %v", k.Name, *k.Default, k.Values)
 		}
+		if k.Secret && k.CredentialsInValue {
+			return fmt.Errorf("key %s: secret and credentials_in_value exclude each other", k.Name)
+		}
+		var since release
 		if k.Since != "" {
-			r, err := parseRelease(k.Since)
+			r, err := e.releaseInRange(k.Since)
 			if err != nil {
-				return fmt.Errorf("key %s: since: %w", k.Name, err)
+				return fmt.Errorf("key %s: since %w", k.Name, err)
 			}
-			if !e.rng.holds(r) {
-				return fmt.Errorf("key %s: since %s is outside the entry's versions %q", k.Name, k.Since, e.Versions)
+			since = r
+		}
+		if k.Until != "" {
+			r, err := parseRelease(k.Until)
+			if err != nil {
+				return fmt.Errorf("key %s: until: %w", k.Name, err)
 			}
+			if r.compare(since) <= 0 {
+				return fmt.Errorf("key %s: until %s is not after since", k.Name, k.Until)
+			}
+			if low, _, ok := e.rng.lowest(); ok && r.compare(low) <= 0 {
+				return fmt.Errorf("key %s: until %s is not after the entry's versions %q", k.Name, k.Until, e.Versions)
+			}
+		}
+		if k.DefaultSince != "" {
+			if k.Default == nil {
+				return fmt.Errorf("key %s: default_since without a default", k.Name)
+			}
+			if err := e.checkKeyRelease(k, k.DefaultSince, since); err != nil {
+				return fmt.Errorf("key %s: default_since %w", k.Name, err)
+			}
+		}
+		for v, rel := range k.ValuesSince {
+			if !slices.Contains(k.Values, v) {
+				return fmt.Errorf("key %s: values_since names %q, not one of its values %v", k.Name, v, k.Values)
+			}
+			if err := e.checkKeyRelease(k, rel, since); err != nil {
+				return fmt.Errorf("key %s: values_since %s: %w", k.Name, v, err)
+			}
+		}
+		if k.Default != nil && k.DefaultSince == "" && k.ValuesSince[*k.Default] != "" {
+			return fmt.Errorf("key %s: default %q is newer than the key; set default_since", k.Name, *k.Default)
+		}
+	}
+	return nil
+}
+
+// releaseInRange parses rel and requires the entry's range to hold it.
+func (e *Entry) releaseInRange(rel string) (release, error) {
+	r, err := parseRelease(rel)
+	if err != nil {
+		return release{}, err
+	}
+	if !e.rng.holds(r) {
+		return release{}, fmt.Errorf("%s is outside the entry's versions %q", rel, e.Versions)
+	}
+	return r, nil
+}
+
+// checkKeyRelease validates a release that refines key k: inside the
+// entry's range, after the key's since and before its until.
+func (e *Entry) checkKeyRelease(k Key, rel string, since release) error {
+	r, err := e.releaseInRange(rel)
+	if err != nil {
+		return err
+	}
+	if k.Since != "" && r.compare(since) <= 0 {
+		return fmt.Errorf("%s is not after the key's since %s", rel, k.Since)
+	}
+	if k.Until != "" {
+		if u, _ := parseRelease(k.Until); r.compare(u) >= 0 {
+			return fmt.Errorf("%s is not before the key's until %s", rel, k.Until)
 		}
 	}
 	return nil
@@ -536,21 +633,35 @@ func (ix *Index) Entries() []Entry { return slices.Clone(ix.entries) }
 // without a $Key/$Value variant), the class's simple name when that is
 // unique within kind, or a Debezium Server sink type. An empty kind
 // matches every kind. It returns ErrUnknownEntry when nothing matches,
-// and when a simple name is ambiguous (Filter is both Kafka's and
-// Debezium's).
+// when the variant is not one the entry has (ValueToKey$Value), and when
+// a simple name is ambiguous (Filter is both Kafka's and Debezium's).
 func (ix *Index) Lookup(kind Kind, name string) (Entry, error) {
 	name = strings.TrimSpace(name)
-	class, _ := splitVariant(name)
+	class, variant, hasVariant := strings.Cut(name, "$")
 	var simple []Entry
 	for _, e := range ix.entries {
 		if kind != "" && e.Kind != kind {
 			continue
 		}
-		if e.Name == name || (e.Class != "" && e.Class == class) || (e.SinkType != "" && e.SinkType == name) {
+		if !hasVariant && (e.Name == name || (e.SinkType != "" && e.SinkType == name)) {
 			return e, nil
 		}
-		if e.Class != "" && e.Class[strings.LastIndexByte(e.Class, '.')+1:] == class {
+		if e.Class == "" {
+			continue
+		}
+		if e.Class == class {
+			if err := checkVariant(e, hasVariant, variant); err != nil {
+				return Entry{}, err
+			}
+			return e, nil
+		}
+		if e.Class[strings.LastIndexByte(e.Class, '.')+1:] == class {
 			simple = append(simple, e)
+		}
+	}
+	if len(simple) == 1 {
+		if err := checkVariant(simple[0], hasVariant, variant); err != nil {
+			return Entry{}, err
 		}
 	}
 	if len(simple) == 1 {
@@ -566,10 +677,13 @@ func (ix *Index) Lookup(kind Kind, name string) (Entry, error) {
 	return Entry{}, fmt.Errorf("%w: %s %q", ErrUnknownEntry, kind, name)
 }
 
-// splitVariant splits "a.b.InsertField$Value" into the class and "Value".
-func splitVariant(name string) (class, variant string) {
-	class, variant, _ = strings.Cut(name, "$")
-	return class, variant
+// checkVariant refuses a $variant suffix the entry does not have: an
+// empty one ("InsertField$") or one on an entry without variants.
+func checkVariant(e Entry, hasVariant bool, variant string) error {
+	if hasVariant && !slices.Contains(e.Variants, variant) {
+		return fmt.Errorf("%w: %s has no $%s variant", ErrUnknownEntry, e.Class, variant)
+	}
+	return nil
 }
 
 // Resolution is the answer to "what class should this config name?".
@@ -579,26 +693,48 @@ type Resolution struct {
 	// when Q1b records a rename. A variant suffix is kept.
 	Class   string `json:"class"`
 	Renamed bool   `json:"renamed"`
-	// IssueID and Source cite the Q1b known issue of a rename.
-	IssueID string `json:"issue_id,omitempty"`
-	Source  string `json:"source,omitempty"`
+	// IssueID and Source cite the Q1b known issue of a rename; Affected is
+	// that issue's release range, where the old class no longer works.
+	IssueID  string `json:"issue_id,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Affected string `json:"affected,omitempty"`
 	// Entry is the index entry of Class, when the index has one; a renamed
 	// class outside this index (a schema history class) has none.
 	Entry *Entry `json:"entry,omitempty"`
 }
 
 // ResolveClass resolves a fully qualified class as a config names it
-// (transforms.x.type, connector.class, a value Q1b records): a class Q1b
-// records as renamed resolves to its new name, and a class in the index
-// resolves to its entry. It returns ErrUnknownEntry otherwise.
-func (ix *Index) ResolveClass(name string) (Resolution, error) {
+// (transforms.x.type, connector.class, a value Q1b records) for release
+// rel of the Debezium deployment: a class Q1b records as renamed resolves
+// to its new name when the rename's known issue holds for rel, and a class
+// in the index resolves to its entry. Before the rename the old class is
+// still the one to configure: it resolves to itself, not Renamed, with
+// the issue cited. It returns ErrUnknownEntry when the class is neither
+// renamed nor indexed, or the variant is not one the entry has.
+//
+// rel "" means the release is not known: every rename is applied, and the
+// caller must check the release against Resolution.Affected before
+// writing the new class, which does not exist before that range (the
+// schema history classes moved in Debezium 2.0). A rel that does not parse
+// is an error.
+func (ix *Index) ResolveClass(name, rel string) (Resolution, error) {
 	name = strings.TrimSpace(name)
-	class, variant := splitVariant(name)
+	class, variant, hasVariant := strings.Cut(name, "$")
+	if rel != "" {
+		if _, err := parseRelease(rel); err != nil {
+			return Resolution{}, fmt.Errorf("knowledge: resolve %s: %w", name, err)
+		}
+	}
 	res := Resolution{Requested: name, Class: name}
 	if newClass, ok := ix.renamed[class]; ok {
 		issue := ix.renames[class]
-		res.Class, res.Renamed, res.IssueID, res.Source = newClass, true, issue.ID, issue.Source
-		if variant != "" {
+		res.IssueID, res.Source, res.Affected = issue.ID, issue.Source, issue.Affected
+		if rel != "" && !issue.Holds(rel) {
+			// The old class is current at rel; it is not in the index.
+			return res, nil
+		}
+		res.Class, res.Renamed = newClass, true
+		if hasVariant {
 			res.Class += "$" + variant
 		}
 		class = newClass
@@ -606,8 +742,8 @@ func (ix *Index) ResolveClass(name string) (Resolution, error) {
 	for i := range ix.entries {
 		if ix.entries[i].Class == class {
 			e := ix.entries[i]
-			if variant != "" && !slices.Contains(e.Variants, variant) {
-				return Resolution{}, fmt.Errorf("%w: %s has no $%s variant", ErrUnknownEntry, class, variant)
+			if err := checkVariant(e, hasVariant, variant); err != nil {
+				return Resolution{}, err
 			}
 			res.Entry = &e
 			return res, nil
@@ -630,18 +766,29 @@ func (ix *Index) RenamedClasses() map[string]string {
 
 // Archive returns the pinned plugin archive that installs entry e at a
 // release of its component. It returns ErrUnpinned for an unpinned
-// entry (plugin_install must refuse it), ErrBundled for an entry with
-// nothing of its own to install, and ErrUnknownRelease when the entry is
-// pinned but not for that release. An entry whose plugin_ref names a
-// plugins.go connector resolves through ResolvePlugin.
+// entry (plugin_install must refuse it), ErrUnsupportedRelease when the
+// release is outside the entry's verified range (an archive of that
+// release may lack the class), ErrBundled for an entry with nothing of
+// its own to install, and ErrUnknownRelease when the entry is pinned but
+// not for that release. Releases are compared parsed, so "3.2.0" finds the
+// 3.2.0.Final archive. An entry whose plugin_ref names a plugins.go
+// connector resolves through ResolvePlugin.
 func (ix *Index) Archive(e Entry, rel string) (Archive, error) {
-	switch {
-	case e.Install == InstallUnpinned:
+	if e.Install == InstallUnpinned {
 		return Archive{}, fmt.Errorf("%w: %s: %s", ErrUnpinned, e.Name, e.UnpinnedReason)
+	}
+	sup, err := e.Supports(rel)
+	if err != nil {
+		return Archive{}, err
+	}
+	if sup != Supported {
+		return Archive{}, fmt.Errorf("%w: %s %s is not in %q", ErrUnsupportedRelease, e.Name, rel, e.Versions)
+	}
+	switch {
 	case e.PluginRef != "" && ix.byName(e.PluginRef).Name != "":
 		return ix.Archive(ix.byName(e.PluginRef), rel)
 	case e.PluginRef != "":
-		p, err := ResolvePlugin(rel, e.PluginRef)
+		p, err := ResolvePlugin(pluginRelease(rel), e.PluginRef)
 		if err != nil {
 			return Archive{}, err
 		}
@@ -649,10 +796,26 @@ func (ix *Index) Archive(e Entry, rel string) (Archive, error) {
 	case e.Install == InstallBundled:
 		return Archive{}, fmt.Errorf("%w: %s", ErrBundled, e.Name)
 	}
+	r, _ := parseRelease(rel) // Supports parsed it
 	for _, a := range e.Archives {
-		if a.Release == rel {
+		if ar, err := parseRelease(a.Release); err == nil && ar.compare(r) == 0 {
 			return a, nil
 		}
 	}
 	return Archive{}, fmt.Errorf("%w: %s has no archive for %s", ErrUnknownRelease, e.Name, rel)
+}
+
+// pluginRelease returns the plugins.go spelling of rel ("3.2.0" ->
+// "3.2.0.Final"), or rel when the table has no release equal to it.
+func pluginRelease(rel string) string {
+	r, err := parseRelease(rel)
+	if err != nil {
+		return rel
+	}
+	for _, have := range Releases() {
+		if hr, err := parseRelease(have); err == nil && hr.compare(r) == 0 {
+			return have
+		}
+	}
+	return rel
 }

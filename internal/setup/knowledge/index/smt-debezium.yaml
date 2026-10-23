@@ -18,9 +18,24 @@
   keys:
     - name: delete.tombstone.handling.mode
       default: "tombstone"
+      default_since: 3.2.0.Final
       values: [drop, tombstone, rewrite, rewrite-with-tombstone, delete-to-tombstone]
+      values_since: {delete-to-tombstone: 3.2.0.Final}
       since: 2.5.0.Final
-      check: drop.tombstones and delete.handling.mode were deprecated in 2.5.0.Final and are gone in 3.2.0.Final; use this key (known issue dbz-unwrap-tombstone-handling).
+      check: >-
+        Set it explicitly. From 2.5.0.Final to 3.1.x it has no default: unset, the legacy
+        delete.handling.mode=drop and drop.tombstones=true apply and deletes are dropped. The
+        default tombstone and the value delete-to-tombstone exist from 3.2.0.Final, which also
+        removes the legacy keys (known issue dbz-unwrap-tombstone-handling).
+    - name: delete.handling.mode
+      default: "drop"
+      values: [drop, rewrite, none]
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set. Its default drop removes delete events.
+    - name: drop.tombstones
+      default: "true"
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set. Its default true removes tombstones.
     - {name: route.by.field, default: ""}
     - {name: add.fields, default: ""}
     - {name: add.fields.prefix, default: "__"}
@@ -28,7 +43,7 @@
     - {name: add.headers.prefix, default: "__"}
     - {name: replace.null.with.default, default: "true", since: 3.1.0.Final}
   checks:
-    - With the default delete.tombstone.handling.mode (tombstone) a delete reaches the sink only as a tombstone; a sink that must see deletes as rows needs rewrite, which adds a __deleted field.
+    - How a delete reaches the sink depends on the release. From 3.2.0.Final the default delete.tombstone.handling.mode=tombstone leaves only a tombstone; before 3.2.0.Final, with neither delete key set, the legacy delete.handling.mode=drop and drop.tombstones=true drop deletes entirely. A sink that must see deletes as rows needs delete.tombstone.handling.mode=rewrite (2.5.0.Final and later), which adds a __deleted field.
     - Relational change events only; MongoDB change events need io.debezium.connector.mongodb.transforms.ExtractNewDocumentState.
     - The SMT rewrites the value only; the record key keeps the primary key struct.
   doc: https://debezium.io/documentation/reference/3.2/transformations/event-flattening.html
@@ -47,8 +62,23 @@
   keys:
     - name: delete.tombstone.handling.mode
       default: "tombstone"
+      default_since: 3.2.0.Final
       values: [drop, tombstone, rewrite, rewrite-with-tombstone, delete-to-tombstone]
+      values_since: {delete-to-tombstone: 3.2.0.Final}
       since: 2.5.0.Final
+      check: >-
+        Shares ExtractNewRecordState's configuration (AbstractExtractNewRecordState): from
+        2.5.0.Final to 3.1.x it has no default and, unset, the legacy delete.handling.mode=drop
+        and drop.tombstones=true drop deletes. Set it explicitly.
+    - name: delete.handling.mode
+      default: "drop"
+      values: [drop, rewrite, none]
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set.
+    - name: drop.tombstones
+      default: "true"
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set.
     - {name: delete.tombstone.handling.mode.rewrite-with-id, default: "false"}
     - {name: array.encoding, default: "array", values: [array, document]}
     - {name: flatten.struct, default: "false"}
@@ -100,6 +130,7 @@
   checks:
     - The class lives in the debezium-scripting module (it was in debezium-core in 1.2); the debezium/connect image ships the module, and a JSR 223 language engine such as Groovy must be on the plugin path as well.
     - Not Kafka's org.apache.kafka.connect.transforms.Filter, which takes no condition and drops whatever its predicate matches.
+    - condition is code the Connect worker runs with the worker's privileges (Groovy and JavaScript can reach the JVM). The operator must write it; never generate it from untrusted input such as event content, table names or a chat message.
   doc: https://debezium.io/documentation/reference/3.2/transformations/filtering.html
   source: https://repo1.maven.org/maven2/io/debezium/debezium-scripting/3.2.0.Final/debezium-scripting-3.2.0.Final-sources.jar
 
@@ -120,6 +151,7 @@
   checks:
     - Same packaging as Debezium's Filter - the debezium-scripting module plus a JSR 223 engine on the plugin path.
     - Every topic the expression can return must exist or be auto-created on the broker.
+    - topic.expression is code the Connect worker runs with the worker's privileges (Groovy and JavaScript can reach the JVM). The operator must write it; never generate it from untrusted input such as event content, table names or a chat message.
   doc: https://debezium.io/documentation/reference/3.2/transformations/content-based-routing.html
   source: https://repo1.maven.org/maven2/io/debezium/debezium-scripting/3.2.0.Final/debezium-scripting-3.2.0.Final-sources.jar
 

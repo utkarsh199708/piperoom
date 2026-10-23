@@ -25,8 +25,8 @@
     - {name: debezium.sink.http.authentication.type, values: [jwt, standard-webhooks]}
     - {name: debezium.sink.http.authentication.jwt.url}
     - {name: debezium.sink.http.authentication.jwt.username}
-    - {name: debezium.sink.http.authentication.jwt.password}
-    - {name: debezium.sink.http.authentication.webhook.secret}
+    - {name: debezium.sink.http.authentication.jwt.password, secret: true}
+    - {name: debezium.sink.http.authentication.webhook.secret, secret: true}
   checks:
     - The Content-Type follows debezium.format.value (avro gives avro/bytes, cloudevents gives application/cloudevents+json, otherwise JSON).
     - Only 200, 202 and 204 count as delivered; any other answer is retried, retry.interval.ms apart, up to the retries limit.
@@ -114,7 +114,7 @@
   keys:
     - {name: debezium.sink.redis.address, required: true}
     - {name: debezium.sink.redis.user}
-    - {name: debezium.sink.redis.password}
+    - {name: debezium.sink.redis.password, secret: true}
     - {name: debezium.sink.redis.db.index, default: "0"}
     - {name: debezium.sink.redis.ssl.enabled, default: "false"}
     - {name: debezium.sink.redis.batch.size, default: "500"}
@@ -127,6 +127,7 @@
     - {name: debezium.sink.redis.socket.timeout.ms, default: "2000"}
   checks:
     - With memory.limit.mb=0 (the default) the sink backs off against the Redis server's own maxmemory setting instead of a limit of its own.
+    - ssl.enabled defaults to false, so the password and every event cross the network in clear text. Set ssl.enabled=true for any Redis that is not on the same host, and give the password as a secret reference.
   doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
   source: https://repo1.maven.org/maven2/io/debezium/debezium-server-redis/3.2.0.Final/debezium-server-redis-3.2.0.Final-sources.jar
 
@@ -193,6 +194,8 @@
     - {name: debezium.sink.rabbitmq.null.value, default: "default"}
   checks:
     - Through the default (empty) exchange a message reaches only the queue named by its routing key, so that queue must exist.
+    - Without connection.username and connection.password the RabbitMQ client uses guest/guest. Never use the guest account; give a dedicated user, with the password as a secret reference.
+    - Use TLS for any broker that is not on the same host; plain AMQP sends the credentials and every event in clear text.
   doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
   source: https://repo1.maven.org/maven2/io/debezium/debezium-server-rabbitmq/3.2.0.Final/debezium-server-rabbitmq-3.2.0.Final-sources.jar
 
@@ -209,12 +212,13 @@
     - {name: debezium.sink.rabbitmqstream.host, default: "localhost"}
     - {name: debezium.sink.rabbitmqstream.port, default: "5552"}
     - {name: debezium.sink.rabbitmqstream.username, default: "guest"}
-    - {name: debezium.sink.rabbitmqstream.password, default: "guest"}
+    - {name: debezium.sink.rabbitmqstream.password, default: "guest", secret: true}
     - {name: debezium.sink.rabbitmqstream.virtualHost, default: "/"}
     - {name: debezium.sink.rabbitmqstream.stream}
     - {name: debezium.sink.rabbitmqstream.producer.batchSize, default: "100"}
   checks:
-    - The guest/guest defaults only work against a broker on the same host; a remote broker needs real credentials, given as a secret reference.
+    - Never use the guest/guest defaults, even against a local broker; give a dedicated user, with the password as a secret reference.
+    - Use TLS for any broker that is not on the same host; a plain connection sends the credentials and every event in clear text.
   doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
   source: https://repo1.maven.org/maven2/io/debezium/debezium-server-rabbitmq/3.2.0.Final/debezium-server-rabbitmq-3.2.0.Final-sources.jar
 
@@ -228,7 +232,7 @@
   install: bundled
   runtime_image: server
   keys:
-    - {name: debezium.sink.eventhubs.connectionstring, required: true}
+    - {name: debezium.sink.eventhubs.connectionstring, required: true, secret: true}
     - {name: debezium.sink.eventhubs.hubname, required: true}
     - {name: debezium.sink.eventhubs.partitionid}
     - {name: debezium.sink.eventhubs.partitionkey}
@@ -252,10 +256,10 @@
     - {name: debezium.sink.nats-jetstream.create-stream, default: "false"}
     - {name: debezium.sink.nats-jetstream.subjects, default: "*.*.*"}
     - {name: debezium.sink.nats-jetstream.storage, default: "memory"}
-    - {name: debezium.sink.nats-jetstream.auth.jwt}
-    - {name: debezium.sink.nats-jetstream.auth.seed}
+    - {name: debezium.sink.nats-jetstream.auth.jwt, secret: true}
+    - {name: debezium.sink.nats-jetstream.auth.seed, secret: true}
     - {name: debezium.sink.nats-jetstream.auth.user}
-    - {name: debezium.sink.nats-jetstream.auth.password}
+    - {name: debezium.sink.nats-jetstream.auth.password, secret: true}
   checks:
     - With create-stream=false (the default) the stream must already exist; subjects and storage apply only when the sink creates its basic stream (named DebeziumStream).
   doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
@@ -275,7 +279,7 @@
     - {name: debezium.sink.infinispan.server.port, default: "11222"}
     - {name: debezium.sink.infinispan.cache, required: true}
     - {name: debezium.sink.infinispan.user}
-    - {name: debezium.sink.infinispan.password}
+    - {name: debezium.sink.infinispan.password, secret: true}
   checks:
     - The cache must exist on the Infinispan server.
   doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html

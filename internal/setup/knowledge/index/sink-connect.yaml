@@ -40,9 +40,9 @@
       digest: sha512:fe4fc16f885a0240f7825e7d3045593b0c52e4bed000c538fbc3eb45f6c2c3a45f248892bf5c41ca52194c2b28bbf1d88f114e8f50acfee81f762a3061d353ed
       source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/2.7.2.Final/debezium-connector-jdbc-2.7.2.Final-plugin.tar.gz
   keys:
-    - {name: connection.url, required: true}
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.username and connection.password with a secret reference."}
     - {name: connection.username, required: true}
-    - {name: connection.password}
+    - {name: connection.password, secret: true}
     - {name: connection.provider, default: "org.hibernate.c3p0.internal.C3P0ConnectionProvider"}
     - {name: connection.pool.min_size, default: "5"}
     - {name: connection.pool.max_size, default: "32"}
@@ -74,9 +74,9 @@
     - {name: use.reduction.buffer, default: "false"}
     - {name: field.include.list}
     - {name: field.exclude.list}
-    - {name: flush.max.retries, default: "5", since: 3.0.7.Final}
-    - {name: flush.retry.delay.ms, default: "1000", since: 3.0.7.Final}
-    - {name: connection.restart.on.errors, default: "false", since: 3.2.0.Final}
+    - {name: flush.max.retries, default: "5", since: 3.0.0.Final}
+    - {name: flush.retry.delay.ms, default: "1000", since: 3.0.0.Final}
+    - {name: connection.restart.on.errors, default: "false", since: 3.1.0.Final}
     - {name: dialect.postgres.postgis.schema, default: "public"}
     - {name: dialect.sqlserver.identity.insert, default: "false"}
   checks:
@@ -98,7 +98,7 @@
   runtime_image: connect
   plugin_ref: mongodb
   keys:
-    - {name: mongodb.connection.string, required: true}
+    - {name: mongodb.connection.string, required: true, credentials_in_value: true, check: "A mongodb:// URI with a user and password embeds a credential; pass it as a secret reference or authenticate without one in the URI."}
     - {name: sink.database, required: true}
     - {name: column.naming.strategy}
     - {name: field.include.list}
@@ -119,7 +119,7 @@
   install: unpinned
   unpinned_reason: The archive is distributed through Confluent Hub, which the build environment could not reach, so no digest was verified.
   keys:
-    - {name: connection.url, required: true}
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.user and connection.password with a secret reference."}
     - {name: insert.mode, default: "insert", values: [insert, upsert, update]}
     - {name: pk.mode, default: "none", values: [none, kafka, record_key, record_value]}
     - {name: pk.fields, default: ""}
@@ -148,9 +148,9 @@
   install: unpinned
   unpinned_reason: The archive is distributed through Confluent Hub, which the build environment could not reach, so no digest was verified.
   keys:
-    - {name: connection.url, required: true}
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.username and connection.password with a secret reference."}
     - {name: connection.username}
-    - {name: connection.password}
+    - {name: connection.password, secret: true}
     - {name: key.ignore, default: "false"}
     - {name: schema.ignore, default: "false"}
     - {name: behavior.on.null.values, default: "FAIL", values: [IGNORE, DELETE, FAIL]}
@@ -237,7 +237,7 @@
   keys:
     - {name: snowflake.url.name, required: true}
     - {name: snowflake.user.name, required: true}
-    - {name: snowflake.private.key}
+    - {name: snowflake.private.key, secret: true}
     - {name: snowflake.database.name, required: true}
     - {name: snowflake.schema.name, required: true}
     - {name: snowflake.role.name}
@@ -269,7 +269,7 @@
   keys:
     - {name: snowflake.url.name, required: true}
     - {name: snowflake.user.name, required: true}
-    - {name: snowflake.private.key}
+    - {name: snowflake.private.key, secret: true}
     - {name: snowflake.authenticator}
     - {name: snowflake.database.name, required: true}
     - {name: snowflake.schema.name, required: true}
@@ -294,7 +294,7 @@
   keys:
     - {name: http.url, required: true}
     - {name: http.authorization.type, required: true, values: [none, static, oauth2]}
-    - {name: http.headers.authorization}
+    - {name: http.headers.authorization, secret: true}
     - {name: http.headers.content.type}
     - {name: batching.enabled, default: "false"}
     - {name: batch.max.size, default: "500"}

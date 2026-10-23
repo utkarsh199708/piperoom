@@ -219,12 +219,22 @@ func (rr releaseRange) satisfiable() bool {
 	return false
 }
 
-// lowest returns the lower bound of the range, if it has one.
-func (rr releaseRange) lowest() (release, bool) {
+// lowest returns the lower bound of the range and its operator (>=, > or
+// =), if it has one. With several lower bounds it returns the highest, the
+// one that binds.
+func (rr releaseRange) lowest() (release, string, bool) {
+	var low rangeBound
 	for _, b := range rr.bounds {
-		if b.op == ">=" || b.op == ">" || b.op == "=" {
-			return b.r, true
+		if b.op != ">=" && b.op != ">" && b.op != "=" {
+			continue
+		}
+		if low.op == "" {
+			low = b
+			continue
+		}
+		if c := b.r.compare(low.r); c > 0 || (c == 0 && b.op == ">") {
+			low = b
 		}
 	}
-	return release{}, false
+	return low.r, low.op, low.op != ""
 }
