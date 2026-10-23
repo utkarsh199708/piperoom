@@ -116,7 +116,7 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			conn, err := resolveConnector(ctx, p, d.Connect)
+			conn, err := resolveConnector(ctx, "pg_publication_tables", p, d.Connect)
 			if err != nil {
 				return tools.Result{}, err
 			}
@@ -146,20 +146,20 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 // config via Connect and returns the connector role (database.user) and the
 // publication name. The role has no default: a nil Connect client, a connector
 // that cannot be found or read, or a config without database.user is an error
-// naming the pipeline (and the connector where known). The publication falls
-// back to defaultPublication, marked publicationSource "default", when the
-// config has no publication.name.
-func resolveConnector(ctx context.Context, p owners.Pipeline, connect clients.ConnectClient) (connectorConfig, error) {
+// naming the tool and the pipeline (and the connector where known). The
+// publication falls back to defaultPublication, marked publicationSource
+// "default", when the config has no publication.name.
+func resolveConnector(ctx context.Context, toolName string, p owners.Pipeline, connect clients.ConnectClient) (connectorConfig, error) {
 	if connect == nil {
-		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: Connect client is nil, cannot read the Debezium connector config", p.ID)
+		return connectorConfig{}, fmt.Errorf("dbtools: %s: pipeline %q: Connect client is nil, cannot read the Debezium connector config", toolName, p.ID)
 	}
 	name, cfg, err := debeziumSourceConnector(ctx, connect, p.Connectors)
 	if err != nil {
-		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: %w", p.ID, err)
+		return connectorConfig{}, fmt.Errorf("dbtools: %s: pipeline %q: %w", toolName, p.ID, err)
 	}
 	role := cfg["database.user"]
 	if role == "" {
-		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: connector %q config has no database.user", p.ID, name)
+		return connectorConfig{}, fmt.Errorf("dbtools: %s: pipeline %q: connector %q config has no database.user", toolName, p.ID, name)
 	}
 	c := connectorConfig{
 		name:        name,
