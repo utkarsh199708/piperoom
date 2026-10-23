@@ -81,7 +81,7 @@ var setupScenarios = map[string]setupScenario{
 	"flat-plugin-dir":             {name: "flat-plugin-dir", check: checkPluginLayout, breakIt: breakFlatPluginDir, fix: fixFlatPluginDir, verify: verifyPluginLayout},
 	"missing-converter-jars":      {name: "missing-converter-jars", check: checkPluginConverters, breakIt: breakMissingConverterJars, fix: fixMissingConverterJars, verify: verifyConverterJars},
 	"wal-level-replica":           {name: "wal-level-replica", check: checkWALLevel, breakIt: breakWALLevelReplica, fix: fixWALLevelReplica, verify: verifyWALLevel},
-	"missing-grant":               {name: "missing-grant", check: checkSourceRoleGrants, breakIt: breakMissingGrant, fix: fixMissingGrant, verify: verifySourceRoleGrants},
+	"missing-grant":               {name: "missing-grant", check: checkSourceRoleGrants, breakIt: breakSetupMissingGrant, fix: fixSetupMissingGrant, verify: verifySourceRoleGrants},
 	"db-unreachable-from-connect": {name: "db-unreachable-from-connect", check: checkConnectSourceReach, breakIt: breakDBUnreachable, fix: fixDBUnreachable, verify: verifyConnectSourceReachable},
 	"plugin-after-scan":           {name: "plugin-after-scan", check: checkConnectPluginScan, breakIt: breakPluginAfterScan, fix: fixPluginAfterScan, verify: verifyConnectPluginScan},
 }
@@ -648,7 +648,7 @@ func verifySourceRoleGrants(ctx context.Context, s *stack) (bool, string, error)
 	return true, "role " + g.Role + " may log in, replicate and select the published tables", nil
 }
 
-func breakMissingGrant(ctx context.Context, s *stack) error {
+func breakSetupMissingGrant(ctx context.Context, s *stack) error {
 	_, err := s.psql(ctx, "orders",
 		// CREATE ROLE is a utility statement, so it runs through EXECUTE inside
 		// the DO block; the password is the dev stack's, never a secret.
@@ -671,7 +671,7 @@ func breakMissingGrant(ctx context.Context, s *stack) error {
 	return nil
 }
 
-func fixMissingGrant(ctx context.Context, s *stack) error {
+func fixSetupMissingGrant(ctx context.Context, s *stack) error {
 	// Back to the baseline connector user first, so the role can be dropped.
 	if err := s.registerConnector(ctx); err != nil {
 		return err
