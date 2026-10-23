@@ -814,7 +814,7 @@ const (
 	UsageRoleTriage     = "triage"     // an investigation turn on PIPEROOM_TRIAGE_MODEL
 	UsageRoleMain       = "main"       // an investigation turn on the main model (Options.Model)
 	UsageRoleHandoff    = "handoff"    // the hand-off summary request
-	UsageRoleCompaction = "compaction" // the server-side compaction pass inside a triage or main request
+	UsageRoleCompaction = "compaction" // a compaction pass: server-side inside a triage or main request (LatencyMS 0), or the client-side summary call of a model without server compaction (its own latency)
 	// UsageRoleJudge is a model call that grades agent output (an LLM judge of
 	// a hand-off or an eval run). Reserved: nothing emits it until the judges
 	// of #93 and the evals are wired to usage and spend (docs/design/cost.md 2).
@@ -832,6 +832,9 @@ const (
 // server-side compaction, a second event with Role "compaction" carries the
 // compaction pass, whose tokens the API reports outside the request's own
 // usage fields; its LatencyMS is 0 because its time is part of the request's.
+// On a model without server-side compaction the agent compacts client-side
+// with a summary call of its own (V2b), reported as one event with Role
+// "compaction" and that call's own LatencyMS.
 //
 // It carries counts only: never prompt text, tool input or output, model text
 // or error text. Model is the model id the request named. CostUSD is

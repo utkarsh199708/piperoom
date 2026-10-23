@@ -1,0 +1,197 @@
+{
+  "scenario": "setup/compose-postgres-clean",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-25T09:40:00Z",
+  "note": "Composed from the compose driver's own refusal text (validator.go, RuleSecret) and the clean template's render, on the fixed clock of the U1-19 setup scenarios. No Docker session: the session that wrote the scenario had no stack. Re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "docker 27.3.1; docker compose v2.29.7; project dir C:\\orders",
+        "data": {
+          "os": "windows",
+          "arch": "amd64",
+          "project_dir": "C:\\orders",
+          "tools": {"docker": "27.3.1", "docker compose": "v2.29.7"}
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "version", "--short"],
+          "target": "C:\\orders",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:01Z",
+          "took_ms": 41,
+          "out_mac": "3b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f7"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6",
+      "params": {"templates": ["postgres"], "project": "piperoom-orders", "file": "compose.yaml"},
+      "result": {
+        "ok": false,
+        "summary": "refused compose_write: compose: secret: service \"postgres\": environment \"POSTGRES_PASSWORD\" carries a credential value in plain text; use a ${secret:name} reference in the env file",
+        "data": {"rule": "secret", "service": "postgres", "key": "POSTGRES_PASSWORD"},
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 1,
+          "at": "2026-10-25T09:40:12Z",
+          "took_ms": 0,
+          "out_mac": "7c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f4"
+        }
+      }
+    },
+    {
+      "op": "properties_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7",
+      "params": {
+        "file": ".env",
+        "entries": {
+          "POSTGRES_USER": "piperoom",
+          "POSTGRES_DB": "orders",
+          "POSTGRES_PASSWORD": "${secret:postgres_password}"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote .env (3 entries), services: postgres",
+        "data": {
+          "file": ".env",
+          "bytes": 118,
+          "changed": true,
+          "keys": ["POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"],
+          "references": ["postgres_password"]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": ".env",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:31Z",
+          "took_ms": 4,
+          "out_mac": "c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b5d8f0a2"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4",
+      "params": {"templates": ["postgres"], "project": "piperoom-orders", "file": "compose.yaml"},
+      "result": {
+        "ok": true,
+        "summary": "wrote compose.yaml (1842 bytes), services: postgres",
+        "data": {
+          "file": "compose.yaml",
+          "bytes": 1842,
+          "changed": true,
+          "services": ["postgres"],
+          "env_file": ".env",
+          "env_keys": ["POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:47Z",
+          "took_ms": 6,
+          "out_mac": "b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6"
+        }
+      }
+    },
+    {
+      "op": "compose_up",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_4",
+      "step_index": 0,
+      "params_hash": "012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9",
+      "params": {"services": ["postgres"]},
+      "result": {
+        "ok": true,
+        "summary": "compose up: postgres (healthy)",
+        "data": {
+          "project": "piperoom-orders",
+          "services": [{"service": "postgres", "state": "running", "health": "healthy"}]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "up", "-d", "--wait", "postgres"],
+          "target": "postgres",
+          "exit_code": 0,
+          "at": "2026-10-25T09:41:20Z",
+          "took_ms": 24318,
+          "out_mac": "5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "29654c444daab10f544bc97271139ee943c860e9c9681e284dace9c14667ea5a",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {"topic": "pg.public.orders", "partitions": [{"partition": 0, "start": 0, "end": 2}], "total_records": 2},
+        "at": "2026-10-25T09:44:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {"connector": "pg-orders-connector", "metrics_found": 11, "snapshot": {"SnapshotCompleted": 1, "SnapshotRunning": 0}},
+        "at": "2026-10-25T09:44:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {"topic": "pg.public.orders", "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718", "found": true, "records": [{"partition": 0, "offset": 1}]},
+        "at": "2026-10-25T09:44:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {"subjects": ["pg.public.orders-key", "pg.public.orders-value"], "deleted_subjects": []},
+        "at": "2026-10-25T09:44:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
+        {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
+        {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
+        {"name": "canary_subject", "ok": true, "note": "2 subject(s) under the canary topic's prefix"},
+        {"name": "sink_row", "ok": true, "note": "no sink was set up"},
+        {"name": "person_change", "ok": false, "note": "awaiting the person's change"}
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

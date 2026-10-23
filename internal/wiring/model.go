@@ -22,6 +22,8 @@ func EndpointConfig(cfg config.Config) agent.EndpointConfig {
 		VertexRegion:    cfg.VertexRegion,
 		TriageModel:     cfg.TriageModel,
 		RoomTokenBudget: cfg.RoomTokenBudget,
+
+		NeutraliseControlTokens: cfg.ModelNeutraliseControlTokens,
 	}
 }
 

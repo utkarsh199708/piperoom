@@ -264,7 +264,7 @@ func parseServer(cfg config.Config, m serveMode) (serverSettings, error) {
 		return serverSettings{}, fmt.Errorf("server: %w", err)
 	}
 
-	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
+	// A bad PIPEROOM_POSTMORTEM_MODE stops the server.
 	if s.pmMode, err = config.ParsePostmortemModel(cfg); err != nil {
 		return serverSettings{}, fmt.Errorf("server: %w", err)
 	}
@@ -461,7 +461,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		run      = agent.Run
 		write    = agent.WriteHandoff
 		// writePM is room.Deps.WritePostmortem; nil gives the events-only
-		// draft (PIPEROOM_POSTMORTEM_MODEL=off, or no writer wired yet).
+		// draft (PIPEROOM_POSTMORTEM_MODE=off, or no writer wired yet).
 		writePM agent.PostmortemWriter
 		// triage is the first look (F6); nil in --demo, which has no model.
 		triage        agent.Triager

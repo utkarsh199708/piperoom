@@ -151,6 +151,10 @@ type runner struct {
 	deferred     map[string]*deferredProposal
 	applies      *applyWaits
 	applyResults map[string]applyDone
+
+	// compact is the client-side compaction state (compaction.go); off on a
+	// model that compacts on the server.
+	compact compactor
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -269,6 +273,7 @@ func (r *runner) run(ctx context.Context) error {
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
 	r.system = systemPromptForSource(r.kind, r.source, r.mode)
+	r.initCompaction()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
@@ -329,7 +334,9 @@ func (r *runner) run(ctx context.Context) error {
 			continue
 		}
 
-		resp, err := r.modelTurn(ctx, messages)
+		var resp llm.Response
+		var err error
+		messages, resp, err = r.sendTurn(ctx, messages)
 		if err != nil {
 			// The room's token budget is spent: stop here, between turns. Tool
 			// calls of the previous turn have all finished by now.
@@ -481,13 +488,7 @@ func (r *runner) request(messages []llm.Message) llm.Request {
 }
 
 func (r *runner) initialMessage(inputs []HumanInput, notes []string) llm.Message {
-	blocks := openingBlocks(r.alert, r.past)
-	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
-		blocks = append(blocks, textPart(note))
-	}
-	if note := repoNote(r.repos, r.deps.Actions); note != "" {
-		blocks = append(blocks, textPart(note))
-	}
+	blocks := r.openingParts()
 	// The opening turn has read nothing yet, so a driver's proposal in it gets
 	// the idle wording (a read or two first), not "answer from the evidence
 	// you already have" (driverproposal.go).
@@ -534,7 +535,9 @@ func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
 			// The runner's own input: its verdict is a [verification] note.
 			continue
 		}
-		blocks = append(blocks, textPart(formatInput(in, idle)))
+		text := formatInput(in, idle)
+		blocks = append(blocks, textPart(text))
+		r.compact.noteInput(in, text)
 	}
 	return blocks
 }

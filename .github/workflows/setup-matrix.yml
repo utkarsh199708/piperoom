@@ -1,0 +1,233 @@
+name: Setup matrix
+
+# U1-16 (tasks/U-board.md, design docs/design/setup-agent.md section 8): the
+# setup capability on the three operating systems the pilot runs on.
+#
+# Every leg runs the setup unit tests, the section 2.3 path table tests and the
+# Docker endpoint detection with fakes (the detection tests take the GOOS as an
+# argument, so the answer is the same on all three and proven on all three).
+# ubuntu also runs the Compose integration against a real Docker daemon;
+# macOS runs it through Colima when the runner has it (a documented skip
+# otherwise: GitHub's hosted macOS runners cannot start a VM inside the VM).
+# Windows *Linux-container* runs are the self-hosted nightly
+# (setup-nightly.yml), because GitHub-hosted Windows runners run Windows
+# containers only (plan section 7, item 7).
+#
+# Unit scope: ./internal/setup/... and ./cmd/setup/... — the capability this
+# matrix is about. The repo-wide unit suite is ci.yml's Go job; on Windows it
+# is not green yet for reasons outside this row (POSIX absolute paths in
+# internal/config, a mode assertion in targets/compose), see the U1-16 PR's
+# "Not done / known gaps".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Same rule as ci.yml: one group per PR (a new push cancels the old head),
+# a group of its own for a push to main or a manual run so nothing in between
+# is replaced.
+concurrency:
+  group: setup-matrix-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  os:
+    name: Setup unit, paths, detection (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # One red OS must not hide the others.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Unit (the setup capability)
+        shell: bash
+        run: |
+          set -euo pipefail
+          skip=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # Three upstream tests cannot pass on Windows for environment
+            # reasons, not logic, and none of them has a skip of its own:
+            #  - TestPropertiesWriteFixesMode (security_fixes_test.go) and
+            #    TestStackOpsRunValidatedSnapshot (allowlist_test.go, #887)
+            #    assert 0600 on a file they wrote. NTFS reports 0666 for every
+            #    writable file and os.Chmod only toggles the read-only bit.
+            #  - TestStackRefusesSymlinkBind (allowlist_test.go, #887) creates
+            #    a symlink. A runner user without SeCreateSymbolicLinkPrivilege
+            #    cannot.
+            # They run on the ubuntu and macOS legs. Each needs a
+            # `//go:build !windows` or a Windows branch: C19's, named as a
+            # follow-up in the U1-16 PR. Only these three are skipped by the
+            # flag; the two path-table rows that create real symlinks still
+            # skip themselves where the OS user may not, which the next step
+            # accounts for.
+            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind)$'
+          fi
+          go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
+      - name: "Section 2.3 path table tests (run, never skipped)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # internal/setup/ops/paths_test.go: the table of refused forms, the
+          # nested-alias walk, the confiner's symlink and handle checks, and
+          # .piperoom re-resolution; paths_windows_test.go adds the junction
+          # (a reparse point) on Windows only.
+          required="TestLexicalRefusal TestWalkRefusesNestedAlias TestWalkRealFS TestVerifyHandleRefusesDeniedIdentity TestPiperoomResolvedAfterStart"
+          # These create real symlinks: they skip where the OS user may not
+          # (a Windows user without Developer Mode), which is not a path-table
+          # failure. The walk's fake-based rows above still run.
+          optional="TestConfinerRefusesSymlinkEscape TestConfinerRefusesRelativeSymlink"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # The junction is the Windows reparse form section 2.3 must refuse;
+            # a skip here means the leg proved nothing, so it is required.
+            required="$required TestConfinerRefusesJunction"
+          fi
+          pattern="$(printf '%s|%s' "$required" "$optional" | tr ' ' '|')"
+          go test -count=1 -v -timeout 5m -run "^($pattern)$" ./internal/setup/ops/ | tee path-tests.log
+          failed=0
+          for t in $required; do
+            if ! grep -q -- "--- PASS: $t" path-tests.log; then
+              echo "::error::$RUNNER_OS: path test $t did not pass (missing or skipped): the section 2.3 path table must run on every leg"
+              failed=1
+            fi
+          done
+          for t in $optional; do
+            if grep -q -- "--- SKIP: $t" path-tests.log; then
+              echo "::notice::$RUNNER_OS: $t skipped (this OS cannot create a symlink here); the fake-lstat rows above still ran"
+            fi
+          done
+          exit "$failed"
+      - name: "Docker endpoint detection (fakes)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # compose/platform_test.go: the daemon endpoint (unix socket, npipe,
+          # DOCKER_HOST) and the Docker Desktop differences (host networking,
+          # host.docker.internal) for linux, darwin and windows, from the
+          # injected GOOS. Service ops are not in the tree yet (U8), so only
+          # detection runs here.
+          go test -count=1 -v -timeout 2m \
+            -run '^(TestDockerSocketPath|TestDockerDesktopDifferences)$' \
+            ./internal/setup/targets/compose/ | tee detection.log
+          for t in TestDockerSocketPath TestDockerDesktopDifferences; do
+            if ! grep -q -- "--- PASS: $t" detection.log; then
+              echo "::error::$RUNNER_OS: detection test $t did not pass"
+              exit 1
+            fi
+          done
+      - name: "Colima (macOS): is it on this runner?"
+        id: colima
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if command -v colima >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::colima found: the Compose integration runs on this runner"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            # A documented skip, not a masked failure: GitHub's hosted macOS
+            # runners cannot start the VM Colima needs. A self-hosted macOS
+            # runner with Colima runs the same test the ubuntu job runs.
+            echo "::notice file=.github/workflows/setup-matrix.yml::Colima is not installed on this macOS runner: the Compose integration step is skipped by design (design section 8). It runs on ubuntu-latest here and on the self-hosted Windows nightly."
+            {
+              echo "### macOS: Compose integration skipped"
+              echo
+              echo '`command -v colima` found no Colima on this runner, so the Compose integration step did not run.'
+              echo "Covered by the \`compose-integration\` job (ubuntu) in this run and by \`Setup nightly\` on the owner's Windows machine."
+              echo "A self-hosted macOS runner with Colima runs it here, unchanged."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Compose integration (macOS, through Colima)
+        if: runner.os == 'macOS' && steps.colima.outputs.found == 'true'
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          if ! colima status >/dev/null 2>&1; then
+            colima start --cpu 2 --memory 4 --disk 20 || { echo "::error::colima start failed"; exit 1; }
+          fi
+          set +e
+          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          rc=$?
+          set -e
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
+          .github/scripts/fail-on-skips.sh test.json
+          exit "$rc"
+      - name: Upload the macOS Compose integration output
+        if: always() && runner.os == 'macOS' && steps.colima.outputs.found == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-compose-integration-macos
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The Compose driver against a real Docker daemon (design section 8,
+  # "Integration (-tags integration), Linux"). The test brings up its own
+  # Compose project on free ports and removes it, so it needs no dev stack and
+  # no stack lock; ci.yml's fullstack job runs it too (./internal/... with the
+  # integration tag), this job makes it the setup matrix's own signal.
+  compose-integration:
+    name: Compose integration (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: go test -tags integration ./internal/setup/... (TestComposeStackToHealthyConnect)
+        run: |
+          set +e
+          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          rc=$?
+          set -e
+          # Readable failures in the log: the whole output of every failed test.
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
+          exit "$rc"
+      - name: Skipped integration tests are failures
+        # The test skips when there is no Docker daemon; on this runner there
+        # is one, so a skip means the job proved nothing.
+        if: success() || failure()
+        run: .github/scripts/fail-on-skips.sh test.json
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: setup-compose-integration-ubuntu
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7

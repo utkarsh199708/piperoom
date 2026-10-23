@@ -78,6 +78,11 @@ type EndpointConfig struct {
 	// agent waits for its applied_when before the outcome is not_deployed
 	// (Q7f). Zero means the default, 2 h.
 	FixPRApplyTimeout time.Duration
+	// NeutraliseControlTokens is the raw
+	// PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS value: all (default when
+	// empty) neutralises chat-template control tokens in the text of every
+	// request; non-claude skips the Claude providers (controltokens.go).
+	NeutraliseControlTokens string
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -176,6 +181,12 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 		return c, 0, fmt.Errorf("agent: unknown PIPEROOM_MODEL_PROVIDER %q; allowed values: %s, %s, %s",
 			c.Provider, ProviderAnthropic, ProviderBedrock, ProviderVertex)
 	}
+
+	mode, err := parseNeutraliseMode(c.NeutraliseControlTokens)
+	if err != nil {
+		return c, 0, err
+	}
+	c.NeutraliseControlTokens = mode
 
 	limit, err := ParseRoomTokenBudget(c.RoomTokenBudget)
 	if err != nil {
@@ -305,7 +316,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		triagePass:   triagePassSettings(cfg),
 		applyTimeout: cfg.FixPRApplyTimeout,
 		limit:        limit,
-		model:        anthropicllm.New(cfg.Provider, opts, log),
+		model:        withNeutraliser(anthropicllm.New(cfg.Provider, opts, log), cfg.NeutraliseControlTokens),
 		log:          log,
 		budgets:      map[string]*tokenBudget{},
 	}, nil

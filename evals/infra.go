@@ -7,8 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/redact"
 )
 
@@ -30,27 +29,28 @@ const MaxRunErrorRunes = 200
 // it is not scored, not compared and not counted in a pass rate.
 func (r RunResult) Infra() bool { return strings.HasPrefix(r.Error, InfraPrefix) }
 
-// billingHint is the response-body fragment of an empty credit balance, the
-// same hint internal/agent/triage.go uses (perRunMarkers).
-const billingHint = "credit balance"
-
 // APIRefusal reports whether err is the model API refusing the request for a
-// reason that no retry or later run can fix, and the HTTP status. A 401 and a
-// 403 always are (the key or its access); a 400 only when its body carries the
-// billing hint, since other 400s are about one request. The SDK has already
-// retried 408, 409, 429 and 5xx, which are never refusals here.
+// reason that no retry or later run can fix, and the HTTP status. It decides
+// on the adapter's classification (*llm.APIError), never on a provider's
+// body: an auth error (401, a key without access) and a billing error (an
+// empty credit balance, an exhausted quota) are refusals. A 403 is one
+// whatever its kind: the adapter calls a 403 that names the model
+// model_not_found so the room's triage switch can turn a triage model off,
+// but for an evaluation it is still the key's access. Other 400s are about one
+// request; rate limits, overload and network failures were retried by the
+// adapter and are never refusals here.
 func APIRefusal(err error) (status int, ok bool) {
-	var apierr *anthropic.Error
-	if !errors.As(err, &apierr) {
+	var ae *llm.APIError
+	if !errors.As(err, &ae) {
 		return 0, false
 	}
-	switch apierr.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return apierr.StatusCode, true
-	case http.StatusBadRequest:
-		return apierr.StatusCode, strings.Contains(strings.ToLower(apierr.RawJSON()), billingHint)
+	switch {
+	case ae.Kind == llm.ErrAuth, ae.Kind == llm.ErrBilling:
+		return ae.Status, true
+	case ae.Status == http.StatusForbidden:
+		return ae.Status, true
 	}
-	return apierr.StatusCode, false
+	return ae.Status, false
 }
 
 // RunErrorText is a run error made safe and short for a log line or a report:

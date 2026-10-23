@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,12 @@ type setupWorld struct {
 	composeCall    []string
 	sqlCalls       []string
 	otherSlots     int
+	// stashed is the plugin directory parked in the break's stash.
+	stashed bool
+	// httpCalls are the Connect REST calls, "METHOD /path", in order.
+	httpCalls []string
+	// execUsers are the users each docker exec ran as, "user argv0".
+	execUsers []string
 }
 
 // healthySetupWorld is the stack `devctl reset` leaves: one connector
@@ -132,11 +139,10 @@ func (w *setupWorld) handler() http.Handler {
 		rw.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/connectors/"+connectorName+"/resume", func(rw http.ResponseWriter, _ *http.Request) {
+		// Debezium streams from the slot the fix created; a resume onto a
+		// missing slot leaves nothing active.
 		w.connectorState, w.taskState = "RUNNING", "RUNNING"
-		if !w.slotExists {
-			w.slotExists = true
-		}
-		w.slotActive = true
+		w.slotActive = w.slotExists
 		rw.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/connectors/"+connectorName+"/offsets", func(rw http.ResponseWriter, _ *http.Request) {
@@ -157,7 +163,10 @@ func (w *setupWorld) handler() http.Handler {
 		}
 		writeJSON(rw, out)
 	})
-	return mux
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		w.httpCalls = append(w.httpCalls, r.Method+" "+r.URL.Path)
+		mux.ServeHTTP(rw, r)
+	})
 }
 
 // sql plays the source Postgres: wal_level, the role's rights and the slot.
@@ -300,9 +309,16 @@ func (w *setupWorld) runScript(script string) int {
 	case scriptRestoreConverters:
 		w.dirJars = append(w.dirJars, "debezium-core-3.2.0.Final.jar", "debezium-api-3.2.0.Final.jar")
 	case scriptDisablePluginDir:
-		w.dirExists = false
+		w.dirExists, w.stashed = false, true
 	case scriptRestorePluginDir:
-		w.dirExists = true
+		if !w.stashed {
+			return 1
+		}
+		w.dirExists, w.stashed = true, false
+	case scriptRestoreIfStashed:
+		if w.stashed {
+			w.dirExists, w.stashed = true, false
+		}
 	case scriptBlockSource:
 		w.blockedHost = true
 	default:
@@ -355,9 +371,17 @@ func (w *setupWorld) rescanPlugins() {
 // drops the connector's replication connection.
 func (w *setupWorld) composeOverride(_ context.Context, override string, args ...string) error {
 	w.composeCall = append(w.composeCall, "override="+override+" "+strings.Join(args, " "))
+	// The server starts with the wal_level its command line names: the
+	// override's when it sets one, else the base file's logical.
 	w.walLevel = "logical"
 	if override != "" {
-		w.walLevel = "replica"
+		body, err := os.ReadFile(override)
+		if err != nil {
+			return err
+		}
+		if m := walLevelArgRE.FindStringSubmatch(string(body)); m != nil {
+			w.walLevel = m[1]
+		}
 	}
 	switch {
 	case w.walLevel != "logical":
@@ -367,6 +391,10 @@ func (w *setupWorld) composeOverride(_ context.Context, override string, args ..
 	}
 	return nil
 }
+
+// walLevelArgRE reads the wal_level a Compose command line sets (the "-c"
+// argument, not a comment that names it).
+var walLevelArgRE = regexp.MustCompile(`"-c", "wal_level=([a-z]+)"`)
 
 // testSetupStack wires a stack to the fake world.
 func testSetupStack(t *testing.T, w *setupWorld) *stack {
@@ -391,10 +419,14 @@ func testSetupStack(t *testing.T, w *setupWorld) *stack {
 		http:              srv.Client(),
 		log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		poll:              time.Millisecond,
+		connectStart:      2 * time.Second,
 		sqlFn:             w.sql,
 		composeFn:         w.compose,
 		composeOverrideFn: w.composeOverride,
-		execInFn:          w.exec,
+		execAsFn: func(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+			w.execUsers = append(w.execUsers, user+" "+argv[0])
+			return w.exec(ctx, container, argv...)
+		},
 	}
 }
 

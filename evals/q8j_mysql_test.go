@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -330,48 +331,51 @@ func TestMySQLScenariosScoreInAMySQLRoom(t *testing.T) {
 	scs, results = append(scs, pg), append(results, r)
 
 	rep := buildReport(Config{}.withDefaults(), scs, results, time.Now())
-	if len(rep.BySourceKind) != 2 {
-		t.Fatalf("by source kind = %+v", rep.BySourceKind)
+	want := []Breakdown{
+		{Kind: owners.SourceKindMySQL, Scenarios: len(mysqlScenarios), Runs: len(mysqlScenarios), Passes: len(mysqlScenarios), PassRate: 1},
+		{Kind: owners.SourceKindPostgres, Scenarios: 1, Runs: 1, Passes: 1, PassRate: 1},
 	}
-	pgS, myS := rep.BySourceKind[0], rep.BySourceKind[1]
-	if pgS.SourceKind != owners.SourceKindPostgres || pgS.Scenarios != 1 || pgS.PassRate != 1 {
-		t.Errorf("postgres = %+v", pgS)
+	if !reflect.DeepEqual(rep.BySource, want) {
+		t.Fatalf("by source = %+v, want %+v", rep.BySource, want)
 	}
-	if myS.SourceKind != owners.SourceKindMySQL || myS.Scenarios != len(mysqlScenarios) || myS.PassRate != 1 || myS.MeanScore != 100 {
-		t.Errorf("mysql = %+v", myS)
+	for _, s := range rep.Scenarios {
+		wantKind := owners.SourceKindMySQL
+		if s.Name == pg.Name {
+			wantKind = owners.SourceKindPostgres
+		}
+		if s.SourceKind != wantKind {
+			t.Errorf("scenario %s source kind = %q, want %q", s.Name, s.SourceKind, wantKind)
+		}
 	}
 	var md strings.Builder
 	if err := rep.WriteMarkdown(&md); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(md.String(), "| **mysql** (4 scenarios) |") || !strings.Contains(md.String(), "| **postgres** (1 scenarios) |") {
-		t.Errorf("markdown has no per-source-kind rows:\n%s", md.String())
+	if !strings.Contains(md.String(), fmt.Sprintf("by source: mysql %d/%d (100%%) · postgres 1/1 (100%%)", len(mysqlScenarios), len(mysqlScenarios))) {
+		t.Errorf("markdown has no per-source-kind line:\n%s", md.String())
 	}
 }
 
-// One source kind: no per-kind breakdown (it would be Overall again), and
-// Restrict recomputes it.
-func TestBySourceKindNeedsTwoKinds(t *testing.T) {
+// A scenario row with no source kind (a report written before Q8j) reads as
+// postgres in BySource, and Restrict recomputes it.
+func TestBySourceReadsEmptyAsPostgres(t *testing.T) {
 	ss := []ScenarioSummary{
 		{Name: "a", Summary: Summary{Runs: 1, Passes: 1, PassRate: 1, MeanScore: 100}},
 		{Name: "b", SourceKind: owners.SourceKindPostgres, Summary: Summary{Runs: 1, PassRate: 0, MeanScore: 40}},
 		{Name: "c", SourceKind: owners.SourceKindMySQL, Summary: Summary{Runs: 1, Passes: 1, PassRate: 1, MeanScore: 90}},
 		{Name: "d", SourceKind: owners.SourceKindMySQL},
 	}
-	got := bySourceKind(ss)
-	if len(got) != 2 || got[0].SourceKind != "postgres" || got[0].Scenarios != 2 || got[0].PassRate != 0.5 ||
-		got[1].SourceKind != "mysql" || got[1].Scenarios != 1 || got[1].MeanScore != 90 {
-		t.Errorf("by source kind = %+v", got)
-	}
-	if got := bySourceKind(ss[:2]); got != nil {
-		t.Errorf("one kind: %+v, want nil", got)
-	}
 	r := Report{Scenarios: ss}
-	if got := r.Restrict([]string{"a", "b"}).BySourceKind; got != nil {
-		t.Errorf("restricted to postgres: %+v", got)
+	got := r.Restrict([]string{"a", "b", "c", "d"}).BySource
+	want := []Breakdown{
+		{Kind: "mysql", Scenarios: 1, Runs: 1, Passes: 1, PassRate: 1},
+		{Kind: "postgres", Scenarios: 2, Runs: 2, Passes: 1, PassRate: 0.5},
 	}
-	if got := r.Restrict([]string{"a", "c"}).BySourceKind; len(got) != 2 {
-		t.Errorf("restricted to both: %+v", got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("by source = %+v, want %+v", got, want)
+	}
+	if got := r.Restrict([]string{"a", "b"}).BySource; len(got) != 1 || got[0].Kind != "postgres" || got[0].Scenarios != 2 {
+		t.Errorf("restricted to postgres: %+v", got)
 	}
 }
 

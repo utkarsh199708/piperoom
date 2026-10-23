@@ -120,14 +120,14 @@ func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 		Effort:       judgeEffort(opts),
 		OutputSchema: judgeSchema(),
 	}
-	msg, err := m.Turn(ctx, params)
+	msg, text, err := structuredTurn(ctx, m.Turn, m.Capabilities(params.Model), params, "judge_verdict")
 	if err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: request: %w", err)
 	}
 	if msg.Stop == llm.StopRefusal {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: model refused the request")
 	}
-	dec := json.NewDecoder(strings.NewReader(extractText(msg.Message.Parts)))
+	dec := json.NewDecoder(strings.NewReader(text))
 	dec.DisallowUnknownFields()
 	var v HandoffVerdict
 	if err := dec.Decode(&v); err != nil {

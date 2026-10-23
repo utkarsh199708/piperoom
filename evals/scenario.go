@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -70,10 +71,62 @@ type Scenario struct {
 	// judge_auto.go). Unset uses the run's default (evalrun: auto). The
 	// evalrun -judge flag overrides it.
 	Judge string `yaml:"judge"`
+	// Setup is the scenario's setup metadata (U1-20): the source kind and
+	// target kind a setup run starts from, which the report groups its
+	// per-source and per-target pass rates by. An incident scenario names
+	// none; its source kind defaults to postgres (the pipeline every incident
+	// scenario runs on) and it is in no target group.
+	Setup *ScenarioSetup `yaml:"setup"`
 
 	// pipelineYAML is the pipeline as written, for the room path's owners
 	// file; nil for a scenario built in code.
 	pipelineYAML *yaml.Node
+}
+
+// ScenarioSetup is the setup shape a scenario reports under (U1-20). The
+// kinds are the ones events.SetupRequest names; an empty SourceKind is
+// DefaultSourceKind.
+type ScenarioSetup struct {
+	SourceKind string `yaml:"source_kind"`
+	Target     string `yaml:"target"`
+}
+
+// DefaultSourceKind is the source kind of a scenario that names none: every
+// incident scenario and the U1-19 setup scenarios run on Postgres.
+const DefaultSourceKind = "postgres"
+
+// setupKinds returns the source kind and target kind the report groups this
+// scenario's runs by. A scenario with no setup block (an incident scenario)
+// has its room's source kind (Q8j, sourceKind). A target is "" (in no target
+// group) when the scenario names none.
+func (s Scenario) setupKinds() (source, target string) {
+	if s.Setup == nil {
+		return s.sourceKind(), ""
+	}
+	source = DefaultSourceKind
+	if s.Setup.SourceKind != "" {
+		source = s.Setup.SourceKind
+	}
+	return source, s.Setup.Target
+}
+
+// attachSetup fills the scenario's setup kinds from its runner recording when
+// it names none (U1-20). A recording is the setup request's own session, so
+// its source and target are what the run started from; a scenario that states
+// a kind keeps it.
+func attachSetup(s *Scenario, rec *evalsetup.Recording) {
+	if rec == nil {
+		return
+	}
+	if s.Setup == nil {
+		s.Setup = &ScenarioSetup{}
+	}
+	if s.Setup.SourceKind == "" {
+		s.Setup.SourceKind = rec.SourceKind()
+	}
+	if s.Setup.Target == "" {
+		s.Setup.Target = rec.Target
+	}
 }
 
 // Alert is what opens the room.
@@ -541,9 +594,17 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
 	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
 	switch s.Judge {
-	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+	case "", JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto:
 	default:
-		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q (alias %q) or %q)", s.Judge, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto))
+	}
+	if s.Setup != nil {
+		if s.Setup.SourceKind != "" && !evalsetup.ValidSourceKind(s.Setup.SourceKind) {
+			errs = append(errs, fmt.Errorf("setup.source_kind: %q is not a setup source kind", s.Setup.SourceKind))
+		}
+		if s.Setup.Target != "" && !evalsetup.ValidTargetKind(s.Setup.Target) {
+			errs = append(errs, fmt.Errorf("setup.target: %q is not a setup target kind", s.Setup.Target))
+		}
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && !contains(incidentLayers(), l) {
@@ -683,7 +744,7 @@ func (s Scenario) checkOutcome() []error {
 			errs = append(errs, fmt.Errorf("expect.%s: only graded when outcome is %s, not %s", field, OutcomeDiagnose, e.Outcome))
 		}
 	}
-	if s.Judge == JudgeClaude || s.Judge == JudgeAuto {
+	if IsLLMJudge(s.Judge) || s.Judge == JudgeAuto {
 		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", s.Judge, e.Outcome))
 	}
 	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {

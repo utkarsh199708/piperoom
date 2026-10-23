@@ -518,7 +518,10 @@ func (p *triagePass) verdict(ctx context.Context, outputs []string) (triageVerdi
 		Effort:       triageEffort,
 		OutputSchema: triageSchema(),
 	}
-	resp, err := p.r.callModel(ctx, req, events.UsageRoleFirstLook)
+	turn := func(ctx context.Context, req llm.Request) (llm.Response, error) {
+		return p.r.callModel(ctx, req, events.UsageRoleFirstLook)
+	}
+	resp, text, err := structuredTurn(ctx, turn, p.r.model.Capabilities(req.Model), req, "first_look")
 	if err != nil {
 		return triageVerdict{}, err
 	}
@@ -526,7 +529,7 @@ func (p *triagePass) verdict(ctx context.Context, outputs []string) (triageVerdi
 		return triageVerdict{}, errTriageRefused
 	}
 	var v triageVerdict
-	if err := json.Unmarshal([]byte(extractText(resp.Message.Parts)), &v); err != nil {
+	if err := json.Unmarshal([]byte(text), &v); err != nil {
 		return triageVerdict{}, fmt.Errorf("agent: first look verdict is not valid JSON: %w", err)
 	}
 	return v, nil

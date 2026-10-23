@@ -10,17 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/auth"
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
@@ -67,7 +65,7 @@ type Deps struct {
 	WriteHandoff    agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
 	// off after its fix (F2). Nil gives the events-only draft:
-	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODE=off.
 	WritePostmortem agent.PostmortemWriter
 	// Triage, when set, runs the triage pass (F6) for every room opened in
 	// this process, before its agent waits for a slot; not for shadow rooms
@@ -1941,35 +1939,19 @@ func isBudgetStop(err error) bool {
 }
 
 // isUnretryable reports an error a second attempt cannot cure: bad input, a
-// validation failure, a closed room, or a model request the API refused
-// (modelRefused).
+// validation failure, a closed room, or a model request the provider refused
+// (llm.Unretryable: auth, billing, unknown model, bad request, truncated).
+// A too-long prompt is about one run's history and a fresh run starts from one
+// message, so it is retried, as are throttling and network errors.
 func isUnretryable(err error) bool {
 	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
 		return true
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) && modelRefused(apiErr) {
+	if llm.Unretryable(err) {
 		return true
 	}
 	var re *Error
 	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
-}
-
-// modelRefused reports a model error every run repeats: a 4xx (a bad key, an
-// unknown model) other than 408, 409 and 429, which the SDK already retried.
-// A 413, or a 400 saying the prompt is too long, is about one run's history
-// (as internal/agent's triage reads it): a fresh run starts from one message,
-// so it is retried.
-func modelRefused(apiErr *anthropic.Error) bool {
-	switch c := apiErr.StatusCode; {
-	case c < 400 || c >= 500:
-		return false
-	case c == http.StatusRequestTimeout, c == http.StatusConflict, c == http.StatusTooManyRequests, c == http.StatusRequestEntityTooLarge:
-		return false
-	case c == http.StatusBadRequest:
-		return !strings.Contains(strings.ToLower(apiErr.RawJSON()), "too long")
-	}
-	return true
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the
