@@ -60,7 +60,7 @@ var cdcExact = map[string]bool{
 // dag_schedule_gap; P4d-2 dbttools: dbt_run_results, dbt_model_lineage,
 // dbt_model_sql) are covered before their packages exist.
 var (
-	cdcPrefixes   = []string{"kafka_", "pg_", "connect_", "schema_registry_", "debezium_", "dlq_", "source_"}
+	cdcPrefixes   = []string{"kafka_", "pg_", "connect_", "schema_registry_", "debezium_", "dlq_", "source_", "mysql_"}
 	batchPrefixes = []string{"dag_", "task_", "dbt_"}
 )
 

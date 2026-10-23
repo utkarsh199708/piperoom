@@ -25,6 +25,21 @@ func PromptHashFor(kind string) (string, error) {
 	return promptHash(systemPromptFor(k)), nil
 }
 
+// PromptHashForSource is PromptHashFor for a room whose source is of
+// sourceKind ("" = postgres, or mysql): a Postgres source's hash is
+// PromptHashFor(kind)'s (Q8g). Unknown kinds are errors.
+func PromptHashForSource(kind, sourceKind string) (string, error) {
+	k, err := RoomKind(kind)
+	if err != nil {
+		return "", err
+	}
+	sk, err := SourceKind(sourceKind)
+	if err != nil {
+		return "", err
+	}
+	return promptHash(systemPromptForSource(k, sk, RoomMode{Write: true})), nil
+}
+
 func promptHash(prompt string) string {
 	sum := sha256.Sum256([]byte(prompt))
 	return hex.EncodeToString(sum[:])

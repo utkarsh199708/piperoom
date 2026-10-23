@@ -40,6 +40,69 @@ func systemPromptForMode(kind string, m RoomMode) string {
 	return strings.Join([]string{promptCDCIntro, promptAlertIsData, promptCDCMethod, promptPastIncidents, promptCDCFixesFor(m), promptRulesFor(kind)}, "\n\n")
 }
 
+// systemPromptForSource is systemPromptForMode for a room whose source is of
+// sourceKind (Q8g). A Postgres source ("" or postgres) gets
+// systemPromptForMode itself, byte for byte, so the Postgres prompt, its
+// snapshots and the CDC evals do not move. A MySQL CDC room gets the MySQL
+// wording of the intro, the method's two source reads and the fixes section
+// (binlog, GTID, schema history), and names no pg_* tool or action, which a
+// MySQL room does not offer. The batch prompt has no source wording. The
+// prompt depends only on kind, source and mode, so it stays byte-identical
+// across a room's requests.
+func systemPromptForSource(kind, sourceKind string, m RoomMode) string {
+	if kind == events.PipelineKindBatch || sourceKind != events.SourceKindMySQL {
+		return systemPromptForMode(kind, m)
+	}
+	return strings.Join([]string{promptCDCIntroMySQL, promptAlertIsData, promptCDCMethodMySQL(), promptPastIncidents, promptCDCFixesMySQLFor(m), promptRulesFor(kind)}, "\n\n")
+}
+
+// promptCDCMethodMySQL is the CDC method with the source's two reads named
+// for MySQL: the DDL history comes from the schema history topic (MySQL has
+// no DDL audit trigger, RecentDDL is ErrNotSupported) and the source's status
+// read is the binlog's. Every other rule is the CDC method's own text, so the
+// two cannot drift; a replaced phrase that is missing leaves a pg_* name in
+// the MySQL prompt, which TestMySQLPromptNamesNoPostgresTool refuses.
+func promptCDCMethodMySQL() string {
+	return strings.NewReplacer(
+		"Make what_changed your second read; without it, read pg_recent_ddl.",
+		"Make what_changed your second read; for DDL, read kafka_schema_history.",
+		"(pg_replication_slots, connect_status,",
+		"(mysql_binlog_status, connect_status,",
+	).Replace(promptCDCMethod)
+}
+
+// promptCDCFixesMySQLFor is promptCDCFixesFor for a MySQL source: the
+// Postgres slot and publication bullets give way to the binlog, server id and
+// schema history ones, and the resume check reads the binlog position
+// instead of the slot. The mode notes are the CDC ones.
+func promptCDCFixesMySQLFor(m RoomMode) string {
+	note := promptCDCWriteOffNote
+	if m.Write {
+		note = promptCDCPolicyNote
+	}
+	return promptCDCFixesMySQL() + "\n" + promptCDCOffsetsNote + "\n" + note
+}
+
+// The MySQL source wording (Q8g, docs/design/mysql-source.md §3, §7, §8).
+// promptCDCFixesMySQL is the CDC fixes section with the Postgres-only bullets
+// replaced: the slot drop by the purged-binlog rule, the publication bullet by
+// the server id and schema history rules, and the resume check's slot by the
+// binlog position. Built from promptCDCFixes so the shared bullets keep their
+// exact words.
+const promptCDCIntroMySQL = `You are on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect (DDL in its schema history topic) -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You use read-only tools; you only propose fixes.`
+
+func promptCDCFixesMySQL() string {
+	return strings.NewReplacer(
+		"- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is irreversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.",
+		"- A stored position the server no longer has (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position the server has or a new snapshot; say what the gap loses.",
+		"confirm with reads that a source connector's slot still exists and holds its position,",
+		"confirm with reads that the binlog still holds a source connector's position (mysql_binlog_status),",
+		"- pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal (signal_table: signal.data.collection from connect_config).",
+		"- A database.server.id clashing with the server's or another connector's is the cause: set a unique one with connect_update_connector_config.\n"+
+			"- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.",
+	).Replace(promptCDCFixes)
+}
+
 // promptCDCFixesFor is the CDC fixes section for a room's mode: the
 // source-offsets bullet in both modes (connect_reset_source_offsets is
 // proposable either way, Q5d and P0 ruling #606), then the scheduling bullet
@@ -815,6 +878,20 @@ func PromptToolNamesFor(kind string) ([]string, error) {
 		return nil, err
 	}
 	return promptToolNamesIn(systemPromptFor(k)), nil
+}
+
+// PromptToolNamesForSource is PromptToolNamesFor for a room whose source is
+// of sourceKind ("" = postgres, or mysql). Unknown kinds are errors.
+func PromptToolNamesForSource(kind, sourceKind string) ([]string, error) {
+	k, err := RoomKind(kind)
+	if err != nil {
+		return nil, err
+	}
+	sk, err := SourceKind(sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	return promptToolNamesIn(systemPromptForSource(k, sk, RoomMode{Write: true})), nil
 }
 
 func promptToolNamesIn(prompt string) []string {

@@ -108,7 +108,7 @@ func run(o runOptions) (err error) {
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
-		reg, err := listToolsRegistry(own, fakeTools)
+		reg, err := listToolsRegistry(listOwners(own, pipe, havePipe), fakeTools)
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
@@ -198,7 +198,9 @@ func run(o runOptions) (err error) {
 		if commit == "" {
 			commit = "unknown"
 		}
-		promptHash, herr := agent.PromptHashFor(kind)
+		// The prompt follows the pipeline's source kind too (Q8g); without
+		// the pipeline in owners (fake tools) it is the Postgres one.
+		promptHash, herr := agent.PromptHashForSource(kind, sourceKindOf(pipe, havePipe))
 		if herr != nil {
 			return fmt.Errorf("investigate: %w", herr)
 		}

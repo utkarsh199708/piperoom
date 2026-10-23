@@ -384,6 +384,15 @@ type proposeFixTool struct {
 	// upstream_app or vendor every proposal is labelled a mitigation. Nil
 	// labels none.
 	causes *externalCauses
+	// source is the room's source kind (SourceKind; "" reads as postgres). A
+	// step's layer is actions.LayerFor(a, source), so a source admin step of a
+	// MySQL room goes to the mysql owner, as the room checks it (Q8o, Q8g).
+	source string
+}
+
+// layerOf is the approving layer of a step of a in this tool's room.
+func (t *proposeFixTool) layerOf(a actions.Action) string {
+	return actions.LayerFor(a, t.source)
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -406,7 +415,7 @@ func (t *proposeFixTool) Description() string {
 		b.WriteString("(none)\n")
 	}
 	for _, a := range acts {
-		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
+		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), t.layerOf(a), describeFor(a, t.source))
 	}
 	b.WriteString("steps is an array; each step has action, params and a short description, and may have verify (at most 200 characters): what you will check after the step runs, for example \"task 0 RUNNING within 60 s\". ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
@@ -597,6 +606,29 @@ func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
 	return &proposeFixTool{actions: reg, proposals: proposals}
 }
 
+// NewProposeFixToolForSource is NewProposeFixTool for a room whose source is
+// of sourceKind ("" = postgres, or mysql): its steps carry the layer
+// actions.LayerFor gives (a source admin step of a MySQL room is the mysql
+// owner's) and its action list the source's descriptions (Q8g). An unknown
+// kind is an error, as in SourceKind.
+func NewProposeFixToolForSource(reg *actions.Registry, proposals Proposals, sourceKind string) (tools.Tool, error) {
+	sk, err := SourceKind(sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	return &proposeFixTool{actions: reg, proposals: proposals, source: sk}, nil
+}
+
+// setRoomSource gives the room tools that depend on it the room's source
+// kind (Q8g): today propose_fix alone.
+func setRoomSource(room []tools.Tool, sourceKind string) {
+	for _, t := range room {
+		if p, ok := t.(*proposeFixTool); ok {
+			p.source = sourceKind
+		}
+	}
+}
+
 // checkStep resolves a step to its action and decoded params, or returns the
 // error the model sees. Order: the action must exist, params must be a JSON
 // object that fits the action's ParamsSchema (types, required fields, enums,
@@ -756,7 +788,7 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		if err != nil {
 			return tools.Result{}, err
 		}
-		layer := a.Layer()
+		layer := t.layerOf(a)
 		verify := strings.TrimSpace(s.Verify)
 		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
 			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)

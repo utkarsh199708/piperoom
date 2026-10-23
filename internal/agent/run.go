@@ -59,6 +59,10 @@ type runner struct {
 	// kind is the room's pipeline kind, normalised (RoomKind): it picks the
 	// system prompt section and the verification of a fix.
 	kind string
+	// source is the room's source kind, normalised (SourceKind): postgres or
+	// mysql. It picks the CDC prompt's source wording, and the layer and
+	// description of each action propose_fix lists (Q8g).
+	source string
 	// mode is the room's mode for wording (P2d). It defaults to write mode on;
 	// the room service fills it once the contract change lands (see mode.go).
 	mode  RoomMode
@@ -184,6 +188,19 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		return nil, err
 	}
 	deps.Actions = kindActions
+	// Then only the tools and actions of the room's source kind (Q8g): a
+	// MySQL room offers no pg_* name and a Postgres room no mysql_* one. The
+	// kind is read off the registry until Alert carries it (sourcekind.go).
+	source, err := RoomSourceKind(deps.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if deps.Tools, err = ToolsForSource(deps.Tools, source); err != nil {
+		return nil, err
+	}
+	if deps.Actions, err = ActionsForSource(deps.Actions, source); err != nil {
+		return nil, err
+	}
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
 	}
@@ -211,6 +228,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	return &runner{
 		alert:     alert,
 		kind:      kind,
+		source:    source,
 		mode:      RoomMode{Write: true},
 		deps:      deps,
 		opts:      opts,
@@ -229,9 +247,11 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions),
+	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
+	setRoomSource(room, r.source)
+	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
-	r.system = systemPromptForMode(r.kind, r.mode)
+	r.system = systemPromptForSource(r.kind, r.source, r.mode)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
