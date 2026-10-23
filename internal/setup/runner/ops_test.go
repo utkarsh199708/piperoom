@@ -400,6 +400,16 @@ func TestStepBindingRefused(t *testing.T) {
 		req = opReq("c", "compose_up", protocol.TierT1, "p1", 3, h, raw)
 		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
 		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+
+		// 4. A frozen step whose params hold keys that differ only in case
+		// (the ALTER SYSTEM probe): the hash and the params match the frozen
+		// step exactly, but the decoder would run the other value.
+		p2 := testProposal("p2")
+		p2.Steps[0].Params = json.RawMessage(`{"name":"wal_level","NAME":"archive_command","value":"x"}`)
+		req = opReq("d", "compose_up", protocol.TierT1, "p2", 0, proposalHash(t, p2), proposalRaw(t, p2))
+		req.Params = p2.Steps[0].Params
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
 	})
 	defer srv.Close()
 
@@ -671,4 +681,80 @@ func tamperOneByte(b []byte) []byte {
 	}
 	out[0] ^= 0xff
 	return out
+}
+
+// TestT3ConfirmationBoundByTheOpDeadline: the "y" must come before the op's
+// own deadline (the server stops waiting then and fails the step). No answer
+// by the deadline is refused as deadline; a "y" typed after it is refused too,
+// and in neither case is the step marked started or run.
+func TestT3ConfirmationBoundByTheOpDeadline(t *testing.T) {
+	t.Run("no answer by the deadline", func(t *testing.T) {
+		cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}}
+		srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+			doHandshake(t, conn, ctx, "tok", time.Now, nil)
+			p1 := testProposalWithAction("p1", "source_restart")
+			req := opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+			req.Deadline = time.Now().Add(300 * time.Millisecond)
+			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: req})
+			assertRefused(t, conn, ctx, protocol.RefuseDeadline)
+		})
+		defer srv.Close()
+		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: blockingReader{started: make(chan struct{})}, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Run(context.Background()); err != nil {
+			t.Fatalf("Run = %v", err)
+		}
+		<-done
+		if n := cat.callCount(); n != 0 {
+			t.Fatalf("executor called %d times, want 0", n)
+		}
+	})
+
+	t.Run("a y after the deadline", func(t *testing.T) {
+		cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}}
+		clock := newTestClock()
+		srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+			doHandshake(t, conn, ctx, "tok", clock.Now, nil)
+			p1 := testProposalWithAction("p1", "source_restart")
+			req := opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+			// An hour away (the clock starts at the real time), so the op's
+			// context never expires: only the check after the answer sees
+			// that the runner's clock passed it.
+			req.Deadline = clock.Now().Add(time.Hour)
+			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: req})
+			assertRefused(t, conn, ctx, protocol.RefuseDeadline)
+		})
+		defer srv.Close()
+		// The person answers y, two hours later on the runner's clock.
+		stdin := &lateYes{clock: clock, after: 2 * time.Hour}
+		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: stdin, Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Run(context.Background()); err != nil {
+			t.Fatalf("Run = %v", err)
+		}
+		<-done
+		if n := cat.callCount(); n != 0 {
+			t.Fatalf("executor called %d times, want 0", n)
+		}
+	})
+}
+
+// lateYes answers "y" once, after advancing clock by after.
+type lateYes struct {
+	clock *testClock
+	after time.Duration
+	done  bool
+}
+
+func (l *lateYes) Read(p []byte) (int, error) {
+	if l.done {
+		select {}
+	}
+	l.done = true
+	l.clock.Advance(l.after)
+	return copy(p, "y\n"), nil
 }

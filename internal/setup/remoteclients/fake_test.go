@@ -451,6 +451,11 @@ func writeCases() []writeCase {
 			mutations: []string{
 				`{"target":"postgres:5432","name":"max_wal_senders","value":"logical"}`,
 				`{"target":"postgres:5432","name":"wal_level","value":"minimal"}`,
+				// Keys that fold together, the call's value last so the
+				// decoder alone would match it: the room's guard read the
+				// other one (protocol.CheckParamKeys).
+				`{"target":"postgres:5432","NAME":"archive_command","name":"wal_level","value":"logical"}`,
+				`{"target":"postgres:5432","name":"archive_command","name":"wal_level","value":"logical"}`,
 			},
 		},
 	}

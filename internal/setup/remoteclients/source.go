@@ -8,6 +8,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -101,10 +102,10 @@ type canaryInsertParams struct {
 	Nonce string `json:"nonce"`
 }
 
-type alterSystemParams struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
+// alterSystemParams is plan.AlterSystemStep: the room's guard reads the
+// parameter name through the same struct, so the allow-list judges the name
+// this write is bound to.
+type alterSystemParams = plan.AlterSystemStep
 
 // ---- reads ----
 

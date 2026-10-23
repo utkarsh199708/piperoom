@@ -276,14 +276,24 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 			return
 		}
 
-		// Every T3 op needs a y on the runner's terminal.
+		// Every T3 op needs a y on the runner's terminal, within the op's
+		// own deadline: the server stops waiting at req.Deadline and fails
+		// (or reports unknown) the step, so a "y" typed after it must not
+		// start the op.
 		if req.Tier == protocol.TierT3 {
-			ok, err := r.confirmT3(ctx, req)
+			ok, err := r.confirmT3(opCtx, req)
 			if err != nil {
-				return // ctx ended; the op does not run
+				if ctx.Err() == nil {
+					r.refuse(ctx, req, protocol.RefuseDeadline)
+				}
+				return // the deadline passed or the connection ended; the op does not run
 			}
 			if !ok {
 				r.refuse(ctx, req, protocol.RefuseNotConfirmed)
+				return
+			}
+			if !req.Deadline.IsZero() && !r.now().Before(req.Deadline) {
+				r.refuse(ctx, req, protocol.RefuseDeadline)
 				return
 			}
 		}
@@ -454,6 +464,12 @@ func (r *Runner) checkStep(req *protocol.OpRequest) error {
 	}
 	if !stepParamsEqual(req.Params, frozen.Params) {
 		return errors.New("setup: params differ from the frozen step")
+	}
+	// Keys that differ only in case hash, print and guard as one value and
+	// decode as another (the decoder folds case, last wins): never run them,
+	// whatever let them into the proposal.
+	if err := protocol.CheckParamKeys(req.Params); err != nil {
+		return err
 	}
 	return nil
 }

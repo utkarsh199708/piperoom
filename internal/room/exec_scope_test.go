@@ -26,6 +26,7 @@ type scopeSeen struct {
 	scope    tools.Scope
 	scopeErr error // tools.ScopeFor(ctx, nil), the write clients' own resolution
 	deadline bool
+	left     time.Duration // until the deadline, when there is one
 }
 
 // scopeAction records the pipeline scope of every Validate and Execute ctx.
@@ -41,9 +42,9 @@ type scopeAction struct {
 func (a *scopeAction) record(ctx context.Context, call string) {
 	p, whole := tools.PipelineFrom(ctx)
 	sc, err := tools.ScopeFor(ctx, nil)
-	_, deadline := ctx.Deadline()
+	dl, deadline := ctx.Deadline()
 	a.smu.Lock()
-	a.seen = append(a.seen, scopeSeen{call: call, pipeline: p, whole: whole, scope: sc, scopeErr: err, deadline: deadline})
+	a.seen = append(a.seen, scopeSeen{call: call, pipeline: p, whole: whole, scope: sc, scopeErr: err, deadline: deadline, left: time.Until(dl)})
 	a.smu.Unlock()
 }
 
@@ -147,6 +148,11 @@ func TestExecutorValidateAndExecuteCarryTheRoomPipeline(t *testing.T) {
 	for i, s := range got {
 		if s.call == "execute" && !s.deadline {
 			t.Fatalf("call %d: Execute ctx has no deadline, want the step timeout", i)
+		}
+		// A step outside a setup room keeps the 30 s step timeout; only a
+		// setup step sent T3 gets longer.
+		if s.call == "execute" && (s.left > 30*time.Second || s.left < 20*time.Second) {
+			t.Fatalf("call %d: Execute ran with %s left, want the 30 s step timeout", i, s.left)
 		}
 	}
 	n := 0

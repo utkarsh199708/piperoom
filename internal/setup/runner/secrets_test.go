@@ -359,8 +359,14 @@ func TestStoreSanitizeResult(t *testing.T) {
 
 	// Data that cannot be parsed is withheld, never passed through.
 	bad := st.SanitizeResult(protocol.OpResult{Data: json.RawMessage("s3cret-value not json")})
-	if strings.Contains(string(bad.Data), "s3cret-value") || !bad.Truncated {
-		t.Fatalf("unparseable Data was not withheld: %s", bad.Data)
+	if strings.Contains(string(bad.Data), "s3cret-value") || !bad.Truncated || !bad.DataTruncated {
+		t.Fatalf("unparseable Data was not withheld (and marked a Data cut): %s", bad.Data)
+	}
+	// A Summary over the cap is cut, but Data is whole: Truncated without
+	// DataTruncated, so a client still decodes Data.
+	long := st.SanitizeResult(protocol.OpResult{OK: true, Summary: strings.Repeat("x", 64<<10), Data: json.RawMessage(`{"x":1}`)})
+	if !long.Truncated || long.DataTruncated {
+		t.Fatalf("a Summary-only cut = Truncated %v DataTruncated %v, want true false", long.Truncated, long.DataTruncated)
 	}
 }
 

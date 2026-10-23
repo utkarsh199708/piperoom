@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/tools"
 )
@@ -39,6 +40,14 @@ func TestOpsTable(t *testing.T) {
 		}
 		if _, ok := defaultAnswers[spec.Op]; !ok {
 			t.Fatalf("%s: the fake runner has no answer for %q", spec.Method, spec.Op)
+		}
+		// The room bounds a step by the tier this package sends it at, so
+		// an op sent above T2 must be in plan's client floor table.
+		if spec.Tier == protocol.TierT3 && plan.ClientFloor(spec.Op) != protocol.TierT3 {
+			t.Fatalf("%s is sent T3 but plan.ClientFloor(%s) = %q: the room would cut its confirmation short", spec.Method, spec.Op, plan.ClientFloor(spec.Op))
+		}
+		if spec.Tier != protocol.TierT3 && plan.ClientFloor(spec.Op) == protocol.TierT3 {
+			t.Fatalf("plan.ClientFloor(%s) is T3 but %s sends it at %s", spec.Op, spec.Method, spec.Tier)
 		}
 	}
 	if len(ops) != len(defaultAnswers) {

@@ -43,9 +43,10 @@
 // it and refuses it again as duplicate_step. A Q action's in-step retry (a
 // create or delete retried after a Connect rebalance or a timeout) therefore
 // never reaches the runner a second time: the session refuses the second
-// write of a step with ErrStepSpent, which wraps the first attempt's error, so
-// the action's retry loop ends on that error (its landed-detection reads still
-// run). Retrying a write is a new proposal step, approved again; retrying
+// write of a step with ErrStepSpent, which wraps the first attempt's error.
+// Every error of a sent step write also wraps clients.ErrWriteSpent, on which
+// the Q actions' retry loops stop at once (after their landed-detection
+// reads). Retrying a write is a new proposal step, approved again; retrying
 // inside one op, next to Connect, is the runner op's job.
 //
 // The runner recomputes ParamsHash from the frozen proposal it was shown with
@@ -57,7 +58,8 @@
 //
 // # Cut and redacted results
 //
-// A result the runner cut to fit the protocol (OpResult.Truncated) or whose
+// A result whose Data the runner cut to fit the protocol
+// (OpResult.DataTruncated; Truncated alone is a Summary cut and decodes) or whose
 // Data its literal redaction changed (OpResult.Redacted) is refused with
 // ErrTruncated or ErrRedacted instead of being decoded: a cut list is not the
 // whole answer, and a ${secret:NAME} the runner put in place of a stored value

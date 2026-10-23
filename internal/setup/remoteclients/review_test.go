@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/room"
 	"piperoom/internal/setup/protocol"
@@ -133,9 +135,10 @@ func TestStepWriteSentOnce(t *testing.T) {
 
 // TestCreateRetryNeverResendsTheStep runs connect_create_connector over the
 // remote client with a runner that answers the create with a Connect
-// rebalance: the action's in-step retry loop ends on ErrStepSpent (wrapping
-// the rebalance) and the create op is sent exactly once, never as a second
-// request the runner would refuse as duplicate_step.
+// rebalance: the error says the step's write is spent (clients.ErrWriteSpent),
+// the action's in-step retry loop stops on it, and the create op is sent
+// exactly once, never as a second request the runner would refuse as
+// duplicate_step.
 func TestCreateRetryNeverResendsTheStep(t *testing.T) {
 	f := newFakeRunner()
 	f.overrides[OpConnectListConnectors] = json.RawMessage(`{"connectors":[]}`)
@@ -149,8 +152,10 @@ func TestCreateRetryNeverResendsTheStep(t *testing.T) {
 		`"database.hostname":"postgres","database.password":"${secret:source_password}","topic.prefix":"pg"}}`
 	ctx := writeCtx(t, protocol.TierT2, protocol.ClassLocal, actions.CreateConnectorName, input)
 	_, err := act.Execute(ctx, json.RawMessage(input))
-	if !errors.Is(err, ErrStepSpent) || !errors.Is(err, connect.ErrRebalancing) {
-		t.Fatalf("Execute = %v, want ErrStepSpent wrapping the rebalance", err)
+	// The first attempt's error says the step is spent, so the action's
+	// retry loop stops there: it never even asks for a second send.
+	if !errors.Is(err, clients.ErrWriteSpent) || !errors.Is(err, connect.ErrRebalancing) || errors.Is(err, ErrStepSpent) {
+		t.Fatalf("Execute = %v, want the rebalance marked spent, and no second attempt", err)
 	}
 	if n := len(f.callsFor(OpConnectCreateConnector)); n != 1 {
 		t.Fatalf("create sent %d times, want 1", n)
@@ -168,7 +173,7 @@ func TestCutOrRedactedResultIsNotAValue(t *testing.T) {
 		res  protocol.OpResult
 		want error
 	}{
-		{"truncated", protocol.OpResult{OK: true, Data: cfg, Truncated: true}, ErrTruncated},
+		{"data truncated", protocol.OpResult{OK: true, Data: cfg, Truncated: true, DataTruncated: true}, ErrTruncated},
 		{"withheld", protocol.OpResult{OK: true, Data: json.RawMessage(`{"truncated":true,"note":"data withheld"}`), Truncated: true}, ErrTruncated},
 		{"redacted", protocol.OpResult{OK: true, Data: cfg, Redacted: true}, ErrRedacted},
 	}
@@ -185,10 +190,16 @@ func TestCutOrRedactedResultIsNotAValue(t *testing.T) {
 		})
 	}
 	// The same Data, neither cut nor redacted, is the endpoint's value: a
-	// genuine provider reference comes back as stored.
-	got, err := New(resultExecutor{res: protocol.OpResult{OK: true, Data: cfg}}, "r_setup").Connect().Config(roomCtx(t), "pg-orders-connector")
-	if err != nil || got["database.password"] != "${secret:source_password}" {
-		t.Fatalf("Config = %v, %v; want the stored reference", got, err)
+	// genuine provider reference comes back as stored. So is it when only
+	// the Summary was cut (Truncated without DataTruncated).
+	for _, res := range []protocol.OpResult{
+		{OK: true, Data: cfg},
+		{OK: true, Data: cfg, Summary: "a long summary…", Truncated: true},
+	} {
+		got, err := New(resultExecutor{res: res}, "r_setup").Connect().Config(roomCtx(t), "pg-orders-connector")
+		if err != nil || got["database.password"] != "${secret:source_password}" {
+			t.Fatalf("Config(truncated=%v) = %v, %v; want the stored reference", res.Truncated, got, err)
+		}
 	}
 }
 
@@ -199,4 +210,76 @@ func (e resultExecutor) Execute(_ context.Context, _ string, req protocol.OpRequ
 	res := e.res
 	res.ID = req.ID
 	return res, nil
+}
+
+// TestSecondWriteWhileTheFirstIsInFlight: a second write of a step whose first
+// write has not returned yet is refused with ErrStepSpent alone (there is no
+// first error to carry yet), and is never sent.
+func TestSecondWriteWhileTheFirstIsInFlight(t *testing.T) {
+	del := writeCaseFor(t, "Connect.DeleteConnector")
+	ex := &blockingExecutor{entered: make(chan struct{}), release: make(chan struct{})}
+	s := New(ex, "r_setup")
+	ctx := del.ctx(t)
+	first := make(chan error, 1)
+	go func() { first <- del.run(ctx, s) }()
+	<-ex.entered
+	err := del.run(ctx, s)
+	if !errors.Is(err, ErrStepSpent) || !errors.Is(err, clients.ErrWriteSpent) {
+		t.Fatalf("second write in flight = %v, want ErrStepSpent", err)
+	}
+	close(ex.release)
+	if err := <-first; err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if n := ex.calls.Load(); n != 1 {
+		t.Fatalf("%d requests sent, want 1", n)
+	}
+}
+
+// blockingExecutor answers OK once release is closed, and says when a call
+// has entered.
+type blockingExecutor struct {
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (e *blockingExecutor) Execute(ctx context.Context, _ string, req protocol.OpRequest) (protocol.OpResult, error) {
+	if e.calls.Add(1) == 1 {
+		close(e.entered)
+	}
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return protocol.OpResult{}, ctx.Err()
+	}
+	return protocol.OpResult{ID: req.ID, OK: true, Summary: "ok", Data: json.RawMessage(`{}`)}, nil
+}
+
+// TestSpentStepsAreBounded: the session remembers at most maxSpentSteps steps,
+// forgetting the oldest first; a remembered step is still refused.
+func TestSpentStepsAreBounded(t *testing.T) {
+	s := New(newFakeRunner(), "r_setup")
+	key := func(i int) stepKey { return stepKey{roomID: "r_setup", proposalID: "p", step: i} }
+	for i := 0; i <= maxSpentSteps; i++ {
+		if err := s.spend(key(i)); err != nil {
+			t.Fatalf("spend %d: %v", i, err)
+		}
+	}
+	if len(s.spent) != maxSpentSteps || len(s.spentOrder) != maxSpentSteps {
+		t.Fatalf("remembers %d/%d steps, want %d", len(s.spent), len(s.spentOrder), maxSpentSteps)
+	}
+	if err := s.spend(key(1)); !errors.Is(err, ErrStepSpent) {
+		t.Fatalf("a remembered step = %v, want ErrStepSpent", err)
+	}
+	if err := s.spend(key(0)); err != nil {
+		t.Fatalf("the evicted oldest step = %v, want it forgotten", err)
+	}
+	// Step 0's return evicted the then oldest, step 1; step 2 is still known.
+	if err := s.spend(key(2)); !errors.Is(err, ErrStepSpent) {
+		t.Fatalf("step 2 = %v, want ErrStepSpent", err)
+	}
+	if err := s.spend(key(1)); err != nil {
+		t.Fatalf("step 1, evicted by step 0's return = %v, want it forgotten", err)
+	}
 }

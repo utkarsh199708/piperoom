@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
@@ -451,6 +453,55 @@ func TestCreateDeleteRetryOnTimeoutAndRebalance(t *testing.T) {
 		}
 		if f.attempts != 1 {
 			t.Fatalf("attempts=%d, want 1", f.attempts)
+		}
+	})
+	// A write the setup runner already ran once (clients.ErrWriteSpent) is
+	// never tried again: the loop stops on the first error, with no sleep.
+	spent := func(err error) error { return fmt.Errorf("%w (%w)", err, clients.ErrWriteSpent) }
+	t.Run("create rebalance of a spent write stops at once", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(connect.ErrRebalancing), nil}}
+		f.names = nil
+		f.allowWrites = true
+		start := time.Now()
+		_, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn))
+		if !errors.Is(err, clients.ErrWriteSpent) || !errors.Is(err, connect.ErrRebalancing) {
+			t.Fatalf("Execute: %v, want the spent rebalance", err)
+		}
+		if f.attempts != 1 || time.Since(start) > 400*time.Millisecond {
+			t.Fatalf("attempts=%d after %s, want 1 and no retry wait", f.attempts, time.Since(start))
+		}
+	})
+	t.Run("create timeout of a spent write still checks it landed", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(timeout)}, landed: true}
+		f.names = nil
+		f.allowWrites = true
+		if _, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn)); err != nil {
+			t.Fatalf("Execute: %v, want the landed create", err)
+		}
+		if f.attempts != 1 {
+			t.Fatalf("attempts=%d, want 1", f.attempts)
+		}
+	})
+	t.Run("create timeout of a spent write that did not land stops", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(timeout), nil}}
+		f.names = nil
+		f.allowWrites = true
+		if _, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn)); !errors.Is(err, clients.ErrWriteSpent) {
+			t.Fatalf("Execute: %v, want the spent timeout", err)
+		}
+		if f.attempts != 1 {
+			t.Fatalf("attempts=%d, want 1", f.attempts)
+		}
+	})
+	t.Run("delete rebalance of a spent write stops at once", func(t *testing.T) {
+		f := &retryDeleteFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(connect.ErrRebalancing), nil}}
+		f.allowWrites = true
+		start := time.Now()
+		if _, err := deleteAction(t, f).Execute(scoped(), json.RawMessage(deleteIn)); !errors.Is(err, clients.ErrWriteSpent) {
+			t.Fatalf("Execute: %v, want the spent rebalance", err)
+		}
+		if f.attempts != 1 || time.Since(start) > 400*time.Millisecond {
+			t.Fatalf("attempts=%d after %s, want 1 and no retry wait", f.attempts, time.Since(start))
 		}
 	})
 	t.Run("delete rebalance then succeeds", func(t *testing.T) {

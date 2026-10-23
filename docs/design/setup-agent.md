@@ -122,6 +122,7 @@ type OpResult struct {
 	Data      json.RawMessage `json:"data,omitempty"` // redacted, ≤ 64 KiB
 	Receipt   events.SetupReceipt `json:"receipt"`
 	Truncated bool            `json:"truncated,omitempty"`
+	DataTruncated bool        `json:"data_truncated,omitempty"` // Data itself was cut or withheld (Truncated alone: only Summary was)
 	Redacted  bool            `json:"redacted,omitempty"` // a stored secret value in Data was replaced by ${secret:NAME}: Data is not the endpoint's value
 }
 

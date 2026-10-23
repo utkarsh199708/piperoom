@@ -431,7 +431,10 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 // (http_get, file_read) redact it at the source too; the pass here is the
 // backstop that makes protocol.go's "Data after redaction" true for every op.
 func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
-	out := protocol.OpResult{ID: id, OK: err == nil, Receipt: res.Receipt, Truncated: res.Truncated}
+	// An op's own Truncated may mean Data was cut (a listing, a file body):
+	// it is reported as a Data cut, the conservative reading. Only the
+	// Summary cap below is a Summary-only cut.
+	out := protocol.OpResult{ID: id, OK: err == nil, Receipt: res.Receipt, Truncated: res.Truncated, DataTruncated: res.Truncated}
 	summary, _ := redact.Text(res.Summary)
 	summary, cut := tools.Truncate(summary)
 	out.Summary = summary
@@ -440,12 +443,14 @@ func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
 		data, st := redact.JSONStats(res.Data)
 		// A string past redact.MaxScan is masked whole, never passed through
 		// unscanned; report that as a cut.
-		out.Truncated = out.Truncated || st.ByKind[redact.KindOverflow] > 0
+		if st.ByKind[redact.KindOverflow] > 0 {
+			out.Truncated, out.DataTruncated = true, true
+		}
 		raw, merr := json.Marshal(data)
 		if merr != nil {
-			out.Truncated = true
+			out.Truncated, out.DataTruncated = true, true
 		} else if len(raw) > protocol.MaxDataBytes {
-			out.Truncated = true
+			out.Truncated, out.DataTruncated = true, true
 			out.Data = json.RawMessage(`{"truncated":true,"note":"data exceeds the protocol cap"}`)
 		} else {
 			out.Data = raw
@@ -472,11 +477,16 @@ func (r *Registry) Close() error {
 	return r.env.Confine.Close()
 }
 
-// decodeParams fills dst from params, rejecting unknown fields and trailing
-// JSON. A nil params value is the empty object.
+// decodeParams fills dst from params, rejecting unknown fields, trailing JSON
+// and keys that differ only in letter case (the decoder would fold them and
+// let the last win, protocol.CheckParamKeys). A nil params value is the empty
+// object.
 func decodeParams(raw json.RawMessage, dst any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
+	}
+	if err := protocol.CheckParamKeys(raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrParams, err)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()

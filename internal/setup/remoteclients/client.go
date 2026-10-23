@@ -47,15 +47,18 @@ var ErrStepMismatch = errors.New("remoteclients: the write is not the proposal s
 // inside one step can never run: the retry is a new proposal step. The error
 // also wraps the first attempt's error when that attempt has finished.
 // Nothing is sent.
-var ErrStepSpent = errors.New("remoteclients: this proposal step's write was already sent to the runner; propose the step again to retry it")
+// It wraps clients.ErrWriteSpent, as does every error of a step write that
+// was sent, so a Q action's retry loop stops at once instead of retrying.
+var ErrStepSpent = fmt.Errorf("remoteclients: this proposal step's write was already sent to the runner; propose the step again to retry it: %w", clients.ErrWriteSpent)
 
 // ErrBadResult reports an op result this package cannot decode: Data over the
 // protocol cap, invalid JSON, or a missing field the method needs.
 var ErrBadResult = errors.New("remoteclients: unusable op result")
 
-// ErrTruncated reports a result the runner cut to fit the protocol
-// (protocol.OpResult.Truncated): a cut list or a withheld payload is not the
-// endpoint's answer, so it is never decoded as one. It matches ErrBadResult.
+// ErrTruncated reports a result whose Data the runner cut to fit the protocol
+// (protocol.OpResult.DataTruncated): a cut list or a withheld payload is not
+// the endpoint's answer, so it is never decoded as one. A result whose only
+// cut is the Summary decodes normally. It matches ErrBadResult.
 var ErrTruncated = fmt.Errorf("remoteclients: the runner cut the op result: %w", ErrBadResult)
 
 // ErrRedacted reports a result whose Data the runner's literal redaction
@@ -302,6 +305,12 @@ func (s *Session) doStep(ctx context.Context, op, tier string, args any) (protoc
 		return protocol.OpResult{}, wrapOp(op, err)
 	}
 	res, err := s.send(ctx, roomID, req)
+	if err != nil {
+		// The step is spent whatever the outcome: say so, so a caller's
+		// retry loop (a Connect rebalance, a timeout) stops here instead of
+		// sending the step again.
+		err = fmt.Errorf("%w (%w)", err, clients.ErrWriteSpent)
+	}
 	s.settle(key, err)
 	return res, err
 }
@@ -408,6 +417,11 @@ func matchStep(stepParams json.RawMessage, args any) error {
 	if len(bytes.TrimSpace(stepParams)) == 0 || !json.Valid(stepParams) {
 		return fmt.Errorf("the proposal step has no params: %w", ErrStepMismatch)
 	}
+	// Two keys the decoder folds together (name and NAME): the check below
+	// would see the last one, the room's guard and the approver another.
+	if err := protocol.CheckParamKeys(stepParams); err != nil {
+		return fmt.Errorf("the proposal step's params are ambiguous (%w): %w", err, ErrStepMismatch)
+	}
 	want, err := json.Marshal(args)
 	if err != nil {
 		return fmt.Errorf("remoteclients: encoding params: %w", err)
@@ -459,13 +473,30 @@ func decode(res protocol.OpResult, data string, dst any) error {
 	return nil
 }
 
+// dataCut reports a result whose Data the runner cut or withheld: it says so
+// with DataTruncated, or (a runner predating that flag) Data is its
+// {"truncated": true} cap note. Truncated alone means only the Summary was
+// cut, and Data is still the op's whole answer.
+func dataCut(res protocol.OpResult) bool {
+	if res.DataTruncated {
+		return true
+	}
+	if !res.Truncated || len(res.Data) == 0 {
+		return false
+	}
+	var note struct {
+		Truncated bool `json:"truncated"`
+	}
+	return json.Unmarshal(res.Data, &note) == nil && note.Truncated
+}
+
 // field returns one named raw field of a result's Data envelope.
 //
-// A result the runner cut (Truncated) or redacted (Redacted) is refused with
-// ErrTruncated or ErrRedacted before any field is read: neither is the
-// endpoint's answer, and a caller must not compare or act on it as one.
+// A result whose Data the runner cut (dataCut) or redacted (Redacted) is
+// refused with ErrTruncated or ErrRedacted before any field is read: neither
+// is the endpoint's answer, and a caller must not compare or act on it as one.
 func field(res protocol.OpResult, name string) (json.RawMessage, error) {
-	if res.Truncated {
+	if dataCut(res) {
 		return nil, ErrTruncated
 	}
 	if res.Redacted {

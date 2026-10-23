@@ -18,15 +18,12 @@ import (
 // stepTimeout bounds each action execution (rule 4).
 const stepTimeout = 30 * time.Second
 
-// setupT3StepTimeout bounds a setup step routed T3: the runner waits for a
+// setupT3StepTimeout bounds a setup step sent T3: the runner waits for a
 // person's "y" on its terminal, so the setup client gives the op a 5 minute
 // deadline (remoteclients' T3 deadline), and the step needs that plus the
-// usual margin, or stepTimeout would cut the confirmation short.
+// usual margin, or stepTimeout would cut the confirmation short. The claim of
+// such a step is kept fresh while it runs (keepClaimFresh).
 const setupT3StepTimeout = 5*time.Minute + stepTimeout
-
-// maxStepTimeout is the longest bound any one step runs under; the stale
-// claim sweep must not take over a step that is still inside it.
-const maxStepTimeout = setupT3StepTimeout
 
 // placeholderTexts are values a model or a form writes when it has nothing to
 // say. They look filled in but say nothing about the risk or the undo plan, so

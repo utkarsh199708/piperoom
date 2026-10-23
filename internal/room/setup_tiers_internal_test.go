@@ -635,7 +635,7 @@ func TestSetupT3Window(t *testing.T) {
 	ctx := context.Background()
 	roomID := r.openSetup("altsys-setup", "a", "alice", "db.prod.acme:5432", plan.ClassProduction)
 	r.plan(roomID, "db.prod.acme:5432", "source_alter_system")
-	params := `{"target":"db.prod.acme:5432","param":"wal_level"}`
+	params := `{"target":"db.prod.acme:5432","name":"wal_level"}`
 
 	// No window yet: refused at Create.
 	if _, err := r.propose(roomID, "source_alter_system", "postgres", params); err == nil ||
@@ -936,7 +936,7 @@ func TestSetupOpMismatchRefused(t *testing.T) {
 	}}}
 	_, err := resolveSetupRoute(snap, reg, []events.ProposalStep{{
 		Action: "source_alter_system", Layer: "postgres",
-		Params: json.RawMessage(`{"op":"env_detect","target":"db.prod.acme:5432","param":"wal_level"}`),
+		Params: json.RawMessage(`{"op":"env_detect","target":"db.prod.acme:5432","name":"wal_level"}`),
 	}}, false, 0, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "may only repeat the action") {
 		t.Fatalf("err = %v, want the op-mismatch refusal", err)
@@ -1220,7 +1220,7 @@ func TestSetupWindowEdges(t *testing.T) {
 	ctx := context.Background()
 	roomID := r.openSetup("altsys2-setup", "a", "alice", "db.prod.acme:5432", plan.ClassProduction)
 	r.plan(roomID, "db.prod.acme:5432", "source_alter_system", "source_alter_system", "source_alter_system")
-	params := `{"target":"db.prod.acme:5432","param":"wal_level"}`
+	params := `{"target":"db.prod.acme:5432","name":"wal_level"}`
 
 	start := r.clock.Now().Add(10 * time.Minute)
 	end := start.Add(time.Hour)
@@ -1268,5 +1268,97 @@ func TestSetupAdminGrantScopedToRoomTenant(t *testing.T) {
 	}
 	if err := r.approve(roomA, pidA, "postgres", "bob"); err != nil {
 		t.Fatalf("own tenant's admin refused: %v", err)
+	}
+}
+
+// TestAlterSystemGuardReadsWhatRuns: the ALTER SYSTEM allow-list judges the
+// name the executor decodes. Keys that fold together (the probe: name and
+// NAME) are refused at Create, and a decoy key the executor never reads
+// ("param") cannot buy the exception for a name off the list.
+func TestAlterSystemGuardReadsWhatRuns(t *testing.T) {
+	// The guard's own read, without the rig.
+	for _, raw := range []string{
+		`{"target":"db.prod.acme:5432","name":"wal_level","NAME":"archive_command","value":"x"}`,
+		`{"target":"db.prod.acme:5432","name":"wal_level","name":"archive_command","value":"x"}`,
+	} {
+		if f := setupGuardFacts(plan.OpSourceAlterSystem, json.RawMessage(raw)); f.Param != "" {
+			t.Fatalf("setupGuardFacts(%s) read %q, want nothing (the strictest facts)", raw, f.Param)
+		}
+	}
+	if f := setupGuardFacts(plan.OpSourceAlterSystem, json.RawMessage(`{"param":"wal_level","name":"archive_command"}`)); f.Param != "archive_command" {
+		t.Fatalf("decoy param: the guard read %q, want the executed name archive_command", f.Param)
+	}
+	if f := setupGuardFacts(plan.OpSourceAlterSystem, json.RawMessage(`{"NAME":"wal_level"}`)); f.Param != "wal_level" {
+		t.Fatalf("a key in another case: the guard read %q, want wal_level as the executor decodes it", f.Param)
+	}
+
+	r := newTierRig(t, tierOpts{})
+	ctx := context.Background()
+	roomID := r.openSetup("altsys3-setup", "a", "alice", "db.prod.acme:5432", plan.ClassProduction)
+	r.plan(roomID, "db.prod.acme:5432", "source_alter_system", "source_alter_system", "source_alter_system")
+	now := r.clock.Now()
+	if _, err := r.svc.RecordMaintenanceWindow(ctx, r.user("alice"), roomID, now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
+		t.Fatalf("record window: %v", err)
+	}
+	for _, params := range []string{
+		`{"target":"db.prod.acme:5432","name":"wal_level","NAME":"archive_command","value":"x"}`,
+		`{"target":"db.prod.acme:5432","name":"wal_level","name":"archive_command","value":"x"}`,
+		`{"target":"db.prod.acme:5432","param":"wal_level","name":"archive_command","value":"x"}`,
+	} {
+		if _, err := r.propose(roomID, "source_alter_system", "postgres", params); err == nil {
+			t.Fatalf("propose(%s) was accepted", params)
+		}
+	}
+	if got := r.acts["source_alter_system"].count(); got != 0 {
+		t.Fatalf("source_alter_system ran %d times", got)
+	}
+	// The allowed name alone is still accepted.
+	r.proposeOK(roomID, "source_alter_system", "postgres", `{"target":"db.prod.acme:5432","name":"wal_level","value":"logical"}`)
+}
+
+// TestSetupStepBound: a setup step's bound follows the tier the setup client
+// sends it at (the routed tier raised to the op's client floor): T3 gets the
+// confirmation's minutes, every other step the 30 s step timeout.
+func TestSetupStepBound(t *testing.T) {
+	cases := []struct {
+		op, tier string
+		want     time.Duration
+	}{
+		{"source_alter_system", plan.TierT2, setupT3StepTimeout}, // the client sends it T3
+		{"source_alter_system", plan.TierT3, setupT3StepTimeout},
+		{"source_create_publication", plan.TierT3, setupT3StepTimeout},
+		{"source_create_publication", plan.TierT2, stepTimeout},
+		{"compose_up", plan.TierT1, stepTimeout},
+	}
+	for _, c := range cases {
+		if got := setupStepBound(c.op, c.tier); got != c.want {
+			t.Fatalf("setupStepBound(%s, %s) = %s, want %s", c.op, c.tier, got, c.want)
+		}
+	}
+	if stepTimeout != 30*time.Second || setupT3StepTimeout < 5*time.Minute {
+		t.Fatalf("bounds %s / %s, want 30s and at least the 5 minute T3 deadline", stepTimeout, setupT3StepTimeout)
+	}
+}
+
+// TestSetupT2StepKeepsTheStepTimeout: a setup step that is not sent T3 runs
+// under the 30 s step timeout, not the T3 bound.
+func TestSetupT2StepKeepsTheStepTimeout(t *testing.T) {
+	r := newTierRig(t, tierOpts{})
+	roomID := r.openSetup("shipments-t2", "a", "alice", "db.acme:5432", plan.ClassShared)
+	r.plan(roomID, "db.acme:5432", "source_create_publication")
+	pid := r.proposeOK(roomID, "source_create_publication", "postgres", `{"target":"db.acme:5432"}`)
+	r.settle(roomID, pid)
+	if err := r.approve(roomID, pid, "postgres", "bob"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	a := r.acts["source_create_publication"]
+	waitForCond(t, 5*time.Second, func() bool { return a.count() == 1 }, "the step never ran")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lastReq == nil || a.lastReq.Tier == plan.TierT3 {
+		t.Fatalf("the step routed %+v, want below T3", a.lastReq)
+	}
+	if a.lastLeft > stepTimeout || a.lastLeft < stepTimeout-10*time.Second {
+		t.Fatalf("a %s setup step ran with %s left, want the %s step timeout", a.lastReq.Tier, a.lastLeft, stepTimeout)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
@@ -163,6 +164,9 @@ func startRunner(t *testing.T, cat runner.Catalogue) *wsExecutor {
 		conns <- conn
 		<-finish
 	}))
+	// Every exit below, a FailNow included, stops the server; the runner's
+	// stop is registered as soon as it runs.
+	t.Cleanup(srv.Close)
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(),
 		// Every T3 op asks on the terminal; the person says yes.
@@ -174,10 +178,6 @@ func startRunner(t *testing.T, cat runner.Catalogue) *wsExecutor {
 	}
 	ran := make(chan error, 1)
 	go func() { ran <- r.Run(context.Background()) }()
-	conn, ok := <-conns
-	if !ok {
-		t.FailNow()
-	}
 	t.Cleanup(func() {
 		close(finish)
 		select {
@@ -185,8 +185,11 @@ func startRunner(t *testing.T, cat runner.Catalogue) *wsExecutor {
 		case <-time.After(10 * time.Second):
 			t.Error("the runner did not stop")
 		}
-		srv.Close()
 	})
+	conn, ok := <-conns
+	if !ok {
+		t.FailNow()
+	}
 	return &wsExecutor{conn: conn}
 }
 
@@ -342,8 +345,10 @@ func TestCreateRetryOverTheRealRunner(t *testing.T) {
 		`"database.hostname":"postgres","database.password":"${secret:source_password}","topic.prefix":"pg"}}`
 	ctx := frozenStepCtx(t, "p_create", protocol.TierT2, actions.CreateConnectorName, input)
 	_, err := act.Execute(ctx, json.RawMessage(input))
-	if !errors.Is(err, ErrStepSpent) || !errors.Is(err, connect.ErrRebalancing) {
-		t.Fatalf("Execute = %v, want ErrStepSpent wrapping the rebalance", err)
+	// The first attempt's error says the step is spent, so the action's
+	// retry loop stops there: it never even asks for a second send.
+	if !errors.Is(err, clients.ErrWriteSpent) || !errors.Is(err, connect.ErrRebalancing) || errors.Is(err, ErrStepSpent) {
+		t.Fatalf("Execute = %v, want the rebalance marked spent, and no second attempt", err)
 	}
 	if errors.Is(err, protocol.ErrDuplicateStep) || errors.Is(err, protocol.ErrParamsHash) {
 		t.Fatalf("Execute = %v: a retry reached the runner", err)
