@@ -216,13 +216,13 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 		d.resolve = filepath.EvalSymlinks
 	}
 	for _, op := range []ops.Op{
-		serverPropertiesWriteOp{d: d},
+		serverPropertiesWriteOp{d: d}, serverComposeWriteOp{d: d}, serverUnitWriteOp{d: d},
 	} {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("server: registering %s: %w", op.Name(), err)
 		}
 	}
-	for _, dir := range []string{DistDir} {
+	for _, dir := range []string{DistDir, UnitDir} {
 		if err := r.RegisterMountDir(dir); err != nil {
 			return nil, fmt.Errorf("server: registering %s as a mount directory: %w", dir, err)
 		}
