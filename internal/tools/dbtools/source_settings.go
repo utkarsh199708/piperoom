@@ -204,7 +204,7 @@ func sourceTableReplicationTool(d Deps) tools.Tool {
 			fmt.Fprintf(&sb, "tables=%d without_primary_key=%d replica_identity_nothing=%d\n", len(repl), noPK, nothing)
 			shown := min(len(repl), maxReplicationLines)
 			for _, t := range repl[:shown] {
-				fmt.Fprintf(&sb, "%s: primary_key=%s replica_identity=%s\n", t.Table, yesNo(t.HasPrimaryKey), orDash(t.ReplicaIdentity))
+				fmt.Fprintf(&sb, "%s: has_primary_key=%s replica_identity=%s\n", t.Table, yesNo(t.HasPrimaryKey), orDash(t.ReplicaIdentity))
 			}
 			more := len(repl) - shown
 			if more > 0 {
