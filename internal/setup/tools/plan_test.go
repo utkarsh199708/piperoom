@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
@@ -57,7 +56,6 @@ func roomDeps(t *testing.T, cat plan.Catalogue, sink Emitter, class string) Room
 		Catalogue: cat,
 		Sink:      sink,
 		ClassOf:   FixedClass(class),
-		Now:       func() time.Time { return time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC) },
 	}
 }
 

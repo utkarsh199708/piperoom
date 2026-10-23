@@ -48,12 +48,8 @@ func TestRequestVerificationEmitsOnlyARequest(t *testing.T) {
 	if recorded[0].typ != TypeVerificationRequested {
 		t.Fatalf("type = %q, want %q", recorded[0].typ, TypeVerificationRequested)
 	}
-	payload, ok := recorded[0].payload.(VerificationRequest)
-	if !ok {
+	if _, ok := recorded[0].payload.(VerificationRequest); !ok {
 		t.Fatalf("payload = %T, want VerificationRequest", recorded[0].payload)
-	}
-	if payload.At.IsZero() {
-		t.Fatal("the request carries no time")
 	}
 	for _, ev := range recorded {
 		if ev.typ == events.SetupVerified {

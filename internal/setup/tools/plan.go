@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
@@ -53,8 +52,6 @@ type RoomDeps struct {
 	// parameter, whether a compose_down keeps its volumes). Nil means the
 	// strictest answer: a guarded step is refused.
 	Facts func(plan.Step) plan.StepFacts
-	// Now is the clock for tests; nil uses time.Now.
-	Now func() time.Time
 }
 
 // LayerCatalogue is the optional catalogue lookup of an op's owners layer
@@ -83,13 +80,9 @@ func RoomTools(deps RoomDeps) ([]tools.Tool, error) {
 	if deps.ClassOf == nil {
 		return nil, errors.New("setuptools: setup_plan needs the class of each step's endpoint")
 	}
-	now := deps.Now
-	if now == nil {
-		now = time.Now
-	}
 	return []tools.Tool{
-		&setupPlanTool{cat: deps.Catalogue, sink: deps.Sink, classOf: deps.ClassOf, facts: deps.Facts, now: now},
-		&requestVerificationTool{sink: deps.Sink, now: now},
+		&setupPlanTool{cat: deps.Catalogue, sink: deps.Sink, classOf: deps.ClassOf, facts: deps.Facts},
+		&requestVerificationTool{sink: deps.Sink},
 	}, nil
 }
 
@@ -108,7 +101,6 @@ type setupPlanTool struct {
 	sink    Emitter
 	classOf func(plan.Step) (string, error)
 	facts   func(plan.Step) plan.StepFacts
-	now     func() time.Time
 }
 
 // Name is the tool name the model calls.
