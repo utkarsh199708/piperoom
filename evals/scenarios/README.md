@@ -491,6 +491,36 @@ then copy the exported `recordings` and `alert.pipeline_map` over the generated 
 and `expect`, change `RECORDED: NO` to the date, commit and stack, and run `go run ./evals/cmd/evalrun -validate`.
 The Q3f files need a `devctl break` each first (A1 follow-up).
 
+### Network-probe scenarios (Q6c)
+
+Two files about a network path that works from Piperoom's position and not from a component's
+(tasks/Q-board.md, step 6, Jira KAN-250). Each label (the header, the description and this table) names the
+**failing step** of `net_probe` (Q6a, `internal/tools/nettools`), which is the row's done-when. Both use `alert`
+and the baseline `dev/owners.yaml` pipeline; each header says where every component runs.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Failing `net_probe` step (label) |
+|---|---|---|---|---|
+| `advertised-listener-wrong` | pg-orders-connector task 0 FAILED, analytics.orders stale 22m | after a 09:14 roll, broker 2 advertises its Kubernetes-internal name `kafka-2.kafka-headless.kafka.svc.cluster.local:9094`, which the Connect workers outside Kubernetes cannot resolve; the producer's batches for partition 1 expire | kafka-connect / kafka | target `kafka`: `listeners` (node 2 advertises an address that is not a configured broker and is not reachable from here), with that address's `dns` step failing |
+| `db-unreachable-from-connect` | pg-orders-connector task 0 FAILED, slot inactive 33m | a 09:05 segmentation policy on the database subnet rejects the Connect workers' subnet: `Connection to orders-db.internal:5432 refused`, while Postgres is up and Piperoom reaches it | kafka-connect / postgres (alt kafka-connect) | target `source`: `connect_view` (Connect's validation of the running config reports the refusal on `database.hostname`; Piperoom's `dns` and `tcp` pass) |
+
+**`net_probe` is not replayable yet.** `evals.LiveTools()` does not register `nettools` (C6's Q6d adds it), and
+`-validate` refuses a recording of an unregistered tool. Each header carries the `net_probe` summary composed
+from `tool.go`, `listeners.go`, `connectview.go` and `probe.go`, and the exact recording and required fact to
+add when Q6d lands. Until then each file proves its cause from the replayed tools plus an owner's steer about
+the change that preceded it: `advertised-listener-wrong` from `connect_status` (batches for
+`pg.public.orders-1` expired), `kafka_cluster_health` (3 brokers, ISR full: no broker is down; its Data
+carries node 2's advertised host), the `no such host` error `kafka_topic_offsets` returns (Piperoom runs
+outside Kubernetes too) and order-sync's lag unknown for partition 1 only; `db-unreachable-from-connect` from
+`connect_status` (the refused connection) against the Postgres reads that succeed from Piperoom
+(`pg_replication_slots`, `pg_row`). Neither sets `expect.fix`: the fixes are a broker setting and a network
+rule, not room actions; `forbidden_actions` lists the restarts (they loop), a connector config change (no
+connector key fixes either), the slot drop and the offset reset.
+
+**Synthesised, not recorded** (`RECORDED: NO` in both headers), like Q3f: no Docker in the session and no
+`devctl break` for either incident (an A1 follow-up: a second listener on the dev broker that advertises an
+unresolvable name, and a firewall rule between the Connect and Postgres containers). Re-record them with the
+procedure of "Stale source offsets (Q5f)" above once those breaks exist.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
@@ -552,7 +582,8 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `52 scenario(s) OK` here (50 before the two Q1e
+  `go run ./evals/cmd/evalrun -validate` reports `54 scenario(s) OK` here (52 before the two Q6c
+  network-probe ones, 50 before the two Q1e
   version-knowledge ones, 46 before the four Q3f/Q5f ones, 44 before the two Q4c register-rejection
   scenarios, 40 before the four Q2g source-setting ones, 38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the
   four CH-4 ClickHouse ones), and `-set heldout` 6.
@@ -584,3 +615,5 @@ All five can be solved with today's tools, but the agent has to infer things a t
   `connect_worker_metrics`, `connect_worker_info` and `connect_source_offsets` are missing from
   `evals.LiveTools()`, and the Q5b actions from `evals.LiveActions`, so the four Q3f/Q5f files name them only in
   their labels until Q6d (C6) adds them.
+- **`net_probe` is not replayable yet** (Q6c): `evals.LiveTools()` does not register `nettools`, so the two
+  network-probe files name its failing step only in their labels until Q6d (C6) adds it.

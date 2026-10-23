@@ -367,6 +367,9 @@ var syntheticLabels = map[string]Label{
 	"internal-topic-not-compacted": {"kafka-connect", []string{"compact*", "cleanup.policy", "offsets topic"}},
 	"rebalance-loop":               {"kafka-connect", []string{"rebalance loop", "group.id", "staging"}},
 	"stale-source-offsets":         {"kafka-connect", []string{"source offsets", "old orders database", "repointed"}},
+	// The Q6c network-probe scenarios (KAN-250).
+	"advertised-listener-wrong":   {"kafka-connect", []string{"advertis*", "cluster.local", "headless"}},
+	"db-unreachable-from-connect": {"kafka-connect", []string{"segmentation", "network policy", "firewall*"}},
 	// The X2e recovery scenarios (KAN-427).
 	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
 	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
@@ -464,6 +467,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// Q6c: the lazy texts are the alert titles, which name the failed task
+	// (kafka-connect) and no cause. The wrong texts blame a down broker
+	// (kafka) and a down database (postgres).
+	"advertised-listener-wrong":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// X2e: the lazy texts are the reconciliation titles, which name the
 	// source and the warehouse and no cause. The wrong texts blame the
 	// connector (kafka-connect, not kafka) and a consumer filter (the right
