@@ -175,6 +175,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		// Q4b: registered because the fake Connect client validates configs.
 		"connect_validate_config",
 		"debezium_metrics", "debezium_snapshot_progress",
+		// Q3e: the Connect worker tools, registered whatever is configured.
+		"connect_worker_metrics", "connect_worker_logs",
 		"runbook_lookup",
 		"what_changed",
 	}

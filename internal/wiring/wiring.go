@@ -25,6 +25,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/logtools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
@@ -69,6 +70,24 @@ type Wired struct {
 	Builder topology.Builder
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
+	// WorkerLogs reads the Connect workers' logs for connect_worker_logs
+	// (Q3c). Nil leaves the tool registered and answering "not configured".
+	// Like Rooms, the caller sets it after Open, before RegisterTools: the
+	// Loki settings (WORKER_LOGS_LOKI_URL, _SELECTOR, _TOKEN, _USER, _ORG_ID)
+	// are not in internal/config yet (Q3e contract change request), so
+	// nothing in production sets it today.
+	WorkerLogs logtools.Reader
+	// ConnectMetricsPrefix is the metric name prefix of connect_worker_metrics
+	// (CONNECT_METRICS_PREFIX, Q3b); "" is
+	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller, as
+	// WorkerLogs, until internal/config has it.
+	ConnectMetricsPrefix string
+	// ConnectInternalTopics is CONNECT_INTERNAL_TOPICS (Q3a): the Connect
+	// cluster's config, offset and status topics, comma separated, in that
+	// order. "" lets connect_worker_info find them by name. Set by the caller,
+	// as WorkerLogs, until internal/config has it.
+	ConnectInternalTopics string
+
 	// Rooms is where similar_incidents reads past closed rooms (the room
 	// store). The caller that owns the store sets it after Open, before
 	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room

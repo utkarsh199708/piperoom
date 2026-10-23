@@ -81,8 +81,10 @@ func pausedState(state string) bool {
 }
 
 // readToolContent is the text of a successful read's tool_result: the wrapped
-// summary, plus the pause rule when the read shows a paused connector and the
-// upgrade rule when a known issue affects a running version (Q1d).
+// summary, plus the pause rule when the read shows a paused connector, the
+// upgrade rule when a known issue affects a running version (Q1d) and the
+// skip rule when a connector's error handling drops records (Q3e, only when
+// the room offers the worker tools it names).
 func (r *runner) readToolContent(tool, stepID, summary string, data any) string {
 	content := r.wrapReadToolOutput(tool, stepID, summary)
 	if pausedConnector(tool, data) {
@@ -91,5 +93,19 @@ func (r *runner) readToolContent(tool, stepID, summary string, data any) string 
 	if upgradeAdvised(tool, data) {
 		content += "\n" + upgradeRuleNote
 	}
+	if skipsRecords(tool, data) && r.offers(skipRuleTools...) {
+		content += "\n" + skipRuleNote
+	}
 	return content
+}
+
+// offers reports whether the room's tool list has every named tool, so a
+// rule never tells the model to call a tool it cannot.
+func (r *runner) offers(names ...string) bool {
+	for _, n := range names {
+		if _, ok := r.toolList.byName[n]; !ok {
+			return false
+		}
+	}
+	return true
 }

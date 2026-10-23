@@ -19,6 +19,7 @@ import (
 	"piperoom/internal/tools/dbttools"
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
+	"piperoom/internal/tools/logtools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
 )
@@ -117,12 +118,29 @@ func toolPackages() []toolPackage {
 			// kafka_throughput reads the watcher's group_lag samples from the
 			// room store when it has them (X6a); without, it says so.
 			samples, _ := w.Rooms.(clients.SampleReader)
-			return kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners, Samples: samples})
+			return kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners, Samples: samples,
+				ConnectInternalTopics: kafkatools.ParseInternalTopics(w.ConnectInternalTopics)})
 		}},
 		{name: "debezium tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			// The source's row estimates give debezium_snapshot_progress its ETA (X6b).
 			rows, _ := w.Source.(debeziumtools.RowEstimator)
-			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners, Rows: rows})
+			d := debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners, Rows: rows}
+			if err := debeziumtools.Register(reg, d); err != nil {
+				return err
+			}
+			// connect_worker_metrics (Q3b) reads the same exporter endpoint;
+			// without DEBEZIUM_METRICS_URL it answers "not configured".
+			return debeziumtools.RegisterWorkerMetrics(reg, d, w.ConnectMetricsPrefix)
+		}},
+		// connect_worker_logs (Q3c) is registered whether or not a log store
+		// is set, so the tool list does not depend on setup; without one it
+		// answers "not configured". A typed nil reader counts as none.
+		{name: "worker logs", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
+			d := logtools.Deps{Owners: w.Owners, Now: w.Now}
+			if !isNilIface(w.WorkerLogs) {
+				d.Logs = w.WorkerLogs
+			}
+			return logtools.Register(reg, d)
 		}},
 		// Schedule is left nil: batchtools.Register falls back to the
 		// orchestrator's clients.DAGScheduleReader (*airflow.Client), the one
