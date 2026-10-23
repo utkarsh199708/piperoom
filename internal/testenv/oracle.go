@@ -29,13 +29,22 @@ func OracleDSNFromEnv(getenv func(string) string) string {
 	return DefaultOracleDSN
 }
 
-// oracleHost is the host:port of a go-ora URL ("" when it has none).
+// oracleDefaultPort is the listener port go-ora assumes when the URL names
+// none.
+const oracleDefaultPort = "1521"
+
+// oracleHost is the host:port of a go-ora URL, with the port defaulted to
+// 1521 as go-ora does ("" when the URL has no host).
 func oracleHost(dsn string) string {
 	u, err := url.Parse(dsn)
-	if err != nil {
+	if err != nil || u.Hostname() == "" {
 		return ""
 	}
-	return u.Host
+	port := u.Port()
+	if port == "" {
+		port = oracleDefaultPort
+	}
+	return net.JoinHostPort(u.Hostname(), port)
 }
 
 // RequireOracle returns the DSN of the `oracle` profile, or skips the test

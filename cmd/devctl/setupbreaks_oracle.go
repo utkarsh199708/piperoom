@@ -106,6 +106,11 @@ func (s *stack) oracleSQL(ctx context.Context, timeout time.Duration, body strin
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	out, code, err := s.execIn(ctx, oracleContainer, "bash", "-c", oracleSQLPlus, "_", oracleScript(body))
+	// A deadline kills docker exec, which then reads as exit -1 (or as an
+	// exec error): report the timeout, not the exit code.
+	if (err != nil || code != 0) && ctx.Err() != nil {
+		return "", fmt.Errorf("devctl: oracle: sqlplus timed out after %s: %w", timeout, ctx.Err())
+	}
 	if err != nil {
 		return "", fmt.Errorf("devctl: oracle: %w", err)
 	}

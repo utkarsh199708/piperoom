@@ -88,7 +88,9 @@ func TestIntegrationOracleSetupBreaks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			sc := setupScenarios[name]
 			if ok, detail, err := sc.verify(ctx, s); err != nil || !ok {
-				t.Skipf("the oracle profile is not in its baseline state for %s (%s, %v); run `devctl setup-fix %s`", sc.check, detail, err, name)
+				// The profile is up (RequireOracle reached it) but not healthy:
+				// a real failure, not a missing profile.
+				t.Fatalf("the oracle profile is not in its baseline state for %s (%s, %v); run `devctl setup-fix %s`", sc.check, detail, err, name)
 			}
 			if ok, detail := u9aCheck(ctx, t, dsn, sc.check); !ok {
 				t.Fatalf("U9a reads %s as failing on the healthy profile: %s", sc.check, detail)

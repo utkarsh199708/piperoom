@@ -27,6 +27,10 @@ func TestOracleHost(t *testing.T) {
 	cases := []struct{ dsn, want string }{
 		{DefaultOracleDSN, "localhost:1521"},
 		{"oracle://u:p@10.0.0.5:1522/FREE", "10.0.0.5:1522"},
+		{"oracle://u:p@db/FREEPDB1", "db:1521"},
+		{"oracle://u:p@[::1]/FREEPDB1", "[::1]:1521"},
+		{"oracle://u:p@[::1]:1522/FREEPDB1", "[::1]:1522"},
+		{"oracle:///FREEPDB1", ""},
 		{"not a url", ""},
 		{"://bad", ""},
 	}

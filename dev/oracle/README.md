@@ -27,6 +27,9 @@ state by hand, run `docker exec piperoom-dev-oracle-1 bash /opt/piperoom/oracle/
 Linux VM with the image already pulled: healthy after 31 s (23.9) and 53 s (23.26.3); the image is about 1.1 GB
 compressed to pull.
 
+**Grants are not a recommendation.** The `C##DBZUSER` grant set in `cdc-setup.sh` is the dev superset copied from the
+Debezium docs, not a least-privilege recommendation for customers.
+
 **Why 23.9 and not -slim.** The regular variant ships `DBMS_LOGMNR` and `DBMS_LOGMNR_D`; a LogMiner session as
 `C##DBZUSER` read this table's changes on both 23.9 and 23.26.3. The `-slim` variants strip more components and were
 not tried. 23.26.x calls itself "Oracle AI Database 26ai" in `V$VERSION`, and the U9a client's `Database` read

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/clients/oracle"
 )
@@ -326,6 +327,17 @@ func TestOracleSQLErrors(t *testing.T) {
 			return "", -1, errors.New("docker: executable file not found")
 		}}
 		if _, err := s.readOracleState(context.Background()); err == nil || !strings.Contains(err.Error(), "executable file not found") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("sqlplus timed out", func(t *testing.T) {
+		// A killed docker exec reports exit -1; the error must say timeout.
+		s := &stack{log: slog.New(slog.NewTextHandler(io.Discard, nil)), execInFn: func(ctx context.Context, _ string, _ ...string) (string, int, error) {
+			<-ctx.Done()
+			return "", -1, nil
+		}}
+		_, err := s.oracleSQL(context.Background(), time.Millisecond, sqlOracleState)
+		if err == nil || !strings.Contains(err.Error(), "timed out after 1ms") || !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "exit -1") {
 			t.Fatalf("err = %v", err)
 		}
 	})
