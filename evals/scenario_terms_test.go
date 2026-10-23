@@ -266,13 +266,21 @@ func w4cScenario(t *testing.T, name string) Scenario {
 
 // w4cSetupRunHypotheses are the final hypotheses of setup/db-unreachable-from-connect
 // in run 39994729845 (runs 1 to 3), copied verbatim from the transcripts. Each
-// blames "the network path" and was judged wrong; none names the Connect
-// side's name resolution.
+// blames "the network path" from the Connect container, which the fix-round
+// terms accept as the observable cause; run 2 still fails on what else it says
+// (w4cSetupRunWant).
 var w4cSetupRunHypotheses = []string{
 	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFHA172ZGCXRK7BVA9RX3, s_01M5MYFRMH72C8MPHGHVGTSB4A). Root cause: the network path from the Connect container to the Postgres host. Postgres itself is up: it answers Piperoom (s_01M5MYFM99AGT9F30Q03M411J7, s_01M5MYFYPTQ1Z3WQ8VSXKKFMC7) and no DDL changed (s_01M5MYFHA1002G3P59Q3ASYNVK). The Connect-side probes returned no data (s_01M5MYFM99KVXGK3QA6ETKAX6B, s_01M5MYFYPTMBB63Y7DYV72MMW9), so the exact network fault is unconfirmed. Separately, slot debezium_orders is missing, so changes made since the failure will not be replayed. No past room matches (s_01M5MYFRMHAT8QCYG1P9SNGWQD).",
 	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFVV91G670X3J2PAQ3PXG). Root cause: the network path from the Connect container to the Postgres host is broken, not Postgres itself. Postgres answers Piperoom (s_01M5MYG41YTNJPJT10AREVT673, s_01M5MYFY7RHTPZ60QQPED9QFXK) and has had no DDL (s_01M5MYFVV973FQSM14XN7GA62M). net_probe and Connect validation returned no data, so this cannot be confirmed from Connect's side (s_01M5MYFY7RRB6S5QYNX73VYFHG, s_01M5MYGFD0NSQ4ZZK59396FH8Y). Separately, slot debezium_orders is missing (s_01M5MYFY7RHTPZ60QQPED9QFXK), so a restart would recreate the slot and change events since the failure may be lost. No similar past room, no injection seen.",
 	"First failing component: pg-orders-connector task 0 FAILED with connect timed out to postgres:5432 (s_01M5MYG8JTQCS1Z0B1Z48BB6SD). Likely root cause: the network path from the Connect container to postgres:5432; Postgres itself answers Piperoom (s_01M5MYGBN2YSRP5Q4CDGW504N6), but Connect's view is unconfirmed because net_probe and Connect validation returned no data (s_01M5MYG8JTXG979BJ4ETJVVMHT, s_01M5MYGHJ3FKRKB2QVC91YNPBD). Also, slot debezium_orders is missing (s_01M5MYGBN2YSRP5Q4CDGW504N6), so a plain restart would leave a gap. No DDL (s_01M5MYG8JT6QKWBZQNV2GTA4V5), no past match, no injection seen.",
 }
+
+// w4cSetupRunWant is what the fix-round terms return for w4cSetupRunHypotheses:
+// runs 1 and 3 name the Connect container's network path; run 2 also tells
+// the forbidden slot story ("slot debezium_orders is missing ... may be lost").
+// The judge still grades runs 1 and 3 against the description (their slot
+// remarks and "unconfirmed").
+var w4cSetupRunWant = []bool{true, false, true}
 
 // w4cIdleRunHypotheses are the final hypotheses of idle-wal-growth in run
 // 39994729845 (runs 1 to 3), verbatim. Each passed the root-cause terms and
@@ -284,13 +292,21 @@ var w4cIdleRunHypotheses = []string{
 	"No component is broken: first symptom is slot debezium_orders on orders-db retaining WAL (s_01M5MXNESEK99E8H4XZQ0E33SA, active, reserved) because public.orders has had no writes since 09:02 (s_01M5MXNQF46DARG8XDAH66AKGE, sink matches source, lag 0 s_01M5MXNK9X1Q830ZB2AMH203E1) and the confirmed_flush_lsn sits flat (s_01M5MXN8YMAMYTVTYDWD2YHXY7); root cause is pg-orders-connector config with a filtered publication and no heartbeat (s_01M5MXNK9XXG2PYZQE8XWAQW8H), so other database WAL piles up behind the slot with max_slot_wal_keep_size=-1 (s_01M5MXNWQ0QKJ9JCBREYPWP02B); no past room matches, no injection seen.",
 }
 
+// w4cSetupLiveHypothesis is the root-cause part of live run 40034120325's
+// hypothesis (judged "wrong root cause" under the [resolv*, dns, hosts] terms),
+// as the lead quoted it in the W4c fix round; the full transcript was not
+// available to this row.
+const w4cSetupLiveHypothesis = "First to fail is pg-orders-connector task 0, which times out connecting to postgres:5432. The root cause is the network path from the Connect container (172.18.0.5) to Postgres; Piperoom reaches postgres:5432 at 172.18.0.2."
+
 // TestW4cSetupDBUnreachableTerms pins W4c's root-cause terms of
-// setup/db-unreachable-from-connect: one group of what net_probe's contrast lets
-// the agent observe (the Connect side's name resolution), no address group, no
-// symptom words, and firewall no longer a forbidden story.
+// setup/db-unreachable-from-connect after the fix round: one group of what
+// net_probe's contrast lets the agent observe (the Connect side's network path
+// or its name resolution; the real tool cannot show what the worker resolved),
+// no address group, no bare symptom words, and firewall no longer a forbidden
+// story.
 func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
-	want := [][]string{{"resolv*", "dns", "hosts"}}
+	want := [][]string{{"resolv*", "dns", "hosts", "network path", "route*"}}
 	if !reflect.DeepEqual(sc.Expect.RootCause, want) {
 		t.Fatalf("root_cause = %v, want %v", sc.Expect.RootCause, want)
 	}
@@ -312,10 +328,15 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 		{"hosts file", "The Connect container's hosts file points postgres at the wrong place.", true},
 		// The symptom every run already named: not the cause.
 		{"cannot reach", "pg-orders-connector cannot reach postgres:5432.", false},
-		{"network path", "Root cause: the network path from the Connect container to the Postgres host is broken.", false},
+		{"timed out reaching", "Task 0 of pg-orders-connector times out reaching postgres:5432 from the Connect container.", false},
 		{"address", "Connect connects to the wrong address for the database.", false},
-		{"route", "There is no route from Connect to the database.", false},
 		{"timeout", "Task 0 failed with java.net.SocketTimeoutException: connect timed out.", false},
+		// The observable cause: the Connect side's network path.
+		{"network path", "Root cause: the network path from the Connect container to the Postgres host is broken.", true},
+		{"route", "The route from the Connect container to postgres:5432 is broken.", true},
+		// "no route" is a negated clause to the matcher, so it does not count.
+		{"no route", "There is no route from the Connect container to postgres:5432.", false},
+		{"live run", w4cSetupLiveHypothesis, true},
 		// A firewall story names no resolution, so the terms fail it; it is no
 		// longer a forbidden row (from the room it reads like a black hole).
 		{"firewall", "A firewall between the Connect container and postgres drops the packets.", false},
@@ -329,17 +350,20 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 		}
 	}
 	for i, h := range w4cSetupRunHypotheses {
-		if rootCauseMatches(sc.Expect, h) {
-			t.Errorf("run %d's hypothesis (judged wrong) matches the terms: %q", i+1, h)
+		if got := rootCauseMatches(sc.Expect, h); got != w4cSetupRunWant[i] {
+			t.Errorf("run %d: matches = %v, want %v: %q", i+1, got, w4cSetupRunWant[i], h)
 		}
 	}
 	// The judge sees the same groups and the observable root cause.
 	p := judgePrompt(sc, "")
-	if !strings.Contains(p, "- resolv* | dns | hosts\n") || strings.Contains(p, "192.0.2.1 | ") {
+	if !strings.Contains(p, "- resolv* | dns | hosts | network path | route*\n") || strings.Contains(p, "192.0.2.1 | ") {
 		t.Errorf("judge prompt groups:\n%s", p)
 	}
-	if !strings.Contains(sc.Description, "the address 192.0.2.1 is not required") {
-		t.Errorf("description does not say the address is not required: %q", sc.Description)
+	desc := strings.Join(strings.Fields(sc.Description), " ")
+	for _, s := range []string{"neither the address 192.0.2.1 nor /etc/hosts is required", "network path to the database"} {
+		if !strings.Contains(desc, s) {
+			t.Errorf("description lacks %q: %q", s, desc)
+		}
 	}
 }
 
@@ -557,5 +581,78 @@ func TestW4cIdleWALGrowthActionsOnReplay(t *testing.T) {
 	// dbz_publication.
 	if err := validate("pg_add_publication_table", `{"connector":"pg-orders-connector","publication":"dbz_publication","table":"public.orders"}`); err == nil || !strings.Contains(err.Error(), "already in publication") {
 		t.Errorf("pg_add_publication_table public.orders = %v, want already published", err)
+	}
+}
+
+// w4cFact returns the scenario's expected fact id.
+func w4cFact(t *testing.T, sc Scenario, id string) Fact {
+	t.Helper()
+	for _, f := range sc.Expect.ExpectedFacts {
+		if f.ID == id {
+			return f
+		}
+	}
+	t.Fatalf("%s: no fact %s", sc.Name, id)
+	return Fact{}
+}
+
+// TestW4cSetupServerAnswersFromNetProbe pins the W4c fix round's evidence for
+// setup/db-unreachable-from-connect (W4a rule, no duplicate evidence):
+// f_server_answers comes from net_probe's tcp check, the read live run
+// 40034120325 used, and source_settings is no longer required evidence (its
+// recording stays, as an optional fact).
+func TestW4cSetupServerAnswersFromNetProbe(t *testing.T) {
+	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
+	if !reflect.DeepEqual(sc.Expect.EvidenceTools, []string{"connect_status"}) {
+		t.Errorf("evidence_tools = %v, want [connect_status]", sc.Expect.EvidenceTools)
+	}
+	f := w4cFact(t, sc, "f_server_answers")
+	if f.Tool != "net_probe" || !f.Required {
+		t.Errorf("f_server_answers = %+v, want a required net_probe fact", f)
+	}
+	rp, err := newScenarioReplayer(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, _ := rp.lookup("net_probe", json.RawMessage(`{"target":"source"}`))
+	if !factIn(f, probe.Summary) {
+		t.Errorf("the net_probe recording does not establish f_server_answers: %q", probe.Summary)
+	}
+	if !factIn(w4cFact(t, sc, "f_connect_view_times_out"), probe.Summary) {
+		t.Errorf("the net_probe recording does not establish f_connect_view_times_out")
+	}
+	// Negative: a probe whose tcp check failed does not establish it.
+	failed := strings.Replace(probe.Summary, "tcp postgres:5432 ok: TCP connected", "tcp postgres:5432 fail: TCP did not connect within the step's time", 1)
+	if factIn(f, failed) {
+		t.Errorf("a failed tcp check establishes f_server_answers")
+	}
+	settings := w4cFact(t, sc, "f_settings_logical")
+	if settings.Tool != "source_settings" || settings.Required {
+		t.Errorf("f_settings_logical = %+v, want an optional source_settings fact", settings)
+	}
+	if rec, ok := rp.lookup("source_settings", json.RawMessage(`{}`)); !ok || !factIn(settings, rec.Summary) {
+		t.Errorf("the source_settings recording is gone or no longer establishes f_settings_logical")
+	}
+}
+
+// TestW4cIdleBlockingSessionsNotRequired pins the W4c fix round for
+// idle-wal-growth (W4a rule): the story has no open transaction, so
+// source_blocking_sessions is no longer required evidence; its recording and
+// the optional f_no_blockers fact stay.
+func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
+	sc := w4cScenario(t, "idle-wal-growth")
+	if !reflect.DeepEqual(sc.Expect.EvidenceTools, []string{"pg_replication_slots", "source_settings"}) {
+		t.Errorf("evidence_tools = %v, want [pg_replication_slots source_settings]", sc.Expect.EvidenceTools)
+	}
+	f := w4cFact(t, sc, "f_no_blockers")
+	if f.Required {
+		t.Errorf("f_no_blockers is required")
+	}
+	rp, err := newScenarioReplayer(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec, ok := rp.lookup("source_blocking_sessions", json.RawMessage(`{}`)); !ok || !factIn(f, rec.Summary) {
+		t.Errorf("the source_blocking_sessions recording is gone or no longer establishes f_no_blockers")
 	}
 }

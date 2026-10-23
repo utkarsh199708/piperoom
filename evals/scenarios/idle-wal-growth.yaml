@@ -647,9 +647,11 @@ expect:
   claims:
     - about: root_cause
       facts: [f_slot_active_retaining, f_source_quiet, f_no_blockers]
-  # source_blocking_sessions stays: it is reachable on the correct path (runs 1 and 2 of
-  # 39994729845 read it in the alert turn; run 3 read pg_long_transactions instead).
-  evidence_tools: [pg_replication_slots, source_settings, source_blocking_sessions]
+  # W4c fix round (W4a rule): source_blocking_sessions leaves evidence_tools. The story has no
+  # open transaction, so the read carries nothing the required facts need (it only rules out a
+  # blocker, as pg_long_transactions does); live run 40034120325 diagnosed and fixed the
+  # scenario without it and failed on this line alone. Its recording and f_no_blockers stay.
+  evidence_tools: [pg_replication_slots, source_settings]
   fix: [[source_create_heartbeat_table]]
   fix_targets:
     # W4c: no table key. The heartbeat table's name is the agent's choice: no read shows
@@ -663,7 +665,8 @@ expect:
   # Budget (W4c). No run of 39994729845 passed (calls 12, 14, 13, all failing), so it is derived
   # from the expected standard path, not from a passing run:
   #   alert turn: 11 reads - pg_recent_ddl (rule 2), pg_replication_slots, pg_streaming_liveness
-  #     (quiet, not stalled), source_blocking_sessions (nothing holds the slot), source_settings
+  #     (quiet, not stalled), source_blocking_sessions or pg_long_transactions (nothing holds the
+  #     slot; optional evidence since the fix round), source_settings
   #     (rule 2: settings before a config change), connect_status, connect_config (the heartbeat
   #     and publication keys the fix changes), debezium_metrics (the connector's last event),
   #     kafka_consumer_lag and warehouse_freshness (the downstream symptom and its nearest
