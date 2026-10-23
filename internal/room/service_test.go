@@ -8,17 +8,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -2373,11 +2371,7 @@ func TestAgentSupervisorModelRefusalInUnknownPipelineRoom(t *testing.T) {
 		Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
 		Run: func(context.Context, agent.Alert, agent.Deps, agent.Options) error {
 			runs.Add(1)
-			return fmt.Errorf("agent: model turn: %w", &anthropic.Error{
-				StatusCode: http.StatusUnauthorized,
-				Request:    httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil),
-				Response:   &http.Response{StatusCode: http.StatusUnauthorized},
-			})
+			return fmt.Errorf("agent: model turn: %w", &llm.APIError{Provider: llm.ProviderAnthropic, Status: http.StatusUnauthorized, Kind: llm.ErrAuth})
 		},
 	})
 	t.Cleanup(svc.Close)

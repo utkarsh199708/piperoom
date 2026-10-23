@@ -520,9 +520,9 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
 	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
 	switch s.Judge {
-	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+	case "", JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto:
 	default:
-		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q (alias %q) or %q)", s.Judge, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto))
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && !contains(incidentLayers(), l) {
@@ -662,7 +662,7 @@ func (s Scenario) checkOutcome() []error {
 			errs = append(errs, fmt.Errorf("expect.%s: only graded when outcome is %s, not %s", field, OutcomeDiagnose, e.Outcome))
 		}
 	}
-	if s.Judge == JudgeClaude || s.Judge == JudgeAuto {
+	if IsLLMJudge(s.Judge) || s.Judge == JudgeAuto {
 		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", s.Judge, e.Outcome))
 	}
 	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {

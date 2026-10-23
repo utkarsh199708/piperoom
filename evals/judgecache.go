@@ -54,9 +54,10 @@ type JudgeCacheEntry struct {
 	// TruthSHA256 is judgeTruthSHA of the scenario when the verdict was
 	// recorded.
 	TruthSHA256 string `json:"truth_sha256"`
-	// Model is the judge model that gave the verdict. It is not part of the
-	// key: a verdict stays valid across models, and the report says which
-	// model's verdicts it read.
+	// Model is the judge that gave the verdict, as "provider:model"
+	// (JudgeID; an entry recorded before V9 holds the bare model). It is not
+	// part of the key: a verdict stays valid across models and providers, and
+	// the report says which judges' verdicts it read.
 	Model   string  `json:"model,omitempty"`
 	Verdict Verdict `json:"verdict"`
 }
@@ -139,7 +140,8 @@ func (c *JudgeCache) Lookup(sc Scenario, hypothesis string) (JudgeCacheEntry, bo
 	return e, true, nil
 }
 
-// Put records v, given by the judge model model ("" when unknown), for
+// Put records v, given by the judge model ("provider:model", JudgeID; "" when
+// unknown), for
 // hypothesis under sc, replacing any earlier entry. The write goes through a
 // temporary file, so a reader never sees half an entry.
 func (c *JudgeCache) Put(sc Scenario, hypothesis, model string, v Verdict) error {

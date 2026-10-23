@@ -132,12 +132,12 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	}
 	for _, m := range []string{cfg.Judge, cfg.DefaultJudge} {
 		if !validJudge(m) {
-			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q or %q)", m, JudgeTerms, JudgeClaude, JudgeAuto)
+			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q (alias %q) or %q)", m, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto)
 		}
 	}
 	for _, sc := range scenarios {
-		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeClaude && cfg.JudgeClient == nil {
-			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags claude and set ANTHROPIC_API_KEY)", sc.Name, JudgeClaude)
+		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeLLM && cfg.JudgeClient == nil {
+			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags livejudge and set the model provider's credentials)", sc.Name, JudgeLLM)
 		}
 	}
 
