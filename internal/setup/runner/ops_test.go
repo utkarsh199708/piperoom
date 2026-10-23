@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,7 +250,7 @@ func TestT3WaitsForY(t *testing.T) {
 		})
 		defer srv.Close()
 
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +273,7 @@ func TestT3WaitsForY(t *testing.T) {
 		})
 		defer srv.Close()
 
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("n\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("n\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -304,7 +305,7 @@ func TestT3WaitsForY(t *testing.T) {
 		defer srv.Close()
 
 		ctx, cancel := context.WithCancel(context.Background())
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: blockingReader{started: started}, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: blockingReader{started: started}, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -629,7 +630,7 @@ func TestConcurrentT3OnlyConfirmedRuns(t *testing.T) {
 	})
 	defer srv.Close()
 
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +700,7 @@ func TestT3ConfirmationBoundByTheOpDeadline(t *testing.T) {
 			assertRefused(t, conn, ctx, protocol.RefuseDeadline)
 		})
 		defer srv.Close()
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: blockingReader{started: make(chan struct{})}, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: blockingReader{started: make(chan struct{})}, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -729,7 +730,7 @@ func TestT3ConfirmationBoundByTheOpDeadline(t *testing.T) {
 		defer srv.Close()
 		// The person answers y, two hours later on the runner's clock.
 		stdin := &lateYes{clock: clock, after: 2 * time.Hour}
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: stdin, Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: stdin, Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -802,7 +803,7 @@ func TestStaleYesDoesNotConfirmTheNextT3(t *testing.T) {
 		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
 	})
 	defer srv.Close()
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(800 * time.Millisecond)}, Stdout: &stdout, Log: quiet(), Catalogue: cat})
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(800 * time.Millisecond)}, Stdout: &stdout, Log: quiet(), Catalogue: cat})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +853,7 @@ func TestServerCancelDropsTheT3Prompt(t *testing.T) {
 		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
 	})
 	defer srv.Close()
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(800 * time.Millisecond)}, Stdout: &stdout, Log: quiet(), Catalogue: cat})
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(800 * time.Millisecond)}, Stdout: &stdout, Log: quiet(), Catalogue: cat})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +885,7 @@ func TestPipedAnswersStillAnswerInOrder(t *testing.T) {
 		}
 	})
 	defer srv.Close()
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\ny\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\ny\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,7 +913,7 @@ func TestT3ConfirmEdges(t *testing.T) {
 			assertRefused(t, conn, ctx, want)
 		})
 		defer srv.Close()
-		r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: stdin, Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
+		r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: stdin, Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -940,3 +941,52 @@ func TestT3ConfirmEdges(t *testing.T) {
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("terminal gone") }
+
+// readSpy records whether anything read the runner's stdin.
+type readSpy struct{ reads atomic.Int32 }
+
+func (r *readSpy) Read(p []byte) (int, error) {
+	r.reads.Add(1)
+	return copy(p, "y\n"), nil
+}
+
+// TestT3OffByDefault: a runner built without AllowT3 (as cmd/setup builds it)
+// refuses every T3 op as tier_disabled before any prompt: stdin is never
+// read (a "y" waiting there changes nothing), nothing is marked started and
+// the executor is never called. The same op at T2 runs.
+func TestT3OffByDefault(t *testing.T) {
+	cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT2}}
+	var stdout syncBuffer
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		assertRefused(t, conn, ctx, "tier_disabled")
+		// The step was not burned: the same step at T2 still runs.
+		b := opReqPtr("b", "source_restart", protocol.TierT2, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: b})
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Errorf("the T2 op: got %+v, want a result", f)
+		}
+	})
+	defer srv.Close()
+	spy := &readSpy{}
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: spy, Stdout: &stdout, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := spy.reads.Load(); n != 0 {
+		t.Fatalf("stdin read %d time(s) for a disabled T3 op", n)
+	}
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("executor called %d time(s), want 1 (the T2 op only)", n)
+	}
+	if strings.Contains(stdout.String(), "confirm?") {
+		t.Fatalf("a disabled T3 op prompted: %q", stdout.String())
+	}
+}

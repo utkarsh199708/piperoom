@@ -88,6 +88,12 @@ type Options struct {
 	// "" = <project dir>/.piperoom/secrets.env. The store is opened on first
 	// use, so a runner that never runs an op creates no file.
 	SecretsFile string
+	// AllowT3 lets T3 ops reach the y/N confirmation. It is false in
+	// production (cmd/setup never sets it, and no flag or env var does):
+	// every T3 op is refused before any prompt, stdin read or start record
+	// (refuseTierDisabled) until the confirm redesign lands. Tests set it to
+	// keep the dormant confirm path exercised.
+	AllowT3 bool
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -95,6 +101,7 @@ type Runner struct {
 	serverURL  string
 	code       string
 	yes        bool
+	allowT3    bool
 	projectDir string
 	label      string
 	stdin      io.Reader
@@ -163,6 +170,7 @@ func New(o Options) (*Runner, error) {
 		serverURL:  strings.TrimSpace(o.ServerURL),
 		code:       strings.TrimSpace(o.Code),
 		yes:        o.Yes,
+		allowT3:    o.AllowT3,
 		projectDir: orDefault(o.ProjectDir, "."),
 		label:      orDefault(o.Label, defaultLabel),
 		stdin:      o.Stdin,

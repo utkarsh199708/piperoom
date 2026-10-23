@@ -781,9 +781,24 @@ meaning. Drivers (`go-mssqldb`, the MongoDB Go driver, `go-ora`) are new modules
 
 ## 9. Known gaps and follow-ups
 
+- **T3 is off on the remote runner** until the confirm redesign lands. The runner refuses every T3 op as
+  `tier_disabled` before any prompt, stdin read or start record (`runner.Options.AllowT3`, never set by
+  `cmd/setup` and not exposed as a flag or env var), and `remoteclients` refuses a T3 step write
+  (`source_alter_system`, or any write on a step routed T3) with `ErrT3Disabled` without sending it. The review of
+  #894 found these holes in the interactive confirm path:
+  - B1: a cancel landing after the `y` but before the start record is lost.
+  - B2: a second stale `y` is stamped late and accepted.
+  - B3: an answer read ahead confirms a later prompt.
+  - B4: a re-sent op id leaves the prompt alive.
+  - H1: a cancel sent while the runner is disconnected is lost.
+  - H2: the claim refresh never cancels the step on repeated refresh errors.
+
+  The redesign needs a per-op confirm code typed by the person (not `y`), an atomic confirming-to-in-flight handoff
+  that re-checks for a cancel, op-id dedupe, confirming ops reported in `Resume`, a cancel of known ops on
+  reconnect, and a fail-closed claim refresh.
 - A malicious server the person paired with can start validated containers, read non-secret project files and
   run T2 ops against the registered targets through the runner (§7); T3 ops and a lowered class are stopped by the
-  runner's own floor and terminal confirm. Signed catalogues, a server allow-list in the runner's config and a
+  runner's own floor (T3 is off for now, see above). Signed catalogues, a server allow-list in the runner's config and a
   terminal confirm for T2 on `production`-class targets are candidates for a later wave.
 - The standalone mode keeps rooms in memory; a laptop that sleeps loses the setup room. `setup-log.jsonl` and the
   op log keep the record; `--resume` is not in this wave.

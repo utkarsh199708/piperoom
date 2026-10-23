@@ -32,6 +32,12 @@ const refuseStartPersist = "start_persist"
 // is not yet one of protocol.Refuse*.
 const refuseStoreUnavailable = "store_unavailable"
 
+// refuseTierDisabled is the reason the runner refuses every T3 op unless
+// Options.AllowT3 is set: T3 over the remote runner is off until the confirm
+// redesign lands (docs/design/setup-agent.md, "T3 is off on the remote
+// runner"). Like refuseStartPersist, it is not yet one of protocol.Refuse*.
+const refuseTierDisabled = "tier_disabled"
+
 // tierRank orders tiers T0..T3; an unknown tier string ranks as T0.
 func tierRank(t string) int {
 	switch t {
@@ -223,6 +229,12 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	}
 	if tierRank(req.Tier) < tierRank(floor) {
 		r.refuse(ctx, req, protocol.RefuseTierBelowFloor)
+		return
+	}
+	// T3 ops are not enabled on the remote runner yet: refused before any
+	// prompt, stdin read or start record.
+	if tierRank(req.Tier) >= tierRank(protocol.TierT3) && !r.allowT3 {
+		r.refuse(ctx, req, refuseTierDisabled)
 		return
 	}
 

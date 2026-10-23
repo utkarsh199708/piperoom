@@ -148,7 +148,7 @@ func TestWriteNeedsProposalStep(t *testing.T) {
 		}
 		t.Run(w.method+" complete", func(t *testing.T) {
 			f := newFakeRunner()
-			if err := w.run(w.ctx(t), New(f, "r_setup")); err != nil {
+			if err := w.run(w.ctx(t), New(f, "r_setup", allowT3Steps())); err != nil {
 				t.Fatalf("a complete step was refused: %v", err)
 			}
 			if got := len(f.allCalls()); got != 1 {
@@ -177,7 +177,7 @@ func TestWriteCarriesProposalFields(t *testing.T) {
 			w := writeCaseFor(t, tc.method)
 			f := newFakeRunner()
 			ctx := writeCtx(t, tc.stepTier, protocol.ClassShared, w.action, w.params)
-			if err := w.run(ctx, New(f, "r_setup")); err != nil {
+			if err := w.run(ctx, New(f, "r_setup", allowT3Steps())); err != nil {
 				t.Fatalf("call: %v", err)
 			}
 			calls := f.callsFor(w.action)
@@ -287,9 +287,9 @@ func TestDeadlines(t *testing.T) {
 			before := time.Now()
 			var s *Session
 			if tc.opt != nil {
-				s = New(f, "r_setup", tc.opt)
+				s = New(f, "r_setup", tc.opt, allowT3Steps())
 			} else {
-				s = New(f, "r_setup")
+				s = New(f, "r_setup", allowT3Steps())
 			}
 			if err := tc.run(tc.ctx(t), s); err != nil {
 				t.Fatalf("call: %v", err)

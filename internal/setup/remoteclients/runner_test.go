@@ -146,7 +146,8 @@ func (e *wsExecutor) write(ctx context.Context, f protocol.Frame) error {
 
 // startRunner pairs a real runner with cat to a test server for room r_setup
 // and returns the executor that reaches it. The runner stops at test end.
-func startRunner(t *testing.T, cat runner.Catalogue) *wsExecutor {
+// allowT3 is the runner's AllowT3 (false is how cmd/setup builds it).
+func startRunner(t *testing.T, cat runner.Catalogue, allowT3 bool) *wsExecutor {
 	t.Helper()
 	conns := make(chan *websocket.Conn, 1)
 	finish := make(chan struct{})
@@ -168,7 +169,7 @@ func startRunner(t *testing.T, cat runner.Catalogue) *wsExecutor {
 	// stop is registered as soon as it runs.
 	t.Cleanup(srv.Close)
 	r, err := runner.New(runner.Options{
-		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(),
+		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), AllowT3: allowT3,
 		// Every T3 op asks on the terminal; the person says yes.
 		Stdin:  strings.NewReader(strings.Repeat("y\n", 8)),
 		Stdout: io.Discard, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Catalogue: cat,
@@ -266,12 +267,12 @@ func frozenStepCtx(t *testing.T, proposalID, tier, action, params string) contex
 // runner as duplicate_step.
 func TestWritesThroughTheRealRunner(t *testing.T) {
 	cat := &stepCatalogue{}
-	ex := startRunner(t, cat)
+	ex := startRunner(t, cat, true)
 	for i, w := range writeCases() {
 		t.Run(w.method, func(t *testing.T) {
 			ctx := frozenStepCtx(t, fmt.Sprintf("p_%d", i), w.tier, w.action, w.params)
 			before := len(cat.executed(w.action))
-			if err := w.run(ctx, New(ex, "r_setup")); err != nil {
+			if err := w.run(ctx, New(ex, "r_setup", allowT3Steps())); err != nil {
 				t.Fatalf("the runner did not run the step's write: %v", err)
 			}
 			got := cat.executed(w.action)
@@ -283,7 +284,7 @@ func TestWritesThroughTheRealRunner(t *testing.T) {
 			}
 			// The runner's ledger is the boundary: the same step again is
 			// refused, whatever the client remembers.
-			err := w.run(ctx, New(ex, "r_setup"))
+			err := w.run(ctx, New(ex, "r_setup", allowT3Steps()))
 			if !errors.Is(err, protocol.ErrDuplicateStep) {
 				t.Fatalf("the same step again = %v, want the runner's duplicate_step", err)
 			}
@@ -298,7 +299,7 @@ func TestWritesThroughTheRealRunner(t *testing.T) {
 // checking, these would run.
 func TestRunnerRefusesTheOldWireShapes(t *testing.T) {
 	cat := &stepCatalogue{extra: map[string]string{"connect_alter_source_offsets": protocol.TierT2}}
-	ex := startRunner(t, cat)
+	ex := startRunner(t, cat, true)
 	send := func(ctx context.Context, op, params string) error {
 		step, _ := room.SetupStepFrom(ctx)
 		idx := step.StepIndex
@@ -335,7 +336,7 @@ func TestCreateRetryOverTheRealRunner(t *testing.T) {
 		answers: map[string]json.RawMessage{OpConnectListConnectors: json.RawMessage(`{"connectors":[]}`)},
 		fail:    map[string]string{OpConnectCreateConnector: ErrorCodeRebalancing},
 	}
-	ex := startRunner(t, cat)
+	ex := startRunner(t, cat, true)
 	reg := actions.NewRegistry()
 	if err := actions.RegisterLifecycle(reg, actions.LifecycleDeps{Connect: New(ex, "r_setup").Connect()}); err != nil {
 		t.Fatal(err)

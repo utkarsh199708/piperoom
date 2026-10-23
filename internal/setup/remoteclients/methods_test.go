@@ -192,7 +192,7 @@ func TestOneOpPerMethod(t *testing.T) {
 	for _, tc := range calls {
 		t.Run(tc.method, func(t *testing.T) {
 			f := newFakeRunner()
-			if err := tc.run(tc.ctx(t), New(f, "r_setup")); err != nil {
+			if err := tc.run(tc.ctx(t), New(f, "r_setup", allowT3Steps())); err != nil {
 				t.Fatalf("%s: %v", tc.method, err)
 			}
 			got := f.allCalls()

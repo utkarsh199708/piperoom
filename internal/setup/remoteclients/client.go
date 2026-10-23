@@ -51,6 +51,14 @@ var ErrStepMismatch = errors.New("remoteclients: the write is not the proposal s
 // was sent, so a Q action's retry loop stops at once instead of retrying.
 var ErrStepSpent = fmt.Errorf("remoteclients: this proposal step's write was already sent to the runner; propose the step again to retry it: %w", clients.ErrWriteSpent)
 
+// ErrT3Disabled reports a T3 step write (source_alter_system): T3 ops are not
+// enabled on the remote runner yet, which refuses them (tier_disabled) until
+// the confirm redesign lands (docs/design/setup-agent.md, "T3 is off on the
+// remote runner"). The session refuses the write itself, so the room gets a
+// clean refusal without a round trip. Nothing is sent and the step is not
+// spent.
+var ErrT3Disabled = errors.New("remoteclients: T3 ops are not enabled on the remote runner yet")
+
 // ErrBadResult reports an op result this package cannot decode: Data over the
 // protocol cap, invalid JSON, or a missing field the method needs.
 var ErrBadResult = errors.New("remoteclients: unusable op result")
@@ -121,6 +129,10 @@ type Session struct {
 	ex      Executor
 	roomID  string
 	timeout time.Duration
+	// allowT3 lets T3 step writes through to the runner. No exported option
+	// sets it: only this package's tests do, to keep the dormant T3 path
+	// exercised (ErrT3Disabled).
+	allowT3 bool
 
 	// mu guards spent and spentOrder: the proposal steps whose write this
 	// session sent, with the outcome once it is known (ErrStepSpent).
@@ -299,6 +311,9 @@ func (s *Session) doStep(ctx context.Context, op, tier string, args any) (protoc
 	}
 	if p := ProposalFrom(ctx); len(p) > 0 {
 		req.Proposal = p
+	}
+	if req.Tier == protocol.TierT3 && !s.allowT3 {
+		return protocol.OpResult{}, wrapOp(op, ErrT3Disabled)
 	}
 
 	key := stepKey{roomID: roomID, proposalID: step.ProposalID, step: step.StepIndex}
