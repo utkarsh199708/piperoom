@@ -313,6 +313,55 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 612 records (0.7/s) over 3 partitions; median 0.2/s, max p2 0.2/s → even
+      order-sync (Stable, 1 members): lag 388214; pg.public.orders p0 33% (129512)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "15m"}
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 612 records (0.7/s) over 3 partitions; median 0.2/s, max p2 0.2/s → even
+      order-sync (Stable, 1 members): lag 388214; pg.public.orders p0 33% (129512)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 1224 records (0.7/s) over 3 partitions; median 0.2/s, max p2 0.2/s → even
+      order-sync (Stable, 1 members): lag 388214; pg.public.orders p0 33% (129512)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 414131 records (115/s) over 3 partitions; median 38/s, max p2 38/s → even
+      order-sync (Stable, 1 members): lag 388214; pg.public.orders p0 33% (129512)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: connect_source_offsets
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=264201118264, lsn_proc=264201118264, ts_usec=1792748330260000, txId=921456
+    data: {"connectors": [{"connector": "pg-orders-connector", "offsets": [{"partition": {"server": "pg"}, "offset": {"lsn": 264201118264, "lsn_proc": 264201118264, "ts_usec": 1792748330260000, "txId": 921456}}]}]}
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 412880 rows inserted since stats reset, 38214 dead tuples, last autovacuum 2026-10-23T09:21:07Z, 0 session(s) waiting on a lock
+  - tool: kafka_dup_keys
+    input: {topic: "pg.public.orders", since: "2026-10-23T09:00:00Z"}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 50 000 records
+      scanned 50 000 (capped): max_scan stopped the scan before the end of partition(s) [0 1 2]; newer records were not checked, use a later since
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
 
 inputs:
   - kind: steer
