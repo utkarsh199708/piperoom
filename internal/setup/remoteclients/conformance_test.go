@@ -22,12 +22,26 @@ import (
 
 const postgresConnectorClass = "io.debezium.connector.postgresql.PostgresConnector"
 
+// The sourceactions readers are the Q2a methods with the postgres DTOs (the
+// package aliases them), so the one Source client serves the Q2 actions and the
+// Q2 tools directly, with no adapter.
+var (
+	_ sourceactions.TableReplicationReader = (*Source)(nil)
+	_ sourceactions.RoleInfoReader         = (*Source)(nil)
+	_ sourceactions.BlockerReader          = (*Source)(nil)
+	_ sourceactions.ScopedBlockerReader    = (*Source)(nil)
+
+	// Connect implements the tool's ConfigValidator as well as the client
+	// contracts its own file asserts.
+	_ kafkatools.ConfigValidator = (*Connect)(nil)
+)
+
 // TestConnectValidateConfigTool runs connect_validate_config over the remote
 // Connect client: the plugin definitions, the pipeline connector's status and
 // config (for the host guard) and the validation itself all reach the runner.
 func TestConnectValidateConfigTool(t *testing.T) {
 	f := newFakeRunner()
-	s := New(f)
+	s := New(f, "r_setup")
 	ctx := roomCtx(t)
 
 	reg := tools.NewReadOnlyRegistry()
@@ -96,7 +110,7 @@ func TestConnectValidateConfigTool(t *testing.T) {
 func TestConnectCreateConnectorAction(t *testing.T) {
 	f := newFakeRunner()
 	f.overrides[OpConnectListConnectors] = json.RawMessage(`{"connectors":[]}`) // not registered yet
-	s := New(f)
+	s := New(f, "r_setup")
 
 	reg := actions.NewRegistry()
 	if err := actions.RegisterLifecycle(reg, actions.LifecycleDeps{Connect: s.Connect()}); err != nil {
@@ -163,11 +177,11 @@ func TestConnectCreateConnectorAction(t *testing.T) {
 // source clients (the action view for its Q2a DTOs, Source for the write).
 func TestSetReplicaIdentityAction(t *testing.T) {
 	f := newFakeRunner()
-	s := New(f)
+	s := New(f, "r_setup")
 	src := s.Source()
 
 	act := sourceactions.NewSetReplicaIdentity(sourceactions.ReplicaIdentityDeps{
-		Source: src.ActionView(),
+		Source: src,
 		Writer: src,
 	})
 	ctx := stepCtxLocal(t)
@@ -216,12 +230,12 @@ func TestSetReplicaIdentityAction(t *testing.T) {
 // connector config read, the role's privileges and the grant itself.
 func TestGrantSelectAction(t *testing.T) {
 	f := newFakeRunner()
-	s := New(f)
+	s := New(f, "r_setup")
 	src := s.Source()
 
 	act := sourceactions.NewGrantSelect(sourceactions.GrantSelectDeps{
 		Connect: s.Connect(),
-		Source:  src.ActionView(),
+		Source:  src,
 		Writer:  src,
 	})
 	ctx := stepCtxLocal(t)
@@ -270,8 +284,8 @@ func TestGrantSelectAction(t *testing.T) {
 // action's side: a setup stack built with no runner refuses before I/O.
 func TestNoRunnerThroughTheAction(t *testing.T) {
 	act := sourceactions.NewSetReplicaIdentity(sourceactions.ReplicaIdentityDeps{
-		Source: New(nil).Source().ActionView(),
-		Writer: New(nil).Source(),
+		Source: New(nil, "").Source(),
+		Writer: New(nil, "").Source(),
 	})
 	err := act.Validate(stepCtxLocal(t), json.RawMessage(`{"table":"public.orders","mode":"full"}`))
 	if !errors.Is(err, ErrNoRunner) {

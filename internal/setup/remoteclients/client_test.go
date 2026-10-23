@@ -85,17 +85,17 @@ func TestNoRunner(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name+" without an executor", func(t *testing.T) {
-			err := tc.run(tc.ctx(t), New(nil))
+			err := tc.run(tc.ctx(t), New(nil, ""))
 			if !errors.Is(err, ErrNoRunner) || !errors.Is(err, protocol.ErrNoRunner) {
 				t.Fatalf("err = %v, want ErrNoRunner (and protocol.ErrNoRunner)", err)
 			}
 		})
 		t.Run(tc.name+" without a room id", func(t *testing.T) {
 			f := newFakeRunner()
-			// The executor is keyed by room; a context with no room id has no
-			// runner this call could reach.
+			// The executor is keyed by room; a session bound to no room and a
+			// context with no room id has no runner this call could reach.
 			ctx := tools.WithPipeline(context.Background(), testPipeline(t))
-			if err := tc.run(ctx, New(f)); !errors.Is(err, ErrNoRunner) {
+			if err := tc.run(ctx, New(f, "")); !errors.Is(err, ErrNoRunner) {
 				t.Fatalf("err = %v, want ErrNoRunner", err)
 			}
 			if got := len(f.allCalls()); got != 0 {
@@ -105,7 +105,7 @@ func TestNoRunner(t *testing.T) {
 		t.Run(tc.name+" with a lost runner", func(t *testing.T) {
 			f := newFakeRunner()
 			f.noRunner = true
-			if err := tc.run(tc.ctx(t), New(f)); !errors.Is(err, ErrNoRunner) {
+			if err := tc.run(tc.ctx(t), New(f, "r_setup")); !errors.Is(err, ErrNoRunner) {
 				t.Fatalf("err = %v, want ErrNoRunner from the executor", err)
 			}
 		})
@@ -138,7 +138,7 @@ func TestWriteNeedsProposalStep(t *testing.T) {
 	for name, run := range writes {
 		for why, ctx := range cases {
 			f := newFakeRunner()
-			if err := run(ctx, New(f)); !errors.Is(err, ErrNoProposal) {
+			if err := run(ctx, New(f, "r_setup")); !errors.Is(err, ErrNoProposal) {
 				t.Fatalf("%s %s: err = %v, want ErrNoProposal", name, why, err)
 			}
 			if got := len(f.allCalls()); got != 0 {
@@ -147,7 +147,7 @@ func TestWriteNeedsProposalStep(t *testing.T) {
 		}
 		t.Run(name+" complete", func(t *testing.T) {
 			f := newFakeRunner()
-			if err := run(complete, New(f)); err != nil {
+			if err := run(complete, New(f, "r_setup")); err != nil {
 				t.Fatalf("a complete step was refused: %v", err)
 			}
 			if got := len(f.allCalls()); got != 1 {
@@ -206,7 +206,7 @@ func TestWriteCarriesProposalFields(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRunner()
 			ctx := stepCtx(t, tc.stepTier, protocol.ClassShared)
-			if err := tc.run(ctx, New(f)); err != nil {
+			if err := tc.run(ctx, New(f, "r_setup")); err != nil {
 				t.Fatalf("call: %v", err)
 			}
 			calls := f.callsFor(tc.wantOp)
@@ -248,7 +248,7 @@ func TestWriteCarriesProposalFields(t *testing.T) {
 func TestReadCarriesNoProposalFields(t *testing.T) {
 	f := newFakeRunner()
 	ctx := stepCtx(t, protocol.TierT2, protocol.ClassProduction)
-	if _, err := New(f).Connect().Status(ctx, "pg-orders-connector"); err != nil {
+	if _, err := New(f, "r_setup").Connect().Status(ctx, "pg-orders-connector"); err != nil {
 		t.Fatalf("status: %v", err)
 	}
 	req := f.callsFor(OpConnectStatus)[0].req
@@ -278,7 +278,7 @@ func TestReadClass(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeRunner()
-			if _, err := New(f).Kafka().Topics(tc.ctx); err != nil {
+			if _, err := New(f, "r_setup").Kafka().Topics(tc.ctx); err != nil {
 				t.Fatalf("topics: %v", err)
 			}
 			if got := f.callsFor(OpKafkaTopics)[0].req.Class; got != tc.want {
@@ -309,6 +309,9 @@ func TestDeadlines(t *testing.T) {
 	}{
 		{"read", nil, roomCtx, read, readTimeout, 2 * time.Second},
 		{"T2 write", nil, stepCtxLocal, write, t2Timeout, 2 * time.Second},
+		{"T2 write raised to T3", nil, func(t *testing.T) context.Context {
+			return stepCtx(t, protocol.TierT3, protocol.ClassLocal)
+		}, write, t3Timeout, 5 * time.Second},
 		{"T3 write", nil, stepCtxLocal, alter, t3Timeout, 5 * time.Second},
 		{"override", WithTimeout(2 * time.Second), roomCtx, read, 2 * time.Second, time.Second},
 	}
@@ -318,9 +321,9 @@ func TestDeadlines(t *testing.T) {
 			before := time.Now()
 			var s *Session
 			if tc.opt != nil {
-				s = New(f, tc.opt)
+				s = New(f, "r_setup", tc.opt)
 			} else {
-				s = New(f)
+				s = New(f, "r_setup")
 			}
 			if err := tc.run(tc.ctx(t), s); err != nil {
 				t.Fatalf("call: %v", err)
@@ -357,7 +360,7 @@ func TestErrorSentinels(t *testing.T) {
 		t.Run(tc.code, func(t *testing.T) {
 			f := newFakeRunner()
 			f.failures[OpConnectDeleteConnector] = fakeFailure{summary: "the runner refused: " + tc.code, code: tc.code}
-			err := New(f).Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
+			err := New(f, "r_setup").Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -369,7 +372,7 @@ func TestErrorSentinels(t *testing.T) {
 	t.Run("no code", func(t *testing.T) {
 		f := newFakeRunner()
 		f.failures[OpConnectDeleteConnector] = fakeFailure{summary: "connect says no"}
-		err := New(f).Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
+		err := New(f, "r_setup").Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
 		if err == nil || !strings.Contains(err.Error(), "connect says no") {
 			t.Fatalf("err = %v, want the summary", err)
 		}
@@ -386,7 +389,7 @@ func TestErrorSentinels(t *testing.T) {
 func TestLongSummaryIsClipped(t *testing.T) {
 	f := newFakeRunner()
 	f.failures[OpKafkaTopics] = fakeFailure{summary: strings.Repeat("A", 4000)}
-	if _, err := New(f).Kafka().Topics(roomCtx(t)); err == nil {
+	if _, err := New(f, "r_setup").Kafka().Topics(roomCtx(t)); err == nil {
 		t.Fatal("a failed op returned no error")
 	} else {
 		if got := len(err.Error()); got > maxErrorText+100 {
@@ -402,7 +405,7 @@ func TestLongSummaryIsClipped(t *testing.T) {
 func TestDataCap(t *testing.T) {
 	f := newFakeRunner()
 	f.overrides[OpConnectListConnectors] = json.RawMessage(`{"connectors":["` + strings.Repeat("a", protocol.MaxDataBytes) + `"]}`)
-	if _, err := New(f).Connect().ListConnectors(roomCtx(t)); !errors.Is(err, ErrBadResult) {
+	if _, err := New(f, "r_setup").Connect().ListConnectors(roomCtx(t)); !errors.Is(err, ErrBadResult) {
 		t.Fatalf("err = %v, want ErrBadResult", err)
 	}
 }
@@ -412,8 +415,33 @@ func TestDataCap(t *testing.T) {
 func TestMissingResultField(t *testing.T) {
 	f := newFakeRunner()
 	f.overrides[OpConnectStatus] = json.RawMessage(`{"something_else":{}}`)
-	if _, err := New(f).Connect().Status(roomCtx(t), "pg-orders-connector"); !errors.Is(err, ErrBadResult) {
+	if _, err := New(f, "r_setup").Connect().Status(roomCtx(t), "pg-orders-connector"); !errors.Is(err, ErrBadResult) {
 		t.Fatalf("err = %v, want ErrBadResult", err)
+	}
+}
+
+// TestBadResultJSON: a result whose Data is not a JSON object is ErrBadResult,
+// never a zero value.
+func TestBadResultJSON(t *testing.T) {
+	f := newFakeRunner()
+	f.overrides[OpKafkaTopics] = json.RawMessage(`{"topics":`)
+	if _, err := New(f, "r_setup").Kafka().Topics(roomCtx(t)); !errors.Is(err, ErrBadResult) {
+		t.Fatalf("err = %v, want ErrBadResult", err)
+	}
+}
+
+// TestExecutorErrorIsWrapped: a runner that fails (a dropped socket, a
+// cancelled op) surfaces the executor's error, wrapped with the op name and
+// still matchable with errors.Is.
+func TestExecutorErrorIsWrapped(t *testing.T) {
+	f := newFakeRunner()
+	f.err = errors.New("runner socket closed")
+	_, err := New(f, "r_setup").Kafka().Topics(roomCtx(t))
+	if !errors.Is(err, f.err) {
+		t.Fatalf("err = %v, want the executor's error", err)
+	}
+	if !strings.Contains(err.Error(), OpKafkaTopics) {
+		t.Fatalf("err %q does not name the op", err)
 	}
 }
 
@@ -421,7 +449,7 @@ func TestMissingResultField(t *testing.T) {
 // before any op.
 func TestBadArgs(t *testing.T) {
 	f := newFakeRunner()
-	s := New(f)
+	s := New(f, "r_setup")
 	ctx := stepCtxLocal(t)
 	read := roomCtx(t)
 	tests := map[string]error{
@@ -449,7 +477,7 @@ func TestBadArgs(t *testing.T) {
 func TestUniqueOpIDs(t *testing.T) {
 	f := newFakeRunner()
 	ctx := roomCtx(t)
-	s := New(f)
+	s := New(f, "r_setup")
 	for i := 0; i < 3; i++ {
 		if _, err := s.Kafka().Topics(ctx); err != nil {
 			t.Fatalf("topics: %v", err)

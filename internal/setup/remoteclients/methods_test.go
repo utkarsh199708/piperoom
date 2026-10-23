@@ -3,6 +3,7 @@ package remoteclients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -219,7 +220,7 @@ func TestOneOpPerMethod(t *testing.T) {
 	for _, tc := range calls {
 		t.Run(tc.method, func(t *testing.T) {
 			f := newFakeRunner()
-			if err := tc.run(tc.ctx(t), New(f)); err != nil {
+			if err := tc.run(tc.ctx(t), New(f, "r_setup")); err != nil {
 				t.Fatalf("%s: %v", tc.method, err)
 			}
 			got := f.allCalls()
@@ -248,6 +249,15 @@ func TestOneOpPerMethod(t *testing.T) {
 			}
 			if req.Class == "" {
 				t.Fatalf("%s is a write but names no class", tc.method)
+			}
+		})
+	}
+	// The same call with no runner: every method, read or write, answers
+	// ErrNoRunner before it sends anything.
+	for _, tc := range calls {
+		t.Run(tc.method+" without a runner", func(t *testing.T) {
+			if err := tc.run(tc.ctx(t), New(nil, "")); !errors.Is(err, ErrNoRunner) {
+				t.Fatalf("%s without a runner = %v, want ErrNoRunner", tc.method, err)
 			}
 		})
 	}

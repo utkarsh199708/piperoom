@@ -218,7 +218,10 @@ func (s *Session) do(ctx context.Context, op, tier string, params any) (protocol
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.timeoutFor(tier))
+	// The deadline follows the tier the request actually runs at: a T2 step
+	// routed T3 on a production target makes the runner ask for a person's
+	// "y", which a T2 deadline would cut short.
+	ctx, cancel := context.WithTimeout(ctx, s.timeoutFor(req.Tier))
 	defer cancel()
 	if dl, ok := ctx.Deadline(); ok {
 		req.Deadline = dl

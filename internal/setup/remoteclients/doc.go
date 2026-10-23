@@ -1,7 +1,7 @@
 // Package remoteclients implements the client interfaces the Q tools and Q
 // actions take (clients.ConnectClient, clients.KafkaReader,
 // clients.SchemaRegistryReader, clients.SourceDB,
-// clients.SourceSettingsReader, clients.SourceAdminWriter,
+// postgres.SourceSettingsReader, postgres.SourceAdminWriter,
 // clients.SetupSourceWriter and the optional connect readers) over the setup
 // runner's typed operation protocol (docs/design/setup-agent.md §2.2, §3.2):
 // every client method sends exactly one protocol.OpRequest to the runner paired
@@ -47,19 +47,22 @@
 //
 // # Contract gaps
 //
-//   - clients.SourceSettingsReader, clients.SourceAdminWriter and
-//     clients.SetupSourceWriter are declared in internal/clients/postgres and
-//     internal/clients/connect rather than in internal/clients/clients.go;
-//     this package implements those declarations.
-//   - package sourceactions declares its own copies of the Q2a DTOs
-//     (TableReplication, RoleInfo, DBSession) instead of aliasing the postgres
-//     types, so one Go type cannot satisfy both. Source.ActionView returns a
-//     view that returns the sourceactions types from the same ops; the PR
-//     carries a contract change request to alias them.
+//   - postgres.SourceSettingsReader, postgres.SourceAdminWriter,
+//     connect.ConnectLifecycleWriter, connect.SourceOffsetReader and
+//     kafkatools.ConfigValidator are declared in those packages rather than in
+//     internal/clients/clients.go (the Q0 gap); this package implements those
+//     declarations unchanged. clients.SetupSourceWriter is in the contract.
+//     package sourceactions aliases the Q2a DTOs (TableReplication, RoleInfo,
+//     DBSession), so the one Source client serves the Q2 tools and actions
+//     directly.
 //   - a failed op result has no structured reason field. When the runner puts
 //     an error_code in the result's Data (see ErrorCode*), the matching
 //     sentinel (clients.ErrNotFound, connect.ErrConnectorExists, ...) is
 //     wrapped so the Q actions branch as they do on a real client; without one
 //     the summary is the error text. The PR asks for the code in
 //     protocol.OpResult.
+//   - the runner catalogue (internal/setup/ops) does not ship the Q op entries
+//     yet: this package sends the design's §2.5 names and params, and the ops
+//     that answer them land with the catalogue's Q work. Until then a real
+//     runner refuses each as unknown_op; the unit tests use a fake runner.
 package remoteclients

@@ -4,16 +4,15 @@ import (
 	"piperoom/internal/setup/protocol"
 )
 
-// Op names, one per client method. The names are the catalogue's
-// (internal/setup/ops) and the action names for the writes: a write op is the
-// action the room's proposal step names (plan.OpConnectDeleteConnector,
-// plan.OpSourceAlterSystem, ...), so the runner's StepAction mapping is the
-// identity and a step's op and action cannot drift apart.
-//
-// docs/design/setup-agent.md §2.5 writes the read names with a dot
-// ("connect.status"); the ops package requires snake_case names, so the dots
-// are underscores here and the spelling below is the contract this package and
-// the catalogue share.
+// Op names, one per client method, spelled as docs/design/setup-agent.md
+// §2.5 names them: a read is the client-method name with a dot in the design
+// ("connect.status") and an underscore here, because the ops package requires
+// snake_case names; a write is the action name the room's proposal step names
+// (plan.OpConnectDeleteConnector, plan.OpSourceAlterSystem, ...), so the
+// runner's StepAction mapping is the identity and a step's op and action
+// cannot drift apart. The runner-side ops that answer these names are the
+// catalogue's Q entries; this package and ops_test pin the names and the
+// params, so the two cannot drift apart silently.
 const (
 	// Kafka Connect readers (T0).
 	OpConnectListConnectors = "connect_list_connectors"
@@ -72,19 +71,19 @@ const (
 )
 
 // OpSpec describes one op this package sends: the client method, the op name,
-// the tier floor and the target kind the runner must have registered. The
-// runner catalogue and the wiring read it; ops_test.go pins every method to
-// exactly one spec.
+// the tier floor and the target kind the runner must reach. ops_test pins
+// every method to exactly one spec, and TestOpsTable pins every op to a fake
+// answer, so a method cannot grow a second op unnoticed.
 type OpSpec struct {
 	// Method is "Connect.Status", "Source.GrantSelect", ...
 	Method string
-	// Op is the catalogue name.
+	// Op is the name of the op the runner executes.
 	Op string
 	// Tier is the op's floor: protocol.TierT0 for reads, TierT2 for a Q
 	// write, TierT3 for AlterSystem.
 	Tier string
-	// Target is the SetupTarget kind the op reaches ("connect", "postgres",
-	// "kafka", "registry"), the kind the runner's class floor applies to.
+	// Target is the events.SetupTarget kind the op reaches ("connect",
+	// "postgres", "kafka", "registry").
 	Target string
 }
 
