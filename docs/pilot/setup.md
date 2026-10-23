@@ -230,6 +230,14 @@ yet carry the variables above or `PIPEROOM_WATCH_MAX_OPEN_ROOMS` / `PIPEROOM_WAT
 `environment:` block of the compose file, or under `env:` (non-secret) or `secrets` (secret) in the Helm
 values. The deploy files belong to the C1 task.
 
+**Fix pull requests (Q7; proposed, not read on this commit)**
+
+`FORGE_KIND`, `GITHUB_API_URL`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (a
+**secret file**, never an environment value) and `PIPEROOM_FIXPR_APPLY_TIMEOUT` turn on the pull-request fix through
+one GitHub App installation. They are proposed in `docs/design/fix-pr.md` §5.6 and not in `internal/config/config.go`
+yet, and `owners.yaml` does not accept `repos:` yet, so set none of them on this commit. The App, its permissions,
+the key file, the ruleset and the `repos:` block are in [fix-pr-github.md](fix-pr-github.md).
+
 **Slack, Kafka, Connect and Registry**
 
 | Variable | Meaning |

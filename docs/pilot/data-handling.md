@@ -151,6 +151,19 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   production one is a load error. The room gets `proposal.staged`: outcomes, object names and staging's own error
   text, redacted and capped (see What reaches the model, below); never a config value, schema body, staging URL or
   credential. The staging connector's config passes through the server's memory for the restore only.
+- **Fix pull requests (Q7; designed, not built on this commit; design `docs/design/fix-pr.md`, setup
+  [fix-pr-github.md](fix-pr-github.md)).** Off unless `FORGE_KIND=github` and a pipeline lists `repos:` (both
+  proposed). Then the server reads, from the repositories you list and only under their path globs, file text at a
+  commit, the base branch head, and a PR's state, checks and statuses, through one GitHub App installation, on
+  outbound HTTPS to the API host only, with tokens narrowed to one repository per call (design §4.2, §9). **File
+  text under the globs reaches the model provider and the room log**, masked of secrets (`redact.Text`), scanned
+  for instruction-like text, wrapped as untrusted, at most 400 lines per read; a file above 64 KiB is refused
+  (design §9.1). After an approval, **the PR title, body and diff leave Piperoom for the repository**, where everyone
+  with read access to it sees them: title and body are model text the approvers saw in full, plus a footer naming
+  the room, the proposal and the approvers' names (design §6.5). Added lines, title and body holding a secret are
+  refused; links only to the forge host and `PIPEROOM_PUBLIC_URL`, no images or HTML, `@` mentions neutralised;
+  a public repository is refused unless `public_ok: true` (design §6.2 rules 6 and 7, §14 D3). `pr_status` returns
+  no PR body, comment or review text (design §9.1).
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go`;
   `internal/slackbridge/bridge.go`). It posts into one thread per room in one channel
@@ -419,6 +432,9 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   (X4) receives the pages its team gets; give it the same care.
 - When the status-page poller is wired (section 1: not yet), set a `vendor_status_url` (X4) only to a status feed
   host your egress policy allows.
+- When the pull-request fix is built (section 1: not yet), list in `repos:` only repositories whose files under
+  the globs may go to the model provider, keep the globs to the files a fix should change, and keep `public_ok`
+  off ([fix-pr-github.md](fix-pr-github.md)).
 - Pin or unset `ANTHROPIC_BASE_URL`; unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` on the host
   (section 1).
 - Keep the HTTP port on loopback or behind your VPN ([setup.md](setup.md#network-exposure)).
@@ -432,6 +448,7 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
 
 - [ ] Is it allowed to send the fields in sections 1 and 2 (keys, statement text, error traces, proposal params, hypotheses, action output, the hand-off digest) to the model provider (Anthropic, Bedrock or Vertex)?
 - [ ] Is it allowed to post proposals, params, hypotheses, approver names and close resolutions to a Slack channel, and who is in that channel?
+- [ ] If the pull-request fix will be used: may the files under each `repos:` glob go to the model provider, and may the PR title, body and approvers' names be published in those repositories?
 - [ ] Who may view incident history, and for how long is it kept?
 - [ ] Who are the approvers per layer, and are they reachable out of hours?
 - [ ] How do we revoke Piperoom's access quickly (one place per system, and the Slack bot)?
