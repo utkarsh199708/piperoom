@@ -45,14 +45,19 @@ const setupOpSourceRestart = "source_restart"
 // setup action adapter (U1-7) reads it to fill protocol.OpRequest: ProposalID,
 // StepIndex, ParamsHash, Tier and Class are exactly the fields the runner
 // re-checks (Class against its own target floors, Tier against the op floor,
-// the params hash over the frozen proposal). Steps outside a setup room carry
-// none.
+// the params hash over the frozen proposal). Action and Params are the frozen
+// step itself, exactly as approved: the runner refuses a request whose op is
+// not the step's action or whose params are not canonically the step's
+// params, so a client sends Params unchanged rather than rebuilding them from
+// its own arguments. Steps outside a setup room carry none.
 type SetupStep struct {
 	ProposalID string
 	StepIndex  int
 	ParamsHash string
 	Tier       string
 	Class      string
+	Action     string
+	Params     json.RawMessage
 }
 
 // setupStepKey carries a SetupStep in an action call's context.

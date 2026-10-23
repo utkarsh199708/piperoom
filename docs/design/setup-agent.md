@@ -122,6 +122,7 @@ type OpResult struct {
 	Data      json.RawMessage `json:"data,omitempty"` // redacted, ≤ 64 KiB
 	Receipt   events.SetupReceipt `json:"receipt"`
 	Truncated bool            `json:"truncated,omitempty"`
+	Redacted  bool            `json:"redacted,omitempty"` // a stored secret value in Data was replaced by ${secret:NAME}: Data is not the endpoint's value
 }
 
 // Resume is the runner's first frame after a reconnect: what it was doing.

@@ -76,6 +76,8 @@ type tierAction struct {
 	lastStep SetupStep
 	hasStep  bool
 	lastReq  *protocol.OpRequest
+	// lastLeft is how long the last Execute's context had until its deadline.
+	lastLeft time.Duration
 	release  chan struct{} // when set, Execute waits for it
 	execErr  error
 	// rollback is the record this fake's Preview reports as the step's undo,
@@ -112,6 +114,9 @@ func (a *tierAction) Tier(_ json.RawMessage, class string) (string, error) {
 func (a *tierAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	a.mu.Lock()
 	a.runs++
+	if dl, ok := ctx.Deadline(); ok {
+		a.lastLeft = time.Until(dl)
+	}
 	if st, ok := SetupStepFrom(ctx); ok {
 		a.lastStep, a.hasStep = st, true
 		// What a setup action adapter (U1-7) does with the context the room
@@ -874,6 +879,16 @@ func TestSetupStepContextCarriesTheOpRequestFields(t *testing.T) {
 	}
 	if a.lastReq.Class != plan.ClassProduction || a.lastReq.Tier != plan.TierT3 {
 		t.Fatalf("OpRequest class/tier = %s/%s, want production/T3", a.lastReq.Class, a.lastReq.Tier)
+	}
+	// The frozen step travels as approved, so a client sends exactly the
+	// params the runner binds the request to.
+	if a.lastStep.Action != "source_create_publication" || string(a.lastStep.Params) != `{"target":"db.prod.acme:5432"}` {
+		t.Fatalf("SetupStep frozen step = %s %s, want the approved action and params", a.lastStep.Action, a.lastStep.Params)
+	}
+	// A T3 step waits for a person on the runner's terminal: its bound is
+	// the op's 5 minute deadline plus the margin, not the 30 s step timeout.
+	if a.lastLeft < 5*time.Minute || a.lastLeft > setupT3StepTimeout {
+		t.Fatalf("a T3 step ran with %s left, want between 5m and %s", a.lastLeft, setupT3StepTimeout)
 	}
 }
 

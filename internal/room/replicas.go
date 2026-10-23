@@ -29,8 +29,9 @@ const (
 	DefaultTakeoverScan = 10 * time.Second
 	DefaultExecSweep    = 30 * time.Second
 	// DefaultClaimStale is when an executor claim counts as dead: no refresh
-	// for one step timeout plus a margin for the result writes.
-	DefaultClaimStale = stepTimeout + 2*time.Minute
+	// for the longest step timeout (a setup T3 step, which waits for a
+	// person on the runner's terminal) plus a margin for the result writes.
+	DefaultClaimStale = maxStepTimeout + 2*time.Minute
 	// DefaultUnclaimedStale is how long a fully approved proposal may wait for
 	// an executor to claim it.
 	DefaultUnclaimedStale = 2 * time.Minute

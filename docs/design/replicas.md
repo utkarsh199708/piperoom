@@ -222,8 +222,8 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
   before a new proposal retries; the agent gets `HumanInput.OK = nil` ("unknown"), so it never claims
   the pipeline recovered or failed. The same applies when the per-step start finds the step already
   started by an earlier run. *When*: not at the next `Load` of any replica (that would hit runs that
-  are alive elsewhere) but once the claim is stale — `claimed_at` older than **step timeout (30 s) +
-  2 min** — or, for an approved proposal nobody claimed, 2 min after its last approval. Every replica
+  are alive elsewhere) but once the claim is stale — `claimed_at` older than **the longest step timeout
+  (a setup T3 step, 5 min 30 s, which waits for a person on the runner's terminal) + 2 min** — or, for an approved proposal nobody claimed, 2 min after its last approval. Every replica
   sweeps every 30 s; the interruption itself is a conditional `UPDATE … SET status = 'failed' …
   WHERE status = 'open' AND (claimed_by IS NULL OR claimed_at < $stale)`, so exactly one replica
   writes the event.
@@ -356,7 +356,7 @@ lands last, after the parallel `00010`–`00013`.
 | conditional append retries | 3, then `409 conflict` |
 | global slot error backoff | 1 s doubling to 10 s |
 | feed buffer | 64 events per room |
-| executor claim stale after | 30 s step timeout + 2 min |
+| executor claim stale after | longest step timeout (setup T3: 5 min 30 s) + 2 min |
 | unclaimed approved proposal stale after | 2 min after the last approval |
 | global slot retry | 1 s |
 

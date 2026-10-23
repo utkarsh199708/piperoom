@@ -823,40 +823,51 @@ func (s *Store) Redact(text string) string {
 
 // redactJSON walks every string (keys included) of a JSON value and redacts
 // it. Data that does not parse is withheld rather than passed through: an
-// unredactable frame must not carry a secret.
-func (s *Store) redactJSON(raw []byte) (json.RawMessage, bool) {
+// unredactable frame must not carry a secret. withheld reports the withheld
+// case; redacted reports that at least one stored value was replaced, so the
+// result can say its Data is no longer the endpoint's value
+// (protocol.OpResult.Redacted).
+func (s *Store) redactJSON(raw []byte) (data json.RawMessage, withheld, redacted bool) {
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return raw, false
+		return raw, false, false
 	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return json.RawMessage(`{"truncated":true,"note":"data withheld: it was not valid JSON and could not be redacted"}`), true
+		return json.RawMessage(`{"truncated":true,"note":"data withheld: it was not valid JSON and could not be redacted"}`), true, false
 	}
-	out, err := json.Marshal(s.redactValue(v))
+	out, err := json.Marshal(s.redactValue(v, &redacted))
 	if err != nil {
-		return json.RawMessage(`{"truncated":true,"note":"data withheld: it could not be re-encoded after redaction"}`), true
+		return json.RawMessage(`{"truncated":true,"note":"data withheld: it could not be re-encoded after redaction"}`), true, false
 	}
-	return out, false
+	return out, false, redacted
 }
 
-func (s *Store) redactValue(v any) any {
+// redactValue redacts every string of v and sets *changed when one differs.
+func (s *Store) redactValue(v any, changed *bool) any {
 	switch x := v.(type) {
 	case string:
-		return s.Redact(x)
+		r := s.Redact(x)
+		if r != x {
+			*changed = true
+		}
+		return r
 	case []any:
 		out := make([]any, len(x))
 		for i, e := range x {
-			out[i] = s.redactValue(e)
+			out[i] = s.redactValue(e, changed)
 		}
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, e := range x {
 			rk := s.Redact(k)
+			if rk != k {
+				*changed = true
+			}
 			if _, dup := out[rk]; dup {
 				continue
 			}
-			out[rk] = s.redactValue(e)
+			out[rk] = s.redactValue(e, changed)
 		}
 		return out
 	default:
@@ -874,13 +885,14 @@ func (s *Store) SanitizeResult(res protocol.OpResult) protocol.OpResult {
 	res.Truncated = res.Truncated || cut
 
 	if len(res.Data) > 0 {
-		data, withheld := s.redactJSON(res.Data)
+		data, withheld, redacted := s.redactJSON(res.Data)
 		if len(data) > protocol.MaxDataBytes {
 			data = json.RawMessage(`{"truncated":true,"note":"data exceeds the protocol cap after redaction"}`)
 			withheld = true
 		}
 		res.Data = data
 		res.Truncated = res.Truncated || withheld
+		res.Redacted = res.Redacted || redacted
 	}
 
 	if len(res.Receipt.Argv) > 0 {

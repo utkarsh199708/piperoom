@@ -429,7 +429,10 @@ type OpRequest struct {
 // ${secret:name}) and redact.Text; Summary is at most tools.MaxSummaryBytes
 // and Data at most MaxDataBytes, Truncated saying when either was cut. A
 // result never carries a secret value, a token or the raw output of an op
-// (Receipt.OutMAC stands for it).
+// (Receipt.OutMAC stands for it). Redacted says that literal redaction
+// replaced at least one stored value in Data, so a ${secret:NAME} there may
+// stand for a value the endpoint holds in plain text: a caller that compares
+// or acts on Data must not read it as the endpoint's value.
 type OpResult struct {
 	ID        string              `json:"id"`
 	OK        bool                `json:"ok"`
@@ -437,6 +440,7 @@ type OpResult struct {
 	Data      json.RawMessage     `json:"data,omitempty"`
 	Receipt   events.SetupReceipt `json:"receipt"`
 	Truncated bool                `json:"truncated,omitempty"`
+	Redacted  bool                `json:"redacted,omitempty"`
 }
 
 // Refusal says the runner did not run an OpRequest. Reason is one of the

@@ -343,6 +343,19 @@ func TestStoreSanitizeResult(t *testing.T) {
 	if got.Receipt.OutMAC != "" {
 		t.Fatalf("SanitizeResult kept a stale OutMAC")
 	}
+	if !got.Redacted {
+		t.Fatal("SanitizeResult replaced a value in Data but did not mark the result Redacted")
+	}
+	// Data with no stored value (a genuine reference included) is not marked.
+	clean := st.SanitizeResult(protocol.OpResult{OK: true, Data: json.RawMessage(`{"password":"${secret:DB_PASSWORD}"}`)})
+	if clean.Redacted {
+		t.Fatalf("SanitizeResult marked untouched Data Redacted: %s", clean.Data)
+	}
+	// A value only in Summary does not mark Data.
+	summaryOnly := st.SanitizeResult(protocol.OpResult{OK: true, Summary: "s3cret-value", Data: json.RawMessage(`{"x":1}`)})
+	if summaryOnly.Redacted {
+		t.Fatal("a Summary-only redaction marked Data Redacted")
+	}
 
 	// Data that cannot be parsed is withheld, never passed through.
 	bad := st.SanitizeResult(protocol.OpResult{Data: json.RawMessage("s3cret-value not json")})

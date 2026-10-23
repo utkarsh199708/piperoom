@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/store"
 	"piperoom/internal/tools"
 )
@@ -406,6 +407,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
 		var planIdx *int
+		bound := stepTimeout
 		if snap != nil && snap.IsSetupRoom() {
 			origin := ""
 			policyApproved := false
@@ -435,7 +437,13 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			actx = WithSetupStep(s.actionCtxFor(ctx, p.RoomID, snap, pipelineID), SetupStep{
 				ProposalID: p.ProposalID, StepIndex: i, ParamsHash: p.ParamsHash,
 				Tier: route.Steps[0].Tier, Class: route.Steps[0].Class,
+				Action: step.Action, Params: append(json.RawMessage(nil), step.Params...),
 			})
+			if route.Steps[0].Tier == plan.TierT3 {
+				// The runner waits for a person's "y": the step's bound must
+				// not cut the op's own T3 deadline short.
+				bound = setupT3StepTimeout
+			}
 		}
 		// Validate and Execute run under the room's whole pipeline: the
 		// write clients refuse a write without it (fail closed), and
@@ -453,7 +461,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		sctx, cancel := context.WithTimeout(actx, stepTimeout)
+		sctx, cancel := context.WithTimeout(actx, bound)
 		out, err := action.Execute(sctx, step.Params)
 		cancel()
 		output := out

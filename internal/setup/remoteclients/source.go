@@ -291,7 +291,7 @@ func (s *Source) SetReplicaIdentity(ctx context.Context, table, mode, index stri
 	default:
 		return fmt.Errorf("remoteclients: %s: table %s: unknown mode %q: %w", OpSourceSetReplicaIdentity, table, mode, ErrBadArgs)
 	}
-	_, err := s.s.do(ctx, OpSourceSetReplicaIdentity, protocol.TierT2,
+	_, err := s.s.doStep(ctx, OpSourceSetReplicaIdentity, protocol.TierT2,
 		replicaIdentityParams{Table: table, Mode: mode, Index: index})
 	return err
 }
@@ -304,7 +304,7 @@ func (s *Source) GrantSelect(ctx context.Context, role string, tables []string) 
 	if len(tables) == 0 {
 		return fmt.Errorf("remoteclients: %s: no tables: %w", OpSourceGrantSelect, ErrBadArgs)
 	}
-	_, err := s.s.do(ctx, OpSourceGrantSelect, protocol.TierT2, roleTablesParams{Role: role, Tables: tables})
+	_, err := s.s.doStep(ctx, OpSourceGrantSelect, protocol.TierT2, roleTablesParams{Role: role, Tables: tables})
 	return err
 }
 
@@ -314,7 +314,7 @@ func (s *Source) CreateHeartbeatTable(ctx context.Context, table string) error {
 	if err := requireArg(OpSourceCreateHeartbeatTable, "table", table); err != nil {
 		return err
 	}
-	_, err := s.s.do(ctx, OpSourceCreateHeartbeatTable, protocol.TierT2, heartbeatTableParams{Table: table})
+	_, err := s.s.doStep(ctx, OpSourceCreateHeartbeatTable, protocol.TierT2, heartbeatTableParams{Table: table})
 	return err
 }
 
@@ -328,7 +328,7 @@ func (s *Source) EndSession(ctx context.Context, pid int64, startedAt time.Time)
 	if startedAt.IsZero() {
 		return fmt.Errorf("remoteclients: %s: startedAt is the session's identity: %w", OpSourceEndSession, ErrBadArgs)
 	}
-	_, err := s.s.do(ctx, OpSourceEndSession, protocol.TierT2, endSessionParams{PID: pid, StartedAt: startedAt})
+	_, err := s.s.doStep(ctx, OpSourceEndSession, protocol.TierT2, endSessionParams{PID: pid, StartedAt: startedAt})
 	return err
 }
 
@@ -342,7 +342,7 @@ func (s *Source) CreatePublication(ctx context.Context, name string, tables []st
 	if len(tables) == 0 {
 		return fmt.Errorf("remoteclients: %s: no tables: %w", OpSourceCreatePublication, ErrBadArgs)
 	}
-	_, err := s.s.do(ctx, OpSourceCreatePublication, protocol.TierT2, publicationParams{Publication: name, Tables: tables})
+	_, err := s.s.doStep(ctx, OpSourceCreatePublication, protocol.TierT2, publicationParams{Publication: name, Tables: tables})
 	return err
 }
 
@@ -351,7 +351,7 @@ func (s *Source) CreateCanaryTable(ctx context.Context, table string) error {
 	if err := requireArg(OpSourceCreateCanaryTable, "table", table); err != nil {
 		return err
 	}
-	_, err := s.s.do(ctx, OpSourceCreateCanaryTable, protocol.TierT2, heartbeatTableParams{Table: table})
+	_, err := s.s.doStep(ctx, OpSourceCreateCanaryTable, protocol.TierT2, heartbeatTableParams{Table: table})
 	return err
 }
 
@@ -363,7 +363,7 @@ func (s *Source) InsertCanary(ctx context.Context, table, nonce string) error {
 	if err := requireArg(OpSourceInsertCanary, "nonce", nonce); err != nil {
 		return err
 	}
-	_, err := s.s.do(ctx, OpSourceInsertCanary, protocol.TierT2, canaryInsertParams{Table: table, Nonce: nonce})
+	_, err := s.s.doStep(ctx, OpSourceInsertCanary, protocol.TierT2, canaryInsertParams{Table: table, Nonce: nonce})
 	return err
 }
 
@@ -377,7 +377,7 @@ func (s *Source) CreateReadRole(ctx context.Context, role string, tables []strin
 	if len(tables) == 0 {
 		return "", fmt.Errorf("remoteclients: %s: no tables: %w", OpSourceCreateReadRole, ErrBadArgs)
 	}
-	res, err := s.s.do(ctx, OpSourceCreateReadRole, protocol.TierT2, roleTablesParams{Role: role, Tables: tables})
+	res, err := s.s.doStep(ctx, OpSourceCreateReadRole, protocol.TierT2, roleTablesParams{Role: role, Tables: tables})
 	if err != nil {
 		return "", err
 	}
@@ -399,7 +399,7 @@ func (s *Source) AlterSystem(ctx context.Context, name, value string) (bool, err
 	if err := requireArg(OpSourceAlterSystem, "setting", name); err != nil {
 		return false, err
 	}
-	res, err := s.s.do(ctx, OpSourceAlterSystem, protocol.TierT3, alterSystemParams{Name: name, Value: value})
+	res, err := s.s.doStep(ctx, OpSourceAlterSystem, protocol.TierT3, alterSystemParams{Name: name, Value: value})
 	if err != nil {
 		return false, err
 	}

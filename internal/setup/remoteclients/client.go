@@ -1,13 +1,16 @@
 package remoteclients
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,12 +31,39 @@ var ErrNoRunner = protocol.ErrNoRunner
 
 // ErrNoProposal reports a write method called without the proposal step the
 // proposal path requires (room.SetupStep in ctx, with ProposalID, StepIndex,
-// ParamsHash and a class). Nothing is sent.
+// ParamsHash, a class and the frozen step's action and params). Nothing is
+// sent.
 var ErrNoProposal = errors.New("remoteclients: a write needs the proposal step in the call's context")
+
+// ErrStepMismatch reports a write method whose op is not the frozen step's
+// action, or whose arguments are not the step's params: the runner would
+// refuse the request (checkStep), and sending another write under the step's
+// approval is exactly what it must never do. Nothing is sent.
+var ErrStepMismatch = errors.New("remoteclients: the write is not the proposal step's approved write")
+
+// ErrStepSpent reports a second write for a proposal step this session already
+// sent. The runner runs a step at most once (it records the step as started
+// before it runs it, and refuses the step again as duplicate_step), so a retry
+// inside one step can never run: the retry is a new proposal step. The error
+// also wraps the first attempt's error when that attempt has finished.
+// Nothing is sent.
+var ErrStepSpent = errors.New("remoteclients: this proposal step's write was already sent to the runner; propose the step again to retry it")
 
 // ErrBadResult reports an op result this package cannot decode: Data over the
 // protocol cap, invalid JSON, or a missing field the method needs.
 var ErrBadResult = errors.New("remoteclients: unusable op result")
+
+// ErrTruncated reports a result the runner cut to fit the protocol
+// (protocol.OpResult.Truncated): a cut list or a withheld payload is not the
+// endpoint's answer, so it is never decoded as one. It matches ErrBadResult.
+var ErrTruncated = fmt.Errorf("remoteclients: the runner cut the op result: %w", ErrBadResult)
+
+// ErrRedacted reports a result whose Data the runner's literal redaction
+// changed (protocol.OpResult.Redacted): a ${secret:NAME} there may stand for a
+// value the endpoint holds in plain text, so a caller comparing it (a config
+// read back after a create) or judging it (a plaintext-credential check) would
+// read the placeholder as the endpoint's value. It matches ErrBadResult.
+var ErrRedacted = fmt.Errorf("remoteclients: the runner redacted a stored secret value in the op result: %w", ErrBadResult)
 
 // ErrBadArgs reports a call with a missing or invalid argument (an empty
 // connector name, a negative task id, an empty offset list). Nothing is sent.
@@ -59,6 +89,12 @@ const (
 	// already caps it at tools.MaxSummaryBytes; this is the backstop that keeps
 	// a hand-made result from putting an unbounded string into a log line.
 	maxErrorText = 512
+
+	// maxSpentSteps caps the steps a session remembers as sent (ErrStepSpent).
+	// The runner's own ledger is the boundary; this one only stops an
+	// in-step retry before it reaches the wire, and the oldest entry goes
+	// first.
+	maxSpentSteps = 4096
 )
 
 // Option configures a Session; the zero value of each option is a no-op.
@@ -81,6 +117,25 @@ type Session struct {
 	ex      Executor
 	roomID  string
 	timeout time.Duration
+
+	// mu guards spent and spentOrder: the proposal steps whose write this
+	// session sent, with the outcome once it is known (ErrStepSpent).
+	mu         sync.Mutex
+	spent      map[stepKey]*spentStep
+	spentOrder []stepKey
+}
+
+// stepKey names one proposal step of one room.
+type stepKey struct {
+	roomID     string
+	proposalID string
+	step       int
+}
+
+// spentStep is a sent step write; err is its outcome once the call returned.
+type spentStep struct {
+	done bool
+	err  error
 }
 
 // New returns the remote clients of roomID over ex. A nil ex or an empty
@@ -166,16 +221,96 @@ func ProposalFrom(ctx context.Context) json.RawMessage {
 
 // ---- the one call path ----
 
-// do builds one OpRequest for op and executes it. tier is the method's floor;
-// params is a typed struct (never a map from the model) or nil for no params.
-//
-// A T0 op carries no proposal fields (protocol.OpRequest: nil on a T0
-// request). A T1+ op requires the room.SetupStep in ctx and copies its
-// proposal fields, class and (raised) tier; without one it returns
-// ErrNoProposal before anything is sent.
+// do sends one T0 read. params is a typed struct (never a map from the model)
+// or nil for no params. A read carries no proposal fields
+// (protocol.OpRequest: nil on a T0 request).
 func (s *Session) do(ctx context.Context, op, tier string, params any) (protocol.OpResult, error) {
+	roomID, err := s.route(ctx, op)
+	if err != nil {
+		return protocol.OpResult{}, err
+	}
+	if tier != protocol.TierT0 {
+		// A write goes through doStep, which binds it to the frozen step.
+		return protocol.OpResult{}, wrapOp(op, ErrNoProposal)
+	}
+	raw, err := marshalParams(params)
+	if err != nil {
+		return protocol.OpResult{}, wrapOp(op, err)
+	}
+	class := ClassFrom(ctx)
+	if step, ok := room.SetupStepFrom(ctx); ok && validClass(step.Class) {
+		class = step.Class
+	}
+	if !validClass(class) {
+		// A read on an unknown endpoint: the lowest class never lowers the
+		// runner's own floor for the target's kind.
+		class = protocol.ClassLocal
+	}
+	return s.send(ctx, roomID, protocol.OpRequest{Op: op, Params: raw, Tier: tier, Class: class})
+}
+
+// doStep sends the write of the proposal step in ctx (room.SetupStep): op at
+// floor tier, with exactly the frozen step's params. args is the method's own
+// arguments in the shape of the step's params (a struct whose fields carry the
+// step's JSON names); they must be what the step approved, or the write is
+// refused with ErrStepMismatch before anything is sent.
+//
+// The params on the wire are the frozen step's params, byte for byte, never a
+// projection built from args: the runner refuses a request whose params are
+// not canonically the step's (runner.checkStep), and a projection would drop
+// the step's other fields (a connector the step is scoped by, a replace flag,
+// a stop_first). The op is the step's action (StepAction is the identity for
+// this package's writes), so a method that serves an action under another
+// name (AlterSourceOffsets serves connect_reset_source_offsets) sends the
+// action's op.
+//
+// A step's write is sent at most once per session (ErrStepSpent): the runner
+// marks the step started before it runs it, so a second request for it could
+// only be refused as duplicate_step. A retry of a failed or timed-out step is
+// a new proposal step, never a second request under the same approval.
+func (s *Session) doStep(ctx context.Context, op, tier string, args any) (protocol.OpResult, error) {
+	roomID, err := s.route(ctx, op)
+	if err != nil {
+		return protocol.OpResult{}, err
+	}
+	step, ok := room.SetupStepFrom(ctx)
+	if !ok || step.ProposalID == "" || step.ParamsHash == "" || !validClass(step.Class) || step.StepIndex < 0 {
+		return protocol.OpResult{}, wrapOp(op, ErrNoProposal)
+	}
+	if step.Action != op {
+		return protocol.OpResult{}, wrapOp(op, fmt.Errorf("the proposal step runs %q: %w", clipText(step.Action), ErrStepMismatch))
+	}
+	if err := matchStep(step.Params, args); err != nil {
+		return protocol.OpResult{}, wrapOp(op, err)
+	}
+	idx := step.StepIndex
+	req := protocol.OpRequest{
+		Op:         op,
+		Params:     append(json.RawMessage(nil), step.Params...),
+		Tier:       raiseTier(tier, step.Tier),
+		Class:      step.Class,
+		ProposalID: step.ProposalID,
+		StepIndex:  &idx,
+		ParamsHash: step.ParamsHash,
+	}
+	if p := ProposalFrom(ctx); len(p) > 0 {
+		req.Proposal = p
+	}
+
+	key := stepKey{roomID: roomID, proposalID: step.ProposalID, step: step.StepIndex}
+	if err := s.spend(key); err != nil {
+		return protocol.OpResult{}, wrapOp(op, err)
+	}
+	res, err := s.send(ctx, roomID, req)
+	s.settle(key, err)
+	return res, err
+}
+
+// route checks that the session can reach a runner for this call and returns
+// the room it reaches: the bound room, or the call's when none is bound.
+func (s *Session) route(ctx context.Context, op string) (string, error) {
 	if s == nil || s.ex == nil {
-		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
+		return "", wrapOp(op, ErrNoRunner)
 	}
 	roomID := s.roomID
 	if ctxRoom := room.RoomID(ctx); roomID == "" {
@@ -185,46 +320,23 @@ func (s *Session) do(ctx context.Context, op, tier string, params any) (protocol
 	} else if ctxRoom != "" && ctxRoom != roomID {
 		// A session bound to one room used for a call in another would send
 		// this room's reads (and writes) to the other room's runner.
-		return protocol.OpResult{}, wrapOp(op, fmt.Errorf("session is bound to another room than the call's: %w", ErrNoRunner))
+		return "", wrapOp(op, fmt.Errorf("session is bound to another room than the call's: %w", ErrNoRunner))
 	}
 	if roomID == "" {
 		// No room, no runner: the executor is keyed by room.
-		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
+		return "", wrapOp(op, ErrNoRunner)
 	}
-	raw, err := marshalParams(params)
-	if err != nil {
-		return protocol.OpResult{}, wrapOp(op, err)
-	}
+	return roomID, nil
+}
 
-	step, hasStep := room.SetupStepFrom(ctx)
-	class := ClassFrom(ctx)
-	if hasStep && validClass(step.Class) {
-		class = step.Class
-	}
-	if !validClass(class) {
-		// A read on an unknown endpoint: the lowest class never lowers the
-		// runner's own floor for the target's kind.
-		class = protocol.ClassLocal
-	}
-
-	req := protocol.OpRequest{Op: op, Params: raw, Tier: tier, Class: class}
-	if tier != protocol.TierT0 {
-		if !hasStep || step.ProposalID == "" || step.ParamsHash == "" || !validClass(step.Class) {
-			return protocol.OpResult{}, wrapOp(op, ErrNoProposal)
-		}
-		idx := step.StepIndex
-		req.ProposalID = step.ProposalID
-		req.StepIndex = &idx
-		req.ParamsHash = step.ParamsHash
-		req.Tier = raiseTier(tier, step.Tier)
-		if p := ProposalFrom(ctx); len(p) > 0 {
-			req.Proposal = p
-		}
-	}
-
+// send gives req its deadline and id, executes it and checks the result.
+func (s *Session) send(ctx context.Context, roomID string, req protocol.OpRequest) (protocol.OpResult, error) {
+	op := req.Op
 	// The deadline follows the tier the request actually runs at: a T2 step
 	// routed T3 on a production target makes the runner ask for a person's
-	// "y", which a T2 deadline would cut short.
+	// "y", which a T2 deadline would cut short. A parent context with an
+	// earlier deadline still wins (the room bounds a T3 step for this one,
+	// room.setupT3StepTimeout).
 	ctx, cancel := context.WithTimeout(ctx, s.timeoutFor(req.Tier))
 	defer cancel()
 	if dl, ok := ctx.Deadline(); ok {
@@ -253,6 +365,86 @@ func (s *Session) do(ctx context.Context, op, tier string, params any) (protocol
 	return res, nil
 }
 
+// spend records key as sent, or refuses it with ErrStepSpent (and the first
+// attempt's error, once that attempt has returned) when it already was.
+func (s *Session) spend(key stepKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if prev, ok := s.spent[key]; ok {
+		if prev.done && prev.err != nil {
+			return fmt.Errorf("%w (first attempt: %w)", ErrStepSpent, prev.err)
+		}
+		return ErrStepSpent
+	}
+	if s.spent == nil {
+		s.spent = map[stepKey]*spentStep{}
+	}
+	if len(s.spentOrder) >= maxSpentSteps {
+		delete(s.spent, s.spentOrder[0])
+		s.spentOrder = s.spentOrder[1:]
+	}
+	s.spent[key] = &spentStep{}
+	s.spentOrder = append(s.spentOrder, key)
+	return nil
+}
+
+// settle records the outcome of a sent step write.
+func (s *Session) settle(key stepKey, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.spent[key]; ok {
+		st.done, st.err = true, err
+	}
+}
+
+// matchStep checks a write's arguments against the frozen step's params: the
+// step's params are decoded into a value of args' type (fields the type does
+// not name are the step's own and are ignored here; they still travel on the
+// wire) and both are compared as canonical JSON. Numbers decode as
+// json.Number, so a 64-bit LSN compares digit for digit. A step whose params
+// do not decode, or differ in any field args names, is ErrStepMismatch; the
+// error names no value.
+func matchStep(stepParams json.RawMessage, args any) error {
+	if len(bytes.TrimSpace(stepParams)) == 0 || !json.Valid(stepParams) {
+		return fmt.Errorf("the proposal step has no params: %w", ErrStepMismatch)
+	}
+	want, err := json.Marshal(args)
+	if err != nil {
+		return fmt.Errorf("remoteclients: encoding params: %w", err)
+	}
+	frozen := reflect.New(reflect.TypeOf(args))
+	dec := json.NewDecoder(bytes.NewReader(stepParams))
+	dec.UseNumber()
+	if err := dec.Decode(frozen.Interface()); err != nil {
+		return fmt.Errorf("the proposal step's params do not decode as this write's: %w", ErrStepMismatch)
+	}
+	got, err := json.Marshal(frozen.Elem().Interface())
+	if err != nil {
+		return fmt.Errorf("the proposal step's params do not encode as this write's: %w", ErrStepMismatch)
+	}
+	if !bytes.Equal(canonicalJSON(want), canonicalJSON(got)) {
+		return fmt.Errorf("the arguments differ from the proposal step's params: %w", ErrStepMismatch)
+	}
+	return nil
+}
+
+// canonicalJSON re-encodes raw with sorted object keys and json.Number
+// numbers, so two encodings of the same value compare equal byte for byte. Raw
+// that does not decode is returned as is (it then equals nothing else).
+func canonicalJSON(raw []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return raw
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
 // decode unmarshals an op result's Data envelope into dst. data is the named
 // field the op's result holds (see the method docs); a result without it is
 // ErrBadResult, never a silent zero value.
@@ -268,7 +460,17 @@ func decode(res protocol.OpResult, data string, dst any) error {
 }
 
 // field returns one named raw field of a result's Data envelope.
+//
+// A result the runner cut (Truncated) or redacted (Redacted) is refused with
+// ErrTruncated or ErrRedacted before any field is read: neither is the
+// endpoint's answer, and a caller must not compare or act on it as one.
 func field(res protocol.OpResult, name string) (json.RawMessage, error) {
+	if res.Truncated {
+		return nil, ErrTruncated
+	}
+	if res.Redacted {
+		return nil, ErrRedacted
+	}
 	if len(res.Data) == 0 {
 		return nil, fmt.Errorf("remoteclients: result has no data, want %q: %w", name, ErrBadResult)
 	}

@@ -10,9 +10,13 @@ import (
 // snake_case names; a write is the action name the room's proposal step names
 // (plan.OpConnectDeleteConnector, plan.OpSourceAlterSystem, ...), so the
 // runner's StepAction mapping is the identity and a step's op and action
-// cannot drift apart. The runner-side ops that answer these names are the
-// catalogue's Q entries; this package and ops_test pin the names and the
-// params, so the two cannot drift apart silently.
+// cannot drift apart. A write method that serves another action's step sends
+// that action's op (AlterSourceOffsets is the write of a
+// connect_reset_source_offsets step with a position, so it has no op of its
+// own). The runner-side ops that answer these names are the catalogue's Q
+// entries; methods_test.go pins every method to its op, tier and wire params
+// and runner_test.go drives every write through the real runner's step
+// binding, so the two cannot drift apart silently.
 const (
 	// Kafka Connect readers (T0).
 	OpConnectListConnectors = "connect_list_connectors"
@@ -31,7 +35,6 @@ const (
 	OpConnectDeleteConnector    = "connect_delete_connector"
 	OpConnectStopConnector      = "connect_stop_connector"
 	OpConnectResetSourceOffsets = "connect_reset_source_offsets"
-	OpConnectAlterSourceOffsets = "connect_alter_source_offsets"
 
 	// Source Postgres readers (T0).
 	OpSourceSettings         = "source_settings"
@@ -71,9 +74,10 @@ const (
 )
 
 // OpSpec describes one op this package sends: the client method, the op name,
-// the tier floor and the target kind the runner must reach. ops_test pins
-// every method to exactly one spec, and TestOpsTable pins every op to a fake
-// answer, so a method cannot grow a second op unnoticed.
+// the tier floor and the target kind the runner must reach. TestOneOpPerMethod
+// (methods_test.go) pins every method to exactly one spec and checks the op
+// and tier it actually sends against it, and TestOpsTable pins every op to a
+// fake answer, so a method cannot grow a second op unnoticed.
 type OpSpec struct {
 	// Method is "Connect.Status", "Source.GrantSelect", ...
 	Method string
@@ -103,7 +107,7 @@ var specs = []OpSpec{
 	{"Connect.DeleteConnector", OpConnectDeleteConnector, protocol.TierT2, "connect"},
 	{"Connect.StopConnector", OpConnectStopConnector, protocol.TierT2, "connect"},
 	{"Connect.ResetSourceOffsets", OpConnectResetSourceOffsets, protocol.TierT2, "connect"},
-	{"Connect.AlterSourceOffsets", OpConnectAlterSourceOffsets, protocol.TierT2, "connect"},
+	{"Connect.AlterSourceOffsets", OpConnectResetSourceOffsets, protocol.TierT2, "connect"},
 	{"Source.Settings", OpSourceSettings, protocol.TierT0, "postgres"},
 	{"Source.TableReplication", OpSourceTableReplication, protocol.TierT0, "postgres"},
 	{"Source.RoleInfo", OpSourceRoleInfo, protocol.TierT0, "postgres"},

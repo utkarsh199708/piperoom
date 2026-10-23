@@ -27,6 +27,10 @@ import (
 // A write op returns Data only when it has something to say; the method
 // ignores it. A failed result may carry {"error_code": ...} (see ErrorCode*)
 // so the Q actions can match their sentinels.
+//
+// Every write is the write of the proposal step in the call's context, sent
+// with the step's frozen params (Session.doStep): the method's arguments are
+// checked against those params, never sent in their place.
 type Connect struct{ s *Session }
 
 var (
@@ -62,9 +66,19 @@ type restartTaskParams struct {
 	Task      int    `json:"task"`
 }
 
-type alterOffsetsParams struct {
-	Connector string                 `json:"connector"`
-	Offsets   []connect.SourceOffset `json:"offsets"`
+// resetOffsetsParams is the part of a connect_reset_source_offsets step the
+// reset and alter writes check: the connector and the one position the step
+// moves to (null for a reset that clears every offset). The step's other
+// params (stop_first) travel unchanged with it.
+type resetOffsetsParams struct {
+	Connector string          `json:"connector"`
+	Position  *offsetPosition `json:"position"`
+}
+
+// offsetPosition is one partition's position as the reset step names it.
+type offsetPosition struct {
+	Partition map[string]any `json:"partition"`
+	Offset    map[string]any `json:"offset"`
 }
 
 // ListConnectors lists every connector name Connect knows
@@ -221,7 +235,7 @@ func (c *Connect) RestartTask(ctx context.Context, name string, task int) error 
 	if task < 0 {
 		return fmt.Errorf("remoteclients: %s: task %d is not a task id: %w", OpConnectRestartTask, task, ErrBadArgs)
 	}
-	_, err := c.s.do(ctx, OpConnectRestartTask, protocol.TierT2, restartTaskParams{Connector: name, Task: task})
+	_, err := c.s.doStep(ctx, OpConnectRestartTask, protocol.TierT2, restartTaskParams{Connector: name, Task: task})
 	return err
 }
 
@@ -240,7 +254,7 @@ func (c *Connect) CreateConnector(ctx context.Context, name string, cfg map[stri
 	if len(cfg) == 0 {
 		return fmt.Errorf("remoteclients: %s: connector %q has an empty config: %w", OpConnectCreateConnector, name, ErrBadArgs)
 	}
-	_, err := c.s.do(ctx, OpConnectCreateConnector, protocol.TierT2, createConnectorParams{Connector: name, Config: cfg})
+	_, err := c.s.doStep(ctx, OpConnectCreateConnector, protocol.TierT2, createConnectorParams{Connector: name, Config: cfg})
 	return err
 }
 
@@ -257,21 +271,29 @@ func (c *Connect) StopConnector(ctx context.Context, name string) error {
 }
 
 // ResetSourceOffsets clears a stopped connector's stored offsets (DELETE
-// /connectors/{name}/offsets, Kafka 3.6+). T2.
+// /connectors/{name}/offsets, Kafka 3.6+). T2. It is the write of a
+// connect_reset_source_offsets step with no position.
 func (c *Connect) ResetSourceOffsets(ctx context.Context, name string) error {
-	return c.write(ctx, OpConnectResetSourceOffsets, connectorParams{Connector: name}, name)
+	return c.write(ctx, OpConnectResetSourceOffsets, resetOffsetsParams{Connector: name}, name)
 }
 
 // AlterSourceOffsets replaces a stopped connector's stored offsets (PATCH
-// /connectors/{name}/offsets, Kafka 3.6+). T2.
+// /connectors/{name}/offsets, Kafka 3.6+). T2. Its only proposal step is a
+// connect_reset_source_offsets step with a position, so it sends that op (the
+// runner binds a request to the step's action) and takes exactly one offset:
+// the step's position.
 func (c *Connect) AlterSourceOffsets(ctx context.Context, name string, offsets []connect.SourceOffset) error {
-	if err := requireArg(OpConnectAlterSourceOffsets, "connector", name); err != nil {
+	if err := requireArg(OpConnectResetSourceOffsets, "connector", name); err != nil {
 		return err
 	}
 	if len(offsets) == 0 {
-		return fmt.Errorf("remoteclients: %s: connector %q: no offsets; reset every offset instead: %w", OpConnectAlterSourceOffsets, name, ErrBadArgs)
+		return fmt.Errorf("remoteclients: %s: connector %q: no offsets; reset every offset instead: %w", OpConnectResetSourceOffsets, name, ErrBadArgs)
 	}
-	_, err := c.s.do(ctx, OpConnectAlterSourceOffsets, protocol.TierT2, alterOffsetsParams{Connector: name, Offsets: offsets})
+	if len(offsets) != 1 {
+		return fmt.Errorf("remoteclients: %s: connector %q: a reset step moves one partition, not %d: %w", OpConnectResetSourceOffsets, name, len(offsets), ErrStepMismatch)
+	}
+	pos := &offsetPosition{Partition: offsets[0].Partition, Offset: offsets[0].Offset}
+	_, err := c.s.doStep(ctx, OpConnectResetSourceOffsets, protocol.TierT2, resetOffsetsParams{Connector: name, Position: pos})
 	return err
 }
 
@@ -280,7 +302,7 @@ func (c *Connect) write(ctx context.Context, op string, params any, name string)
 	if err := requireArg(op, "connector", name); err != nil {
 		return err
 	}
-	_, err := c.s.do(ctx, op, protocol.TierT2, params)
+	_, err := c.s.doStep(ctx, op, protocol.TierT2, params)
 	return err
 }
 

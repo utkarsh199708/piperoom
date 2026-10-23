@@ -53,15 +53,11 @@ func TestNoRunner(t *testing.T) {
 		_, err := s.Connect().Status(ctx, "pg-orders-connector")
 		return err
 	}
-	write := func(ctx context.Context, s *Session) error {
-		return s.Connect().CreateConnector(ctx, "pg-orders-connector", map[string]string{"connector.class": "c"})
-	}
+	create := writeCaseFor(t, "Connect.CreateConnector")
+	grant := writeCaseFor(t, "Source.GrantSelect")
 	source := func(ctx context.Context, s *Session) error {
 		_, err := s.Source().Settings(ctx)
 		return err
-	}
-	sourceWrite := func(ctx context.Context, s *Session) error {
-		return s.Source().GrantSelect(ctx, "debezium", []string{"public.orders"})
 	}
 	kafka := func(ctx context.Context, s *Session) error {
 		_, err := s.Kafka().Topics(ctx)
@@ -77,9 +73,9 @@ func TestNoRunner(t *testing.T) {
 		run  func(context.Context, *Session) error
 	}{
 		{"Connect.Status", roomCtx, call},
-		{"Connect.CreateConnector", stepCtxLocal, write},
+		{"Connect.CreateConnector", create.ctx, create.run},
 		{"Source.Settings", roomCtx, source},
-		{"Source.GrantSelect", stepCtxLocal, sourceWrite},
+		{"Source.GrantSelect", grant.ctx, grant.run},
 		{"Kafka.Topics", roomCtx, kafka},
 		{"Registry.Subjects", roomCtx, registry},
 	}
@@ -115,18 +111,6 @@ func TestNoRunner(t *testing.T) {
 // TestWriteNeedsProposalStep: a write without the room's proposal step, or
 // with an incomplete one, refuses with ErrNoProposal before building anything.
 func TestWriteNeedsProposalStep(t *testing.T) {
-	writes := map[string]func(context.Context, *Session) error{
-		"Connect.DeleteConnector": func(ctx context.Context, s *Session) error {
-			return s.Connect().DeleteConnector(ctx, "pg-orders-connector")
-		},
-		"Source.SetReplicaIdentity": func(ctx context.Context, s *Session) error {
-			return s.Source().SetReplicaIdentity(ctx, "public.orders", "full", "")
-		},
-		"Source.AlterSystem": func(ctx context.Context, s *Session) error {
-			_, err := s.Source().AlterSystem(ctx, "wal_level", "logical")
-			return err
-		},
-	}
 	base := roomCtx(t)
 	cases := map[string]context.Context{
 		"no step":        base,
@@ -134,20 +118,28 @@ func TestWriteNeedsProposalStep(t *testing.T) {
 		"no params hash": withStep(t, base, protocol.TierT2, protocol.ClassLocal, 0, "", "p_1"),
 		"no class":       withStep(t, base, protocol.TierT2, "", 0, "hash", "p_1"),
 	}
-	complete := stepCtxLocal(t)
-	for name, run := range writes {
+	for _, w := range writeCases() {
 		for why, ctx := range cases {
 			f := newFakeRunner()
-			if err := run(ctx, New(f, "r_setup")); !errors.Is(err, ErrNoProposal) {
-				t.Fatalf("%s %s: err = %v, want ErrNoProposal", name, why, err)
+			if err := w.run(ctx, New(f, "r_setup")); !errors.Is(err, ErrNoProposal) {
+				t.Fatalf("%s %s: err = %v, want ErrNoProposal", w.method, why, err)
 			}
 			if got := len(f.allCalls()); got != 0 {
-				t.Fatalf("%s %s: sent %d ops, want 0", name, why, got)
+				t.Fatalf("%s %s: sent %d ops, want 0", w.method, why, got)
 			}
 		}
-		t.Run(name+" complete", func(t *testing.T) {
+		// The proposal fields without the frozen step: the write cannot
+		// know the params the runner binds it to.
+		f := newFakeRunner()
+		if err := w.run(stepCtxLocal(t), New(f, "r_setup")); !errors.Is(err, ErrStepMismatch) {
+			t.Fatalf("%s without the frozen step: err = %v, want ErrStepMismatch", w.method, err)
+		}
+		if got := len(f.allCalls()); got != 0 {
+			t.Fatalf("%s without the frozen step: sent %d ops, want 0", w.method, got)
+		}
+		t.Run(w.method+" complete", func(t *testing.T) {
 			f := newFakeRunner()
-			if err := run(complete, New(f, "r_setup")); err != nil {
+			if err := w.run(w.ctx(t), New(f, "r_setup")); err != nil {
 				t.Fatalf("a complete step was refused: %v", err)
 			}
 			if got := len(f.allCalls()); got != 1 {
@@ -161,57 +153,27 @@ func TestWriteNeedsProposalStep(t *testing.T) {
 // class and the raised tier, and the frozen proposal when the context has it.
 func TestWriteCarriesProposalFields(t *testing.T) {
 	tests := []struct {
-		name      string
-		stepTier  string
-		run       func(context.Context, *Session) error
-		wantOp    string
-		wantTier  string
-		wantParam map[string]any
+		name     string
+		method   string
+		stepTier string
+		wantTier string
 	}{
-		{
-			name: "connect create T2", stepTier: protocol.TierT2,
-			run: func(ctx context.Context, s *Session) error {
-				return s.Connect().CreateConnector(ctx, "pg-orders-connector", map[string]string{"connector.class": "c", "topic.prefix": "pg"})
-			},
-			wantOp: OpConnectCreateConnector, wantTier: protocol.TierT2,
-			wantParam: map[string]any{"connector": "pg-orders-connector"},
-		},
-		{
-			name: "source grant T2", stepTier: protocol.TierT2,
-			run: func(ctx context.Context, s *Session) error {
-				return s.Source().GrantSelect(ctx, "debezium", []string{"public.orders"})
-			},
-			wantOp: OpSourceGrantSelect, wantTier: protocol.TierT2,
-			wantParam: map[string]any{"role": "debezium"},
-		},
-		{
-			name: "a step routed T3 raises a T2 op", stepTier: protocol.TierT3,
-			run: func(ctx context.Context, s *Session) error {
-				return s.Source().SetReplicaIdentity(ctx, "public.orders", "full", "")
-			},
-			wantOp: OpSourceSetReplicaIdentity, wantTier: protocol.TierT3,
-			wantParam: map[string]any{"table": "public.orders", "mode": "full"},
-		},
-		{
-			name: "alter system is T3 even on a T2 step", stepTier: protocol.TierT2,
-			run: func(ctx context.Context, s *Session) error {
-				_, err := s.Source().AlterSystem(ctx, "wal_level", "logical")
-				return err
-			},
-			wantOp: OpSourceAlterSystem, wantTier: protocol.TierT3,
-			wantParam: map[string]any{"name": "wal_level", "value": "logical"},
-		},
+		{name: "connect create T2", method: "Connect.CreateConnector", stepTier: protocol.TierT2, wantTier: protocol.TierT2},
+		{name: "source grant T2", method: "Source.GrantSelect", stepTier: protocol.TierT2, wantTier: protocol.TierT2},
+		{name: "a step routed T3 raises a T2 op", method: "Source.SetReplicaIdentity", stepTier: protocol.TierT3, wantTier: protocol.TierT3},
+		{name: "alter system is T3 even on a T2 step", method: "Source.AlterSystem", stepTier: protocol.TierT2, wantTier: protocol.TierT3},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			w := writeCaseFor(t, tc.method)
 			f := newFakeRunner()
-			ctx := stepCtx(t, tc.stepTier, protocol.ClassShared)
-			if err := tc.run(ctx, New(f, "r_setup")); err != nil {
+			ctx := writeCtx(t, tc.stepTier, protocol.ClassShared, w.action, w.params)
+			if err := w.run(ctx, New(f, "r_setup")); err != nil {
 				t.Fatalf("call: %v", err)
 			}
-			calls := f.callsFor(tc.wantOp)
+			calls := f.callsFor(w.action)
 			if len(calls) != 1 {
-				t.Fatalf("op %s sent %d times, want 1", tc.wantOp, len(calls))
+				t.Fatalf("op %s sent %d times, want 1", w.action, len(calls))
 			}
 			req := calls[0].req
 			if req.ProposalID != "p_1" || req.StepIndex == nil || *req.StepIndex != 0 || req.ParamsHash != "b1946ac92492d2347c6235b4d2611184" {
@@ -229,14 +191,8 @@ func TestWriteCarriesProposalFields(t *testing.T) {
 			if req.Deadline.IsZero() {
 				t.Fatal("the request has no deadline")
 			}
-			var params map[string]any
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				t.Fatalf("params: %v", err)
-			}
-			for k, want := range tc.wantParam {
-				if got := params[k]; got != want {
-					t.Fatalf("param %s = %v, want %v (params %s)", k, got, want, req.Params)
-				}
+			if string(req.Params) != w.params {
+				t.Fatalf("params = %s, want the frozen step's %s", req.Params, w.params)
 			}
 		})
 	}
@@ -289,15 +245,16 @@ func TestReadClass(t *testing.T) {
 }
 
 // TestDeadlines: every op gets a deadline; the tier decides it, and
-// WithTimeout overrides it.
+// WithTimeout overrides it. The wanted values are the documented ones, not the
+// constants, so a constant cut short (a T3 at 30 s) fails here.
 func TestDeadlines(t *testing.T) {
 	read := func(ctx context.Context, s *Session) error { _, err := s.Kafka().Topics(ctx); return err }
-	write := func(ctx context.Context, s *Session) error {
-		return s.Connect().CreateConnector(ctx, "pg-orders-connector", map[string]string{"connector.class": "c"})
-	}
-	alter := func(ctx context.Context, s *Session) error {
-		_, err := s.Source().AlterSystem(ctx, "wal_level", "logical")
-		return err
+	create := writeCaseFor(t, "Connect.CreateConnector")
+	alter := writeCaseFor(t, "Source.AlterSystem")
+	createAt := func(tier string) func(*testing.T) context.Context {
+		return func(t *testing.T) context.Context {
+			return writeCtx(t, tier, protocol.ClassLocal, create.action, create.params)
+		}
 	}
 	tests := []struct {
 		name  string
@@ -307,12 +264,12 @@ func TestDeadlines(t *testing.T) {
 		want  time.Duration
 		slack time.Duration
 	}{
-		{"read", nil, roomCtx, read, readTimeout, 2 * time.Second},
-		{"T2 write", nil, stepCtxLocal, write, t2Timeout, 2 * time.Second},
-		{"T2 write raised to T3", nil, func(t *testing.T) context.Context {
-			return stepCtx(t, protocol.TierT3, protocol.ClassLocal)
-		}, write, t3Timeout, 5 * time.Second},
-		{"T3 write", nil, stepCtxLocal, alter, t3Timeout, 5 * time.Second},
+		{"read", nil, roomCtx, read, 10 * time.Second, 2 * time.Second},
+		{"T2 write", nil, createAt(protocol.TierT2), create.run, 30 * time.Second, 2 * time.Second},
+		{"T2 write raised to T3", nil, createAt(protocol.TierT3), create.run, 5 * time.Minute, 5 * time.Second},
+		{"T3 write", nil, func(t *testing.T) context.Context {
+			return writeCtx(t, protocol.TierT2, protocol.ClassLocal, alter.action, alter.params)
+		}, alter.run, 5 * time.Minute, 5 * time.Second},
 		{"override", WithTimeout(2 * time.Second), roomCtx, read, 2 * time.Second, time.Second},
 	}
 	for _, tc := range tests {
@@ -332,9 +289,12 @@ func TestDeadlines(t *testing.T) {
 			if req.Deadline.IsZero() {
 				t.Fatal("no deadline on the request")
 			}
+			// Both bounds: a deadline far past the tier's leaks an op, and
+			// one short of it (a T3 cut to the T2 30 s) takes away a
+			// person's time to confirm.
 			left := req.Deadline.Sub(before)
-			if left <= 0 || left > tc.want+tc.slack {
-				t.Fatalf("deadline is %s away, want about %s", left, tc.want)
+			if left < tc.want-tc.slack || left > tc.want+tc.slack {
+				t.Fatalf("deadline is %s away, want %s (±%s)", left, tc.want, tc.slack)
 			}
 		})
 	}
@@ -343,6 +303,7 @@ func TestDeadlines(t *testing.T) {
 // TestErrorSentinels: a failed op with an error_code wraps the sentinel the Q
 // actions branch on, and one without a code is a plain error.
 func TestErrorSentinels(t *testing.T) {
+	del := writeCaseFor(t, "Connect.DeleteConnector")
 	tests := []struct {
 		code string
 		want error
@@ -360,7 +321,7 @@ func TestErrorSentinels(t *testing.T) {
 		t.Run(tc.code, func(t *testing.T) {
 			f := newFakeRunner()
 			f.failures[OpConnectDeleteConnector] = fakeFailure{summary: "the runner refused: " + tc.code, code: tc.code}
-			err := New(f, "r_setup").Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
+			err := del.run(del.ctx(t), New(f, "r_setup"))
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -372,7 +333,7 @@ func TestErrorSentinels(t *testing.T) {
 	t.Run("no code", func(t *testing.T) {
 		f := newFakeRunner()
 		f.failures[OpConnectDeleteConnector] = fakeFailure{summary: "connect says no"}
-		err := New(f, "r_setup").Connect().DeleteConnector(stepCtxLocal(t), "pg-orders-connector")
+		err := del.run(del.ctx(t), New(f, "r_setup"))
 		if err == nil || !strings.Contains(err.Error(), "connect says no") {
 			t.Fatalf("err = %v, want the summary", err)
 		}

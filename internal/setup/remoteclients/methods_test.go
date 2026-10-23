@@ -2,23 +2,22 @@ package remoteclients
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
-	"piperoom/internal/clients/connect"
 	"piperoom/internal/setup/protocol"
 )
 
 // TestOneOpPerMethod calls every client method once against the fake runner
-// and asserts it sent exactly one request, named as the spec says, at the
-// method's tier, with the proposal fields exactly on the writes. A method that
-// fans out into several ops, forwards a different name, or forgets the proposal
-// fields fails here.
+// and asserts it sent exactly one request, with the op and tier its Ops() spec
+// names (the table and the code cannot disagree), the proposal fields exactly
+// on the writes, and the wire params golden-checked: a read's params byte for
+// byte as below, a write's the frozen step's params byte for byte. A method
+// that fans out into several ops, forwards a different name, drops or renames
+// a param, or forgets the proposal fields fails here.
 func TestOneOpPerMethod(t *testing.T) {
 	read := roomCtx
-	write := stepCtxLocal
 	at := func(epoch string) time.Time {
 		ts, err := time.Parse(time.RFC3339, epoch)
 		if err != nil {
@@ -26,16 +25,20 @@ func TestOneOpPerMethod(t *testing.T) {
 		}
 		return ts
 	}
-	// every(connect.SourceOffset) is a valid alter entry: one partition.
-	offsets := []connect.SourceOffset{{Partition: map[string]any{"server": "postgres"}, Offset: map[string]any{"lsn": 1}}}
-
-	calls := []struct {
+	type call struct {
 		method string
 		op     string
 		tier   string
 		ctx    func(*testing.T) context.Context
 		run    func(context.Context, *Session) error
-	}{
+	}
+	// wire is the exact params JSON each method sends: readWire for a read,
+	// the frozen step's params for a write.
+	wire := map[string]string{}
+	for m, w := range readWire {
+		wire[m] = w
+	}
+	calls := []call{
 		// Connect.
 		{"Connect.ListConnectors", OpConnectListConnectors, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
 			_, err := s.Connect().ListConnectors(ctx)
@@ -69,28 +72,6 @@ func TestOneOpPerMethod(t *testing.T) {
 			_, err := s.Connect().ServerInfo(ctx)
 			return err
 		}},
-		{"Connect.RestartTask", OpConnectRestartTask, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().RestartTask(ctx, "pg-orders-connector", 0)
-		}},
-		{"Connect.RestartConnector", OpConnectRestartConnector, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().RestartConnector(ctx, "pg-orders-connector")
-		}},
-		{"Connect.CreateConnector", OpConnectCreateConnector, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().CreateConnector(ctx, "pg-orders-connector", map[string]string{"connector.class": "c"})
-		}},
-		{"Connect.DeleteConnector", OpConnectDeleteConnector, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().DeleteConnector(ctx, "pg-orders-connector")
-		}},
-		{"Connect.StopConnector", OpConnectStopConnector, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().StopConnector(ctx, "pg-orders-connector")
-		}},
-		{"Connect.ResetSourceOffsets", OpConnectResetSourceOffsets, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().ResetSourceOffsets(ctx, "pg-orders-connector")
-		}},
-		{"Connect.AlterSourceOffsets", OpConnectAlterSourceOffsets, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Connect().AlterSourceOffsets(ctx, "pg-orders-connector", offsets)
-		}},
-
 		// Source.
 		{"Source.Settings", OpSourceSettings, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
 			_, err := s.Source().Settings(ctx)
@@ -131,42 +112,6 @@ func TestOneOpPerMethod(t *testing.T) {
 			}
 			return err
 		}},
-		{"Source.SetReplicaIdentity", OpSourceSetReplicaIdentity, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().SetReplicaIdentity(ctx, "public.orders", "full", "")
-		}},
-		{"Source.GrantSelect", OpSourceGrantSelect, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().GrantSelect(ctx, "debezium", []string{"public.orders"})
-		}},
-		{"Source.CreateHeartbeatTable", OpSourceCreateHeartbeatTable, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().CreateHeartbeatTable(ctx, "public.piperoom_heartbeat")
-		}},
-		{"Source.EndSession", OpSourceEndSession, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().EndSession(ctx, 42, at("2026-01-01T00:00:00Z"))
-		}},
-		{"Source.CreatePublication", OpSourceCreatePublication, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().CreatePublication(ctx, "pg_orders_pub", []string{"public.orders"})
-		}},
-		{"Source.CreateCanaryTable", OpSourceCreateCanaryTable, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().CreateCanaryTable(ctx, "public.piperoom_canary")
-		}},
-		{"Source.InsertCanary", OpSourceInsertCanary, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			return s.Source().InsertCanary(ctx, "public.piperoom_canary", "00112233445566778899aabbccddeeff")
-		}},
-		{"Source.CreateReadRole", OpSourceCreateReadRole, protocol.TierT2, write, func(ctx context.Context, s *Session) error {
-			name, err := s.Source().CreateReadRole(ctx, "piperoom_reader", []string{"public.orders"})
-			if err == nil && name != "orders_reader" {
-				t.Fatalf("secret name = %q, want orders_reader", name)
-			}
-			return err
-		}},
-		{"Source.AlterSystem", OpSourceAlterSystem, protocol.TierT3, write, func(ctx context.Context, s *Session) error {
-			pending, err := s.Source().AlterSystem(ctx, "wal_level", "logical")
-			if err == nil && !pending {
-				t.Fatal("the fake's pending_restart was not read")
-			}
-			return err
-		}},
-
 		// Kafka.
 		{"Kafka.Topics", OpKafkaTopics, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
 			_, err := s.Kafka().Topics(ctx)
@@ -214,6 +159,33 @@ func TestOneOpPerMethod(t *testing.T) {
 			return err
 		}},
 	}
+	for _, w := range writeCases() {
+		calls = append(calls, call{method: w.method, op: w.action, tier: w.tier, ctx: w.ctx, run: w.run})
+		wire[w.method] = w.params
+	}
+
+	// The calls and the table are the same set of methods, each once.
+	specs := map[string]OpSpec{}
+	for _, spec := range Ops() {
+		specs[spec.Method] = spec
+	}
+	seen := map[string]bool{}
+	for _, tc := range calls {
+		if seen[tc.method] {
+			t.Fatalf("%s is under test twice", tc.method)
+		}
+		seen[tc.method] = true
+		spec, ok := specs[tc.method]
+		if !ok {
+			t.Fatalf("%s is not in Ops()", tc.method)
+		}
+		if spec.Op != tc.op || spec.Tier != tc.tier {
+			t.Fatalf("%s: Ops() says %s at %s, the test expects %s at %s", tc.method, spec.Op, spec.Tier, tc.op, tc.tier)
+		}
+		if wire[tc.method] == "" {
+			t.Fatalf("%s has no golden wire params", tc.method)
+		}
+	}
 	if len(calls) != len(Ops()) {
 		t.Fatalf("%d methods under test, %d ops in the table", len(calls), len(Ops()))
 	}
@@ -228,15 +200,15 @@ func TestOneOpPerMethod(t *testing.T) {
 				t.Fatalf("%s sent %d ops, want 1", tc.method, len(got))
 			}
 			req := got[0].req
-			if req.Op != tc.op {
-				t.Fatalf("%s sent op %q, want %q", tc.method, req.Op, tc.op)
+			spec := specs[tc.method]
+			if req.Op != spec.Op {
+				t.Fatalf("%s sent op %q, Ops() says %q", tc.method, req.Op, spec.Op)
 			}
-			if req.Tier != tc.tier {
-				t.Fatalf("%s sent tier %q, want %q", tc.method, req.Tier, tc.tier)
+			if req.Tier != spec.Tier {
+				t.Fatalf("%s sent tier %q, Ops() says %q", tc.method, req.Tier, spec.Tier)
 			}
-			var params map[string]any
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				t.Fatalf("%s: params %s are not a JSON object: %v", tc.method, req.Params, err)
+			if string(req.Params) != wire[tc.method] {
+				t.Fatalf("%s sent params\n  %s\nwant\n  %s", tc.method, req.Params, wire[tc.method])
 			}
 			if tc.tier == protocol.TierT0 {
 				if req.ProposalID != "" || req.StepIndex != nil || req.ParamsHash != "" {
@@ -258,6 +230,78 @@ func TestOneOpPerMethod(t *testing.T) {
 		t.Run(tc.method+" without a runner", func(t *testing.T) {
 			if err := tc.run(tc.ctx(t), New(nil, "")); !errors.Is(err, ErrNoRunner) {
 				t.Fatalf("%s without a runner = %v, want ErrNoRunner", tc.method, err)
+			}
+		})
+	}
+}
+
+// readWire is the exact params JSON of every read, as TestOneOpPerMethod calls
+// it. A field dropped, renamed or added on the wire fails the comparison.
+var readWire = map[string]string{
+	"Connect.ListConnectors":  `{}`,
+	"Connect.Status":          `{"connector":"pg-orders-connector"}`,
+	"Connect.Config":          `{"connector":"pg-orders-connector"}`,
+	"Connect.ValidateConfig":  `{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"c"}}`,
+	"Connect.PluginConfigDef": `{"class":"io.debezium.connector.postgresql.PostgresConnector"}`,
+	"Connect.Plugins":         `{}`,
+	"Connect.SourceOffsets":   `{"connector":"pg-orders-connector"}`,
+	"Connect.ServerInfo":      `{}`,
+	"Source.Settings":         `{}`,
+	"Source.TableReplication": `{"tables":["public.orders"]}`,
+	"Source.RoleInfo":         `{"role":"debezium","tables":["public.orders"]}`,
+	"Source.Blockers":         `{"older_than_ms":60000}`,
+	"Source.BlockersOnTables": `{"older_than_ms":60000,"scoped":true,"tables":["public.orders"]}`,
+	"Source.ReplicationSlots": `{}`,
+	"Source.RecentDDL":        `{"since":"2026-01-01T00:00:00Z","limit":10}`,
+	"Source.LongTransactions": `{"older_than_ms":60000}`,
+	"Source.Row":              `{"table":"public.orders","pk_column":"id","pk":"1"}`,
+	"Kafka.Topics":            `{}`,
+	"Kafka.TopicOffsets":      `{"topic":"pg.public.orders"}`,
+	"Kafka.ConsumerGroups":    `{}`,
+	"Kafka.GroupLag":          `{"group":"orders-consumer"}`,
+	"Kafka.FindByKey":         `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
+	"Kafka.FindByKeyScan":     `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
+	"Registry.Subjects":       `{}`,
+	"Registry.Versions":       `{"subject":"pg.public.orders-value"}`,
+	"Registry.Schema":         `{"subject":"pg.public.orders-value","version":-1}`,
+	"Registry.Compatibility":  `{"subject":"pg.public.orders-value"}`,
+}
+
+// TestWriteArgsBoundToStep: every write checks each argument it takes against
+// the frozen step's params, and a step that differs in any one of them (or runs
+// another action) is refused with ErrStepMismatch before anything is sent. A
+// field dropped from a method's check (EndSession without started_at, a reset
+// without its position) lets a mutation through and fails here.
+func TestWriteArgsBoundToStep(t *testing.T) {
+	for _, w := range writeCases() {
+		t.Run(w.method, func(t *testing.T) {
+			if len(w.mutations) == 0 {
+				t.Fatal("no mutation checks this write's arguments")
+			}
+			for _, m := range w.mutations {
+				f := newFakeRunner()
+				err := w.run(writeCtx(t, w.tier, protocol.ClassLocal, w.action, m), New(f, "r_setup"))
+				if !errors.Is(err, ErrStepMismatch) {
+					t.Fatalf("step %s: err = %v, want ErrStepMismatch", m, err)
+				}
+				if n := len(f.allCalls()); n != 0 {
+					t.Fatalf("step %s: %d ops sent for a mismatched step", m, n)
+				}
+			}
+			// The step runs another action: never this write, whatever its
+			// params.
+			f := newFakeRunner()
+			err := w.run(writeCtx(t, w.tier, protocol.ClassLocal, "connect_tune_throughput", w.params), New(f, "r_setup"))
+			if !errors.Is(err, ErrStepMismatch) {
+				t.Fatalf("another action's step: err = %v, want ErrStepMismatch", err)
+			}
+			// A step with no params at all.
+			err = w.run(writeCtx(t, w.tier, protocol.ClassLocal, w.action, ""), New(f, "r_setup"))
+			if !errors.Is(err, ErrStepMismatch) {
+				t.Fatalf("a step without params: err = %v, want ErrStepMismatch", err)
+			}
+			if n := len(f.allCalls()); n != 0 {
+				t.Fatalf("%d ops sent for a mismatched step", n)
 			}
 		})
 	}

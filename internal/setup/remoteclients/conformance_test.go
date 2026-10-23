@@ -120,7 +120,6 @@ func TestConnectCreateConnectorAction(t *testing.T) {
 	if !ok {
 		t.Fatal("connect_create_connector did not register")
 	}
-	ctx := stepCtxLocal(t)
 	input := json.RawMessage(`{
 		"connector": "pg-orders-connector",
 		"config": {
@@ -130,6 +129,9 @@ func TestConnectCreateConnectorAction(t *testing.T) {
 			"topic.prefix": "pg"
 		}
 	}`)
+	// The room's step context: the frozen step is this action with exactly
+	// the params the executor hands Execute.
+	ctx := writeCtx(t, protocol.TierT2, protocol.ClassLocal, actions.CreateConnectorName, string(input))
 	if err := act.Validate(ctx, input); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -168,6 +170,9 @@ func TestConnectCreateConnectorAction(t *testing.T) {
 	if params.Connector != "pg-orders-connector" || params.Config["topic.prefix"] != "pg" {
 		t.Fatalf("create params = %+v", params)
 	}
+	if string(req.Params) != string(input) {
+		t.Fatalf("create params = %s, want the frozen step's params unchanged", req.Params)
+	}
 	if got := len(f.callsFor(OpConnectValidateConfig)); got == 0 {
 		t.Fatal("the create never asked Connect to validate the config")
 	}
@@ -184,8 +189,8 @@ func TestSetReplicaIdentityAction(t *testing.T) {
 		Source: src,
 		Writer: src,
 	})
-	ctx := stepCtxLocal(t)
 	input := json.RawMessage(`{"table":"public.orders","mode":"full"}`)
+	ctx := writeCtx(t, protocol.TierT2, protocol.ClassLocal, sourceactions.SetReplicaIdentityName, string(input))
 	if err := act.Validate(ctx, input); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -238,8 +243,8 @@ func TestGrantSelectAction(t *testing.T) {
 		Source:  src,
 		Writer:  src,
 	})
-	ctx := stepCtxLocal(t)
 	input := json.RawMessage(`{"connector":"pg-orders-connector","role":"debezium","tables":["public.orders"]}`)
+	ctx := writeCtx(t, protocol.TierT2, protocol.ClassLocal, sourceactions.GrantSelectName, string(input))
 	if err := act.Validate(ctx, input); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -271,6 +276,9 @@ func TestGrantSelectAction(t *testing.T) {
 	}
 	if params.Role != "debezium" || len(params.Tables) != 1 || params.Tables[0] != "public.orders" {
 		t.Fatalf("grant params = %+v", params)
+	}
+	if string(req.Params) != string(input) {
+		t.Fatalf("grant params = %s, want the frozen step's params (connector included) unchanged", req.Params)
 	}
 	if got := len(f.callsFor(OpConnectConfig)); got == 0 {
 		t.Fatal("the grant never read the connector's database.user over the runner")
