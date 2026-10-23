@@ -60,6 +60,15 @@ type SetupSnapshot struct {
 	// Phase and StepIndex follow the plan.
 	phases   []events.SetupPlanPhase
 	executed map[int]bool
+	// planSeq is the seq of the setup.plan event phases came from. The rollback
+	// plan ("roll back this setup", setup_rollback.go) reads the log from here,
+	// so only the current plan's steps are in scope. Unexported: it is the
+	// room's own pointer into the log, not a documented field.
+	planSeq int64
+	// firstPlanSeq is the seq of the room's first setup.plan: the rollback
+	// walks from there, so a superseding plan does not hide what an earlier
+	// one ran.
+	firstPlanSeq int64
 	// list marks the trimmed form GET /api/rooms rows carry: mode, phase and
 	// runner.connected only (MarshalJSON, trimSetupForList).
 	list bool
@@ -398,6 +407,10 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Setup.PlanID = p.PlanID
 		snap.Setup.phases = p.Phases
 		snap.Setup.executed = map[int]bool{}
+		snap.Setup.planSeq = e.Seq
+		if snap.Setup.firstPlanSeq == 0 {
+			snap.Setup.firstPlanSeq = e.Seq
+		}
 		snap.Setup.advance()
 
 	case events.ActionExecuted:
