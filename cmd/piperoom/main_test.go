@@ -25,11 +25,14 @@ type recorder struct {
 	ran       bool
 }
 
-// newApp builds an app whose executable lives in dir; the named siblings are
-// created there as empty files.
+// newApp builds an app whose executable lives in dir; it and the named
+// siblings are created there as empty files.
 func newApp(t *testing.T, rec *recorder, siblings ...string) (app, *bytes.Buffer, *bytes.Buffer, string) {
 	t.Helper()
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "piperoom"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, s := range siblings {
 		if err := os.WriteFile(filepath.Join(dir, binaryName(s)), nil, 0o755); err != nil {
 			t.Fatal(err)
@@ -232,9 +235,6 @@ func TestSiblingBesideResolvedExecutable(t *testing.T) {
 	rec := &recorder{}
 	a, _, stderr, dir := newApp(t, rec, "server")
 	real := filepath.Join(dir, "piperoom")
-	if err := os.WriteFile(real, nil, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	linkDir := t.TempDir()
 	link := filepath.Join(linkDir, "piperoom")
 	if err := os.Symlink(real, link); err != nil {
@@ -250,5 +250,40 @@ func TestSiblingBesideResolvedExecutable(t *testing.T) {
 	}
 	if got, _ := filepath.EvalSymlinks(rec.ranPath); got != want {
 		t.Fatalf("ran %q, want %q", rec.ranPath, want)
+	}
+}
+
+// An executable path that cannot be resolved is refused, not used as is: a
+// sibling beside an unresolved path could come from a link's directory
+// rather than the one the umbrella was shipped in.
+func TestUnresolvableExecutable(t *testing.T) {
+	rec := &recorder{}
+	a, _, stderr, _ := newApp(t, rec, "server")
+	linkDir := t.TempDir()
+	// linkDir/piperoom does not exist, so it cannot be resolved; a sibling
+	// sits beside it, which a fallback to the unresolved path would run.
+	if err := os.WriteFile(filepath.Join(linkDir, binaryName("server")), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.executable = func() (string, error) { return filepath.Join(linkDir, "piperoom"), nil }
+	if code := a.dispatch([]string{"server"}); code != exitFailed || rec.ran {
+		t.Fatalf("code = %d ran = %v (%q), want %d and nothing run", code, rec.ran, rec.ranPath, exitFailed)
+	}
+	if !strings.Contains(stderr.String(), "resolving this executable") {
+		t.Fatalf("stderr = %q, want the resolve failure", stderr)
+	}
+}
+
+// The real setup command behind the umbrella keeps piperoom-setup's guards:
+// --standalone on a reachable address is refused with exit 1.
+func TestSetupStandaloneRefusesNonLoopback(t *testing.T) {
+	t.Setenv("PIPEROOM_HTTP_ADDR", "0.0.0.0:0")
+	a, _, stderr, _ := newApp(t, &recorder{})
+	a.setup = setupcmd.Run
+	if code := a.dispatch([]string{"setup", "--standalone", "--project", t.TempDir()}); code != exitFailed {
+		t.Fatalf("code = %d, want %d (stderr %q)", code, exitFailed, stderr)
+	}
+	if !strings.Contains(stderr.String(), "not loopback") {
+		t.Fatalf("stderr = %q, want the non-loopback refusal", stderr)
 	}
 }

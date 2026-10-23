@@ -15,7 +15,9 @@
 //
 // With no subcommand, or when the first argument is a flag, the arguments go
 // to the server, so an existing "piperoom --healthcheck" or a bare "piperoom"
-// entrypoint keeps meaning the server.
+// entrypoint keeps meaning the server. The one exception is a first argument
+// of -h, -help or --help, which prints the umbrella's own usage;
+// "piperoom server --help" lists the server's flags.
 package main
 
 import (
@@ -58,8 +60,10 @@ Commands:
   help         print this help
 
 Each command takes the flags of the binary it runs; "piperoom <command> --help"
-lists them. server, discover and investigate run piperoom-server,
-piperoom-discover and piperoom-investigate from this binary's directory.
+lists them ("piperoom server --help" for the server's). Flags with no command
+go to the server, so "piperoom --healthcheck" is "piperoom server --healthcheck".
+server, discover and investigate run piperoom-server, piperoom-discover and
+piperoom-investigate from this binary's directory.
 `
 
 // app holds the process edges so dispatch is testable without spawning.
@@ -122,13 +126,18 @@ func (a app) dispatch(args []string) int {
 // siblingPath is piperoom-<sub> in the directory of the real (symlink
 // resolved) umbrella executable. It never searches PATH: the umbrella runs
 // the binaries shipped with it, not whatever a PATH entry happens to hold.
+// When the executable cannot be resolved it fails rather than use the
+// unresolved path: os.Executable can return a symlink (macOS, BSD), and the
+// link's directory is not where the shipped binaries are and may be writable
+// by someone else.
 func (a app) siblingPath(sub string) (string, error) {
 	exe, err := a.executable()
 	if err != nil {
 		return "", fmt.Errorf("finding this executable: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return "", fmt.Errorf("resolving this executable: %w", err)
 	}
 	path := filepath.Join(filepath.Dir(exe), binaryName(sub))
 	info, err := os.Stat(path)
