@@ -57,17 +57,20 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // read that lists one (externalcause.go), so a room without external changes
 // reads the prompt as before but for these words. To stay at 1335 words,
 // rule 7 reads "stop reading; call propose_fix or say" and the tools rule
-// lost its "also".
+// lost its "also". Q2e moved it a ninth time: rule 2 ends "Read database
+// settings before proposing a config change." (the Q2a settings tools); to
+// stay at 1335 words, two ", and" joins became ";", the rule-3 example lost
+// "task 0" and the schema bullet ends "high-risk: last resort only."
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "8e70612c64ee9f166f5172cd1bc085c27f9b5724fcac4f86eb56fe9615aa9ef8"
+const cdcPromptSHA256 = "e273420b28da576a9d08f445daf3a6226f11493a0489719b9d3d31433f3e98d4"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
-// snapshot cannot silently move it. X4c moved it with cdcPromptSHA256.
-const cdcPromptWriteOffSHA256 = "c9e21e8f84d4f28b03b09783421ccde3eb6b01de711902bef2c4ae5bc1024a14"
+// snapshot cannot silently move it. X4c and Q2e moved it with cdcPromptSHA256.
+const cdcPromptWriteOffSHA256 = "d7e4215afeda11a5b30a1d2e4ad28341f4339556337799540c80dca1b6ae9b96"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
