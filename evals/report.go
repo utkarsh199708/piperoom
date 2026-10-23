@@ -81,7 +81,15 @@ type Summary struct {
 	CauseRetracted     int     `json:"cause_retracted"`
 	Misses             int     `json:"misses"`
 	RejectedAttempts   int     `json:"rejected_attempts"`
-	Errors             int     `json:"errors"`
+	// InvalidToolCalls are the tool calls the agent refused before running
+	// them (invalid_calls.go), not rejected_attempts. AllToolCalls is every
+	// tool call of the runs, and InvalidToolCallRate the first over the
+	// second (pooled over every tool call in Overall). All three are nil
+	// when a run was not checked (a report written before V9r).
+	InvalidToolCalls    *int     `json:"invalid_tool_calls,omitempty"`
+	AllToolCalls        *int     `json:"all_tool_calls,omitempty"`
+	InvalidToolCallRate *float64 `json:"invalid_tool_call_rate,omitempty"`
+	Errors              int      `json:"errors"`
 	// Usage holds the latency percentiles, tokens, cost and model routing
 	// (stats.go); nil until UsageCollector.Apply fills it.
 	Usage *UsageSummary `json:"usage,omitempty"`
@@ -194,6 +202,7 @@ func summarize(all []RunResult) Summary {
 		s.Misses += len(r.Misses)
 		s.RejectedAttempts += r.RejectedAttempts
 	}
+	summarizeInvalid(&s, rs)
 	n := float64(len(rs))
 	s.PassRate = float64(s.Passes) / n
 	s.RootCauseRate = float64(rootCauses) / n
@@ -276,6 +285,7 @@ func combine(ss []Summary) Summary {
 		out.RightActionRate = rightRate / float64(withFix)
 	}
 	out.MedianMSToCause, out.MedianStepsToCause = median(ms), median(steps)
+	combineInvalid(&out, ss)
 	return out
 }
 
@@ -361,12 +371,13 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	if r.Commit != "" || len(r.PromptHashes) > 0 {
 		fmt.Fprintf(&b, "commit `%s` · prompt %s\n\n", mdCell(orDefault(r.Commit)), mdCell(promptCell(r.PromptHashes)))
 	}
-	b.WriteString("| scenario | pass | score | root cause | layer | right action | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| scenario | pass | score | root cause | layer | right action | tool calls | calls to cause | time to cause ms / steps | retracted | misses | invalid tool calls | rejected fixes | errors |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	writeInvalidLine(&b, r.Overall, r.Results)
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
@@ -516,7 +527,7 @@ func writeJudgeLine(b *strings.Builder, j *JudgeStats) {
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {
 	if s.Runs == 0 && s.Infra > 0 {
 		// Not scored: say so instead of printing a 0/0 row of zeros.
-		fmt.Fprintf(b, "| %s | infra (%d, not scored) | - | - | - | - | - | - | - | - | - | - | %d |\n", mdCell(name), s.Infra, s.Infra)
+		fmt.Fprintf(b, "| %s | infra (%d, not scored) | - | - | - | - | - | - | - | - | - | - | - | %d |\n", mdCell(name), s.Infra, s.Infra)
 		return
 	}
 	pass := fmt.Sprintf("%d/%d", s.Passes, s.Runs)
@@ -527,9 +538,9 @@ func writeSummaryRow(b *strings.Builder, name string, s Summary) {
 	if s.MedianMSToCause >= 0 {
 		ttc = fmt.Sprintf("%.0f / %.1f", s.MedianMSToCause, s.MedianStepsToCause)
 	}
-	fmt.Fprintf(b, "| %s | %s | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %d | %d |\n",
+	fmt.Fprintf(b, "| %s | %s | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %s | %d | %d |\n",
 		mdCell(name), pass, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate, rightActionCell(s),
-		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, s.RejectedAttempts, s.Errors)
+		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, invalidCell(s), s.RejectedAttempts, s.Errors)
 }
 
 // matchedSoFar names the steps that met the earlier fix groups.
@@ -639,7 +650,12 @@ type Comparison struct {
 	Overall     CompareRow   `json:"overall"`
 	Regressions int          `json:"regressions"`
 	Tolerance   float64      `json:"score_tolerance"`
-	Notes       []string     `json:"notes,omitempty"`
+	// InvalidToolCalls compares invalid tool calls per run over the shared
+	// scenarios (invalid_calls.go). Its growth is not in Regressions, which
+	// counts scenarios; evalrun -fail-on-regression fails on it too, as
+	// evals-live fails on misses per run growing.
+	InvalidToolCalls InvalidCallsComparison `json:"invalid_tool_calls"`
+	Notes            []string               `json:"notes,omitempty"`
 }
 
 // CompareRow is one scenario in both reports.
@@ -689,6 +705,7 @@ func Compare(base, cand Report, tolerance float64) Comparison {
 	bo, co := base.Overall, cand.Overall
 	c.Overall = CompareRow{Scenario: "OVERALL", Base: &bo, Candidate: &co}
 	judgeRow(&c.Overall, tolerance)
+	c.InvalidToolCalls = compareInvalid(base, cand)
 
 	if n := cand.Overall.Infra; n > 0 {
 		c.Notes = append(c.Notes, fmt.Sprintf("%d candidate run(s) were infra failures (the model API refused them): left out of every rate and verdict, never a regression", n))
@@ -763,6 +780,7 @@ func (c Comparison) WriteMarkdown(w io.Writer) error {
 			mdCell(verdict))
 	}
 	fmt.Fprintf(&b, "\n%d scenario(s) regressed (score tolerance %.1f).\n", c.Regressions, c.Tolerance)
+	c.InvalidToolCalls.writeMarkdown(&b)
 	for _, n := range c.Notes {
 		fmt.Fprintf(&b, "\nNote: %s\n", n)
 	}
