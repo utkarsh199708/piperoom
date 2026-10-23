@@ -13,6 +13,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/forge"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -36,11 +37,11 @@ var errNoWriter = errors.New("no write credentials: the forge writer is not conf
 type Deps struct {
 	// Reader reads the repositories: required. Validate and Preview use it
 	// only; they never hold the writer.
-	Reader forge.ForgeReader
+	Reader clients.ForgeReader
 	// Writer opens the PR in Execute; nil (untyped) with write mode off, and
 	// then Execute refuses while the proposal is still created, previewed
 	// and approved (P0 ruling #606).
-	Writer forge.ForgeWriter
+	Writer clients.ForgeWriter
 	// WebHost is the forge's web host (config Forge.WebHost: github.com for
 	// api.github.com, else the GitHub Enterprise host); "" means github.com.
 	// The title and body may link to it.
@@ -62,11 +63,12 @@ func New(d Deps) actions.Action { return &action{d: d} }
 type action struct{ d Deps }
 
 var (
-	_ actions.Scoped    = (*action)(nil)
-	_ actions.Preview   = (*action)(nil)
-	_ Layered           = (*action)(nil)
-	_ Deferred          = (*action)(nil)
-	_ PullRequestOpener = (*action)(nil)
+	_ actions.Action            = (*action)(nil)
+	_ actions.Scoped            = (*action)(nil)
+	_ actions.Preview           = (*action)(nil)
+	_ actions.Layered           = (*action)(nil)
+	_ actions.Deferred          = (*action)(nil)
+	_ actions.PullRequestOpener = (*action)(nil)
 )
 
 func (a *action) Name() string { return Name }
@@ -77,7 +79,8 @@ func (a *action) Layer() string { return "" }
 
 // Deferred marks the action: its Execute only opens a PR that people merge
 // and deploy later. Never policy-approved; a proposal holding it holds only
-// Deferred steps, at most MaxDeferredSteps (the room service enforces both).
+// Deferred steps, at most actions.MaxDeferredSteps (the room service
+// enforces both).
 func (a *action) Deferred() {}
 
 func (a *action) Describe() string {
@@ -296,35 +299,24 @@ func (a *action) change(ctx context.Context, r resolved, i int, c change) (planF
 // branchFor is the branch Execute writes, or a placeholder before the step
 // has its ids (a preview of a proposal being created).
 func branchFor(ctx context.Context) string {
-	if s, ok := StepFrom(ctx); ok {
+	if s, ok := actions.StepFrom(ctx); ok {
 		return forge.FixBranch(s.RoomID, s.ProposalID, s.StepIndex)
 	}
 	return forge.FixBranchPrefix + "<room>-<proposal>-<step>"
 }
 
 // Preview implements actions.Preview: the PreviewResult text of design §6.3
-// with the "base branch check" dry run. The full diff is PreviewDiff's (the
-// PreviewResult.Diff field of Q7-0c has not landed). Reader only.
+// with the "base branch check" dry run, and in Diff the step's whole change:
+// every file's unified diff, redacted line by line, the hosts the added
+// lines name and the risk warnings (design §5.3 DiffPreview). Reader only.
 func (a *action) Preview(ctx context.Context, raw json.RawMessage) (actions.PreviewResult, error) {
-	res, _, err := a.preview(ctx, raw)
-	return res, err
+	res, dp, err := a.preview(ctx, raw)
+	if err != nil {
+		return actions.PreviewResult{}, err
+	}
+	res.Diff = &dp
+	return res, nil
 }
-
-// PreviewDiff is Preview plus the step's whole change: every file's unified
-// diff, redacted line by line, the hosts the added lines name and the risk
-// warnings (design §5.3 DiffPreview). Until Q7-0c adds PreviewResult.Diff
-// the room service calls it through the DiffPreviewer interface.
-func (a *action) PreviewDiff(ctx context.Context, raw json.RawMessage) (actions.PreviewResult, DiffPreview, error) {
-	return a.preview(ctx, raw)
-}
-
-// DiffPreviewer is implemented by an action whose preview has a diff; the
-// local stand-in for PreviewResult.Diff (design §5.3).
-type DiffPreviewer interface {
-	PreviewDiff(ctx context.Context, raw json.RawMessage) (actions.PreviewResult, DiffPreview, error)
-}
-
-var _ DiffPreviewer = (*action)(nil)
 
 func (a *action) preview(ctx context.Context, raw json.RawMessage) (actions.PreviewResult, DiffPreview, error) {
 	pl, err := a.check(ctx, raw)
@@ -415,29 +407,31 @@ func (a *action) Execute(ctx context.Context, raw json.RawMessage) (string, erro
 	return s, err
 }
 
-// ExecutePullRequest is design §6.4: it needs the step's ids (StepFrom) and
-// the writer, validates again (scope and reads), builds the request from
-// params alone, never from the preview, and opens the PR. A retried call
+// ExecutePullRequest implements actions.PullRequestOpener, design §6.4: it
+// needs the step's ids (actions.StepFrom, which the executor's
+// actions.WithStep fills) and the writer, validates again (scope and reads),
+// builds the request from params alone, never from the preview, and opens
+// the PR. A retried call
 // writes the same branch and tree, and the writer returns the PR it opened.
-func (a *action) ExecutePullRequest(ctx context.Context, raw json.RawMessage) (string, PullRequestRef, error) {
-	step, ok := StepFrom(ctx)
+func (a *action) ExecutePullRequest(ctx context.Context, raw json.RawMessage) (string, events.PullRequestRef, error) {
+	step, ok := actions.StepFrom(ctx)
 	if !ok || step.RoomID == "" || step.ProposalID == "" || step.StepIndex < 0 {
-		return "", PullRequestRef{}, a.fail(errors.New("the executor gave no proposal step (StepFrom): the fix branch would have no name"))
+		return "", events.PullRequestRef{}, a.fail(errors.New("the executor gave no proposal step (StepFrom): the fix branch would have no name"))
 	}
 	if a.d.Writer == nil {
 		// Scope first, so a refused step says why; the writer is never needed for that.
 		if _, err := a.scoped(ctx, raw); err != nil {
-			return "", PullRequestRef{}, a.fail(err)
+			return "", events.PullRequestRef{}, a.fail(err)
 		}
-		return "", PullRequestRef{}, a.fail(errNoWriter)
+		return "", events.PullRequestRef{}, a.fail(errNoWriter)
 	}
 	pl, err := a.check(ctx, raw)
 	if err != nil {
-		return "", PullRequestRef{}, a.fail(err)
+		return "", events.PullRequestRef{}, a.fail(err)
 	}
 	branch := forge.FixBranch(step.RoomID, step.ProposalID, step.StepIndex)
 	if !forge.ValidBranchName(branch) {
-		return "", PullRequestRef{}, a.fail(errors.New("the room and proposal ids do not make a valid branch name"))
+		return "", events.PullRequestRef{}, a.fail(errors.New("the room and proposal ids do not make a valid branch name"))
 	}
 	req := forge.PullRequestRequest{
 		BaseSHA:       pl.p.BaseSHA,
@@ -455,26 +449,26 @@ func (a *action) ExecutePullRequest(ctx context.Context, raw json.RawMessage) (s
 	pr, err := a.d.Writer.OpenPullRequest(wctx, pl.ref, req)
 	switch {
 	case errors.Is(err, forge.ErrBaseMoved):
-		return "", PullRequestRef{}, a.fail(fmt.Errorf("the base branch changed a file of this step since the agent read it at %s; nothing was written: read the files again and propose again: %w", short(pl.p.BaseSHA), err))
+		return "", events.PullRequestRef{}, a.fail(fmt.Errorf("the base branch changed a file of this step since the agent read it at %s; nothing was written: read the files again and propose again: %w", short(pl.p.BaseSHA), err))
 	case errors.Is(err, forge.ErrBranchExists):
-		return "", PullRequestRef{}, a.fail(fmt.Errorf("branch %s already holds a different change; nothing was written: %w", branch, err))
+		return "", events.PullRequestRef{}, a.fail(fmt.Errorf("branch %s already holds a different change; nothing was written: %w", branch, err))
 	case err != nil:
-		return "", PullRequestRef{}, a.fail(fmt.Errorf("open the pull request: %w", err))
+		return "", events.PullRequestRef{}, a.fail(fmt.Errorf("open the pull request: %w", err))
 	}
-	ref := PullRequestRef{Repo: pl.ref.ID, Number: pr.Number, URL: pr.URL, Branch: branch, HeadSHA: pr.HeadSHA}
+	ref := events.PullRequestRef{Repo: pl.ref.ID, Number: pr.Number, URL: pr.URL, Branch: branch, HeadSHA: pr.HeadSHA}
 	return fmt.Sprintf("opened pull request #%d: %s (branch %s into %s). Nothing changes until a reviewer merges it.", pr.Number, pr.URL, branch, pl.ref.Base), ref, nil
 }
 
 // stepOrZero is the step in ctx, or a zero StepRef for a preview made
 // before the step has ids.
-func stepOrZero(ctx context.Context) StepRef {
-	s, _ := StepFrom(ctx)
+func stepOrZero(ctx context.Context) actions.StepRef {
+	s, _ := actions.StepFrom(ctx)
 	return s
 }
 
 // footer is the fixed text after the body (design §6.5), which the approver
 // saw in the preview.
-func footer(publicURL string, s StepRef, layer string) string {
+func footer(publicURL string, s actions.StepRef, layer string) string {
 	room, prop := s.RoomID, s.ProposalID
 	if room == "" {
 		room, prop = "<room>", "<proposal>"

@@ -108,12 +108,6 @@ func TestBlobSHA(t *testing.T) {
 	}
 }
 
-func TestFileChangeString(t *testing.T) {
-	if s := (FileChange{Path: "a", Content: []byte("secret=1")}).String(); strings.Contains(s, "secret") {
-		t.Fatalf("content printed: %s", s)
-	}
-}
-
 // The client and owners.yaml apply one path rule set: the same inputs give
 // the same answer from forge.CheckRepoPath and owners.CheckRepoPath, and a
 // refusal from either matches both packages' ErrRepoPathDenied. Before they

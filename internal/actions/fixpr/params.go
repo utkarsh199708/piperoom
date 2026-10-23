@@ -254,15 +254,10 @@ func checkChange(i int, c change) error {
 	return nil
 }
 
-// checkPath runs both copies of the fixed path rules: the forge client's
-// (design §5.1) and owners.yaml's (Q7a, which also denies any .git* segment).
-// Until Q7-0c makes them one function, a path passes only when both agree.
-func checkPath(p string) error {
-	if err := forge.CheckRepoPath(p, false); err != nil {
-		return err
-	}
-	return owners.CheckRepoPath(p, false)
-}
+// checkPath runs the fixed path rules: forge.CheckRepoPath applies both the
+// contract's clients.CheckRepoPath (design §5.1) and owners.yaml's (Q7a, which
+// also denies any .git* segment), so a path passes only when both agree.
+func checkPath(p string) error { return forge.CheckRepoPath(p, false) }
 
 // checkAppliedWhen is rule 9 without the pipeline (the connector's scope is
 // in inScope).

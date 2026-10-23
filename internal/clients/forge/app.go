@@ -17,7 +17,6 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -192,14 +191,11 @@ func (t *tokens) store(key tokenKey, c cachedToken) {
 }
 
 // token returns an installation token narrowed to repo and s, minting one
-// when none is cached or the cached one expires within tokenRefresh. A repo
-// that names its web host (RepoRef.Host, filled from repos[].url) is refused
-// when it is not this forge's: the App's token is never asked for, and no
-// request is sent, for a repository owners.yaml placed on another host.
+// when none is cached or the cached one expires within tokenRefresh.
+// clients.RepoRef names no host: that every repos[].url is on this forge's
+// web host is owners.CheckRepoHosts', run by cmd/server at start
+// (docs/design/fix-pr.md §5.6).
 func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secret, error) {
-	if err := c.checkHost(repo); err != nil {
-		return "", err
-	}
 	key := tokenKey{repo: repo.Owner + "/" + repo.Name, scope: s}
 	if tok, ok := c.tok.cached(key, c.now()); ok {
 		return tok, nil
@@ -241,15 +237,6 @@ func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secre
 	t := cachedToken{tok: netsec.Secret(out.Token), expires: out.ExpiresAt}
 	c.tok.store(key, t)
 	return t.tok, nil
-}
-
-// checkHost refuses a RepoRef whose Host is set and is not this forge's web
-// host (case-insensitive). owners.Repo.Ref always sets Host from the url.
-func (c *Client) checkHost(repo RepoRef) error {
-	if repo.Host != "" && !strings.EqualFold(repo.Host, c.webHost) {
-		return fmt.Errorf("%w: repo %q is on host %q, but the forge is %q", ErrRefused, oneLine(repo.ID, 80), oneLine(repo.Host, 100), c.webHost)
-	}
-	return nil
 }
 
 // botLogin returns the login of the App's bot user ("<slug>[bot]"), read
