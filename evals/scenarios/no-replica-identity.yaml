@@ -20,8 +20,8 @@
 #   default also restores writes (public.orders has a primary key), and devctl fix uses FULL.
 #   The ALTER takes a brief ACCESS EXCLUSIVE lock and FULL adds the old row to the WAL of every
 #   UPDATE and DELETE, which the action's preview sizes from the table size.
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not score expect.fix.
+#   Graded since Q2h (C6): expect.fix and fix_targets (the table only: mode full and mode
+#   default both restore writes, so the target leaves mode free).
 #   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector -
 #     nothing failed in Connect; a restart re-reads the same table and the application's UPDATE
 #     still fails.
@@ -449,9 +449,21 @@ expect:
     # states it with a cause term stays out of the ambiguous set (no negation).
     # No bare "no key": a false "the table has no primary key" story would pass
     # (public.orders has one: has_primary_key=yes).
-    - [nothing, not recorded, no old key, omits the old tuple]
-  # The wrong stories of a source write failure: the pipeline stages are healthy.
+    # No bare "nothing" either: "Nothing in the pipeline failed" is no cause.
+    - [identity nothing, identity is nothing, identity was nothing, to nothing, identity none, identity is none,
+       to none, not recorded, no old key, omits the old tuple, changed the replica identity,
+       changed its replica identity, replica identity was changed, replica identity changed]
+  # The wrong stories of a source write failure: the pipeline stages are
+  # healthy, the table has a primary key and the app is not at fault.
   root_cause_forbidden:
+    - ['no primary key']
+    - ['lacks a primary key']
+    - ['missing primary key']
+    - ['missing a primary key']
+    - [orm]
+    - ['bug in the app']
+    - ['app bug']
+    - ['redeploy the app']
     - ['task failed']
     - ['connector failed']
     - ['consumer rejected']
@@ -478,5 +490,8 @@ expect:
     - about: root_cause
       facts: [f_replica_identity_nothing]
   evidence_tools: [source_table_replication]
+  fix: [[pg_set_replica_identity]]
+  fix_targets:
+    pg_set_replica_identity: {table: public.orders}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
   max_tool_calls: 12

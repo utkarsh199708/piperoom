@@ -55,11 +55,15 @@
 #     matches <class>, available connectors are: ...").
 #   - internal/tools/kafkatools/validate_config_tool.go: on a worker without the plugin,
 #     PluginConfigDef and ValidateConfig both fail for the class, so connect_validate_config
-#     returns Connect's error before any config key is judged. The eval harness
-#     cannot replay that tool yet (C6's Q6d adds the definition-only Connect client), so this
-#     file proves the missing plugin from connect_status and connect_config; when Q6d lands, add
-#     the connect_validate_config read (input {class}) with that error and count it as the probe
-#     that separates "plugin absent" from "config wrong".
+#     returns Connect's error before any config key is judged. Since Q6d the harness replays it:
+#     the recording below (input {class}) is that error as internal/clients/connect reports it.
+#     On Kafka Connect 3.6.1 the validate answer is HTTP 500, not 404: AbstractHerder runs the
+#     validation in a future, Plugins.newConnector throws ConnectException("Failed to find any
+#     class ..."), ConnectorPluginsResource.validateConfigs does not catch the ExecutionException
+#     and ConnectExceptionMapper maps it to 500 with the cause's toString (checked against the
+#     3.6.1 sources in the Q batch 4 review; GET /connector-plugins/{class}/config is the 404
+#     "Unknown plugin"). It is an error result, so it is not a fact: connect_status and
+#     connect_config still prove the missing plugin.
 #   - internal/tools/kafkatools/connect_tools.go: connect_list_connectors and connect_status
 #     print the type Connect reports, here "unknown" (internal/clients/connect passes it
 #     through).
@@ -387,6 +391,9 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    error: 'connect_validate_config: io.debezium.connector.postgresql.PostgresConnector: connect: PUT /connector-plugins/io.debezium.connector.postgresql.PostgresConnector/config/validate: status 500: {"error_code":500,"message":"org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name=''org.apache.kafka.connect.mirror.MirrorCheckpointConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorHeartbeatConnector, name=''org.apache.kafka.connect.mirror.MirrorHeartbeatConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorSourceConnector, name=''org.apache.kafka.connect.mirror.MirrorSourceConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}"}'
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: connect_status
     error: 'connect: GET /connectors/<name>/status: not found'
@@ -421,13 +428,29 @@ inputs:
 
 expect:
   root_cause:
-    - [plugin]
-    - [missing, not installed, not found, absent, removed, not loaded, not on the worker, classpath]
-  # The wrong stories of a connector that cannot be loaded.
+    # Not a bare "plugin": Connect's own trace says "PluginDesc{...}", and a
+    # paste of it is no diagnosis.
+    - [plugin path, plugin jar*, plugin folder, plugin dir*, connector plugin, postgres plugin, debezium plugin,
+       plugin is, plugin was, plugin isn, plugin wasn]
+    # No "classpath": the trace lists location='classpath' for every plugin.
+    - [missing, not installed, isn t installed, not found, absent, removed, not loaded, not on the worker,
+       no longer contains]
+  # The wrong stories of a connector that cannot be loaded: the config, the
+  # role and the renamed key are all fine.
   root_cause_forbidden:
     - ['schema change']
     - ['database server name']
-    - ['topic prefix']
+    - ['topic prefix is missing']
+    - ['missing topic prefix']
+    - ['topic prefix is required']
+    - ['config is missing']
+    - ['config lacks']
+    - ['missing a key']
+    - ['missing key']
+    - ['database hostname']
+    - ['database user']
+    - [privilege*]
+    - [grant*]
     - ['permission denied']
     - ['slot was lost']
     - ['disk full']

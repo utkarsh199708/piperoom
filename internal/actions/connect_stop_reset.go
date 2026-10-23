@@ -152,7 +152,7 @@ func (a *stopConnector) Execute(ctx context.Context, raw json.RawMessage) (strin
 	// agent must still be able to propose (Validate) and preview.
 	lw, ok := a.d.Connect.(connect.ConnectLifecycleWriter)
 	if !ok {
-		return "", fmt.Errorf("actions: stop %s: connect client does not support StopConnector (connect.ConnectLifecycleWriter); is write mode on?", name)
+		return "", fmt.Errorf("actions: stop %s: %w", name, ErrNoLifecycleWriter)
 	}
 	// A stop of a STOPPED connector would change nothing; say so instead. A
 	// failed read is not a reason to skip the write.
@@ -584,7 +584,7 @@ func (a *resetSourceOffsets) Execute(ctx context.Context, raw json.RawMessage) (
 	defer cancel()
 	lw, ok := a.d.Connect.(connect.ConnectLifecycleWriter)
 	if !ok {
-		return "", fmt.Errorf("actions: %s: connect client does not support offset changes (connect.ConnectLifecycleWriter); is write mode on?", ResetSourceOffsetsName)
+		return "", fmt.Errorf("actions: %s: %w", ResetSourceOffsetsName, ErrNoLifecycleWriter)
 	}
 	st, err := a.d.Connect.Status(ctx, p.Connector)
 	if err != nil {

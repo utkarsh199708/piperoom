@@ -10,6 +10,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/wiring"
+	"piperoom/internal/wiring/netwire"
 )
 
 // roomKind returns the run's Alert.PipelineKind, as the room service derives
@@ -62,7 +63,7 @@ func listToolsRegistry(own *owners.Owners, fakeTools bool) (*tools.Registry, err
 		}
 		return reg, nil
 	}
-	if err := wiring.RegisterTools(reg, actions.NewRegistry(), &wiring.Wired{Owners: own}); err != nil {
+	if err := wiring.RegisterTools(reg, actions.NewRegistry(), &wiring.Wired{Owners: own, ProbeTools: netwire.Register}); err != nil {
 		return nil, err
 	}
 	return reg, nil

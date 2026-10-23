@@ -18,15 +18,15 @@
 #
 # Expected label: the tool that shows the cause is connect_worker_info (Q3a): it lists the worker
 #   group's internal topics and flags "an internal topic that is not compacted" - here connect-offsets
-#   with cleanup_policy=delete. The eval harness cannot replay that tool yet: kafkatools adds it only
-#   for a Kafka client that implements the optional ConnectClusterReader, and evals.LiveTools() has
-#   no such definition-only client (C6's Q6d adds the Q3a reader), so a recording naming it fails
-#   -validate. kafka_topic_config reads the pipeline's CDC topics only, not connect-offsets. Until
-#   Q6d the file proves the re-snapshot from debezium_snapshot_progress / debezium_metrics, the
-#   jump in kafka_topic_offsets and the consumer lag, and the offsets topic's policy from the
-#   kafka-connect owner's comment (the Terraform module defaults) together with kafka_topic_config
-#   of the CDC topic (the module's default: cleanup.policy=delete, retention.ms=86400000). When Q6d
-#   lands, add the connect_worker_info recording with the flag and make it the required fact.
+#   with cleanup_policy=delete. Since Q6d the harness replays it (evals.LiveTools() has a
+#   definition-only ConnectClusterReader): the connect_worker_info recording below is the tool's
+#   real output over the scenario's values (Q batch 4 review), its finding is the required fact
+#   f_offsets_not_compacted and the tool an evidence tool. kafka_topic_config reads the pipeline's
+#   CDC topics only, not connect-offsets. The other replayed tools agree: the re-snapshot in
+#   debezium_snapshot_progress / debezium_metrics, the jump in kafka_topic_offsets and the consumer
+#   lag, and the kafka-connect owner's comment (the Terraform module defaults) together with
+#   kafka_topic_config of the CDC topic (the module's default: cleanup.policy=delete,
+#   retention.ms=86400000).
 #
 # Why the worker started at all: Kafka Connect checks at startup that its internal topics use
 #   cleanup.policy=compact and refuses to start otherwise, but it skips the check when it cannot
@@ -214,6 +214,79 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group connect-cluster (Stable): 3 workers; runs the pipeline's connectors
+        - worker 10.0.4.11 http://connect-1:8083/ leader; runs pg-orders-connector
+        - worker 10.0.4.12 http://connect-2:8083/
+        - worker 10.0.4.13 http://connect-3:8083/
+      Internal topics (name match):
+      - config connect-configs: 1 partitions, RF 3, cleanup compact
+      - offset connect-offsets: 25 partitions, RF 3, cleanup delete
+      - status connect-status: 5 partitions, RF 3, cleanup compact
+      Findings:
+      - connect-offsets has cleanup.policy=delete; Connect's internal topics must be compacted, or configs, offsets and status are deleted after retention
+      Plugins: Kafka 3.6.1; 2 plugins (1 source, 1 converter) (connect_plugins lists them)
+      Log levels: root INFO
+    data:
+      findings:
+        - connect-offsets has cleanup.policy=delete; Connect's internal topics must be compacted, or configs, offsets and status are deleted after retention
+      groups:
+        - group_id: connect-cluster
+          state: Stable
+          why: runs the pipeline's connectors
+          workers:
+            - connectors:
+                - pg-orders-connector
+              host: 10.0.4.11
+              leader: true
+              member_id: connect-1-4f1c
+              url: http://connect-1:8083/
+            - host: 10.0.4.12
+              member_id: connect-2-9a2e
+              url: http://connect-2:8083/
+            - host: 10.0.4.13
+              member_id: connect-3-c7d0
+              url: http://connect-3:8083/
+      internal_topics:
+        - brokers: 3
+          cleanup_policy: compact
+          min_insync_replicas: 0
+          name: connect-configs
+          partitions: 1
+          replication_factor: 3
+          role: config
+        - brokers: 3
+          cleanup_policy: delete
+          min_insync_replicas: 0
+          name: connect-offsets
+          partitions: 25
+          replication_factor: 3
+          role: offset
+        - brokers: 3
+          cleanup_policy: compact
+          min_insync_replicas: 0
+          name: connect-status
+          partitions: 5
+          replication_factor: 3
+          role: status
+      kafka_version: 3.6.1
+      loggers:
+        - level: INFO
+          logger: root
+      plugin_count: 2
+      plugins:
+        - class: io.debezium.connector.postgresql.PostgresConnector
+          type: source
+          version: 2.5.4.Final
+        - class: io.confluent.connect.avro.AvroConverter
+          type: converter
+          version: 7.5.3
+      plugins_by_type:
+        converter: 1
+        source: 1
+      topics_source: name match
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -286,9 +359,13 @@ expect:
     - id: f_no_ddl
       tool: pg_recent_ddl
       match: [no ddl]
+    - id: f_offsets_not_compacted
+      tool: connect_worker_info
+      match: [connect offsets, cleanup policy delete]
+      required: true
   claims:
     - about: root_cause
       facts: [f_snapshot_completed, f_snapshot_rows, f_module_default_delete]
-  evidence_tools: [debezium_snapshot_progress, kafka_topic_config]
+  evidence_tools: [debezium_snapshot_progress, kafka_topic_config, connect_worker_info]
   forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
   max_tool_calls: 14

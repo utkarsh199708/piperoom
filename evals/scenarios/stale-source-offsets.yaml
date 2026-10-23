@@ -20,22 +20,18 @@
 #   1. connect_stop_connector   {connector: pg-orders-connector}
 #   2. connect_reset_source_offsets {connector: pg-orders-connector} to empty (no position)
 # then a resume: with no stored offset Debezium snapshots the new database (snapshot.mode initial)
-# and streams from the new slot. Both actions are Q5b's (PR #873, not merged): a running connector
+# and streams from the new slot. Both actions are Q5b's (PR #873): a running connector
 # needs the stop step first in the same proposal, and the reset's Preview shows the stored offsets
 # now (the rollback). The tool that shows the cause is connect_source_offsets (Q5a): partition
 # {"server":"pg"}, offset {"lsn": <the orders database's LSN>}.
 #
-# Why the label is not graded yet: evals.LiveActions registers neither Q5b action and
-#   evals.LiveTools() does not register connect_source_offsets (kafkatools adds it only for a
-#   Connect client that implements SourceOffsetReader; the replay has none). -validate refuses an
-#   unknown tool in recordings and an unknown action in expect.fix or forbidden_actions, so the two
-#   actions sit in this header, the description and the README, and expect has no fix. C6's Q6d
-#   ("replay for the ... Q5a readers; writers as recording no-ops") adds both; then add
+# Graded since Q6d: evals.LiveActions registers the Q5b actions on replay clients (writes are
+#   recorded no-ops) and evals.LiveTools() offers connect_source_offsets, so expect has
 #     fix: [[connect_stop_connector], [connect_reset_source_offsets]]
-#     fix_targets: {connect_stop_connector: {connector: pg-orders-connector},
-#                   connect_reset_source_offsets: {connector: pg-orders-connector}}
-#   and a connect_source_offsets recording (input {connector: pg-orders-connector}) as the required
-#   fact. Until then the file proves the stale offset from connect_status (the task asks for
+#   with fix_targets on the connector, and the connect_source_offsets recording (input {connector:
+#   pg-orders-connector}; LSN{3D/4A11C920} = 263235684640) is the required fact f_stored_offset.
+#   connect_config's recording carries the shown config as data, which the reset's Preview reads
+#   (Q batch 4 review). The other replayed tools agree: connect_status (the task asks for
 #   LSN{3D/4A11C920}, "no longer available"), connect_config (database.dbname and slot.name are
 #   devctl_orders_v2) and pg_replication_slots (the new slot, the old one now outside the pipeline).
 #
@@ -163,6 +159,16 @@ recordings:
       slot.name: devctl_orders_v2
       table.include.list: public.orders
       topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: devctl_orders_v2
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: devctl_orders_v2
+      table.include.list: public.orders
+      topic.prefix: pg
   - tool: pg_replication_slots
     summary: |
       slot devctl_orders_v2: active=false retained=56.0 KiB wal_status=reserved
@@ -220,6 +226,16 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=263235684640, lsn_proc=263235684640, ts_usec=1792735512000000, txId=918223
+    data:
+      connectors:
+        - connector: pg-orders-connector
+          offsets:
+            - partition: {server: pg}
+              offset: {lsn: 263235684640, lsn_proc: 263235684640, ts_usec: 1792735512000000, txId: 918223}
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -281,9 +297,17 @@ expect:
     - id: f_consumer_ok
       tool: kafka_consumer_lag
       match: [stable, total lag 0]
+    - id: f_stored_offset
+      tool: connect_source_offsets
+      match: [partition server pg, lsn 263235684640]
+      required: true
   claims:
     - about: root_cause
       facts: [f_task_failed_lsn, f_repointed]
-  evidence_tools: [connect_status, connect_config]
+  evidence_tools: [connect_status, connect_config, connect_source_offsets]
+  fix: [[connect_stop_connector], [connect_reset_source_offsets]]
+  fix_targets:
+    connect_stop_connector: {connector: pg-orders-connector}
+    connect_reset_source_offsets: {connector: pg-orders-connector}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, connect_snapshot_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

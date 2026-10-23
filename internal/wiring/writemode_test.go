@@ -170,9 +170,15 @@ var refusingAdapters = map[reflect.Type]bool{
 	reflect.TypeOf(readOnlyConnectDryRun{}):        true,
 	reflect.TypeOf(readOnlyConnectValidate{}):      true,
 	reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
-	reflect.TypeOf(readOnlyRegistry{}):             true,
-	reflect.TypeOf(readOnlyRegistryDryRun{}):       true,
-	reflect.TypeOf(noRegistry{}):                   true,
+	// readConnect's values with the Q-wave reads, which the Q5 lifecycle
+	// actions hold with write mode off (Q5d).
+	reflect.TypeOf(readOnlyConnectQ{}):              true,
+	reflect.TypeOf(readOnlyConnectTasksQ{}):         true,
+	reflect.TypeOf(readOnlyConnectValidateQ{}):      true,
+	reflect.TypeOf(readOnlyConnectValidateTasksQ{}): true,
+	reflect.TypeOf(readOnlyRegistry{}):              true,
+	reflect.TypeOf(readOnlyRegistryDryRun{}):        true,
+	reflect.TypeOf(noRegistry{}):                    true,
 }
 
 // readOnlyKafkaViews are the only types reachable from the actions with write
@@ -205,7 +211,7 @@ var adminWriterIfaces = []reflect.Type{
 // SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}, adminWriterIfaces...)
+	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](), ifaceOf[connect.ConnectLifecycleWriter]()}, adminWriterIfaces...)
 	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
@@ -225,7 +231,10 @@ func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) 
 				t.Errorf("%s: an action can reach %s, which implements %s", name, ty, w)
 			}
 		}
-		for _, m := range []string{"Resume", "UpdateConfig"} {
+		// Resume and UpdateConfig are the Connect writes the actions assert
+		// for; the rest are the Q5 lifecycle writes (Q5d), any one of which
+		// is enough.
+		for _, m := range []string{"Resume", "UpdateConfig", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
 			if _, ok := ty.MethodByName(m); ok {
 				t.Errorf("%s: an action can reach %s, which has the write method %s", name, ty, m)
 			}
@@ -336,6 +345,25 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 				}
 			}
 			assertSourceActionsRefuse(t, pa.Actions, tools.WithPipeline(ctx, pipe), sourceActionParams("pa"))
+
+			// The Q5 lifecycle actions too (Q5d, P0 ruling #606): listed in
+			// every set so the agent can propose a stop, an offsets reset, a
+			// create or a delete, and each refuses at Execute for want of a
+			// lifecycle writer (none is reachable, assertNoWriterReachable
+			// above) before any Connect call.
+			for _, s := range st.All() {
+				for _, n := range lifecycleActionNames {
+					if _, ok := s.Actions.Get(n); !ok {
+						t.Errorf("set %q: %s not registered with write mode off", s.Name, n)
+					}
+				}
+			}
+			assertLifecycleExecuteRefuses(t, pa.Actions, tools.WithPipeline(ctx, pipe), "pa-connector")
+			for _, m := range []string{"StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
+				if sp.saw(m) {
+					t.Errorf("lifecycle write %s reached the client with write mode off", m)
+				}
+			}
 		})
 	}
 }

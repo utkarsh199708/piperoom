@@ -140,9 +140,9 @@ func RegisterP3Actions(areg *actions.Registry, d P3ActionDeps) error {
 func registerP3Actions(areg *actions.Registry, w *Wired) error {
 	sw, kw := actionWriters(w)
 	planner, records := actionKafkaReads(w)
-	// readConnect is nil (a nil interface) without a Connect client, and an
+	// readConnectBase is nil (a nil interface) without a Connect client, and an
 	// interface conversion keeps it nil.
-	var connReader clients.ConnectReader = readConnect(w)
+	var connReader clients.ConnectReader = readConnectBase(w)
 	return RegisterP3Actions(areg, P3ActionDeps{
 		Connect: connReader, Source: w.Source, Planner: planner, Records: records,
 		SourceWriter: sw, KafkaWriter: kw, Sink: w.Warehouse,

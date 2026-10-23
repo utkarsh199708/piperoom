@@ -80,6 +80,42 @@ func (ProcessLocation) Dial(ctx context.Context, network, address string) (net.C
 	return d.DialContext(ctx, network, address)
 }
 
+// remoteDialGuard is the stricter policy for an address read from remote
+// data (Endpoint.Remote): private ranges stay allowed, where real source
+// databases and brokers live, but loopback is refused.
+var remoteDialGuard = connprobe.Guard{AllowPrivate: true}
+
+// remoteLocation wraps a Location for a Remote endpoint. Dial resolves the
+// host itself, refuses the dial if any address remoteDialGuard blocks, and
+// dials the checked IP, so a second DNS answer cannot swap it.
+type remoteLocation struct{ inner Location }
+
+func (r remoteLocation) Lookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	return r.inner.Lookup(ctx, host)
+}
+
+func (r remoteLocation) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("nettools: dial guard: %w", err)
+	}
+	var addrs []netip.Addr
+	if a, perr := netip.ParseAddr(host); perr == nil {
+		addrs = []netip.Addr{a}
+	} else if addrs, err = r.inner.Lookup(ctx, host); err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("nettools: %s has no addresses", host)
+	}
+	for _, a := range addrs {
+		if err := remoteDialGuard.CheckAddr(a); err != nil {
+			return nil, fmt.Errorf("nettools: refusing dial to an address from remote config: %w", err)
+		}
+	}
+	return r.inner.Dial(ctx, network, net.JoinHostPort(addrs[0].String(), port))
+}
+
 // checkProcessDial refuses a resolved address processDialGuard blocks.
 func checkProcessDial(address string) error {
 	host, _, err := net.SplitHostPort(address)
@@ -147,6 +183,13 @@ func (p Prober) ProbeLabel(ctx context.Context, src TargetSource, pl owners.Pipe
 }
 
 func (p Prober) probeEndpoint(ctx context.Context, e Endpoint) []Check {
+	if e.Remote {
+		inner := p.Loc
+		if inner == nil {
+			inner = ProcessLocation{}
+		}
+		p.Loc = remoteLocation{inner: inner}
+	}
 	host, _, err := net.SplitHostPort(e.Addr)
 	if err != nil || host == "" {
 		return []Check{{

@@ -24,6 +24,7 @@ import (
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
+	"piperoom/internal/wiring/netwire"
 )
 
 func main() {
@@ -162,7 +163,10 @@ func run(o runOptions) (err error) {
 		// (docs/design/tenancy.md). No other pipeline's credentials are read.
 		// Without -approve-all nothing runs a fix, so no write client is
 		// built whatever PIPEROOM_WRITE_MODE says.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}, ReadOnly: !o.ApproveAll})
+		// net_probe is registered through the set's hook (netwire: wiring
+		// cannot import nettools).
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}, ReadOnly: !o.ApproveAll,
+			Prepare: func(w *wiring.Wired) { w.ProbeTools = netwire.Register }})
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}

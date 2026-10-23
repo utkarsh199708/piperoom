@@ -712,6 +712,24 @@ plugin.
   compose ops. `internal/testenv/setupstack/setup_integration_test.go` also proves the
   compose validator refuses a `privileged: true` file before `compose_up`.
 
+## Setup breaks: MongoDB (`mongo` profile)
+
+Two more `setup-break` / `setup-fix` pairs, on the opt-in `mongo` profile (dev/mongo/README.md) instead of the
+Postgres pipeline. Start the profile first (`docker compose -f dev/docker-compose.yml --profile mongo up -d --wait
+mongo`); the commands, the lock and the idempotence are the same as above. Each check is the
+`internal/clients/mongodb` read the MongoDB setup source makes, connected as the capture user `piperoom_cdc`.
+
+| Scenario | Named check | What the break does | What the client reports |
+|---|---|---|---|
+| `standalone-mongod` | `mongo-change-streams` | recreates the `mongo` service without `--replSet rs0` (a Compose override; same start script, keyFile and data volume) | `ChangeStreamSupport`: not supported, "standalone mongod has no change streams"; `Settings`: `server_type=standalone` |
+| `no-oplog-role` | `mongo-oplog-read` | `revokeRolesFromUser('piperoom_cdc', [{role: 'read', db: 'local'}])` as the root user | `RoleInfo("admin.piperoom_cdc")`: `replication=false`, the user cannot read `local.oplog.rs` (`readAnyDatabase` never covers `local`) |
+
+**Fixes:** recreate the service from the base file (`up -d --no-deps --wait mongo`): the member's replica set
+config is still on the volume, so it elects itself primary again; grant `read` on `local` back. Measured on Linux:
+the standalone break takes about 4 s and its fix about 8 s; the role pair takes under 1 s each.
+`go test -tags integration ./cmd/devctl -run TestIntegrationMongoSetupBreaks` runs both pairs on the profile, and
+skips when it is not up.
+
 ## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`
 
 Two breaks where orders are missing from `analytics.orders` while order-sync runs at lag 0, each ended by one X2

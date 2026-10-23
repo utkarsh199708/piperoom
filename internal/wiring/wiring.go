@@ -25,6 +25,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/logtools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
@@ -69,18 +70,56 @@ type Wired struct {
 	Builder topology.Builder
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
+	// WorkerLogs reads the Connect workers' logs for connect_worker_logs
+	// (Q3c). Nil leaves the tool registered and answering "not configured".
+	// Like Rooms, the caller sets it after Open, before RegisterTools: the
+	// Loki settings (WORKER_LOGS_LOKI_URL, _SELECTOR, _TOKEN, _USER, _ORG_ID)
+	// are not in internal/config yet (Q3e contract change request), so
+	// nothing in production sets it today.
+	WorkerLogs logtools.Reader
+	// ConnectMetricsPrefix is the metric name prefix of connect_worker_metrics
+	// (CONNECT_METRICS_PREFIX, Q3b); "" is
+	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller, as
+	// WorkerLogs, until internal/config has it.
+	ConnectMetricsPrefix string
+	// ConnectInternalTopics is CONNECT_INTERNAL_TOPICS (Q3a): the Connect
+	// cluster's config, offset and status topics, comma separated, in that
+	// order. "" lets connect_worker_info find them by name. Set by the caller,
+	// as WorkerLogs, until internal/config has it.
+	ConnectInternalTopics string
+
+	// ProbeTools registers net_probe (Q6a) over this set. It is a hook, not
+	// a direct call, because nettools imports internal/connprobe, which
+	// imports this package, so wiring cannot import nettools. The caller sets
+	// it to netwire.Register (internal/wiring/netwire) after Open, or in
+	// StackOptions.Prepare, before RegisterTools. Nil leaves net_probe
+	// unregistered.
+	ProbeTools func(reg *tools.Registry, w *Wired) error
+
 	// Rooms is where similar_incidents reads past closed rooms (the room
 	// store). The caller that owns the store sets it after Open, before
 	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room
 	// store).
 	Rooms similarincidents.Source
 
+	// conn is the connection settings this set was opened with (the
+	// process-wide settings, or one pipeline's resolved connections: block).
+	// net_probe lists its targets from them, so a set never names another
+	// set's host. Zero for a Wired built by hand: net_probe then offers only
+	// the pipeline's literal connections and its connectors' hosts.
+	conn config.Config
+
 	// write is true when the set was opened with write mode on
 	// (PIPEROOM_WRITE_MODE=on and not StackOptions.ReadOnly). Only then do
 	// the actions get the whole Connect and Schema Registry clients, and only
 	// then does writers hold anything. A Wired built any other way is read-only.
-	write   bool
-	writers writeClients
+	write bool
+	// lifecycleHosts are the endpoints this set was opened with (Kafka
+	// brokers, Schema Registry, source database): the hosts a connector
+	// created by connect_create_connector may name before any connector of
+	// the pipeline is registered (registerLifecycle).
+	lifecycleHosts []string
+	writers        writeClients
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.
@@ -343,7 +382,24 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	w.DebeziumMetrics = dm
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
+	w.conn = cfg
+	if ks.cdc() {
+		w.lifecycleHosts = lifecycleHosts(cfg)
+	}
 	return w, nil
+}
+
+// lifecycleHosts lists cfg's CDC endpoints as AllowedHosts entries: each
+// broker, and the Schema Registry and source database URLs (the action
+// reduces each to its host and drops userinfo). Unset values are left out.
+func lifecycleHosts(cfg config.Config) []string {
+	hosts := splitBrokers(cfg.KafkaBrokers)
+	for _, u := range []string{cfg.SchemaRegistryURL, cfg.SourceDBURL} {
+		if u = strings.TrimSpace(u); u != "" {
+			hosts = append(hosts, u)
+		}
+	}
+	return hosts
 }
 
 // assemble builds the Wired that Open returns from the clients it opened,
@@ -460,7 +516,9 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // the room previews as before. The room's executor already runs nothing then
 // (P1a-1); this keeps an action that got past it from writing anyway. The
 // P3 actions follow (registerP3Actions over RegisterP3Actions, actions_p3.go),
-// then the Q2 source admin actions (registerSourceActions, actions_q2.go).
+// then the Q2 source admin actions (registerSourceActions, actions_q2.go),
+// then the Q5 connector lifecycle actions (registerLifecycle, actions_q5.go),
+// over a read-only Connect value with write mode off.
 //
 // staging is the pipeline's staging client set (X8a, staging.go), handed to
 // the actions as Deps.Staging with write mode on only: off, Deps.Staging is
@@ -479,7 +537,10 @@ func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging)
 	if err := registerP3Actions(areg, w); err != nil {
 		return err
 	}
-	return registerSourceActions(areg, w)
+	if err := registerSourceActions(areg, w); err != nil {
+		return err
+	}
+	return registerLifecycle(areg, w)
 }
 
 // registerTuning registers the performance action connect_tune_throughput
