@@ -156,16 +156,16 @@ recordings:
       08:05 | 1204 | 1253 | 1204 | +0
       08:10 | 1206 | 1255 | 1206 | +0
       08:15 | 1208 | 1257 | 1208 | +0
-      08:20 | 1209 | 1258 | 0 | -1209
-      08:25 | 1285 | 1337 | 0 | -1285
-      08:30 | 1213 | 1262 | 0 | -1213
-      08:35 | 1216 | 1265 | 0 | -1216
+      08:20 | 0 | 0 | 0 | +0
+      08:25 | 0 | 0 | 0 | +0
+      08:30 | 0 | 0 | 0 | +0
+      08:35 | 252 | 263 | 0 | -252
       08:40 | 1217 | 1266 | 0 | -1217
       08:45 | 1218 | 1267 | 0 | -1218
       08:50 | 1221 | 1270 | 0 | -1221
       08:55 | 954 | 993 | 0 | -954
-      verdict: sink is missing 9533 rows in 08:20–09:00; the topic carried 9918 change events for 9533 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
-      keys not compared: 14427 source / 4894 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      verdict: sink is missing 4862 rows in 08:35–09:00; the topic carried 5059 change events for 4862 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+      keys not compared: 9756 source / 4894 sink keys exceed the 2000-key cap; narrow since/until for a key diff
       note: rows newer than 2026-10-20T08:58:08.412785093Z (the last 2m0s) are in flight and not judged
   - tool: reconcile
     input: {table: public.orders, since: "2026-10-20T08:10:00Z"}
@@ -174,16 +174,16 @@ recordings:
       bucket | source rows | topic events | sink rows | sink−source
       08:10 | 1206 | 1255 | 1206 | +0
       08:15 | 1208 | 1257 | 1208 | +0
-      08:20 | 1209 | 1258 | 0 | -1209
-      08:25 | 1285 | 1337 | 0 | -1285
-      08:30 | 1213 | 1262 | 0 | -1213
-      08:35 | 1216 | 1265 | 0 | -1216
+      08:20 | 0 | 0 | 0 | +0
+      08:25 | 0 | 0 | 0 | +0
+      08:30 | 0 | 0 | 0 | +0
+      08:35 | 252 | 263 | 0 | -252
       08:40 | 1217 | 1266 | 0 | -1217
       08:45 | 1218 | 1267 | 0 | -1218
       08:50 | 1221 | 1270 | 0 | -1221
       08:55 | 954 | 993 | 0 | -954
-      verdict: sink is missing 9533 rows in 08:20–09:00; the topic carried 9918 change events for 9533 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
-      keys not compared: 11947 source / 2414 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      verdict: sink is missing 4862 rows in 08:35–09:00; the topic carried 5059 change events for 4862 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+      keys not compared: 7276 source / 2414 sink keys exceed the 2000-key cap; narrow since/until for a key diff
       note: rows newer than 2026-10-20T08:58:08.412785093Z (the last 2m0s) are in flight and not judged
 
 inputs:
