@@ -472,18 +472,20 @@ var syntheticTruth = map[string]map[string]truth{
 	// names the failed task (kafka-connect); blocked-slot's and
 	// idle-wal-growth's name the slot and the retained WAL (postgres). The
 	// wrong texts blame the consumer, a dropped slot, a lagging consumer and a
-	// lost slot. The matcher misses the layer of idle-wal-growth's good text:
-	// its failure clause names Debezium (kafka-connect) before Postgres, the
-	// same read as watcher-start's.
+	// lost slot. The truth is what the texts say, not what the matcher reads:
+	// it misses the layer of idle-wal-growth's good text (its failure clause
+	// names Debezium, kafka-connect, before Postgres, the same read as
+	// watcher-start's), and those misses count against the accuracy.
 	"no-replica-identity": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
-	"idle-wal-growth":     {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the
 	// missing-plugin one blames the connector's role (kafka-connect, the right
-	// layer, the wrong cause).
-	"register-rejected-renamed-key":    {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// layer, the wrong cause). The renamed-key good text names the Connect
+	// layer; a layer miss on it counts against the accuracy.
+	"register-rejected-renamed-key":    {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"register-rejected-missing-plugin": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 }
 

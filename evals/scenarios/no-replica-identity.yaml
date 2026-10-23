@@ -449,9 +449,20 @@ expect:
     # states it with a cause term stays out of the ambiguous set (no negation).
     # No bare "no key": a false "the table has no primary key" story would pass
     # (public.orders has one: has_primary_key=yes).
-    - [nothing, not recorded, no old key, omits the old tuple]
-  # The wrong stories of a source write failure: the pipeline stages are healthy.
+    # No bare "nothing" either: "Nothing in the pipeline failed" is no cause.
+    - [identity nothing, identity is nothing, identity was nothing, to nothing, identity none, identity is none,
+       to none, not recorded, no old key, omits the old tuple, changed the replica identity,
+       changed its replica identity, replica identity was changed, replica identity changed]
+  # The wrong stories of a source write failure: the pipeline stages are
+  # healthy, the table has a primary key and the app is not at fault.
   root_cause_forbidden:
+    - ['no primary key']
+    - ['lacks a primary key']
+    - ['missing primary key']
+    - ['missing a primary key']
+    - [orm]
+    - ['in the app']
+    - ['redeploy the app']
     - ['task failed']
     - ['connector failed']
     - ['consumer rejected']

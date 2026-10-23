@@ -450,11 +450,19 @@ inputs:
 
 expect:
   root_cause:
-    - [transaction, session, blocker, xid, open transaction, query]
+    # The blocker is an open transaction; a bare "session" or "query" names
+    # any slot story ("the connector's session could not create the slot").
+    - [transaction, blocker, blocking session, xid, open transaction, idle in transaction, '48213']
     - [slot, replication slot]
     - [wait*, block*, hold*, creat*]
-  # The wrong stories of a stale warehouse with a RUNNING connector.
+  # The wrong stories of a stale warehouse with a RUNNING connector, and the
+  # wrong blockers: the consumer and a full slot table.
   root_cause_forbidden:
+    - [order sync, block*]
+    - [order sync, hold*]
+    - [restart*, consumer]
+    - ['max replication slots']
+    - [slot*, exhaust*]
     - ['task failed']
     - ['connector failed']
     - ['schema change']

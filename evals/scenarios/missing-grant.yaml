@@ -456,10 +456,23 @@ inputs:
 
 expect:
   root_cause:
-    - [devctl cdc, database user, connector role, least privilege, role]
-    - [select, permission, grant*, privilege]
-  # The wrong stories of a failed task: only the grant is missing.
+    # Not a bare "role", and the privilege is SELECT: "lacks REPLICATION" and
+    # "the role's grant expired" are wrong stories.
+    - [devctl cdc, database user, connector role, connector s role, least privilege role]
+    - [select, selectable]
+  # The wrong stories of a failed task: only the grant is missing. The role
+  # move is deliberate (the steer forbids reverting it) and the role has
+  # REPLICATION.
   root_cause_forbidden:
+    - [revert*]
+    - [password*]
+    - [rotat*]
+    - [expir*]
+    - ['lacks replication']
+    - ['lacks the replication']
+    - ['missing replication']
+    - ['missing the replication']
+    - ['no replication privilege']
     - ['schema change']
     - [schema registry]
     - ['disk full']
