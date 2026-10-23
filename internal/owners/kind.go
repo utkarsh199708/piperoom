@@ -53,8 +53,9 @@ func (p *Pipeline) KindOrDefault() string {
 }
 
 // Layers returns the layers of the pipeline's kind, upstream first
-// (events.LayersOf): the six CDC layers, or orchestrator, transform and
-// warehouse for batch. It is a new slice on every call, so the caller may keep
+// (events.LayersOf): the six CDC layers with the source layer of the
+// pipeline's source_kind first ("postgres" or "mysql", source_kind.go) and
+// then environment, or orchestrator, transform and warehouse for batch. It is a new slice on every call, so the caller may keep
 // or change it. A nil pipeline, or one with an unknown Kind, has no layers
 // (nil): a caller must not read that as "every layer", and OwnsAll already
 // reads an empty list as "not allowed".
@@ -62,7 +63,7 @@ func (p *Pipeline) Layers() []string {
 	if p == nil {
 		return nil
 	}
-	return events.LayersOf(p.KindOrDefault())
+	return layersOfSource(p.KindOrDefault(), p.SourceKindOrDefault())
 }
 
 // ModelName returns the dbt model name that ref names: a model name as
@@ -132,7 +133,10 @@ func (p *Pipeline) isBatch() bool { return p.KindOrDefault() == events.PipelineK
 func (p *Pipeline) validateKind() error {
 	switch p.Kind {
 	case "", events.PipelineKindCDC:
-		return p.refuseBatchFields()
+		if err := p.refuseBatchFields(); err != nil {
+			return err
+		}
+		return p.validateSourceKind()
 	case events.PipelineKindBatch:
 		return p.validateBatch()
 	}
@@ -180,6 +184,8 @@ func (p *Pipeline) validateBatch() error {
 		field = "sinks"
 	case p.ReprocessTopic != "":
 		field = "reprocess_topic"
+	case p.SourceKind != "":
+		field = "source_kind"
 	}
 	if field != "" {
 		return fmt.Errorf("%s is a %s field, but the pipeline kind is %s",

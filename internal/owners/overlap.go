@@ -131,7 +131,7 @@ func (p Pipeline) sourceHostPort(endpoints func(Pipeline) map[string]string) str
 	if !p.HasConnections() {
 		return ""
 	}
-	return hostPort(resolvedEndpoint(p, "source_db_url", endpoints), defaultPort("source_db_url"))
+	return hostPort(resolvedEndpoint(p, "source_db_url", endpoints), p.defaultPortFor("source_db_url"))
 }
 
 // sameSourceHost reports whether p and q read their source tables from the
@@ -159,7 +159,7 @@ func (p Pipeline) hostPorts(endpoints func(Pipeline) map[string]string) []string
 			}
 			continue
 		}
-		if v := hostPort(resolvedEndpoint(p, k, endpoints), defaultPort(k)); v != "" {
+		if v := hostPort(resolvedEndpoint(p, k, endpoints), p.defaultPortFor(k)); v != "" {
 			set[v] = true
 		}
 	}
@@ -188,6 +188,16 @@ func defaultPort(key string) string {
 	return ""
 }
 
+// defaultPortFor is defaultPort for one pipeline: the source database keys of
+// a MySQL pipeline default to 3306, so its bare "db.acme" and a typed
+// "db.acme:3306" are one host (Q8d).
+func (p Pipeline) defaultPortFor(key string) string {
+	if p.IsMySQL() && (key == "source_db_url" || key == "source_db_write_url") {
+		return "3306"
+	}
+	return defaultPort(key)
+}
+
 // schemeDefaultPort is the standard port for a URL scheme, used when a URL
 // endpoint names a host without a port; "" for a scheme with no known default.
 func schemeDefaultPort(scheme string) string {
@@ -198,6 +208,8 @@ func schemeDefaultPort(scheme string) string {
 		return "443"
 	case "postgres", "postgresql":
 		return "5432"
+	case "mysql":
+		return "3306"
 	}
 	return ""
 }
