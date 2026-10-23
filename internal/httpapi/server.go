@@ -250,6 +250,9 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/setup/targets/{t}/class", visible(s.handleSetupRaiseClass))
 				short.Post("/rooms/{id}/setup/pipeline", visible(s.handleSetupExtendPipeline))
 				short.Post("/rooms/{id}/setup/maintenance-window", visible(s.handleSetupMaintenanceWindow))
+				// "Roll back this setup": one proposal from the recorded
+				// rollbacks, newest first (U1-14b).
+				short.Post("/rooms/{id}/setup/rollback", visible(s.handleSetupRollback))
 				// The secret route's body is a value: it is excluded from
 				// request logging (setupSecretPath), and the service stores the
 				// value nowhere (setup.go, U1-5d).

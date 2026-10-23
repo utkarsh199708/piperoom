@@ -245,6 +245,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/setup/maintenance-window", "/api/rooms/" + f.rb + "/setup/maintenance-window", `{"start":"2026-10-21T10:00:00Z","end":"2026-10-21T11:00:00Z"}`},
 		{"POST", "/api/rooms/{id}/setup/secret", "/api/rooms/" + f.rb + "/setup/secret", `{"name":"source_password","value":"longenough"}`},
 		{"POST", "/api/rooms/{id}/setup/credentials", "/api/rooms/" + f.rb + "/setup/credentials", ""},
+		{"POST", "/api/rooms/{id}/setup/rollback", "/api/rooms/" + f.rb + "/setup/rollback", ""},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
 }

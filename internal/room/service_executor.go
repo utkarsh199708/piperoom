@@ -495,6 +495,10 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 	}
 	s.setProposalStatus(p.ProposalID, "executed")
+	// A setup room closes "rolled back" once the last step its plan executed
+	// has been undone (setup_rollback.go, U1-14b). A proposal that is not part
+	// of a setup, or a setup with steps left, closes nothing.
+	s.closeRolledBackSetup(ctx, p.RoomID)
 	return nil
 }
 
