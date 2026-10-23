@@ -46,6 +46,7 @@ type qWorld struct {
 	roleExists, roleSelect bool
 	// sessions
 	blockerOpen, slotWaiting bool
+	blockerRole              bool // devctl_blocker exists
 	// the orders slot
 	slotExists, slotActive bool
 	retained               int64
@@ -215,6 +216,9 @@ func (w *qWorld) detach(_ context.Context, name string, args ...string) error {
 	w.detached = append(w.detached, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "PGAPPNAME="+blockerApp) && strings.Contains(joined, "pg_current_xact_id()") {
+		if !strings.Contains(joined, "-U "+blockerRole+" ") || !w.blockerRole {
+			return fmt.Errorf("fake docker: the blocker must log in as the existing role %s: %s", blockerRole, joined)
+		}
 		w.blockerOpen = true
 	}
 	return nil
@@ -307,8 +311,19 @@ func (w *qWorld) exec(db, q string) (string, error) {
 		}
 		w.roleExists, w.roleSelect = false, false
 	// blocked-slot
-	case q == sqlBlockerOpen:
+	case q == sqlBlockerOpen, q == sqlBlockerSessions:
 		return boolCount(w.blockerOpen), nil
+	case q == sqlCreateBlockerRole:
+		w.blockerRole = true
+	case q == sqlBlockerConnect:
+		if !w.blockerRole {
+			return "", fmt.Errorf("psql: role %q does not exist", blockerRole)
+		}
+	case q == sqlDropBlockerRole:
+		if w.blockerOpen {
+			return "", fmt.Errorf("fake postgres: role %s dropped while its session is open", blockerRole)
+		}
+		w.blockerRole = false
 	case q == sqlSlotCreateWaits:
 		return boolCount(w.slotWaiting), nil
 	case q == sqlEndBlocker:

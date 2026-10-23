@@ -787,7 +787,7 @@ safe to run twice. Only `idle-wal-growth` needs another owners file: **`OWNERS_F
 |---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): updates on `public.orders` fail | `source_table_replication`: `replica_identity: nothing` | `pg_set_replica_identity` (mode `full`) |
 | `missing-grant` | watcher: `connector_down` (task 0 FAILED), `slot_inactive` | `source_role_grants`: role `devctl_cdc` (the connector's `database.user`), `select: false` on `public.orders` | `source_grant_select` |
-| `blocked-slot` | alert (`source: freshness`): no new order in `analytics.orders` | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot: true` | `source_end_session` |
+| `blocked-slot` | alert (`source: freshness`): no new order in `analytics.orders` | `source_blocking_sessions`: a session of another user (identity withheld), `blocks_slot: true` | `source_end_session` |
 | `idle-wal-growth` | watcher: `slot_wal` (on `dev/owners.q2.yaml`) | `source_settings`: `max_slot_wal_keep_size = -1` (no cap) next to an active slot whose retained WAL grows | `source_create_heartbeat_table` (+ its follow-up config step) |
 
 ### 20. `no-replica-identity` — updates fail on the source
@@ -833,26 +833,30 @@ an active slot, `DROP OWNED BY devctl_cdc; DROP ROLE devctl_cdc`, and a marker o
 
 ### 22. `blocked-slot` — slot creation waits for an open transaction
 
-**Break (`devctl break blocked-slot`):** an analyst's session opens a transaction and keeps it
-(`docker exec -d`, `application_name=devctl-blocker`: `BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800)`,
-so it holds an xid for 30 minutes). Then the connector is set up again as after a host move: stopped (Connect REST
+**Break (`devctl break blocked-slot`):** an analyst logs in with their own role, `devctl_blocker` (`CREATE ROLE
+devctl_blocker LOGIN`, `CONNECT` on `orders`, no table grant), and the session opens a transaction and keeps it
+(`docker exec -d`, `psql -U devctl_blocker`, `application_name=devctl-blocker`: `BEGIN; SELECT pg_current_xact_id();
+SELECT pg_sleep(1800)`, so it holds an xid for 30 minutes). It must not run as `piperoom`: that is the connector's
+`database.user`, and `source_end_session` never ends the connector's own sessions. Then the connector is set up again as after a host move: stopped (Connect REST
 `stop`), `debezium_orders` dropped, its stored offsets deleted, resumed. Debezium's `CREATE_REPLICATION_SLOT` has
 to wait for every transaction that held an xid when it started, so the task never gets past `start()`. The break
 waits until a walsender waits on a `transactionid` lock (`pg_stat_activity`). Refuses when the slot is missing or
-inactive, or a `devctl-blocker` session is already open.
+inactive, or a `devctl_blocker` session is already open.
 
 **Expected (not yet observed):**
 ```
 pg_stat_activity   walsender  wait_event_type=Lock wait_event=transactionid
-source_blocking_sessions   pid … application devctl-blocker state "active" blocks_slot=true query "SELECT pg_sleep(1800)"
+source_blocking_sessions   pid … user "" application "" state "active" blocks_slot=true in_scope=false (it locks no pipeline table: identity withheld in a room; the CLI's unscoped read shows devctl_blocker / devctl-blocker / "SELECT pg_sleep(1800)")
 connector   RUNNING; task 0 RUNNING or UNASSIGNED (start() has not returned) — not observed which
 warehouse   no new order after the break
 ```
 The watcher may fire `connector_down` if Connect reports task 0 as not `RUNNING`; the room is opened by
 `devctl alert blocked-slot` either way.
 
-**Fix:** `source_end_session` on the blocker (the pid is in `source_blocking_sessions` at Validate and Execute).
-`devctl fix` terminates every `devctl-blocker` session; the slot creation finishes, Debezium snapshots (no
+**Fix:** `source_end_session` on the blocker (the pid is in `source_blocking_sessions` at Validate and Execute; a
+room may end it although its identity is withheld because it holds the oldest xid horizon, `blocks_slot`, and it is
+not the connector's `database.user`; the preview says "a session of another user or database; identity withheld").
+`devctl fix` terminates every `devctl_blocker` session, then drops the role; the slot creation finishes, Debezium snapshots (no
 offsets: every row is re-emitted, the load is an upsert) and streams. It resumes a connector a half-run break left
 `STOPPED`, then waits for task 0 `RUNNING`, an active slot, a marker order in the warehouse and order-sync lag 0.
 
