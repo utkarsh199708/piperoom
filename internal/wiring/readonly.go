@@ -119,8 +119,9 @@ func (c readOnlyConnectValidateTasks) WorkerTasks(ctx context.Context) (map[stri
 
 // connectLifecycleReads are the Connect reads of the Q wave that the read
 // tools find by a type assertion: the stored source offsets
-// (connect_source_offsets, Q5a), the worker's version (GET /, Q5a) and its
-// plugin list (connect_plugins, Q1c). The real client has all three; a
+// (connect_source_offsets, Q5a), the worker's version (GET /, Q5a), its
+// plugin list (connect_plugins, Q1c) and its logger levels (GET
+// /admin/loggers, connect_worker_info, Q3a). The real client has all four; a
 // client without every one keeps none of them (the tools then stay
 // unregistered or say the read is unsupported), so the wrapper types below
 // need not cover every combination.
@@ -128,13 +129,15 @@ type connectLifecycleReads interface {
 	connect.SourceOffsetReader
 	connect.ConnectInfoReader
 	connect.PluginReader
+	connect.LoggerReader
 }
 
-// The real client has the three reads, so connect_plugins and
-// connect_source_offsets are registered over its read-only value.
+// The real client has the four reads, so connect_plugins,
+// connect_source_offsets and connect_worker_info's logger levels work over
+// its read-only value.
 var _ connectLifecycleReads = (*connect.Client)(nil)
 
-// lifecycleReads forwards the three reads; each read-only Connect value
+// lifecycleReads forwards the four reads; each read-only Connect value
 // below embeds it beside its own reads. None of them writes.
 type lifecycleReads struct{ l connectLifecycleReads }
 
@@ -146,6 +149,9 @@ func (f lifecycleReads) ServerInfo(ctx context.Context) (connect.ServerInfo, err
 }
 func (f lifecycleReads) Plugins(ctx context.Context) ([]connect.Plugin, error) {
 	return f.l.Plugins(ctx)
+}
+func (f lifecycleReads) Loggers(ctx context.Context) ([]connect.LoggerLevel, error) {
+	return f.l.Loggers(ctx)
 }
 
 // The four read-only Connect values plus the Q-wave reads.
