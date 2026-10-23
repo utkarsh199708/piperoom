@@ -1,0 +1,492 @@
+
+<section class="sec" id="how">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">01 — How a room works</span><span class="rule"></span><button class="tc" data-seek="0" data-end="76">{i:play}Watch 0:00–1:16</button></div>
+    <div class="sec-head">
+      <h2 class="display-l">One room, from the first alert to the hand-off.</h2>
+      <p class="lead">Every room is an append-only log of events. Anyone who joins late sees it replay, then follows along live.</p>
+    </div>
+    <div class="strip">
+      <ol class="steps4" style="list-style:none;margin:0;padding:0">
+        <li class="hstep">
+          <div class="still ui-dark">
+            <div class="still-art" role="img" aria-label="Film still: Arjun, in his wheelchair at his laptop, lit red as an alert arrives: connector_down, sev2, verified by the watcher.">
+            <div class="still-grid"></div><span class="tag">CH 1 · 0:00</span>
+            <div class="s1-fig" style="--rim:var(--state-alert)"><svg viewBox="0 0 200 220" aria-hidden="true"><use href="#fig-arjun"/></svg></div>
+            <div class="toast"><span class="t1"><span class="td"></span>connector_down · sev2</span><span class="chip-src" style="justify-self:start;font-size:11px;height:18px">{i:check:ico-12}watcher</span></div></div>
+          </div>
+          <div class="still-cap"><span class="num">01</span><button class="play-from" data-seek="0">{i:play}Play from 0:00</button></div>
+          <h3>A room opens itself.</h3>
+          <p>A built-in watcher spots a failed connector, an inactive replication slot or growing WAL and opens a room. Alerts from Alertmanager, Grafana, PagerDuty, Datadog or any signed webhook open one too.</p>
+          <p class="fn">The watcher only writes log lines until you switch it to rooms.</p>
+        </li>
+        <li class="hstep">
+          <div class="still ui-dark">
+            <div class="still-art" role="img" aria-label="Film still: the step stream with three read-only tool calls, connect_status, schema_registry_versions and schema_registry_diff, and Kabir's comment pinned on step 1.">
+            <div class="still-grid"></div><span class="tag">CH 2 · 0:12</span>
+            <div class="mini">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span class="lens" style="width:20px;height:20px">{i:lens}</span><span style="font-weight:600;font-size:11.5px">Investigation</span></div>
+              <div class="mrow"><span class="sid">s_1</span><span class="tl">connect_status</span>{i:check}</div>
+              <div class="bub"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-kabir"/></svg></span><span class="bx">Wrong service? I'd expect Connect to be down, not the schema.</span></div>
+              <div class="mrow"><span class="sid">s_2</span><span class="tl">schema_registry_versions</span>{i:check}</div>
+              <div class="mrow"><span class="sid">s_3</span><span class="tl">schema_registry_diff</span>{i:check}</div>
+            </div></div>
+          </div>
+          <div class="still-cap"><span class="num">02</span><button class="play-from" data-seek="12">{i:play}Play from 0:12</button></div>
+          <h3>Claude investigates. Everyone watches.</h3>
+          <p>Claude works through read-only tool calls you can follow step by step. Anyone can comment. One driver steers, and everyone else's ideas arrive as suggestions the driver can send on or decline.</p>
+        </li>
+        <li class="hstep">
+          <div class="still ui-dark">
+            <div class="still-art" role="img" aria-label="Film still: a proposal card with two owner rings. Priya's is closed with a check; Arjun's is still dashed, and the run button is locked.">
+            <div class="still-grid"></div><span class="tag">CH 5 · 0:50</span>
+            <div class="card-ui mprop">
+              <span class="pt">Set subject compatibility to NONE and restart the connector task</span>
+              <div class="rings">
+                <span class="oring static is-ok" style="--lc:var(--l-sr)"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-priya"/></svg></span><svg class="rg" viewBox="0 0 30 30" aria-hidden="true"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span>
+                <span class="oring" style="--lc:var(--l-connect)"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span><svg class="rg" viewBox="0 0 30 30" aria-hidden="true"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span>
+                <span class="ui-label" style="font-size:10.5px">1 of 2 approved</span>
+              </div>
+              <span class="run">{i:lock}Approve and run</span>
+            </div></div>
+          </div>
+          <div class="still-cap"><span class="num">03</span><button class="play-from" data-seek="50">{i:play}Play from 0:50</button></div>
+          <h3>Owners approve the exact fix.</h3>
+          <p>Claude can only propose. Each step names the layer it touches, and the fix runs only after every owner of those layers approves that exact proposal.</p>
+        </li>
+        <li class="hstep">
+          <div class="still ui-dark">
+            <div class="still-art" role="img" aria-label="Film still: the shift 1 hand-off card. What broke: task 0 failed after the ALTER. Done: set NONE, restarted task 0. Still open: restore BACKWARD. The driver ring travels from Arjun to Meera above it.">
+            <div class="still-grid"></div><span class="tag">CH 6 · 1:04</span>
+            <svg class="s4-arc" viewBox="0 0 400 300" preserveAspectRatio="none" aria-hidden="true"><path d="M54 75 C 94 15, 306 15, 346 75"/></svg>
+            <span class="s4-av" style="left:7%"><span class="av" style="box-shadow:0 0 0 2px var(--ui-bg),0 0 0 4px var(--lamp)"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span></span>
+            <span class="s4-av" style="right:7%"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-meera"/></svg></span></span>
+            <div class="card-ui mho"><span style="font-weight:600;font-size:11px;line-height:15px">Shift 1 summary</span><b>What broke</b><span class="v">Task 0 failed after ALTER</span><b>Done</b><span class="v">Set NONE · restarted task 0</span><b>Still open</b><span class="v">Restore BACKWARD</span><span class="ui-status" style="font-size:10px">{i:check:ico-12}Checked against the room log</span></div>
+            <span class="baton" style="left:50%;top:10%;width:22px;height:22px;margin:-11px 0 0 -11px" aria-hidden="true"></span></div>
+          </div>
+          <div class="still-cap"><span class="num">04</span><button class="play-from" data-seek="64">{i:play}Play from 1:04</button></div>
+          <h3>Hand off without losing the thread.</h3>
+          <p>At shift change Claude writes what broke, why, what's done, what's ruled out, what's still open and the risks. The driver role moves when the next person accepts.</p>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="investigation">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">02 — The investigation</span><span class="rule"></span><button class="tc" data-seek="12" data-end="38">{i:play}Watch 0:12–0:38</button></div>
+    <div class="grid12 iv-grid">
+      <div class="iv-copy">
+        <div class="sec-head" style="margin:0">
+          <h2 class="display-l">Watch the reasoning, one tool call at a time.</h2>
+          <p class="lead">Claude works through read-only tools you can follow step by step: what it called, with what input, and what came back. The hypothesis cites the steps it rests on, and any term the cited steps don't show is marked.</p>
+        </div>
+        <ul class="iv-lines">
+          <li>{i:lens}<span>43 read-only tools across Kafka Connect, Schema Registry, Kafka, Postgres, your warehouse and batch jobs.</span></li>
+          <li>{i:bracket}<span>Alerts, logs and record values reach the model only inside an untrusted wrapper. Suspected instructions are flagged, not followed.</span></li>
+          <li>{i:users}<span>Anyone can comment on a step. The driver steers; the driver's lease lasts 30 minutes and renews whenever they act.</span></li>
+        </ul>
+        <div><button class="btn btn-ghost btn-sm" id="iv-replay">{i:restart}Replay the stream</button></div>
+      </div>
+      <div class="iv-card-w">
+        <div class="mock ivc" id="iv-card">
+          <div class="ivc-h"><span class="ui-h"><span class="lens">{i:lens}</span>Investigation</span><span class="pill" data-tone="agent"><i class="dot"></i>Investigating · step 6</span></div>
+          <div class="first-row"><span class="badge agent">First look</span><span class="u">triage, unverified</span><span>Task 0 of pg-orders-connector failed on a Schema Registry error.</span></div>
+          <div class="rail-s" id="iv-rail">
+            <div class="step has-thread" id="iv-s1" data-tool="connect_status"><div class="st-node"><span>1</span>{i:check}</div><div class="st-body"><div class="st-title">Check the Debezium connector</div><div class="st-call"><span class="tool">connect_status</span><span class="arg">connector=pg-orders-connector</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">Task 0: FAILED … incompatible with an earlier schema for subject "pg.public.orders-value" … error code: 409</span></div></div>
+              <div class="thread"><div class="bubble"><span class="av" style="--sz:24px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-kabir"/></svg></span><div class="bx"><b>Kabir</b>Wrong service? I'd expect Connect to be down, not the schema.</div></div><div class="bubble agent"><span class="lens">{i:lens}</span><div class="bx"><b>Claude</b>Connect is up; task 0 is failed on a Schema Registry compatibility error.</div></div></div>
+            </div>
+            <div class="step" id="iv-s2" data-tool="schema_registry_versions"><div class="st-node"><span>2</span>{i:check}</div><div class="st-body"><div class="st-title">Inspect the Schema Registry subject</div><div class="st-call"><span class="tool">schema_registry_versions</span><span class="arg">subject=pg.public.orders-value</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">versions [1] … compatibility BACKWARD</span></div></div></div>
+            <div class="step" id="iv-s3" data-tool="schema_registry_diff"><div class="st-node"><span>3</span>{i:check}</div><div class="st-body"><div class="st-title">Diff the attempted schema against v1</div><div class="st-call"><span class="tool">schema_registry_diff</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">amount: int → bytes(decimal 12,2)</span></div></div></div>
+            <div class="step" id="iv-s4" data-tool="kafka_consumer_lag"><div class="st-node"><span>4</span>{i:check}</div><div class="st-body"><div class="st-title">Check consumer lag</div><div class="st-call"><span class="tool">kafka_consumer_lag</span><span class="arg">group=order-sync</span><span class="tag-ro">ruled out · consumer</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">order-sync: Stable, 1 members, total lag 0</span></div></div></div>
+            <div class="step" id="iv-s5" data-tool="pg_recent_ddl"><div class="st-node"><span>5</span>{i:check}</div><div class="st-body"><div class="st-title">Check the DDL log</div><div class="st-call"><span class="tool">pg_recent_ddl</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)</span></div></div></div>
+            <div class="step last" id="iv-s6" data-tool="what_changed"><div class="st-node"><span>6</span>{i:check}</div><div class="st-body"><div class="st-title">Check what changed before the alert</div><div class="st-call"><span class="tool">what_changed</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="ln">DDL 90 s before the alert · connector config change · schema version</span></div></div></div>
+          </div>
+          <div class="sg-box">
+            <span class="ui-h" style="font-size:13px">Suggestions</span>
+            <div class="sg-row" id="iv-sg">
+              <span class="av" style="--sz:26px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-kabir"/></svg></span>
+              <span class="sg-t"><b>Kabir</b>Check the connector config first, not the topic.</span>
+              <span class="sg-btns" id="iv-sg-btns"><button class="btn-ui primary" id="iv-send">Send to agent</button><button class="btn-ui" id="iv-decline">Decline</button></span>
+              <span class="ui-status" id="iv-sg-status" hidden></span>
+            </div>
+            <p class="sg-note">You are Arjun, the driver. Kabir can't steer, so his idea waits for you. <button class="ui-link" id="iv-reset" hidden>Reset</button></p>
+            <div class="msg" id="iv-agent" hidden><span class="lens">{i:lens}</span><div><b class="mh">Claude · read-only</b><span id="iv-agent-t"></span></div></div>
+          </div>
+          <div class="hyc">
+            <div class="hy-top"><span class="ui-h">Hypothesis</span><span class="badge agent">high confidence</span><span class="conf">low 09:45 <svg viewBox="0 0 46 14" aria-hidden="true"><path class="cp-l" d="M2 12 C 16 12, 26 3, 44 2"/><circle class="cp-a" cx="2" cy="12" r="2"/><circle class="cp-b" cx="44" cy="2" r="2.2"/></svg> high 09:47</span></div>
+            <p>A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.</p>
+            <div class="basedon">based on <button class="cite" data-cite="iv-s1">s_1</button><button class="cite" data-cite="iv-s3">s_3</button><button class="cite" data-cite="iv-s5">s_5</button><button class="cite" data-cite="iv-s6">s_6</button></div>
+            <div class="terms">Terms the cited steps do not show: none</div>
+            <div class="ctas"><button class="btn-ui" disabled title="Preview only">Confirm</button><button class="btn-ui" disabled title="Preview only">Dispute…</button></div>
+          </div>
+        </div>
+        <p class="small fine" style="margin-top:10px">The First look verdict text is illustrative; steps, tools and outputs follow the schema-change demo.</p>
+      </div>
+      <div class="shelf iv-shelf" id="iv-shelf">
+        <p class="slate">Read shelf · 43 tools · kind read</p>
+        <div class="shelf-cols">
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-connect)"></i>Connect · 4</span><div class="chips"><span class="tchip">connect_list_connectors</span><span class="tchip used" data-tool="connect_status">connect_status</span><span class="tchip">connect_config</span><span class="tchip">debezium_metrics</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-sr)"></i>Schema Registry · 3</span><div class="chips"><span class="tchip">schema_registry_subjects</span><span class="tchip used" data-tool="schema_registry_versions">schema_registry_versions</span><span class="tchip used" data-tool="schema_registry_diff">schema_registry_diff</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-kafka)"></i>Kafka · 12</span><div class="chips"><span class="tchip">kafka_topic_offsets</span><span class="tchip">kafka_list_groups</span><span class="tchip used" data-tool="kafka_consumer_lag">kafka_consumer_lag</span><span class="tchip">kafka_find_by_key</span><span class="tchip">kafka_topic_config</span><span class="tchip">kafka_cluster_health</span><span class="tchip">kafka_acls</span><span class="tchip">kafka_throughput</span><span class="tchip">kafka_partition_rates</span><span class="tchip">kafka_dup_keys</span><span class="tchip">dlq_peek</span><span class="tchip">tls_cert_expiry</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-pg)"></i>Postgres source · 8</span><div class="chips"><span class="tchip">pg_replication_slots</span><span class="tchip used" data-tool="pg_recent_ddl">pg_recent_ddl</span><span class="tchip">pg_long_transactions</span><span class="tchip">pg_row</span><span class="tchip">pg_publication_tables</span><span class="tchip">pg_connector_scope_gap</span><span class="tchip">pg_streaming_liveness</span><span class="tchip">pg_toast_risk</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-wh)"></i>Warehouse · 3</span><div class="chips"><span class="tchip used">warehouse_freshness</span><span class="tchip">warehouse_row</span><span class="tchip">warehouse_load_errors</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-orch)"></i>Cross-pipeline · 6</span><div class="chips"><span class="tchip">pipeline_map</span><span class="tchip">trace_record</span><span class="tchip">reconcile</span><span class="tchip used" data-tool="what_changed">what_changed</span><span class="tchip">similar_incidents</span><span class="tchip">runbook_lookup</span></div></div>
+          <div class="shelf-g"><span class="slate"><i style="--lc:var(--l-transform)"></i>Batch · 7</span><div class="chips"><span class="tchip">dag_runs</span><span class="tchip">task_instances</span><span class="tchip">task_log_tail</span><span class="tchip">dag_schedule_gap</span><span class="tchip">dbt_run_results</span><span class="tchip">dbt_model_lineage</span><span class="tchip">dbt_model_sql</span></div></div>
+        </div>
+        <p class="small">Write actions are not on this shelf. They sit in a separate registry and run only from an approved proposal.</p>
+      </div>
+    </div>
+    <p class="vh" id="iv-live" aria-live="polite"></p>
+  </div>
+</section>
+
+<section class="sec" id="approval">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">03 — The approval</span><span class="rule"></span><button class="tc" data-seek="38" data-end="64">{i:play}Watch 0:38–1:04</button></div>
+    <div class="sec-head">
+      <h2 class="display-l">Nothing runs until every owner says yes.</h2>
+      <p class="lead">Claude can only propose. Each step names the layer it touches, and every owner of those layers approves that exact proposal. Each approval carries a SHA-256 fingerprint of the proposal, so an edited proposal no longer matches. After the fix runs, Claude re-reads the touched layers and checks that new rows arrive.</p>
+      <p class="slate ap-try">Try it: approve as Arjun, or change one parameter first.</p>
+    </div>
+    <div class="grid12 ap-grid">
+      <div class="ap-sheet-w">
+        <div class="mock apc" id="ap-card">
+          <span class="beamring"></span>
+          <div class="dbar" id="ap-bar"><i class="dot"></i><span id="ap-bar-t">Waiting for kafka-connect · 1 of 2 approved</span></div>
+          <div class="apc-b">
+            <div class="apc-pills"><span class="ui-h">Proposals</span><span style="display:flex;gap:6px;flex-wrap:wrap"><span class="pill" data-tone="warn" id="ap-status"><i class="dot"></i><span>Needs approval · 4m</span></span><span class="pill pill-agent" data-tone="agent" id="ap-agent"><i class="dot"></i><span>Agent waiting · 1 of 2 approvals</span></span></span></div>
+            <div class="pr-title">Set subject compatibility to NONE and restart the connector task</div>
+            <div class="pstep"><div class="pstep-h"><span class="sn">Step 1</span><span class="act">schema_set_compatibility</span><span class="lchip" style="--lc:var(--l-sr)"><i></i>schema-registry</span></div><dl class="kv"><dt>subject</dt><dd>pg.public.orders-value</dd><dt>level</dt><dd id="ap-lv">NONE</dd></dl><p class="pnote">Allow the new decimal schema to register under the same subject.</p></div>
+            <div class="pstep"><div class="pstep-h"><span class="sn">Step 2</span><span class="act">connect_restart_task</span><span class="lchip" style="--lc:var(--l-connect)"><i></i>kafka-connect</span></div><dl class="kv"><dt>connector</dt><dd>pg-orders-connector</dd><dt>task</dt><dd>0</dd></dl><p class="pnote">Restart Debezium task 0 so it picks up the new schema.</p></div>
+            <div class="rb"><span>Rollback: <b>set compatibility back to BACKWARD</b></span><span>Required layers: <b>schema-registry · kafka-connect</b></span></div>
+            <div class="fprint"><div class="fp-l"><b>Fingerprint</b><span>Approving exactly this</span></div><span class="hash" id="ap-hash">205a 8899 … f485</span><p class="pnote" style="flex-basis:100%">if the steps change, this fingerprint changes and your approval is void</p></div>
+            <div class="tblock" id="ap-tb">
+              <div><small>Proposed by</small><span>Claude (agent)</span></div>
+              <div id="ap-tb-p"><small>Schema-registry</small><span>Priya · approved 09:49</span><em hidden>void · fingerprint changed</em></div>
+              <div id="ap-tb-a"><small>Kafka-connect</small><span>Arjun · pending</span></div>
+              <div><small>Fingerprint</small><span id="ap-tb-fp">205a…f485</span></div>
+              <div class="rev" id="ap-tb-rev"><small>Rev</small><span>A</span></div>
+            </div>
+            <div class="prog2"><div class="bars"><span id="ap-pb1" class="on"><i></i></span><span id="ap-pb2"><i></i></span></div><span class="ui-label" id="ap-pl">1 of 2 approved</span></div>
+            <span class="runbtn" id="ap-run"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path class="shackle" d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id="ap-run-t">Approve and run</span></span>
+            <div class="xlog" id="ap-log"><span class="e">Runs after the last approval.</span></div>
+            <p class="vmsg" id="ap-vmsg" hidden>Verification passed: pg-orders-connector task 0 is RUNNING and new rows reached analytics.orders. pg.public.orders-value compatibility is still NONE; restore BACKWARD with a separate fix.</p>
+            <span class="lchip fchip" id="ap-follow" hidden style="--lc:var(--l-sr);font-family:var(--f-body)"><i></i>Restore BACKWARD compatibility · waiting for schema-registry</span>
+            <div><div class="ui-label" style="margin-bottom:6px">Pipeline, source to sink</div>
+              <div class="mlane" id="ap-lane">
+                <div class="node" data-state="degraded" style="--lc:var(--l-pg)"><span class="tint"></span><span class="n-k">Source</span><span class="n-v">orders</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">Priya</span></span></div>
+                <div class="node" data-state="failed" style="--lc:var(--l-connect)"><span class="tint"></span><span class="n-k">Connector</span><span class="n-v">pg-orders-connector</span><span class="n-f"><i class="dot"></i><span class="n-st">failed</span><span class="own">Arjun</span></span></div>
+                <div class="node" data-state="degraded" style="--lc:var(--l-sr)"><span class="tint"></span><span class="n-k">Schema subject</span><span class="n-v">pg.public.orders-value</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">Priya</span></span></div>
+                <div class="node" data-state="unknown" style="--lc:var(--l-kafka)"><span class="tint"></span><span class="n-k">Topic</span><span class="n-v">pg.public.orders</span><span class="n-f"><i class="dot"></i><span class="n-st">unknown</span><span class="own">Arjun</span></span></div>
+                <div class="node" data-state="healthy" style="--lc:var(--l-consumer)"><span class="tint"></span><span class="n-k">Consumer</span><span class="n-v">order-sync</span><span class="n-f"><i class="dot"></i><span class="n-st">healthy</span><span class="own">Kabir</span></span></div>
+                <div class="node" data-state="degraded" style="--lc:var(--l-wh)"><span class="tint"></span><span class="n-k">Sink</span><span class="n-v">analytics.orders</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">Meera</span></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="small fine">Fingerprint computed in your browser over the steps shown. Piperoom's own also covers the room, the proposal id and the risk, in RFC 8785 form. <span id="ap-fpcheck"></span></p>
+      </div>
+      <div class="ap-side" id="ap-side">
+        <div class="ap-owners">
+          <div class="ap-owner">
+            <span class="desk-k">Desk 1</span>
+            <div class="figbox"><svg viewBox="0 40 200 180" aria-hidden="true"><use href="#fig-priya" width="200" height="220"/></svg></div>
+            <div class="who"><span class="oring static is-ok" id="ap-ring-p" style="--lc:var(--l-sr)"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-priya"/></svg></span><span class="rgw"><svg class="rg" viewBox="0 0 30 30"><title id="ap-ring-p-t">Priya: approved</title><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg></span><span class="ck">{i:check}</span></span>
+            <span class="lbl"><b>Priya</b>schema-registry</span></div>
+          </div>
+          <div class="ap-owner">
+            <span class="desk-k">Desk 2</span>
+            <div class="figbox"><svg viewBox="0 40 200 180" aria-hidden="true"><use href="#fig-arjun" width="200" height="220"/></svg></div>
+            <div class="who"><span class="oring" id="ap-ring-a" style="--lc:var(--l-connect)"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span><span class="rgw spin"><svg class="rg" viewBox="0 0 30 30"><title id="ap-ring-a-t">Arjun: pending</title><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg></span><span class="ck">{i:check}</span></span>
+            <span class="lbl"><b>Arjun</b>kafka-connect</span></div>
+          </div>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl-row"><span class="ctrl-l" id="ap-level-l">Change one parameter</span>
+            <span class="seg" role="radiogroup" aria-labelledby="ap-level-l" id="ap-level"><button role="radio" aria-checked="true" data-level="NONE" id="ap-lv-none">level: NONE</button><button role="radio" aria-checked="false" data-level="FULL" id="ap-lv-full" tabindex="-1">FULL</button></span></div>
+          <div class="ctrl-row"><button class="sw" role="switch" aria-checked="true" id="ap-write"><span class="tr"></span><span class="ctrl-l"><b style="font-weight:500;color:var(--ink)">Write mode</b><small>on for this demo · ships off</small></span></button></div>
+          <div class="ap-btns"><button class="btn btn-primary" id="ap-approve">Approve and run as Arjun</button><button class="btn btn-ghost btn-sm" id="ap-undo" hidden>Undo change</button><button class="textbtn" id="ap-reset">Reset</button></div>
+          <p class="ap-note" id="ap-note"></p>
+        </div>
+        <p class="vh" id="ap-live" aria-live="polite"></p>
+      </div>
+      <div class="ap-below">
+        <div class="lshelf">
+          <p class="slate"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-lock"/></svg>Write actions · 15 · run only from an approved proposal</p>
+          <div class="lshelf-g"><span class="slate"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--l-connect);margin-right:6px"></i>kafka-connect</span><span class="tchip locked">connect_restart_task</span><span class="tchip locked">connect_restart_connector</span><span class="tchip locked">connect_resume_connector</span><span class="tchip locked">connect_pause_connector</span><span class="tchip locked">connect_update_connector_config</span><span class="tchip locked">connect_snapshot_table</span></div>
+          <div class="lshelf-g"><span class="slate"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--l-sr);margin-right:6px"></i>schema-registry</span><span class="tchip locked">schema_set_compatibility</span><span class="tchip locked">schema_register</span></div>
+          <div class="lshelf-g"><span class="slate"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--l-kafka);margin-right:6px"></i>kafka</span><span class="tchip locked">dlq_replay</span><span class="tchip locked">kafka_replay_range</span></div>
+          <div class="lshelf-g"><span class="slate"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--l-consumer);margin-right:6px"></i>consumer</span><span class="tchip locked">kafka_reset_consumer_offsets</span></div>
+          <div class="lshelf-g"><span class="slate"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--l-pg);margin-right:6px"></i>postgres</span><span class="tchip locked">pg_drop_replication_slot</span><span class="tchip locked">pg_add_publication_table</span><span class="tchip locked">pg_snapshot_signal</span><span class="tchip locked">pg_resnapshot_rows</span></div>
+          <p class="small">Write mode is off by default. Proposals and approvals work, but nothing runs until you turn it on.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="handoff">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">04 — The hand-off</span><span class="rule"></span><button class="tc" data-seek="64" data-end="76">{i:play}Watch 1:04–1:16</button></div>
+    <div class="sec-head ho-head">
+      <h2 class="display-l">Shift change without the scroll-back.</h2>
+      <p class="lead">When the driver hands off, Claude writes the summary from the room log: what broke, why, what's done, what's ruled out, what's still open and the risks. It is checked against the log before anyone accepts, and the driver role moves only when the next person does.</p>
+      <p class="keyline"><kbd>H</kbd><span>Hand-offs never start on their own. The driver presses H and picks who takes over. The summary stays pinned in the room for everyone who joins later.</span></p>
+    </div>
+    <div class="ho-scene" id="ho-scene">
+      <div class="ho-pan ho-pan-a" id="ho-pa" style="--rim:var(--state-ok)">
+        <svg class="scene" viewBox="0 0 480 360" preserveAspectRatio="xMidYMax slice" role="img" aria-label="Arjun at his desk in his wheelchair, a dusk sky in the window behind him and his desk lamp on."><use href="#scene-arjun"/></svg>
+        <span class="hav" id="ho-av-a"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span></span>
+        <span class="hs-tag" id="ho-tag-a">Arjun · local 18:00</span>
+      </div>
+      <div class="ho-cardw">
+        <div class="mock hoc" id="ho-card">
+          <div class="ui-h">Shift 1 summary <span class="ui-label" style="font-weight:400">from Arjun to Meera</span></div>
+          <div class="ho-sec"><b>What broke</b>Debezium task 0 failed after orders.amount was altered to numeric(12,2).</div>
+          <div class="ho-sec"><b>Why</b>New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.</div>
+          <div class="ho-sec"><b>Done</b>Set compatibility to NONE · Restarted task 0 · Warehouse caught up</div>
+          <div class="ho-sec"><b>Ruled out</b>Kafka brokers · Consumer group config</div>
+          <div class="ho-sec"><b>Still open</b>Consider pinning decimal.handling.mode · Restore BACKWARD (waiting for schema-registry)</div>
+          <div class="ho-sec"><b>Risks</b>BACKWARD compatibility is off until re-enabled</div>
+          <div class="chk">{i:check}Checked against the room log · no issues</div>
+          <span class="you">You are Meera</span>
+          <div class="ho-btns" id="ho-btns"><button class="btn-ui success" id="ho-accept">Accept</button><button class="btn-ui" id="ho-later">Not yet</button></div>
+          <p class="ho-done" id="ho-msg" tabindex="-1" hidden></p>
+        </div>
+      </div>
+      <div class="ho-pan ho-pan-m" id="ho-pm" style="--rim:var(--state-idle)">
+        <svg class="scene" viewBox="0 0 480 360" preserveAspectRatio="xMidYMax slice" role="img" aria-label="Meera at her desk in the morning, a dawn sky and a low sun in the window, sunlight across the desk."><use href="#scene-meera"/></svg>
+        <span class="hav" id="ho-av-m"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-meera"/></svg></span></span>
+        <span class="hs-tag" id="ho-tag-m">Meera · local 07:00</span>
+      </div>
+      <svg class="ho-arcsvg" id="ho-arc-svg" aria-hidden="true"><path id="ho-arc" d=""/></svg>
+      <span class="baton" id="ho-baton" aria-hidden="true"></span>
+      <span class="plate ho-plate">room clock 10:00 UTC · times illustrative</span>
+    </div>
+    <button class="textbtn ho-reset" id="ho-reset">Reset</button>
+    <p class="vh" id="ho-live" aria-live="polite"></p>
+  </div>
+</section>
+
+<section class="sec" id="trust">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">05 — Trust</span><span class="rule"></span></div>
+    <div class="sec-head">
+      <h2 class="display-l">It can read. It can't write.</h2>
+      <p class="lead">Piperoom is built so Claude can be in the room without being able to touch the pipeline. Each guarantee names the file on main that enforces it.</p>
+    </div>
+    <div class="bento">
+      <article class="panel p7" id="t1">
+        <span class="slate">T1</span><h3>Read-only by construction</h3>
+        <div class="row2">
+          <p class="body">Every investigation tool sits in a read-only registry that refuses anything else. Client interfaces are split into readers and writers, and writes live only in a separate set of actions. Source Postgres reads run in a READ ONLY transaction that is rolled back. Every read and every action is checked against the room's own pipeline.</p>
+          <div class="vis" role="img" aria-label="Registry log: connect_status, read, accepted. schema_registry_diff, read, accepted. pg_recent_ddl, read, accepted. connect_restart_task and pg_drop_replication_slot, write, refused with ErrNotReadOnly. Then BEGIN READ ONLY, ROLLBACK.">
+            <div class="reglog">
+              <div><span class="nm">connect_status · read</span><span class="acc">accepted</span></div>
+              <div><span class="nm">schema_registry_diff · read</span><span class="acc">accepted</span></div>
+              <div><span class="nm">pg_recent_ddl · read</span><span class="acc">accepted</span></div>
+              <div><span class="nm">connect_restart_task · write<i class="strike" id="t1-strike"></i></span><span class="ref">refused (ErrNotReadOnly)</span></div>
+              <div><span class="nm">pg_drop_replication_slot · write<i class="strike"></i></span><span class="ref">refused (ErrNotReadOnly)</span></div>
+            </div>
+            <div class="ribbon"><b>BEGIN READ ONLY</b> … <b>ROLLBACK</b></div>
+          </div>
+        </div>
+        <p class="proof"><b>Proof:</b> internal/tools/tool.go · internal/clients/postgres · internal/tools/scope.go</p>
+      </article>
+      <article class="panel p5" id="t2">
+        <span class="slate">T2</span><h3>Approval per layer, bound to the exact plan</h3>
+        <p class="body">Each step names its layer, and the approver must own that layer. The approval carries a SHA-256 fingerprint of the proposal: without it the server answers 400, with a different one 409 params_mismatch. Each write action has a preview and a rollback.</p>
+        <div class="vis t2v" role="img" aria-label="A proposal with fingerprint 205a…f485. Two owner rings, schema-registry for Priya and kafka-connect for Arjun, are closed and wired to a padlock. Below, an edited plan is struck through and answered with 409 params_mismatch.">
+          <div class="t2-row"><b>Proposal · 2 layers</b><span class="t2-fp">fingerprint 205a…f485</span></div>
+          <div><div class="t2-own"><span class="t2-o"><span class="oring static is-ok" style="--lc:var(--l-sr)"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><svg class="rg" viewBox="0 0 30 30"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done r" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span><small>schema-registry<br>Priya</small></span><span class="t2-o"><span class="oring static is-ok" style="--lc:var(--l-connect)"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span><svg class="rg" viewBox="0 0 30 30"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done r" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span><small>kafka-connect<br>Arjun</small></span></div>
+          <svg class="t2-spokes" viewBox="0 0 300 26" preserveAspectRatio="none" aria-hidden="true"><path d="M75 0C75 16 150 10 150 26M225 0C225 16 150 10 150 26"/></svg></div>
+          <span class="t2-lock">{i:lock}runs only with both</span>
+          <div class="t2-void"><s>edited plan · level FULL</s><span class="t2-409">409 params_mismatch</span></div>
+        </div>
+        <p class="proof"><b>Proof:</b> internal/room/params_hash.go · internal/room/service_proposals.go · internal/actions/preview.go</p>
+      </article>
+      <article class="panel p5" id="t3">
+        <span class="slate">T3</span><h3>Secrets masked, untrusted text kept as data</h3>
+        <p class="body">Secrets are masked in tool summaries, error traces and record values before they reach the prompt, the room log, Slack or an export. Redaction is partial: names and timestamps still appear, and redacted tool summaries do reach your Claude endpoint. Alerts, logs and record values reach the model only inside an untrusted wrapper.</p>
+        <div class="vis t3v" id="t3v" role="img" aria-label="A connection string with its password replaced by: redacted 16."><span class="from" aria-hidden="true">postgres://app:<wbr>••••••••<wbr>@db:5432/orders</span><span class="to" id="t3-to" aria-hidden="true">postgres://app:<wbr><span class="rd" id="t3-rd">[redacted 16]</span><wbr>@db:5432/orders</span></div>
+        <p class="proof"><b>Proof:</b> internal/redact/redact.go · internal/agent/prompt.go</p>
+      </article>
+      <article class="panel p7" id="t4">
+        <span class="slate">T4</span><h3>An audit trail you can export</h3>
+        <div class="row2">
+          <p class="body">Every room is an append-only event log; events are never edited. Export a room as JSON with an X-Piperoom-Export-SHA256 integrity header, or start from the post-mortem draft. Export is limited to approvers and auditors.</p>
+          <div class="vis ticket" role="img" aria-label="Export ticket for room-orders.json listing eight events, from approval.given to room.closed, and the SHA-256 of those lines.">
+            <span class="th">{i:file}room-orders.json</span>
+            <div class="evs"><span><b>41</b>approval.given</span><span><b>42</b>approval.given</span><span><b>43</b>action.executed</span><span><b>44</b>action.executed</span><span><b>45</b>agent.verification</span><span><b>51</b>handoff.created</span><span><b>52</b>handoff.accepted</span><span><b>58</b>room.closed</span></div>
+            <span class="hs"><span>SHA-256 of the lines above:</span><b>ea39 bebe … f5a5</b></span>
+            <span class="chip-pm">{i:file}Post-mortem draft</span>
+          </div>
+        </div>
+        <p class="small fine">Event types are real; sequence numbers are illustrative.</p>
+        <p class="proof"><b>Proof:</b> internal/events/events.go · internal/room/service_export.go</p>
+      </article>
+      <article class="panel p12" id="t5">
+        <span class="slate">T5</span><h3>Runs where your pipeline runs</h3>
+        <div class="row2">
+          <p class="body">Self-hosted: a Docker image, Docker Compose, a Helm chart or Terraform for GCP. Sign-in with OIDC, with member, viewer and auditor roles. Credentials are set per pipeline, from environment variables or files. Claude runs through the Anthropic API, AWS Bedrock or Google Vertex AI, with token and cost budgets per room and per pipeline.</p>
+          <div class="vis t5v"><span class="dchips"><span class="tchip">Dockerfile</span><span class="tchip">docker-compose.pilot.yml</span><span class="tchip">helm/piperoom</span><span class="tchip">terraform/gcp</span></span><span class="flow">Piperoom {i:arrow} your Claude endpoint</span></div>
+        </div>
+        <p class="proof"><b>Proof:</b> deploy/ · internal/httpapi/auth_oidc.go · internal/config/config.go</p>
+      </article>
+    </div>
+    <p class="small under">Slack is outbound only: one thread per room. Nothing typed in Slack reaches a room, and approvals happen only in Piperoom.</p>
+  </div>
+</section>
+
+<section class="sec" id="integrations">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">06 — Works with</span><span class="rule"></span></div>
+    <h2 class="display-m" style="margin-bottom:32px">Works with the pipeline you already run.</h2>
+    <div class="ig">
+      <div class="ig-row"><span class="slate">CDC path</span><div><div class="pchips" id="ig-cdc"><span class="pchip"><i style="--lc:var(--l-pg)"></i>PostgreSQL</span><span class="pchip"><i style="--lc:var(--l-connect)"></i>Debezium on Kafka Connect</span><span class="pchip"><i style="--lc:var(--l-kafka)"></i>Kafka</span><span class="pchip" id="ig-sr"><i style="--lc:var(--l-sr)"></i>Confluent Schema Registry</span><span class="pchip"><i style="--lc:var(--l-wh)"></i>Postgres warehouse</span><span class="pchip"><i></i>TLS and SASL</span></div><div class="hair" aria-hidden="true"><i id="ig-pulse"></i></div></div></div>
+      <div class="ig-row"><span class="slate">Warehouses</span><div class="pchips"><span class="pchip"><i style="--lc:var(--l-wh)"></i>Snowflake</span><span class="pchip"><i style="--lc:var(--l-wh)"></i>BigQuery</span><span class="pchip"><i style="--lc:var(--l-wh)"></i>Databricks SQL</span><span class="pchip"><i style="--lc:var(--l-wh)"></i>ClickHouse</span></div></div>
+      <div class="ig-row"><span class="slate">Batch rooms</span><div class="pchips"><span class="pchip"><i style="--lc:var(--l-orch)"></i>Apache Airflow 2.x</span><span class="pchip"><i style="--lc:var(--l-transform)"></i>dbt</span></div></div>
+      <div class="ig-row"><span class="slate">Alerts in</span><div class="pchips"><span class="pchip"><i></i>Alertmanager</span><span class="pchip"><i></i>Grafana</span><span class="pchip"><i></i>PagerDuty</span><span class="pchip"><i></i>Datadog</span><span class="pchip"><i></i>signed webhook</span></div></div>
+      <div class="ig-row"><span class="slate">Out</span><div class="pchips"><span class="pchip"><i></i>Slack, outbound, one thread per room</span></div></div>
+      <div class="ig-row"><span class="slate">Claude via</span><div class="pchips"><span class="pchip"><i style="--lc:var(--ui-agent)"></i>Anthropic API</span><span class="pchip"><i style="--lc:var(--ui-agent)"></i>AWS Bedrock</span><span class="pchip"><i style="--lc:var(--ui-agent)"></i>Google Vertex AI</span></div></div>
+    </div>
+    <p class="small ig-note">Not supported today: MySQL, MongoDB, Oracle or SQL Server sources, two-way Slack, Microsoft Teams, or a hosted plan. Product names belong to their owners.</p>
+  </div>
+</section>
+
+<section class="sec" id="pilot">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">07 — Shadow mode</span><span class="rule"></span></div>
+    <div class="sec-head">
+      <h2 class="display-l">Try it silently first.</h2>
+      <p class="lead">Switch on shadow for one pipeline. Your team runs incidents exactly as today, and nobody sees Claude's work until the room closes.</p>
+    </div>
+    <div class="sh3">
+      <div class="shp">
+        <div class="mock shw" role="img" aria-label="A room window with four people in it, investigating at step 4.">
+          <div class="tb"><span class="av-stack"><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-priya"/></svg></span><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-kabir"/></svg></span><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-meera"/></svg></span></span><span class="pill" data-tone="agent"><i class="dot"></i>Investigating · step 4</span></div>
+          <div class="lines"><span>s_1 connect_status</span><span>s_2 schema_registry_versions</span><span>s_3 schema_registry_diff</span><span>s_4 kafka_consumer_lag</span></div>
+        </div>
+        <h3>Your team works the incident.</h3>
+        <p>The room opens as usual. People investigate, steer and close it.</p>
+      </div>
+      <div class="shp">
+        <div class="mock shw" role="img" aria-label="The same room window behind frosted glass: Claude works silently, sealed until the room closes.">
+          <div class="tb"><span class="lens">{i:lens}</span><span class="pill pill-agent" data-tone="agent"><i class="dot"></i>Shadow · agent works silently</span></div>
+          <div class="lines"><span>s_1 connect_status</span><span>s_2 schema_registry_diff</span><span>s_3 pg_recent_ddl</span><span>s_4 what_changed</span></div>
+          <div class="frost"><span class="seal">{i:seal}sealed until close</span></div>
+        </div>
+        <h3>Claude works in the dark.</h3>
+        <p>On the same alert, Claude investigates with read tools only, proposes nothing and writes to a separate shadow log.</p>
+      </div>
+      <div class="shp">
+        <div class="mock shw" role="img" aria-label="A grade card: layer correct yes, root cause yes, for label postgres with the terms ALTER and orders.amount.">
+          <div class="tb"><span class="ui-h" style="font-size:13px">Grade</span><span class="lchip" style="--lc:var(--l-pg)"><i></i>postgres</span></div>
+          <div class="grade">
+            <div class="gr"><span class="gk">layer_correct</span><span class="gch on">yes</span><span class="gch">no</span></div>
+            <div class="gr"><span class="gk">root_cause</span><span class="gch on">yes</span><span class="gch">partial</span><span class="gch">no</span></div>
+            <div class="gr"><span class="gk">terms</span><span class="gch">ALTER</span><span class="gch">orders.amount</span></div>
+          </div>
+        </div>
+        <h3>Label first, then grade.</h3>
+        <p>After the room closes, someone on the pipeline names the layer and the cause, blind. Then they open Claude's answer and grade it: right layer or not, and root cause yes, partial or no.</p>
+      </div>
+    </div>
+    <p class="small" style="margin-top:24px">Grades roll up in <code class="data">GET /api/shadow/metrics</code> on your own server. Piperoom publishes no benchmark numbers.</p>
+    <div class="ladder">
+      <h3>How a pilot grows, if you want it to</h3>
+      <div class="lad">
+        <svg class="stairs" viewBox="0 0 100 132" preserveAspectRatio="none" aria-hidden="true"><path d="M0 122H25V82H50V42H75V2H100"/></svg>
+        <ol class="lad-ol">
+        <li class="land"><span class="ln">01</span><h4>Install</h4><code>docker compose · helm · terraform</code><p>Run it on your own infrastructure. Sign in through your OIDC provider.</p></li>
+        <li class="land"><span class="ln">02</span><h4>Shadow</h4><code>shadow: {enabled: true}</code><p>Claude works silently on one pipeline. You grade every answer.</p></li>
+        <li class="land"><span class="ln">03</span><h4>Rooms</h4><code>PIPEROOM_WATCH_MODE=rooms</code><p>The watcher opens rooms and your team works them with Claude. By default the watcher only writes log lines.</p></li>
+        <li class="land"><span class="ln">04</span><h4>Write mode</h4><code>PIPEROOM_WRITE_MODE=on</code><p>Approved fixes run. It stays off until you turn it on.</p></li>
+      </ol></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="apply">
+  <div class="wrap">
+    <div class="slate-row"><span class="slate">08 — Design partners</span><span class="rule"></span></div>
+    <div class="ap-cast">
+      <span class="av-stack"><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-arjun"/></svg></span><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-priya"/></svg></span><span class="av"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-kabir"/></svg></span><span class="av ring"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#av-meera"/></svg></span></span>
+      <p class="small fine">Arjun, Priya, Kabir and Meera are Piperoom's demo users.</p>
+    </div>
+    <div class="ap-head">
+      <h2 class="display-l">Five teams. One pipeline each. Shadow mode first.</h2>
+      <p class="lead">Piperoom is pre-1.0 and has no customers yet. We're looking for the first five teams to run it. If you run Postgres, Debezium and Kafka in production and you're the one who gets paged when the warehouse goes stale, we'd like to hear from you.</p>
+    </div>
+    <div class="pp">
+      <div class="grid12">
+        <div class="inv">
+          <h3>What it involves</h3>
+          <ul>
+            <li>{i:check}<span>You host it: Docker Compose, a Helm chart or Terraform for GCP.</span></li>
+            <li>{i:check}<span>You create read-only credentials for one pipeline.</span></li>
+            <li>{i:check}<span>Write mode stays off, so no fix can run.</span></li>
+            <li>{i:check}<span>After each closed room, someone labels the cause and grades Claude's answer.</span></li>
+            <li>{i:check}<span>Redacted tool summaries go to the Claude endpoint you choose: Anthropic API, AWS Bedrock or Google Vertex AI.</span></li>
+          </ul>
+        </div>
+        <div class="formw">
+          <form id="pilot-form" class="form" novalidate>
+            <div class="fld"><label for="pf-name">Your name</label><input class="inp" id="pf-name" name="name" type="text" required autocomplete="name" aria-describedby="pf-name-err"><span class="err" id="pf-name-err"></span></div>
+            <div class="fld"><label for="pf-role">Your role <span class="opt">(optional)</span></label><input class="inp" id="pf-role" name="role" type="text" placeholder="Data platform engineer" autocomplete="organization-title"></div>
+            <div class="fld"><label for="pf-company">Team or company</label><input class="inp" id="pf-company" name="company" type="text" required autocomplete="organization" aria-describedby="pf-company-err"><span class="err" id="pf-company-err"></span></div>
+            <div class="fld"><label for="pf-email">Work email</label><input class="inp" id="pf-email" name="email" type="email" required autocomplete="email" aria-describedby="pf-email-err"><span class="err" id="pf-email-err"></span></div>
+            <fieldset><legend>Your CDC path</legend>
+              <div class="cbs">
+                <label class="cb" for="pf-stack-pg"><input type="checkbox" id="pf-stack-pg" value="PostgreSQL source">PostgreSQL source</label>
+                <label class="cb" for="pf-stack-debezium"><input type="checkbox" id="pf-stack-debezium" value="Debezium">Debezium</label>
+                <label class="cb" for="pf-stack-connect"><input type="checkbox" id="pf-stack-connect" value="Kafka Connect">Kafka Connect</label>
+                <label class="cb" for="pf-stack-sr"><input type="checkbox" id="pf-stack-sr" value="Schema Registry">Schema Registry</label>
+                <label class="cb" for="pf-stack-kafka"><input type="checkbox" id="pf-stack-kafka" value="Kafka">Kafka</label>
+              </div>
+            </fieldset>
+            <div class="fld"><label for="pf-warehouse">Warehouse</label><select class="inp" id="pf-warehouse"><option>Postgres</option><option>Snowflake</option><option>BigQuery</option><option>Databricks SQL</option><option>ClickHouse</option><option>Other</option></select></div>
+            <div class="fld"><label for="pf-pipelines">CDC pipelines in production</label><select class="inp" id="pf-pipelines"><option>1</option><option>2–5</option><option>6–20</option><option>More than 20</option></select></div>
+            <div class="fld"><label for="pf-deploy">Where you'd run it</label><select class="inp" id="pf-deploy"><option>Docker Compose</option><option>Kubernetes (Helm)</option><option>GCP (Terraform)</option><option>Not sure yet</option></select></div>
+            <div class="fld"><label for="pf-model">Claude endpoint</label><select class="inp" id="pf-model"><option>Anthropic API</option><option>AWS Bedrock</option><option>Google Vertex AI</option><option>Not sure yet</option></select></div>
+            <div class="fld full"><label for="pf-incident">Your last pipeline incident, in a sentence or two <span class="opt">(optional)</span></label><textarea class="inp" id="pf-incident" rows="3" maxlength="600"></textarea></div>
+            <div class="f-submit full"><button class="btn btn-primary" type="submit" id="pf-submit">Prepare my application</button><p class="small fine">This page doesn't send anything. You'll get a summary to copy and send.</p></div>
+          </form>
+          <div class="result" id="pf-result" hidden>
+            <h3 id="pf-result-h" tabindex="-1">Your application is ready to send.</h3>
+            <label class="vh" for="pf-summary">Application summary</label>
+            <textarea class="inp" id="pf-summary" readonly rows="12"></textarea>
+            <div class="res-btns"><button class="btn btn-primary" id="pf-copy" type="button">{i:copy}<span id="pf-copy-t">Copy application</span></button><button class="btn btn-ghost" id="pf-edit" type="button">Edit answers</button></div>
+            <p class="small" id="pf-copy-msg" aria-live="polite"></p>
+            <p class="sendto" id="pf-sendto"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="faq">
+      <details><summary>Can Claude change my pipeline?{i:plus}</summary><p>Not by itself. Its tools are read-only. A fix runs only after every owner of the layers it touches approves that exact proposal, and only when write mode is on. It is off by default. If you list an action under auto_approve for a pipeline, a matching proposal gets a visible countdown that the driver or an owner can cancel; it still needs write mode on. The list is empty unless you configure it.</p></details>
+      <details><summary>Where does my data go?{i:plus}</summary><p>Piperoom runs in your environment. Redacted tool summaries go to the Claude endpoint you configure. If you connect Slack, it gets one outbound thread per room.</p></details>
+      <details><summary>Which systems does it read?{i:plus}</summary><p>PostgreSQL sources through Debezium on Kafka Connect, Kafka, Confluent Schema Registry, and Postgres, Snowflake, BigQuery, Databricks SQL or ClickHouse warehouses. Batch rooms read Airflow 2.x and dbt.</p></details>
+      <details><summary>Is it open source?{i:plus}</summary><p>No. The source is published for viewing only, and all rights are reserved.</p></details>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-g">
+    <div style="display:grid;gap:12px">
+      <span class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#brand"/></svg>Piperoom</span>
+      <p>The incident room for CDC pipelines.</p>
+      <p>Pre-1.0 · Self-hosted · Claude through the Anthropic API, AWS Bedrock or Google Vertex AI.</p>
+      <p class="fine">The film is dramatised from Piperoom's schema-change demo. Arjun, Priya, Kabir and Meera are demo users; times are illustrative.</p>
+    </div>
+    <div class="foot-r">
+      <nav class="foot-links" aria-label="Footer"><a href="#film">Film</a><a href="#how">How it works</a><a href="#trust">Trust</a><a href="#pilot">Pilot</a><a href="#apply">Join the pilot</a><button class="icon-btn" id="theme-toggle-2" aria-label="Switch to light theme">{i:sun:i-sun}{i:moon:i-moon}</button></nav>
+      <p class="fine">Product names belong to their owners and are named only as integrations. © 2026 Piperoom. All rights reserved.</p>
+    </div>
+  </div>
+</footer>
+</div>

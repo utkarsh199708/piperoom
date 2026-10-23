@@ -1,0 +1,240 @@
+<div class="page">
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="Piperoom, back to top"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#brand"/></svg>Piperoom</a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#film">Film</a><a href="#how">How it works</a><a href="#trust">Trust</a><a href="#pilot">Pilot</a>
+    </nav>
+    <div class="nav-right">
+      <button class="resume" id="resume-pill" hidden><i></i><span id="resume-t">Resume film · 0:34</span></button>
+      <button class="icon-btn" id="theme-toggle" aria-label="Switch to light theme">{i:sun:i-sun}{i:moon:i-moon}</button>
+      <a class="btn btn-primary btn-sm" href="#apply">Join the pilot</a>
+    </div>
+  </div>
+  <div class="wrap navprog" aria-hidden="true"><span style="flex:12"><i></i></span><span style="flex:14"><i></i></span><span style="flex:12"><i></i></span><span style="flex:12"><i></i></span><span style="flex:14"><i></i></span><span style="flex:12"><i></i></span></div>
+</header>
+
+<main>
+<section class="hero pre" id="top">
+  <div class="wrap">
+    <div class="hero-top">
+      <div class="hero-h">
+        <p class="slate"><span class="live-dot" aria-hidden="true"></span>Now showing · Schema change · 1:16</p>
+        <h1 class="h1"><span>Claude investigates.</span> <span>Your team decides<span class="stop">.</span></span></h1>
+      </div>
+      <div class="hero-side">
+        <p class="lead hero-lead">Piperoom is a self-hosted incident room for Postgres, Debezium and Kafka pipelines. When one breaks, a room opens and Claude investigates with read-only tools while your team watches and steers. A fix runs only after every owner it touches approves it.</p>
+        <div class="hero-btns">
+          <button class="btn btn-primary" id="hero-play">{i:play}Play the film <span class="chip-t">1:16</span></button>
+          <a class="btn btn-ghost" href="#apply">Join the pilot</a>
+        </div>
+        <p class="slate hero-status">Pre-1.0 · Looking for five design-partner teams</p>
+      </div>
+    </div>
+
+    <div class="hero-player">
+      <div class="beam" aria-hidden="true"></div>
+      <div class="floor" aria-hidden="true"></div>
+      <section id="film" class="player" data-explainer aria-label="Piperoom explainer film, 1 minute 16 seconds">
+        <div class="frame" id="fp-frame">
+          <div class="stage ui-dark is-poster" id="fp-stage" tabindex="0" role="group" aria-roledescription="video" aria-label="Film stage. Space plays or pauses.">
+
+            <div class="set set-prologue" id="set-pro" aria-hidden="true">
+              <div class="pro-in" id="pro-in" data-layout="land">
+                <div class="frag frag-a" id="fa">
+                  <div class="frag-h"><span class="lts"><i></i><i></i><i></i></span>app migration · orders</div>
+                  <div class="frag-b"><span><span class="prompt">orders=&gt; </span>ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2);</span><span class="ok-l" id="fa2">ALTER TABLE</span><span class="muted" id="fa3">INSERT 0 1</span><span class="muted" id="fa4">INSERT 0 1</span></div>
+                </div>
+                <div class="frag frag-b2" id="fb">
+                  <div class="frag-h"><span class="lts"><i></i><i></i><i></i></span>Schema Registry</div>
+                  <div class="frag-b"><span>POST /subjects/pg.public.orders-value/versions</span><span class="muted" id="fb1">Debezium registers the new value schema…</span><span class="stamp" id="fb2"><b>409</b>&#160;incompatible · MISSING_UNION_BRANCH</span><span class="muted" id="fb3">compatibility BACKWARD</span><span class="ul-t" id="fb4" style="justify-self:start">amount: int → bytes(decimal 12,2)<i id="fb4u"></i></span></div>
+                </div>
+                <div class="frag frag-c" id="fc">
+                  <div class="frag-h"><span class="lts"><i></i><i></i><i></i></span>Kafka Connect</div>
+                  <div class="frag-b"><span style="display:flex;gap:10px;align-items:center">pg-orders-connector <span class="chip-run" id="fc-run">RUNNING</span></span><span id="fc2">task 0&#160;&#160;<span class="fail" id="fc2f">FAILED</span></span><span class="muted" id="fc3" data-text="slot debezium_orders active=false · retained WAL growing"></span><span class="muted" id="fc4">analytics.orders · last new row <span id="fc4n">0m</span> ago</span></div>
+                </div>
+                <div class="alert-chip" id="pa"><span class="td"></span>connector_down · sev2 · orders<span class="wv">{i:check:ico-12}watcher</span></div>
+              </div>
+              <div class="pro-fig" id="pro-fig"><svg viewBox="0 0 200 220"><use href="#fig-arjun"/></svg></div>
+            </div>
+
+            <div class="set set-world" id="set-world" aria-hidden="true">
+              <div class="world" id="world" data-layout="land">
+                <header class="w-header" id="w-header">
+                  <div class="wh-main">
+                    <div class="wh-row1"><span class="wh-title" id="w-title">orders: connector pg-orders-connector task 0 FAILED 3m</span><span class="badge sev">SEV2</span><span class="chip-src">alert · watcher {i:check}</span></div>
+                    <div class="wh-row2"><span class="pill" id="w-status" data-tone="agent"><i class="dot"></i><span class="tx">Investigating · step 1</span></span><span class="pill pill-agent" id="w-agent" data-tone="agent"><i class="dot"></i><span class="tx">Agent working</span></span><span class="mono facts">orders · opened 09:44:30</span></div>
+                    <div class="wh-res" id="w-res">ALTER on orders.amount rejected by Schema Registry (BACKWARD); set NONE, restarted task 0, data flowing, BACKWARD restored.</div>
+                  </div>
+                  <div class="wh-side">
+                    <div class="wh-btns"><span class="btn-ui" id="w-hbtn">Hand off <kbd id="w-hk">H</kbd></span><span class="btn-ui">Close room <kbd>C</kbd></span><span class="btn-ui">Invite</span></div>
+                    <div class="wh-people"><span class="av-stack" id="w-avs"><span class="av ring" id="wa-arjun"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span><span class="av" id="wa-priya"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><span class="av" id="wa-kabir"><svg viewBox="0 0 64 64"><use href="#av-kabir"/></svg></span><span class="av" id="wa-meera"><svg viewBox="0 0 64 64"><use href="#av-meera"/></svg></span></span><span id="w-drv">Arjun · driving</span></div>
+                  </div>
+                </header>
+                <div class="w-bar" id="w-bar" data-state="none"><i class="bar-dot"></i><span id="w-bar-t"></span></div>
+                <div class="w-col">
+                  <div class="card-ui w-lane" id="w-lane">
+                    <div class="lane-h"><span class="ui-h" style="font-size:13px">Pipeline, source to sink</span><span class="ui-label mono">orders</span></div>
+                    <div class="lane-nodes">
+                      <div class="node" id="n-src" data-state="degraded" style="--lc:var(--l-pg)"><span class="tint"></span><span class="n-k">Source</span><span class="n-v">orders</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">PR</span></span></div>
+                      <div class="node" id="n-con" data-state="failed" style="--lc:var(--l-connect)"><span class="tint"></span><span class="n-k">Connector</span><span class="n-v" title="pg-orders-connector">pg-orders</span><span class="n-f"><i class="dot"></i><span class="n-st">failed</span><span class="own">AR</span></span></div>
+                      <div class="node" id="n-sub" data-state="degraded" style="--lc:var(--l-sr)"><span class="tint"></span><span class="n-k">Schema subject</span><span class="n-v" title="pg.public.orders-value">orders-value</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">PR</span></span></div>
+                      <div class="node" id="n-top" data-state="unknown" style="--lc:var(--l-kafka)"><span class="tint"></span><span class="n-k">Topic</span><span class="n-v">pg.public.orders</span><span class="n-f"><i class="dot"></i><span class="n-st">unknown</span><span class="own">AR</span></span></div>
+                      <div class="node" id="n-cons" data-state="unknown" style="--lc:var(--l-consumer)"><span class="tint"></span><span class="ro" id="n-ro">ruled out</span><span class="n-k">Consumer</span><span class="n-v">order-sync</span><span class="n-f"><i class="dot"></i><span class="n-st">unknown</span><span class="own">KA</span></span></div>
+                      <div class="node" id="n-sink" data-state="degraded" style="--lc:var(--l-wh)"><span class="tint"></span><span class="n-k">Sink</span><span class="n-v">analytics.orders</span><span class="n-f"><i class="dot"></i><span class="n-st">degraded</span><span class="own">ME</span></span></div>
+                    </div>
+                  </div>
+                  <div class="w-feed" id="w-feed">
+                    <div class="w-feed-in" id="w-feed-in">
+                      <div class="card-ui fl-card first" id="w-first"><span class="badge agent">First look</span><span class="ui-label">triage, unverified · 2 reads</span><span style="flex-basis:100%">Task 0 of pg-orders-connector failed on a Schema Registry error.</span></div>
+                      <div class="step" id="w-s1"><div class="st-node"><span>1</span>{i:check}</div><div class="st-body"><div class="st-title">Check the Debezium connector</div><div class="st-call"><span class="tool" data-text="connect_status"></span><span class="arg">connector=pg-orders-connector</span><span class="spin"></span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">Task 0: FAILED … incompatible with an earlier schema for subject "pg.public.orders-value" … error code: 409</span><span class="ln">Rejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)</span></div></div>
+                        <div class="thread" id="w-thread"><div class="bubble" id="w-kb"><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-kabir"/></svg></span><div class="bx"><b>Kabir · on s_1</b><span class="tx" data-text="Wrong service? I'd expect Connect to be down, not the schema."></span></div></div><div class="bubble agent" id="w-ar"><span class="lens" style="width:22px;height:22px">{i:lens}</span><div class="bx"><b>Claude · read-only</b>Connect is up; task 0 is failed on a Schema Registry compatibility error.</div></div></div>
+                      </div>
+                      <div class="step" id="w-s2"><div class="st-node"><span>2</span>{i:check}</div><div class="st-body"><div class="st-title">Inspect the Schema Registry subject</div><div class="st-call"><span class="tool" data-text="schema_registry_versions"></span><span class="arg">subject=pg.public.orders-value</span><span class="spin"></span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">versions [1] … compatibility BACKWARD</span></div></div></div>
+                      <div class="step" id="w-s3"><div class="st-node"><span>3</span>{i:check}</div><div class="st-body"><div class="st-title">Diff the attempted schema against v1</div><div class="st-call"><span class="tool" data-text="schema_registry_diff"></span><span class="arg">subject=pg.public.orders-value</span><span class="spin"></span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">amount: int → bytes(decimal 12,2)</span></div></div></div>
+                      <div class="step" id="w-s4"><div class="st-node"><span>4</span>{i:check}</div><div class="st-body"><div class="st-title">Check consumer lag</div><div class="st-call"><span class="tool" data-text="kafka_consumer_lag"></span><span class="arg">group=order-sync</span><span class="spin"></span><span class="tag-ro" id="w-s4ro">ruled out · consumer</span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">order-sync: Stable, 1 members, total lag 0</span></div></div></div>
+                      <div class="step" id="w-s5"><div class="st-node"><span>5</span>{i:check}</div><div class="st-body"><div class="st-title">Check the DDL log</div><div class="st-call"><span class="tool" data-text="pg_recent_ddl"></span><span class="arg">table=orders</span><span class="spin"></span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)</span></div></div></div>
+                      <div class="step last" id="w-s6"><div class="st-node"><span>6</span>{i:check}</div><div class="st-body"><div class="st-title">Check what changed before the alert</div><div class="st-call"><span class="tool" data-text="what_changed"></span><span class="arg">pipeline=orders</span><span class="spin"></span></div><div class="untrusted"><span class="ut-tab">tool output · untrusted</span><span class="glow"></span><span class="ln">DDL 90 s before the alert · connector config change · schema version</span></div></div></div>
+                      <div class="card-ui fl-card" id="w-changed"><div class="ui-h" style="font-size:13px;margin-bottom:6px">What changed</div><div class="wc-grid"><div class="wc-c"><span class="ui-label">Before</span><span class="mono" id="wcb">amount: int</span></div><div class="wc-c"><span class="ui-label">After</span><span class="mono" id="wca">amount: bytes(decimal 12,2)</span></div><div class="wc-c wc-w" id="wcr"><span class="ui-label">Changes</span><span class="mono">09:41 · DDL ALTER TABLE orders … numeric(12,2) · 90 s before the alert</span><span class="mono ui-label">connector config change · schema version</span></div></div></div>
+                      <div class="msg" id="w-m1"><span class="lens">{i:lens}</span><div><b class="mh">Claude · read-only</b><span class="tx" data-text="Connector config is unchanged; the failure is the value schema subject."></span></div></div>
+                      <div class="card-ui hypo" id="w-hypo">
+                        <div class="hy-top"><span class="ui-h">Hypothesis</span><span class="badge agent">high confidence</span><span class="conf">low 09:45 <svg viewBox="0 0 46 14"><path id="w-cpath" d="M2 12 C 16 12, 26 3, 44 2" fill="none" stroke="var(--ui-agent)" stroke-width="1.5" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/><circle cx="2" cy="12" r="2" fill="var(--ui-muted-fg)"/><circle id="w-cdot" cx="44" cy="2" r="2.2" fill="var(--ui-agent)"/></svg> high 09:47</span></div>
+                        <div class="tx" id="w-htx" data-text="A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse."></div>
+                        <div class="basedon">based on <span class="cite" id="wc1"><i></i>s_1</span><span class="cite" id="wc3"><i></i>s_3</span><span class="cite" id="wc5"><i></i>s_5</span><span class="cite" id="wc6"><i></i>s_6</span></div>
+                        <div class="terms">Terms the cited steps do not show: none</div>
+                        <div style="display:flex;gap:6px"><span class="btn-ui">Confirm</span><span class="btn-ui">Dispute…</span></div>
+                      </div>
+                      <div class="msg" id="w-m2"><span class="lens">{i:lens}</span><div><b class="mh">Claude · read-only</b>Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal.</div></div>
+                      <div class="card-ui prop" id="w-prop">
+                        <span class="beamring" id="w-beam"></span>
+                        <div class="ui-h">Proposals <span class="badge warn" id="w-pbadge">Needs approval</span></div>
+                        <div class="pr-title" id="w-pt" data-text="Set subject compatibility to NONE and restart the connector task"></div>
+                        <div class="pstep" id="w-ps1"><div class="pstep-h"><span class="sn">Step 1</span><span class="act">schema_set_compatibility</span><span class="lchip" style="--lc:var(--l-sr)"><i></i>schema-registry</span></div><dl class="kv"><dt>subject</dt><dd>pg.public.orders-value</dd><dt>level</dt><dd>NONE</dd></dl><p class="pnote">Allow the new decimal schema to register under the same subject.</p></div>
+                        <div class="pstep" id="w-ps2"><div class="pstep-h"><span class="sn">Step 2</span><span class="act">connect_restart_task</span><span class="lchip" style="--lc:var(--l-connect)"><i></i>kafka-connect</span></div><dl class="kv"><dt>connector</dt><dd>pg-orders-connector</dd><dt>task</dt><dd>0</dd></dl><p class="pnote">Restart Debezium task 0 so it picks up the new schema.</p></div>
+                        <div class="rb" id="w-rb"><span>Rollback: <b>set compatibility back to BACKWARD</b></span><span>Required layers: <b>schema-registry · kafka-connect</b></span></div>
+                        <div class="fprint" id="w-print"><div class="fp-l"><b>Fingerprint</b><span>Approving exactly this</span></div><span class="hash" id="w-hash">205a 8899 … f485</span></div>
+                        <div class="owners" id="w-owners">
+                          <div class="owner"><span class="oring" id="wo-p" style="--lc:var(--l-sr)"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><svg class="rg" viewBox="0 0 30 30"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span><span class="lbl">schema-registry · Priya</span><span class="btn-ui success" id="wo-pbtn">Approve</span></div>
+                          <div class="owner"><span class="oring" id="wo-a" style="--lc:var(--l-connect)"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span><svg class="rg" viewBox="0 0 30 30"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span><span class="lbl">kafka-connect · Arjun</span><span class="btn-ui success" id="wo-abtn"><svg class="ico pad" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path class="shackle" id="wo-shk" d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Approve and run</span></div>
+                        </div>
+                        <div class="audit" id="w-audit"><div id="w-aud1">09:49 Priya approved · schema-registry · 205a…f485</div><div id="w-aud2">09:49 Arjun approved · kafka-connect · 205a…f485</div><span class="same" id="w-same">same fingerprint</span></div>
+                      </div>
+                      <div class="msg" id="w-m3"><span class="lens">{i:lens}</span><div><b class="mh">Claude · read-only</b>The fix proposal is waiting for the schema-registry and kafka-connect owners.</div></div>
+                      <div class="card-ui exec" id="w-exec"><div class="ui-h" style="font-family:var(--f-body);font-size:13px;margin-bottom:4px">Executor <span class="ui-label">approved fix</span></div><div id="we1"><span class="ok">{i:check:ico-12}</span> pg.public.orders-value compatibility BACKWARD → NONE</div><div id="we2"><span class="ok">{i:check:ico-12}</span> restarted pg-orders-connector task 0 (RUNNING)</div><div class="vh2">Verify after fix</div><div id="wv1"><span class="ok">{i:check:ico-12}</span> connect_status · task 0 RUNNING</div><div id="wv2"><span class="ok">{i:check:ico-12}</span> schema_registry_versions · compatibility NONE</div><div id="wv3"><span class="ok">{i:check:ico-12}</span> warehouse_freshness · new rows in analytics.orders</div></div>
+                      <div class="msg ok" id="w-m4"><span class="lens">{i:lens}</span><div><b class="mh">Claude · read-only</b>Verification passed: pg-orders-connector task 0 is RUNNING and new rows reached analytics.orders. pg.public.orders-value compatibility is still NONE; restore BACKWARD with a separate fix.</div></div>
+                      <div class="card-ui follow" id="w-follow"><span class="oring" id="wf-ring" style="--lc:var(--l-sr);--rs:26px"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><svg class="rg" viewBox="0 0 30 30"><circle class="pend" cx="15" cy="15" r="14"/><circle class="done" cx="15" cy="15" r="14" pathLength="100"/></svg><span class="ck">{i:check}</span></span><span style="font-weight:600">Restore BACKWARD compatibility</span><span class="ui-label" id="wf-st">waiting for schema-registry</span><span class="mono ok-t" id="wf-line">{i:check:ico-12} compatibility BACKWARD</span></div>
+                    </div>
+                  </div>
+                </div>
+                <aside class="w-rail" id="w-rail">
+                  <div class="card-ui rail-card" id="w-people"><div class="ui-h">People <span class="ui-label">4</span></div>
+                    <div class="prow"><span class="av ring" id="wp-ar" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span><span class="nm">Arjun</span><span class="rl" id="wp-arr">on call · driving</span><span class="pres"></span></div>
+                    <div class="prow"><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><span class="nm">Priya</span><span class="rl">postgres · schema-registry</span><span class="pres"></span></div>
+                    <div class="prow"><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-kabir"/></svg></span><span class="nm">Kabir</span><span class="rl">consumer · watching</span><span class="pres"></span></div>
+                    <div class="prow"><span class="av" id="wp-me" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-meera"/></svg></span><span class="nm">Meera</span><span class="rl" id="wp-mer">warehouse · next shift</span><span class="pres off" id="wp-mep"></span></div>
+                  </div>
+                  <div class="card-ui rail-card" id="w-suggest"><div class="ui-h">Suggestions</div>
+                    <div class="empty" id="ws-empty">No suggestions yet.</div>
+                    <div class="sugg" id="ws-row"><div class="sugg-row"><span class="av" style="--sz:22px"><svg viewBox="0 0 64 64"><use href="#av-kabir"/></svg></span><span><b style="font-weight:600">Kabir</b> · Check the connector config first, not the topic.</span></div>
+                      <div class="sugg-act" id="ws-btns"><span class="btn-ui primary" id="ws-send">Send to agent</span><span class="btn-ui">Decline</span></div><span class="sugg-status" id="ws-status">{i:check:ico-12}Sent to agent</span></div>
+                  </div>
+                  <div class="card-ui rail-card" id="w-psum"><div class="ui-h">Proposals</div>
+                    <div class="psum"><div class="pr" id="wp1"><span>Set subject compatibility to NONE…</span><span class="badge warn" id="wp1b">Needs approval</span></div><div class="pr" id="wp2"><span>Restore BACKWARD compatibility</span><span class="badge warn" id="wp2b">waiting</span></div></div>
+                  </div>
+                  <div class="card-ui rail-card" id="w-activity"><div class="ui-h">Activity</div>
+                    <div class="act">
+                      <div id="wa1"><time>09:44</time>room opened by watcher</div>
+                      <div id="wa2"><time>09:45</time>Kabir commented on s_1</div>
+                      <div id="wa3"><time>09:46</time>Arjun sent Kabir's suggestion</div>
+                      <div id="wa4"><time>09:49</time>Priya approved · schema-registry</div>
+                      <div id="wa5"><time>09:49</time>Arjun approved · kafka-connect</div>
+                      <div id="wa6"><time>09:50</time>fix ran</div>
+                      <div id="wa7"><time>10:00</time>Arjun handed off to Meera</div>
+                      <div id="wa8"><time>10:03</time>Priya approved restore</div>
+                      <div id="wa9"><time>10:05</time>Meera closed the room</div>
+                    </div>
+                  </div>
+                </aside>
+                <div class="w-composer" id="w-composer"><span class="cp-in" id="wc-in">Steer the agent…</span><span class="cp-note" id="wc-note">You are driving · Lease ends in 28m — any action renews</span><span class="btn-ui primary" id="wc-btn">Steer</span></div>
+              </div>
+            </div>
+
+            <div class="set set-handoff" id="set-ho" aria-hidden="true">
+              <div class="ho-world" id="ho-world" data-layout="land">
+                <div class="hs-panel hs-a" id="hs-pa"><svg class="scene" viewBox="0 0 480 360" preserveAspectRatio="xMidYMid slice"><use href="#scene-arjun"/></svg><span class="hs-tag" id="hs-ta">Arjun · local 18:00</span></div>
+                <div class="hs-panel hs-m" id="hs-pm"><svg class="scene" viewBox="0 0 480 360" preserveAspectRatio="xMidYMid slice"><use href="#scene-meera"/></svg><span class="hs-tag" id="hs-tm">Meera · local 07:00</span></div>
+                <span class="hs-av hs-av-a" id="hs-ava"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span></span>
+                <span class="hs-av hs-av-m" id="hs-avm"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-meera"/></svg></span></span>
+                <svg class="hs-arc" id="hs-arcsvg" viewBox="0 0 1280 720"><path id="hs-arcp" d="M250 140 C 420 -30, 860 -30, 1030 140"/></svg>
+                <span class="baton" id="hs-baton"></span>
+                <div class="card-ui hoc hs-card" id="hs-card">
+                  <div class="ui-h">Shift 1 summary <span class="ui-label" style="font-weight:400">from Arjun to Meera</span></div>
+                  <div class="ho-sec" id="hs1"><b>What broke</b><span>Debezium task 0 failed after orders.amount was altered to numeric(12,2).</span></div>
+                  <div class="ho-sec" id="hs2"><b>Why</b><span>New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.</span></div>
+                  <div class="ho-sec" id="hs3"><b>Done</b><span>Set compatibility to NONE · Restarted task 0 · Warehouse caught up</span></div>
+                  <div class="ho-sec" id="hs4"><b>Ruled out</b><span>Kafka brokers · Consumer group config</span></div>
+                  <div class="ho-sec" id="hs5"><b>Still open</b><span>Consider pinning decimal.handling.mode · Restore BACKWARD (waiting for schema-registry)</span></div>
+                  <div class="ho-sec" id="hs6"><b>Risks</b><span>BACKWARD compatibility is off until re-enabled</span></div>
+                  <div class="chk" id="hs7">{i:check}Checked against the room log · no issues</div>
+                  <div class="ho-btns" id="hs8"><span class="btn-ui success" id="hs-acc">Accept</span><span class="btn-ui">Not yet</span><span class="you">You are Meera</span></div>
+                </div>
+                <span class="plate hs-plate">room clock 10:00 UTC · times illustrative</span>
+              </div>
+            </div>
+
+            <div class="ov" aria-hidden="true">
+              <div class="ov-band" id="ov-band">
+                <div class="bug" id="ov-bug"><span id="ov-bug-t">01 · A ROOM OPENS</span><i id="ov-bug-u"></i></div>
+                <div class="ov-mid"><span class="plate" id="ov-pm">write mode: on (demo)</span><div class="l3w"><div class="l3" id="ov-l3"><span class="bar" id="ov-l3b"></span><div class="pl"><span class="nm" id="ov-l3n">Arjun</span><span class="rl" id="ov-l3r">ON CALL</span></div></div></div></div>
+                <div class="ov-tr"><span class="chipov" id="ov-pov"><span class="av"><svg viewBox="0 0 64 64"><use id="ov-pov-u" href="#av-arjun"/></svg></span><span id="ov-pov-t">Viewing as Arjun</span></span><span class="chipov clk"><small>room clock · illustrative</small><span id="ov-clock">09:41:07</span></span></div>
+              </div>
+              <div class="ov-foot"></div>
+              <span class="plate" id="ov-pw">watcher mode: rooms · times illustrative</span>
+              <div class="cursor" id="ov-cur"><svg viewBox="0 0 16 16"><path d="M1.5 1.5l4.8 13 2.1-5.3 5.3-2.1z"/></svg><span class="cn" id="ov-cur-n">Kabir</span><span class="rp" id="ov-cur-r"></span></div>
+            </div>
+
+            <button class="poster" id="fp-poster" aria-label="Play the film, 1 minute 16 seconds">
+              <span class="disc">{i:play}</span>
+              <span class="p-title"><b>Schema change, 09:41</b><span>A Piperoom incident in six chapters · 1:16</span></span>
+              <span class="p-cast"><span style="display:flex;align-items:center"><span class="av-stack"><span class="av"><svg viewBox="0 0 64 64"><use href="#av-arjun"/></svg></span><span class="av"><svg viewBox="0 0 64 64"><use href="#av-priya"/></svg></span><span class="av"><svg viewBox="0 0 64 64"><use href="#av-kabir"/></svg></span><span class="av"><svg viewBox="0 0 64 64"><use href="#av-meera"/></svg></span></span><span class="lens">{i:lens}</span></span><small>Dramatised from the demo · times illustrative</small></span>
+            </button>
+            <div class="endcard" id="fp-end" hidden>
+              <div class="endcard-in"><b>That was one room.</b><p>Run Piperoom on one of your pipelines in shadow mode: Claude investigates silently, and you grade it.</p>
+                <div class="row"><a class="btn btn-primary" href="#apply" id="fp-end-join">Join the pilot</a><button class="btn btn-ghost" id="fp-replay">{i:restart}Replay</button></div></div>
+            </div>
+          </div>
+          <p class="cc" id="fp-cc" aria-live="polite"></p>
+          <div class="transport">
+            <button class="tp-btn" id="fp-play" aria-label="Play film">{i:play:i-play}{i:pause:i-pause}</button>
+            <button class="tp-btn" id="fp-restart" aria-label="Restart film">{i:restart}</button>
+            <span class="tp-time" id="fp-time">0:00 / 1:16</span>
+            <div class="seek" id="fp-seek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="76" aria-valuenow="0" aria-valuetext="0:00, chapter 1, A room opens">
+              <span class="sg" style="--w:12"><i></i></span><span class="sg" style="--w:14"><i></i></span><span class="sg" style="--w:12"><i></i></span><span class="sg" style="--w:12"><i></i></span><span class="sg" style="--w:14"><i></i></span><span class="sg" style="--w:12"><i></i></span>
+              <span class="thumb" id="fp-thumb"></span><span class="tip" id="fp-tip">0:00 · A room opens</span>
+            </div>
+            <button class="tp-txt" id="fp-cc-btn" aria-pressed="true" aria-label="Captions">CC</button>
+            <button class="tp-txt" id="fp-speed" aria-label="Playback speed">1×</button>
+            <button class="tp-btn" id="fp-fs" aria-label="Full screen" hidden>{i:max}</button>
+          </div>
+        </div>
+        <ol class="chapters" id="fp-chapters">
+          <li><button data-chapter="1"><span class="cn"><span>01</span><span>0:00</span></span><span class="ct">A room opens</span><span class="cp"></span></button></li>
+          <li><button data-chapter="2"><span class="cn"><span>02</span><span>0:12</span></span><span class="ct">Claude investigates</span><span class="cp"></span></button></li>
+          <li><button data-chapter="3"><span class="cn"><span>03</span><span>0:26</span></span><span class="ct">Everyone watches, one drives</span><span class="cp"></span></button></li>
+          <li><button data-chapter="4"><span class="cn"><span>04</span><span>0:38</span></span><span class="ct">A fix is proposed</span><span class="cp"></span></button></li>
+          <li><button data-chapter="5"><span class="cn"><span>05</span><span>0:50</span></span><span class="ct">Every owner approves</span><span class="cp"></span></button></li>
+          <li><button data-chapter="6"><span class="cn"><span>06</span><span>1:04</span></span><span class="ct">Shift change</span><span class="cp"></span></button></li>
+        </ol>
+      </section>
+    </div>
+
+    <div class="credits">
+      <p class="small">With Arjun, on call · Priya, schema-registry owner · Kabir, consumer owner · Meera, next shift · and Claude, read-only.</p>
+      <p class="small fine">Dramatised from Piperoom's schema-change demo. Times are illustrative.</p>
+    </div>
+    <details class="transcript" id="transcript">
+      <summary>{i:file}Read the transcript</summary>
+      <div class="tr-body">{TRANSCRIPT}</div>
+    </details>
+  </div>
+</section>

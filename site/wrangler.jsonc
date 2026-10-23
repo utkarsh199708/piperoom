@@ -1,0 +1,10 @@
+{
+  // Static site on Workers (assets only, no Worker code). Deploy: npx wrangler deploy
+  "name": "piperoom-site",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./public", "not_found_handling": "single-page-application" },
+  "routes": [
+    { "pattern": "piperoom.ai", "custom_domain": true },
+    { "pattern": "www.piperoom.ai", "custom_domain": true }
+  ]
+}

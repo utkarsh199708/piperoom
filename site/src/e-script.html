@@ -1,0 +1,944 @@
+<script>
+const PILOT_CONTACT = "";   // the first line of the script
+(function () {
+  try {
+    const s = localStorage.getItem("piperoom-theme");
+    if (s === "light" || s === "dark") document.documentElement.dataset.theme = s;
+  } catch (e) { /* storage unavailable: the OS preference applies */ }
+})();
+const DURATION = 76;
+const CHAPTERS = [
+  { n: 1, id: "opens",    title: "A room opens",                 start: 0,  end: 12 },
+  { n: 2, id: "reads",    title: "Claude investigates",          start: 12, end: 26 },
+  { n: 3, id: "steers",   title: "Everyone watches, one drives", start: 26, end: 38 },
+  { n: 4, id: "proposes", title: "A fix is proposed",            start: 38, end: 50 },
+  { n: 5, id: "approves", title: "Every owner approves",         start: 50, end: 64 },
+  { n: 6, id: "handoff",  title: "Shift change",                 start: 64, end: 76 },
+];
+// s/e = cue start/end; k = key frame for reduced motion (all of that cue's motion complete)
+const CUES = [
+  { s: 0.4,  e: 3.6,  k: 3.3,  text: "09:41. A migration changes orders.amount to numeric(12,2)." },
+  { s: 3.6,  e: 6.8,  k: 6.5,  text: "Schema Registry rejects the new schema with a 409. Debezium task 0 fails." },
+  { s: 6.8,  e: 9.6,  k: 9.3,  text: "The connector still reads RUNNING. New rows stop reaching the warehouse." },
+  { s: 9.6,  e: 12.0, k: 11.8, text: "The watcher sees the failed task and opens a room. Arjun is on call." },
+  { s: 12.0, e: 15.2, k: 15.0, text: "A first look arrives, marked unverified. Then Claude starts the real investigation." },
+  { s: 15.2, e: 18.8, k: 18.6, text: "Every step is a read-only tool call: connector status, schema versions, a diff." },
+  { s: 18.8, e: 22.4, k: 22.2, text: "Consumer lag is zero, so the consumer is ruled out. The DDL log shows the ALTER." },
+  { s: 22.4, e: 26.0, k: 25.8, text: "Tool output stays data: instructions hidden in it are flagged, not followed." },
+  { s: 26.0, e: 29.6, k: 29.4, text: "Anyone can watch the room live. Kabir questions step 1, right on the step." },
+  { s: 29.6, e: 33.2, k: 33.0, text: "Only the driver steers. Kabir's idea becomes a suggestion, not a command." },
+  { s: 33.2, e: 38.0, k: 37.8, text: "Arjun drives, so he sends it on. Claude checks: the connector config is unchanged." },
+  { s: 38.0, e: 41.6, k: 41.4, text: "Root cause: the ALTER on orders.amount breaks BACKWARD compatibility." },
+  { s: 41.6, e: 45.6, k: 45.4, text: "The hypothesis cites the steps it rests on. Then Claude writes a fix it cannot run." },
+  { s: 45.6, e: 50.0, k: 49.8, text: "Two steps, each tagged with its layer, a rollback, and a fingerprint of the plan." },
+  { s: 50.0, e: 53.4, k: 53.2, text: "Priya owns the Schema Registry. She approves her step, bound to that fingerprint." },
+  { s: 53.4, e: 56.8, k: 56.6, text: "Arjun approves for Kafka Connect. With both owners in, the fix can run." },
+  { s: 56.8, e: 60.4, k: 60.2, text: "Compatibility goes to NONE and task 0 restarts. Then Claude checks the recovery." },
+  { s: 60.4, e: 64.0, k: 63.8, text: "New rows reach the warehouse. A follow-up to restore BACKWARD waits for Priya." },
+  { s: 64.0, e: 67.6, k: 67.4, text: "Shift change. Arjun hands off, and Claude writes the summary from the room log." },
+  { s: 67.6, e: 71.2, k: 71.0, text: "What broke, why, what's done, what's ruled out, what's still open, and the risks." },
+  { s: 71.2, e: 76.0, k: 75.8, text: "Meera accepts and drives. Priya approves the restore, and the room closes verified." },
+];
+const FP = { NONE: "205a8899f2dacab0a2af2a9d33b652cd9ba714015d1cce8818d74d988866f485",
+             FULL: "9bd1c62c39aa1caa58408624df0b2782c9e30cf8303608c39e1af0cc05e227f1" };
+const shortFp = (h) => `${h.slice(0, 4)} ${h.slice(4, 8)} … ${h.slice(-4)}`;
+const tinyFp = (h) => `${h.slice(0, 4)}…${h.slice(-4)}`;
+
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const byId = (id) => document.getElementById(id);
+const mqReduce = matchMedia("(prefers-reduced-motion: reduce)");
+const reduced = () => mqReduce.matches;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const fmt = (s) => { s = Math.max(0, Math.floor(s + 1e-6)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+function bez(x1, y1, x2, y2) {
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
+  const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const X = (u) => ((ax * u + bx) * u + cx) * u, Y = (u) => ((ay * u + by) * u + cy) * u, dX = (u) => (3 * ax * u + 2 * bx) * u + cx;
+  return (x) => {
+    if (x <= 0) return 0; if (x >= 1) return 1;
+    let u = x;
+    for (let i = 0; i < 6; i++) { const e = X(u) - x, d = dX(u); if (Math.abs(e) < 1e-5 || Math.abs(d) < 1e-6) break; u -= e / d; }
+    u = clamp(u, 0, 1);
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 14 && Math.abs(X(u) - x) > 1e-4; i++) { if (X(u) < x) lo = u; else hi = u; u = (lo + hi) / 2; }
+    return Y(u);
+  };
+}
+const E = { lin: (x) => clamp(x, 0, 1), out: bez(.2, .7, .2, 1), cam: bez(.65, 0, .35, 1), pop: bez(.3, 1.4, .5, 1) };
+const P = (T, a, b) => clamp((T - a) / (b - a), 0, 1);
+function op(el, v) { v = Math.round(v * 1000) / 1000; if (el._o !== v) { el._o = v; el.style.opacity = v; } }
+function tf(el, v) { if (el._t !== v) { el._t = v; el.style.transform = v; } }
+function tx(el, v) { if (el._x !== v) { el._x = v; el.textContent = v; } }
+function st(el, v) { if (el.dataset.state !== v) el.dataset.state = v; }
+function tone(el, v) { if (el.dataset.tone !== v) el.dataset.tone = v; }
+function disp(el, on) { const v = on ? "" : "none"; if (el._dp !== v) { el._dp = v; el.style.display = v; } }
+function vis(el, on) { const v = on ? "" : "hidden"; if (el._v !== v) { el._v = v; el.style.visibility = v; } }
+function flt(el, v) { if (el._f !== v) { el._f = v; el.style.filter = v; } }
+function prop(el, k, v) { el._p = el._p || {}; if (el._p[k] !== v) { el._p[k] = v; el.style.setProperty(k, v); } }
+function setCls(el, v) { if (el.className !== v) el.className = v; }
+function cls(el, c, on) { if (el.classList.contains(c) !== !!on) el.classList.toggle(c, !!on); }
+function stepv(keys, T) { let v = keys[0][1]; for (const k of keys) { if (T >= k[0]) v = k[1]; else break; } return v; }
+function stepk(keys, T) { let v = keys[0]; for (const k of keys) { if (T >= k[0]) v = k; else break; } return v; }
+function enter(el, T, a, d = .32, dy = 8) { const p = E.out(P(T, a, a + d)); op(el, p); tf(el, p >= 1 ? "none" : `translateY(${((1 - p) * dy).toFixed(2)}px)`); }
+function typeIt(el, T, a, ms = 40) {
+  const full = el.dataset.text || ""; const n = T < a ? 0 : Math.min(full.length, Math.floor((T - a) * 1000 / ms));
+  tx(el, full.slice(0, n)); cls(el, "caret", n > 0 && n < full.length);
+}
+const HEX = "0123456789abcdef";
+function rnd(i, f) { let x = (Math.imul(i + 1, 374761393) + Math.imul(f + 7, 668265263)) >>> 0; x = Math.imul(x ^ (x >>> 13), 1274126177) >>> 0; return HEX[(x >>> 7) & 15]; }
+function scramble(finalStr, frame, nSettled) {
+  return finalStr.split("").map((c, i) => (c === " " || c === "…" || i < nSettled) ? c : rnd(i, frame)).join("");
+}
+function isIn(el) { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; }
+function smoothScrollTo(el) { el.scrollIntoView({ behavior: reduced() ? "auto" : "smooth", block: "center" }); }
+
+/* ---------- film: elements ---------- */
+const player = byId("film"), frameEl = byId("fp-frame"), stage = byId("fp-stage");
+const setPro = byId("set-pro"), setWorld = byId("set-world"), setHo = byId("set-ho");
+const world = byId("world"), feedEl = byId("w-feed"), feedIn = byId("w-feed-in"), proIn = byId("pro-in"), hoW = byId("ho-world");
+const posterEl = byId("fp-poster"), endEl = byId("fp-end"), ccEl = byId("fp-cc"), bandEl = byId("ov-band");
+const G = {}; const g = (id) => G[id] || (G[id] = byId(id));
+
+/* ---------- layout + measurement (no layout reads inside render) ---------- */
+const L = { portrait: false, sw: 1, sh: 1, top: 44, bot: 0, b: 1, bp: 1, bh: 1, colW: 872, ww: 1280, wh: 720, pw: 1280, ph: 720, hw: 1280, hh: 720, boxes: {}, pboxes: {}, hboxes: {}, feedH: 400, feedInH: 1600, items: {} };
+const ANCHORS = ["#w-header", "#w-lane", "#w-feed", "#w-thread", "#w-composer", "#w-suggest", "#w-hypo", "#w-prop", "#w-print", "#w-owners", "#w-exec",
+  "#w-kb", "#ws-send", "#wo-pbtn", "#wo-abtn", "#w-hbtn", "#wc-btn", "#wc-in", "#w-res", "#w-first", "#w-s1", "#w-s2", "#w-s4", "#w-s6", "#w-m1", "#w-m2", "#w-m3", "#w-m4", "#w-ps2", "#w-changed"];
+function boxOf(el, root) {
+  let x = 0, y = 0, e = el, inFeed = false;
+  while (e && e !== root) { if (e === feedIn) inFeed = true; x += e.offsetLeft; y += e.offsetTop; e = e.offsetParent; }
+  if (el === feedIn) inFeed = false;
+  return { x, y, w: el.offsetWidth, h: el.offsetHeight, inFeed };
+}
+function feedTop(el) { let y = 0, e = el; while (e && e !== feedIn) { y += e.offsetTop; e = e.offsetParent; } return y; }
+function layout() {
+  const portrait = player.clientWidth < 600;
+  L.portrait = portrait;
+  const lay = portrait ? "portrait" : "land";
+  world.dataset.layout = lay; proIn.dataset.layout = lay; hoW.dataset.layout = lay;
+  L.sw = stage.clientWidth || 1; L.sh = stage.clientHeight || 1;
+  // the overlay band sits above the room; every set is framed in the area below it
+  L.top = bandEl.offsetHeight || 0;
+  // landscape captions sit over the stage's foot: keep that band clear of framed content (one caption line, two when narrow)
+  if (portrait) L.bot = 0;
+  else { const fs = parseFloat(getComputedStyle(ccEl).fontSize) || 17, lines = L.sw * .8 >= 86 * fs * .53 ? 1 : 2; L.bot = Math.round(26 + lines * fs * 1.35); }
+  stage.style.setProperty("--safe-b", L.bot + "px");
+  const vh = Math.max(1, L.sh - L.top - L.bot);
+  L.ww = world.offsetWidth; L.wh = world.offsetHeight;
+  L.pw = proIn.offsetWidth; L.ph = proIn.offsetHeight; L.hw = hoW.offsetWidth; L.hh = hoW.offsetHeight;
+  L.b = portrait ? L.sw / L.ww : Math.min(L.sw / L.ww, vh / L.wh);
+  L.bp = portrait ? L.sw / L.pw : Math.min(L.sw / L.pw, vh / L.ph);
+  L.bh = Math.min(L.sw / L.hw, vh / L.hh);
+  for (const s of ANCHORS) { const el = $(s, world); if (el) L.boxes[s] = boxOf(el, world); }
+  for (const s of ["#fa", "#fb", "#fc", "#pa"]) L.pboxes[s] = boxOf($(s, proIn), proIn);
+  for (const s of ["#hs-acc", "#hs-card", "#hs-ava", "#hs-avm"]) L.hboxes[s] = boxOf($(s, hoW), hoW);
+  const ln = L.boxes["#w-lane"]; L.colW = ln ? ln.x + ln.w + 16 : 872;
+  L.feedH = feedEl.clientHeight; L.feedInH = feedIn.offsetHeight;
+  L.items = {};
+  for (const k of FEED) if (!L.items[k[1]]) { const el = $(k[1], feedIn); L.items[k[1]] = { y: feedTop(el), h: el.offsetHeight }; }
+  // the baton travels the same arc that is drawn
+  const a = L.hboxes["#hs-ava"], m = L.hboxes["#hs-avm"];
+  const ax = a.x + a.w / 2, ay = a.y + a.h / 2, mx = m.x + m.w / 2, my = m.y + m.h / 2;
+  const lift = portrait ? 26 : 150;
+  const d = `M${ax} ${ay} C ${ax + (mx - ax) * .22} ${ay - lift}, ${mx - (mx - ax) * .22} ${my - lift}, ${mx} ${my}`;
+  g("hs-arcp").setAttribute("d", d);
+  g("hs-arcsvg").setAttribute("viewBox", `0 0 ${L.hw} ${L.hh}`);
+  g("hs-baton").style.offsetPath = `path('${d}')`;
+  draw();
+}
+
+/* ---------- camera ----------
+   Three framings only, so no shot can cut a line of UI text mid-word:
+   WIDE = the whole room; TOP = the main column from the header down; FEED = the main column's whole feed and composer.
+   Zoomed shots always show the full width of the main column. */
+const SHOTS = { WIDE: "wide", WIDE96: "wide96", TOP: "top", FEED: "feed", RAIL: "rail" };
+const CAM = [[0, "WIDE", 0], [12, "TOP", 1.2], [14.6, "FEED", 1], [24.4, "TOP", .9], [26, "FEED", 1], [32.4, "RAIL", .8], [35.4, "FEED", 1],
+  [60.4, "TOP", .9], [62.6, "WIDE", 1.2], [72.2, "WIDE", 0], [74.6, "WIDE96", 1.4]];
+// feed track: [time, item, align] — the item's bottom sits at the feed's bottom ("b"), or its top at the top ("t")
+const FEED = [[0, "#w-first"], [12.6, "#w-s1"], [14.6, "#w-s2"], [16.8, "#w-s3"], [19.2, "#w-s4"], [20.8, "#w-s5"], [22.4, "#w-s6"], [23.2, "#w-changed"],
+  [26, "#w-s1"], [35.4, "#w-m1"], [37.0, "#w-hypo"], [41.6, "#w-m2"], [42.7, "#w-prop", "t"], [45.0, "#w-owners"], [48.4, "#w-m3"], [56.8, "#w-exec", "t"],
+  [62.6, "#w-m4", "b", "#w-exec"], [63.2, "#w-follow", "b", "#w-exec"]];
+const PSHOTS = { FA: { a: "#fa", z: 1 }, FB: { a: "#fb", z: 1.03 }, FC: { a: "#fc", z: 1.05 }, PULL: { a: "#pa", z: .96 } };
+const PCAM = [[0, "FA", 0], [3.4, "FB", 1.2], [6.6, "FC", 1.2], [9.2, "PULL", 1.4]];
+
+// place a W x H set at scale sc in the area under the band; (wx, wy) is the world point for the top-left, null centres
+function view(sc, W, H, wx, wy) {
+  const vh = L.sh - L.top - L.bot, w = W * sc, h = H * sc;
+  const x = w <= L.sw ? (L.sw - w) / 2 : clamp(wx == null ? (L.sw - w) / 2 : -wx * sc, L.sw - w, 0);
+  const y = h <= vh ? L.top + (vh - h) / 2 : clamp(wy == null ? L.top + (vh - h) / 2 : L.top - wy * sc, L.top + vh - h, L.top);
+  return { x, y, s: sc };
+}
+function feedScroll(key) {
+  const it = L.items[key[1]]; if (!it) return 0;
+  const tall = it.h + 28 > L.feedH;
+  let s = key[2] === "t" || tall ? it.y - 14 : it.y + it.h + 14 - L.feedH;
+  // a floor item keeps everything above it scrolled off (stale messages never return once the fix has run)
+  if (key[3] && L.items[key[3]]) s = Math.max(s, L.items[key[3]].y - 14);
+  return -clamp(s, 0, Math.max(0, L.feedInH - L.feedH));
+}
+function feedYAt(T) {
+  const i = FEED.indexOf(stepk(FEED, T));
+  const B = feedScroll(FEED[i]);
+  if (i === 0) return B;
+  const p = E.cam(P(T, FEED[i][0], FEED[i][0] + .8));
+  if (p >= 1) return B;
+  const A = feedScroll(FEED[i - 1]);
+  return A + (B - A) * p;
+}
+function worldShot(name) {
+  const k = SHOTS[name], B = L.boxes, vh = L.sh - L.top - L.bot;
+  if (L.portrait) {
+    const sc = L.b, span = (L.sh - L.top) / sc;
+    let wy = 0;
+    if (k === "feed" && B["#w-feed"]) wy = B["#w-feed"].y - 8;
+    else if (k === "rail" && B["#w-suggest"]) { const r = B["#w-suggest"]; wy = r.y + r.h / 2 - span / 2; }
+    return view(sc, L.ww, L.wh, 0, wy);
+  }
+  if (k === "wide" || k === "rail") return view(L.b, L.ww, L.wh, null, null);
+  if (k === "wide96") return view(L.b * .96, L.ww, L.wh, null, null);
+  const sc = Math.min(L.sw / L.colW, L.b * 1.8), span = vh / sc;
+  if (k === "top") return view(sc, L.ww, L.wh, 0, 0);
+  const c = B["#w-composer"];
+  return view(sc, L.ww, L.wh, 0, c ? c.y + c.h + 8 - span : 0);
+}
+function proShot(name) {
+  const s = PSHOTS[name], b = L.pboxes[s.a], vh = L.sh - L.top - L.bot;
+  if (L.portrait) { const sc = L.bp; return view(sc, L.pw, L.ph, 0, b.y + b.h / 2 - (vh / sc) / 2); }
+  const sc = L.bp * s.z;
+  return view(sc, L.pw, L.ph, b.x + b.w / 2 - (L.sw / sc) / 2, b.y + b.h / 2 - (vh / sc) / 2);
+}
+function camAt(keys, T, f) {
+  let i = 0; for (let k = 0; k < keys.length; k++) if (T >= keys[k][0]) i = k;
+  const cur = keys[i], B = f(cur[1]);
+  if (i === 0 || !cur[2]) return B;
+  const p = E.cam(P(T, cur[0], cur[0] + cur[2])); if (p >= 1) return B;
+  const A = f(keys[i - 1][1]);
+  return { x: A.x + (B.x - A.x) * p, y: A.y + (B.y - A.y) * p, s: A.s + (B.s - A.s) * p };
+}
+const tfStr = (c) => `translate(${c.x.toFixed(2)}px, ${c.y.toFixed(2)}px) scale(${c.s.toFixed(5)})`;
+
+/* ---------- timeline data ---------- */
+const STATUS = [[0, "agent", "Investigating · step 1"], [14.6, "agent", "Investigating · step 2"], [16.8, "agent", "Investigating · step 3"], [19.2, "agent", "Investigating · step 4"],
+  [20.8, "agent", "Investigating · step 5"], [22.4, "agent", "Investigating · step 6"], [47.4, "warn", "Needs approval · 1m"], [56.8, "info", "Executing fix · 1 of 2"],
+  [58.6, "info", "Fix ran · verifying"], [61.4, "ok", "Fix ran · recovered"], [64.9, "agent", "Writing hand-off…"], [72.2, "ok", "Fix ran · recovered"], [74.6, "ok", "Resolved · verified"]];
+const AGENT = [[0, "Agent working"], [47.4, "Agent waiting for approval"], [51.8, "Agent waiting · 1 of 2 approvals"], [56.8, "Executing fix"], [60.4, "Agent working"]];
+const BAR = [[0, "idle", "Nothing needs your approval"], [47.4, "warn", "Needs your approval · schema-registry · kafka-connect"], [50, "warn", "Needs your approval · schema-registry"],
+  [51.8, "warn", "Waiting for kafka-connect · 1 of 2 approved"], [53.4, "warn", "Needs your approval · kafka-connect"], [54.3, "ok", "Approved"],
+  [56.8, "info", "Running step 1 of 2"], [58.6, "ok", "Fix ran · 2 of 2 steps"], [61.4, "ok", "Verified · recovered"], [64, "idle", "Nothing needs your approval"]];
+const POV = [[0, "arjun"], [26, "kabir"], [33.2, "arjun"], [50, "priya"], [53.4, "arjun"], [70.6, "meera"]];
+const NAMES = { arjun: "Arjun", priya: "Priya", kabir: "Kabir", meera: "Meera" };
+const PCOL = { arjun: "var(--l-connect)", priya: "var(--l-sr)", kabir: "var(--l-consumer)", meera: "var(--l-wh)" };
+const CLOCK = [[0, 9 * 3600 + 41 * 60 + 7], [10.6, 9 * 3600 + 44 * 60 + 30], [38, 9 * 3600 + 47 * 60], [50, 9 * 3600 + 49 * 60], [60.4, 9 * 3600 + 51 * 60], [64, 10 * 3600], [76, 10 * 3600 + 5 * 60]];
+const RIM = [[0, "idle"], [4.4, "alert"], [12, "agent"], [48.4, "need"], [60.4, "ok"], [64, "idle"], [74.6, "ok"]];
+const STEPS = [["w-s1", 12.6, 13.8], ["w-s2", 14.6, 15.5], ["w-s3", 16.8, 17.6], ["w-s4", 19.2, 19.9], ["w-s5", 20.8, 21.6], ["w-s6", 22.4, 23.1]];
+const LANE = [["n-src", "degraded", 60.4], ["n-con", "failed", 60.55], ["n-sub", "degraded", 60.7], ["n-top", "unknown", 60.85], ["n-cons", "unknown", 61.0], ["n-sink", "degraded", 61.15]];
+const ACT = [["wa1", 10.6], ["wa2", 28.4], ["wa3", 34.6], ["wa4", 52.0], ["wa5", 54.2], ["wa6", 58.6], ["wa7", 72.4], ["wa8", 74.0], ["wa9", 75.2]];
+const L3 = [{ a: 11.4, b: 13.2, n: "Arjun", r: "ON CALL · DRIVING · KAFKA-CONNECT", c: "var(--l-connect)" },
+  { a: 13.4, b: 15.6, n: "Claude", r: "READ-ONLY AGENT", c: "var(--ui-agent)" },
+  { a: 27.0, b: 29.4, n: "Kabir", r: "WATCHING · OWNS THE CONSUMER", c: "var(--l-consumer)" },
+  { a: 50.0, b: 52.4, n: "Priya", r: "OWNS POSTGRES, SCHEMA-REGISTRY", c: "var(--l-sr)" },
+  { a: 66.0, b: 68.4, n: "Meera", r: "NEXT SHIFT · OWNS THE WAREHOUSE", c: "var(--l-wh)" }];
+const CUR = [
+  { who: "kabir", a: 27.0, b: 32.6, path: [[27.0, "#w-kb", 140, 70], [27.8, "#w-kb", -20, -6], [30.6, "#w-kb", -20, -6], [31.2, "#wc-in", -60, 0], [32.0, "#wc-btn", 0, 0]], clicks: [27.9, 32.2] },
+  { who: "arjun", a: 33.2, b: 35.4, path: [[33.2, "#ws-send", 90, 50], [34.0, "#ws-send", 0, 0]], clicks: [34.2] },
+  { who: "priya", a: 50.2, b: 53.2, path: [[50.2, "#wo-pbtn", 70, 40], [50.8, "#wo-pbtn", 0, 0]], clicks: [51.7] },
+  { who: "arjun", a: 53.4, b: 55.4, path: [[53.4, "#wo-pbtn", 30, 30], [54.0, "#wo-abtn", 0, 0]], clicks: [54.1] },
+  { who: "arjun", a: 64.6, b: 66.0, path: [[64.6, "#w-hbtn", -160, 60], [65.3, "#w-hbtn", 0, 0]], clicks: [65.4] },
+  { who: "meera", a: 70.6, b: 72.2, path: [[70.6, "#hs-acc", 120, 40], [70.9, "#hs-acc", 0, 0]], clicks: [71.0], ho: true },
+];
+
+/* ---------- render(t): pure, every visible property derives from T ---------- */
+let camW = { x: 0, y: 0, s: 1 }, camP = { x: 0, y: 0, s: 1 }, camH = { x: 0, y: 0, s: 1 }, feedY = 0;
+function ptWorld(sel, dx, dy) { const b = L.boxes[sel]; if (!b) return { x: 0, y: 0 }; const x = b.x + b.w / 2 + dx, y = b.y + b.h / 2 + dy + (b.inFeed ? feedY : 0); return { x: x * camW.s + camW.x, y: y * camW.s + camW.y }; }
+function ptHo(sel, dx, dy) { const b = L.hboxes[sel]; const x = b.x + b.w / 2 + dx, y = b.y + b.h / 2 + dy; return { x: x * camH.s + camH.x, y: y * camH.s + camH.y }; }
+
+function render(T, alive) {
+  // sets
+  const showPro = T < 11.4, showWorld = (T >= 10.6 && T < 66.7) || T >= 72.2, showHo = T >= 66 && T < 73;
+  vis(setPro, showPro); vis(setWorld, showWorld); vis(setHo, showHo);
+  prop(stage, "--rim", `var(--state-${stepv(RIM, T)})`);
+
+  // prologue
+  if (showPro) {
+    camP = camAt(PCAM, T, proShot); tf(proIn, tfStr(camP));
+    op(setPro, E.lin(P(T, 0, .3)));
+    // every window is readable from the first frame; the one the caption talks about is lit, the others rest at 55%
+    op(g("fa2"), P(T, .9, 1.0)); op(g("fa3"), P(T, 1.25, 1.35)); op(g("fa4"), P(T, 1.5, 1.6));
+    op(g("fb1"), 1 - .5 * P(T, 3.9, 4.1));
+    const sp = E.pop(P(T, 4.0, 4.3)); op(g("fb2"), P(T, 4.0, 4.1)); tf(g("fb2"), `scale(${(1.4 - .4 * sp).toFixed(3)}) rotate(${(-2 * sp).toFixed(2)}deg)`);
+    enter(g("fb3"), T, 4.7); enter(g("fb4"), T, 5.1); tf(g("fb4u"), `scaleX(${E.out(P(T, 5.5, 6.0)).toFixed(3)})`);
+    const rf = P(T, 7.0, 7.5);
+    op(g("fc-run"), 1 - .45 * rf); op(g("fc2"), .55 + .45 * rf);
+    const blink = T >= 7.6 && T < 8.2 && Math.floor((T - 7.6) / .15) % 2 === 0;
+    op(g("fc2f"), blink ? .15 : 1);
+    typeIt(g("fc3"), T, 7.8, 22); enter(g("fc4"), T, 8.4);
+    tx(g("fc4n"), T < 8.6 ? "0m" : T < 8.8 ? "1m" : T < 9.0 ? "2m" : "3m");
+    const lit = (a, b) => .62 + .38 * Math.min(P(T, a - .3, a), 1 - P(T, b, b + .3));
+    const dim = 1 - .6 * E.out(P(T, 9.2, 9.8));
+    op(g("fa"), lit(0, 3.4) * dim); op(g("fb"), lit(3.4, 6.6) * dim); op(g("fc"), lit(6.6, 99) * dim);
+    const cp = E.pop(P(T, 9.3, 9.7)); op(g("pa"), P(T, 9.3, 9.45)); tf(g("pa"), `translate(-50%, -50%) scale(${(.8 + .2 * cp).toFixed(3)})`);
+    const fp = E.out(P(T, 9.6, 10.4)); op(g("pro-fig"), fp); tf(g("pro-fig"), `translateX(${((1 - fp) * 110).toFixed(1)}%)`);
+  }
+
+  // world
+  if (showWorld) {
+    // the poster holds the proposal from its title down
+    feedY = posterOn ? feedScroll([0, "#w-prop", "t"]) : feedYAt(T);
+    tf(feedIn, `translateY(${feedY.toFixed(1)}px)`);
+    camW = posterOn ? worldShot("WIDE") : camAt(CAM, T, worldShot);
+    if (!L.portrait && !posterOn) {
+      const part = (L.sw - camW.x) / camW.s - L.colW;
+      if (part > 0 && part < 240) camW = { x: L.sw - (L.colW + Math.max(0, 2 * (part - 120))) * camW.s, y: camW.y, s: camW.s };
+    }
+    tf(world, tfStr(camW));
+    // circle wipe out of the alert chip
+    if (T < 11.4) {
+      const b = L.pboxes["#pa"], cx = (b.x + b.w / 2) * camP.s + camP.x, cy = (b.y + b.h / 2) * camP.s + camP.y;
+      const r = E.cam(P(T, 10.6, 11.4)) * Math.hypot(L.sw, L.sh);
+      setWorld.style.clipPath = `circle(${r.toFixed(1)}px at ${cx.toFixed(1)}px ${cy.toFixed(1)}px)`; setWorld._clip = 1;
+    } else if (setWorld._clip) { setWorld.style.clipPath = ""; setWorld._clip = 0; }
+    const hb = P(T, 66.0, 66.7); flt(setWorld, hb > 0 && T < 72.2 ? `blur(${(6 * hb).toFixed(2)}px) brightness(${(1 - .45 * hb).toFixed(3)})` : "none");
+
+    // header
+    const s = stepk(STATUS, T); tone(g("w-status"), s[1]); tx(g("w-status").lastChild, s[2]);
+    op(g("w-status"), T >= 64.9 && T < 66.6 ? .55 + .45 * Math.abs(Math.cos((T - 64.9) * 3.2)) : 1);
+    tx(g("w-agent").lastChild, stepv(AGENT, T)); op(g("w-agent"), 1 - P(T, 61.4, 61.7)); disp(g("w-agent"), T < 61.7);
+    enter(g("w-res"), T, 73.6, .5, 4);
+    const press = T >= 65.4 && T < 65.6; tf(g("w-hbtn"), press ? "translateY(1px)" : "none"); tf(g("w-hk"), press ? "translateY(1px)" : "none");
+    ["wa-arjun", "wa-priya", "wa-kabir", "wa-meera"].forEach((id, i) => { const p = E.pop(P(T, 11.4 + i * .08, 11.65 + i * .08)); op(g(id), clamp(p, 0, 1)); tf(g(id), `scale(${(.6 + .4 * p).toFixed(3)})`); });
+    const meeraDrives = T >= 72.2;
+    cls(g("wa-arjun"), "ring", !meeraDrives); cls(g("wa-meera"), "ring", meeraDrives);
+    tx(g("w-drv"), meeraDrives ? "Meera · driving" : "Arjun · driving");
+    const bar = stepk(BAR, T); st(g("w-bar"), bar[1]); tx(g("w-bar-t"), bar[2]);
+
+    // lane
+    for (const [id, s0, healAt] of LANE) {
+      const n = g(id); let state = s0, tint = 0;
+      if (id === "n-cons" && T >= 20.0) { state = "healthy"; tint = Math.max(tint, 1 - P(T, 20.0, 20.6)); }
+      if (T >= healAt) { state = "healthy"; tint = Math.max(tint, 1 - P(T, healAt, healAt + .6)); }
+      st(n, state); tx($(".n-st", n), state); op($(".tint", n), T >= 10.6 ? tint : 0);
+    }
+    op(g("n-ro"), T >= 20.0 && T < 60.4 ? P(T, 20.0, 20.3) : 0);
+
+    // feed
+    enter(g("w-first"), T, 12.2, .45, 14);
+    for (const [id, a, d] of STEPS) {
+      const el = g(id); enter(el, T, a, .32, 10);
+      typeIt($(".tool", el), T, a + .2, 25);
+      op($(".spin", el), T >= a + .3 && T < d ? 1 : 0);
+      tf($(".spin", el), `rotate(${((T * 540) % 360).toFixed(0)}deg)`);
+      st(el, T >= d ? "done" : "run");
+      $$(".ln", el).forEach((ln, j) => enter(ln, T, d + j * .3, .3, 4));
+      op($(".untrusted", el), T >= d ? 1 : 0);
+      const gl = (id === "w-s4" || id === "w-s5" || id === "w-s6") ? Math.sin(Math.PI * P(T, 24.0, 24.6)) : 0;
+      op($(".glow", el), gl);
+    }
+    op(g("w-s4ro"), P(T, 20.0, 20.3));
+    enter(g("w-changed"), T, 23.2, .4, 10);
+    enter(g("w-kb"), T, 27.9, .3, 6); typeIt($(".tx", g("w-kb")), T, 28.0, 23);
+    enter(g("w-ar"), T, 29.6, .32, 6);
+    enter(g("w-m1"), T, 35.6, .32, 8); typeIt($(".tx", g("w-m1")), T, 35.7, 18);
+    enter(g("w-hypo"), T, 37.0, .4, 12);
+    ["wc1", "wc3", "wc5", "wc6"].forEach((id, i) => {
+      const a = 37.1 + i * .15, p = E.cam(P(T, a, a + .55)), el = g(id);
+      op(el, P(T, a, a + .1)); tf(el, `translateY(${((1 - p) * -46).toFixed(1)}px)`);
+      op($("i", el), T >= a ? Math.max(.55 * (1 - P(T, a + .55, a + 1.0)), .45 * (1 - P(T, 39.6 + i * .5, 40.2 + i * .5)) * (T >= 39.6 + i * .5 ? 1 : 0)) : 0);
+    });
+    const cpth = g("w-cpath"); const cdo = (100 * (1 - E.out(P(T, 37.5, 38.0)))).toFixed(1); if (cpth._d !== cdo) { cpth._d = cdo; cpth.style.strokeDashoffset = cdo; }
+    op(g("w-cdot"), P(T, 37.9, 38.0));
+    typeIt(g("w-htx"), T, 37.2, 6);
+    enter(g("w-m2"), T, 41.8, .32, 8);
+    enter(g("w-prop"), T, 42.7, .4, 12);
+    typeIt(g("w-pt"), T, 42.8, 25);
+    enter(g("w-ps1"), T, 43.4); enter(g("w-ps2"), T, 44.0); enter(g("w-rb"), T, 44.6); enter(g("w-print"), T, 45.0); enter(g("w-owners"), T, 45.3);
+    const fin = shortFp(FP.NONE);
+    tx(g("w-hash"), T < 46.5 ? "···· ···· … ····" : T >= 47.4 ? fin : scramble(fin, Math.floor(T * 24), T < 47.0 ? 0 : Math.floor(fin.length * P(T, 47.0, 47.4))));
+    ringAt(g("wo-p"), T, 51.7); ringAt(g("wo-a"), T, 54.1); ringAt(g("wf-ring"), T, 73.4);
+    tf(g("wo-pbtn"), T >= 51.7 && T < 51.85 ? "scale(.96)" : "none");
+    tx(g("wo-pbtn"), T >= 52.2 ? "Approved" : "Approve");
+    tf(g("wo-abtn"), T >= 54.1 && T < 54.25 ? "scale(.96)" : "none");
+    const sh = E.out(P(T, 55.0, 55.24)); tf(g("wo-shk"), sh > 0 ? `translate(${(4 * sh).toFixed(2)}px, ${(-4 * sh).toFixed(2)}px) rotate(${(-20 * sh).toFixed(1)}deg)` : "none");
+    enter(g("w-aud1"), T, 52.0, .3, 4); enter(g("w-aud2"), T, 54.2, .3, 4); op(g("w-same"), P(T, 54.4, 54.8));
+    const pb = T < 52.2 ? ["warn", "Needs approval"] : T < 54.4 ? ["warn", "1 of 2 approved"] : T < 58.6 ? ["ok", "Approved"] : ["ok", "Fix ran"];
+    setCls(g("w-pbadge"), "badge " + pb[0]); tx(g("w-pbadge"), pb[1]);
+    setCls(g("wp1b"), "badge " + pb[0]); tx(g("wp1b"), pb[1]); op(g("wp1"), P(T, 45.6, 45.9));
+    const bm = P(T, 55.0, 56.4); op(g("w-beam"), bm > 0 && bm < 1 ? 1 - Math.pow(bm, 6) : 0); prop(g("w-beam"), "--ba", `${(bm * 360).toFixed(1)}deg`);
+    enter(g("w-m3"), T, 48.4, .32, 8); if (T >= 56.8) op(g("w-m3"), 1 - P(T, 56.8, 57.2));
+    enter(g("w-exec"), T, 56.8, .32, 8);
+    enter(g("we1"), T, 57.2, .3, 4); enter(g("we2"), T, 57.9, .3, 4); enter(g("wv1"), T, 58.8, .3, 4); enter(g("wv2"), T, 59.4, .3, 4); enter(g("wv3"), T, 60.0, .3, 4);
+    enter(g("w-m4"), T, 62.7, .4, 8);
+    enter(g("w-follow"), T, 63.2, .4, 10);
+    op(g("wf-st"), 1 - P(T, 73.6, 73.8)); enter(g("wf-line"), T, 73.8, .3, 3);
+    op(g("wp2"), P(T, 63.2, 63.5)); const f2 = T >= 73.8; setCls(g("wp2b"), "badge " + (f2 ? "ok" : "warn")); tx(g("wp2b"), f2 ? "Approved" : "waiting");
+
+    // rail
+    cls(g("wp-ar"), "ring", !meeraDrives); cls(g("wp-me"), "ring", meeraDrives);
+    tx(g("wp-arr"), meeraDrives ? "on call · watching" : "on call · driving");
+    tx(g("wp-mer"), meeraDrives ? "warehouse · driving" : "warehouse · next shift");
+    cls(g("wp-mep"), "off", T < 64);
+    op(g("ws-empty"), T < 32.4 ? 1 : 0);
+    enter(g("ws-row"), T, 32.5, .35, 8);
+    op(g("ws-btns"), T < 34.3 ? 1 : 0); op(g("ws-status"), P(T, 34.3, 34.5));
+    tf(g("ws-send"), T >= 34.2 && T < 34.35 ? "scale(.96)" : "none");
+    // the list is anchored to its foot: rows exist only once they happened, so the newest is always in view
+    for (const [id, a] of ACT) { disp(g(id), T >= a); enter(g(id), T, a, .3, 4); }
+
+    // composer follows the point of view: the driver steers, everyone else suggests
+    const pov = stepv(POV, T), driver = meeraDrives ? "meera" : "arjun", isDriver = pov === driver || (pov === "meera" && T >= 70.6);
+    const typing = T >= 30.8 && T < 32.4, typed = "Check the connector config first, not the topic.";
+    if (isDriver) { tx(g("wc-in"), "Steer the agent…"); cls(g("wc-in"), "has", false); cls(g("wc-in"), "caret", false); tx(g("wc-btn"), "Steer"); tx(g("wc-note"), "You are driving · Lease ends in 28m — any action renews"); }
+    else {
+      const n = typing ? Math.min(typed.length, Math.floor((T - 30.8) * 1000 / 28)) : 0;
+      tx(g("wc-in"), n > 0 ? typed.slice(0, n) : "Suggest a first step…"); cls(g("wc-in"), "has", n > 0); cls(g("wc-in"), "caret", n > 0 && n < typed.length);
+      tx(g("wc-btn"), "Suggest"); tx(g("wc-note"), (driver === "arjun" ? "Arjun" : "Meera") + " · driving");
+    }
+    tf(g("wc-btn"), T >= 32.2 && T < 32.35 ? "scale(.96)" : "none");
+  }
+
+  // hand-off set
+  if (showHo) {
+    const z = 1 + .04 * E.lin(P(T, 66.7, 70.6));
+    camH = view(L.bh * z, L.hw, L.hh, null, null); tf(hoW, tfStr(camH));
+    op(setHo, T < 72.2 ? E.out(P(T, 66.0, 66.5)) : 1 - E.out(P(T, 72.2, 72.8)));
+    const cg = E.cam(P(T, 66.0, 66.7)); op(g("hs-card"), P(T, 66.0, 66.25)); tf(g("hs-card"), cg >= 1 ? "none" : `translateY(${((1 - cg) * -140).toFixed(1)}px) scale(${(.6 + .4 * cg).toFixed(3)})`);
+    for (let i = 1; i <= 6; i++) enter(g("hs" + i), T, 66.9 + (i - 1) * .6, .32, 6);
+    const ck = E.pop(P(T, 70.4, 70.6)); op(g("hs7"), P(T, 70.4, 70.5)); tf(g("hs7"), `scale(${(.9 + .1 * ck).toFixed(3)})`);
+    enter(g("hs8"), T, 70.5, .3, 4);
+    tf(g("hs-acc"), T >= 71.0 && T < 71.15 ? "scale(.96)" : "none");
+    const bp = E.cam(P(T, 71.0, 72.2)); const bd = (bp * 100).toFixed(2) + "%"; if (g("hs-baton")._d !== bd) { g("hs-baton")._d = bd; g("hs-baton").style.offsetDistance = bd; }
+    prop(g("hs-pa"), "--lamp-on", (1 - .7 * P(T, 71.2, 71.8)).toFixed(3));
+    const moved = T >= 71.9; tx(g("hs-ta"), moved ? "Arjun · watching" : "Arjun · local 18:00"); tx(g("hs-tm"), moved ? "Meera · driving" : "Meera · local 07:00");
+  }
+
+  // people life: blink and a slow head tilt, only while playing
+  [[g("pro-fig"), 0], [g("hs-pa"), 1700], [g("hs-pm"), 3100]].forEach(([el, off]) => {
+    const bl = alive && ((T * 1000 + off) % 4300) < 110 ? ".1" : "1"; prop(el, "--blink", bl);
+    prop(el, "--tilt", alive ? (1.5 * Math.sin(2 * Math.PI * .15 * T + off)).toFixed(2) + "deg" : "0deg");
+  });
+
+  // overlay
+  const ch = CHAPTERS.find((c) => T >= c.start && T < c.end) || CHAPTERS[5];
+  tx(g("ov-bug-t"), `0${ch.n} · ${ch.title.toUpperCase()}`);
+  op(g("ov-bug"), .7 + .3 * P(T, ch.start, ch.start + .25));
+  tf(g("ov-bug-u"), `scaleX(${E.out(P(T, ch.start + .1, ch.start + .6)).toFixed(3)})`);
+  const pov = stepv(POV, T); tx(g("ov-pov-t"), "Viewing as " + NAMES[pov]);
+  const pu = g("ov-pov-u"); if (pu._h !== pov) { pu._h = pov; pu.setAttribute("href", "#av-" + pov); }
+  const ci = CLOCK.findIndex((k, i) => i === CLOCK.length - 1 || (T >= k[0] && T < CLOCK[i + 1][0]));
+  const k0 = CLOCK[ci], k1 = CLOCK[Math.min(ci + 1, CLOCK.length - 1)];
+  const secs = Math.round(k1 === k0 ? k0[1] : k0[1] + (k1[1] - k0[1]) * P(T, k0[0], k1[0]));
+  tx(g("ov-clock"), [Math.floor(secs / 3600), Math.floor(secs / 60) % 60, secs % 60].map((v) => String(v).padStart(2, "0")).join(":"));
+  op(g("ov-pw"), T >= 9.4 && T < 11.4 ? P(T, 9.4, 9.7) : 0);
+  op(g("ov-pm"), T >= 55.0 && T < 64.0 ? P(T, 55.0, 55.3) : 0);
+  const l3 = L3.find((x) => T >= x.a && T < x.b);
+  if (l3) {
+    tx(g("ov-l3n"), l3.n); tx(g("ov-l3r"), l3.r); prop(g("ov-l3"), "--l3c", l3.c);
+    const pin = E.out(P(T, l3.a, l3.a + .24)), pout = P(T, l3.b - .2, l3.b);
+    op(g("ov-l3"), pin * (1 - pout)); tf(g("ov-l3"), `translateX(${((1 - pin) * -24).toFixed(1)}px)`);
+    tf(g("ov-l3b"), `scaleY(${E.out(P(T, l3.a, l3.a + .2)).toFixed(3)})`);
+  } else op(g("ov-l3"), 0);
+  // one cursor on screen at a time, owned by the point-of-view person
+  const cur = CUR.find((c) => T >= c.a && T < c.b), ce = g("ov-cur");
+  if (cur && (cur.ho ? showHo : showWorld)) {
+    const pt = cur.ho ? ptHo : ptWorld;
+    let i = 0; for (let k = 0; k < cur.path.length; k++) if (T >= cur.path[k][0]) i = k;
+    const A = cur.path[i], Bk = cur.path[Math.min(i + 1, cur.path.length - 1)];
+    const pa = pt(A[1], A[2], A[3]), pbb = pt(Bk[1], Bk[2], Bk[3]);
+    const p = Bk === A ? 0 : E.cam(P(T, A[0], Bk[0]));
+    const x = pa.x + (pbb.x - pa.x) * p, y = pa.y + (pbb.y - pa.y) * p;
+    tf(ce, `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`);
+    op(ce, Math.min(P(T, cur.a, cur.a + .25), 1 - P(T, cur.b - .35, cur.b)));
+    prop(ce, "--cc", PCOL[cur.who]); tx(g("ov-cur-n"), NAMES[cur.who]);
+    const ck = cur.clicks.find((c) => T >= c && T < c + .35);
+    const rp = ck === undefined ? 0 : P(T, ck, ck + .35);
+    op(g("ov-cur-r"), ck === undefined ? 0 : .9 * (1 - rp)); tf(g("ov-cur-r"), `scale(${(.6 + rp).toFixed(3)})`);
+  } else op(ce, 0);
+}
+function ringAt(el, T, at) {
+  const p = E.out(P(T, at, at + .7)), done = $(".done", el), off = (100 * (1 - p)).toFixed(1);
+  if (done._d !== off) { done._d = off; done.style.strokeDashoffset = off; done.style.opacity = p > 0 ? 1 : 0; }
+  op($(".pend", el), p > 0 ? 0 : 1);
+  const c = E.pop(P(T, at + .6, at + .8)); tf($(".ck", el), `scale(${clamp(c, 0, 1.2).toFixed(3)})`);
+}
+
+/* ---------- engine ---------- */
+let stopAt = DURATION;
+let t = 0, playing = false, speed = 1, posterOn = true, lastTs = 0, rafId = 0, autoPaused = false, ccOn = true, exactFrame = false, stageRatio = 0, qaLock = false;
+const keyT = (time) => { let c = CUES[0]; for (const q of CUES) if (time >= q.s) c = q; return c.k; };
+function draw() {
+  if (posterOn) render(47.5, false);
+  else render((reduced() && !exactFrame) ? keyT(t) : t, playing && !reduced());
+  syncUI();
+}
+function loop(ts) {
+  rafId = 0; if (!playing) return;
+  const dt = lastTs ? Math.min((ts - lastTs) / 1000, .1) : 0; lastTs = ts;
+  t += dt * speed;
+  // a "Watch 0:12–0:38" range stops where its label says
+  if (t >= stopAt && stopAt < DURATION) { t = stopAt; stopAt = DURATION; pause(); return; }
+  if (t >= DURATION) { t = DURATION; finish(); return; }
+  draw(); rafId = requestAnimationFrame(loop);
+}
+function hidePoster() { if (!posterOn) return; posterOn = false; posterEl.hidden = true; stage.classList.remove("is-poster"); }
+function showEnd(on) { if (on) { endEl.hidden = false; } else endEl.hidden = true; }
+function play() {
+  if (t >= DURATION) t = 0;
+  showEnd(false); hidePoster(); exactFrame = false; autoPaused = false; byId("resume-pill").hidden = true;
+  playing = true; lastTs = 0; player.classList.add("is-playing"); byId("fp-play").setAttribute("aria-label", "Pause film");
+  draw(); if (!rafId) rafId = requestAnimationFrame(loop);
+}
+function pause() {
+  playing = false; if (rafId) cancelAnimationFrame(rafId); rafId = 0;
+  player.classList.remove("is-playing"); byId("fp-play").setAttribute("aria-label", "Play film"); draw();
+}
+function finish() { pause(); t = DURATION; showEnd(true); draw(); }
+function seek(x, keepPlaying = true) {
+  if (!Number.isFinite(x)) return;
+  t = clamp(x, 0, DURATION); stopAt = DURATION; hidePoster(); exactFrame = false;
+  if (t < DURATION) showEnd(false); else showEnd(true);
+  if (!keepPlaying && playing) pause(); else draw();
+}
+function toggle() { if (playing) pause(); else play(); }
+function restart() { t = 0; stopAt = DURATION; play(); }
+function applyCC() { byId("fp-cc-btn").setAttribute("aria-pressed", String(ccOn)); ccEl.classList.toggle("cc-hidden", !ccOn); }
+
+/* scrubber geometry: six chapter segments with gaps (the chapter ticks) */
+const seekEl = byId("fp-seek"), segs = $$(".sg", seekEl), thumb = byId("fp-thumb"), tip = byId("fp-tip");
+function segRects() { const base = seekEl.getBoundingClientRect(); return segs.map((s) => { const r = s.getBoundingClientRect(); return { l: r.left - base.left, w: r.width }; }); }
+let SR = null;
+function xToT(x) {
+  SR = SR || segRects();
+  for (let i = 0; i < 6; i++) { const r = SR[i], c = CHAPTERS[i], w = r.w || 1; if (x < r.l + w || i === 5) return clamp(c.start + (c.end - c.start) * clamp((x - r.l) / w, 0, 1), 0, DURATION); }
+  return 0;
+}
+function tToX(time) { SR = SR || segRects(); const i = Math.max(0, CHAPTERS.findIndex((c) => time < c.end || c.n === 6)); const c = CHAPTERS[i], r = SR[i]; return r.l + r.w * clamp((time - c.start) / (c.end - c.start), 0, 1); }
+let lastCue = -2, lastChap = -1;
+const chapBtns = $$("#fp-chapters button"), chapCps = $$("#fp-chapters .cp"), navIs = $$(".navprog i");
+function syncUI() {
+  const shown = posterOn ? 0 : t;
+  tx(byId("fp-time"), player.clientWidth < 480 ? fmt(shown) : `${fmt(shown)} / ${fmt(DURATION)}`);
+  const ch = CHAPTERS.find((c) => shown < c.end) || CHAPTERS[5];
+  seekEl.setAttribute("aria-valuenow", String(Math.floor(shown)));
+  seekEl.setAttribute("aria-valuetext", `${fmt(shown)}, chapter ${ch.n}, ${ch.title}`);
+  segs.forEach((s, i) => tf(s.firstElementChild, `scaleX(${clamp((shown - CHAPTERS[i].start) / (CHAPTERS[i].end - CHAPTERS[i].start), 0, 1).toFixed(4)})`));
+  tf(thumb, `translateX(${tToX(shown).toFixed(1)}px)`);
+  if (lastChap !== ch.n || posterOn) {
+    chapBtns.forEach((b) => { if (Number(b.dataset.chapter) === ch.n && !posterOn) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current"); });
+    lastChap = posterOn ? -1 : ch.n;
+  }
+  chapCps.forEach((cp, i) => tf(cp, `scaleX(${clamp((shown - CHAPTERS[i].start) / (CHAPTERS[i].end - CHAPTERS[i].start), 0, 1).toFixed(4)})`));
+  navIs.forEach((el, i) => tf(el, `scaleX(${clamp((shown - CHAPTERS[i].start) / (CHAPTERS[i].end - CHAPTERS[i].start), 0, 1).toFixed(4)})`));
+  const ci = posterOn ? -1 : CUES.findIndex((c) => shown >= c.s && shown < c.e);
+  if (ci !== lastCue) { lastCue = ci; ccEl.textContent = ci < 0 ? "" : CUES[ci].text; }
+  if (!byId("resume-pill").hidden) tx(byId("resume-t"), `Resume film · ${fmt(t)}`);
+}
+
+/* controls */
+byId("fp-play").addEventListener("click", toggle);
+byId("fp-restart").addEventListener("click", restart);
+posterEl.addEventListener("click", () => { cancelPremiere(); t = 0; stopAt = DURATION; play(); });
+byId("fp-replay").addEventListener("click", () => { restart(); stage.focus({ preventScroll: true }); });
+byId("fp-cc-btn").addEventListener("click", () => { ccOn = !ccOn; applyCC(); });
+byId("fp-speed").addEventListener("click", (e) => { speed = speed === 1 ? 1.5 : 1; const l = speed === 1 ? "1×" : "1.5×"; e.currentTarget.textContent = l; e.currentTarget.setAttribute("aria-label", "Playback speed " + l); SR = null; syncUI(); });
+const fsBtn = byId("fp-fs");
+if (document.fullscreenEnabled) { fsBtn.hidden = false; fsBtn.addEventListener("click", toggleFs); }
+function toggleFs() { if (!document.fullscreenEnabled) return; if (document.fullscreenElement) document.exitFullscreen(); else frameEl.requestFullscreen().catch(() => {}); }
+stage.addEventListener("click", (e) => { if (e.target === stage || e.target.closest(".set,.ov")) toggle(); });
+$$("#fp-chapters button").forEach((b) => b.addEventListener("click", () => {
+  const c = CHAPTERS[Number(b.dataset.chapter) - 1]; cancelPremiere(); stopAt = DURATION;
+  seek(c.start); if (!reduced() && !playing) play();
+}));
+let dragging = false;
+seekEl.addEventListener("pointerdown", (e) => { SR = segRects(); dragging = true; seekEl.setPointerCapture(e.pointerId); seekEl.classList.add("drag"); cancelPremiere(); seek(xToT(e.clientX - seekEl.getBoundingClientRect().left)); });
+seekEl.addEventListener("pointermove", (e) => {
+  const x = e.clientX - seekEl.getBoundingClientRect().left, tt = xToT(x), c = CHAPTERS.find((q) => tt < q.end) || CHAPTERS[5];
+  tip.textContent = `${fmt(tt)} · ${c.title}`; tip.style.left = clamp(x, 40, seekEl.clientWidth - 40) + "px";
+  if (dragging) seek(tt);
+});
+const endDrag = () => { dragging = false; seekEl.classList.remove("drag"); };
+seekEl.addEventListener("pointerup", endDrag); seekEl.addEventListener("pointercancel", endDrag);
+player.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const tg = e.target; if (tg.closest("input, textarea, select")) return;
+  const k = e.key, isBtn = tg.tagName === "BUTTON";
+  const by = (d) => { e.preventDefault(); cancelPremiere(); seek(t + d); };
+  if (k === " " || k === "k" || k === "K") { if (k === " " && isBtn) return; e.preventDefault(); cancelPremiere(); toggle(); }
+  else if (k === "ArrowLeft") by(-5); else if (k === "ArrowRight") by(5);
+  else if (k === "j" || k === "J") by(-10); else if (k === "l" || k === "L") by(10);
+  else if (k === "ArrowUp" && tg === seekEl) by(5); else if (k === "ArrowDown" && tg === seekEl) by(-5);
+  else if (k === "PageUp" && tg === seekEl) by(10); else if (k === "PageDown" && tg === seekEl) by(-10);
+  else if (k === "Home") { e.preventDefault(); seek(0); } else if (k === "End") { e.preventDefault(); seek(DURATION); }
+  else if (/^[1-6]$/.test(k)) { e.preventDefault(); seek(CHAPTERS[Number(k) - 1].start); }
+  else if (k === "c" || k === "C") { ccOn = !ccOn; applyCC(); }
+  else if (k === "f" || k === "F") toggleFs();
+});
+function goFilm(start, end = DURATION) {
+  cancelPremiere(); smoothScrollTo(player);
+  byId("fp-play").focus({ preventScroll: true });
+  const range = end > start ? Math.min(end, DURATION) : DURATION;
+  if (reduced()) { seek(start, false); stopAt = range; return; }
+  seek(start); stopAt = range; play();
+}
+byId("hero-play").addEventListener("click", () => { cancelPremiere(); smoothScrollTo(player); t = 0; stopAt = DURATION; play(); byId("fp-play").focus({ preventScroll: true }); });
+$$("[data-seek]").forEach((b) => b.addEventListener("click", () => goFilm(Number(b.dataset.seek), b.dataset.end ? Number(b.dataset.end) : DURATION)));
+byId("resume-pill").addEventListener("click", () => { smoothScrollTo(player); play(); });
+
+/* premiere, autoplay and off-screen pause */
+let premiereTimers = [], premiereDone = false;
+function cancelPremiere() { premiereTimers.forEach(clearTimeout); premiereTimers = []; premiereDone = true; byId("fp-poster").classList.remove("fading"); }
+function premiere() {
+  if (premiereDone || qaLock) return; premiereDone = true;
+  const hero = byId("top"); hero.classList.remove("pre"); hero.classList.add("premiere");
+  const at = (ms, fn) => premiereTimers.push(setTimeout(fn, ms));
+  const away = () => { if (stageRatio < .5 || document.hidden) { cancelPremiere(); return true; } return false; };
+  // the poster holds long enough to be read before the film starts
+  at(500, () => { if (!away()) frameEl.classList.add("beaming"); });
+  at(1500, () => { if (!away()) posterEl.classList.add("pulse"); });
+  at(2600, () => { if (away()) return; posterEl.classList.add("fading"); stage.classList.add("is-flat"); stage.classList.remove("is-poster"); });
+  at(3200, () => {
+    posterEl.classList.remove("fading"); t = 0;
+    if (stageRatio >= .5 && !document.hidden) play();
+    else { hidePoster(); autoPaused = true; byId("resume-pill").hidden = false; draw(); }
+  });
+}
+const io = new IntersectionObserver((ents) => {
+  for (const en of ents) {
+    stageRatio = en.intersectionRatio;
+    if (!premiereDone && !reduced() && !document.hidden && stageRatio >= .5) premiere();
+    if (playing && stageRatio < .35) { pause(); autoPaused = true; byId("resume-pill").hidden = false; syncUI(); }
+    else if (autoPaused && !reduced() && stageRatio >= .5 && !document.hidden) { play(); }
+  }
+}, { threshold: [0, .35, .5, .75] });
+io.observe(stage);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && playing) { pause(); autoPaused = true; }
+  else if (!document.hidden && autoPaused && !reduced() && stageRatio >= .5) play();
+});
+window.__explainerDuration = DURATION;
+window.__explainerSeek = (seconds) => {
+  qaLock = true; autoPaused = false; cancelPremiere(); pause(); hidePoster();
+  t = clamp(Number(seconds) || 0, 0, DURATION);
+  showEnd(t >= DURATION); exactFrame = true;
+  render(t, false); syncUI();
+  const k = stepk(FEED, t), it = L.items[k[1]];
+  if (t >= 12 && t < 64 && it && t >= k[0] + .8) {
+    const top = it.y + feedY;
+    if (top < -1 || top > L.feedH - 24) console.error(`explainer: feed item ${k[1]} is outside the feed viewport at ${t.toFixed(1)}s (top ${top.toFixed(0)}, feed ${L.feedH})`);
+  }
+};
+
+/* ---------- theme ---------- */
+const root = document.documentElement, mqLight = matchMedia("(prefers-color-scheme: light)");
+const theme = () => root.dataset.theme || (mqLight.matches ? "light" : "dark");
+function syncTheme() {
+  const th = theme(); root.classList.toggle("is-light", th === "light");
+  ["theme-toggle", "theme-toggle-2"].forEach((id) => byId(id).setAttribute("aria-label", th === "light" ? "Switch to dark theme" : "Switch to light theme"));
+}
+["theme-toggle", "theme-toggle-2"].forEach((id) => byId(id).addEventListener("click", () => {
+  const next = theme() === "light" ? "dark" : "light"; root.dataset.theme = next;
+  try { localStorage.setItem("piperoom-theme", next); } catch (e) { /* keep the in-page choice only */ }
+  syncTheme();
+}));
+mqLight.addEventListener("change", syncTheme); syncTheme();
+
+/* nav */
+const nav = byId("nav");
+addEventListener("scroll", () => nav.classList.toggle("is-scrolled", scrollY > 8), { passive: true });
+nav.classList.toggle("is-scrolled", scrollY > 8);
+
+/* ---------- 02 investigation ---------- */
+const ivLive = byId("iv-live");
+const ivSteps = $$("#iv-rail .step");
+const ivChip = (tool) => $(`.tchip[data-tool="${tool}"]`);
+let ivTimers = [];
+const ivClear = () => { ivTimers.forEach(clearTimeout); ivTimers = []; };
+const ivAt = (ms, fn) => ivTimers.push(setTimeout(fn, ms));
+function flash(el, c = "cited", ms = 600) { el.classList.add(c); setTimeout(() => el.classList.remove(c), ms); }
+function ivSweep() {
+  ivClear();
+  ivSteps.forEach((s) => { s.style.setProperty("--fill", "0"); s.classList.remove("pop"); });
+  ivSteps.forEach((s, i) => ivAt(i * 1200, () => {
+    s.classList.add("pop"); s.style.setProperty("--fill", "1");
+    const c = ivChip(s.dataset.tool); if (c) flash(c, "lit", 600);
+  }));
+}
+function ivRestream() {
+  ivClear();
+  if (reduced()) { ivSteps.forEach((s, i) => ivAt(i * 650, () => flash(s, "cited", 600))); return; }
+  ivSteps.forEach((s) => { s.hidden = true; s.style.setProperty("--fill", "0"); s.classList.remove("pop"); });
+  let at = 0;
+  ivSteps.forEach((s, i) => {
+    const tool = $(".tool", s), name = tool.dataset.full || tool.textContent, ut = $(".untrusted", s), th = $(".thread", s);
+    tool.dataset.full = name;
+    ivAt(at, () => { s.hidden = false; tool.textContent = ""; ut.style.opacity = "0"; if (th) th.style.opacity = "0"; });
+    for (let c = 1; c <= name.length; c++) ivAt(at + 250 + c * 20, () => { tool.textContent = name.slice(0, c); });
+    const done = at + 250 + name.length * 20 + 250;
+    ivAt(done, () => { ut.style.transition = "opacity .32s"; ut.style.opacity = "1"; s.classList.add("pop"); if (i > 0) ivSteps[i - 1].style.setProperty("--fill", "1"); const ch = ivChip(s.dataset.tool); if (ch) flash(ch, "lit", 600); if (th) { th.style.transition = "opacity .32s"; th.style.opacity = "1"; } });
+    at = done + 600;
+  });
+}
+byId("iv-replay").addEventListener("click", ivRestream);
+const ivObs = new IntersectionObserver((ents, o) => { ents.forEach((en) => { if (en.isIntersecting && en.intersectionRatio >= .4) { o.disconnect(); if (!reduced()) ivSweep(); } }); }, { threshold: [.4] });
+ivObs.observe(byId("iv-card"));
+$$(".hyc .cite").forEach((c) => { const go = () => flash(byId(c.dataset.cite)); c.addEventListener("mouseenter", go); c.addEventListener("focus", go); c.addEventListener("click", go); });
+let ivTypeT = 0;
+function ivSuggest(sent) {
+  byId("iv-sg-btns").hidden = true; const s = byId("iv-sg-status"); s.hidden = false;
+  s.className = "ui-status" + (sent ? "" : " muted");
+  s.innerHTML = sent ? '<svg class="ico ico-12" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check"/></svg>Sent to agent' : "Declined";
+  ivLive.textContent = sent ? "Sent to agent." : "Declined.";
+  byId("iv-reset").hidden = false; byId("iv-reset").focus();
+  if (sent) {
+    const msg = "Connector config is unchanged; the failure is the value schema subject.", out = byId("iv-agent-t");
+    byId("iv-agent").hidden = false; clearInterval(ivTypeT);
+    if (reduced()) { out.textContent = msg; return; }
+    let n = 0; out.textContent = ""; ivTypeT = setInterval(() => { n++; out.textContent = msg.slice(0, n); if (n >= msg.length) clearInterval(ivTypeT); }, 18);
+  }
+}
+byId("iv-send").addEventListener("click", () => ivSuggest(true));
+byId("iv-decline").addEventListener("click", () => ivSuggest(false));
+byId("iv-reset").addEventListener("click", () => {
+  clearInterval(ivTypeT); byId("iv-sg-btns").hidden = false; byId("iv-sg-status").hidden = true; byId("iv-agent").hidden = true; byId("iv-reset").hidden = true;
+  ivLive.textContent = ""; byId("iv-send").focus();
+});
+
+/* ---------- 03 approval ---------- */
+const AP = { level: "NONE", write: true, phase: "R" };
+let apTimers = [];
+const apAt = (ms, fn) => apTimers.push(setTimeout(fn, reduced() ? 0 : ms));
+function canon(v) {
+  if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}";
+  return JSON.stringify(v);
+}
+const proposalFor = (level) => ({
+  title: "Set subject compatibility to NONE and restart the connector task", rollback: "set compatibility back to BACKWARD",
+  required_layers: ["schema-registry", "kafka-connect"],
+  steps: [{ action: "schema_set_compatibility", layer: "schema-registry", params: { subject: "pg.public.orders-value", level } },
+    { action: "connect_restart_task", layer: "kafka-connect", params: { connector: "pg-orders-connector", task: 0 } }],
+});
+const HASH = { NONE: FP.NONE, FULL: FP.FULL };
+async function computeFps() {
+  try {
+    if (!(window.crypto && crypto.subtle)) return;
+    const hex = async (o) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canon(o))))).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const n = await hex(proposalFor("NONE")), f = await hex(proposalFor("FULL"));
+    if (n === FP.NONE && f === FP.FULL) { HASH.NONE = n; HASH.FULL = f; byId("ap-fpcheck").textContent = `Recomputed in this browser: ${tinyFp(n)} and ${tinyFp(f)}.`; }
+  } catch (e) { /* fall back to the verified constants */ }
+}
+computeFps();
+const apLive = byId("ap-live");
+function setRing(el, ok, unwind) {
+  el.classList.toggle("is-ok", ok); el.classList.toggle("is-unwind", !!unwind);
+  const w = $(".rgw", el); if (w) w.classList.toggle("spin", !ok && !unwind);
+  // scheduled through apAt so Reset clears it; a ring that is approved by then never starts spinning
+  if (unwind) apAt(500, () => { el.classList.remove("is-unwind"); if (!el.classList.contains("is-ok") && w) w.classList.add("spin"); });
+}
+let apScrTok = 0;
+function apScramble(target) {
+  const el = byId("ap-hash"), fin = shortFp(target), tok = ++apScrTok;
+  if (reduced()) { el.textContent = fin; return; }
+  const t0 = performance.now();
+  const step = (now) => { if (tok !== apScrTok) return; const p = (now - t0) / 400; if (p >= 1) { el.textContent = fin; return; } el.textContent = scramble(fin, Math.floor(now / 40), Math.floor(fin.length * Math.max(0, p - .5) * 2)); requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+function apText(id, s) { const el = byId(id); el.lastElementChild.textContent = s; }
+function apBar(s, tn) { tx(byId("ap-bar-t"), s); const b = byId("ap-bar"); if (tn) b.dataset.tone = tn; else delete b.dataset.tone; }
+function apApproveLabel() {
+  const b = byId("ap-approve"); b.textContent = AP.write ? "Approve and run as Arjun" : "Approve as Arjun (will not run)";
+  tx(byId("ap-run-t"), AP.write ? "Approve and run" : "Approve (will not run)");
+}
+function apRest(announce) {
+  apTimers.forEach(clearTimeout); apTimers = []; apScrTok++;
+  AP.phase = "R"; AP.level = "NONE";
+  byId("ap-lv-none").setAttribute("aria-checked", "true"); byId("ap-lv-full").setAttribute("aria-checked", "false");
+  byId("ap-lv-none").tabIndex = 0; byId("ap-lv-full").tabIndex = -1;
+  byId("ap-lv").textContent = "NONE"; byId("ap-lv").classList.remove("changed");
+  apBar("Waiting for kafka-connect · 1 of 2 approved"); apText("ap-status", "Needs approval · 4m"); byId("ap-status").dataset.tone = "warn"; apText("ap-agent", "Agent waiting · 1 of 2 approvals");
+  byId("ap-hash").textContent = shortFp(HASH.NONE); byId("ap-tb-fp").textContent = tinyFp(HASH.NONE);
+  const tp = byId("ap-tb-p"); tp.classList.remove("void"); $("em", tp).hidden = true;
+  $("span", byId("ap-tb-a")).textContent = "Arjun · pending";
+  $("span", byId("ap-tb-rev")).textContent = "A"; byId("ap-tb-rev").classList.remove("b");
+  setRing(byId("ap-ring-p"), true); setRing(byId("ap-ring-a"), false);
+  byId("ap-ring-p-t").textContent = "Priya: approved"; byId("ap-ring-a-t").textContent = "Arjun: pending";
+  byId("ap-pb1").classList.add("on"); byId("ap-pb2").classList.remove("on"); tx(byId("ap-pl"), "1 of 2 approved");
+  const run = byId("ap-run"); run.classList.remove("ok", "unlocked"); apApproveLabel();
+  byId("ap-log").innerHTML = '<span class="e">Runs after the last approval.</span>';
+  byId("ap-vmsg").hidden = true; byId("ap-follow").hidden = true;
+  $$("#ap-lane .node").forEach((n, i) => { const s0 = ["degraded", "failed", "degraded", "unknown", "healthy", "degraded"][i]; n.dataset.state = s0; $(".n-st", n).textContent = s0; });
+  byId("ap-approve").disabled = false; byId("ap-undo").hidden = true; byId("ap-write").disabled = false; byId("ap-level").querySelectorAll("button").forEach((b) => b.disabled = false);
+  byId("ap-note").textContent = "";
+  if (announce) apLive.textContent = "Reset. Waiting for kafka-connect, 1 of 2 approved.";
+}
+function apSetLevel(level) {
+  if (AP.phase !== "R" && AP.phase !== "V") return;
+  if (level === AP.level) return;
+  if (level === "NONE") { apRest(false); apScramble(HASH.NONE); apLive.textContent = "Change undone. Waiting for kafka-connect, 1 of 2 approved."; byId("ap-lv-none").focus(); return; }
+  AP.phase = "V"; AP.level = "FULL";
+  byId("ap-lv-none").setAttribute("aria-checked", "false"); byId("ap-lv-full").setAttribute("aria-checked", "true");
+  byId("ap-lv-none").tabIndex = -1; byId("ap-lv-full").tabIndex = 0;
+  byId("ap-lv").textContent = "FULL"; byId("ap-lv").classList.add("changed");
+  apBar("Needs your approval · schema-registry · kafka-connect"); apText("ap-agent", "Agent waiting for approval");
+  apScramble(HASH.FULL); byId("ap-tb-fp").textContent = tinyFp(HASH.FULL);
+  $("span", byId("ap-tb-rev")).textContent = "B"; byId("ap-tb-rev").classList.add("b");
+  const tp = byId("ap-tb-p"); tp.classList.add("void"); $("em", tp).hidden = false;
+  setRing(byId("ap-ring-p"), false, true); byId("ap-ring-p-t").textContent = "Priya: approval void";
+  byId("ap-pb1").classList.remove("on"); tx(byId("ap-pl"), "0 of 2 approved");
+  byId("ap-approve").disabled = true; byId("ap-undo").hidden = false;
+  byId("ap-note").textContent = `Priya approved ${tinyFp(HASH.NONE)}. The proposal is now ${tinyFp(HASH.FULL)}, so her approval no longer counts; an approval sent with the old fingerprint gets 409 params_mismatch. Priya has to approve again.`;
+  apLive.textContent = "Needs your approval, kafka-connect. Priya's approval no longer counts, so she has to approve again.";
+}
+function apHeal() { $$("#ap-lane .node").forEach((n, i) => apAt(i * 150, () => { n.dataset.state = "healthy"; $(".n-st", n).textContent = "healthy"; const tn = $(".tint", n); if (!reduced()) tn.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 600 }); })); }
+function apApprove() {
+  if (AP.phase !== "R") return;
+  byId("ap-reset").focus();
+  byId("ap-approve").disabled = true; byId("ap-write").disabled = true; byId("ap-level").querySelectorAll("button").forEach((b) => b.disabled = true);
+  setRing(byId("ap-ring-a"), true); byId("ap-ring-a-t").textContent = "Arjun: approved";
+  $("span", byId("ap-tb-a")).textContent = "Arjun · approved 09:49";
+  apAt(200, () => { byId("ap-pb2").classList.add("on"); tx(byId("ap-pl"), "2 of 2 approved"); });
+  if (!AP.write) {
+    AP.phase = "A-off";
+    apAt(300, () => { apBar("Approved · waiting for write mode", "ok"); byId("ap-note").textContent = "Write mode is off, so this fix is approved and will not run."; apLive.textContent = "Approved, waiting for write mode."; });
+    return;
+  }
+  AP.phase = "A-on";
+  const card = byId("ap-card"), run = byId("ap-run"), log = byId("ap-log");
+  apAt(380, () => { run.classList.add("unlocked", "ok"); tx(byId("ap-run-t"), "Approved"); });
+  apAt(560, () => { card.classList.remove("beam"); void card.offsetWidth; if (!reduced()) card.classList.add("beam"); });
+  const ok = (s) => `<div><span class="ok"><svg class="ico ico-12" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-check"/></svg></span> ${s}</div>`;
+  apAt(700, () => { apBar("Running step 1 of 2", "info"); apText("ap-status", "Executing fix · 1 of 2"); byId("ap-status").dataset.tone = "info"; apText("ap-agent", "Executing fix"); log.innerHTML = ok("pg.public.orders-value compatibility BACKWARD → NONE"); apLive.textContent = "Running step 1 of 2."; });
+  apAt(1300, () => { log.innerHTML += ok("restarted pg-orders-connector task 0 (RUNNING)"); apBar("Fix ran · 2 of 2 steps", "ok"); apText("ap-status", "Fix ran · verifying"); });
+  apAt(1900, apHeal);
+  apAt(2800, () => { apText("ap-status", "Fix ran · recovered"); byId("ap-status").dataset.tone = "ok"; apText("ap-agent", "Agent working"); apBar("Verified · recovered", "ok"); byId("ap-vmsg").hidden = false; byId("ap-follow").hidden = false; apLive.textContent = "Verified, recovered."; });
+}
+byId("ap-approve").addEventListener("click", apApprove);
+byId("ap-undo").addEventListener("click", () => apSetLevel("NONE"));
+byId("ap-reset").addEventListener("click", () => apRest(true));
+$$("#ap-level button").forEach((b) => b.addEventListener("click", () => apSetLevel(b.dataset.level)));
+byId("ap-level").addEventListener("keydown", (e) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) { e.preventDefault(); const nx = AP.level === "NONE" ? "FULL" : "NONE"; apSetLevel(nx); byId(nx === "NONE" ? "ap-lv-none" : "ap-lv-full").focus(); } });
+byId("ap-write").addEventListener("click", (e) => {
+  if (AP.phase !== "R" && AP.phase !== "V") return;
+  AP.write = !AP.write; e.currentTarget.setAttribute("aria-checked", String(AP.write)); apApproveLabel();
+  apLive.textContent = AP.write ? "Write mode on." : "Write mode off.";
+});
+new IntersectionObserver((ents) => ents.forEach((en) => byId("approval").classList.toggle("paused", !en.isIntersecting))).observe(byId("ap-side"));
+apRest(false);
+
+/* ---------- 04 hand-off ---------- */
+const hoScene = byId("ho-scene"), hoBaton = byId("ho-baton"), hoLive = byId("ho-live");
+let hoAccepted = false;
+function hoLayout() {
+  const r = hoScene.getBoundingClientRect(), a = byId("ho-av-a").getBoundingClientRect(), m = byId("ho-av-m").getBoundingClientRect();
+  const ax = a.left - r.left + a.width / 2, ay = a.top - r.top + a.height / 2, mx = m.left - r.left + m.width / 2, my = m.top - r.top + m.height / 2;
+  let d;
+  if (Math.abs(my - ay) < 40) d = `M${ax.toFixed(1)} ${ay.toFixed(1)} C ${(ax + (mx - ax) * .25).toFixed(1)} ${(ay - 46).toFixed(1)}, ${(mx - (mx - ax) * .25).toFixed(1)} ${(my - 46).toFixed(1)}, ${mx.toFixed(1)} ${my.toFixed(1)}`;
+  else { const bx = r.width - 14; d = `M${ax.toFixed(1)} ${ay.toFixed(1)} C ${bx} ${(ay + (my - ay) * .2).toFixed(1)}, ${bx} ${(ay + (my - ay) * .8).toFixed(1)}, ${mx.toFixed(1)} ${my.toFixed(1)}`; }
+  const svg = byId("ho-arc-svg"); svg.setAttribute("viewBox", `0 0 ${r.width.toFixed(0)} ${r.height.toFixed(0)}`); byId("ho-arc").setAttribute("d", d);
+  hoBaton.style.offsetPath = `path('${d}')`; hoBaton.style.offsetDistance = hoAccepted ? "100%" : "0%";
+}
+function hoSet(accepted, animate) {
+  hoAccepted = accepted;
+  if (animate && !reduced()) hoBaton.classList.add("go"); else hoBaton.classList.remove("go");
+  hoBaton.style.offsetDistance = accepted ? "100%" : "0%";
+  byId("ho-pa").style.setProperty("--lamp-on", accepted ? ".3" : "1");
+  byId("ho-tag-a").textContent = accepted ? "Arjun · watching" : "Arjun · local 18:00";
+  byId("ho-tag-m").textContent = accepted ? "Meera · driving" : "Meera · local 07:00";
+  byId("ho-btns").hidden = accepted;
+}
+byId("ho-accept").addEventListener("click", () => { hoSet(true, true); const m = byId("ho-msg"); m.hidden = false; m.textContent = "Meera is driving."; hoLive.textContent = "Meera is driving."; m.focus(); });
+byId("ho-later").addEventListener("click", () => { const m = byId("ho-msg"); m.hidden = false; m.textContent = "The room stays with Arjun until you accept."; hoLive.textContent = m.textContent; });
+byId("ho-reset").addEventListener("click", () => { hoSet(false, false); byId("ho-msg").hidden = true; hoLive.textContent = "Reset. The room is with Arjun."; });
+
+/* ---------- 05 trust, 06 integrations: one emphasis each, from a readable rest state ---------- */
+function onceInView(el, fn, ratio = .4) {
+  new IntersectionObserver((ents, o) => ents.forEach((en) => { if (en.isIntersecting && en.intersectionRatio >= ratio) { o.disconnect(); if (!reduced()) fn(); } }), { threshold: [ratio] }).observe(el);
+}
+onceInView(byId("t1"), () => byId("t1-strike").animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], { duration: 600, easing: "cubic-bezier(.2,.7,.2,1)", delay: 300 }));
+onceInView(byId("t2"), () => $$("#t2 .r").forEach((r, i) => r.animate([{ strokeDashoffset: 100 }, { strokeDashoffset: 0 }], { duration: 700, delay: 200 + i * 220, easing: "cubic-bezier(.2,.7,.2,1)", fill: "backwards" })));
+let t3Tok = 0;
+function t3Scramble() {
+  if (reduced()) return;
+  const el = byId("t3-rd"), fin = "[redacted 16]", t0 = performance.now(), tok = ++t3Tok;
+  const glyphs = "•#%*+=?@&$";
+  const step = (now) => { if (tok !== t3Tok) return; const p = (now - t0) / 600; if (p >= 1) { el.textContent = fin; return; } el.textContent = fin.split("").map((c, i) => i < fin.length * p ? c : glyphs[(i * 7 + Math.floor(now / 50)) % glyphs.length]).join(""); requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+onceInView(byId("t3"), t3Scramble);
+byId("t3v").addEventListener("mouseenter", t3Scramble);
+onceInView(byId("ig-cdc"), () => {
+  const pulse = byId("ig-pulse"), sr = byId("ig-sr"), row = byId("ig-cdc").getBoundingClientRect(), s = sr.getBoundingClientRect();
+  const to = s.left - row.left + s.width / 2;
+  pulse.animate([{ left: "-80px", opacity: 1 }, { left: `${to - 80}px`, opacity: 1 }], { duration: 1100, easing: "cubic-bezier(.65,0,.35,1)", fill: "forwards" }).finished.then(() => {
+    pulse.style.background = "linear-gradient(90deg, transparent, var(--tally))"; sr.classList.add("hit");
+    setTimeout(() => { sr.classList.remove("hit"); pulse.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 400, fill: "forwards" }); }, 800);
+  }).catch(() => {});
+}, .6);
+
+/* ---------- 08 pilot form: nothing is sent; the visitor copies a summary ---------- */
+const form = byId("pilot-form"), result = byId("pf-result");
+const val = (id) => byId(id).value.trim();
+function fieldErr(id, msg) { const el = byId(id), er = byId(id + "-err"); if (msg) { el.setAttribute("aria-invalid", "true"); er.textContent = msg; } else { el.removeAttribute("aria-invalid"); er.textContent = ""; } return !msg; }
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const checks = [
+    ["pf-name", val("pf-name") ? "" : "Add your name"],
+    ["pf-company", val("pf-company") ? "" : "Add your team or company"],
+    ["pf-email", /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val("pf-email")) ? "" : "Add a work email"],
+  ];
+  const order = ["pf-name", "pf-company", "pf-email"]; let first = null;
+  for (const [id, msg] of checks) if (!fieldErr(id, msg) && !first) first = id;
+  if (first) { byId(order.find((id) => byId(id).getAttribute("aria-invalid") === "true")).focus(); return; }
+  const stack = ["pf-stack-pg", "pf-stack-debezium", "pf-stack-connect", "pf-stack-sr", "pf-stack-kafka"].filter((id) => byId(id).checked).map((id) => byId(id).value);
+  const lines = [
+    "Piperoom design-partner application",
+    "Name: " + val("pf-name"),
+    "Role: " + (val("pf-role") || "not given"),
+    "Team or company: " + val("pf-company"),
+    "Work email: " + val("pf-email"),
+    "CDC path: " + (stack.length ? stack.join(", ") : "not given"),
+    "Warehouse: " + val("pf-warehouse"),
+    "CDC pipelines in production: " + val("pf-pipelines"),
+    "Would run it on: " + val("pf-deploy"),
+    "Claude endpoint: " + val("pf-model"),
+    "Last pipeline incident: " + (val("pf-incident") || "not given"),
+  ];
+  byId("pf-summary").value = lines.join("\n");
+  const send = byId("pf-sendto"); send.textContent = "";
+  if (PILOT_CONTACT !== "") {
+    send.append("Send it to the Piperoom team at ");
+    const b = document.createElement("b"); b.textContent = PILOT_CONTACT; send.append(b, ".");
+    const cb = document.createElement("button"); cb.type = "button"; cb.className = "btn btn-ghost btn-sm"; cb.id = "pf-copy-addr"; cb.textContent = "Copy address";
+    cb.addEventListener("click", () => copyText(PILOT_CONTACT, null, cb, "Copy address")); send.append(cb);
+  } else send.textContent = "Send it to the Piperoom team. We'll share the address with you.";
+  form.hidden = true; result.hidden = false; byId("pf-copy-msg").textContent = "";
+  byId("pf-result-h").focus();
+});
+["pf-name", "pf-company", "pf-email"].forEach((id) => byId(id).addEventListener("input", () => { if (byId(id).getAttribute("aria-invalid") === "true") fieldErr(id, ""); }));
+function copyText(text, selectEl, btn, label) {
+  const msg = byId("pf-copy-msg");
+  const fallback = () => {
+    if (selectEl) { selectEl.focus(); selectEl.select(); }
+    else { const b = byId("pf-sendto").querySelector("b"); if (b) { const r = document.createRange(); r.selectNodeContents(b); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } }
+    msg.textContent = "Selected. Press Ctrl+C, or ⌘C on a Mac, to copy.";
+  };
+  if (!(navigator.clipboard && navigator.clipboard.writeText)) { fallback(); return; }
+  navigator.clipboard.writeText(text).then(() => {
+    const lab = btn.querySelector("span") || btn; lab.textContent = "Copied";
+    msg.textContent = "Copied.";
+    setTimeout(() => { lab.textContent = label; }, 2000);
+  }, fallback);
+}
+byId("pf-copy").addEventListener("click", (e) => copyText(byId("pf-summary").value, byId("pf-summary"), e.currentTarget, "Copy application"));
+byId("pf-edit").addEventListener("click", () => { result.hidden = true; form.hidden = false; byId("pf-name").focus(); });
+
+/* ---------- boot ---------- */
+if (reduced()) { byId("transcript").open = true; byId("top").classList.remove("pre"); }
+mqReduce.addEventListener("change", () => draw());
+applyCC();
+new ResizeObserver(() => { SR = null; layout(); }).observe(player);
+new ResizeObserver(() => { SR = null; syncUI(); }).observe(seekEl);
+new ResizeObserver(() => hoLayout()).observe(hoScene);
+addEventListener("resize", () => { SR = null; });
+layout(); hoLayout();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { SR = null; layout(); hoLayout(); });
+</script>
