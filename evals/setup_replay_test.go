@@ -3,6 +3,7 @@ package evals
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -141,6 +142,14 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 			if !r.Pass || r.Score != 100 || len(r.Misses) != 0 {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v", r.Pass, r.Score, r.Misses, r.Failures)
 			}
+			// The recording is part of the score: the run replayed its ops and
+			// ladder and found nothing to fail.
+			if r.SetupReplay == nil || len(r.SetupReplay.Failures) != 0 {
+				t.Errorf("setup replay = %+v, want a clean replay", r.SetupReplay)
+			}
+			if r.SetupReplay != nil && (r.SetupReplay.Ops != len(rec.Ops) || r.SetupReplay.Rungs != len(rec.Ladder.Verified.Rungs)) {
+				t.Errorf("setup replay ops/rungs = %d/%d, want %d/%d", r.SetupReplay.Ops, r.SetupReplay.Rungs, len(rec.Ops), len(rec.Ladder.Verified.Rungs))
+			}
 			if len(rep.Scenarios) != 1 || rep.Scenarios[0].SourceKind != "postgres" || rep.Scenarios[0].Target != "compose" {
 				t.Errorf("scenario kinds = %+v, want postgres/compose from the recording", rep.Scenarios)
 			}
@@ -164,9 +173,9 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 	}
 }
 
-// TestEvaluateRunsWithABrokenSetupDir: a malformed setup recording costs the
-// setup grouping only. Every scenario still runs, and the load error is
-// logged as a warning rather than swallowed.
+// TestEvaluateRunsWithABrokenSetupDir: a malformed setup recording costs only
+// the setup scenarios' runs. An incident scenario still runs, and the load
+// error is logged as a warning rather than swallowed.
 func TestEvaluateRunsWithABrokenSetupDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte(`{"scenario":"x","ops":[]}`), 0o600); err != nil {
@@ -186,5 +195,162 @@ func TestEvaluateRunsWithABrokenSetupDir(t *testing.T) {
 	}
 	if s := logs.String(); !strings.Contains(s, "level=WARN") || !strings.Contains(s, "ops is empty") {
 		t.Errorf("logs = %q, want a warning naming the broken recording", s)
+	}
+}
+
+// setupScenario loads one of the six U1-19 scenarios by name.
+func setupScenario(t *testing.T, name string) Scenario {
+	t.Helper()
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sc := range scs {
+		if sc.Name == name {
+			return sc
+		}
+	}
+	t.Fatalf("%s: no scenario file", name)
+	return Scenario{}
+}
+
+// writeSetupRecording writes rec as a recording file under dir.
+func writeSetupRecording(t *testing.T, dir string, rec evalsetup.Recording) {
+	t.Helper()
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.ReplaceAll(rec.Scenario, "/", "-") + ".json"
+	if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// copySetupRecordings copies the named recordings from setup/recordings into
+// dir. A name that is not copied is, to the run, a missing recording.
+func copySetupRecordings(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		b, err := os.ReadFile(filepath.Join("setup", "recordings", strings.ReplaceAll(name, "/", "-")+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, strings.ReplaceAll(name, "/", "-")+".json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestEvaluateFailsASetupScenarioWithABrokenLadder is the U1-20 follow-up's
+// blocking property: the recorded setup session and ladder are part of the
+// scenario's score. A ladder that recomputes a different verdict than the one
+// it records fails the run (score 0), it does not pass on the hypothesis alone.
+func TestEvaluateFailsASetupScenarioWithABrokenLadder(t *testing.T) {
+	const name = "setup/flat-plugin-dir"
+	rec, err := evalsetup.Load(filepath.Join("setup", "recordings", "setup-flat-plugin-dir.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The reads still say the connector is RUNNING; the recording claims the
+	// rung flipped red. The replay must not reach that verdict.
+	rec.Ladder.Verified.Rungs[0].OK = false
+	dir := t.TempDir()
+	writeSetupRecording(t, dir, rec)
+
+	sc := setupScenario(t, name)
+	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
+		Runner:   scriptedRunner(canPassScript(t, sc, nil)),
+		Logger:   quietLogger(),
+		SetupDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	r := rep.Results[0]
+	if r.Pass || r.Score != 0 {
+		t.Errorf("pass=%v score=%v, want the broken recording to fail the scenario", r.Pass, r.Score)
+	}
+	if !strings.Contains(strings.Join(r.Failures, "; "), "setup replay:") || !strings.Contains(strings.Join(r.Failures, "; "), "rung 0") {
+		t.Errorf("failures = %v, want a setup replay failure naming the rung", r.Failures)
+	}
+	if r.SetupReplay == nil || r.SetupReplay.Ops != len(rec.Ops) {
+		t.Errorf("setup replay = %+v, want the session replayed before the ladder failed", r.SetupReplay)
+	}
+}
+
+// TestEvaluateFailsASetupScenarioWithoutARecording: a setup scenario is never
+// scored without its recording. A directory that holds other scenarios'
+// recordings leaves this one without one, and the run says so.
+func TestEvaluateFailsASetupScenarioWithoutARecording(t *testing.T) {
+	const name = "setup/flat-plugin-dir"
+	dir := t.TempDir()
+	copySetupRecordings(t, dir, "setup/missing-grant")
+
+	sc := setupScenario(t, name)
+	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
+		Runner:   scriptedRunner(canPassScript(t, sc, nil)),
+		Logger:   quietLogger(),
+		SetupDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	r := rep.Results[0]
+	if r.Pass || r.Score != 0 {
+		t.Errorf("pass=%v score=%v, want a missing recording to fail the scenario", r.Pass, r.Score)
+	}
+	if !strings.Contains(strings.Join(r.Failures, "; "), "setup replay: no runner-session recording for "+name) {
+		t.Errorf("failures = %v, want the missing recording named", r.Failures)
+	}
+}
+
+// TestEvaluateFailsSetupScenariosWhenRecordingsDoNotLoad: one malformed file
+// makes LoadDir fail. The setup scenarios then fail with the load error
+// instead of running ungrouped and unverified; an incident scenario in the
+// same set still runs.
+func TestEvaluateFailsSetupScenariosWhenRecordingsDoNotLoad(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte(`{"scenario":"x","ops":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc := setupScenario(t, "setup/missing-grant")
+	rep, err := Evaluate(context.Background(), []Scenario{sc, loadSeed()}, Config{
+		Runner:   scriptedRunner(goodSchemaChangeScript()),
+		Logger:   quietLogger(),
+		SetupDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	byName := map[string]RunResult{}
+	for _, r := range rep.Results {
+		byName[r.Scenario] = r
+	}
+	setup := byName["setup/missing-grant"]
+	if setup.Pass || setup.Score != 0 || !strings.Contains(strings.Join(setup.Failures, "; "), "setup replay: the recordings did not load") {
+		t.Errorf("setup result = %+v, want a load failure", setup)
+	}
+	if seed := byName["schema-change"]; !seed.Pass {
+		t.Errorf("incident scenario = %+v, want it to run", seed)
+	}
+}
+
+// TestVerifySetupReplays is the -check path: good recordings pass, a ladder
+// that does not reach its recorded verdict fails with the recording named.
+func TestVerifySetupReplays(t *testing.T) {
+	if err := VerifySetupReplays(filepath.Join("setup", "recordings")); err != nil {
+		t.Fatalf("good recordings: %v", err)
+	}
+	rec, err := evalsetup.Load(filepath.Join("setup", "recordings", "setup-wal-level-replica.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Ladder.Verified.Rungs[0].OK = false
+	dir := t.TempDir()
+	writeSetupRecording(t, dir, rec)
+	err = VerifySetupReplays(dir)
+	if err == nil || !strings.Contains(err.Error(), "setup/wal-level-replica") || !strings.Contains(err.Error(), "rung 0") {
+		t.Fatalf("err = %v, want the broken recording named with its rung", err)
 	}
 }

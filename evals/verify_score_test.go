@@ -17,8 +17,10 @@ func evalOnce(t *testing.T, sc Scenario, script []step) (RunResult, Transcript) 
 	t.Helper()
 	var tr Transcript
 	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
-		Runner: scriptedRunner(script), Logger: quietLogger(),
-		OnRun: func(_ RunResult, got Transcript) { tr = got },
+		Runner:   scriptedRunner(script),
+		Logger:   quietLogger(),
+		SetupDir: "setup/recordings",
+		OnRun:    func(_ RunResult, got Transcript) { tr = got },
 	})
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)

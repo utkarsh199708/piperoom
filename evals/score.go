@@ -173,6 +173,11 @@ type RunResult struct {
 	DurationMS int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// SetupReplay is the recorded setup session and ladder replayed for this
+	// run (U1-20, setup_replay.go). nil on an incident scenario. A failure
+	// fails the run and takes its score to 0: the setup evidence is part of
+	// what the scenario tests, not a decoration.
+	SetupReplay *SetupReplayResult `json:"setup_replay,omitempty"`
 	ReplayResult
 	Provenance
 }
@@ -405,6 +410,12 @@ func finish(sc Scenario, res *RunResult) {
 }
 
 func score(sc Scenario, res RunResult) float64 {
+	if res.SetupReplay != nil && len(res.SetupReplay.Failures) > 0 {
+		// A setup scenario whose recorded session or ladder does not replay
+		// has no setup evidence to score; the zero is the harness's, not the
+		// agent's (failures names the recording).
+		return 0
+	}
 	var s float64
 	switch {
 	case res.Outcome != OutcomeDiagnose:
@@ -537,6 +548,11 @@ func failures(sc Scenario, res RunResult) []string {
 	}
 	if budget := sc.Expect.MaxToolCalls; budget > 0 && res.ToolCalls > budget {
 		f = append(f, fmt.Sprintf("over tool budget: %d > %d", res.ToolCalls, budget))
+	}
+	if sr := res.SetupReplay; sr != nil {
+		for _, why := range sr.Failures {
+			f = append(f, "setup replay: "+why)
+		}
 	}
 	f = append(f, verifyFailures(sc, res)...)
 	return f
