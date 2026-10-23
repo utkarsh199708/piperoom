@@ -181,14 +181,12 @@ var relationalSourceKeys = mergeSourceKeys(commonSourceKeys, map[string]sourceKe
 	"database.password": {rule: sourceText}, // a credential by name: secret ref only
 	"database.dbname":   {rule: sourceText},
 
-	"database.include.list": {rule: sourceList},
-	"database.exclude.list": {rule: sourceList},
-	"table.include.list":    {rule: sourceList},
-	"table.exclude.list":    {rule: sourceList},
-	"schema.include.list":   {rule: sourceList},
-	"schema.exclude.list":   {rule: sourceList},
-	"column.include.list":   {rule: sourceList},
-	"column.exclude.list":   {rule: sourceList},
+	"table.include.list":  {rule: sourceList},
+	"table.exclude.list":  {rule: sourceList},
+	"schema.include.list": {rule: sourceList},
+	"schema.exclude.list": {rule: sourceList},
+	"column.include.list": {rule: sourceList},
+	"column.exclude.list": {rule: sourceList},
 
 	"schema.history.internal":                                   {rule: sourceClass, values: []string{"io.debezium.storage.file.history.FileSchemaHistory"}},
 	"schema.history.internal.file.filename":                     {rule: sourceDataPath},
@@ -219,6 +217,8 @@ var sourceKeyTables = map[string]map[string]sourceKeySpec{
 		"database.sslmode":                         {rule: sourceText, values: []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}},
 	}),
 	"mysql": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
+		"database.include.list":                       {rule: sourceList},
+		"database.exclude.list":                       {rule: sourceList},
 		"database.server.id":                          {rule: sourceInt},
 		"database.connectionTimeZone":                 {rule: sourceText},
 		"database.ssl.mode":                           {rule: sourceText, values: []string{"disabled", "preferred", "required", "verify_ca", "verify_identity"}},
