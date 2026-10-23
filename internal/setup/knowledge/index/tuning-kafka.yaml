@@ -1,0 +1,301 @@
+# Kafka Connect tuning entries (U10a): the worker heap, worker settings and
+# the producer and consumer settings a connector overrides. Schema: Entry
+# in ../index.go, kind tuning in ../tuning.go.
+#
+# Client defaults were read from ProducerConfig and ConsumerConfig in the
+# kafka-clients 4.1.0 sources jar (the Kafka of the allow-listed
+# apache/kafka:4.1.0 image) and from the 3.0.0 and 3.9.0 sources on GitHub
+# (apache/kafka tags). Kafka Connect replaces some client defaults for its
+# own producers (Worker.baseProducerConfigs): where it does, the key's
+# default is Connect's, and its check names the plain client default. Worker
+# defaults were read from WorkerConfig and DistributedConfig in the
+# connect-runtime 4.1.0 sources jar and the 3.0.0 sources. Every entry is
+# checked on 3.0.0 and 4.1.0, hence ">=3.0.0".
+#
+# A producer key is set on one connector as producer.override.<key> (when
+# connector.client.config.override.policy allows it) or on every connector
+# of a worker as producer.<key> in the worker properties; consumer keys the
+# same way with consumer. Lookup accepts either spelling and the bare key.
+
+- name: connect-worker-heap
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: env
+  versions: ">=3.0.0"
+  summary: The JVM heap of the Kafka Connect worker, shared by every connector and task it runs.
+  keys:
+    - name: KAFKA_HEAP_OPTS
+      default: "-Xms256M -Xmx2G"
+      check: >-
+        connect-distributed.sh sets this default only when the variable is unset. On the debezium/connect
+        images set HEAP_OPTS, which the entrypoint copies into KAFKA_HEAP_OPTS.
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space in the worker log."
+    - Long garbage collection pauses, after which the worker drops out of the group and its tasks rebalance.
+    - The container is killed for exceeding its memory limit (exit code 137) when -Xmx is close to that limit.
+  checks:
+    - Keep -Xmx well under the container or host memory limit; the JVM uses memory outside the heap too.
+    - Before raising the heap, check whether one connector's max.queue.size, max.batch.size or snapshot fetch size is holding large rows.
+  doc: https://kafka.apache.org/documentation/#connect_running
+  source: https://raw.githubusercontent.com/apache/kafka/4.1.0/bin/connect-distributed.sh
+
+- name: connect-offset-flush
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: worker
+  versions: ">=3.0.0"
+  summary: How often the worker commits source offsets and how long a commit may wait for the producer to flush.
+  keys:
+    - {name: offset.flush.interval.ms, default: "60000"}
+    - {name: offset.flush.timeout.ms, default: "5000", check: "No effect on source connectors running with exactly-once support."}
+  symptoms:
+    - "The worker log shows \"Timed out waiting to flush offsets to storage; will try again on next flush interval with latest offsets\" (the Kafka 4.1 wording)."
+    - After a restart a source connector re-sends up to a minute of change events that downstream had already seen.
+  checks:
+    - A shorter interval means fewer replayed events after a restart and more commits to the offsets topic.
+    - Raise the timeout when the producer is slow to drain (large batches, a slow cluster) rather than the interval.
+    - On the debezium/connect images the variables are OFFSET_FLUSH_INTERVAL_MS and OFFSET_FLUSH_TIMEOUT_MS.
+  doc: https://kafka.apache.org/documentation/#connectconfigs_offset.flush.interval.ms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+- name: connect-task-shutdown-timeout
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: worker
+  versions: ">=3.0.0"
+  summary: Total time the worker waits for its tasks to stop cleanly on a rebalance or shutdown.
+  keys:
+    - name: task.shutdown.graceful.timeout.ms
+      default: "5000"
+      check: The Kafka default. The debezium/connect images set it from SHUTDOWN_TIMEOUT, which defaults to 10000.
+  symptoms:
+    - "The worker log shows \"Graceful stop of task ... failed.\" during a rebalance or restart."
+    - Duplicate change events after each rebalance, because a task stopped before its offsets were committed.
+  checks:
+    - It is a total for all tasks of the worker, waited on in turn, not a per-task limit.
+  doc: https://kafka.apache.org/documentation/#connectconfigs_task.shutdown.graceful.timeout.ms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+- name: connect-scheduled-rebalance-delay
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: worker
+  versions: ">=3.0.0"
+  summary: How long a distributed Connect cluster waits for a departed worker to return before reassigning its connectors and tasks.
+  keys:
+    - {name: scheduled.rebalance.max.delay.ms, default: "300000"}
+  symptoms:
+    - After a worker stops or restarts, its connectors and tasks stay unassigned for up to five minutes before another worker picks them up.
+  checks:
+    - Lowering it speeds failover but causes extra rebalances during rolling restarts.
+  doc: https://kafka.apache.org/documentation/#connectconfigs_scheduled.rebalance.max.delay.ms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+- name: connect-client-override-policy
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: worker
+  versions: ">=3.0.0"
+  summary: Which producer.override.*, consumer.override.* and admin.override.* keys a connector config may set.
+  keys:
+    - name: connector.client.config.override.policy
+      default: All
+      values: [All, None, Principal]
+      check: All is the default from Kafka 3.0.0; up to 2.8 it was None, which refuses every override.
+  symptoms:
+    - Creating or updating a connector fails because a producer.override or consumer.override key is not allowed by the override policy.
+  checks:
+    - With None, set the client keys worker-wide as producer.* or consumer.* instead, which affects every connector on the worker.
+  doc: https://kafka.apache.org/documentation/#connectconfigs_connector.client.config.override.policy
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+# Producer settings of source connectors.
+
+- name: producer-batch-size
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Upper bound in bytes of one producer batch per partition.
+  keys:
+    - {name: producer.override.batch.size, default: "16384"}
+  symptoms:
+    - Source throughput is capped while the producer sends many small requests (the batch-size-avg producer metric sits near batch.size).
+  checks:
+    - Raise it together with producer linger.ms, or batches still leave half empty.
+    - Batches are allocated from buffer.memory; a much larger batch.size with many partitions needs a larger buffer.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_batch.size
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: producer-linger
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: How long the producer waits to fill a batch before sending it.
+  keys:
+    - name: producer.override.linger.ms
+      default: "5"
+      default_since: 4.0.0
+      check: The client default is 5 from Kafka 4.0.0; it was 0 before.
+  symptoms:
+    - Source throughput is low and the producer sends many small batches (batch-size-avg far below batch.size) while records arrive steadily.
+  checks:
+    - A higher linger adds up to that many milliseconds of latency per record.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_linger.ms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: producer-compression
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: The codec the producer compresses batches with.
+  keys:
+    - {name: producer.override.compression.type, default: none, values: [none, gzip, snappy, lz4, zstd]}
+  symptoms:
+    - Network bandwidth between the worker and the brokers, or broker disk, limits throughput for verbose change events such as JSON with schemas.
+  checks:
+    - Compression costs worker CPU for every batch sent.
+    - Compression works per batch, so it gains little while batches are small (see producer batch size and linger).
+  doc: https://kafka.apache.org/documentation/#producerconfigs_compression.type
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: producer-acks
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: How many replicas must acknowledge a write before the producer counts it as sent.
+  keys:
+    - {name: producer.override.acks, default: all, values: [all, "-1", "0", "1"], check: "Kafka Connect sets all for its producers; all and -1 are the same."}
+  symptoms:
+    - Produce latency is high because a slow replica holds back acknowledgements at acks=all.
+    - NotEnoughReplicas errors when the topic's in-sync replicas drop below min.insync.replicas.
+  checks:
+    - Keep all for change data capture. 1 or 0 can lose acknowledged change events when a broker fails, and the source offset is committed anyway.
+    - Fix replica health or min.insync.replicas instead of lowering acks.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_acks
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+- name: producer-max-request-size
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Largest request, and so the largest single record, the producer sends.
+  keys:
+    - {name: producer.override.max.request.size, default: "1048576"}
+  symptoms:
+    - "RecordTooLargeException: the message is larger than the max.request.size configuration, for rows with large text, JSON or binary columns."
+  checks:
+    - The broker's message.max.bytes or the topic's max.message.bytes must allow the size too, or the broker rejects the batch.
+    - Consumers need max.partition.fetch.bytes and fetch.max.bytes at least as large to read the record.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_max.request.size
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: producer-buffer-memory
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Bytes the producer may hold in records waiting to be sent.
+  keys:
+    - {name: producer.override.buffer.memory, default: "33554432"}
+  symptoms:
+    - The producer's buffer-available-bytes metric stays near 0 and its bufferpool-wait-ratio rises, so the task blocks on send.
+  checks:
+    - Kafka Connect sets max.block.ms to Long.MAX_VALUE for its producers, so a full buffer blocks the task instead of failing it.
+    - The buffer is heap; add it to the worker heap budget for every task.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_buffer.memory
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: producer-in-flight
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Kafka Connect's ordering settings for its producers, one request in flight and no idempotence, which cap throughput on high-latency links.
+  keys:
+    - name: producer.override.max.in.flight.requests.per.connection
+      default: "1"
+      check: Kafka Connect sets 1 for its producers; the client default is 5.
+    - name: producer.override.enable.idempotence
+      default: "false"
+      default_since: 3.2.0
+      check: >-
+        Kafka Connect sets false for its producers from 3.2.0; before that it set nothing and the client
+        default (true from Kafka 3.0.0) applied.
+  symptoms:
+    - Source throughput per task is limited by round-trip time to the brokers (a remote or cross-region cluster) while the worker and the brokers are idle.
+  checks:
+    - Raise max.in.flight.requests.per.connection only together with enable.idempotence=true (at most 5), or retries can reorder change events.
+    - An idempotent producer needs the IDEMPOTENT_WRITE ACL on brokers older than 2.8.
+  doc: https://kafka.apache.org/documentation/#producerconfigs_max.in.flight.requests.per.connection
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-runtime/4.1.0/connect-runtime-4.1.0-sources.jar
+
+# Consumer settings of sink connectors.
+
+- name: consumer-max-poll-records
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Most records a sink task receives from one poll, and so the largest batch it is handed.
+  keys:
+    - {name: consumer.override.max.poll.records, default: "500"}
+  symptoms:
+    - A sink writes many small batches to its target (for example small JDBC transactions) and consumer lag grows.
+    - A sink task is kicked out of the group because one poll's records take longer than max.poll.interval.ms to write (lower it).
+  checks:
+    - Sinks with their own batch setting (such as batch.size on a JDBC sink) cannot write batches larger than what one poll returns.
+  doc: https://kafka.apache.org/documentation/#consumerconfigs_max.poll.records
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: consumer-max-poll-interval
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Longest time a sink task may spend between polls before the group counts it as dead.
+  keys:
+    - {name: consumer.override.max.poll.interval.ms, default: "300000"}
+  symptoms:
+    - The sink task's consumer leaves the group because the poll timeout expired, then rejoins and rebalances repeatedly while the target is slow.
+  checks:
+    - Prefer a smaller max.poll.records when one batch is slow to write; a longer interval also delays detection of a hung task.
+  doc: https://kafka.apache.org/documentation/#consumerconfigs_max.poll.interval.ms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
+
+- name: consumer-fetch-size
+  kind: tuning
+  component: kafka
+  runtime: connect
+  scope: connector
+  versions: ">=3.0.0"
+  summary: Bytes a sink task's consumer fetches per partition and per request.
+  keys:
+    - {name: consumer.override.max.partition.fetch.bytes, default: "1048576"}
+    - {name: consumer.override.fetch.max.bytes, default: "52428800"}
+  symptoms:
+    - Sink throughput is low on topics with large records, each fetch returning only a few of them.
+    - Producers were allowed larger records (max.request.size raised) and sink consumers now make little progress on those partitions.
+  checks:
+    - The consumer still returns a record larger than these limits so it can make progress, one fetch at a time.
+    - Fetched data is held in the worker heap per partition assigned to the task.
+  doc: https://kafka.apache.org/documentation/#consumerconfigs_max.partition.fetch.bytes
+  source: https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/4.1.0/kafka-clients-4.1.0-sources.jar
