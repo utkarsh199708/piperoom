@@ -29,7 +29,11 @@ const devOrdersConnector = "pg-orders-connector"
 // are put back and the connector resumed on every exit path.
 func TestConnectLifecycleActionsIntegration(t *testing.T) {
 	cfg := testenv.Require(t)
-	c := connect.New(cfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
+	// GET /connectors/{name}/offsets reads the offsets topic through the
+	// worker's herder and waits out a rebalance; right after startRunning
+	// resumes the connector that took longer than 10 s on the shared CI
+	// runner. The bound only stops a hung worker from stalling the job.
+	c := connect.New(cfg.ConnectURL, &http.Client{Timeout: 60 * time.Second})
 	bg := tools.WithUnscoped(context.Background())
 
 	startRunning(t, c, devOrdersConnector)
