@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
-	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
@@ -17,8 +17,16 @@ import (
 
 // Emitter receives the events a KindRoom setup tool produces. It is the
 // agent.Sink contract (Emit) expressed here so this package and the agent
-// package do not depend on each other; the room service's Sink satisfies it as
-// it stands.
+// package do not depend on each other.
+//
+// The room service's agent sink (room.agentEmit) does not accept these events
+// as it stands: it allow-lists agent.* types only. The PR that wires these
+// tools must add exactly two types to that allow-list, events.SetupPlan
+// (setup.plan, emitted here) and TypeVerificationRequested
+// (setup.verification_requested, emitted by setup_request_verification), and
+// must never add setup.verified, which only the server's ladder runner writes.
+// Until then every Emit through the room's sink is refused and the tool
+// reports the error.
 type Emitter interface {
 	Emit(ctx context.Context, typ events.Type, payload any) error
 }
@@ -27,7 +35,9 @@ type Emitter interface {
 type RoomDeps struct {
 	// Catalogue answers the tier floor of an op: the runner's op catalogue
 	// (internal/setup/ops.Registry implements plan.Catalogue with Floor), or a
-	// fake in tests. Required: without it no op can be checked.
+	// fake in tests. Required: without it no op can be checked. When it also
+	// implements LayerCatalogue (ops.Registry does), every stored step's
+	// Layer is filled from it; otherwise Layer is left empty.
 	Catalogue plan.Catalogue
 	// Sink receives setup.plan and the verification request. Required: a tool
 	// that cannot record its result must not claim it.
@@ -42,8 +52,12 @@ type RoomDeps struct {
 	// parameter, whether a compose_down keeps its volumes). Nil means the
 	// strictest answer: a guarded step is refused.
 	Facts func(plan.Step) plan.StepFacts
-	// Now is the clock for tests; nil uses time.Now.
-	Now func() time.Time
+}
+
+// LayerCatalogue is the optional catalogue lookup of an op's owners layer
+// ("environment", ...). ops.Registry implements it with LayerOf.
+type LayerCatalogue interface {
+	LayerOf(op string) (layer string, ok bool)
 }
 
 // RoomToolNames returns the names of the tools RoomTools builds.
@@ -66,13 +80,9 @@ func RoomTools(deps RoomDeps) ([]tools.Tool, error) {
 	if deps.ClassOf == nil {
 		return nil, errors.New("setuptools: setup_plan needs the class of each step's endpoint")
 	}
-	now := deps.Now
-	if now == nil {
-		now = time.Now
-	}
 	return []tools.Tool{
-		&setupPlanTool{cat: deps.Catalogue, sink: deps.Sink, classOf: deps.ClassOf, facts: deps.Facts, now: now},
-		&requestVerificationTool{sink: deps.Sink, now: now},
+		&setupPlanTool{cat: deps.Catalogue, sink: deps.Sink, classOf: deps.ClassOf, facts: deps.Facts},
+		&requestVerificationTool{sink: deps.Sink},
 	}, nil
 }
 
@@ -91,7 +101,6 @@ type setupPlanTool struct {
 	sink    Emitter
 	classOf func(plan.Step) (string, error)
 	facts   func(plan.Step) plan.StepFacts
-	now     func() time.Time
 }
 
 // Name is the tool name the model calls.
@@ -113,8 +122,8 @@ func (t *setupPlanTool) InputSchema() map[string]any {
 		"additionalProperties": false,
 		"required":             []string{"phases"},
 		"properties": map[string]any{
-			"plan_id":    map[string]any{"type": "string", "maxLength": plan.MaxPlanIDBytes},
-			"supersedes": map[string]any{"type": "string", "maxLength": plan.MaxPlanIDBytes},
+			// plan_id is not here: the server mints it (Run refuses one).
+			"supersedes": map[string]any{"type": "string", "maxLength": plan.MaxPlanIDBytes, "pattern": planIDPattern},
 			"phases": map[string]any{
 				"type": "array", "minItems": 1, "maxItems": plan.MaxPhases,
 				"items": map[string]any{
@@ -154,13 +163,23 @@ func (t *setupPlanTool) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %w", tools.ErrBadInput, err)
 	}
-	if p.PlanID == "" {
-		id, err := newPlanID()
-		if err != nil {
-			return tools.Result{}, err
-		}
-		p.PlanID = id
+	// plan_id is the room's key for a plan: the SetupVerified fold drops a
+	// verdict whose plan_id is not the current plan's, and pipeline_register
+	// keys on a setup.verified for the current plan. A model that chose the
+	// id could reuse the id of a plan whose ladder already ran and make that
+	// verdict count for steps that never executed, so the id is server-owned
+	// like a step's class and tier: refused on input, always minted here.
+	if p.PlanID != "" {
+		return tools.Result{}, fmt.Errorf("%w: setup_plan: %q is filled by the server, never by the plan's text", tools.ErrBadInput, "plan_id")
 	}
+	if p.Supersedes != "" && !planIDRe.MatchString(p.Supersedes) {
+		return tools.Result{}, fmt.Errorf("%w: setup_plan: supersedes is not a plan id", tools.ErrBadInput)
+	}
+	id, err := newPlanID()
+	if err != nil {
+		return tools.Result{}, err
+	}
+	p.PlanID = id
 	// Resolve fills Index and Tier; the class is Resolve's input, so set it
 	// from the server's resolver before resolving rather than trusting a
 	// step the model wrote (plan.Decode already refused one).
@@ -170,6 +189,7 @@ func (t *setupPlanTool) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if err := p.Resolve(t.cat, t.facts); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %w", tools.ErrBadInput, err)
 	}
+	t.fillLayers(&p)
 	payload := p.Payload()
 	if err := t.sink.Emit(ctx, events.SetupPlan, payload); err != nil {
 		return tools.Result{}, fmt.Errorf("setuptools: recording setup.plan: %w", err)
@@ -196,6 +216,32 @@ func (t *setupPlanTool) fillClasses(p *plan.Plan) error {
 	return nil
 }
 
+// fillLayers sets every step's Layer from the catalogue when it can answer
+// one. plan.Decode refused a model-written layer, so the stored value is
+// always the catalogue's. Target is not filled here: it needs the resolved
+// endpoint, which the room (U1-10) owns.
+func (t *setupPlanTool) fillLayers(p *plan.Plan) {
+	lc, ok := t.cat.(LayerCatalogue)
+	if !ok {
+		return
+	}
+	for pi := range p.Phases {
+		for si := range p.Phases[pi].Steps {
+			step := &p.Phases[pi].Steps[si]
+			if layer, ok := lc.LayerOf(step.Op); ok {
+				step.Layer = layer
+			}
+		}
+	}
+}
+
+// planIDPattern bounds supersedes to the shape of an id this tool mints
+// (pl_<hex>) or any short id of letters, digits, '_' and '-': it is stored
+// in setup.plan, so it must never carry a control character or markup.
+const planIDPattern = `^[A-Za-z0-9_-]{1,64}$`
+
+var planIDRe = regexp.MustCompile(planIDPattern)
+
 // planSummary is the one-paragraph rendering the model reads: the plan id,
 // its phases and each step's op with the tier the server assigned.
 func planSummary(p events.SetupPlanPayload) string {
@@ -218,7 +264,8 @@ func planSummary(p events.SetupPlanPayload) string {
 
 // newPlanID returns a fresh plan id. plan.PlanID is at most
 // plan.MaxPlanIDBytes and the room keys plans by it, so it is a random hex
-// string, never a timestamp the next plan could collide with.
+// string minted here for every plan, never a timestamp the next plan could
+// collide with and never text the model chose.
 func newPlanID() (string, error) {
 	var b [10]byte
 	if _, err := rand.Read(b[:]); err != nil {

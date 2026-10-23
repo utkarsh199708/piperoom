@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"piperoom/internal/room"
+	"piperoom/internal/clients"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/tools"
 )
@@ -78,7 +78,7 @@ var readOps = map[string]string{
 func TestRegisterReadToolsInReadOnlyRegistry(t *testing.T) {
 	f := &fakeRunner{}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r_setup"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r_setup", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if !reg.ReadOnly() {
@@ -119,13 +119,26 @@ func TestRegisterRefusesAPlainRegistry(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresTheBoundRoom(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		reg := tools.NewReadOnlyRegistry()
+		err := Register(reg, Deps{Runner: &fakeRunner{}, RoomID: id, CallRoom: callRoomFromCtx})
+		if err == nil || !strings.Contains(err.Error(), "RoomID") {
+			t.Fatalf("Register(RoomID %q) = %v, want a refusal naming RoomID", id, err)
+		}
+		if got := len(reg.All()); got != 0 {
+			t.Fatalf("a refused Register added %d tools, want 0", got)
+		}
+	}
+}
+
 func TestReadToolsForwardOnlyTheirWhitelistedOp(t *testing.T) {
 	inputs := readInputs()
 	for name, op := range readOps {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeRunner{}
 			reg := tools.NewReadOnlyRegistry()
-			if err := Register(reg, Deps{Runner: f, RoomID: "r_setup", Class: protocol.ClassLocal}); err != nil {
+			if err := Register(reg, Deps{Runner: f, RoomID: "r_setup", Class: protocol.ClassLocal, CallRoom: callRoomFromCtx}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
 			tool, ok := reg.Get(name)
@@ -178,12 +191,14 @@ func TestReadToolsRefuseUnknownInputFields(t *testing.T) {
 		"file_read":         json.RawMessage(`{"path":"a","op":"file_delete"}`),
 		"jar_list":          json.RawMessage(`{"path":"a","extra":true}`),
 		"container_inspect": json.RawMessage(`{"service":"connect","command":"rm -rf /"}`),
+		// compose_config renders the whole project; its schema has only file.
+		"compose_config": json.RawMessage(`{"file":"compose.yaml","services":["connect"]}`),
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeRunner{}
 			reg := tools.NewReadOnlyRegistry()
-			if err := Register(reg, Deps{Runner: f}); err != nil {
+			if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
 			tool, _ := reg.Get(name)
@@ -214,7 +229,7 @@ func TestReadToolsRefuseBadInput(t *testing.T) {
 		t.Run(tc.tool+string(tc.input), func(t *testing.T) {
 			f := &fakeRunner{}
 			reg := tools.NewReadOnlyRegistry()
-			if err := Register(reg, Deps{Runner: f}); err != nil {
+			if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
 			tool, _ := reg.Get(tc.tool)
@@ -231,7 +246,7 @@ func TestReadToolsRefuseBadInput(t *testing.T) {
 func TestReadToolsWithoutARunner(t *testing.T) {
 	inputs := readInputs()
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{}); err != nil {
+	if err := Register(reg, Deps{RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	for name := range readOps {
@@ -242,14 +257,45 @@ func TestReadToolsWithoutARunner(t *testing.T) {
 	}
 }
 
+// ctxRoomKey stands in for the room package's context key: CallRoom is how
+// wiring hands this package room.RoomID without an import.
+type ctxRoomKey struct{}
+
+func callRoomFromCtx(ctx context.Context) string {
+	id, _ := ctx.Value(ctxRoomKey{}).(string)
+	return id
+}
+
+func TestRegisterRequiresTheCallRoomReader(t *testing.T) {
+	reg := tools.NewReadOnlyRegistry()
+	err := Register(reg, Deps{Runner: &fakeRunner{}, RoomID: "r"})
+	if err == nil || !strings.Contains(err.Error(), "CallRoom") {
+		t.Fatalf("Register without CallRoom = %v, want a refusal naming CallRoom", err)
+	}
+	if got := len(reg.All()); got != 0 {
+		t.Fatalf("a refused Register added %d tools, want 0", got)
+	}
+}
+
+func TestZeroCallerFailsClosed(t *testing.T) {
+	f := &fakeRunner{}
+	c := &caller{runner: f, roomID: "r"}
+	if _, err := c.call(context.Background(), "env_detect", nil); !errors.Is(err, ErrNoRunner) {
+		t.Fatalf("call without a room reader = %v, want ErrNoRunner", err)
+	}
+	if got := len(f.recorded()); got != 0 {
+		t.Fatalf("sent %d ops, want 0", got)
+	}
+}
+
 func TestReadToolRefusesAnotherRoomsCall(t *testing.T) {
 	f := &fakeRunner{}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r_one"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r_one", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tool, _ := reg.Get("env_detect")
-	ctx := room.WithRoomID(context.Background(), "r_two")
+	ctx := context.WithValue(context.Background(), ctxRoomKey{}, "r_two")
 	if _, err := tool.Run(ctx, json.RawMessage(`{}`)); !errors.Is(err, ErrNoRunner) {
 		t.Fatalf("Run for another room = %v, want ErrNoRunner", err)
 	}
@@ -258,20 +304,27 @@ func TestReadToolRefusesAnotherRoomsCall(t *testing.T) {
 	}
 }
 
-func TestReadToolTakesTheRoomsIDFromContext(t *testing.T) {
-	f := &fakeRunner{}
-	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f}); err != nil {
-		t.Fatalf("Register: %v", err)
+func TestReadToolSendsToTheBoundRoom(t *testing.T) {
+	cases := map[string]context.Context{
+		"no room in ctx":   context.Background(),
+		"same room in ctx": context.WithValue(context.Background(), ctxRoomKey{}, "r_bound"),
 	}
-	tool, _ := reg.Get("docker_info")
-	ctx := room.WithRoomID(context.Background(), "r_ctx")
-	if _, err := tool.Run(ctx, json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	calls := f.recorded()
-	if len(calls) != 1 || calls[0].roomID != "r_ctx" {
-		t.Fatalf("calls = %+v, want one to r_ctx", calls)
+	for name, ctx := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeRunner{}
+			reg := tools.NewReadOnlyRegistry()
+			if err := Register(reg, Deps{Runner: f, RoomID: "r_bound", CallRoom: callRoomFromCtx}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			tool, _ := reg.Get("docker_info")
+			if _, err := tool.Run(ctx, json.RawMessage(`{}`)); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			calls := f.recorded()
+			if len(calls) != 1 || calls[0].roomID != "r_bound" {
+				t.Fatalf("calls = %+v, want one to r_bound", calls)
+			}
+		})
 	}
 }
 
@@ -280,7 +333,7 @@ func TestReadToolTurnsARefusalIntoAnError(t *testing.T) {
 		return protocol.OpResult{ID: req.ID, OK: false, Summary: "the plugin dir is flat"}, nil
 	}}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tool, _ := reg.Get("jar_list")
@@ -295,7 +348,7 @@ func TestReadToolTruncatesALongSummary(t *testing.T) {
 		return protocol.OpResult{ID: req.ID, OK: true, Summary: strings.Repeat("x", tools.MaxSummaryBytes+100)}, nil
 	}}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tool, _ := reg.Get("env_detect")
@@ -313,7 +366,7 @@ func TestReadToolWithholdsCutData(t *testing.T) {
 		return protocol.OpResult{ID: req.ID, OK: true, Summary: "partial", Data: json.RawMessage(`{"truncated":true}`), Truncated: true}, nil
 	}}
 	reg := tools.NewReadOnlyRegistry()
-	if err := Register(reg, Deps{Runner: f, RoomID: "r"}); err != nil {
+	if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tool, _ := reg.Get("compose_ps")
@@ -326,5 +379,40 @@ func TestReadToolWithholdsCutData(t *testing.T) {
 	}
 	if res.Data != nil {
 		t.Fatalf("cut data was returned: %v", res.Data)
+	}
+}
+
+func TestReadToolMapsErrorCodesToSentinels(t *testing.T) {
+	for code, want := range map[string]error{
+		"out_of_scope": tools.ErrOutOfScope,
+		"not_found":    clients.ErrNotFound,
+	} {
+		t.Run(code, func(t *testing.T) {
+			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+				return protocol.OpResult{ID: req.ID, OK: false, Summary: "refused", Data: json.RawMessage(`{"error_code":"` + code + `"}`)}, nil
+			}}
+			reg := tools.NewReadOnlyRegistry()
+			if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			tool, _ := reg.Get("file_read")
+			_, err := tool.Run(context.Background(), json.RawMessage(`{"path":"compose.yaml"}`))
+			if !errors.Is(err, want) {
+				t.Fatalf("Run with error_code %q = %v, want %v", code, err, want)
+			}
+		})
+	}
+	// An unknown code is still an error, with no sentinel.
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: false, Summary: "refused", Data: json.RawMessage(`{"error_code":"weird"}`)}, nil
+	}}
+	reg := tools.NewReadOnlyRegistry()
+	if err := Register(reg, Deps{Runner: f, RoomID: "r", CallRoom: callRoomFromCtx}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	tool, _ := reg.Get("file_read")
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"path":"compose.yaml"}`))
+	if err == nil || errors.Is(err, tools.ErrOutOfScope) || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("Run with an unknown error_code = %v, want a plain error", err)
 	}
 }

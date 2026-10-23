@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
@@ -21,23 +20,31 @@ import (
 //
 //	SetupVerificationRequested Type = "setup.verification_requested"
 //
-// beside SetupVerified. Until a lead decides, this local constant is the
-// adapter the change request names. The room service's agent sink must accept
-// it (and keep refusing setup.verified) when U1-8b wires the ladder runner.
+// beside SetupVerified, with an empty payload (see VerificationRequest), and
+// amending the events.go block comment that lists the setup types the agent
+// may emit ("except setup.plan and setup.blocked") to name it as well: the
+// agent may emit exactly setup.plan and setup.verification_requested, and must
+// never emit setup.verified. Until a lead decides, this local constant is the
+// adapter the change request names. The room owns the rest of the CCR: its
+// sink refuses the request while a ladder run is in flight (each run creates
+// a T2 canary-insert proposal), and the human route
+// POST /api/rooms/{id}/setup/verify emits the same event with the person as
+// actor, so the ladder has one trigger and the log says who asked.
 const TypeVerificationRequested events.Type = "setup.verification_requested"
 
-// VerificationRequest is the payload TypeVerificationRequested carries: when
-// the request was made. The plan it names is the room's current setup.plan
-// (read from the log), so the request never repeats a plan id the model chose.
-type VerificationRequest struct {
-	At time.Time `json:"at"`
-}
+// VerificationRequest is the payload TypeVerificationRequested carries. It is
+// empty on purpose: the store stamps the event's time (Event.At), so a second
+// timestamp here could only disagree with it, and the plan a request verifies
+// is the room's current setup.plan when the sink accepts it, never a plan id
+// the model chose. The room's sink stamps that plan id, so a setup.plan
+// landing between the call and the ladder's start cannot make the request
+// ambiguous.
+type VerificationRequest struct{}
 
 // requestVerificationTool is setup_request_verification (KindRoom, no
 // parameters): the model asks for the ladder; it never reports the outcome.
 type requestVerificationTool struct {
 	sink Emitter
-	now  func() time.Time
 }
 
 // Name is the tool name the model calls.
@@ -68,7 +75,7 @@ func (t *requestVerificationTool) Run(ctx context.Context, input json.RawMessage
 			return tools.Result{}, fmt.Errorf("%w: setup_request_verification: %v", tools.ErrBadInput, err)
 		}
 	}
-	if err := t.sink.Emit(ctx, TypeVerificationRequested, VerificationRequest{At: t.now().UTC()}); err != nil {
+	if err := t.sink.Emit(ctx, TypeVerificationRequested, VerificationRequest{}); err != nil {
 		return tools.Result{}, fmt.Errorf("setuptools: requesting verification: %w", err)
 	}
 	return tools.Result{

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
 	"piperoom/internal/tools"
@@ -65,6 +66,14 @@ type Config struct {
 	// evaluation (0: DefaultJudgeMaxCalls; negative: none). Past the cap an
 	// ambiguous hypothesis is unjudged and counts as not passed.
 	JudgeMaxCalls int
+	// SetupDir is the directory of runner-session recordings (U1-20;
+	// evals/setup/recordings). A scenario with a recording gets the source
+	// and target kinds it reports under when it names none, so the report's
+	// per-source and per-target pass rates cover the setup scenarios; the
+	// recordings are also the replay a setup run's runner needs (evals/setup).
+	// Empty reads none. A directory that fails to load is logged as a warning
+	// and the run goes on without it.
+	SetupDir string
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
 	// refusal latches the first API refusal of the evaluation (infra.go).
@@ -111,6 +120,24 @@ func (c Config) gate() *judgeGate {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	if cfg.SetupDir != "" {
+		recs, err := evalsetup.LoadDir(cfg.SetupDir)
+		if err != nil {
+			// A broken recording costs the setup grouping, not every other
+			// scenario's run: warn and run the set without the recordings'
+			// kinds. evalrun -check fails on the same error.
+			cfg.Logger.Warn("evals: setup recordings not loaded; setup scenarios report without their source and target", "dir", cfg.SetupDir, "err", err)
+			recs = nil
+		}
+		// Copy the slice: attaching the recordings' kinds must not mutate the
+		// caller's scenarios.
+		scenarios = append([]Scenario(nil), scenarios...)
+		for i := range scenarios {
+			if rec, ok := recs[scenarios[i].Name]; ok {
+				attachSetup(&scenarios[i], rec)
+			}
+		}
+	}
 	if cfg.Runner == nil {
 		run, err := NewEndpointRunner(ctx, config.Load(), cfg.Logger)
 		if err != nil {
@@ -132,12 +159,12 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	}
 	for _, m := range []string{cfg.Judge, cfg.DefaultJudge} {
 		if !validJudge(m) {
-			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q or %q)", m, JudgeTerms, JudgeClaude, JudgeAuto)
+			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q (alias %q) or %q)", m, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto)
 		}
 	}
 	for _, sc := range scenarios {
-		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeClaude && cfg.JudgeClient == nil {
-			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags claude and set ANTHROPIC_API_KEY)", sc.Name, JudgeClaude)
+		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeLLM && cfg.JudgeClient == nil {
+			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags livejudge and set the model provider's credentials)", sc.Name, JudgeLLM)
 		}
 	}
 
