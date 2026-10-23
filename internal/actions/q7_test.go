@@ -60,7 +60,6 @@ var (
 )
 
 func TestStepLayer(t *testing.T) {
-	p := owners.Pipeline{ID: "orders"}
 	cases := []struct {
 		name       string
 		a          Action
@@ -83,7 +82,8 @@ func TestStepLayer(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := StepLayer(c.a, p, c.sourceKind, json.RawMessage(c.params))
+			p := owners.Pipeline{ID: "orders", SourceKind: c.sourceKind}
+			got, err := StepLayer(c.a, p, json.RawMessage(c.params))
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Fatalf("StepLayer = %q, %v; want error containing %q", got, err, c.wantErr)

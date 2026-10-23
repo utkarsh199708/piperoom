@@ -337,7 +337,7 @@ runner, a name for a secret, a hash for the canary nonce.
 - **Approving layer of a source action.** A source-neutral source action (`actions.SourceLayered`) is approved by
   the pipeline's source layer, `actions.LayerFor(a, source_kind)`: `postgres` or `mysql`. Its `Layer()` (what a
   caller without a pipeline shows) stays `postgres`. The room service and the agent take a step's layer from
-  `actions.StepLayer(a, pipeline, source_kind, params)` (Q7-0c), which answers this rule and the Q7 `Layered` rule
+  `actions.StepLayer(a, pipeline, params)` (Q7-0c), which answers this rule and the Q7 `Layered` rule
   in one place.
 - **Topology.** A MySQL source table is node id `mysql:<db>.<table>` (e.g. `mysql:shop.orders`), `kind:
   "source_table"`, `layer: "mysql"`; there is no new node kind.
@@ -349,7 +349,7 @@ The action `repo_open_pull_request` (Q7c) proposes a fix as a pull request on a 
 repository's own reviewers merge it and the customer's deployment applies it.
 
 - **Approving layer.** The action is `actions.Layered`: its `Layer()` is `""` and a step's layer is the layer of
-  the `repos[].paths` globs its files match, `actions.StepLayer(a, pipeline, source_kind, params)`. The room service
+  the `repos[].paths` globs its files match, `actions.StepLayer(a, pipeline, params)`. The room service
   derives it at creation and again before Execute and refuses a step whose `layer` differs, so the proposer never
   picks the approver. Every other action answers its `Layer()` (or, for a source action, the source layer).
 - **Deferred steps.** The action is `actions.Deferred`: never approved by a policy (`auto_approve:`, `autonomy:`),

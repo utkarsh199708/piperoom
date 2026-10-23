@@ -313,16 +313,14 @@ type Layered interface {
 // StepLayer is the layer whose owner approves one step of a with params on
 // pipeline p, the one rule the room service (Q7k, Q8o) and the agent call:
 //   - a Layered action: LayerFor(p, params);
-//   - a SourceLayered action: events.SourceLayer(sourceKind);
+//   - a SourceLayered action: events.SourceLayer(p.SourceKindOrDefault());
 //   - any other action: a.Layer().
 //
-// sourceKind is p's owners.yaml source_kind ("" = postgres). It is a
-// parameter, not read from p, because owners.Pipeline has no source_kind
-// field yet (A3 adds it in Q8d); callers pass that field once it exists.
+// The source kind is p's owners.yaml source_kind (Q8d; "" = postgres).
 // An empty answer is an error, never a layer: no owner owns "", so a step
 // without a layer fails closed instead of reaching an approver by accident.
 // It does no I/O. (Q7, Q8)
-func StepLayer(a Action, p owners.Pipeline, sourceKind string, params json.RawMessage) (string, error) {
+func StepLayer(a Action, p owners.Pipeline, params json.RawMessage) (string, error) {
 	var layer string
 	if l, ok := a.(Layered); ok {
 		v, err := l.LayerFor(p, params)
@@ -331,6 +329,7 @@ func StepLayer(a Action, p owners.Pipeline, sourceKind string, params json.RawMe
 		}
 		layer = v
 	} else if _, ok := a.(SourceLayered); ok {
+		sourceKind := p.SourceKindOrDefault()
 		layer = events.SourceLayer(sourceKind)
 		if layer == "" {
 			return "", fmt.Errorf("actions: %s: unknown source_kind %q", a.Name(), sourceKind)
