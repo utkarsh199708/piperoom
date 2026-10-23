@@ -35,6 +35,14 @@ const (
 	KindToolRequest Kind = "tool_request"
 	// KindRoleTag is chat-format markup (<system>, [INST], "Human:" turns).
 	KindRoleTag Kind = "role_tag"
+	// KindControlToken is a chat-template control token or a fake tool-call
+	// tag (<|im_start|>, <|eot_id|>, <start_of_turn>, [INST], [TOOL_CALLS],
+	// <tool_call>, <function=name>). On a local or open-weight model served
+	// through a chat template, data holding one can end the data turn and open
+	// a forged one; the agent neutralises them (V16, model-providers.md
+	// section 10.1). It is reported next to KindRoleTag for the tokens both
+	// rules know.
+	KindControlToken Kind = "control_token"
 	// KindHiddenComment is an HTML comment that addresses the AI.
 	KindHiddenComment Kind = "hidden_comment"
 	// KindWrapperTag is one of the agent's own untrusted-data wrapper tags
