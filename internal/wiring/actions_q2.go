@@ -88,8 +88,8 @@ func RegisterSourceActions(areg *actions.Registry, d SourceActionDeps) error {
 // clients: the read-only Connect adapter in both write modes, and the admin
 // writer only with write mode on (adminWriter).
 func registerSourceActions(areg *actions.Registry, w *Wired) error {
-	// readConnect is nil (a nil interface) without a Connect client, and an
+	// readConnectBase is nil (a nil interface) without a Connect client, and an
 	// interface conversion keeps it nil.
-	var conn tools.ConfigReader = readConnect(w)
+	var conn tools.ConfigReader = readConnectBase(w)
 	return RegisterSourceActions(areg, SourceActionDeps{Connect: conn, Source: w.Source, Admin: adminWriter(w)})
 }

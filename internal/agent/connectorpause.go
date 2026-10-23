@@ -81,11 +81,15 @@ func pausedState(state string) bool {
 }
 
 // readToolContent is the text of a successful read's tool_result: the wrapped
-// summary, plus the pause rule when the read shows a paused connector.
+// summary, plus the pause rule when the read shows a paused connector and the
+// upgrade rule when a known issue affects a running version (Q1d).
 func (r *runner) readToolContent(tool, stepID, summary string, data any) string {
 	content := r.wrapReadToolOutput(tool, stepID, summary)
 	if pausedConnector(tool, data) {
 		content += "\n" + pauseRuleNote
+	}
+	if upgradeAdvised(tool, data) {
+		content += "\n" + upgradeRuleNote
 	}
 	return content
 }

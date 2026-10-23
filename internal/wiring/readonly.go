@@ -117,10 +117,89 @@ func (c readOnlyConnectValidateTasks) WorkerTasks(ctx context.Context) (map[stri
 	return c.wt.WorkerTasks(ctx)
 }
 
+// connectLifecycleReads are the Connect reads of the Q wave that the read
+// tools find by a type assertion: the stored source offsets
+// (connect_source_offsets, Q5a), the worker's version (GET /, Q5a) and its
+// plugin list (connect_plugins, Q1c). The real client has all three; a
+// client without every one keeps none of them (the tools then stay
+// unregistered or say the read is unsupported), so the wrapper types below
+// need not cover every combination.
+type connectLifecycleReads interface {
+	connect.SourceOffsetReader
+	connect.ConnectInfoReader
+	connect.PluginReader
+}
+
+// The real client has the three reads, so connect_plugins and
+// connect_source_offsets are registered over its read-only value.
+var _ connectLifecycleReads = (*connect.Client)(nil)
+
+// lifecycleReads forwards the three reads; each read-only Connect value
+// below embeds it beside its own reads. None of them writes.
+type lifecycleReads struct{ l connectLifecycleReads }
+
+func (f lifecycleReads) SourceOffsets(ctx context.Context, connector string) ([]connect.SourceOffset, error) {
+	return f.l.SourceOffsets(ctx, connector)
+}
+func (f lifecycleReads) ServerInfo(ctx context.Context) (connect.ServerInfo, error) {
+	return f.l.ServerInfo(ctx)
+}
+func (f lifecycleReads) Plugins(ctx context.Context) ([]connect.Plugin, error) {
+	return f.l.Plugins(ctx)
+}
+
+// The four read-only Connect values plus the Q-wave reads.
+type (
+	readOnlyConnectQ struct {
+		readOnlyConnect
+		lifecycleReads
+	}
+	readOnlyConnectValidateQ struct {
+		readOnlyConnectValidate
+		lifecycleReads
+	}
+	readOnlyConnectTasksQ struct {
+		readOnlyConnectTasks
+		lifecycleReads
+	}
+	readOnlyConnectValidateTasksQ struct {
+		readOnlyConnectValidateTasks
+		lifecycleReads
+	}
+)
+
 // readConnect returns w's Connect client for read tools: nil when none is
 // configured (the tools then say so), else read-only, with the worker-task
-// read (X6b) and the config validation pair (Q4b) when the client has them.
+// read (X6b), the config validation pair (Q4b) and the Q-wave offsets,
+// version and plugin reads (Q1c, Q5a; Q1d registers connect_plugins through
+// them) when the client has them.
 func readConnect(w *Wired) clients.ConnectClient {
+	c := readConnectBase(w)
+	if c == nil {
+		return nil
+	}
+	l, ok := w.Connect.(connectLifecycleReads)
+	if !ok {
+		return c
+	}
+	q := lifecycleReads{l: l}
+	switch v := c.(type) {
+	case readOnlyConnectValidateTasks:
+		return readOnlyConnectValidateTasksQ{readOnlyConnectValidateTasks: v, lifecycleReads: q}
+	case readOnlyConnectValidate:
+		return readOnlyConnectValidateQ{readOnlyConnectValidate: v, lifecycleReads: q}
+	case readOnlyConnectTasks:
+		return readOnlyConnectTasksQ{readOnlyConnectTasks: v, lifecycleReads: q}
+	case readOnlyConnect:
+		return readOnlyConnectQ{readOnlyConnect: v, lifecycleReads: q}
+	}
+	return c
+}
+
+// readConnectBase is readConnect without the Q-wave reads. The actions with
+// write mode off use it (readOnlyActionConnect): no action needs them there,
+// since the Q5 lifecycle actions are registered only with write mode on.
+func readConnectBase(w *Wired) clients.ConnectClient {
 	if w.Connect == nil {
 		return nil
 	}
@@ -231,7 +310,7 @@ func (s readOnlyRegistryDryRun) CheckCompatibility(ctx context.Context, subject,
 // off: nil when none is configured (as with write mode on), else read-only,
 // with config validate when the client has it.
 func readOnlyActionConnect(w *Wired) clients.ConnectClient {
-	c := readConnect(w)
+	c := readConnectBase(w)
 	ro, ok := c.(readOnlyConnect)
 	if !ok {
 		return c

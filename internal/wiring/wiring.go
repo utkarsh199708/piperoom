@@ -460,7 +460,9 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // the room previews as before. The room's executor already runs nothing then
 // (P1a-1); this keeps an action that got past it from writing anyway. The
 // P3 actions follow (registerP3Actions over RegisterP3Actions, actions_p3.go),
-// then the Q2 source admin actions (registerSourceActions, actions_q2.go).
+// then the Q2 source admin actions (registerSourceActions, actions_q2.go),
+// then, with write mode on only, the Q5 connector lifecycle actions
+// (registerLifecycle, actions_q5.go).
 //
 // staging is the pipeline's staging client set (X8a, staging.go), handed to
 // the actions as Deps.Staging with write mode on only: off, Deps.Staging is
@@ -479,7 +481,10 @@ func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging)
 	if err := registerP3Actions(areg, w); err != nil {
 		return err
 	}
-	return registerSourceActions(areg, w)
+	if err := registerSourceActions(areg, w); err != nil {
+		return err
+	}
+	return registerLifecycle(areg, w)
 }
 
 // registerTuning registers the performance action connect_tune_throughput
