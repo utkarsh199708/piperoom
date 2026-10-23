@@ -71,10 +71,11 @@ func (r fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Ad
 }
 
 type setupEnv struct {
-	svc   *room.Service
-	store store.Store
-	own   *owners.Owners
-	now   time.Time
+	svc        *room.Service
+	store      store.Store
+	own        *owners.Owners
+	now        time.Time
+	secretsDir string
 }
 
 type setupOptions struct {
@@ -85,6 +86,9 @@ type setupOptions struct {
 	budget      int64
 	resolver    room.TargetResolver
 	withTenants bool
+	// secretsDir is PIPEROOM_SECRETS_DIR for the credential tests; when empty
+	// a fresh temp directory is used (setup enabled only).
+	secretsDir string
 }
 
 func newSetupEnv(t *testing.T, o setupOptions) *setupEnv {
@@ -111,6 +115,10 @@ func newSetupEnv(t *testing.T, o setupOptions) *setupEnv {
 	}
 	st := memstore.New()
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	secretsDir := o.secretsDir
+	if secretsDir == "" && !o.disabled {
+		secretsDir = t.TempDir()
+	}
 	svc := room.New(room.Deps{
 		Store: st, Users: users, Owners: own,
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
@@ -118,13 +126,13 @@ func newSetupEnv(t *testing.T, o setupOptions) *setupEnv {
 			return nil
 		},
 		Now:           func() time.Time { return now },
-		Setup:         config.Setup{Enabled: !o.disabled, TokenBudget: budget, ProdPatterns: o.prod},
+		Setup:         config.Setup{Enabled: !o.disabled, TokenBudget: budget, ProdPatterns: o.prod, SecretsDir: secretsDir},
 		SetupLocal:    o.local,
 		SetupOwnAddrs: o.ownAddrs,
 		SetupResolver: res,
 	})
 	t.Cleanup(svc.Close)
-	return &setupEnv{svc: svc, store: st, own: own, now: now}
+	return &setupEnv{svc: svc, store: st, own: own, now: now, secretsDir: secretsDir}
 }
 
 func alice() room.User   { return room.User{ID: "alice", Name: "Alice"} }
