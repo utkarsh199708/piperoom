@@ -2,7 +2,7 @@ import { PersonName } from '@/components/VerifiedBadge'
 import type { Person, PresenceMember } from '../api/types'
 import type { MemberState } from '../state/types'
 import { cn } from '@/lib/utils'
-import { Badge, layerVariant } from '@/components/ui/badge'
+import { Badge, layerLabel, layerVariant } from '@/components/ui/badge'
 import { ageLabel } from '../lib/time'
 import { useNow } from './room/useNow'
 import { PersonAvatar } from './room/PersonAvatar'
@@ -82,8 +82,8 @@ export function PresencePanel({
               {driver && <Badge variant="accent">Driver</Badge>}
               {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}
               {layers.slice(0, 3).map((l) => (
-                <Badge key={l} variant={layerVariant(l)} mono aria-label={`owns ${l}`}>
-                  {l}
+                <Badge key={l} variant={layerVariant(l)} mono aria-label={`owns ${layerLabel(l)}`}>
+                  {layerLabel(l)}
                 </Badge>
               ))}
               {layers.length > 3 && (

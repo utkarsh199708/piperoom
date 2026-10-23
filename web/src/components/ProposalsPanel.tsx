@@ -51,7 +51,7 @@ export interface WaitingContext {
   nudges: Record<string, NudgeState>
   canNudge: boolean
 }
-import { Badge, layerVariant } from '@/components/ui/badge'
+import { Badge, layerLabel, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -1018,7 +1018,7 @@ function LayerRow({
       data-state={state}
     >
       <Badge variant={layerVariant(layer)} mono>
-        {layer}
+        {layerLabel(layer)}
       </Badge>
       {decision ? (
         <>
@@ -1334,7 +1334,7 @@ function Proposal({
                 <div className="flex min-w-0 flex-col gap-1.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant={layerVariant(s.layer)} mono>
-                      {s.layer}
+                      {layerLabel(s.layer)}
                     </Badge>
                     <span className="font-mono font-medium">{s.action}</span>
                   </div>

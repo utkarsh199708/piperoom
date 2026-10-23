@@ -666,7 +666,14 @@ export const LAYERS = [
   'transform',
 ] as const
 
-export type Layer = (typeof LAYERS)[number]
+/**
+ * Q8: the source layer of a source_kind: mysql pipeline, in place of postgres (docs/design/mysql-source.md §4.1).
+ * Nodes, steps, proposals and owners may carry it. It is not in LAYERS yet: LAYERS feeds the label forms, and the
+ * server's events.IncidentLayers does not accept "mysql" until the Q0 item 7 contract change lands.
+ */
+export const LAYER_MYSQL = 'mysql'
+
+export type Layer = (typeof LAYERS)[number] | typeof LAYER_MYSQL
 
 // ---- REST / WS objects (docs/api.md) ----
 
