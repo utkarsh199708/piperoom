@@ -26,6 +26,12 @@ type CertInfo struct {
 	// Verified is true when the chain verifies against the configured roots
 	// for the dialed host name.
 	Verified bool `json:"verified"`
+	// NameMatches reports whether the certificate is valid for the dialed
+	// name (a SAN DNS name, a SAN IP address, or the common name when the
+	// certificate has no SANs). It separates "the name does not match" from
+	// "the chain is not trusted", which a caller must tell apart: the first is
+	// usually a server misconfiguration, the second a missing CA.
+	NameMatches bool `json:"name_matches"`
 }
 
 // CertExpiry dials addr ("host:port"), reads the leaf certificate and
@@ -48,9 +54,9 @@ func CertExpiry(ctx context.Context, addr string, cfg *tls.Config) (CertInfo, er
 			serverName = cfg.ServerName
 		}
 	}
-	// A fresh config: no client certificates, no verification during the read.
-	dial := &tls.Config{InsecureSkipVerify: true, ServerName: serverName, MinVersion: tls.VersionTLS12} //nolint:gosec // reading the certificate, not trusting it
-	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: certDialTimeout}, Config: dial}
+	// A fresh dialer: the handshake happens in CertFromConn, which presents no
+	// client certificate.
+	d := &net.Dialer{Timeout: certDialTimeout}
 	cctx, cancel := context.WithTimeout(ctx, certDialTimeout)
 	defer cancel()
 	conn, err := d.DialContext(cctx, "tcp", addr)
@@ -58,14 +64,40 @@ func CertExpiry(ctx context.Context, addr string, cfg *tls.Config) (CertInfo, er
 		return CertInfo{}, fmt.Errorf("netsec: cert expiry %s: %w", addr, err)
 	}
 	defer conn.Close()
-	tc, ok := conn.(*tls.Conn)
-	if !ok {
-		return CertInfo{}, errors.New("netsec: cert expiry: not a TLS connection")
+	info, err := CertFromConn(cctx, conn, serverName, roots)
+	if err != nil {
+		return CertInfo{}, fmt.Errorf("netsec: cert expiry %s: %w", addr, err)
+	}
+	return info, nil
+}
+
+// CertFromConn performs the TLS handshake on conn, which the caller dialed from
+// its own network position, and reports the certificate the server presented.
+// The setup runner's probe dials through the runner's guarded dialer and then
+// reads the certificate here, so both callers share one set of TLS rules.
+// serverName is the name checked against the certificate; roots are the CAs the
+// Verified verdict uses (nil = the system roots). It presents no client
+// certificate and sends no credential. The caller closes conn.
+func CertFromConn(ctx context.Context, conn net.Conn, serverName string, roots *x509.CertPool) (CertInfo, error) {
+	tc := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // reading the certificate, not trusting it; Verified reports the real verdict
+		ServerName:         serverName,
+		MinVersion:         tls.VersionTLS12,
+	})
+	if err := tc.HandshakeContext(ctx); err != nil {
+		return CertInfo{}, fmt.Errorf("netsec: tls handshake: %w", err)
 	}
 	peers := tc.ConnectionState().PeerCertificates
 	if len(peers) == 0 {
-		return CertInfo{}, fmt.Errorf("netsec: cert expiry %s: the server presented no certificate", addr)
+		return CertInfo{}, errors.New("netsec: the server presented no certificate")
 	}
+	return certInfo(peers, serverName, roots), nil
+}
+
+// certInfo builds the report for the peer chain: the leaf's names and dates,
+// whether the chain and the dialed name verify, and the leaf's SAN DNS names
+// (at most maxCertNames).
+func certInfo(peers []*x509.Certificate, serverName string, roots *x509.CertPool) CertInfo {
 	leaf := peers[0]
 	inter := x509.NewCertPool()
 	for _, c := range peers[1:] {
@@ -75,6 +107,7 @@ func CertExpiry(ctx context.Context, addr string, cfg *tls.Config) (CertInfo, er
 	info := CertInfo{
 		Subject: leaf.Subject.CommonName, Issuer: leaf.Issuer.CommonName, NotAfter: leaf.NotAfter,
 		DaysLeft: int(time.Until(leaf.NotAfter).Hours() / 24), Verified: verr == nil,
+		NameMatches: leaf.VerifyHostname(serverName) == nil,
 	}
 	if time.Now().After(leaf.NotAfter) && info.DaysLeft == 0 {
 		info.DaysLeft = -1 // expired earlier today still reads as expired
@@ -84,5 +117,5 @@ func CertExpiry(ctx context.Context, addr string, cfg *tls.Config) (CertInfo, er
 		names = names[:maxCertNames]
 	}
 	info.DNSNames = append([]string(nil), names...)
-	return info, nil
+	return info
 }

@@ -24,7 +24,8 @@ func certServer(t *testing.T, notBefore, notAfter time.Time) (addr string, caPoo
 		t.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "kafka-1"}, DNSNames: []string{"localhost"},
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "kafka-1"},
+		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
 		NotBefore: notBefore, NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true, IsCA: true,
 	}
@@ -89,8 +90,45 @@ func TestCertExpiryExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.DaysLeft > -3 || info.Verified {
+	if info.DaysLeft > -3 || info.Verified || !info.NameMatches {
 		t.Fatalf("%+v", info)
+	}
+}
+
+// CertFromConn reads a certificate on a connection the caller dialed: the name
+// check reports SANs by IP as well as by name, and a name the certificate does
+// not carry is reported as such, not as an untrusted chain.
+func TestCertFromConnNameAndIPSAN(t *testing.T) {
+	now := time.Now()
+	addr, pool, _ := certServer(t, now.Add(-time.Hour), now.Add(48*time.Hour))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := CertFromConn(ctx, conn, "localhost", pool)
+	_ = conn.Close()
+	if err != nil || !info.Verified || !info.NameMatches || info.DaysLeft != 1 {
+		t.Fatalf("err=%v info=%+v", err, info)
+	}
+	conn, err = net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err = CertFromConn(ctx, conn, "127.0.0.1", pool)
+	_ = conn.Close()
+	if err != nil || !info.Verified || !info.NameMatches {
+		t.Fatalf("IP SAN: err=%v info=%+v", err, info)
+	}
+	conn, err = net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err = CertFromConn(ctx, conn, "elsewhere.example", pool)
+	_ = conn.Close()
+	if err != nil || info.Verified || info.NameMatches {
+		t.Fatalf("wrong name: err=%v info=%+v", err, info)
 	}
 }
 
