@@ -12,8 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -179,17 +178,14 @@ func (c callTokens) plus(o callTokens) callTokens {
 	return callTokens{c.input + o.input, c.cacheCreation + o.cacheCreation, c.cacheRead + o.cacheRead, c.output + o.output}
 }
 
-// splitUsage separates a response's own usage from its compaction passes. The
-// API reports compaction iterations outside the top-level fields, and
-// messageUsage counts both, so the two always add up to messageUsage.
-func splitUsage(m anthropic.BetaMessage) (own, compaction callTokens, compacted bool) {
-	u := m.Usage
-	own = callTokens{u.InputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, u.OutputTokens}
-	for _, it := range u.Iterations {
-		if it.Type == "compaction" {
-			compacted = true
-			compaction = compaction.plus(callTokens{it.InputTokens, it.CacheCreationInputTokens, it.CacheReadInputTokens, it.OutputTokens})
-		}
+// splitUsage separates a response's own usage from its compaction pass. The
+// API reports compaction outside the top-level fields, and messageUsage
+// counts both, so the two always add up to messageUsage.
+func splitUsage(u llm.Usage) (own, compaction callTokens, compacted bool) {
+	own = callTokens{u.Input, u.CacheWrite, u.CacheRead, u.Output}
+	if c := u.Compaction; c != nil {
+		compacted = true
+		compaction = callTokens{c.Input, c.CacheWrite, c.CacheRead, c.Output}
 	}
 	return own, compaction, compacted
 }
@@ -230,8 +226,8 @@ func (p Prices) estimateMicros(model string, est int64) int64 {
 // usagePayloads builds the agent.usage events of one sent request: one for the
 // request with role, and one more for its compaction pass when it ran one.
 // They carry counts and the model id only, never request or response text.
-func usagePayloads(model, role string, m anthropic.BetaMessage, took time.Duration, prices Prices) []events.AgentUsagePayload {
-	own, comp, compacted := splitUsage(m)
+func usagePayloads(model, role string, u llm.Usage, took time.Duration, prices Prices) []events.AgentUsagePayload {
+	own, comp, compacted := splitUsage(u)
 	out := []events.AgentUsagePayload{usagePayload(model, role, own, took.Milliseconds(), prices)}
 	if compacted {
 		// The pass runs inside the same request; its time is in the request's.
@@ -269,8 +265,9 @@ func detached(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // errNotSent marks an error returned before a request reached the API, so no
-// agent.usage is reported for it. A *BudgetError means the same.
-var errNotSent = errors.New("agent: request not sent")
+// agent.usage is reported for it. It is llm.ErrNotSent, which an adapter
+// wraps when it cannot encode a request. A *BudgetError means the same.
+var errNotSent = llm.ErrNotSent
 
 // wasSent reports whether a model call that returned err reached the API.
 func wasSent(err error) bool {
@@ -290,15 +287,23 @@ type reportingModel struct {
 	report func(ctx context.Context, p events.AgentUsagePayload)
 }
 
-func (m *reportingModel) Turn(ctx context.Context, params anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+func (m *reportingModel) Turn(ctx context.Context, req llm.Request) (llm.Response, error) {
 	start := time.Now()
-	msg, err := m.inner.Turn(ctx, params)
+	resp, err := m.inner.Turn(ctx, req)
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(params.Model, m.role, msg, time.Since(start), m.prices) {
+		for _, p := range usagePayloads(req.Model, m.role, resp.Usage, time.Since(start), m.prices) {
 			m.report(ectx, p)
 		}
 	}
-	return msg, err
+	return resp, err
 }
+
+// Capabilities is the wrapped model's.
+func (m *reportingModel) Capabilities(model string) llm.Capabilities {
+	return m.inner.Capabilities(model)
+}
+
+// Provider is the wrapped model's.
+func (m *reportingModel) Provider() string { return m.inner.Provider() }

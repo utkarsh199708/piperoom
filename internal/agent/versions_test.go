@@ -246,7 +246,7 @@ func runbookRoom(t *testing.T, plugins *pluginsTool, inputs ...string) (*scripte
 	if err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
-	r.model = model
+	r.model = viaSDK(model)
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}

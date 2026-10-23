@@ -9,8 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -305,8 +304,8 @@ func (g *spendGuard) refund(ctx context.Context, ch spendCharge) {
 // reply was lost, the retry counts the request twice: an overcount, which
 // errs on the side of the cap.) If the retry fails too, the estimate stays
 // charged, usually an undercount, and an Error is logged with counts only.
-func (g *spendGuard) settle(ctx context.Context, ch spendCharge, model string, msg anthropic.BetaMessage) {
-	own, comp, _ := splitUsage(msg)
+func (g *spendGuard) settle(ctx context.Context, ch spendCharge, model string, u llm.Usage) {
+	own, comp, _ := splitUsage(u)
 	used := own.plus(comp)
 	cost, priced := g.s.prices.costMicros(model, used)
 	if !priced && g.s.dailyCostMicros > 0 {

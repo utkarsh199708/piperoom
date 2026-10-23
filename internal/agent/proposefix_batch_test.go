@@ -50,7 +50,7 @@ func TestBatchRoomProposeFixIsRefused(t *testing.T) {
 	r, err := newRunnerWith(Alert{Title: "revenue_daily failed", PipelineID: "p", PipelineKind: events.PipelineKindBatch}, Deps{
 		Tools: reg, Actions: kindTestActions(t), Proposals: props,
 		Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: sink, Logger: discardLogger(),
-	}, Options{MaxTurns: 3}, m)
+	}, Options{MaxTurns: 3}, viaSDK(m))
 	if err != nil {
 		t.Fatal(err)
 	}

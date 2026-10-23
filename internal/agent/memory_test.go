@@ -60,8 +60,9 @@ func TestRunCompactionBlockCarriesToNextRequest(t *testing.T) {
 		t.Fatalf("expected at least 2 model calls, got %d", len(model.calls))
 	}
 	// The second call's history is the first call's history plus the
-	// assistant turn: resp.ToParam() must carry the compaction block along
-	// with the tool_use block, byte for byte, into that next request.
+	// assistant turn: the adapter must carry the compaction block (a native
+	// part) along with the tool_use block, byte for byte, into that next
+	// request.
 	js := messagesJSON(model.calls[1])
 	if !strings.Contains(js, `"type":"compaction"`) {
 		t.Fatalf("compaction block missing from next request: %s", js)

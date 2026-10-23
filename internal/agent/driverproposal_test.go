@@ -131,12 +131,12 @@ func TestDriverProposalCreatedWhileBusyAsksForNoReads(t *testing.T) {
 	}
 	r := &runner{}
 	blocks := r.inputBlocks([]HumanInput{in}, nil)
-	if len(blocks) != 1 || !strings.Contains(blocks[0].OfText.Text, "mid-investigation") {
+	if len(blocks) != 1 || !strings.Contains(blocks[0].Text, "mid-investigation") {
 		t.Fatalf("a batch drained between tool turns must render busy: %+v", blocks)
 	}
 	idle := r.idleInputBlocks([]HumanInput{in}, nil)
-	if !strings.Contains(idle[0].OfText.Text, "You were idle") {
-		t.Fatalf("a batch that woke the agent must render idle: %q", idle[0].OfText.Text)
+	if !strings.Contains(idle[0].Text, "You were idle") {
+		t.Fatalf("a batch that woke the agent must render idle: %q", idle[0].Text)
 	}
 	// Secrets the driver pasted are masked like any human text.
 	masked := formatInput(driverCreated("set connection.url=postgres://app:hunter2@db:5432/orders"), false)
