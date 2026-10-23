@@ -399,7 +399,7 @@ func testSetupStack(t *testing.T, w *setupWorld) *stack {
 }
 
 func TestSetupScenariosAreRegistered(t *testing.T) {
-	names := setupScenarioNames()
+	names := setupScenarioNamesFor("")
 	want := []string{
 		"agent-stopped", "cdc-not-enabled-table",
 		"db-unreachable-from-connect", "flat-plugin-dir", "missing-converter-jars",
@@ -427,7 +427,7 @@ func TestSetupScenariosAreRegistered(t *testing.T) {
 // the named check passes before, fails after the break, and passes after the
 // fix.
 func TestSetupBreakFixPair(t *testing.T) {
-	for _, name := range setupScenarioNames() {
+	for _, name := range setupScenarioNamesFor("") {
 		if isMSSQLSetupScenario(name) {
 			continue // the fake SQL Server: setupbreaks_mssql_test.go
 		}
@@ -473,7 +473,7 @@ func TestSetupBreakFixPair(t *testing.T) {
 // TestSetupBreakFixIdempotent: a second break and a second fix are no-ops;
 // neither errors and the check keeps its state.
 func TestSetupBreakFixIdempotent(t *testing.T) {
-	for _, name := range setupScenarioNames() {
+	for _, name := range setupScenarioNamesFor("") {
 		if isMSSQLSetupScenario(name) {
 			continue // the fake SQL Server: setupbreaks_mssql_test.go
 		}
