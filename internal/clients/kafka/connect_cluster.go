@@ -146,7 +146,9 @@ func (c *Client) ConnectWorkerGroups(ctx context.Context) ([]ConnectWorkerGroup,
 	}
 	start = time.Now()
 	described, err := adm.DescribeGroups(ctx, ids...)
-	c.record(ctx, start, "kadm.DescribeGroups(groups)", "groups="+strings.Join(ids, ","))
+	// A count only: the ids are every Connect group on the cluster, other
+	// pipelines' included, and the provenance goes into the room log.
+	c.record(ctx, start, "kadm.DescribeGroups(groups)", fmt.Sprintf("groups=%d", len(ids)))
 	if err != nil && len(described) == 0 {
 		return nil, fmt.Errorf("kafka: describe connect groups: %w", err)
 	}
@@ -249,11 +251,19 @@ func workerText(s string) string {
 func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // InternalTopicRole returns the Connect storage role a topic name suggests:
-// the last "-" or "_" separated word is configs/config, offsets/offset or
-// status/statuses (Strimzi "<cluster>-configs", the Debezium images'
-// "my_connect_configs"), or the name holds the word "connect" and one of
-// those words anywhere ("_connect_configs_staging"). "" = not a candidate.
+// the name holds the word "connect" (Connect's and Strimzi's defaults
+// "connect-configs" and "connect-cluster-offsets", the Debezium images'
+// "my_connect_configs") and its last "-" or "_" separated word, or failing
+// that any word, is configs/config, offsets/offset or status/statuses
+// ("_connect_configs_staging"). Without "connect" a name is not a candidate:
+// "payments_config" or "order-status" is an application topic, and the
+// discovery would show another pipeline's topic name to the room and judge it
+// by Connect's rules. A broker-internal "__" topic (__consumer_offsets) never
+// is. Other names are set with CONNECT_INTERNAL_TOPICS. "" = not a candidate.
 func InternalTopicRole(name string) string {
+	if strings.HasPrefix(name, "__") {
+		return ""
+	}
 	words := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool { return r == '-' || r == '_' })
 	if len(words) == 0 {
 		return ""
@@ -274,9 +284,6 @@ func InternalTopicRole(name string) string {
 	if strings.Contains(name, ".") {
 		return ""
 	}
-	if r := role(words[len(words)-1]); r != "" && len(words) > 1 {
-		return r
-	}
 	hasConnect := false
 	for _, w := range words {
 		if w == "connect" {
@@ -285,6 +292,9 @@ func InternalTopicRole(name string) string {
 	}
 	if !hasConnect {
 		return ""
+	}
+	if r := role(words[len(words)-1]); r != "" {
+		return r
 	}
 	for _, w := range words {
 		if r := role(w); r != "" {

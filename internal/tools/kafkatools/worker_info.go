@@ -232,7 +232,7 @@ func configuredRoles(names []string) map[string]string {
 func internalTopicFindings(topics []kafka.InternalTopic, source string) []string {
 	var out []string
 	if len(topics) == 0 && source == "name match" {
-		out = append(out, "no topic looks like a Connect internal topic (…-configs, …-offsets, …-status); set CONNECT_INTERNAL_TOPICS to name them")
+		out = append(out, "no topic looks like a Connect internal topic (a name with the word connect ending in configs, offsets or status); set CONNECT_INTERNAL_TOPICS to name them")
 	}
 	for _, it := range topics {
 		name := pluginText(it.Name)

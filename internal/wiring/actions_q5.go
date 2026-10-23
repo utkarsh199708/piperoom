@@ -20,12 +20,13 @@ import (
 
 // registerLifecycle registers the Q5 actions over w's clients. Source is the
 // read-only source client: only connect_reset_source_offsets' Preview reads
-// it, for the size of the snapshot a reset starts. AllowedHosts stays empty:
-// no setting names extra endpoints yet, so a created connector may point only
-// at hosts the pipeline's connections or its registered connectors already
-// reach.
+// it, for the size of the snapshot a reset starts. AllowedHosts are the
+// set's own Kafka brokers, Schema Registry and source database (in both write
+// modes, so Preview answers the same), so a pipeline's first connector can
+// name them; any other host must already be in a registered connector's
+// config.
 func registerLifecycle(areg *actions.Registry, w *Wired) error {
-	var d actions.LifecycleDeps
+	d := actions.LifecycleDeps{AllowedHosts: w.lifecycleHosts}
 	if w.write {
 		d.Connect = w.Connect
 	} else {

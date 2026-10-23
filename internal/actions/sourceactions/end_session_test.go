@@ -343,6 +343,32 @@ func TestEndSessionHorizonHolderRefusals(t *testing.T) {
 			t.Fatalf("Validate = %v", err)
 		}
 	})
+	// blocks_slot is relative (some session always holds the oldest
+	// horizon), so a hidden session must also be an ordinary client of the
+	// pipeline's own database with a transaction past the threshold.
+	for _, tc := range []struct {
+		name string
+		set  func(*DBSession)
+	}{
+		{"another database", func(s *DBSession) { s.SameDB = false }},
+		{"background worker", func(s *DBSession) { s.ClientBackend = false }},
+		{"young transaction", func(s *DBSession) { s.OldXact = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, src, w, a := esFixture()
+			src.sessions[0].InScope, src.sessions[0].BlocksSlot = false, true
+			tc.set(&src.sessions[0])
+			if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, tools.ErrOutOfScope) {
+				t.Fatalf("Validate = %v, want ErrOutOfScope", err)
+			}
+			if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, errRefused) {
+				t.Fatalf("Execute = %v", err)
+			}
+			if len(w.calls) != 0 {
+				t.Fatalf("writer called: %+v", w.calls)
+			}
+		})
+	}
 	t.Run("gone from the full read", func(t *testing.T) {
 		_, src, _, a := esFixture()
 		src.sessions[0].InScope, src.sessions[0].BlocksSlot = false, true
