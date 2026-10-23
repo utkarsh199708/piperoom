@@ -17,6 +17,7 @@ in the same PR.
 | [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions and the connector lifecycle actions (each Connect call with the Kafka version it needs), only if you turn write mode on |
 | [source-admin.md](source-admin.md) | add the source admin actions: replica identity, the connector's `SELECT` grant, ending a blocking session, the heartbeat table |
 | [worker-visibility.md](worker-visibility.md) | let the agent read Kafka Connect worker logs (Loki) and JMX metrics: the least-privilege Loki token, the proposed `WORKER_LOGS_*` settings, the exporter rules, what reaches the model |
+| [transforms-and-sinks.md](transforms-and-sinks.md) | what the agent knows about SMTs, predicates and sinks from the knowledge index, which tool answers which question, and what it does not know |
 | [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
 | [governance.md](governance.md) | know what Piperoom can attest about drift, column lineage, PII tags and retention, and what it cannot (value-level correctness, erasure, business metrics), before you tell an auditor anything |
