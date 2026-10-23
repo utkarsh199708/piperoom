@@ -93,6 +93,53 @@ func TestMySQLNextToPostgresKeepsPostgresSlots(t *testing.T) {
 	}
 }
 
+// A MySQL set has no DDL audit table: the change feed never calls RecentDDL
+// for it, so its ErrNotSupported never turns into a WARN (PR #934 review,
+// minor 5). Its other change kinds still record.
+func TestMySQLPipelineReadsNoDDL(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{mysqlPipe()}})
+	h.setMySQLConfig("shop")
+	ch, ddl := &fakeChanges{}, &fakeDDL{err: clients.ErrNotSupported}
+	d := h.deps
+	d.Changes, d.DDL = ch, ddl
+	w, err := New(d)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.w = w
+	h.step(0)
+	h.steps(3, time.Minute)
+	if len(ddl.since) != 0 {
+		t.Fatalf("RecentDDL called %d times for a MySQL set", len(ddl.since))
+	}
+	if n := h.logs.count("cannot read the DDL audit table"); n != 0 {
+		t.Fatalf("DDL WARN lines = %d on a MySQL set\n%s", n, h.logs)
+	}
+	h.breakConnector("shop", "binlog purged")
+	h.step(time.Minute)
+	if rows := ch.all(); len(rows) == 0 || rows[0].Kind != clients.ChangeConnectorState {
+		t.Fatalf("connector_state not recorded on a MySQL set: %v", kinds(rows))
+	}
+}
+
+// Next to a Postgres pipeline in one set, the DDL feed still reads.
+func TestMySQLNextToPostgresKeepsDDL(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders"}, mysqlPipe()}})
+	h.setMySQLConfig("shop")
+	ddl := &fakeDDL{}
+	d := h.deps
+	d.Changes, d.DDL = &fakeChanges{}, ddl
+	w, err := New(d)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.w = w
+	h.step(0)
+	if len(ddl.since) == 0 {
+		t.Fatal("RecentDDL not read for a set with a Postgres pipeline")
+	}
+}
+
 // The slot WAL forecast never samples a MySQL pipeline.
 func TestMySQLPipelineHasNoSlotForecastSample(t *testing.T) {
 	h := newHarness(t, opts{pipes: []pipeSpec{mysqlPipe()}})
