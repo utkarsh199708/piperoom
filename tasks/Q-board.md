@@ -249,6 +249,14 @@ In short:
   `docs/api.md` (layer `mysql`), `AGENTS.md` §4 rule 6 (the MySQL line: backticks after the same regex).
 - `owners.yaml` `source_kind: postgres | mysql` (default `postgres`) is A3's code (Q8d), not a contract.
 
+**Items 6 and 7 both make a step's approving layer depend on context** (Q batch 4 review): item 6's `Layered`
+(`LayerFor(p owners.Pipeline, params)`, the repo glob's layer) and item 7's `SourceLayered` marker with the package
+function `actions.LayerFor(a, sourceKind)`. The two can coexist in Go (a method and a function of one name), but
+the room service would then run two rules (Q7k and Q8o, both A5). Whichever contract PR lands second folds them
+into one entry point, e.g. `actions.StepLayer(a, p owners.Pipeline, params) (string, error)` that answers
+`Layered.LayerFor`, then `SourceLayer(p.SourceKind)` for a `SourceLayered` action, then `Layer()`; Q7k and Q8o
+then call only it.
+
 ## Step 0: contracts
 
 | ID | Agent | Model | Days | PR | Done when | After |

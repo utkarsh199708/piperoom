@@ -719,7 +719,7 @@ without merge: the fix was not applied"}`. On `pr_merged` it waits, in code and 
 | `applied_when.kind` | Seen when | Reader |
 |---|---|---|
 | `connector_config` `{connector, keys}` | the connector's live config holds every key with that value | `ConnectReader.Config` |
-| `plugin` `{class, version}` | Connect lists the plugin at that version | `ConnectInfoReader.Plugins` (Q1c) |
+| `plugin` `{class, version}` | Connect lists the plugin at that version | `connect.PluginReader.Plugins` (Q1c) |
 | `change` `{kinds, service?}` | a PipelineChange of one of `kinds` after the merge time (a deploy webhook, a connector config change the watcher saw) | `ChangeReader` (F8, X4) |
 | `merge` `{settle}` | `settle` (1 to 60 minutes, default 10) after the merge; for a change nothing in Piperoom can observe | clock |
 
