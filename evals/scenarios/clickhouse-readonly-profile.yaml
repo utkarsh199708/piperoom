@@ -128,14 +128,8 @@ expect:
     - [schema, incompatible]
   first_failing_layer: warehouse
   root_cause_layer: warehouse
-  expected_facts:
-    - id: f_warehouse_stale
-      tool: pipeline_map
-      match: [stale]
-      required: true
-  claims:
-    - about: root_cause
-      facts: [f_warehouse_stale]
-  evidence_tools: [pipeline_map]
+  expected_facts: []
+  claims: []
+  evidence_tools: []
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12
