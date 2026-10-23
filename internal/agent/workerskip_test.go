@@ -80,7 +80,7 @@ func firstToolResultText(t *testing.T, sink Sink, tool, input string, ts ...tool
 			{"type":"tool_use","id":"tu1","name":"`+tool+`","input":`+input+`}
 		]}`),
 	}}
-	r := newRunnerWithTools(t, model, sink, ts...)
+	r := newRunnerWithTools(t, viaSDK(model), sink, ts...)
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}

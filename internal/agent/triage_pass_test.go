@@ -64,7 +64,7 @@ type triageFixture struct {
 	tools map[string]*recordingTool
 }
 
-func newTriageFixture(t *testing.T, m model, toolDefs ...*recordingTool) *triageFixture {
+func newTriageFixture(t *testing.T, m sdkModel, toolDefs ...*recordingTool) *triageFixture {
 	t.Helper()
 	reg := tools.NewRegistry()
 	f := &triageFixture{ep: testEndpoint(m, 0), sink: &fakeSink{}, reg: reg, tools: map[string]*recordingTool{}}

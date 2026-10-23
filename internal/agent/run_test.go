@@ -181,7 +181,14 @@ func testSchema(required ...string) map[string]any {
 	}
 }
 
-func newTestRunner(t *testing.T, model model, inbox Inbox, sink Sink, tool tools.Tool, opts Options) *runner {
+func newTestRunner(t *testing.T, model sdkModel, inbox Inbox, sink Sink, tool tools.Tool, opts Options) *runner {
+	t.Helper()
+	return newTestRunnerM(t, viaSDK(model), inbox, sink, tool, opts)
+}
+
+// newTestRunnerM is newTestRunner with a model that is already an llm.Model
+// (a budget or reporting wrapper around viaSDK).
+func newTestRunnerM(t *testing.T, model model, inbox Inbox, sink Sink, tool tools.Tool, opts Options) *runner {
 	t.Helper()
 	reg := tools.NewRegistry()
 	if err := reg.Register(tool); err != nil {

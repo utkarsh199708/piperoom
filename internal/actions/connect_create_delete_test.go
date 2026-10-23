@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
@@ -453,6 +455,55 @@ func TestCreateDeleteRetryOnTimeoutAndRebalance(t *testing.T) {
 			t.Fatalf("attempts=%d, want 1", f.attempts)
 		}
 	})
+	// A write the setup runner already ran once (clients.ErrWriteSpent) is
+	// never tried again: the loop stops on the first error, with no sleep.
+	spent := func(err error) error { return fmt.Errorf("%w (%w)", err, clients.ErrWriteSpent) }
+	t.Run("create rebalance of a spent write stops at once", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(connect.ErrRebalancing), nil}}
+		f.names = nil
+		f.allowWrites = true
+		start := time.Now()
+		_, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn))
+		if !errors.Is(err, clients.ErrWriteSpent) || !errors.Is(err, connect.ErrRebalancing) {
+			t.Fatalf("Execute: %v, want the spent rebalance", err)
+		}
+		if f.attempts != 1 || time.Since(start) > 400*time.Millisecond {
+			t.Fatalf("attempts=%d after %s, want 1 and no retry wait", f.attempts, time.Since(start))
+		}
+	})
+	t.Run("create timeout of a spent write still checks it landed", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(timeout)}, landed: true}
+		f.names = nil
+		f.allowWrites = true
+		if _, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn)); err != nil {
+			t.Fatalf("Execute: %v, want the landed create", err)
+		}
+		if f.attempts != 1 {
+			t.Fatalf("attempts=%d, want 1", f.attempts)
+		}
+	})
+	t.Run("create timeout of a spent write that did not land stops", func(t *testing.T) {
+		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(timeout), nil}}
+		f.names = nil
+		f.allowWrites = true
+		if _, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn)); !errors.Is(err, clients.ErrWriteSpent) {
+			t.Fatalf("Execute: %v, want the spent timeout", err)
+		}
+		if f.attempts != 1 {
+			t.Fatalf("attempts=%d, want 1", f.attempts)
+		}
+	})
+	t.Run("delete rebalance of a spent write stops at once", func(t *testing.T) {
+		f := &retryDeleteFake{lifecycleFake: newLifecycleFake(), errs: []error{spent(connect.ErrRebalancing), nil}}
+		f.allowWrites = true
+		start := time.Now()
+		if _, err := deleteAction(t, f).Execute(scoped(), json.RawMessage(deleteIn)); !errors.Is(err, clients.ErrWriteSpent) {
+			t.Fatalf("Execute: %v, want the spent rebalance", err)
+		}
+		if f.attempts != 1 || time.Since(start) > 400*time.Millisecond {
+			t.Fatalf("attempts=%d after %s, want 1 and no retry wait", f.attempts, time.Since(start))
+		}
+	})
 	t.Run("delete rebalance then succeeds", func(t *testing.T) {
 		f := &retryDeleteFake{lifecycleFake: newLifecycleFake(), errs: []error{connect.ErrRebalancing, nil}}
 		f.allowWrites = true
@@ -617,5 +668,45 @@ func TestCreateConnectorValidateRetriesATimedOutList(t *testing.T) {
 	f3 := &slowListFake{lifecycleFake: newLifecycleFake(), listErrs: []error{context.DeadlineExceeded, context.DeadlineExceeded, context.DeadlineExceeded}}
 	if err := createAction(t, f3).Validate(scoped(), json.RawMessage(repl)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Validate on a list that keeps timing out: %v", err)
+	}
+}
+
+// configRetryFake answers Config with errs in order, then the stored config.
+type configRetryFake struct {
+	*lifecycleFake
+	errs  []error
+	reads int
+}
+
+func (f *configRetryFake) Config(ctx context.Context, name string) (map[string]string, error) {
+	f.reads++
+	if f.reads <= len(f.errs) {
+		return nil, f.errs[f.reads-1]
+	}
+	return f.lifecycleFake.Config(ctx, name)
+}
+
+// The delete's config guard re-read retries a transient rebalance (a busy
+// Connect answers it on GET .../config right after a create) and a request
+// timeout, and never retries a real failure.
+func TestDeleteConnectorConfigReadRetriesRebalance(t *testing.T) {
+	rebalance := fmt.Errorf("connect: GET /connectors/x/config: %w", connect.ErrRebalancing)
+	f := &configRetryFake{lifecycleFake: newLifecycleFake(), errs: []error{rebalance, context.DeadlineExceeded}}
+	f.allowWrites = true
+	if _, err := deleteAction(t, f).Execute(scoped(), json.RawMessage(deleteIn)); err != nil {
+		t.Fatalf("Execute through a rebalance: %v", err)
+	}
+	if f.reads != 3 || len(f.deleted) != 1 {
+		t.Fatalf("reads=%d deleted=%v, want 3 reads and one delete", f.reads, f.deleted)
+	}
+
+	boom := errors.New("connect: GET /connectors/x/config: status 500: disk full")
+	f2 := &configRetryFake{lifecycleFake: newLifecycleFake(), errs: []error{boom}}
+	f2.allowWrites = true
+	if _, err := deleteAction(t, f2).Execute(scoped(), json.RawMessage(deleteIn)); !errors.Is(err, boom) {
+		t.Fatalf("Execute on a real failure: %v", err)
+	}
+	if f2.reads != 1 || len(f2.deleted) != 0 {
+		t.Fatalf("reads=%d deleted=%v, want one read and no delete", f2.reads, f2.deleted)
 	}
 }

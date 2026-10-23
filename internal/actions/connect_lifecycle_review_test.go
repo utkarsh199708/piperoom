@@ -138,7 +138,10 @@ func (f *settlingFake) Status(ctx context.Context, name string) (clients.Connect
 func TestSourceOffsetResetExecuteWaitsForSettlingStop(t *testing.T) {
 	f := &settlingFake{lifecycleFake: newLifecycleFake(), after: 2}
 	f.allowWrites = true
-	a := &resetSourceOffsets{d: LifecycleDeps{Connect: f, PollInterval: time.Millisecond}}
+	// The settling poll gives up after 6 poll intervals; at 1ms the race
+	// detector on a shared runner can eat that window before the third
+	// status read, so this case uses a wider interval.
+	a := &resetSourceOffsets{d: LifecycleDeps{Connect: f, PollInterval: 25 * time.Millisecond}}
 	guardWrites(t, f.lifecycleFake)
 	out, err := a.Execute(scoped(), json.RawMessage(resetEmptyIn))
 	if err != nil {

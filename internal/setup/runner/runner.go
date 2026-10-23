@@ -88,6 +88,12 @@ type Options struct {
 	// "" = <project dir>/.piperoom/secrets.env. The store is opened on first
 	// use, so a runner that never runs an op creates no file.
 	SecretsFile string
+	// AllowT3 lets T3 ops reach the y/N confirmation. It is false in
+	// production (cmd/setup never sets it, and no flag or env var does):
+	// every T3 op is refused before any prompt, stdin read or start record
+	// (refuseTierDisabled) until the confirm redesign lands. Tests set it to
+	// keep the dormant confirm path exercised.
+	AllowT3 bool
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -95,6 +101,7 @@ type Runner struct {
 	serverURL  string
 	code       string
 	yes        bool
+	allowT3    bool
 	projectDir string
 	label      string
 	stdin      io.Reader
@@ -129,6 +136,9 @@ type Runner struct {
 	// leaves an orphaned read racing the next one.
 	stdinMu    sync.Mutex
 	stdinLines chan stdinLine
+	// stdinAbandoned: the last prompt ended without an answer, so a line
+	// read before the next prompt is printed belongs to it (nextLine).
+	stdinAbandoned bool
 
 	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
 	// reconnect handshake is in progress (the window between setConn and the
@@ -146,8 +156,12 @@ type Runner struct {
 	proposals map[string]events.ProposalCreatedPayload
 	floors    map[string]string
 	inflight  map[string]*inflightOp
-	opLog     *opLog
-	opLogDone bool // op log closed; late appends are no-ops
+	// confirming holds the cancel of each T3 op still waiting for its "y":
+	// such an op is not started (not in inflight), but a FrameCancel must
+	// still drop its prompt.
+	confirming map[string]*context.CancelFunc
+	opLog      *opLog
+	opLogDone  bool // op log closed; late appends are no-ops
 }
 
 // New validates the options and builds a Runner.
@@ -156,6 +170,7 @@ func New(o Options) (*Runner, error) {
 		serverURL:  strings.TrimSpace(o.ServerURL),
 		code:       strings.TrimSpace(o.Code),
 		yes:        o.Yes,
+		allowT3:    o.AllowT3,
 		projectDir: orDefault(o.ProjectDir, "."),
 		label:      orDefault(o.Label, defaultLabel),
 		stdin:      o.Stdin,
@@ -171,6 +186,7 @@ func New(o Options) (*Runner, error) {
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
 		inflight:   make(map[string]*inflightOp),
+		confirming: make(map[string]*context.CancelFunc),
 	}
 	if r.stdin == nil {
 		r.stdin = os.Stdin

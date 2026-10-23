@@ -712,6 +712,26 @@ plugin.
   compose ops. `internal/testenv/setupstack/setup_integration_test.go` also proves the
   compose validator refuses a `privileged: true` file before `compose_up`.
 
+### Oracle setup breaks (profile `oracle`, U9c)
+
+The three prerequisites the U9a Oracle client reads, broken on the `oracle` profile (dev/oracle/README.md). Same
+commands, lock and idempotence as above; the profile must be running (`docker compose -f dev/docker-compose.yml
+--profile oracle up -d --wait oracle`), or break and fix stop with that command. devctl runs fixed SQL*Plus scripts
+as SYSDBA through `docker exec` (`cmd/devctl/setupbreaks_oracle.go`), and each check evaluates the U9a client's own
+types with the grant list its writer grants.
+
+| Scenario | Named check | What the break does | What the check reports |
+|---|---|---|---|
+| `no-archivelog` | `oracle-archive-log-mode` | `SHUTDOWN IMMEDIATE`, `STARTUP MOUNT`, `ALTER DATABASE NOARCHIVELOG`, open the CDB and PDBs (about 7 s) | `LOG_MODE=NOARCHIVELOG; LogMiner needs ARCHIVELOG` (U9a `DatabaseInfo.LogMode`) |
+| `no-supplemental-logging` | `oracle-supplemental-logging` | drops the `ALL COLUMNS` log group of `PIPEROOM.ORDERS`, then the database-level minimal supplemental logging | missing `SUPPLEMENTAL_LOG_DATA_MIN=NO` and the `ALL COLUMNS` group on `PIPEROOM.ORDERS` (U9a `SupplementalLogging.Minimal`, `TableSupplementalLogging`) |
+| `missing-logminer-grant` | `oracle-logminer-grants` | `REVOKE LOGMINING FROM C##DBZUSER CONTAINER=ALL` | `C##DBZUSER is missing LOGMINING` (U9a `LogMinerGrants.SysPrivs`) |
+
+**Fixes:** the same restart with `ALTER DATABASE ARCHIVELOG` (the recovery area set at first start stays in the
+spfile); add the minimal supplemental logging and the table's `ALL COLUMNS` group back; grant every system
+privilege, role and table `SELECT` the check reads (not only `LOGMINING`). `no-archivelog` ends every open session.
+Unit tests: `go test ./cmd/devctl -run Oracle`. Integration (profile up; reads the checks through the U9a client
+over go-ora): `go test -tags integration ./cmd/devctl -run TestIntegrationOracleSetupBreaks`.
+
 ## Setup breaks: MongoDB (`mongo` profile)
 
 Two more `setup-break` / `setup-fix` pairs, on the opt-in `mongo` profile (dev/mongo/README.md) instead of the

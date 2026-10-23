@@ -13,8 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/injectscan"
@@ -216,7 +215,7 @@ func (p *triagePass) setup() error {
 		return err
 	}
 	r.prices = p.ep.prices()
-	r.toolList = buildToolList(r.deps.Tools, nil)
+	r.toolList = buildToolListWithCap(r.deps.Tools, nil, strictCap(m.Capabilities(p.cfg.model)))
 	p.r = r
 	return nil
 }
@@ -411,25 +410,24 @@ func firstRiskConnector(sig map[string]any) string {
 // The first triagePassReads tool_use blocks run; the turn is not continued,
 // so the others need no tool_result.
 func (p *triagePass) modelReads(ctx context.Context) ([]toolUse, error) {
-	req := anthropic.BetaMessageNewParams{
-		Model:     p.cfg.model,
-		MaxTokens: triagePickMaxTokens,
-		System:    []anthropic.BetaTextBlockParam{{Text: triagePrompt()}},
-		Tools:     p.r.toolList.params,
-		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(openingBlocks(p.alert, p.past)...)},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(triageEffort),
-		},
-		ToolChoice: anthropic.BetaToolChoiceUnionParam{OfAuto: &anthropic.BetaToolChoiceAutoParam{}},
+	req := llm.Request{
+		Model:      p.cfg.model,
+		MaxTokens:  triagePickMaxTokens,
+		System:     triagePrompt(),
+		Tools:      p.r.toolList.defs,
+		Messages:   []llm.Message{userMessage(openingBlocks(p.alert, p.past)...)},
+		Effort:     triageEffort,
+		ToolChoice: llm.ToolChoiceAuto,
+		Cache:      llm.CacheHints{Tools: true},
 	}
 	resp, err := p.r.callModel(ctx, req, events.UsageRoleFirstLook)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StopReason == anthropic.BetaStopReasonRefusal {
+	if resp.Stop == llm.StopRefusal {
 		return nil, errTriageRefused
 	}
-	_, uses := splitContent(resp.Content)
+	_, uses := splitContent(resp.Message.Parts)
 	var out []toolUse
 	for _, u := range uses {
 		if e, ok := p.r.toolList.byName[u.name]; ok && e.isRoom {
@@ -505,32 +503,30 @@ type triageVerdict struct {
 func (p *triagePass) verdict(ctx context.Context, outputs []string) (triageVerdict, error) {
 	blocks := openingBlocks(p.alert, p.past)
 	if len(outputs) == 0 {
-		blocks = append(blocks, anthropic.NewBetaTextBlock("First-look reads: none could run."))
+		blocks = append(blocks, textPart("First-look reads: none could run."))
 	} else {
-		blocks = append(blocks, anthropic.NewBetaTextBlock("First-look reads:"))
+		blocks = append(blocks, textPart("First-look reads:"))
 		for _, o := range outputs {
-			blocks = append(blocks, anthropic.NewBetaTextBlock(o))
+			blocks = append(blocks, textPart(o))
 		}
 	}
-	req := anthropic.BetaMessageNewParams{
-		Model:     p.cfg.model,
-		MaxTokens: triageVerdictMaxTokens,
-		System:    []anthropic.BetaTextBlockParam{{Text: triageVerdictPrompt()}},
-		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(blocks...)},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(triageEffort),
-			Format: anthropic.BetaJSONOutputFormatParam{Schema: triageSchema()},
-		},
+	req := llm.Request{
+		Model:        p.cfg.model,
+		MaxTokens:    triageVerdictMaxTokens,
+		System:       triageVerdictPrompt(),
+		Messages:     []llm.Message{userMessage(blocks...)},
+		Effort:       triageEffort,
+		OutputSchema: triageSchema(),
 	}
 	resp, err := p.r.callModel(ctx, req, events.UsageRoleFirstLook)
 	if err != nil {
 		return triageVerdict{}, err
 	}
-	if resp.StopReason == anthropic.BetaStopReasonRefusal {
+	if resp.Stop == llm.StopRefusal {
 		return triageVerdict{}, errTriageRefused
 	}
 	var v triageVerdict
-	if err := json.Unmarshal([]byte(extractText(resp.Content)), &v); err != nil {
+	if err := json.Unmarshal([]byte(extractText(resp.Message.Parts)), &v); err != nil {
 		return triageVerdict{}, fmt.Errorf("agent: first look verdict is not valid JSON: %w", err)
 	}
 	return v, nil

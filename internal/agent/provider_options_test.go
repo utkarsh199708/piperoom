@@ -5,10 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"golang.org/x/oauth2/google"
+
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 )
 
 // exportedTestLoaders is testLoaders through the exported type.
@@ -21,7 +22,7 @@ func exportedTestLoaders() ProviderLoaders {
 func callWith(t *testing.T, ws *wireServer, opts []option.RequestOption, modelID string) seenRequest {
 	t.Helper()
 	opts = append(opts, option.WithBaseURL(ws.URL), option.WithMaxRetries(0))
-	ep := &Endpoint{model: &anthropicModel{client: anthropic.NewClient(opts...), log: discardLogger()}}
+	ep := &Endpoint{model: anthropicllm.New(ProviderAnthropic, opts, discardLogger())}
 	return ws.call(t, ep, modelID)
 }
 

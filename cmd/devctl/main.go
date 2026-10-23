@@ -74,7 +74,9 @@ up/down/reset/load/break/fix/setup-break/setup-fix/serve mutate the shared stack
 scenarios: %s
 
 setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replica,
-missing-grant, db-unreachable-from-connect, plugin-after-scan
+missing-grant, db-unreachable-from-connect, plugin-after-scan;
+SQL Server (profile mssql, dev/mssql/README.md): agent-stopped, cdc-not-enabled-table;
+oracle profile (dev/oracle/README.md): no-archivelog, no-supplemental-logging, missing-logminer-grant;
 mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role
 `
 

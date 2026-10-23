@@ -13,8 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/runbooks"
@@ -230,7 +229,8 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions))
+	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions),
+		strictCap(r.model.Capabilities(r.opts.Model)))
 	r.system = systemPromptForMode(r.kind, r.mode)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
@@ -246,7 +246,7 @@ func (r *runner) run(ctx context.Context) error {
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
 	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
 	r.past = r.pastIncidents(ctx, pastIncidentsRunBytes, pastIncidentsTimeout)
-	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
+	messages := []llm.Message{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
@@ -313,7 +313,7 @@ func (r *runner) run(ctx context.Context) error {
 			return fmt.Errorf("agent: model turn: %w", err)
 		}
 
-		if resp.StopReason == anthropic.BetaStopReasonRefusal {
+		if resp.Stop == llm.StopRefusal {
 			reason := refusalReason(resp)
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
@@ -332,9 +332,9 @@ func (r *runner) run(ctx context.Context) error {
 
 		turns++
 		// History is append-only: keep the assistant turn exactly as returned.
-		messages = append(messages, resp.ToParam())
+		messages = append(messages, resp.Message)
 
-		texts, uses := splitContent(resp.Content)
+		texts, uses := splitContent(resp.Message.Parts)
 		resultBlocks := r.runToolUses(ctx, uses)
 
 		// The agent's own words follow the tool steps, matching the loop order.
@@ -342,8 +342,8 @@ func (r *runner) run(ctx context.Context) error {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: t})
 		}
 
-		switch resp.StopReason {
-		case anthropic.BetaStopReasonEndTurn, anthropic.BetaStopReasonStopSequence:
+		switch resp.Stop {
+		case llm.StopEndTurn:
 			// resultBlocks is empty here in practice (the model does not stop
 			// with end_turn while also requesting a tool), but pass it anyway:
 			// if a turn's content ever did carry a tool_use with one of these
@@ -353,7 +353,7 @@ func (r *runner) run(ctx context.Context) error {
 			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
 				return err
 			}
-		case anthropic.BetaStopReasonModelContextWindowExceeded:
+		case llm.StopContextExceeded:
 			// This must never end the room: report it and wait for a human,
 			// the same as a refusal. Server-side compaction (see request())
 			// should make this rare, but a single turn's input can still
@@ -374,15 +374,15 @@ func (r *runner) run(ctx context.Context) error {
 				return err
 			}
 		default:
-			// tool_use, max_tokens and pause_turn all continue: the next user
+			// tool_use, max_tokens, pause_turn and any other stop continue: the next user
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
 			inputs, outcome := r.handleInputs(ctx, inputs)
-			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
+			blocks := append([]llm.Part(nil), resultBlocks...)
 			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
-				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
+				blocks = append(blocks, textPart("Continue."))
 			}
 			messages = appendUser(messages, blocks...)
 			if resetsTurns(inputs) {
@@ -398,13 +398,13 @@ func (r *runner) run(ctx context.Context) error {
 // agent.usage event (docs/design/cost.md): role is triage or main, the model
 // the triage rules picked. A request that was never sent (a budget refused it)
 // is not reported.
-func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewParams, role string) (anthropic.BetaMessage, error) {
+func (r *runner) callModel(ctx context.Context, req llm.Request, role string) (llm.Response, error) {
 	start := time.Now()
 	resp, err := r.model.Turn(ctx, req)
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(req.Model, role, resp, time.Since(start), r.prices) {
+		for _, p := range usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices) {
 			r.emit(ectx, events.AgentUsage, p)
 		}
 	}
@@ -414,86 +414,83 @@ func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewPara
 // request assembles one model request. The system prompt and tool list are
 // stable so the prompt cache stays warm.
 //
-// It asks for server-side compaction (beta compact-2026-01-12): once the
-// conversation passes the server's input-token trigger, the response gets an
-// extra compaction content block summarizing the oldest messages, in place of
-// a stop. Run keeps history append-only either way — resp.ToParam() carries
-// that block back in the next request's messages exactly like any other
-// content block, never specially — which is what lets a room survive hours
-// of steers and tool calls without hitting the model's context window. The
-// edit carries compactionInstructions() so the summary keeps step ids,
-// hypotheses, proposals and driver instructions, and keeps untrusted text
-// data instead of laundering its instructions into trusted history.
-func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
-	return anthropic.BetaMessageNewParams{
-		Model:     r.opts.Model,
-		MaxTokens: maxTokens,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaCompact2026_01_12},
-		System:    []anthropic.BetaTextBlockParam{{Text: r.system, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()}},
-		Tools:     r.toolList.params,
-		Messages:  messages,
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(r.opts.effort()),
-		},
-		Thinking: anthropic.BetaThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
-		},
-		ToolChoice: anthropic.BetaToolChoiceUnionParam{
-			OfAuto: &anthropic.BetaToolChoiceAutoParam{},
-		},
-		ContextManagement: anthropic.BetaContextManagementConfigParam{
-			Edits: []anthropic.BetaContextManagementConfigEditUnionParam{
-				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{
-					Instructions: anthropic.String(compactionInstructions()),
-				}},
-			},
-		},
-		// Top-level cache control applies a breakpoint to the last cacheable
-		// block, so each turn re-reads the conversation history from cache.
-		CacheControl: anthropic.NewBetaCacheControlEphemeralParam(),
+// It asks for server-side compaction (on Claude the beta compact-2026-01-12):
+// once the conversation passes the server's input-token trigger, the response
+// gets an extra compaction content block summarizing the oldest messages, in
+// place of a stop. Run keeps history append-only either way — resp.Message
+// carries that block back in the next request's messages exactly like any
+// other content block (a native part the adapter sends back as it came),
+// never specially — which is what lets a room survive hours of steers and
+// tool calls without hitting the model's context window. The edit carries
+// compactionInstructions() so the summary keeps step ids, hypotheses,
+// proposals and driver instructions, and keeps untrusted text data instead of
+// laundering its instructions into trusted history.
+func (r *runner) request(messages []llm.Message) llm.Request {
+	return llm.Request{
+		Model:      r.opts.Model,
+		MaxTokens:  maxTokens,
+		System:     r.system,
+		Tools:      r.toolList.defs,
+		Messages:   messages,
+		Effort:     r.opts.effort(),
+		Thinking:   true,
+		ToolChoice: llm.ToolChoiceAuto,
+		Compaction: &llm.Compaction{Instructions: compactionInstructions()},
+		// Cache through the system prompt and the tool list, and (History) a
+		// breakpoint on the last cacheable block, so each turn re-reads the
+		// conversation history from cache.
+		Cache: llm.CacheHints{System: true, Tools: true, History: true},
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
+func (r *runner) initialMessage(inputs []HumanInput, notes []string) llm.Message {
 	blocks := openingBlocks(r.alert, r.past)
 	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(note))
+		blocks = append(blocks, textPart(note))
 	}
 	// The opening turn has read nothing yet, so a driver's proposal in it gets
 	// the idle wording (a read or two first), not "answer from the evidence
 	// you already have" (driverproposal.go).
 	blocks = append(blocks, r.idleInputBlocks(inputs, notes)...)
-	return anthropic.NewBetaUserMessage(blocks...)
+	return userMessage(blocks...)
 }
 
 // inputBlocks renders one batch of human input and its verification notes, in
 // the order the model reads them: the inputs, then what verification found.
-func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []llm.Part {
 	return append(r.humanBlocks(inputs, false), verifyBlocks(notes)...)
 }
 
 // idleInputBlocks is inputBlocks for a batch that woke the agent from a wait
 // for input: the agent was idle, so a driver's proposal may get a read of its
 // own before the agent answers (P3e, driverproposal.go).
-func (r *runner) idleInputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+func (r *runner) idleInputBlocks(inputs []HumanInput, notes []string) []llm.Part {
 	return append(r.humanBlocks(inputs, true), verifyBlocks(notes)...)
+}
+
+// textPart is one text block of a user turn.
+func textPart(text string) llm.Part { return llm.Part{Kind: llm.PartText, Text: text} }
+
+// userMessage is a user turn of the given blocks.
+func userMessage(parts ...llm.Part) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Parts: parts}
 }
 
 // appendUser adds blocks to the history as a user turn. When the last message
 // is already a user turn, the blocks join it, so the request never carries two
 // consecutive user messages.
-func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaContentBlockParamUnion) []anthropic.BetaMessageParam {
-	if n := len(messages); n > 0 && messages[n-1].Role == anthropic.BetaMessageParamRoleUser {
-		messages[n-1].Content = append(messages[n-1].Content, blocks...)
+func appendUser(messages []llm.Message, blocks ...llm.Part) []llm.Message {
+	if n := len(messages); n > 0 && messages[n-1].Role == llm.RoleUser {
+		messages[n-1].Parts = append(messages[n-1].Parts, blocks...)
 		return messages
 	}
-	return append(messages, anthropic.NewBetaUserMessage(blocks...))
+	return append(messages, userMessage(blocks...))
 }
 
-func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []anthropic.BetaContentBlockParamUnion {
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(inputs))
+func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
+	blocks := make([]llm.Part, 0, len(inputs))
 	for _, in := range inputs {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(formatInput(in, idle)))
+		blocks = append(blocks, textPart(formatInput(in, idle)))
 	}
 	return blocks
 }
@@ -568,7 +565,7 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // should return. If the room closes before input arrives, pending is
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
-func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
+func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]llm.Message, turns *int, pending []llm.Part) (bool, error) {
 	// A recovered episode ends "done" with the reason, not "idle".
 	recovered := r.recoveredIdle
 	if recovered {
@@ -584,7 +581,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		return true, nil
 	}
 	inputs, outcome := r.handleInputs(ctx, inputs)
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.idleInputBlocks(inputs, outcome.notes)...)
+	blocks := append(append([]llm.Part(nil), pending...), r.idleInputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
 	if r.parked(outcome) {
@@ -609,7 +606,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 // stop=false when the model should run again (a human spoke, or a step failed
 // or is unknown) and stop=true when the room closed, with the error Run should
 // return.
-func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]llm.Message, turns *int) (bool, error) {
 	for {
 		inputs, err := r.waitForInput(ctx)
 		if err != nil {
@@ -724,32 +721,28 @@ func stopErr(err error) error {
 	return err
 }
 
-// refusalReason renders the structured refusal details into a short, stable
-// reason string for the room log and the agent's message.
-func refusalReason(m anthropic.BetaMessage) string {
-	d := m.StopDetails
-	if d.Category == "" && d.Explanation == "" {
+// refusalReason is the short, stable reason of a refusal for the room log
+// and the agent's message: the adapter's "category: explanation" detail, or
+// a fixed text when the provider gave none.
+func refusalReason(resp llm.Response) string {
+	if resp.StopDetail == "" {
 		return "model refused the request"
 	}
-	if d.Category == "" {
-		return d.Explanation
-	}
-	if d.Explanation == "" {
-		return string(d.Category)
-	}
-	return string(d.Category) + ": " + d.Explanation
+	return resp.StopDetail
 }
 
-// splitContent separates an assistant turn into text and tool_use blocks.
-func splitContent(content []anthropic.BetaContentBlockUnion) (texts []string, uses []toolUse) {
-	for _, block := range content {
-		switch block.Type {
-		case "text":
-			if s := strings.TrimSpace(block.Text); s != "" {
-				texts = append(texts, block.Text)
+// splitContent separates an assistant turn into text and tool calls.
+func splitContent(parts []llm.Part) (texts []string, uses []toolUse) {
+	for _, p := range parts {
+		switch p.Kind {
+		case llm.PartText:
+			if s := strings.TrimSpace(p.Text); s != "" {
+				texts = append(texts, p.Text)
 			}
-		case "tool_use":
-			uses = append(uses, toolUse{id: block.ID, name: block.Name, input: block.Input})
+		case llm.PartToolCall:
+			if c := p.ToolCall; c != nil {
+				uses = append(uses, toolUse{id: c.ID, name: c.Name, input: c.Input})
+			}
 		}
 	}
 	return texts, uses
@@ -769,10 +762,10 @@ type toolResult struct {
 	isError   bool
 }
 
-// runToolUses executes every tool_use. Room tools run inline in order; read
-// tools run in parallel (max 4). The returned blocks preserve the model's
-// original order.
-func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.BetaContentBlockParamUnion {
+// runToolUses executes every tool call. Room tools run inline in order; read
+// tools run in parallel (max 4). The returned tool results preserve the
+// model's original order.
+func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []llm.Part {
 	results := make([]toolResult, len(uses))
 
 	// Room tools first: they are fast and often steer the turn.
@@ -834,9 +827,11 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		panic(firstPanic)
 	}
 
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(results))
-	for _, res := range results {
-		blocks = append(blocks, anthropic.NewBetaToolResultBlock(res.toolUseID, res.content, res.isError))
+	blocks := make([]llm.Part, 0, len(results))
+	for i, res := range results {
+		blocks = append(blocks, llm.Part{Kind: llm.PartToolResult, ToolResult: &llm.ToolResult{
+			CallID: res.toolUseID, Name: uses[i].name, Content: res.content, IsError: res.isError,
+		}})
 	}
 	return blocks
 }

@@ -131,3 +131,21 @@ func TestTemplatesPassTightenedValidator(t *testing.T) {
 		t.Fatal("a template renders an entrypoint")
 	}
 }
+
+// Params whose keys differ only in letter case are refused: the decoder folds
+// them and the last one wins, so the value checked by one reader and the value
+// run by another could differ.
+func TestDecodeParamsRefusesCaseCollidingKeys(t *testing.T) {
+	var p PropertiesParams
+	for _, raw := range []string{
+		`{"file":"a.properties","File":"../../etc/passwd"}`,
+		`{"file":"a.properties","FILE":"b.properties"}`,
+	} {
+		if err := decodeParams([]byte(raw), &p); !errors.Is(err, ErrParams) || !strings.Contains(err.Error(), "letter case") {
+			t.Fatalf("decodeParams(%s) = %v, want ErrParams for colliding keys", raw, err)
+		}
+	}
+	if err := decodeParams([]byte(`{"file":"a.properties"}`), &p); err != nil {
+		t.Fatalf("decodeParams of clean params = %v", err)
+	}
+}

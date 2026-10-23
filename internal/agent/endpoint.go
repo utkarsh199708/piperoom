@@ -11,22 +11,21 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/bedrock"
-	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2/google"
 
+	"piperoom/internal/agent/llm"
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 	"piperoom/internal/events"
 )
 
-// Model providers an Endpoint can talk to.
+// Model providers an Endpoint can talk to: the Claude providers of the llm
+// contract, all served by the Claude adapter (internal/agent/llm/anthropic).
 const (
-	ProviderAnthropic = "anthropic"
-	ProviderBedrock   = "bedrock"
-	ProviderVertex    = "vertex"
+	ProviderAnthropic = llm.ProviderAnthropic
+	ProviderBedrock   = llm.ProviderBedrock
+	ProviderVertex    = llm.ProviderVertex
 )
 
 // defaultTriageTurns is how many turns run on the triage model before the
@@ -105,7 +104,8 @@ func (l ProviderLoaders) loaders() providerLoaders {
 }
 
 // ProviderOptions checks cfg as NewEndpoint does and returns the normalized
-// provider name and the SDK request options that reach that provider, for a
+// provider name and the SDK request options that reach that provider
+// (anthropicllm.RequestOption is the SDK's option.RequestOption), for a
 // caller that needs its own client on the agent's provider (the eval judge).
 // It runs the same credential checks as NewEndpoint but sends no request.
 // getenv nil means os.Getenv.
@@ -113,7 +113,7 @@ func (l ProviderLoaders) loaders() providerLoaders {
 // For vertex, ctx must outlive the returned options: vertex.WithCredentials
 // and the oauth2 token source it wraps keep ctx and use it for every later
 // token refresh, so a cancelled ctx breaks the client's calls.
-func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []option.RequestOption, error) {
+func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []anthropicllm.RequestOption, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
@@ -187,16 +187,18 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 // The SDK's bedrock.WithLoadDefaultConfig panics when the AWS config cannot be
 // loaded, and vertex.WithGoogleAuth panics when no Google default credentials
 // are found. So this loads both itself, returns those failures as errors, and
-// passes the result to bedrock.WithConfig and vertex.WithCredentials.
+// passes the result to the adapter's BedrockOption and VertexOption
+// (bedrock.WithConfig and vertex.WithCredentials).
 //
 // For Bedrock it also fetches the credentials once (bounded by
 // credentialCheckTimeout) so that missing or broken AWS credentials stop the
 // server at startup instead of failing the first alert. That is a credential
 // lookup (environment, shared files, instance/role metadata), not a model call.
-func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string) string, ld providerLoaders) (opts []option.RequestOption, err error) {
+func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string) string, ld providerLoaders) ([]anthropicllm.RequestOption, error) {
 	switch c.Provider {
 	case ProviderBedrock:
 		var cfg aws.Config
+		var err error
 		if c.AWSConfig != nil {
 			// A shallow copy: the region set below stays local, while the
 			// credentials provider (and its cache) is the shared one.
@@ -220,23 +222,20 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 				return nil, fmt.Errorf("agent: retrieve AWS credentials for bedrock: %w", err)
 			}
 		}
-		return []option.RequestOption{bedrock.WithConfig(cfg)}, nil
+		return []anthropicllm.RequestOption{anthropicllm.BedrockOption(cfg)}, nil
 	case ProviderVertex:
-		var creds *google.Credentials
-		creds, err = ld.googleCreds(ctx)
+		creds, err := ld.googleCreds(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("agent: find Google application default credentials for vertex: %w", err)
 		}
 		if creds == nil {
 			return nil, errors.New("agent: no Google application default credentials for vertex")
 		}
-		// vertex.WithCredentials panics on a failure it cannot report.
-		defer func() {
-			if p := recover(); p != nil {
-				opts, err = nil, fmt.Errorf("agent: set up vertex client: %v", p)
-			}
-		}()
-		return []option.RequestOption{vertex.WithCredentials(ctx, c.VertexRegion, c.VertexProject, creds)}, nil
+		opt, err := anthropicllm.VertexOption(ctx, c.VertexRegion, c.VertexProject, creds)
+		if err != nil {
+			return nil, fmt.Errorf("agent: %w", err)
+		}
+		return []anthropicllm.RequestOption{opt}, nil
 	default:
 		return clientOptions(getenv), nil
 	}
@@ -277,7 +276,7 @@ func NewEndpoint(ctx context.Context, cfg EndpointConfig, log *slog.Logger) (*En
 	return newEndpoint(ctx, cfg, os.Getenv, defaultLoaders(), log)
 }
 
-func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld providerLoaders, log *slog.Logger, extra ...option.RequestOption) (*Endpoint, error) {
+func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld providerLoaders, log *slog.Logger, extra ...anthropicllm.RequestOption) (*Endpoint, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -296,7 +295,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		triageTurns: cfg.TriageTurns,
 		triagePass:  triagePassSettings(cfg),
 		limit:       limit,
-		model:       &anthropicModel{client: anthropic.NewClient(opts...), log: log},
+		model:       anthropicllm.New(cfg.Provider, opts, log),
 		log:         log,
 		budgets:     map[string]*tokenBudget{},
 	}, nil

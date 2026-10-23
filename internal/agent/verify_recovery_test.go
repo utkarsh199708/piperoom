@@ -115,7 +115,7 @@ func resnapStep(action string) events.ProposalStep {
 
 // newRecoveryRunner is newVerifyRunner with the given actions registered and
 // a tickClock.
-func newRecoveryRunner(t *testing.T, m model, inbox Inbox, sink Sink, regTools []tools.Tool, steps []events.ProposalStep, acts ...actions.Action) (*runner, *tickClock) {
+func newRecoveryRunner(t *testing.T, m sdkModel, inbox Inbox, sink Sink, regTools []tools.Tool, steps []events.ProposalStep, acts ...actions.Action) (*runner, *tickClock) {
 	t.Helper()
 	r := newVerifyRunner(t, m, inbox, sink, regTools, steps)
 	reg := actions.NewRegistry()

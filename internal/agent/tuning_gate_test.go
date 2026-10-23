@@ -43,7 +43,7 @@ func tuningRunner(t *testing.T, fn func(i int, p anthropic.BetaMessageNewParams)
 		t.Fatal(err)
 	}
 	var results []string
-	r.model = &funcModel{fn: func(_ context.Context, i int, p anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+	r.model = viaSDK(&funcModel{fn: func(_ context.Context, i int, p anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
 		if i > 0 {
 			results = append(results, toolResultTexts(t, p)...)
 		}
@@ -52,7 +52,7 @@ func tuningRunner(t *testing.T, fn func(i int, p anthropic.BetaMessageNewParams)
 			return mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`), nil
 		}
 		return mustMessage(t, `{"stop_reason":"tool_use","content":[`+content+`]}`), nil
-	}}
+	}})
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}

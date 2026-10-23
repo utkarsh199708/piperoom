@@ -10,9 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"piperoom/internal/actions"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -1170,10 +1169,10 @@ func jsonObject(kv ...string) json.RawMessage {
 
 // verifyBlocks renders the verification notes of one batch as text blocks, for
 // the same user message as the inputs they judge.
-func verifyBlocks(notes []string) []anthropic.BetaContentBlockParamUnion {
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(notes))
+func verifyBlocks(notes []string) []llm.Part {
+	blocks := make([]llm.Part, 0, len(notes))
 	for _, n := range notes {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(n))
+		blocks = append(blocks, textPart(n))
 	}
 	return blocks
 }

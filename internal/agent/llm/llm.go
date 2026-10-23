@@ -271,6 +271,11 @@ func (e *APIError) Error() string {
 // Unwrap returns the underlying error.
 func (e *APIError) Unwrap() error { return e.Err }
 
+// ErrNotSent is wrapped in the error of a request that never left the
+// process (an adapter could not encode it), so a caller reports no usage for
+// it: nothing was billed.
+var ErrNotSent = errors.New("llm: request not sent")
+
 // Unretryable reports an error a fresh run repeats: auth, billing,
 // model_not_found, bad_request and truncated. too_long, rate_limited,
 // overloaded and network are not, and neither is an error that is not an
