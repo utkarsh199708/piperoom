@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
@@ -473,5 +474,42 @@ func TestLifecycleWritesAcceptRoomPipeline(t *testing.T) {
 	}
 	if err := c.AlterSourceOffsets(ctx, "pg-orders-connector", []SourceOffset{{Partition: map[string]any{"server": "pg"}}}); err != nil {
 		t.Fatalf("AlterSourceOffsets: %v", err)
+	}
+}
+
+// One alter entry can carry an arbitrarily large map; the encoded body is
+// capped before anything is sent.
+func TestAlterSourceOffsetsBodyCap(t *testing.T) {
+	c := New("http://127.0.0.1:1", nil)
+	offsets := []SourceOffset{{
+		Partition: map[string]any{"server": "pg"},
+		Offset:    map[string]any{"blob": strings.Repeat("x", maxAlterBodyBytes+1)},
+	}}
+	err := c.AlterSourceOffsets(unscoped(), "pg-orders-connector", offsets)
+	if err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized alter body accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), "xxxx") {
+		t.Fatalf("error quotes the offset value: %.120v", err)
+	}
+}
+
+// The capped create-error body is cut on a rune boundary, so the error text
+// stays valid UTF-8.
+func TestCreateConnectorErrorBodyRuneSafe(t *testing.T) {
+	body := strings.Repeat("€", 300) // 900 bytes of 3-byte runes; 512 splits one
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(body))
+	})
+	err := c.CreateConnector(unscoped(), "pg-orders-connector", map[string]string{"a": "b"})
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("error is not valid UTF-8: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "…") {
+		t.Fatalf("oversized body not truncated: %v", err)
 	}
 }

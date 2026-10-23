@@ -346,17 +346,18 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
-// sensitiveKey reports whether a config key holds a credential. ".key" targets
-// fields like "ssl.key.password"/"api.key" but not "key.converter".
+// sensitiveKey reports whether a config key holds a credential. The substring
+// list mirrors actions.LooksSecret (secretKeySubstrings), so the tools and the
+// actions agree on what is a credential; ".key" additionally targets fields
+// like "ssl.key.password"/"api.key" but not "key.converter".
 func sensitiveKey(k string) bool {
 	lower := strings.ToLower(k)
-	if strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") {
-		return true
+	for _, s := range []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"} {
+		if strings.Contains(lower, s) {
+			return true
+		}
 	}
-	if strings.Contains(lower, ".key") {
-		return true
-	}
-	return false
+	return strings.Contains(lower, ".key")
 }
 
 // truncateRunes returns s truncated to n bytes on a UTF-8 rune boundary.

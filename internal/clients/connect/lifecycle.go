@@ -2,12 +2,14 @@ package connect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/redact"
@@ -111,6 +113,11 @@ const (
 
 	// maxCreateErrorBody caps the Connect body quoted in a create error.
 	maxCreateErrorBody = 512
+
+	// maxAlterBodyBytes caps the encoded alter-offsets request body. The entry
+	// count alone does not bound it: one entry's partition or offset map can be
+	// arbitrarily large.
+	maxAlterBodyBytes = 1 << 20
 )
 
 // ServerInfo reads GET /: the worker's Kafka version, commit and cluster id.
@@ -270,7 +277,15 @@ func (c *Client) AlterSourceOffsets(ctx context.Context, name string, offsets []
 	body := struct {
 		Offsets []SourceOffset `json:"offsets"`
 	}{Offsets: offsets}
-	err := c.doBody(ctx, http.MethodPatch, path, body, nil)
+	// Encode here to enforce the body cap; the error never quotes a value.
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("connect: alter source offsets %q: encode body: %w", name, err)
+	}
+	if len(b) > maxAlterBodyBytes {
+		return fmt.Errorf("connect: alter source offsets %q: request body is %d bytes; at most %d", name, len(b), maxAlterBodyBytes)
+	}
+	err = c.doBody(ctx, http.MethodPatch, path, json.RawMessage(b), nil)
 	if err != nil {
 		if notStopped(err) {
 			return fmt.Errorf("connect: alter source offsets %q: %w", name, ErrConnectorNotStopped)
@@ -357,7 +372,13 @@ func createError(name string, err error) error {
 	}
 	body := redactText(se.Body)
 	if len(body) > maxCreateErrorBody {
-		body = body[:maxCreateErrorBody] + "…"
+		// Cut on a rune boundary: a byte slice can split a UTF-8 rune and put
+		// invalid UTF-8 into the error.
+		cut := maxCreateErrorBody
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut] + "…"
 	}
 	return fmt.Errorf("connect: create connector %q: status %d: %s", name, se.Code, body)
 }

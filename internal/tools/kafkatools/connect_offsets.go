@@ -269,8 +269,15 @@ func positionValue(v any) (any, bool) {
 	case string:
 		s, _ := redact.Text(x)
 		// A position must stay on one summary line: a line break in an
-		// untrusted value could forge a second row.
-		s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+		// untrusted value could forge a second row, and a control character
+		// (an ANSI escape, a NEL) could do the same in a log or terminal.
+		// U+2028/U+2029 are line breaks too but are not unicode.IsControl.
+		s = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+				return ' '
+			}
+			return r
+		}, s)
 		if len(s) > maxOffsetValueBytes {
 			s = truncateRunes(s, maxOffsetValueBytes) + "…"
 		}
@@ -291,7 +298,8 @@ func offsetKeyOK(k string) bool {
 		return false
 	}
 	return !strings.ContainsFunc(k, func(r rune) bool {
-		return unicode.IsControl(r)
+		// U+2028/U+2029 break lines but are not unicode.IsControl.
+		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
 	})
 }
 
@@ -301,9 +309,26 @@ func offsetKeyOK(k string) bool {
 func (t *connectSourceOffsets) unsupportedNote(ctx context.Context) string {
 	const need = "reading connector offsets needs Kafka Connect 3.5 or later (KIP-875)"
 	if r, ok := t.d.Connect.(connect.ConnectInfoReader); ok {
-		if info, err := r.ServerInfo(ctx); err == nil && info.Version != "" {
-			return fmt.Sprintf("this Connect reports Kafka %s; %s", info.Version, need)
+		if info, err := r.ServerInfo(ctx); err == nil {
+			if v := safeVersion(info.Version); v != "" {
+				return fmt.Sprintf("this Connect reports Kafka %s; %s", v, need)
+			}
 		}
 	}
 	return need
+}
+
+// safeVersion accepts a short, printable version string. GET / is an untrusted
+// Connect response: a huge value, a control character or a line break must not
+// be echoed into an error that reaches a log or the prompt.
+func safeVersion(v string) string {
+	if v == "" || len(v) > 64 {
+		return ""
+	}
+	for _, r := range v {
+		if unicode.IsControl(r) || !unicode.IsPrint(r) {
+			return ""
+		}
+	}
+	return v
 }
