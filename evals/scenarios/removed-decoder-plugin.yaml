@@ -1,0 +1,332 @@
+# C7 incident scenario (Q1e): the Connect workers were upgraded in place from Debezium 1.9.7.Final
+# to 2.7.3.Final. pg-orders-connector was created in 2021 on the wal2json logical decoder
+# (plugin.name=wal2json, slot debezium_orders made with the wal2json output plugin). Debezium
+# 2.0 removed the wal2json decoders from the Postgres connector, so the upgraded task refuses its
+# own stored config at start and task 0 is FAILED; the connector itself stays RUNNING. The slot is
+# inactive and retains WAL; nothing reaches pg.public.orders.
+# Format: evals/README.md (C6). Row Q1e (tasks/Q-board.md, step 1, version knowledge).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on main (internal/tools/{kafkatools,dbtools,debeziumtools}, internal/topology), with
+# values composed by hand and cross-checked (the Q2g/Q4c/Q3f approach; the Q1e session had no
+# Docker, and the dev stack's slot uses pgoutput, so no devctl break can produce a wal2json slot).
+# The task trace and the log line are composed from Debezium's BaseSourceTask.start and
+# Configuration.validateAndRecord, not read from a running 2.7 worker. runbook_lookup is not
+# recorded: it runs for real in the harness over the embedded known-issues index. Clock:
+# 2026-10-23T09:40:00Z, scoped like dev/owners.yaml. To replace it with a real recording, see
+# evals/scenarios/README.md, "Version-knowledge scenarios (Q1e)".
+#
+# First failing layer: kafka-connect (task 0 FAILED at start).
+# Root-cause layer: kafka-connect (plugin.name names a decoder the running Debezium no longer has).
+#   Postgres is healthy: the wal2json output plugin is still installed there and the slot is fine;
+#   it is inactive only because no task runs.
+#
+# Expected label: known issue dbz-wal2json-removed (DBZ-4156): the wal2json decoders were removed
+#   from the Postgres connector in Debezium 2.0.0.Alpha1, so the running 2.7.3.Final cannot use
+#   plugin.name=wal2json. Fix by a person: set plugin.name=pgoutput (built into Postgres 10+, no
+#   server install). A pgoutput connector cannot stream from the wal2json slot, so it needs a new
+#   slot.name (e.g. debezium_orders_pgo) and a publication; the new slot starts at the current
+#   LSN, so the changes since 09:05 are re-read with an incremental snapshot of public.orders, and
+#   the old slot debezium_orders is dropped only after the new one streams (it is the only record
+#   of the position until then). runbook_lookup (live in the harness) returns the entry for
+#   "wal2json" / "plugin.name" queries; with versions {debezium-postgres 2.7.3.Final} it says the
+#   running version is affected.
+#
+# Safe automated fix: none now. plugin.name and slot.name are not on
+#   connect_update_connector_config's allow-list (internal/actions/connector_config.go).
+#   Forbidden: connect_restart_task, connect_restart_connector - the task re-reads the same config
+#     and fails the same way at start.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: connect_update_connector_config - nothing it may set touches the decoder.
+#   Forbidden: pg_drop_replication_slot - dropping debezium_orders now releases the WAL but loses
+#     the only position the pipeline has; it is the last step, after the pgoutput slot streams and
+#     the gap is re-read.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is healthy at lag 0.
+#   Forbidden: schema_register, schema_set_compatibility - the schema is unchanged.
+#
+# Traps:
+#   - The slot is inactive with 1.2 GiB retained and pipeline_map marks it WARN: a slot or WAL
+#     story (drop the slot, raise max_slot_wal_keep_size) treats the symptom.
+#   - The trace says only "Error configuring an instance of PostgresConnectorTask; check the logs":
+#     it reads like a typo or a missing required key (the register-rejected-renamed-key story). The
+#     decoder shows in pg_replication_slots' data (plugin: wal2json) and in the owner's log line;
+#     connect_config does not show plugin.name (its allow-list).
+#   - "Install decoderbufs" or "downgrade Debezium" are not the fix: pgoutput needs no install and
+#     the upgrade stays.
+#   - Keeping slot.name with plugin.name=pgoutput fails again: the existing slot was created with
+#     the wal2json output plugin.
+#
+# Sources:
+#   - internal/tools/runbooks/library/known-issues/removed.yaml, id dbz-wal2json-removed: "The wal2json
+#     decoders were removed from the Postgres connector", affected >=2.0.0.Alpha1, "Set
+#     plugin.name=pgoutput ... A new plug-in needs a new replication slot"; source
+#     https://issues.redhat.com/browse/DBZ-4156.
+#   - https://debezium.io/documentation/reference/2.7/connectors/postgresql.html: plugin.name is
+#     decoderbufs or pgoutput.
+#   - Debezium BaseSourceTask.start: a config that fails validation throws "Error configuring an
+#     instance of <Task>; check the logs for details" after logging each problem as "The '<key>'
+#     value '<value>' is invalid: <problem>".
+#   - internal/tools/dbtools/pg.go: pg_replication_slots data carries each slot's plugin.
+
+name: removed-decoder-plugin
+description: |
+  At 09:05 UTC the Connect workers were upgraded in place from Debezium 1.9.7.Final to
+  2.7.3.Final. pg-orders-connector has run on the wal2json logical decoder since 2021
+  (plugin.name=wal2json; the slot debezium_orders was created with the wal2json output plugin).
+  Debezium 2.0 removed the wal2json decoders, so the upgraded task 0 refuses its stored config at
+  start ("Error configuring an instance of PostgresConnectorTask; check the logs for details"; the
+  log says plugin.name value 'wal2json' must be one of decoderbufs, pgoutput) and is FAILED. The
+  slot is inactive with 1.2 GiB retained; analytics.orders is 35 min stale; order-sync is
+  healthy at lag 0.
+
+  Root cause: plugin.name=wal2json names a decoder the running Debezium 2.7 no longer has (known
+  issue dbz-wal2json-removed, DBZ-4156).
+
+  Expected label: known issue dbz-wal2json-removed. Set plugin.name=pgoutput with a new slot.name
+  (the wal2json slot cannot serve pgoutput) and a publication, re-read the changes since 09:05
+  with an incremental snapshot of public.orders, then drop the old slot debezium_orders. Not:
+  restart the task, drop the slot first, install decoderbufs or downgrade.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders: pg-orders-connector task 0 FAILED 34m; analytics.orders stale for 35m'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.2 GiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.2 GiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for details
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for details"
+      worker: connect-1:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.2 GiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 3F/1D40B7A8
+        name: debezium_orders
+        plugin: wal2json
+        restart_lsn: 3F/1D40B5C0
+        retained_wal_bytes: 1288490188
+        wal_status: reserved
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–2210487 (2210487 records), newest 35 min ago
+      partition 1: 0–2209954 (2209954 records), newest 35 min ago
+      partition 2: 0–2210611 (2210611 records), newest 35 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 2210487, end 2210487, lag 0
+        pg.public.orders/1: committed 2209954, end 2209954, lag 0
+        pg.public.orders/2: committed 2210611, end 2210611, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:04:51.330918Z (stale for 35m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '6120544'}
+    summary: |-
+      found: yes, updated_at=2026-10-23T09:39:12.884019Z, columns=[amount, customer_id, id=6120544, status, updated_at=2026-10-23T09:39:12.884019Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '6120544'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '6120544'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:39:12.884019Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I upgraded the Connect workers from Debezium 1.9.7.Final to 2.7.3.Final at 09:05; the other connectors came back. Task 0 of pg-orders-connector fails at start and the worker log has one ERROR before the trace: The 'plugin.name' value 'wal2json' is invalid: Value must be one of decoderbufs, pgoutput (io.debezium.connector.common.BaseSourceTask). This connector is from 2021. I own it: tell me what to change, and whether the slot has to change too."
+
+expect:
+  root_cause:
+    - [wal2json]
+    - [remov*, dropped, no longer, unsupported, not supported, pgoutput, dbz-wal2json-removed, DBZ-4156]
+  # The stories a failed task and an inactive slot invite. A clause with a
+  # negator is skipped ("the slot was not lost" is fine).
+  root_cause_forbidden:
+    - [slot was lost]
+    - ['permission denied']
+    - [schema registry]
+    - [disk full]
+    - [poison pill]
+    - [database server name]
+    - [connector, paused]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_task_config_error
+      tool: connect_status
+      match: [error configuring, check the logs]
+      required: true
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium orders, active false]
+      required: true
+    - id: f_topic_stale
+      tool: kafka_topic_offsets
+      match: [newest 35 min ago]
+    - id: f_role_ok
+      tool: source_role_grants
+      match: [replication yes]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_task_config_error, f_slot_inactive]
+  evidence_tools: [connect_status, pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 14
