@@ -176,18 +176,19 @@ jobs:
           set +e
           "$RUNNER_TEMP/evalrun" "${args[@]}"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
+      # The default set's report. A held-out run uploads its report only as
+      # heldout-<sha> below: the cand and transcripts artifacts are what rows
+      # read to tune scenarios, and nobody tunes on held-out answers (KAN-489).
       - name: Upload report
-        if: steps.key.outputs.run == 'true' && hashFiles('cand.json') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cand
           path: cand.json
           retention-days: 14
-      # Each run's transcript and result (replayed synthetic tool output and the
-      # agent's text). The API key is only in the environment of the process and
-      # is never part of a transcript.
       # The held-out reference for the W4j comparison (KAN-510); never committed
-      # as a baseline file.
+      # as a baseline file. W4j reads results only, so no transcript of a
+      # held-out run is uploaded.
       - name: Upload held-out report
         if: steps.key.outputs.run == 'true' && inputs.set == 'heldout' && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -195,8 +196,11 @@ jobs:
           name: heldout-${{ github.sha }}
           path: cand.json
           retention-days: 14
+      # Each run's transcript and result (replayed synthetic tool output and the
+      # agent's text). The API key is only in the environment of the process and
+      # is never part of a transcript.
       - name: Upload transcripts
-        if: steps.key.outputs.run == 'true' && hashFiles('transcripts/**') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('transcripts/**') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: transcripts
