@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -146,3 +147,33 @@ type BinlogFile struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 }
+
+// SourceAdminWriter is the item 2 admin write contract (design §5.2 (a),
+// §6.8), the shape postgres.SourceAdminWriter has (Q2b). *Writer implements
+// it on the SOURCE_DB_WRITE_URL pool; it is built only with write mode on.
+type SourceAdminWriter interface {
+	// SetReplicaIdentity has no MySQL equivalent: clients.ErrNotSupported.
+	SetReplicaIdentity(ctx context.Context, table, mode, index string) error
+	// GrantSelect grants SELECT and nothing else on tables to the one
+	// account of user role.
+	GrantSelect(ctx context.Context, role string, tables []string) error
+	// CreateHeartbeatTable creates the Debezium heartbeat table if it does
+	// not exist.
+	CreateHeartbeatTable(ctx context.Context, table string) error
+	// EndSession ends the processlist id pid, refused as ErrSessionChanged
+	// when pid no longer names the session whose open transaction started
+	// at startedAt.
+	EndSession(ctx context.Context, pid int64, startedAt time.Time) error
+}
+
+// ErrSessionChanged is returned (wrapped) by EndSession when pid no longer
+// names the session that was read: the thread is gone, has no open
+// transaction, or its transaction started at another time. Nothing was
+// ended. The contract's sentinel (item 2); the message keeps the contract's
+// prefix until clients.ErrSessionChanged lands, as in the postgres client.
+var ErrSessionChanged = errors.New("clients: database session changed since it was read")
+
+// ErrSessionProtected is returned (wrapped) by EndSession for a session
+// Piperoom never ends (design §5.2 (a), §6.8). Nothing was ended. The
+// message is the one clients.ErrSessionProtected will carry.
+var ErrSessionProtected = errors.New("clients: refusing to end a protected session")
