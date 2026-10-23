@@ -712,6 +712,24 @@ plugin.
   compose ops. `internal/testenv/setupstack/setup_integration_test.go` also proves the
   compose validator refuses a `privileged: true` file before `compose_up`.
 
+## Setup breaks: MongoDB (`mongo` profile)
+
+Two more `setup-break` / `setup-fix` pairs, on the opt-in `mongo` profile (dev/mongo/README.md) instead of the
+Postgres pipeline. Start the profile first (`docker compose -f dev/docker-compose.yml --profile mongo up -d --wait
+mongo`); the commands, the lock and the idempotence are the same as above. Each check is the
+`internal/clients/mongodb` read the MongoDB setup source makes, connected as the capture user `piperoom_cdc`.
+
+| Scenario | Named check | What the break does | What the client reports |
+|---|---|---|---|
+| `standalone-mongod` | `mongo-change-streams` | recreates the `mongo` service without `--replSet rs0` (a Compose override; same start script, keyFile and data volume) | `ChangeStreamSupport`: not supported, "standalone mongod has no change streams"; `Settings`: `server_type=standalone` |
+| `no-oplog-role` | `mongo-oplog-read` | `revokeRolesFromUser('piperoom_cdc', [{role: 'read', db: 'local'}])` as the root user | `RoleInfo("admin.piperoom_cdc")`: `replication=false`, the user cannot read `local.oplog.rs` (`readAnyDatabase` never covers `local`) |
+
+**Fixes:** recreate the service from the base file (`up -d --no-deps --wait mongo`): the member's replica set
+config is still on the volume, so it elects itself primary again; grant `read` on `local` back. Measured on Linux:
+the standalone break takes about 4 s and its fix about 8 s; the role pair takes under 1 s each.
+`go test -tags integration ./cmd/devctl -run TestIntegrationMongoSetupBreaks` runs both pairs on the profile, and
+skips when it is not up.
+
 ## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`
 
 Two breaks where orders are missing from `analytics.orders` while order-sync runs at lag 0, each ended by one X2
@@ -787,7 +805,7 @@ safe to run twice. Only `idle-wal-growth` needs another owners file: **`OWNERS_F
 |---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): updates on `public.orders` fail | `source_table_replication`: `replica_identity: nothing` | `pg_set_replica_identity` (mode `full`) |
 | `missing-grant` | watcher: `connector_down` (task 0 FAILED), `slot_inactive` | `source_role_grants`: role `devctl_cdc` (the connector's `database.user`), `select: false` on `public.orders` | `source_grant_select` |
-| `blocked-slot` | alert (`source: freshness`): no new order in `analytics.orders` | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot: true` | `source_end_session` |
+| `blocked-slot` | alert (`source: freshness`): no new order in `analytics.orders` | `source_blocking_sessions`: the blocker's pid, `blocks_slot: true` (identity hidden in a pipeline room: it locks no pipeline table) | `source_end_session` |
 | `idle-wal-growth` | watcher: `slot_wal` (on `dev/owners.q2.yaml`) | `source_settings`: `max_slot_wal_keep_size = -1` (no cap) next to an active slot whose retained WAL grows | `source_create_heartbeat_table` (+ its follow-up config step) |
 
 ### 20. `no-replica-identity` — updates fail on the source
@@ -834,8 +852,9 @@ an active slot, `DROP OWNED BY devctl_cdc; DROP ROLE devctl_cdc`, and a marker o
 ### 22. `blocked-slot` — slot creation waits for an open transaction
 
 **Break (`devctl break blocked-slot`):** an analyst's session opens a transaction and keeps it
-(`docker exec -d`, `application_name=devctl-blocker`: `BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800)`,
-so it holds an xid for 30 minutes). Then the connector is set up again as after a host move: stopped (Connect REST
+(`docker exec -d`, as the role `devctl_analyst` (`LOGIN`, created if missing), `application_name=devctl-blocker`:
+`BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800)`, so it holds an xid for 30 minutes). The role is not the
+connector's `database.user` (`piperoom`): `source_end_session` never ends a session of that user. Then the connector is set up again as after a host move: stopped (Connect REST
 `stop`), `debezium_orders` dropped, its stored offsets deleted, resumed. Debezium's `CREATE_REPLICATION_SLOT` has
 to wait for every transaction that held an xid when it started, so the task never gets past `start()`. The break
 waits until a walsender waits on a `transactionid` lock (`pg_stat_activity`). Refuses when the slot is missing or
@@ -844,7 +863,8 @@ inactive, or a `devctl-blocker` session is already open.
 **Expected (not yet observed):**
 ```
 pg_stat_activity   walsender  wait_event_type=Lock wait_event=transactionid
-source_blocking_sessions   pid … application devctl-blocker state "active" blocks_slot=true query "SELECT pg_sleep(1800)"
+source_blocking_sessions   pipeline room: pid=… state=active age=… blocks_slot=yes (outside the pipeline's tables; identity hidden)
+                           unscoped: pid=… user=devctl_analyst app=devctl-blocker state=active … blocks_slot=yes query="SELECT pg_sleep(1800)"
 connector   RUNNING; task 0 RUNNING or UNASSIGNED (start() has not returned) — not observed which
 warehouse   no new order after the break
 ```
@@ -852,7 +872,7 @@ The watcher may fire `connector_down` if Connect reports task 0 as not `RUNNING`
 `devctl alert blocked-slot` either way.
 
 **Fix:** `source_end_session` on the blocker (the pid is in `source_blocking_sessions` at Validate and Execute).
-`devctl fix` terminates every `devctl-blocker` session; the slot creation finishes, Debezium snapshots (no
+`devctl fix` terminates every `devctl-blocker` session and drops the role `devctl_analyst`; the slot creation finishes, Debezium snapshots (no
 offsets: every row is re-emitted, the load is an upsert) and streams. It resumes a connector a half-run break left
 `STOPPED`, then waits for task 0 `RUNNING`, an active slot, a marker order in the warehouse and order-sync lag 0.
 

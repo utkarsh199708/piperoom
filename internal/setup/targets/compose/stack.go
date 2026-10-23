@@ -16,13 +16,15 @@ import (
 // package may carry, on top of the pinned argv. The flags are literals this
 // package chose, never request text: `-d` makes compose_up return instead of
 // streaming logs, `--no-interpolate` keeps the ${KEY} references in the
-// preview, and `ps --format json` / `ps -q` are the two read forms. There is
+// preview, and `ps --format json` / `ps -q` / `ps -a -q` are the read forms
+// (`-a` lists stopped containers too, so container_logs can read a crash's
+// logs). There is
 // deliberately no sequence for `down` that removes volumes (no `-v`).
 var subcommandFlags = map[string][][]string{
 	"up":      {{"-d"}},
 	"down":    {{}},
 	"restart": {{}},
-	"ps":      {{"--format", "json"}, {"-q"}},
+	"ps":      {{"--format", "json"}, {"-q"}, {"-a", "-q"}},
 	"config":  {{"--no-interpolate"}},
 }
 

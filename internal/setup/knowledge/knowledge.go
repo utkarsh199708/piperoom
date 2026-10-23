@@ -2,7 +2,10 @@
 // the allow-list of container images the setup templates (Compose, Strimzi,
 // Debezium Server) may reference — each pinned to the registry manifest
 // digest of an exact tag — and the Maven Central digests of the Debezium
-// connector plugin archives, per release.
+// connector plugin archives, per release. It also holds the SMT and sink
+// index (index.go, data in index/*.yaml): the transforms, predicates and
+// sinks a setup config may name, with keys, defaults, verified release
+// ranges, the checks each implies and how each is installed.
 //
 // Every entry is pinned, not guessed. Each Image.Digest was fetched from the
 // image's registry (Docker Hub, Quay, or the Microsoft Container Registry)
@@ -203,14 +206,19 @@ func Validate(images []Image, plugins []Plugin) error {
 	return nil
 }
 
-// Check validates the shipped index and fails when it is empty. Call it once
-// at runner start-up; a non-nil error means the shipped tables are corrupt
-// and the runner must refuse to start.
+// Check validates the shipped index — the image and plugin tables and the
+// SMT and sink index — and fails when it is empty. Call it once at runner
+// start-up; a non-nil error means the shipped data is corrupt and the
+// runner must refuse to start.
 func Check() error {
 	if len(images) == 0 || len(plugins) == 0 {
 		return errors.New("knowledge: index is empty")
 	}
-	return Validate(images, plugins)
+	if err := Validate(images, plugins); err != nil {
+		return err
+	}
+	_, err := LoadIndex()
+	return err
 }
 
 // LookupImage returns the allow-listed image for a repository and tag. repo

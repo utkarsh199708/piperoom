@@ -55,6 +55,12 @@ type Endpoint struct {
 	// the address came from a setting. The Connect check validates that
 	// connector's running config.
 	Connector string `json:"connector,omitempty"`
+	// Remote marks an address read from remote data (a connector's
+	// database.hostname, a broker's advertised listener) rather than from
+	// the operator's settings. The probe refuses to reach loopback for it
+	// (remoteDialGuard): whoever can write a connector config must not
+	// make Piperoom open connections to its own host's services.
+	Remote bool `json:"-"`
 	// Config carries the roots and server name for the chain verdict; nil =
 	// system roots and the dialed host's name. It is never marshalled: it can
 	// hold a client certificate, which the probe never presents.
@@ -200,7 +206,7 @@ func (b *targetSet) addConnectors(ctx context.Context, connect clients.ConnectCl
 			notes = append(notes, "connector "+clip(name)+": database.hostname is not a host")
 			continue
 		}
-		b.add(KindSource, LabelSource, addr, false, nil, name)
+		b.addRemote(KindSource, LabelSource, addr, name)
 	}
 	return notes
 }
@@ -273,6 +279,22 @@ func (b *targetSet) add(kind, label, addr string, tlsOn bool, cfg *tls.Config, c
 		return
 	}
 	t.Endpoints = append(t.Endpoints, Endpoint{Addr: addr, TLS: tlsOn, Connector: connector, Config: cfg})
+}
+
+// addRemote adds an address read from a connector's config. An address the
+// settings already name keeps its settings origin.
+func (b *targetSet) addRemote(kind, label, addr, connector string) {
+	t, ok := b.byLabel[label]
+	n := 0
+	if ok {
+		n = len(t.Endpoints)
+	}
+	b.add(kind, label, addr, false, nil, connector)
+	if t = b.byLabel[label]; t != nil && len(t.Endpoints) > n {
+		// Settings that reach the target over loopback make a loopback
+		// connector host expected; otherwise it may be planted.
+		t.Endpoints[len(t.Endpoints)-1].Remote = !anyLoopback(t.Endpoints[:n])
+	}
 }
 
 // addLabel lists a label with no endpoint yet (a target whose address is only

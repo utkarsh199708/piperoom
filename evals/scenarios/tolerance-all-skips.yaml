@@ -20,14 +20,14 @@
 # Expected label: the tool that shows the cause is connect_worker_metrics (Q3b):
 #   "pg-orders-connector: FLAGS: <n> records skipped: errors.tolerance=all drops them unless a DLQ
 #   is set. tasks total 1 (running 1, ...). task 0: <n> record errors, <n> record failures, <n>
-#   skipped, ..." - Connect's own task-error-metrics (total-records-skipped). The eval harness
-#   cannot replay that tool yet: evals.LiveTools() does not call debeziumtools.RegisterWorkerMetrics
-#   (C6's Q6d adds it), and a recording naming an unregistered tool fails -validate. Until then
-#   the file proves the skip from what the replayed tools show: connect_config (errors.tolerance:
-#   all, no errors.log.enable), debezium_metrics (events seen keep rising, last event seconds ago),
-#   kafka_topic_offsets (newest record 28 min ago) and trace_record (the row reached Connect, not
-#   Kafka). When Q6d lands, add the connect_worker_metrics recording (input {connector:
-#   pg-orders-connector}) with the skipped count and make it the required fact and evidence tool.
+#   skipped, ..." - Connect's own task-error-metrics (total-records-skipped). Since Q6d the harness
+#   replays it: the connect_worker_metrics recording (input {connector: pg-orders-connector}) is
+#   the tool's real summary over the scenario's numbers (Q batch 4 review), its skipped count is
+#   the required fact f_records_skipped and the tool an evidence tool. The other replayed tools
+#   agree: connect_config (errors.tolerance: all, no errors.log.enable), debezium_metrics (events
+#   seen keep rising, last event seconds ago), kafka_topic_offsets (newest record 28 min ago) and
+#   trace_record (the row reached Connect, not Kafka). connect_worker_logs is not recorded (a call
+#   is a replay miss).
 #
 # Safe automated fix: none.
 #   connect_update_connector_config with errors.log.enable=true is allowed (visibility only) but
@@ -233,6 +233,10 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_worker_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: FLAGS: 2187 records skipped: errors.tolerance=all drops them unless a DLQ is set. tasks total 1 (running 1, failed 0, paused 0, unassigned 0, restarting 0). task 0: 2187 record errors, 2187 record failures, 2187 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures, last error 0.8 s ago. worker (all connectors): 0 task startup failures of 1 attempts, 0 connector startup failures of 1 attempts, 1 connectors, 1 tasks. rebalance: rebalancing=false, 2 completed, epoch 3, last 144.0 h ago, avg 0.2 s, max 0.3 s
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -303,9 +307,13 @@ expect:
     - id: f_no_new_schema
       tool: schema_registry_versions
       match: [versions 1]
+    - id: f_records_skipped
+      tool: connect_worker_metrics
+      match: [records skipped, errors tolerance all]
+      required: true
   claims:
     - about: root_cause
       facts: [f_tolerance_all, f_events_seen, f_topic_stale]
-  evidence_tools: [connect_config, debezium_metrics]
+  evidence_tools: [connect_config, debezium_metrics, connect_worker_metrics]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register]
   max_tool_calls: 14

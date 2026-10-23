@@ -74,7 +74,9 @@ up/down/reset/load/break/fix/setup-break/setup-fix/serve mutate the shared stack
 scenarios: %s
 
 setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replica,
-missing-grant, db-unreachable-from-connect, plugin-after-scan
+missing-grant, db-unreachable-from-connect, plugin-after-scan;
+SQL Server (profile mssql, dev/mssql/README.md): agent-stopped, cdc-not-enabled-table;
+mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role
 `
 
 func main() {
@@ -214,7 +216,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if len(rest) != 1 {
-			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(setupScenarioNames(), ", "))
+			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(allSetupScenarioNames(), ", "))
 		}
 		if err := requireLock(owner); err != nil {
 			return err

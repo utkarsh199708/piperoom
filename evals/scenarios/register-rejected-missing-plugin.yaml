@@ -1,6 +1,7 @@
 # C7 incident scenario (Q4c): the Debezium Postgres connector plugin is not loaded on the
 # Connect worker any more, so the stored connector cannot be instantiated and a re-registration
-# is refused with "Connector plugin ... not found". Format: evals/README.md (C6). The break is
+# is refused with Connect's "Failed to find any class that implements Connector and which name
+# matches ...". Format: evals/README.md (C6). The break is
 # the worker's plugin set, the thing Q4a's validation is there to name before a registration
 # (tasks/Q-board.md rows Q4a/Q4b/Q4c).
 #
@@ -32,10 +33,15 @@
 #     from; nothing about it is broken.
 #
 # Traps:
-#   - "Connector plugin ... not found" also appears when the class name in the config is wrong.
-#     connect_config shows the class that ran on the old host, so the class is right.
-#   - connect_list_connectors shows the connector's type empty: Connect cannot report the type of
-#     a connector whose plugin is missing. That is the tell, not a second fault.
+#   - "Failed to find any class that implements Connector ..." also appears when the class name
+#     in the config is wrong. connect_config shows the class that ran before the redeploy, so the
+#     class is right.
+#   - connect_list_connectors shows the connector's type as "unknown" (Connect's
+#     ConnectorType.UNKNOWN): Connect cannot tell source from sink without loading the class.
+#     It follows from the missing plugin; it is not a second fault.
+#   - The trace lists the connectors the worker does have: only Kafka's own MirrorMaker 2
+#     connectors from the classpath (Kafka 3.2+ ships no FileStream connectors there), so no
+#     Debezium connector is loaded at all.
 #   - A half-replaced plugin folder (two Debezium versions) fails differently: NoSuchMethodError
 #     or NoClassDefFoundError from a class that IS loaded (known issue
 #     connect-mixed-debezium-versions). Here the class is absent.
@@ -48,14 +54,19 @@
 #     (Worker/AbstractHerder: "Failed to find any class that implements Connector and which name
 #     matches <class>, available connectors are: ...").
 #   - internal/tools/kafkatools/validate_config_tool.go: on a worker without the plugin,
-#     PluginConfigDef and ValidateConfig both answer 404, so connect_validate_config returns
-#     "Connector plugin <class> not found" before any config key is judged. The eval harness
-#     cannot replay that tool yet (C6's Q6d adds the definition-only Connect client), so this
-#     file proves the missing plugin from connect_status and connect_config; when Q6d lands, add
-#     the connect_validate_config read (input {class}) with that error and count it as the probe
-#     that separates "plugin absent" from "config wrong".
+#     PluginConfigDef and ValidateConfig both fail for the class, so connect_validate_config
+#     returns Connect's error before any config key is judged. Since Q6d the harness replays it:
+#     the recording below (input {class}) is that error as internal/clients/connect reports it.
+#     On Kafka Connect 3.6.1 the validate answer is HTTP 500, not 404: AbstractHerder runs the
+#     validation in a future, Plugins.newConnector throws ConnectException("Failed to find any
+#     class ..."), ConnectorPluginsResource.validateConfigs does not catch the ExecutionException
+#     and ConnectExceptionMapper maps it to 500 with the cause's toString (checked against the
+#     3.6.1 sources in the Q batch 4 review; GET /connector-plugins/{class}/config is the 404
+#     "Unknown plugin"). It is an error result, so it is not a fact: connect_status and
+#     connect_config still prove the missing plugin.
 #   - internal/tools/kafkatools/connect_tools.go: connect_list_connectors and connect_status
-#     render an empty type as "()" when Connect cannot name the connector's type.
+#     print the type Connect reports, here "unknown" (internal/clients/connect passes it
+#     through).
 
 name: register-rejected-missing-plugin
 description: |
@@ -64,7 +75,7 @@ description: |
   start, Connect cannot instantiate pg-orders-connector: "Failed to find any class that
   implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector"
   and the connector is FAILED with no tasks. A re-registration of the same config is refused
-  with "Connector plugin io.debezium.connector.postgresql.PostgresConnector not found". The slot
+  with the same "Failed to find any class that implements Connector ..." error. The slot
   debezium_orders is inactive with 1.1 MiB retained; nothing reaches Kafka and analytics.orders
   is 35 minutes stale. The connector's config never changed and the database is healthy.
 
@@ -95,7 +106,7 @@ alert:
     pipeline orders
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
-    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL state=FAILED tasks_failed=0
       from: pg:public.orders
     3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
       from: connect:pg-orders-connector
@@ -111,7 +122,7 @@ recordings:
       pipeline orders
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
-      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL state=FAILED tasks_failed=0
         from: pg:public.orders
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
         from: connect:pg-orders-connector
@@ -141,7 +152,10 @@ recordings:
           layer: postgres
           name: public.orders
           owner: priya
-        - health: fail
+        - facts:
+            state: FAILED
+            tasks_failed: "0"
+          health: fail
           id: connect:pg-orders-connector
           kind: connector
           layer: kafka-connect
@@ -176,23 +190,23 @@ recordings:
       pipeline_id: orders
   - tool: connect_list_connectors
     summary: |-
-      pg-orders-connector (): FAILED, 0 failed tasks
+      pg-orders-connector (unknown): FAILED, 0 failed tasks
     data:
       - failed_tasks: 0
         name: pg-orders-connector
         state: FAILED
-        type: ""
+        type: unknown
   - tool: connect_status
     input: {connector: pg-orders-connector}
     summary: |-
-      pg-orders-connector (): FAILED on connect:8083:
-      org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSinkConnector, name='org.apache.kafka.connect.file.FileStreamSinkConnector', version='3.6.1', encodedVersion=3.6.1, type=sink, typeName='sink', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSourceConnector, name='org.apache.kafka.connect.file.FileStreamSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}
+      pg-orders-connector (unknown): FAILED on connect:8083:
+      org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name='org.apache.kafka.connect.mirror.MirrorCheckpointConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorHeartbeatConnector, name='org.apache.kafka.connect.mirror.MirrorHeartbeatConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorSourceConnector, name='org.apache.kafka.connect.mirror.MirrorSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}
     data:
       name: pg-orders-connector
       state: FAILED
-      tasks: []
+      tasks: null
       worker: connect:8083
-      error: "org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSinkConnector, name='org.apache.kafka.connect.file.FileStreamSinkConnector', version='3.6.1', encodedVersion=3.6.1, type=sink, typeName='sink', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSourceConnector, name='org.apache.kafka.connect.file.FileStreamSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}"
+      error: "org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name='org.apache.kafka.connect.mirror.MirrorCheckpointConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorHeartbeatConnector, name='org.apache.kafka.connect.mirror.MirrorHeartbeatConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorSourceConnector, name='org.apache.kafka.connect.mirror.MirrorSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}"
   - tool: connect_config
     input: {connector: pg-orders-connector}
     summary: |-
@@ -248,13 +262,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: schema_registry_subjects
     summary: |-
@@ -275,14 +289,17 @@ recordings:
       versions:
         - 1
   - tool: schema_registry_diff
-    input: {subject: pg.public.orders-value}
+    input: {subject: pg.public.orders-value, from_version: 1}
     summary: |-
       no field changes
     data:
-      changes: []
+      changes: null
       from_version: 1
       subject: pg.public.orders-value
-      to_version: 2
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
   - tool: pg_recent_ddl
     summary: |
       (no DDL since 2026-10-23T09:40:00Z)
@@ -374,6 +391,9 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    error: 'connect_validate_config: io.debezium.connector.postgresql.PostgresConnector: connect: PUT /connector-plugins/io.debezium.connector.postgresql.PostgresConnector/config/validate: status 500: {"error_code":500,"message":"org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorCheckpointConnector, name=''org.apache.kafka.connect.mirror.MirrorCheckpointConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorHeartbeatConnector, name=''org.apache.kafka.connect.mirror.MirrorHeartbeatConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}, PluginDesc{klass=class org.apache.kafka.connect.mirror.MirrorSourceConnector, name=''org.apache.kafka.connect.mirror.MirrorSourceConnector'', version=''3.6.1'', encodedVersion=3.6.1, type=source, typeName=''source'', location=''classpath''}"}'
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: connect_status
     error: 'connect: GET /connectors/<name>/status: not found'
@@ -408,13 +428,29 @@ inputs:
 
 expect:
   root_cause:
-    - [plugin]
-    - [missing, not installed, not found, absent, removed, not loaded, not on the worker, classpath]
-  # The wrong stories of a connector that cannot be loaded.
+    # Not a bare "plugin": Connect's own trace says "PluginDesc{...}", and a
+    # paste of it is no diagnosis.
+    - [plugin path, plugin jar*, plugin folder, plugin dir*, connector plugin, postgres plugin, debezium plugin,
+       plugin is, plugin was, plugin isn, plugin wasn]
+    # No "classpath": the trace lists location='classpath' for every plugin.
+    - [missing, not installed, isn t installed, not found, absent, removed, not loaded, not on the worker,
+       no longer contains]
+  # The wrong stories of a connector that cannot be loaded: the config, the
+  # role and the renamed key are all fine.
   root_cause_forbidden:
     - ['schema change']
     - ['database server name']
-    - ['topic prefix']
+    - ['topic prefix is missing']
+    - ['missing topic prefix']
+    - ['topic prefix is required']
+    - ['config is missing']
+    - ['config lacks']
+    - ['missing a key']
+    - ['missing key']
+    - ['database hostname']
+    - ['database user']
+    - [privilege*]
+    - [grant*]
     - ['permission denied']
     - ['slot was lost']
     - ['disk full']

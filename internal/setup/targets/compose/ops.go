@@ -218,6 +218,11 @@ func writeText(env ops.Env, name string, data []byte, mode fs.FileMode) (string,
 	if ops.MountedPath(clean, env.MountDirs) {
 		return "", false, fmt.Errorf("%w: %s is under a directory a template mounts or builds from", ops.ErrExecutedName, q(name))
 	}
+	// And the secret refusal: a file the runner materialised from the secret
+	// store is not overwritten by a rendered one.
+	if err := ops.MaterialisedRefusal(clean, env); err != nil {
+		return "", false, err
+	}
 	root, err := os.OpenRoot(env.Confine.Dir())
 	if err != nil {
 		return "", false, fmt.Errorf("compose: opening the project root: %w", err)

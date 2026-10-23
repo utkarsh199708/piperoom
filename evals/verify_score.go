@@ -54,6 +54,9 @@ type ReplayResult struct {
 	// proposed steps. Nil when the scenario expects no fix. Reported only;
 	// it does not change pass or score.
 	RightAction *RightAction `json:"right_action,omitempty"`
+	// ToolCallChecks are the invalid tool calls (invalid_calls.go), set here
+	// with the other checks Judge does not make.
+	ToolCallChecks
 }
 
 // withReplayChecks adds the replay judgement to a run Judge scored, moves
@@ -64,6 +67,7 @@ type ReplayResult struct {
 func withReplayChecks(sc Scenario, tr Transcript, res RunResult) RunResult {
 	res.ReplayResult = judgeReplay(sc, tr)
 	res.RightAction = judgeRightAction(sc, tr.Events)
+	res.ToolCallChecks = checkToolCalls(tr.Events)
 	res.ToolCalls -= res.VerifyCalls
 	res.Score = score(sc, res)
 	res.Failures = failures(sc, res)

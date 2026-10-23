@@ -46,6 +46,7 @@ type qWorld struct {
 	roleExists, roleSelect bool
 	// sessions
 	blockerOpen, slotWaiting bool
+	blockerRole              bool // devctl_analyst exists
 	// the orders slot
 	slotExists, slotActive bool
 	retained               int64
@@ -215,6 +216,10 @@ func (w *qWorld) detach(_ context.Context, name string, args ...string) error {
 	w.detached = append(w.detached, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "PGAPPNAME="+blockerApp) && strings.Contains(joined, "pg_current_xact_id()") {
+		// psql fails to connect as a role that does not exist.
+		if !strings.Contains(joined, "-U "+blockerRole+" ") || !w.blockerRole {
+			return nil
+		}
 		w.blockerOpen = true
 	}
 	return nil
@@ -311,6 +316,10 @@ func (w *qWorld) exec(db, q string) (string, error) {
 		return boolCount(w.blockerOpen), nil
 	case q == sqlSlotCreateWaits:
 		return boolCount(w.slotWaiting), nil
+	case q == sqlCreateBlockerRole:
+		w.blockerRole = true
+	case q == sqlDropBlockerRole:
+		w.blockerRole = false
 	case q == sqlEndBlocker:
 		n := boolCount(w.blockerOpen)
 		w.blockerOpen = false

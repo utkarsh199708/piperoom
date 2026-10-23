@@ -1,0 +1,386 @@
+# C7 setup scenario (U1-19): the source Postgres runs with wal_level=replica, so no logical
+# replication slot can exist and the connector's task fails as soon as it tries to decode. The
+# label names the failing check and the fixing op (tasks/U-board.md row U1-19, step 1). Format:
+# evals/README.md (C6). Built on `devctl setup-break wal-level-replica` (dev/scenarios.md,
+# "Setup breaks", PR #880).
+#
+# RECORDED: NO. Every summary and data payload is the exact output of the real source_settings,
+# connect_config, connect_status, source_table_replication, dbtools and kafkatools code from main,
+# composed by hand from those tools' format strings and from the Postgres error text the dev
+# stack shows (the Q2g/Q3f approach; this session has no Docker). Clock:
+# 2026-10-25T09:40:00Z, scoped like dev/owners.yaml. To re-record it on the dev stack, see
+# evals/scenarios/README.md, "Setup scenarios (U1-19)".
+#
+# First failing layer: kafka-connect (task 0 FAILED). Root-cause layer: postgres (the server
+#   setting). The slot is gone because Postgres refuses to start at a lower wal_level while a
+#   logical slot exists, so the slot had to be dropped before the restart that applied the
+#   setting; the connector's saved position went with it.
+#
+# Expected label: failing check postgres-wal-level ("wal_level=replica; a logical replication slot
+#   needs wal_level=logical"); fixing ops source_alter_system {param: wal_level, value: logical}
+#   (T3: only inside a recorded maintenance window; the preview lists pending_restart) and
+#   source_restart of the database, or - when the Compose source's command line pins
+#   `-c wal_level=replica`, which beats ALTER SYSTEM - the source-postgres template re-rendered
+#   with compose_write and brought up again with compose_up. A new slot and a snapshot follow (the
+#   old slot is gone and its position with it).
+#   None of these is a room action in evals.LiveActions (source_alter_system, source_restart,
+#   compose_write and compose_up are runner ops, U1-20 adds the setup replay), so there is no
+#   expect.fix: the check and the ops are in this label and in the alert.
+#   Forbidden: connect_restart_task, connect_restart_connector - the server still cannot serve
+#     logical decoding; every start fails the same way.
+#   Forbidden: connect_resume_connector - the connector is not STOPPED (Validate refuses it).
+#   Forbidden: connect_update_connector_config - no connector setting fixes a server setting.
+#   Forbidden: pg_drop_replication_slot - no logical slot exists; there is nothing to drop.
+#   Forbidden: schema_register, schema_set_compatibility - nothing reached the registry.
+#
+# Traps:
+#   - The missing slot invites the failover / dead-slot story; source_settings is the read that
+#     shows the server cannot have a logical slot at all, and the task's own error is exact.
+#   - The settings that look wrong (max_replication_slots=10, max_wal_senders=10) are fine: only
+#     wal_level is replica.
+#   - No DDL ran and the schema has one version: a schema-change story fails.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks.go: walLevelOverride restarts the dev Postgres with
+#     `-c wal_level=replica` (a command-line setting beats ALTER SYSTEM), verifyWALLevel's detail
+#     "wal_level=replica; a logical replication slot needs wal_level=logical", check name
+#     postgres-wal-level; fixWALLevelReplica recreates the server on its own command line, recreates
+#     the slot and clears the connector's offsets so Debezium snapshots again.
+#   - Postgres: a walsender asked for logical decoding at wal_level=replica fails with "ERROR:
+#     logical decoding requires wal_level >= logical"; a server with a logical slot refuses to
+#     start at a lower wal_level.
+#   - internal/tools/dbtools/source_settings.go: source_settings' summary and the fixed setting
+#     order; internal/clients/postgres: SettingNames.
+#   - internal/setup/plan/guard.go: source_alter_system's allow-list includes wal_level, and the
+#     op is refused on production outside a maintenance window (T3).
+
+name: setup/wal-level-replica
+description: |
+  The person re-ran piperoom-setup against the project after a tuning change to the source
+  Postgres. The run stopped at the source settings step: check postgres-wal-level fails with
+  "wal_level=replica; a logical replication slot needs wal_level=logical". The Postgres service
+  was restarted with `-c wal_level=replica` on its command line; Postgres refuses to start at the
+  lower level while a logical slot exists, so the slot debezium_orders was dropped before that
+  restart and its position is gone. pg-orders-connector task 0 fails with "ERROR: logical decoding
+  requires wal_level >= logical", order-sync is Stable at lag 0 and analytics.orders is 41 minutes
+  stale. The connector config, the source role, the schema and the topic are as they were.
+
+  Root cause: the source Postgres runs with wal_level=replica, the setting a logical replication
+  slot cannot use, so Debezium cannot decode, and the dropped slot's position is lost with it.
+
+  Expected label: failing check postgres-wal-level; fixing ops source_alter_system {param:
+  wal_level, value: logical} with source_restart inside a maintenance window (or, where the
+  Compose command line pins `-c wal_level=replica`, compose_write of the source-postgres template
+  plus compose_up), then a new slot and a snapshot.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders setup: check postgres-wal-level failed (logical decoding requires wal_level >= logical); pg-orders-connector task 0 FAILED and analytics.orders is 41m stale'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=41m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=41m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=41m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=41m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot: missing
+          health: unknown
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - facts:
+            tasks_failed: "1"
+          health: fail
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 41m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 41m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: source_settings
+    summary: |-
+      wal_level=replica
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: replica}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: ERROR: logical decoding requires wal_level >= logical
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\nCaused by: org.postgresql.util.PSQLException: ERROR: logical decoding requires wal_level >= logical"
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: not found in pg_replication_slots
+    data: []
+  - tool: source_table_replication
+    input: {pipeline_id: orders}
+    summary: |-
+      tables=1 without_primary_key=0 replica_identity_nothing=0
+      public.orders: has_primary_key=yes replica_identity=default
+    data:
+      - table: public.orders
+        has_primary_key: true
+        replica_identity: default
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-24T09:40:00Z)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 41 min ago
+      partition 1: 0–1417 (1417 records), newest 41 min ago
+      partition 2: 0–1403 (1403 records), newest 41 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-25T08:59:10Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-25T08:59:10Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-25T08:59:10Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-25T08:59:06Z (stale for 41m)
+    data:
+      newest: "2026-10-25T08:59:06Z"
+      stale_for: 41m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I restarted the source database with the tuning change and the setup run now stops at its WAL check. The connector's task fails within seconds of every start. What do I set on the server, and does the connector need anything after it?"
+
+expect:
+  root_cause:
+    - [wal level, wal_level]
+    - [replica, override*, command line]
+  # The wrong stories of a missing slot and a failed task.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [permission denied]
+    - [disk full]
+    - [retention, delet*]
+    - [slot, lost]
+    - [connector, paused]
+    - [standby]
+    - [read replica]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_wal_level_replica
+      tool: source_settings
+      match: [wal level replica]
+      required: true
+    - id: f_logical_decoding
+      tool: connect_status
+      match: [logical decoding requires wal level]
+      required: true
+    - id: f_no_slot
+      tool: pg_replication_slots
+      match: [not found in pg replication slots]
+    - id: f_consumer_idle
+      tool: kafka_consumer_lag
+      match: [total lag 0]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_wal_level_replica, f_logical_decoding]
+  evidence_tools: [source_settings, connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

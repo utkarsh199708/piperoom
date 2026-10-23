@@ -20,8 +20,8 @@
 #   default also restores writes (public.orders has a primary key), and devctl fix uses FULL.
 #   The ALTER takes a brief ACCESS EXCLUSIVE lock and FULL adds the old row to the WAL of every
 #   UPDATE and DELETE, which the action's preview sizes from the table size.
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not score expect.fix.
+#   Graded since Q2h (C6): expect.fix and fix_targets (the table only: mode full and mode
+#   default both restore writes, so the target leaves mode free).
 #   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector -
 #     nothing failed in Connect; a restart re-reads the same table and the application's UPDATE
 #     still fails.
@@ -226,13 +226,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: pg_replication_slots
     summary: |
@@ -311,14 +311,17 @@ recordings:
       versions:
         - 1
   - tool: schema_registry_diff
-    input: {subject: pg.public.orders-value}
+    input: {subject: pg.public.orders-value, from_version: 1}
     summary: |-
       no field changes
     data:
-      changes: []
+      changes: null
       from_version: 1
       subject: pg.public.orders-value
-      to_version: 2
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
@@ -444,9 +447,23 @@ expect:
     - [replica identity]
     # "omits the old tuple" is the positive phrasing of NOTHING: an answer that
     # states it with a cause term stays out of the ambiguous set (no negation).
-    - [nothing, not recorded, no old key, no key, omits the old tuple]
-  # The wrong stories of a source write failure: the pipeline stages are healthy.
+    # No bare "no key": a false "the table has no primary key" story would pass
+    # (public.orders has one: has_primary_key=yes).
+    # No bare "nothing" either: "Nothing in the pipeline failed" is no cause.
+    - [identity nothing, identity is nothing, identity was nothing, to nothing, identity none, identity is none,
+       to none, not recorded, no old key, omits the old tuple, changed the replica identity,
+       changed its replica identity, replica identity was changed, replica identity changed]
+  # The wrong stories of a source write failure: the pipeline stages are
+  # healthy, the table has a primary key and the app is not at fault.
   root_cause_forbidden:
+    - ['no primary key']
+    - ['lacks a primary key']
+    - ['missing primary key']
+    - ['missing a primary key']
+    - [orm]
+    - ['bug in the app']
+    - ['app bug']
+    - ['redeploy the app']
     - ['task failed']
     - ['connector failed']
     - ['consumer rejected']
@@ -473,5 +490,8 @@ expect:
     - about: root_cause
       facts: [f_replica_identity_nothing]
   evidence_tools: [source_table_replication]
+  fix: [[pg_set_replica_identity]]
+  fix_targets:
+    pg_set_replica_identity: {table: public.orders}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
   max_tool_calls: 12

@@ -56,6 +56,28 @@ func TestWriteTextRefusesMountDirs(t *testing.T) {
 	}
 }
 
+// writeText refuses a materialised secret file, like file_write does: a
+// rendered file does not replace one the runner materialised from the store.
+func TestWriteTextRefusesMaterialised(t *testing.T) {
+	h := newHarness(t, protocol.ClassLocal)
+	if err := os.MkdirAll(filepath.Join(h.dir, ".piperoom"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.dir, ".piperoom", "materialised"), []byte(EnvFileName+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.dir, EnvFileName), []byte("POSTGRES_PASSWORD=materialised\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.run(t, "properties_write", PropertiesParams{File: EnvFileName, Entries: map[string]string{"POSTGRES_DB": "orders"}})
+	if !errors.Is(err, ops.ErrSecretPath) {
+		t.Fatalf("properties_write over a materialised file = %v, want ops.ErrSecretPath", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.dir, EnvFileName)); string(b) != "POSTGRES_PASSWORD=materialised\n" {
+		t.Errorf("the materialised file changed: %q", b)
+	}
+}
+
 // An unchanged properties_write still fixes the file's mode: a pre-existing
 // world-readable .env must not stay 0644 because its bytes already matched.
 func TestPropertiesWriteFixesMode(t *testing.T) {

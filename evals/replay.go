@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,9 +46,10 @@ type Miss struct {
 // runsLive) are the exception and run for real.
 func LiveTools() ([]tools.Tool, error) {
 	reg := tools.NewRegistry()
-	// kafkatools registers the F12 reads only for a client that has them, so the
-	// definition-only client below says it does.
-	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: definitionKafka{}}); err != nil {
+	// kafkatools registers the F12 reads, and the Q1c, Q3a, Q4a and Q5a reads
+	// (Q6d), only for clients that have them, so the definition-only clients
+	// below say they do.
+	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: definitionKafka{}, Connect: definitionConnect{}}); err != nil {
 		return nil, fmt.Errorf("evals: kafka tool definitions: %w", err)
 	}
 	// dbtools refuses a nil Owners (a wiring guard); an empty one is enough
@@ -58,6 +60,9 @@ func LiveTools() ([]tools.Tool, error) {
 	// Definition only: no Connect client and no metrics URL; the harness never runs it.
 	if err := debeziumtools.Register(reg, debeziumtools.Deps{Owners: &owners.Owners{}}); err != nil {
 		return nil, fmt.Errorf("evals: debezium tool definitions: %w", err)
+	}
+	if err := registerWorkerToolDefs(reg); err != nil {
+		return nil, err
 	}
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
@@ -93,8 +98,10 @@ func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients
 }
 
 // LiveActions returns the production write actions, backed by replay clients
-// that know only res and what recs recorded: actions.Register's seven and
-// the P3 actions (replay_actions.go). The agent can propose them (their real
+// that know only res and what recs recorded: actions.Register's seven, the
+// P3 actions (replay_actions.go), the Q2 source admin actions
+// (replay_source.go) and the Q5 connector lifecycle actions
+// (replay_connect.go). The agent can propose them (their real
 // Validate runs against that) but nothing is ever written: every write of a
 // replay client is a no-op that only records the call.
 func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
@@ -119,13 +126,22 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 	if err := registerP3(reg, res, recs, wl); err != nil {
 		return nil, nil, err
 	}
+	if err := registerSourceActions(reg, res, recs, wl); err != nil {
+		return nil, nil, err
+	}
+	if err := registerLifecycle(reg, res, recs, wl); err != nil {
+		return nil, nil, err
+	}
 	return reg, wl, nil
 }
 
 // connectStatusData is the part of connect_status's Data that action
-// validation reads (name, state, and task ids/states).
+// validation reads (name, state, and task ids/states). The real tool's Data
+// carries no type; Type is set only when a scenario adds one, otherwise it
+// comes from the summary (statusType).
 type connectStatusData struct {
 	Name  string `json:"name"`
+	Type  string `json:"type"`
 	State string `json:"state"`
 	Tasks []struct {
 		ID    int    `json:"id"`
@@ -162,9 +178,12 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		if err := json.Unmarshal(b, &d); err != nil {
 			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data is not a connector status: %w", i, err)
 		}
-		st := clients.ConnectorStatus{Name: d.Name, State: d.State}
+		st := clients.ConnectorStatus{Name: d.Name, Type: d.Type, State: d.State}
 		if st.Name == "" {
 			st.Name = name
+		}
+		if st.Type == "" {
+			st.Type = statusType(st.Name, recordingResults(r)[0].Summary)
 		}
 		for _, t := range d.Tasks {
 			st.Tasks = append(st.Tasks, clients.TaskStatus{ID: t.ID, State: t.State})
@@ -172,6 +191,19 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		out[name] = st
 	}
 	return out, nil
+}
+
+// statusType reads a connector's type from connect_status's summary, whose
+// first line the tool writes as "<name> (<type>): <state>". Its Data leaves
+// the type out, and connect_reset_source_offsets refuses anything but a
+// source connector (Q6d).
+func statusType(name, summary string) string {
+	for _, typ := range []string{"source", "sink"} {
+		if strings.HasPrefix(summary, name+" ("+typ+"): ") {
+			return typ
+		}
+	}
+	return ""
 }
 
 // replayer serves recordings for one run. It owns the run's replay state: the
@@ -199,10 +231,18 @@ type replayer struct {
 	marks      []ReplayMark
 	unexecuted []string
 	misses     []Miss
-	// isLookup tells the agent's own room-start past-incidents lookup from a
-	// call the model made. It is a field so a test can mark a context; the
-	// production value is agent.IsPastIncidentsLookup.
+	// isLookup tells the agent's own reads (the room-start past-incidents
+	// lookup, the connect_plugins read of the running versions) from a call
+	// the model made. It is a field so a test can mark a context; the
+	// production value is agentOwnRead.
 	isLookup func(context.Context) bool
+}
+
+// agentOwnRead reports a read the agent runner makes on its own: it is
+// answered when recorded but is never a miss, never counts toward
+// after_calls and never moves a sequence.
+func agentOwnRead(ctx context.Context) bool {
+	return agent.IsPastIncidentsLookup(ctx) || agent.IsRunningVersionsRead(ctx)
 }
 
 // replayRecord is a Recording with its results already converted to JSON, so
@@ -288,7 +328,7 @@ func newPhasedReplayer(recs []Recording, phases []string, transitions []Transiti
 		transitions: transitions,
 		calls:       map[string]int{},
 		seqPos:      map[int]int{},
-		isLookup:    agent.IsPastIncidentsLookup,
+		isLookup:    agentOwnRead,
 	}
 	if len(phases) > 0 {
 		r.phase = phases[0]
