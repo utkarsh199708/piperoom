@@ -407,3 +407,14 @@ func TestLoopRequestPassesThroughTheCloudAdapters(t *testing.T) {
 		})
 	}
 }
+
+func TestModelConcurrencyIsClamped(t *testing.T) {
+	for _, tt := range []struct {
+		in   int64
+		want int
+	}{{-1, 0}, {0, 0}, {3, 3}, {maxModelConcurrency, maxModelConcurrency}, {1 << 40, maxModelConcurrency}} {
+		if got := modelConcurrency(tt.in); got != tt.want {
+			t.Errorf("modelConcurrency(%d) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -648,13 +649,12 @@ func (s *Service) lockProposalRoom(ctx context.Context, user User, proposalID st
 // executeProposal, finishStep, failStep, setProposalStatus, isRoomOpen and the
 // step state machine live in service_executor.go.
 
+// isKnownLayer reports whether layer is one owners.yaml may name
+// (owners.KnownLayers: events.Layers plus the mysql source layer). The room
+// and owners.yaml share that one list, so a layer owners.yaml accepts is
+// never refused here, and the other way round.
 func isKnownLayer(layer string) bool {
-	for _, l := range events.Layers {
-		if l == layer {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(owners.KnownLayers(), layer)
 }
 
 func contains(layers []string, layer string) bool {

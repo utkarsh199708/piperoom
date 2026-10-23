@@ -48,7 +48,7 @@ func addPIITags(g *Graph, lr *columnReads) {
 		var cols map[string]PIIClass
 		switch n.Kind {
 		case KindSourceTable:
-			cols = lr.srcPII[strings.TrimPrefix(n.ID, "pg:")]
+			cols = lr.srcPII[sourceTableOf(n.ID)]
 		case KindSinkTable:
 			cols = lr.sinkPII[strings.TrimPrefix(n.ID, "wh:")]
 		}

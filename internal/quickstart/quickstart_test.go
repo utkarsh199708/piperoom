@@ -587,3 +587,15 @@ func TestUsersRefusedIDCleansUp(t *testing.T) {
 		t.Fatalf("the temp dir should be removed, found %v", left)
 	}
 }
+
+// The mysql source layer is a known layer: it sorts with the known ones
+// (owners.KnownLayers order), not with the unknown names.
+func TestOwnedLayersMySQL(t *testing.T) {
+	own := &owners.Owners{Layers: owners.UserLayers(map[string]string{
+		"mysql": "a", "kafka": "a", "aa-custom": "a",
+	})}
+	want := []string{"kafka", "mysql", "aa-custom"}
+	if got := ownedLayers(own); !slices.Equal(got, want) {
+		t.Fatalf("ownedLayers = %v, want %v", got, want)
+	}
+}

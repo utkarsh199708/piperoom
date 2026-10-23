@@ -1,6 +1,12 @@
 package evals
 
-import "testing"
+import (
+	"encoding/json"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+)
 
 // termCase is one hypothesis read against a scenario's root-cause terms.
 type termCase struct {
@@ -174,5 +180,177 @@ func TestScenarioRootCauseTerms(t *testing.T) {
 				t.Logf("%s: correct paraphrase not matched (the judge covers it): %q", name, text)
 			}
 		}
+	}
+}
+
+// TestW4aRelaxedFacts pins KAN-492 (W4a): a required fact or evidence tool
+// must be reachable on the correct read path and carry information no other
+// required fact gives. The alert already carries the pipeline map, so the two
+// ClickHouse scenarios no longer demand a pipeline_map read; the other three
+// lose a reader whose answer another required fact already contains.
+func TestW4aRelaxedFacts(t *testing.T) {
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Scenario{}
+	for _, sc := range scs {
+		byName[sc.Name] = sc
+	}
+	get := func(name string) Expect {
+		sc, ok := byName[name]
+		if !ok {
+			t.Fatalf("scenario %q not found", name)
+		}
+		return sc.Expect
+	}
+	fact := func(e Expect, id string) (Fact, bool) {
+		for _, f := range e.ExpectedFacts {
+			if f.ID == id {
+				return f, true
+			}
+		}
+		return Fact{}, false
+	}
+	has := func(list []string, s string) bool {
+		for _, x := range list {
+			if x == s {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, name := range []string{"clickhouse-readonly-profile", "clickhouse-sink-table-dropped"} {
+		e := get(name)
+		for _, f := range e.ExpectedFacts {
+			if f.Tool == "pipeline_map" {
+				t.Errorf("%s: fact %q still reads pipeline_map", name, f.ID)
+			}
+		}
+		if has(e.EvidenceTools, "pipeline_map") {
+			t.Errorf("%s: evidence_tools still lists pipeline_map: %v", name, e.EvidenceTools)
+		}
+	}
+	if e := get("clickhouse-readonly-profile"); len(e.Claims) != 0 || len(e.ExpectedFacts) != 0 {
+		t.Errorf("clickhouse-readonly-profile: want claims [] and no facts, got claims %v facts %v", e.Claims, e.ExpectedFacts)
+	}
+	{
+		e := get("clickhouse-sink-table-dropped")
+		f, ok := fact(e, "f_code60")
+		if !ok || !f.Required || f.Tool != "warehouse_load_errors" {
+			t.Errorf("clickhouse-sink-table-dropped: f_code60 must stay required on warehouse_load_errors, got %+v (found %v)", f, ok)
+		}
+	}
+
+	eq := func(name string, got, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Errorf("%s: evidence_tools = %v, want %v", name, got, want)
+			return
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				t.Errorf("%s: evidence_tools = %v, want %v", name, got, want)
+				return
+			}
+		}
+	}
+	eq("rebalance-loop", get("rebalance-loop").EvidenceTools, []string{"connect_status", "connect_worker_metrics"})
+	if e := get("setup/flat-plugin-dir"); has(e.EvidenceTools, "connect_list_connectors") {
+		t.Errorf("setup/flat-plugin-dir: evidence_tools still lists connect_list_connectors: %v", e.EvidenceTools)
+	}
+	{
+		e := get("register-rejected-missing-plugin")
+		f, ok := fact(e, "f_class_in_config")
+		if !ok || f.Required {
+			t.Errorf("register-rejected-missing-plugin: f_class_in_config must exist with required false, got %+v (found %v)", f, ok)
+		}
+		eq("register-rejected-missing-plugin", e.EvidenceTools, []string{"connect_status"})
+	}
+
+	// Negative: relaxing facts must not relax the root cause. A hypothesis that
+	// names no root-cause term still fails; the good one still passes.
+	absent := map[string]string{
+		"clickhouse-readonly-profile":      "The warehouse is stale and analytics.orders has not loaded for a while; investigate further.",
+		"clickhouse-sink-table-dropped":    "analytics.orders is stale and the warehouse is behind; the cause is not yet known.",
+		"rebalance-loop":                   "pg-orders-connector task 0 is RUNNING but analytics.orders is stale; the cause is not yet known.",
+		"setup/flat-plugin-dir":            "pg-orders-connector FAILED and the worker restarted; the cause is not yet known.",
+		"register-rejected-missing-plugin": "pg-orders-connector FAILED after the redeploy; the cause is not yet known.",
+	}
+	for name, text := range absent {
+		e := get(name)
+		if rootCauseMatches(e, text) {
+			t.Errorf("%s: a hypothesis without the root-cause term matched: %q", name, text)
+		}
+		h, ok := hypotheses[name]
+		if !ok {
+			t.Fatalf("%s: no good/wrong hypotheses in scoring_test.go", name)
+		}
+		if !rootCauseMatches(e, h.good) {
+			t.Errorf("%s: the good hypothesis no longer matches", name)
+		}
+		if rootCauseMatches(e, h.wrong) {
+			t.Errorf("%s: the wrong hypothesis matches", name)
+		}
+	}
+}
+
+// TestBlockedSlotRecordingPrintsStartedAt pins W4e-2 (KAN-503): the blocked-slot
+// source_blocking_sessions recording prints started_at (RFC3339Nano UTC, after
+// blocks_slot=) as source_blocking_sessions now does, and that exact string is
+// the start time source_end_session accepts and the recorded data carries (the
+// action refuses a pid whose start differs).
+func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
+	scs, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc *Scenario
+	for i := range scs {
+		if scs[i].Name == "blocked-slot" {
+			sc = &scs[i]
+		}
+	}
+	if sc == nil {
+		t.Fatal("scenario blocked-slot not found")
+	}
+	var rec *Recording
+	for i := range sc.Recordings {
+		if sc.Recordings[i].Tool == "source_blocking_sessions" {
+			rec = &sc.Recordings[i]
+		}
+	}
+	if rec == nil {
+		t.Fatal("blocked-slot has no source_blocking_sessions recording")
+	}
+	m := regexp.MustCompile(`^pid=48213 state=active age=25m blocks_slot=yes started_at=(\S+) \(outside the pipeline's tables; identity hidden\)$`).FindStringSubmatch(rec.Summary)
+	if m == nil {
+		t.Fatalf("summary does not match the W4e format: %q", rec.Summary)
+	}
+	started, err := time.Parse(time.RFC3339Nano, m[1])
+	if err != nil {
+		t.Fatalf("started_at %q is not RFC3339: %v", m[1], err)
+	}
+	if want := time.Date(2026, 10, 23, 9, 14, 12, 0, time.UTC); !started.Equal(want) || !strings.HasSuffix(m[1], "Z") {
+		t.Errorf("started_at = %q, want %s in UTC", m[1], want.Format(time.RFC3339Nano))
+	}
+	rows, ok := rec.Data.([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("recorded data = %#v, want one row", rec.Data)
+	}
+	row, _ := rows[0].(map[string]any)
+	if got, _ := row["started_at"].(string); got != m[1] {
+		t.Errorf("data started_at = %q, summary started_at = %q", got, m[1])
+	}
+	if age := time.Date(2026, 10, 23, 9, 40, 0, 0, time.UTC).Sub(started); age < 25*time.Minute || age >= 26*time.Minute {
+		t.Errorf("age at the scenario clock = %s, want 25m", age)
+	}
+	// source_end_session decodes started_at into a time.Time.
+	var p struct {
+		StartedAt time.Time `json:"started_at"`
+	}
+	if err := json.Unmarshal([]byte(`{"started_at":"`+m[1]+`"}`), &p); err != nil || !p.StartedAt.Equal(started) {
+		t.Errorf("started_at does not decode as an end-session param: %v", err)
 	}
 }
