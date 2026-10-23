@@ -387,3 +387,31 @@ func TestV0EnvNames(t *testing.T) {
 		}
 	}
 }
+
+// TestParseTriagePassAgreesWithModelRoles: the live first-look parser and
+// ParseModelRoles give the same first-look model, or both refuse, for every
+// first-look provider over a Claude and an openai main provider.
+func TestParseTriagePassAgreesWithModelRoles(t *testing.T) {
+	for _, main := range []string{"anthropic", "openai"} {
+		for _, fl := range []string{"", "anthropic", "bedrock", "vertex", "openai", "gemini", "bedrock-converse"} {
+			c := Config{ModelProvider: main, Model: "m-main", TriagePassProvider: fl}
+			if main == "anthropic" {
+				c.Model = "claude-opus-5-5"
+			}
+			tp, tpErr := ParseTriagePass(c)
+			r, rErr := ParseModelRoles(c)
+			if rErr != nil && strings.Contains(rErr.Error(), "TRIAGE_PASS_MODEL is required") {
+				if tpErr == nil {
+					t.Errorf("main %s, first look %q: ParseModelRoles refuses (%v), ParseTriagePass gives %q", main, fl, rErr, tp.Model)
+				}
+				continue
+			}
+			if rErr != nil {
+				continue // refused for another reason (a role setting this test does not set)
+			}
+			if tpErr != nil || tp.Model != r.FirstLook.Model {
+				t.Errorf("main %s, first look %q: ParseTriagePass = %q, %v; ParseModelRoles = %q", main, fl, tp.Model, tpErr, r.FirstLook.Model)
+			}
+		}
+	}
+}
