@@ -191,7 +191,7 @@ func OpenStore(projectDir, file string) (*Store, error) {
 	if err := s.loadMaterialised(); err != nil {
 		return nil, err
 	}
-	if err := ensureGitignore(dir); err != nil {
+	if err := EnsureGitignore(dir); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -262,10 +262,12 @@ func ensureRegularOrMissing(file string) error {
 	return nil
 }
 
-// ensureGitignore appends .piperoom/ to the project's .gitignore, creating it
+// EnsureGitignore appends .piperoom/ to the project's .gitignore, creating it
 // when missing. It never follows a symlinked .gitignore (the entry would be
-// written into a file outside the project) and never rewrites the file.
-func ensureGitignore(projectDir string) error {
+// written into a file outside the project) and never rewrites the file. The
+// standalone server (internal/setup/standalone) creates the same directory
+// for the registered credentials, so it makes the same entry.
+func EnsureGitignore(projectDir string) error {
 	p := filepath.Join(projectDir, ".gitignore")
 	if fi, err := os.Lstat(p); err == nil {
 		if fi.Mode()&fs.ModeSymlink != 0 || !fi.Mode().IsRegular() {
