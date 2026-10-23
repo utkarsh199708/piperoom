@@ -46,11 +46,13 @@ var sharedTools = map[string]bool{
 
 // cdcExact are the CDC tools without a CDC prefix: trace_record follows a key
 // through Debezium and Kafka, reconcile compares the source table with the
-// warehouse, tls_cert_expiry reads the Kafka and Connect endpoints.
+// warehouse, tls_cert_expiry reads the Kafka and Connect endpoints, net_probe
+// (Q6a) probes the source, Kafka, Connect and registry endpoints.
 var cdcExact = map[string]bool{
 	"trace_record":    true,
 	"reconcile":       true,
 	"tls_cert_expiry": true,
+	"net_probe":       true,
 }
 
 // cdcPrefixes and batchPrefixes name whole tool families. The batch tools

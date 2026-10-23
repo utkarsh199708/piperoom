@@ -94,9 +94,13 @@ func (t *netProbe) listenerChecks(ctx context.Context, endpointChecks []Check, t
 		mismatched = append(mismatched, fmt.Sprintf("node %d advertises %s, which is not a configured broker address", b.NodeID, addr))
 		checks := prober.Probe(ctx, Target{Label: tgt.Label, Kind: tgt.Kind, Endpoints: []Endpoint{{Addr: addr, TLS: tlsOn, Config: tlsCfg}}})
 		out = append(out, checks...)
+		// A name that does not resolve here is as unreachable as a refused
+		// port: it is the typical listener that exists only inside the
+		// cluster (a pod's headless-service name), and its tcp step is then a
+		// skip, not a failure.
 		reachable := true
 		for _, c := range checks {
-			if c.ID == "tcp" && c.failed() {
+			if (c.ID == "tcp" || c.ID == "dns") && c.failed() {
 				reachable = false
 			}
 		}

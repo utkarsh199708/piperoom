@@ -298,6 +298,15 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "pg-orders-connector task 0 FAILED: Debezium asks the new slot devctl_orders_v2 for LSN 3D/4A11C920, a position of the old database older than the new slot. The connector kept the stored source offsets of the old orders database after it was repointed at devctl_orders_v2 (Kafka Connect keys offsets by connector name and source partition), so it also skipped the snapshot of the new database. Stop the connector and reset its source offsets to empty in one proposal; on resume Debezium snapshots devctl_orders_v2.",
 		wrong: "The WAL was purged on the Postgres server, so the replication slot lost the position the connector needs; drop and recreate the slot.",
 	},
+	// Q6c network-probe scenarios (C7, KAN-250).
+	"advertised-listener-wrong": {
+		good:  "Since the 09:14 roll, broker 2 (kafka-2) advertises a Kubernetes-internal listener address, kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which fails to resolve on the ops VMs where the Connect workers run. The producer of pg-orders-connector fails to reach the leader of pg.public.orders partition 1, its batches expired and task 0 FAILED; the brokers themselves are in sync. Set kafka-2's advertised.listeners back to kafka-2.prod.internal:9094, roll it and restart task 0.",
+		wrong: "Broker 2 (kafka-2) is down, so partition 1 of pg.public.orders lost its leader and the producer times out; restart the connector once the broker is back.",
+	},
+	"db-unreachable-from-connect": {
+		good:  "The Kafka Connect workers are blocked from Postgres: since the 09:05 segmentation policy on the database subnet, their connections to orders-db.internal:5432 are refused, so task 0 of pg-orders-connector FAILED after 5 retries and the slot debezium_orders sits inactive. The database itself is up: Piperoom reads the slot and a row updated a minute ago. Allow the Connect workers' subnet to 5432 in the network policy, then restart task 0.",
+		wrong: "The orders database crashed at 09:05 and has been down since; restart Postgres and then the connector.",
+	},
 	// Q1e version-knowledge scenarios (C7, KAN-182).
 	"renamed-property-after-upgrade": {
 		good:  "Task 0 of pg-orders-connector is RUNNING but blocked: after the 08:57 upgrade to Debezium 2.7.3.Final its stored config still sets heartbeat.topics.prefix=heartbeats, a key Debezium 2.0 renamed to topic.heartbeat.prefix (known issue dbz-topic-heartbeat-transaction), so 2.7 ignores it and sends heartbeats to the default topic __debezium-heartbeat.pg, a topic missing from the cluster because auto topic creation is off. The producer waits for that topic's metadata and the change events queued behind the heartbeat stay in the task, short of pg.public.orders (newest record 42 min ago, Debezium queue 8192/8192). Rename the key to topic.heartbeat.prefix=heartbeats and restart the connector.",
@@ -406,20 +415,20 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "The replication slot debezium_orders went idle after the host move, so the pipeline stalls. Drop and recreate the slot with a fresh snapshot.",
 	},
 	"blocked-slot": {
-		good:  "An analyst's session (pid 48213, listed with identity hidden as outside the pipeline's tables) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays in STARTING and the slot debezium_orders is still pending. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
+		good:  "An unrelated session (pid 48213, open for 25 minutes) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays UNASSIGNED while the slot debezium_orders is still being created. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
 		wrong: "The replication slot debezium_orders was dropped in the host move; re-create the slot by hand and take a new snapshot.",
 	},
 	"idle-wal-growth": {
-		good:  "public.orders stays idle for 38 minutes while the batch database on the same server writes, so Debezium's heartbeat confirms only when a source event arrives; the active slot debezium_orders retains 34.6 MiB of WAL, and max_slot_wal_keep_size=-1 leaves retention unlimited, so Postgres keeps the WAL. source_blocking_sessions lists short transactions only. Add a heartbeat table with heartbeat.action.query (source_create_heartbeat_table) so the slot advances.",
+		good:  "public.orders stays idle for 38 minutes while the batch database on the same server writes, so Debezium's heartbeat confirms only when a source event arrives; the active slot debezium_orders retains 34.6 MiB of WAL, and max_slot_wal_keep_size=-1 leaves retention unlimited, so Postgres keeps the WAL. source_blocking_sessions lists no blocking session. Add a heartbeat table with heartbeat.action.query (source_create_heartbeat_table) so the slot advances.",
 		wrong: "order-sync is lagging behind the batch database, so the pipeline is slow; raise max_slot_wal_keep_size and restart the connector to release the WAL.",
 	},
 	// The Q4c config-validation scenarios.
 	"register-rejected-renamed-key": {
-		good:  "The stored config of pg-orders-connector uses the removed key database.server.name=pg; Debezium 2.0 requires topic.prefix, so the upgraded worker rejects the config with Missing required configuration topic.prefix and leaves the connector FAILED before it starts tasks. Rename the key to topic.prefix=pg and restart the connector; the topic and subject names and the stored offsets stay the same.",
+		good:  "The stored config of pg-orders-connector uses the removed key database.server.name=pg; Debezium 2.0 requires topic.prefix, so after the upgrade task 0 FAILED with Error configuring an instance of PostgresConnectorTask, and Connect rejects the re-registered 1.x config with The 'topic.prefix' value is invalid: A value is required. Rename the key to topic.prefix=pg and restart the connector; the topic and subject names and the stored offsets stay the same.",
 		wrong: "The Schema Registry rejected the schema after the upgrade, so pg-orders-connector fails to start; set the subject's compatibility to NONE and restart the connector.",
 	},
 	"register-rejected-missing-plugin": {
-		good:  "The Debezium Postgres plugin jar set is absent from the Connect worker's plugin.path: the class io.debezium.connector.postgresql.PostgresConnector shows as unavailable in GET /connector-plugins, so pg-orders-connector FAILED and a re-registration fails during plugin discovery. Restore the plugin jars in plugin.path and restart the workers; the stored config is correct.",
+		good:  "The Debezium Postgres plugin jar set is absent from the Connect worker's plugin.path: Connect fails to find any class that implements Connector and matches io.debezium.connector.postgresql.PostgresConnector, so pg-orders-connector FAILED and a re-registration fails during plugin discovery. Restore the plugin jars in plugin.path and restart the workers; the stored config is correct.",
 		wrong: "The connector's database.user piperoom lost its privileges on public.orders after the redeploy, so the snapshot fails; grant SELECT again and restart it.",
 	},
 }

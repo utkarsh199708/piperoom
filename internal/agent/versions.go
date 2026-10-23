@@ -53,6 +53,18 @@ var debeziumComponents = []struct{ prefix, component string }{
 // word: nothing that could read as an instruction reaches the model.
 var runningVersionRe = regexp.MustCompile(`^[0-9]{1,6}(\.[0-9]{1,6}){0,3}([.-][A-Za-z]{1,12}[0-9]{0,3})?$`)
 
+// versionsReadKey marks the context of the runner's own connect_plugins read.
+type versionsReadKey struct{}
+
+// IsRunningVersionsRead reports whether ctx is the runner's own
+// connect_plugins read of the running versions rather than a call the model
+// made. A replay harness can use it, like IsPastIncidentsLookup, to keep that
+// read out of its per-scenario miss and call counts.
+func IsRunningVersionsRead(ctx context.Context) bool {
+	v, _ := ctx.Value(versionsReadKey{}).(bool)
+	return v
+}
+
 // versionReads holds the room's running versions once read. It is safe for
 // concurrent use: read tools run in parallel, and a second runbook_lookup
 // waits for the first one's read instead of making its own.
@@ -85,7 +97,7 @@ func (r *runner) runningVersions(ctx context.Context) []runbooks.RunningVersion 
 		return nil
 	}
 	v.attempts++
-	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
+	tctx, cancel := context.WithTimeout(context.WithValue(r.toolScope(ctx), versionsReadKey{}, true), r.timing.toolTimeout)
 	defer cancel()
 	res, err := t.Run(tctx, json.RawMessage(`{}`))
 	if err != nil {

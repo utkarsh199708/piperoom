@@ -276,7 +276,7 @@ with one Q2 admin action, which the label names. `idle-wal-growth` is scoped lik
 |---|---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
 | `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
-| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes`, identity hidden (it locks no pipeline table; the analyst's role `devctl_blocker`) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes` (identity hidden: it locks no pipeline table) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
 | `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
 
 **Graded since Q2h (C6).** `evals.LiveActions` registers the source actions on replay clients
@@ -331,18 +331,23 @@ worker. Both labels name what has to change, which is the row's done-when.
 
 | Scenario | Alert | Root cause | First failing / root-cause layer | Label names |
 |---|---|---|---|---|
-| `register-rejected-renamed-key` | pg-orders-connector FAILED after the Debezium 3.2 upgrade, re-registered from the 1.x export | the config carries `database.server.name=pg` and no `topic.prefix`, which 2.0 made required | kafka-connect / kafka-connect | the key: `database.server.name`, renamed to `topic.prefix` (known issue `dbz-topic-prefix`, DBZ-4180) |
-| `register-rejected-missing-plugin` | connector FAILED after the worker redeploy; re-register refused with "Connector plugin ... not found" | the Debezium Postgres plugin is not loaded on the worker (plugin.path lost it) | kafka-connect / kafka-connect | the plugin: `io.debezium.connector.postgresql.PostgresConnector` |
+| `register-rejected-renamed-key` | pg-orders-connector task 0 FAILED after the Debezium 3.2 in-place upgrade; re-registering the 1.x export is refused (HTTP 400, not stored) | the config carries `database.server.name=pg` and no `topic.prefix`, which 2.0 made required | kafka-connect / kafka-connect | the key: `database.server.name`, renamed to `topic.prefix` (known issue `dbz-topic-prefix`, DBZ-4180) |
+| `register-rejected-missing-plugin` | connector FAILED after the worker redeploy; re-register refused with Connect's "Failed to find any class that implements Connector ..." | the Debezium Postgres plugin is not loaded on the worker (plugin.path lost it) | kafka-connect / kafka-connect | the plugin: `io.debezium.connector.postgresql.PostgresConnector` |
 
-**`connect_validate_config` is not replayable yet.** Q4a's tool names both faults on its own, but
-`evals.LiveTools()` has no definition-only Connect client, and `kafkatools.Register` adds the tool
-only for a `Deps.Connect` that implements `ConfigValidator`, so a recording naming it fails
-`-validate`. C6's Q6d ("replay for the Q1c, Q3a, Q3c, Q4a and Q5a readers") adds that client.
-Until then the two files prove the key and the plugin from `connect_config` (the stored config
-keeps `database.server.name`), `connect_status` (the connector trace names `topic.prefix` or the
-missing class) and `connect_list_connectors` (an empty type is the tell of an unloadable plugin) -
-the reads Q4b's prompt sends the agent to before it proposes a registration. Each header says
-which `connect_validate_config` recording and fact to add when Q6d lands. `runbook_lookup` runs
+**`connect_validate_config` is replayed since Q6d** (`evals.LiveTools()` has a definition-only
+Connect client). Each file records it with input `{class}` (Q batch 4 review): for
+`register-rejected-renamed-key` its summary (the `topic.prefix` error and the unknown key
+`database.server.name`), with the fact `f_validate_unknown_key` (not required); for
+`register-rejected-missing-plugin` the error the client reports, HTTP 500 with Connect's "Failed to
+find any class ..." (Kafka Connect 3.6.1 does not map the validation future's exception to 404;
+checked against its sources). Both files still prove the key and the plugin from `connect_config` (the stored config
+keeps `database.server.name` and has no `topic.prefix`), `connect_status` (task 0's condensed
+trace "Error configuring an instance of PostgresConnectorTask", or the connector trace naming the
+missing class) and `connect_list_connectors` (type `unknown`: Connect cannot load the class to
+tell source from sink). `connect_status` keeps only a trace's first line and its "Caused by:"
+lines, so Connect's "The 'topic.prefix' value is invalid" (the HTTP 400 body of the refused
+re-register) reaches the room only through the owner's steer -
+the reads Q4b's prompt sends the agent to before it proposes a registration. `runbook_lookup` runs
 for real in the harness, so the known-issue id in the first label is reachable today.
 
 **No `expect.fix`** (a 0.5-day row, and no action applies). The renamed-key incident needs a config
@@ -375,8 +380,10 @@ index, so neither file records it and no `expected_facts` entry can name it (`-v
 against recordings). A query such as "heartbeat topic name changed after upgrade" or "plugin.name
 wal2json invalid after upgrade" with `versions: [{component: debezium-postgres, version:
 2.7.3.Final}]` ranks the labelled entry first and says the running version is affected. It is not an
-`evidence_tools` entry yet: the prompt does not send the agent to it with versions until Q1d (A4)
-lands; then it can become one.
+`evidence_tools` entry yet. Since Q1d the agent itself reads `connect_plugins` with `{}` on its first
+`runbook_lookup` and passes the running versions to the lookup; both files record that read (Kafka
+3.7.1, Debezium Postgres 2.7.3.Final, with `data`) since the Q batch 4 review, with the fact
+`f_debezium_version` (not required), so the automatic read is no replay miss here.
 
 **What the replayed tools show.** `connect_config` hides `heartbeat.*` and `plugin.name` (its
 allow-list), so the key and the decoder reach the agent through the connect owner's steer (the worker
@@ -440,16 +447,16 @@ the cause, which is the row's done-when. All three use `alert` and the baseline 
 | `internal-topic-not-compacted` | order-sync lag 388214 after a resume | `connect-offsets` is `cleanup.policy=delete`, 1-day retention: the connector's offset aged out during a 4-day pause, so Debezium re-snapshotted public.orders | kafka-connect / kafka-connect (alt kafka) | `connect_worker_info`: internal topic not compacted |
 | `rebalance-loop` | analytics.orders stale 19m, connector changed state 23 times | a staging Connect cluster joined the production worker group (same `group.id`, own config topic): endless rebalances | kafka-connect / kafka-connect | `connect_worker_metrics` (rebalancing, completed rebalances) and `connect_worker_info` (the staging workers in the group) |
 
-**The labelled tools are not replayable yet.** `evals.LiveTools()` does not call
-`debeziumtools.RegisterWorkerMetrics` and has no client for Q3a's `ConnectClusterReader` (`connect_worker_info`
-is not merged either), and `-validate` refuses a recording of an unregistered tool. C6's Q6d adds them. Until
-then each file proves its cause from the replayed tools: `tolerance-all-skips` from `connect_config`
+**The labelled tools are replayed since Q6d** and recorded in each file with the real tools' output over the
+scenario's values (Q batch 4 review): `connect_worker_metrics` is the required fact of `tolerance-all-skips`
+(records skipped) and `rebalance-loop` (rebalancing), `connect_worker_info` the required fact of
+`internal-topic-not-compacted` (connect-offsets not compacted) and a fact of `rebalance-loop` (five workers in
+the group), each required reader an evidence tool. The other replayed tools agree: `tolerance-all-skips` from `connect_config`
 (`errors.tolerance: all`), `debezium_metrics` (events still seen) and `kafka_topic_offsets` (nothing new for
 28 min); `internal-topic-not-compacted` from `debezium_snapshot_progress` (a snapshot completed on resume) and
 `kafka_topic_config` (the module default the internal topics were created with, which the kafka-connect owner's
 comment names); `rebalance-loop` from `connect_status` read several times (UNASSIGNED and RUNNING on different
-workers), a 409 "worker rebalance" on `connect_config` and the owner's steer about the staging cluster. Each
-header says which recording and fact to add when Q6d lands. No file sets `expect.fix`: the fixes are on workers
+workers), a 409 "worker rebalance" on `connect_config` and the owner's steer about the staging cluster. No file sets `expect.fix`: the fixes are on workers
 and topics, not room actions; `forbidden_actions` lists the restarts and other reflexes each trap invites.
 
 ### Stale source offsets (Q5f)
@@ -461,10 +468,12 @@ for an LSN older than the slot. Layers: kafka-connect / kafka-connect. **Label (
 `connect_stop_connector`, then `connect_reset_source_offsets` to empty, in one proposal**; on resume Debezium
 snapshots the new database. `connect_source_offsets` (Q5a) is the tool that shows the stale offset.
 
-Neither Q5b action (PR #873) nor `connect_source_offsets` is registered in the eval harness (`LiveActions`,
-`LiveTools`), and `-validate` refuses unknown names in `expect.fix` and `forbidden_actions`, so the two actions
-are in the header, the description and here, and the header carries the exact `fix`/`fix_targets` to add with
-Q6d. Today the file proves the stale offset from `connect_status` (the task's LSN, "no longer available"),
+**Graded since Q6d:** the Q5b actions are registered in `LiveActions` on replay clients (writes are recorded
+no-ops) and `connect_source_offsets` in `LiveTools`, so the file sets `expect.fix`
+(`[[connect_stop_connector], [connect_reset_source_offsets]]`) and `fix_targets` on the connector, and records
+`connect_source_offsets` (partition `{server: pg}`, `lsn` 263235684640 = `3D/4A11C920`) as the required fact
+`f_stored_offset`; `connect_config`'s recording carries the shown config as data for the reset's Preview. The
+other reads agree: `connect_status` (the task's LSN, "no longer available"),
 `connect_config` (the new database and slot) and `pg_replication_slots` (the new slot; the old one is outside
 the pipeline). Forbidden: the restarts and resume (same offsets, same failure), `connect_update_connector_config`,
 `pg_drop_replication_slot` (the new slot is healthy), the snapshot signals (task 0 never streams),
@@ -490,6 +499,37 @@ go run ./cmd/devctl fix stale-source-offsets
 then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the header, `inputs`
 and `expect`, change `RECORDED: NO` to the date, commit and stack, and run `go run ./evals/cmd/evalrun -validate`.
 The Q3f files need a `devctl break` each first (A1 follow-up).
+
+### Network-probe scenarios (Q6c)
+
+Two files about a network path that works from Piperoom's position and not from a component's
+(tasks/Q-board.md, step 6, Jira KAN-250). Each label (the header, the description and this table) names the
+**failing step** of `net_probe` (Q6a, `internal/tools/nettools`), which is the row's done-when. Both use `alert`
+and the baseline `dev/owners.yaml` pipeline; each header says where every component runs.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Failing `net_probe` step (label) |
+|---|---|---|---|---|
+| `advertised-listener-wrong` | pg-orders-connector task 0 FAILED, analytics.orders stale 22m | after a 09:14 roll, broker 2 advertises its Kubernetes-internal name `kafka-2.kafka-headless.kafka.svc.cluster.local:9094`, which the Connect workers outside Kubernetes cannot resolve; the producer's batches for partition 1 expire | kafka-connect / kafka | target `kafka`: `listeners` (node 2 advertises an address that is not a configured broker and is not reachable from here), with that address's `dns` step failing |
+| `db-unreachable-from-connect` | pg-orders-connector task 0 FAILED, slot inactive 33m | a 09:05 segmentation policy on the database subnet rejects the Connect workers' subnet: `Connection to orders-db.internal:5432 refused`, while Postgres is up and Piperoom reaches it | kafka-connect / postgres (alt kafka-connect) | target `source`: `connect_view` (Connect's validation of the running config reports the refusal on `database.hostname`; Piperoom's `dns` and `tcp` pass) |
+
+**`net_probe` is replayed since Q6d.** Each file records it (input `{target: kafka}` or `{target: source}`) with
+the real tool's output over a fake resolver, dialer, metadata and Connect holding the scenario's values (Q
+batch 4 review); the failing step is the required fact (`f_listener_fails`, `f_connect_view_fails`) in the
+root-cause claim, and `net_probe` an evidence tool. The review also fixed `nettools` so that an advertised
+listener whose name does not resolve counts as unreachable (it was a warning). Each file also proves its cause from the replayed tools plus an owner's steer about
+the change that preceded it: `advertised-listener-wrong` from `connect_status` (batches for
+`pg.public.orders-1` expired), `kafka_cluster_health` (3 brokers, ISR full: no broker is down; its Data
+carries node 2's advertised host), the `no such host` error `kafka_topic_offsets` returns (Piperoom runs
+outside Kubernetes too) and order-sync's lag unknown for partition 1 only; `db-unreachable-from-connect` from
+`connect_status` (the refused connection) against the Postgres reads that succeed from Piperoom
+(`pg_replication_slots`, `pg_row`). Neither sets `expect.fix`: the fixes are a broker setting and a network
+rule, not room actions; `forbidden_actions` lists the restarts (they loop), a connector config change (no
+connector key fixes either), the slot drop and the offset reset.
+
+**Synthesised, not recorded** (`RECORDED: NO` in both headers), like Q3f: no Docker in the session and no
+`devctl break` for either incident (an A1 follow-up: a second listener on the dev broker that advertises an
+unresolvable name, and a firewall rule between the Connect and Postgres containers). Re-record them with the
+procedure of "Stale source offsets (Q5f)" above once those breaks exist.
 
 ## Outcome scenarios (E2)
 
@@ -552,7 +592,8 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `52 scenario(s) OK` here (50 before the two Q1e
+  `go run ./evals/cmd/evalrun -validate` reports `54 scenario(s) OK` here (52 before the two Q6c
+  network-probe ones, 50 before the two Q1e
   version-knowledge ones, 46 before the four Q3f/Q5f ones, 44 before the two Q4c register-rejection
   scenarios, 40 before the four Q2g source-setting ones, 38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the
   four CH-4 ClickHouse ones), and `-set heldout` 6.
@@ -580,7 +621,5 @@ All five can be solved with today's tools, but the agent has to infer things a t
   only, so the agent can check a `kafka_replay_range` copy only through the action's own Verify counts.
 - **Offsets by time are visible only through `reconcile`**, which counts what is retained: records that
   retention deleted look as if the connector never wrote them (`rows-lost-after-retention`).
-- **Connect worker metrics, the worker group and source offsets are not replayable yet** (Q3f, Q5f):
-  `connect_worker_metrics`, `connect_worker_info` and `connect_source_offsets` are missing from
-  `evals.LiveTools()`, and the Q5b actions from `evals.LiveActions`, so the four Q3f/Q5f files name them only in
-  their labels until Q6d (C6) adds them.
+- **No scenario records `connect_worker_logs` yet** (Q3c): it is replayable since Q6d, and the agent's skip
+  rule (Q3e) sends the model to it in `tolerance-all-skips`, where a call is a replay miss.

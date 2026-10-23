@@ -290,7 +290,7 @@ func TestCreateConnectorWithoutWriter(t *testing.T) {
 	f := newLifecycleFake()
 	f.names = nil
 	a := &createConnector{d: LifecycleDeps{Connect: noExtras{f}}}
-	if _, err := a.Execute(scoped(), json.RawMessage(createIn)); err == nil || !strings.Contains(err.Error(), "write mode") {
+	if _, err := a.Execute(scoped(), json.RawMessage(createIn)); !errors.Is(err, ErrNoLifecycleWriter) {
 		t.Fatalf("Execute without a writer: %v", err)
 	}
 }
@@ -381,7 +381,7 @@ func TestDeleteConnectorExecute(t *testing.T) {
 
 	f3 := newLifecycleFake()
 	a3 := &deleteConnector{d: LifecycleDeps{Connect: noExtras{f3}}}
-	if _, err := a3.Execute(scoped(), json.RawMessage(deleteIn)); err == nil || !strings.Contains(err.Error(), "write mode") {
+	if _, err := a3.Execute(scoped(), json.RawMessage(deleteIn)); !errors.Is(err, ErrNoLifecycleWriter) {
 		t.Fatalf("Execute without a writer: %v", err)
 	}
 }

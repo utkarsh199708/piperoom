@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,7 +35,8 @@ type ConnectClusterReader interface {
 	// InternalTopics describes the named topics. With no names it finds the
 	// candidates itself: every topic whose name ends in a Connect storage
 	// suffix (see InternalTopicRole). A named topic the cluster does not know
-	// is returned with Missing set.
+	// is returned with Missing set. Discovery finds every Connect cluster's
+	// topics; AttributeInternalTopics ties them to groups.
 	InternalTopics(ctx context.Context, names []string) ([]InternalTopic, error)
 }
 
@@ -146,7 +148,9 @@ func (c *Client) ConnectWorkerGroups(ctx context.Context) ([]ConnectWorkerGroup,
 	}
 	start = time.Now()
 	described, err := adm.DescribeGroups(ctx, ids...)
-	c.record(ctx, start, "kadm.DescribeGroups(groups)", "groups="+strings.Join(ids, ","))
+	// A count, not the ids: the receipt reaches the room, and the other
+	// Connect clusters' group ids are not the room's to see.
+	c.record(ctx, start, "kadm.DescribeGroups(groups)", fmt.Sprintf("groups=%d", len(ids)))
 	if err != nil && len(described) == 0 {
 		return nil, fmt.Errorf("kafka: describe connect groups: %w", err)
 	}
@@ -292,6 +296,120 @@ func InternalTopicRole(name string) string {
 		}
 	}
 	return ""
+}
+
+// genericConnectWords are the words Connect storage topic and group names
+// share across clusters ("connect-configs", "my_connect_offsets", Strimzi's
+// default group "connect-cluster"). They say nothing about which cluster a
+// topic belongs to, so attribution ignores them.
+var genericConnectWords = map[string]bool{"connect": true, "kafka": true, "my": true, "cluster": true}
+
+// connectNameWords splits a topic or group name into the words that tell
+// clusters apart: lower case, split on "-", "_" and ".", without the generic
+// words and, for a topic, without its role words.
+func connectNameWords(name string, topic bool) []string {
+	var out []string
+	for _, w := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool { return r == '-' || r == '_' || r == '.' }) {
+		if genericConnectWords[w] {
+			continue
+		}
+		if topic {
+			switch w {
+			case "configs", "config", "offsets", "offset", "status", "statuses":
+				continue
+			}
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// containsRun reports whether short is a contiguous run of long.
+func containsRun(long, short []string) bool {
+	if len(short) == 0 || len(short) > len(long) {
+		return false
+	}
+	for i := 0; i+len(short) <= len(long); i++ {
+		if slices.Equal(long[i:i+len(short)], short) {
+			return true
+		}
+	}
+	return false
+}
+
+// AttributeInternalTopics ties discovered internal topics to the Connect
+// worker groups on the cluster by Connect's naming habit: a cluster's
+// storage topics are named after its group id ("<group>-configs" in
+// Strimzi; "_connect_configs_staging" for the dev stack's group
+// "piperoom-connect-staging").
+//
+//   - A topic whose distinguishing words (connectNameWords) equal a group's
+//     belongs to that group; failing that, one whose words are a contiguous
+//     run of a group's words, or the reverse. Two groups matching equally
+//     well is ambiguous: the topic stays unattributed.
+//   - A topic with only generic words ("connect-configs", "_connect_status",
+//     "my_connect_offsets") belongs to the one group no specific topic was
+//     tied to, if there is exactly one; with several such groups it could
+//     be anyone's and stays unattributed.
+//
+// The result maps topic name to group id; an unattributed topic is absent.
+// The caller shows a scoped room only its own groups' topics. Attribution
+// is by name only: a wrong guess can hide a topic, and it can show another
+// cluster's topic only when that cluster has no live group of its own (its
+// specific topic shares the room group's words, or its generic topic falls
+// to the room's group as the one unclaimed group).
+func AttributeInternalTopics(topics, groupIDs []string) map[string]string {
+	out := map[string]string{}
+	groupWords := make([][]string, len(groupIDs))
+	for i, g := range groupIDs {
+		groupWords[i] = connectNameWords(g, false)
+	}
+	claimed := make([]bool, len(groupIDs))
+	var generic []string
+	for _, t := range topics {
+		tw := connectNameWords(t, true)
+		if len(tw) == 0 {
+			generic = append(generic, t)
+			continue
+		}
+		best, bestScore, tie := -1, 0, false
+		for i, gw := range groupWords {
+			score := 0
+			switch {
+			case slices.Equal(tw, gw):
+				score = 2
+			case containsRun(gw, tw) || containsRun(tw, gw):
+				score = 1
+			}
+			switch {
+			case score > bestScore:
+				best, bestScore, tie = i, score, false
+			case score > 0 && score == bestScore:
+				tie = true
+			}
+		}
+		if best >= 0 && !tie {
+			out[t] = groupIDs[best]
+			claimed[best] = true
+		}
+	}
+	free := -1
+	for i := range groupIDs {
+		if claimed[i] {
+			continue
+		}
+		if free != -1 {
+			free = -2 // more than one: a generic name is ambiguous
+			break
+		}
+		free = i
+	}
+	if free >= 0 {
+		for _, t := range generic {
+			out[t] = groupIDs[free]
+		}
+	}
+	return out
 }
 
 // InternalTopics reads partitions and replication from one metadata request

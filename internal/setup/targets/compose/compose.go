@@ -61,6 +61,10 @@ const (
 const (
 	// DefaultProject is the Compose project name when the params name none.
 	DefaultProject = "piperoom-setup"
+	// ProjectPrefix starts every project name this driver renders or runs:
+	// a compose file can only ever name a piperoom stack, never another
+	// project on the host.
+	ProjectPrefix = "piperoom-"
 	// DefaultFile is the Compose file compose_write writes when the params
 	// name none. compose_write accepts the other compose names too
 	// (compose.yml, compose.override.yaml, docker-compose*.yml).

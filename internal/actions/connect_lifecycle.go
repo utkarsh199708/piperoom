@@ -39,6 +39,13 @@ const (
 	DeleteConnectorName = "connect_delete_connector"
 )
 
+// ErrNoLifecycleWriter is the Execute refusal of the four lifecycle actions
+// when their Connect client is not a connect.ConnectLifecycleWriter: write
+// mode is off (wiring hands them the read-only client), so the step can be
+// proposed and previewed but not run. It is returned before any I/O and
+// worded like the source actions' refusal.
+var ErrNoLifecycleWriter = errors.New("no write credentials: the Connect lifecycle writer is not configured (PIPEROOM_WRITE_MODE=on is needed)")
+
 // LifecycleDeps is what the Q5b/Q5c actions read and write through. Connect
 // must be the whole client when write mode is on: the actions assert for
 // connect.ConnectLifecycleWriter and connect.SourceOffsetReader at use time,

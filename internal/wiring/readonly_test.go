@@ -245,7 +245,7 @@ var readOnlyAdapterMethods = map[string]bool{
 	"Subjects": true, "Versions": true, "Schema": true, "Compatibility": true,
 	"SubjectsIncludingDeleted": true, "VersionsIncludingDeleted": true,
 	"CheckCompatibility": true,
-	"SourceOffsets":      true, "ServerInfo": true, "Plugins": true,
+	"SourceOffsets":      true, "ServerInfo": true, "Plugins": true, "Loggers": true,
 	// Writes that refuse (ErrReadOnly, or errNoRegistry on noRegistry).
 	"RestartTask": true, "RestartConnector": true,
 	"SetCompatibility": true, "Register": true,

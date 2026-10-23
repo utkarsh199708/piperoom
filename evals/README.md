@@ -923,6 +923,33 @@ the unscoped read, which in replay answers the same recording; with the room's b
 check passes, so the scenario cannot test the connector-role refusal of a hidden session
 (`q2_source_test.go` does, with a recording whose `user` is set).
 
+### Worker, version, offset and network reads; the lifecycle actions (Q6d)
+
+The model is offered `connect_plugins` (Q1c), `connect_worker_info` (Q3a), `connect_validate_config`
+(Q4a), `connect_source_offsets` (Q5a), `connect_worker_metrics` (Q3b), `connect_worker_logs` (Q3c) and
+`net_probe` (Q6a) with their production definitions (`replay_connect.go`); like every read they are
+answered from recordings, so a scenario may now record them (ten files do since the Q batch 4
+review: `q6_replay_test.go` lists them). Production registers the last three since Q3e and Q6b. Since Q1d the agent itself calls `connect_plugins` with `{}` on its
+first `runbook_lookup` and passes the versions from its `data` (`kafka_version`, `plugins[]`) to the
+lookup: record it (no input, with data) where the running versions matter; without a recording that
+read is a miss (at most two per run) and no versions are passed, as before.
+
+`connect_stop_connector`, `connect_reset_source_offsets`, `connect_create_connector` and
+`connect_delete_connector` are registered after the source admin actions through
+`actions.RegisterLifecycle`, the call production's wiring makes. Their reads:
+
+| read | from |
+|---|---|
+| connector names | `resources.connectors` |
+| state | the first `connect_status` recording's data; `connect_stop_connector` executed in the run makes it `STOPPED` |
+| type (`source`/`sink`) | `connect_status`'s data `type` if a scenario sets it, else its summary's `<name> (<type>):` |
+| config | as for the P3 actions (`connect_config` data, `resources.connector_configs`): the reset's Preview and the delete need it |
+| stored offsets | the `connect_source_offsets` recording for `{connector}` (or one without input that lists it); numbers stay exact |
+| config validation | the `connect_validate_config` recording for `{class}`: its `error_count` and `errors` |
+
+Every lifecycle write (`StopConnector`, `ResetSourceOffsets`, `AlterSourceOffsets`, `CreateConnector`,
+`DeleteConnector`) is a no-op recorded in the run's write log, without config values or positions.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from

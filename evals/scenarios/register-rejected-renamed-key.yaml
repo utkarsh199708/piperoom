@@ -1,7 +1,8 @@
-# C7 incident scenario (Q4c): the connector's config still names the Debezium 1.x logical server
-# key database.server.name, which 2.0 replaced with topic.prefix; the upgraded worker refuses
-# the config and the connector sits FAILED at load. Format: evals/README.md (C6). The break is
-# the config a registration uses, so this is the Q4a "validate before registering" story
+# C7 incident scenario (Q4c): the connector's stored config still names the Debezium 1.x logical
+# server key database.server.name, which 2.0 replaced with topic.prefix. After an in-place worker
+# upgrade task 0 fails to configure itself, and re-registering the same 1.x config is refused by
+# Connect's validation (HTTP 400, nothing stored). Format: evals/README.md (C6). The break is the
+# config a registration uses, so this is the Q4a "validate before registering" story
 # (tasks/Q-board.md rows Q4a/Q4b/Q4c).
 #
 # RECORDED: NO. Every summary and data payload below is the exact output of the real
@@ -12,29 +13,33 @@
 # real recording, see evals/scenarios/README.md, "Config-validation scenarios (Q4c)".
 #
 # First failing layer: kafka-connect. Root-cause layer: kafka-connect (a connector config key).
-#   Nothing is wrong in Postgres, Kafka or the warehouse: the slot is inactive only because the
-#   connector cannot be instantiated.
+#   Nothing is wrong in Postgres, Kafka or the warehouse: the slot is inactive only because task 0
+#   cannot configure itself. The connector itself is RUNNING: Debezium's PostgresConnector.start
+#   only keeps the properties; the task's start validates them and fails.
 #
 # Expected label: the key is database.server.name. Debezium 2.0 replaced it with topic.prefix
 #   (known issue dbz-topic-prefix, DBZ-4180); renaming it with the same value (pg) keeps the topic
 #   names, the schema subject names and the stored offsets, so the connector can start where it
-#   stopped. The fix is a config change plus a restart of the connector (Connect cannot load it
-#   at all while the required key is missing). connect_update_connector_config cannot do it: its
+#   stopped. The fix is a config change plus a restart of the connector and its task (the task
+#   cannot start at all while the required key is missing). connect_update_connector_config cannot do it: its
 #   allow-list is output/precision settings and error logging. Re-registering by delete then
 #   create is connect_delete_connector + connect_create_connector (Q5c, not merged yet); its
 #   Preview runs ValidateConfig, which is the check that refuses this config today.
 #   Forbidden: connect_restart_connector, connect_restart_task - a restart re-reads the same
-#     stored config and fails with the same message.
-#   Forbidden: connect_resume_connector - the connector is not STOPPED (Validate refuses it).
+#     stored config and task 0 fails with the same message.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not STOPPED (Validate
+#     refuses it).
 #   Forbidden: schema_register, schema_set_compatibility - both subjects have one version and the
 #     schema is not what is missing; the required connector key is.
 #   Forbidden: connect_update_connector_config - it cannot rename a key (see above).
 #
 # Traps:
-#   - "topic.prefix is invalid" reads like a schema or topic-naming problem; the fix is the
-#     connector's own config key, and pg_recent_ddl shows no DDL at all.
-#   - The connector's config also lacks topic.prefix, which the agent can only see by reading
-#     connect_config (the tool shows database.server.name and hides nothing here).
+#   - "topic.prefix is invalid" (the owner's steer) reads like a schema or topic-naming problem;
+#     the fix is the connector's own config key, and pg_recent_ddl shows no DDL at all.
+#   - Task 0's trace says only "Error configuring an instance of PostgresConnectorTask; check the
+#     logs for errors": the field is in the worker log, which no tool reads. The agent has to
+#     read connect_config (it shows database.server.name and no topic.prefix, and hides nothing
+#     here) and tie it to the owner's 400 message or the dbz-topic-prefix known issue.
 #   - The slot is inactive with 1.1 MiB retained: small, so a slot_wal / dead-slot story fails.
 #
 # Sources:
@@ -46,28 +51,37 @@
 #     key with the nearest known key from PluginConfigDef, and names the Q1 known-issue id when
 #     Deps.RenamedKey is wired (A4's wiring does not pass it yet; until then the rename is
 #     resolved from runbook_lookup, which reads the same embedded index and runs for real in the
-#     harness). The eval harness cannot replay connect_validate_config at all yet (C6's Q6d adds
-#     the definition-only Connect client), so this file proves the key from connect_config and
-#     the connector trace instead; when Q6d lands, add the connect_validate_config read (input
-#     {class}) with its summary and a fact on it.
+#     harness). Since Q6d the harness replays connect_validate_config: the recording below
+#     (input {class}) is the tool's output for the stored config, with the fact
+#     f_validate_unknown_key on it (not required: connect_config and task 0's trace prove the
+#     key too). connect_create_connector's Preview reads the same recording.
 #   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: topic.prefix is
 #     required; it replaced database.server.name in 2.0.
-#   - Kafka Connect: an invalid stored config makes the connector FAILED at load with
-#     "Connector configuration is invalid and contains the following 1 error(s)"; the REST config
-#     endpoint still serves the stored config.
+#   - Kafka Connect validates a config only on the REST create/update path (AbstractHerder
+#     validateConnectorConfig): a PUT /connectors/<name>/config without topic.prefix is answered
+#     HTTP 400 "Connector configuration is invalid and contains the following 1 error(s): The
+#     'topic.prefix' value is invalid: A value is required ..." and nothing is stored. A config
+#     already in the config topic is not re-validated when the worker starts: the connector
+#     starts (RUNNING), and Debezium's BaseSourceTask.start validates the fields and throws
+#     "Error configuring an instance of PostgresConnectorTask; check the logs for errors", so
+#     task 0 is FAILED. connect_status keeps a trace's first line and its "Caused by:" lines
+#     (internal/tools/kafkatools/connect_tools.go condenseTrace); this trace has no cause.
 
 name: register-rejected-renamed-key
 description: |
-  At 09:08 UTC the Connect workers were upgraded to Debezium 3.2. pg-orders-connector was
-  re-registered from the export taken on the old 1.x cluster, so its config still carries the
-  logical server name in the 1.x key database.server.name=pg and has no topic.prefix. The
-  upgraded worker refuses the config ("The 'topic.prefix' value is invalid: A value is required")
-  and the connector sits FAILED at load: no task runs, the slot debezium_orders is inactive and
-  order-sync and analytics.orders have been idle for 32 minutes. Nothing else changed: the
-  schema has one version, no DDL ran, the source role can read the table.
+  At 09:08 UTC the Connect workers were upgraded in place to Debezium 3.2. pg-orders-connector's
+  stored config dates from the 1.x cluster, so it still carries the logical server name in the
+  1.x key database.server.name=pg and has no topic.prefix. The connector starts (RUNNING) but
+  task 0 FAILED: "Error configuring an instance of PostgresConnectorTask; check the logs for
+  errors". The owner then tried to re-register the 1.x export (PUT /connectors/.../config) and
+  Connect refused it with HTTP 400 ("The 'topic.prefix' value is invalid: A value is required"),
+  so the stored config is unchanged. The slot debezium_orders is inactive and order-sync and
+  analytics.orders have been idle for 32 minutes. Nothing else changed: the schema has one
+  version, no DDL ran, the source role can read the table.
 
   Root cause: the connector's config still uses database.server.name, which Debezium 2.0 renamed
-  to topic.prefix, and topic.prefix is required, so Connect cannot instantiate the connector.
+  to topic.prefix, and topic.prefix is required, so task 0 cannot configure itself and Connect
+  refuses the same config on re-registration.
 
   Expected label: rename database.server.name to topic.prefix with the value pg (known issue
   DBZ-4180) and restart the connector; the topic names, subject names and stored offsets stay
@@ -89,12 +103,12 @@ resources:
   subjects: [pg.public.orders-key, pg.public.orders-value]
 
 alert:
-  title: 'orders: pg-orders-connector is FAILED and analytics.orders is 32m stale after the Debezium 3.2 upgrade; the connector was re-registered from the 1.x export'
+  title: 'orders: pg-orders-connector task 0 is FAILED and analytics.orders is 32m stale after the Debezium 3.2 upgrade; re-registering the 1.x export was refused'
   pipeline_map: |
     pipeline orders
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
-    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
       from: pg:public.orders
     3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
       from: connect:pg-orders-connector
@@ -110,7 +124,7 @@ recordings:
       pipeline orders
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
-      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
         from: pg:public.orders
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
         from: connect:pg-orders-connector
@@ -140,7 +154,9 @@ recordings:
           layer: postgres
           name: public.orders
           owner: priya
-        - health: fail
+        - facts:
+            tasks_failed: "1"
+          health: fail
           id: connect:pg-orders-connector
           kind: connector
           layer: kafka-connect
@@ -175,24 +191,26 @@ recordings:
       pipeline_id: orders
   - tool: connect_list_connectors
     summary: |-
-      pg-orders-connector (source): FAILED, 0 failed tasks
+      pg-orders-connector (source): RUNNING, 1 failed tasks
     data:
-      - failed_tasks: 0
+      - failed_tasks: 1
         name: pg-orders-connector
-        state: FAILED
+        state: RUNNING
         type: source
   - tool: connect_status
     input: {connector: pg-orders-connector}
     summary: |-
-      pg-orders-connector (source): FAILED on connect:8083:
-      org.apache.kafka.connect.errors.ConnectException: Connector configuration is invalid and contains the following 1 error(s):
-      The 'topic.prefix' value is invalid: A value is required
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for errors
     data:
       name: pg-orders-connector
-      state: FAILED
-      tasks: []
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: FAILED
+          error: 'org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for errors'
       worker: connect:8083
-      error: "org.apache.kafka.connect.errors.ConnectException: Connector configuration is invalid and contains the following 1 error(s):\nThe 'topic.prefix' value is invalid: A value is required"
   - tool: connect_config
     input: {connector: pg-orders-connector}
     summary: |-
@@ -256,14 +274,17 @@ recordings:
       versions:
         - 1
   - tool: schema_registry_diff
-    input: {subject: pg.public.orders-value}
+    input: {subject: pg.public.orders-value, from_version: 1}
     summary: |-
       no field changes
     data:
-      changes: []
+      changes: null
       from_version: 1
       subject: pg.public.orders-value
-      to_version: 2
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
   - tool: pg_recent_ddl
     summary: |
       (no DDL since 2026-10-23T09:40:00Z)
@@ -293,13 +314,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
@@ -385,6 +406,22 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    summary: |-
+      1 error in io.debezium.connector.postgresql.PostgresConnector:
+        topic.prefix: The 'topic.prefix' value is invalid: A value is required
+      unknown key "database.server.name": not a known key of this plugin
+    data:
+      base_connector: pg-orders-connector
+      class: io.debezium.connector.postgresql.PostgresConnector
+      config_keys: 4
+      error_count: 1
+      errors:
+        topic.prefix:
+          - 'The ''topic.prefix'' value is invalid: A value is required'
+      unknown_keys:
+        - key: database.server.name
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: connect_status
     error: 'connect: GET /connectors/<name>/status: not found'
@@ -415,7 +452,7 @@ recordings:
 inputs:
   - kind: steer
     from: arjun
-    text: "I did the upgrade and the re-register. The worker refuses the config - it says The 'topic.prefix' value is invalid: A value is required - and the connector will not start. I own the connector: tell me which setting to change and I will re-register it the same way."
+    text: "I did the in-place upgrade. Task 0 failed, so I tried re-registering the connector from our 1.x export with PUT /connectors/pg-orders-connector/config, and Connect answered 400: Connector configuration is invalid and contains the following 1 error(s): The 'topic.prefix' value is invalid: A value is required. I own the connector: tell me which setting to change and I will re-register it the same way."
 
 expect:
   root_cause:
@@ -432,9 +469,9 @@ expect:
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:
-    - id: f_topic_prefix_required
+    - id: f_task_config_error
       tool: connect_status
-      match: [topic prefix, value is invalid]
+      match: [task 0, failed, error configuring, postgres connector task]
       required: true
     - id: f_old_key_in_config
       tool: connect_config
@@ -446,9 +483,12 @@ expect:
     - id: f_one_schema_version
       tool: schema_registry_versions
       match: [versions 1, latest id 2]
+    - id: f_validate_unknown_key
+      tool: connect_validate_config
+      match: [unknown key, database server name]
   claims:
     - about: root_cause
-      facts: [f_topic_prefix_required, f_old_key_in_config]
+      facts: [f_old_key_in_config, f_task_config_error]
   evidence_tools: [connect_config, connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
   max_tool_calls: 12

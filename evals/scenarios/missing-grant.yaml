@@ -15,7 +15,10 @@
 # Expected fix (the label): source_grant_select {connector: pg-orders-connector, role: devctl_cdc,
 #   tables: [public.orders]} (the postgres owner approves; SELECT and nothing else), then
 #   connect_restart_task {connector: pg-orders-connector, task: 0}: snapshot.mode=always makes
-#   the task read the table on start, which is where the missing grant failed.
+#   the task read the table on start, which is where the missing grant failed. connect_config
+#   does not show snapshot.mode (it is not on the tool's allow-list), so nothing here depends on
+#   reading it: the trace and source_role_grants are the evidence, and the restart after the
+#   grant is right whatever the snapshot mode.
 #   devctl fix also proves the grant by restarting task 0 and then restores the dev baseline
 #   (the connector back on piperoom), which is not part of the incident fix.
 #   Graded since Q2h (C6): expect.fix (the grant, then the task restart, in that order) and
@@ -51,7 +54,7 @@
 
 name: missing-grant
 description: |
-  At 09:05 UTC the platform team moved pg-orders-connector to a least-privilege role after the
+  At 09:12 UTC the platform team moved pg-orders-connector to a least-privilege role after the
   security review: the connector now connects as devctl_cdc (LOGIN, REPLICATION; CONNECT on
   orders, USAGE on public) and runs with snapshot.mode=always, so every task start reads
   public.orders. The SELECT grant on public.orders is still open with the DBA. Task 0 was
@@ -214,7 +217,6 @@ recordings:
       database.user: devctl_cdc
       publication.autocreate.mode: disabled
       slot.name: debezium_orders
-      snapshot.mode: always
       table.include.list: public.orders
       topic.prefix: pg
   - tool: source_role_grants
@@ -248,13 +250,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: source_blocking_sessions
     summary: |-
@@ -325,12 +327,17 @@ recordings:
       versions:
         - 1
   - tool: schema_registry_diff
-    input: {subject: pg.public.orders-value}
+    input: {subject: pg.public.orders-value, from_version: 1}
     summary: |-
-      pg.public.orders-value: no difference between version 1 and the latest (id 2)
+      no field changes
     data:
-      changes: []
+      changes: null
+      from_version: 1
       subject: pg.public.orders-value
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
