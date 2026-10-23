@@ -225,6 +225,14 @@ type Deps struct {
 	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
 	// slack_off and writes nothing.
 	TeamPager TeamPager
+
+	// PullRequests reads the fix PRs the rooms follow (Q7e, pr_follow.go):
+	// the forge's reader. Nil (FORGE_KIND empty) means no follower: an
+	// opened PR stays in pull_requests as open.
+	PullRequests PullRequestReader
+	// PRPollTicker, when set, replaces the follower's ticker, like
+	// LeaseTicker. Nil uses time.NewTicker.
+	PRPollTicker func(d time.Duration) (<-chan time.Time, func())
 }
 
 type roomState struct {
@@ -452,6 +460,17 @@ type Service struct {
 	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
 	credMu      sync.Mutex
 	credPending map[string]pendingCredentials
+
+	// Pull request follower (pr_follow.go; Q7e). prReader is nil with no
+	// forge: then nothing below runs. changeW records a merged PR in the
+	// pipeline change log (nil when the store keeps none). prTickDone, when
+	// set (tests only), runs after each check of the loop.
+	prReader   PullRequestReader
+	prTicker   func(d time.Duration) (<-chan time.Time, func())
+	prOnce     sync.Once
+	prTickDone func()
+	prf        *prFollower
+	changeW    clients.ChangeWriter
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -490,6 +509,7 @@ func New(d Deps) *Service {
 	}
 	shadowStore, _ := d.Store.(store.ShadowStore)
 	changes, _ := d.Store.(clients.ChangeReader)
+	changeW, _ := d.Store.(clients.ChangeWriter)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:           d.Store,
@@ -520,6 +540,10 @@ func New(d Deps) *Service {
 		onActionExec:    d.OnActionExecuted,
 		onActionResult:  d.OnActionResult,
 		teamPager:       d.TeamPager,
+		prReader:        d.PullRequests,
+		prTicker:        d.PRPollTicker,
+		prf:             newPRFollower(),
+		changeW:         changeW,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
@@ -624,6 +648,7 @@ func (s *Service) Load(ctx context.Context) error {
 	s.startCoordination()
 	s.startLeaseExpiry()
 	s.startAutoApprove()
+	s.startPRFollower()
 	return nil
 }
 
@@ -1503,7 +1528,10 @@ func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
 // event decides it (emitLocked), as for a steer.
 func startsAgent(snap RoomSnapshot, e events.Event) bool {
 	for _, in := range inputsFor(snap, e) {
-		if in.Kind == "proposal_created" || in.Kind == "proposal_executed" {
+		// Q7: a fix PR that merged or closed wakes an idle agent too: it
+		// verifies after a merge and reports a close (agent.HumanInput).
+		switch in.Kind {
+		case "proposal_created", "proposal_executed", "pr_merged", "pr_closed":
 			return true
 		}
 	}
@@ -1672,6 +1700,10 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Seq: e.Seq, Actor: e.Actor, Kind: "proposal_staged",
 			Text: stagedInputText(p), OK: &healthy, ProposalID: p.ProposalID,
 		}
+	case events.PullRequestUpdated:
+		// Q7: pr_merged or pr_closed, once per fix PR (the follower writes
+		// one event per state, and a merged or closed PR is not followed).
+		return prInput(e)
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {

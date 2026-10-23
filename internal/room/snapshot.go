@@ -948,6 +948,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		if !p.OK || isLastStep(snap.OpenProposals, p.ProposalID, p.StepIndex) {
 			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 		}
+
+	case events.PullRequestUpdated:
+		if p, ok := decode[events.PullRequestUpdatedPayload](e); ok {
+			snap.PullRequests = applyPRUpdate(snap.PullRequests, p, e.At)
+		}
 	}
 
 	// The setup member folds from the setup.* events (setup_snapshot.go). It
