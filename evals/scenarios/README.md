@@ -291,6 +291,69 @@ Every file starts with comments that are not part of the format: the first faili
 root-cause layer, why no action fixes it, what each forbidden action would do wrong, the correct
 human fix, the traps, and the sources for every error string.
 
+### Worker-visibility scenarios (Q3f)
+
+Three files about Kafka Connect itself, where the connector's REST status alone does not show the cause
+(tasks/Q-board.md, step 3). Each label (the header, the description and this table) names the tool that shows
+the cause, which is the row's done-when. All three use `alert` and the baseline `dev/owners.yaml` pipeline.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Tool that shows the cause (label) |
+|---|---|---|---|---|
+| `tolerance-all-skips` | analytics.orders stale 28m, connector RUNNING | `errors.tolerance=all` silently skips every event whose new Avro schema (the 09:12 `amount` type change) the registry rejects | kafka-connect / kafka-connect | `connect_worker_metrics`: task 0 records skipped |
+| `internal-topic-not-compacted` | order-sync lag 388214 after a resume | `connect-offsets` is `cleanup.policy=delete`, 1-day retention: the connector's offset aged out during a 4-day pause, so Debezium re-snapshotted public.orders | kafka-connect / kafka-connect (alt kafka) | `connect_worker_info`: internal topic not compacted |
+| `rebalance-loop` | analytics.orders stale 19m, connector changed state 23 times | a staging Connect cluster joined the production worker group (same `group.id`, own config topic): endless rebalances | kafka-connect / kafka-connect | `connect_worker_metrics` (rebalancing, completed rebalances) and `connect_worker_info` (the staging workers in the group) |
+
+**The labelled tools are not replayable yet.** `evals.LiveTools()` does not call
+`debeziumtools.RegisterWorkerMetrics` and has no client for Q3a's `ConnectClusterReader` (`connect_worker_info`
+is not merged either), and `-validate` refuses a recording of an unregistered tool. C6's Q6d adds them. Until
+then each file proves its cause from the replayed tools: `tolerance-all-skips` from `connect_config`
+(`errors.tolerance: all`), `debezium_metrics` (events still seen) and `kafka_topic_offsets` (nothing new for
+28 min); `internal-topic-not-compacted` from `debezium_snapshot_progress` (a snapshot completed on resume) and
+`kafka_topic_config` (the module default the internal topics were created with, which the kafka-connect owner's
+comment names); `rebalance-loop` from `connect_status` read several times (UNASSIGNED and RUNNING on different
+workers), a 409 "worker rebalance" on `connect_config` and the owner's steer about the staging cluster. Each
+header says which recording and fact to add when Q6d lands. No file sets `expect.fix`: the fixes are on workers
+and topics, not room actions; `forbidden_actions` lists the restarts and other reflexes each trap invites.
+
+### Stale source offsets (Q5f)
+
+`stale-source-offsets` is built on `devctl break stale-source-offsets` (`dev/scenarios.md` §24, Q5e):
+pg-orders-connector is repointed at the migrated database `devctl_orders_v2` (`database.dbname` and `slot.name`)
+and keeps the offsets Connect stored under its name for the old database, so task 0 fails asking the new slot
+for an LSN older than the slot. Layers: kafka-connect / kafka-connect. **Label (expected actions):
+`connect_stop_connector`, then `connect_reset_source_offsets` to empty, in one proposal**; on resume Debezium
+snapshots the new database. `connect_source_offsets` (Q5a) is the tool that shows the stale offset.
+
+Neither Q5b action (PR #873) nor `connect_source_offsets` is registered in the eval harness (`LiveActions`,
+`LiveTools`), and `-validate` refuses unknown names in `expect.fix` and `forbidden_actions`, so the two actions
+are in the header, the description and here, and the header carries the exact `fix`/`fix_targets` to add with
+Q6d. Today the file proves the stale offset from `connect_status` (the task's LSN, "no longer available"),
+`connect_config` (the new database and slot) and `pg_replication_slots` (the new slot; the old one is outside
+the pipeline). Forbidden: the restarts and resume (same offsets, same failure), `connect_update_connector_config`,
+`pg_drop_replication_slot` (the new slot is healthy), the snapshot signals (task 0 never streams),
+`kafka_reset_consumer_offsets` and the schema actions.
+
+**Synthesised from the code paths, not recorded** (Q3f and Q5f). The session had no Docker, no `devctl break`
+exists for the three Q3f incidents, and §24 is not observed on the stack yet. Every summary follows the real
+tools' format strings on main (`kafkatools`, `dbtools`, `debeziumtools`, topology), composed by hand on a fixed
+clock of 2026-10-23T09:40:00Z; every header says `RECORDED: NO` and lists its sources. The good, wrong and
+synthetic-label entries are in `../scoring_test.go` and `../agreement_test.go`. To re-record
+`stale-source-offsets` (needs Docker and `ANTHROPIC_API_KEY`):
+
+```sh
+docker compose -f dev/docker-compose.yml up -d
+go run ./cmd/devctl break stale-source-offsets
+go run ./cmd/server                    # dev/owners.yaml; the watcher opens connector_down
+# let the agent investigate, label the room (cause, layer, fix proposal), close it, then export and convert it:
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix stale-source-offsets
+```
+
+then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the header, `inputs`
+and `expect`, change `RECORDED: NO` to the date, commit and stack, and run `go run ./evals/cmd/evalrun -validate`.
+The Q3f files need a `devctl break` each first (A1 follow-up).
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
@@ -379,3 +442,7 @@ All five can be solved with today's tools, but the agent has to infer things a t
   only, so the agent can check a `kafka_replay_range` copy only through the action's own Verify counts.
 - **Offsets by time are visible only through `reconcile`**, which counts what is retained: records that
   retention deleted look as if the connector never wrote them (`rows-lost-after-retention`).
+- **Connect worker metrics, the worker group and source offsets are not replayable yet** (Q3f, Q5f):
+  `connect_worker_metrics`, `connect_worker_info` and `connect_source_offsets` are missing from
+  `evals.LiveTools()`, and the Q5b actions from `evals.LiveActions`, so the four Q3f/Q5f files name them only in
+  their labels until Q6d (C6) adds them.
