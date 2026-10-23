@@ -243,6 +243,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/setup/targets/{t}/class", "/api/rooms/" + f.rb + "/setup/targets/db.acme%3A5432/class", `{"class":"production"}`},
 		{"POST", "/api/rooms/{id}/setup/pipeline", "/api/rooms/" + f.rb + "/setup/pipeline", `{"add_tables":["public.b2"]}`},
 		{"POST", "/api/rooms/{id}/setup/maintenance-window", "/api/rooms/" + f.rb + "/setup/maintenance-window", `{"start":"2026-10-21T10:00:00Z","end":"2026-10-21T11:00:00Z"}`},
+		{"POST", "/api/rooms/{id}/setup/secret", "/api/rooms/" + f.rb + "/setup/secret", `{"name":"source_password","value":"longenough"}`},
+		{"POST", "/api/rooms/{id}/setup/credentials", "/api/rooms/" + f.rb + "/setup/credentials", ""},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
 }

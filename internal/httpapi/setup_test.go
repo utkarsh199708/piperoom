@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -60,9 +61,11 @@ func (r setupAPIResolver) LookupNetIP(_ context.Context, _, host string) ([]neti
 }
 
 type setupAPIEnv struct {
-	srv *httptest.Server
-	api *httpapi.Server
-	svc *room.Service
+	srv        *httptest.Server
+	api        *httpapi.Server
+	svc        *room.Service
+	logs       *syncLogBuf
+	secretsDir string
 }
 
 func newSetupAPIEnv(t *testing.T, enabled bool) *setupAPIEnv {
@@ -80,25 +83,28 @@ func newSetupAPIEnv(t *testing.T, enabled bool) *setupAPIEnv {
 		t.Fatal(err)
 	}
 	st := memstore.New()
+	secretsDir := filepath.Join(t.TempDir(), "secrets")
 	svc := room.New(room.Deps{
 		Store: st, Users: users, Owners: own,
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
 			<-ctx.Done()
 			return nil
 		},
-		Setup: config.Setup{Enabled: enabled, TokenBudget: 2_000_000},
+		Setup: config.Setup{Enabled: enabled, TokenBudget: 2_000_000, SecretsDir: secretsDir},
 		SetupResolver: setupAPIResolver{
 			"db.acme":           {netip.MustParseAddr("10.1.2.3")},
 			"internal.metadata": {netip.MustParseAddr("169.254.169.254")},
 		},
 	})
-	api := httpapi.New(svc, st, nil)
+	logs := &syncLogBuf{}
+	opts := []httpapi.Option{httpapi.WithSetup(enabled)}
+	api := httpapi.New(svc, st, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})), opts...)
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() {
 		srv.Close()
 		api.Close()
 	})
-	return &setupAPIEnv{srv: srv, api: api, svc: svc}
+	return &setupAPIEnv{srv: srv, api: api, svc: svc, logs: logs, secretsDir: secretsDir}
 }
 
 func (e *setupAPIEnv) do(t *testing.T, user, method, path, body string) (int, []byte) {
