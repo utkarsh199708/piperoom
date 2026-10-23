@@ -20,8 +20,10 @@
 #   creation then finishes, Debezium snapshots (no stored offsets) and streams.
 #   The pid and started_at come from source_blocking_sessions: the action re-reads the session
 #   and refuses one that changed, and never ends a walsender or the connector's own sessions.
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not expect.fix.
+#   The session locks no pipeline table, so the room's scoped read withholds its identity
+#   (in_scope=false); the action accepts it because it holds the oldest xid horizon
+#   (blocks_slot), and checks itself that it is not the connector's database.user (piperoom).
+#   Graded since Q2h (C6): expect.fix and fix_targets (pid; started_at is checked by the action).
 #   Forbidden: pg_drop_replication_slot - there is no slot to drop (Validate refuses), and the
 #     slot the connector is creating is the one the pipeline needs.
 #   Forbidden: connect_restart_task, connect_restart_connector - the wait repeats: any restart
@@ -38,15 +40,17 @@
 #   - connect_status shows the task UNASSIGNED and no trace: "the task failed" is wrong.
 #
 # Sources:
-#   - cmd/devctl/scenarios_q2.go breakBlockedSlot (#866): a detached psql session
-#     (application_name=devctl-blocker, BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800))
+#   - cmd/devctl/scenarios_q2.go breakBlockedSlot (#866, role since the Q batch 3 review): a
+#     detached psql session as the analyst's own role devctl_blocker (application_name=
+#     devctl-blocker, BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800))
 #     then stop the connector, drop the slot, clear its offsets, resume, and wait until a
 #     walsender waits on a transactionid lock (backend_type=walsender, wait_event_type=Lock,
 #     wait_event=transactionid).
 #   - https://www.postgresql.org/docs/17/functions-admin.html: CREATE_REPLICATION_SLOT exports a
 #     snapshot and waits for every transaction that was running when it started.
 #   - internal/tools/dbtools/source_settings.go: source_blocking_sessions' summary and Data
-#     (pid, started_at, xact_start, blocks_slot, query redacted to 200 bytes).
+#     (pid, started_at, xact_start, blocks_slot, query redacted to 200 bytes); a session outside
+#     the pipeline's tables is listed with user, application and query blank ("identity hidden").
 #   - internal/actions/sourceactions/end_session.go: the params (connector, pid, started_at,
 #     older_than_minutes) and the re-read that refuses a changed session.
 
@@ -55,13 +59,14 @@ description: |
   At 09:14 UTC the platform team moved pg-orders-connector to a new host and set it up again:
   the connector was stopped, its slot debezium_orders dropped and its stored offsets cleared,
   then resumed, so Debezium is creating the slot and taking a fresh snapshot. An analyst's psql
-  session had opened a transaction at 09:14 and left it open (application_name=devctl-blocker).
+  session (role devctl_blocker) had opened a transaction at 09:14 and left it open.
   CREATE_REPLICATION_SLOT waits for every transaction that was running when it started, so task
   0 never gets past start: no slot exists, nothing reaches Kafka and analytics.orders is 26
   minutes stale. Nothing FAILED: Connect reports no trace, the task has not started yet.
 
-  Root cause: the analyst's open transaction devctl-blocker (pid 48213) holds back the slot
-  creation, so the connector cannot start streaming.
+  Root cause: the analyst's open transaction (pid 48213; it locks no pipeline table, so the room
+  sees it with identity hidden and blocks_slot=yes) holds back the slot creation, so the
+  connector cannot start streaming.
 
   Expected fix (label): source_end_session on that session (pid and started_at from
   source_blocking_sessions); the slot creation then completes and Debezium snapshots and streams.
@@ -171,17 +176,17 @@ recordings:
   - tool: source_blocking_sessions
     input: {older_than_minutes: 20}
     summary: |-
-      pid=48213 user=piperoom app=devctl-blocker state=active age=26m blocks_slot=yes query="SELECT pg_sleep(1800)"
+      pid=48213 state=active age=26m blocks_slot=yes (outside the pipeline's tables; identity hidden)
     data:
       - pid: 48213
         started_at: "2026-10-23T09:14:12Z"
         xact_start: "2026-10-23T09:14:13Z"
-        user: piperoom
-        application: devctl-blocker
+        user: ""
+        application: ""
         state: active
-        query: SELECT pg_sleep(1800)
+        query: ""
         blocks_slot: true
-        in_scope: true
+        in_scope: false
   - tool: source_blocking_sessions
     summary: |-
       (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
@@ -465,7 +470,7 @@ expect:
   expected_facts:
     - id: f_blocker
       tool: source_blocking_sessions
-      match: [devctl blocker, blocks slot yes]
+      match: [pid 48213, blocks slot yes]
       required: true
     - id: f_no_slot
       tool: pg_replication_slots
@@ -481,5 +486,8 @@ expect:
     - about: root_cause
       facts: [f_blocker, f_no_slot]
   evidence_tools: [source_blocking_sessions]
+  fix: [[source_end_session]]
+  fix_targets:
+    source_end_session: {connector: pg-orders-connector, pid: 48213}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 12

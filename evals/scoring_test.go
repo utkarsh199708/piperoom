@@ -406,7 +406,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "The replication slot debezium_orders went idle after the host move, so the pipeline stalls. Drop and recreate the slot with a fresh snapshot.",
 	},
 	"blocked-slot": {
-		good:  "An analyst's session (application_name=devctl-blocker, pid 48213) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays in STARTING and the slot debezium_orders is still pending. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
+		good:  "An analyst's session (pid 48213, listed with identity hidden as outside the pipeline's tables) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays in STARTING and the slot debezium_orders is still pending. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
 		wrong: "The replication slot debezium_orders was dropped in the host move; re-create the slot by hand and take a new snapshot.",
 	},
 	"idle-wal-growth": {

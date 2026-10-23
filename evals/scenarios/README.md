@@ -276,14 +276,18 @@ with one Q2 admin action, which the label names. `idle-wal-growth` is scoped lik
 |---|---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
 | `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
-| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot=yes` | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes`, identity hidden (it locks no pipeline table; the analyst's role `devctl_blocker`) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
 | `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
 
-**Grading waits for Q2h (C6).** `evals.LiveActions` registers neither the Q2a readers nor the
-source actions, so these files do not set `expect.fix`/`fix_targets`: the expected action and its
-params sit in the label, the header and the description, and `forbidden_actions` lists the
-restarts, resume, slot drop and schema actions each trap reaches for. Q2h adds the replay and
-the fix grading.
+**Graded since Q2h (C6).** `evals.LiveActions` registers the source actions on replay clients
+(`../replay_source.go`), so each file sets `expect.fix` and `fix_targets` for its labelled action
+(`no-replica-identity`: the table, mode free; `missing-grant`: the grant to `devctl_cdc`, then
+`connect_restart_task` on task 0; `idle-wal-growth`: the heartbeat table; `blocked-slot`: pid
+48213), and `forbidden_actions` lists the restarts, resume, slot drop and schema actions each trap
+reaches for. `blocked-slot`'s session is recorded as a room sees it: it locks no pipeline table, so
+`in_scope=false` with user, application and query blank; `source_end_session` accepts it because it
+holds the oldest xid horizon (`blocks_slot`) and checks itself that it is not the connector's
+`database.user`. In replay that check reads the same recording (blank user), so it passes.
 
 **How the rooms open.** All four use `alert`. The eval watcher reads Connect and slots only
 (`../watcher_start.go`); the dev watcher opens `missing-grant` on `connector_down`/`slot_inactive`

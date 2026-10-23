@@ -916,8 +916,12 @@ matching tool recording answers, so a scenario that records the evidence needs n
 
 Every admin write (`SetReplicaIdentity`, `GrantSelect`, `CreateHeartbeatTable`, `EndSession`) is a
 no-op recorded in the run's write log. `source_end_session` refuses a session whose `user` is the
-connector's `database.user` and, in a room, one recorded with `in_scope: false`: record the blocker
-as the room would see it.
+connector's `database.user` and, in a room, one recorded with `in_scope: false` unless it also has
+`blocks_slot: true` (it holds the oldest xid horizon, so it holds back the pipeline's slot): record
+the blocker as the room would see it. For such a hidden session the action checks the user through
+the unscoped read, which in replay answers the same recording; with the room's blank `user` that
+check passes, so the scenario cannot test the connector-role refusal of a hidden session
+(`q2_source_test.go` does, with a recording whose `user` is set).
 
 ## Answers that list every cause
 

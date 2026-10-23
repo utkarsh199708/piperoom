@@ -867,9 +867,8 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"rows-lost-after-retention": {ps("pg_resnapshot_rows", `{"connector":"pg-orders-connector","table":"public.orders","key_range":{"column":"id","from":"1301","to":"1340"}}`)},
 		"consumer-skipped-range":    {ps("kafka_replay_range", `{"topic":"pg.public.orders","to_topic":"pg.public.orders.reprocess","ranges":[{"partition":0,"from_offset":433,"to_offset":445},{"partition":1,"from_offset":434,"to_offset":446},{"partition":2,"from_offset":433,"to_offset":446}]}`)},
 	}
-	// The Q2 source admin fixes (Q2h), proposed once C7 grades them
-	// (expect.fix). blocked-slot has none: its labelled source_end_session
-	// is refused on its recordings (see q2_source_test.go).
+	// The Q2 source admin fixes (Q2h); each Q2g file grades its fix
+	// (expect.fix and fix_targets).
 	for name, fix := range q2Fixes {
 		p3Fixes[name] = fix
 	}

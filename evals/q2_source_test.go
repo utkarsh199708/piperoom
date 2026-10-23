@@ -7,17 +7,17 @@ import (
 	"strings"
 	"testing"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
 
 // Q2h: the Q2 source admin actions on replay clients. The four Q2g scenarios
-// name their fix in a comment label only (C7 sets expect.fix once these
-// actions replay); the tests below grade each label as expect.fix would.
+// grade their fix with expect.fix and fix_targets; the tests below run each
+// labelled fix against the scenario's own recordings.
 
 // q2Fixes are the labelled fixes of the Q2g scenarios, as the agent proposes
-// them. blocked-slot's label is missing on purpose: see
-// TestQ2BlockedSlotLabelRefusedOnRecordings.
+// them.
 var q2Fixes = map[string][]events.ProposalStep{
 	"no-replica-identity": {ps("pg_set_replica_identity", `{"table":"public.orders","mode":"full"}`)},
 	"missing-grant": {
@@ -25,19 +25,28 @@ var q2Fixes = map[string][]events.ProposalStep{
 		ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`),
 	},
 	"idle-wal-growth": {ps("source_create_heartbeat_table", `{"connector":"pg-orders-connector","table":"public.devctl_heartbeat"}`)},
+	"blocked-slot":    {blockedSlotFix},
 }
 
 // blockedSlotFix is blocked-slot's labelled fix.
 var blockedSlotFix = ps("source_end_session", `{"connector":"pg-orders-connector","pid":48213,"started_at":"2026-10-23T09:14:12Z","older_than_minutes":20}`)
 
-// graded returns sc with expect.fix set to fix's actions, one group each,
-// as C7 would set it.
-func graded(sc Scenario, fix []events.ProposalStep) Scenario {
-	sc.Expect.Fix = nil
+// expectsFix fails t unless sc's expect.fix is fix's actions, one group
+// each, in order: the scenario file grades the labelled fix.
+func expectsFix(t *testing.T, sc Scenario, fix []events.ProposalStep) {
+	t.Helper()
+	var want [][]string
 	for _, st := range fix {
-		sc.Expect.Fix = append(sc.Expect.Fix, []string{st.Action})
+		want = append(want, []string{st.Action})
 	}
-	return sc
+	if !slices.EqualFunc(sc.Expect.Fix, want, slices.Equal) {
+		t.Fatalf("expect.fix = %v, want %v", sc.Expect.Fix, want)
+	}
+	for _, st := range fix {
+		if _, ok := sc.Expect.FixTargets[st.Action]; !ok {
+			t.Fatalf("expect.fix_targets has no target for %s", st.Action)
+		}
+	}
 }
 
 func loadQ2(t *testing.T, name string) Scenario {
@@ -76,7 +85,8 @@ func TestLiveActionsIncludeSourceAdminActions(t *testing.T) {
 func TestQ2ScenariosScoreLabelledFix(t *testing.T) {
 	for name, fix := range q2Fixes {
 		t.Run(name, func(t *testing.T) {
-			sc := graded(loadQ2(t, name), fix)
+			sc := loadQ2(t, name)
+			expectsFix(t, sc, fix)
 			defs, err := LiveTools()
 			if err != nil {
 				t.Fatal(err)
@@ -101,9 +111,9 @@ func TestQ2ScenariosScoreLabelledFix(t *testing.T) {
 // A run that proposes nothing, or only a forbidden step, fails the graded
 // scenario: the label is what makes it pass.
 func TestQ2ScenariosWithoutTheFixFail(t *testing.T) {
-	for name, fix := range q2Fixes {
+	for name := range q2Fixes {
 		t.Run(name, func(t *testing.T) {
-			sc := graded(loadQ2(t, name), fix)
+			sc := loadQ2(t, name)
 			r, _ := evalOnce(t, sc, canPassScript(t, sc, nil))
 			if r.Pass || !strings.Contains(strings.Join(r.Failures, "; "), "fix") {
 				t.Fatalf("no proposal: pass=%v failures=%v", r.Pass, r.Failures)
@@ -158,12 +168,12 @@ func TestQ2ActionsValidateOnReplay(t *testing.T) {
 	}
 }
 
-// blocked-slot's labelled source_end_session is refused on the scenario's own
-// recordings: the blocker runs as piperoom, which is also the connector's
-// database.user, and the action never ends a session of that role. With the
-// blocker on another role the same step validates and the scenario scores,
-// so the replay is not what stops it (finding for C7 and A1, Q2h report).
-func TestQ2BlockedSlotLabelRefusedOnRecordings(t *testing.T) {
+// blocked-slot's labelled source_end_session validates on the scenario's own
+// recordings: the blocker locks no pipeline table, so the room sees it with
+// identity hidden (in_scope false), and the action accepts it because it
+// holds the oldest xid horizon (blocks_slot). Were the hidden session the
+// connector's own database.user, the action's unscoped check refuses it.
+func TestQ2BlockedSlotHiddenBlockerValidates(t *testing.T) {
 	sc := loadQ2(t, "blocked-slot")
 	reg, err := LiveActions(sc.Resources, sc.Recordings)
 	if err != nil {
@@ -171,29 +181,32 @@ func TestQ2BlockedSlotLabelRefusedOnRecordings(t *testing.T) {
 	}
 	a, _ := reg.Get("source_end_session")
 	ctx := tools.WithPipeline(context.Background(), sc.Pipeline)
-	if err := a.Validate(ctx, blockedSlotFix.Params); err == nil || !strings.Contains(err.Error(), "own database.user") {
-		t.Fatalf("Validate = %v, want the connector-role refusal", err)
+	if err := a.Validate(ctx, blockedSlotFix.Params); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	pv, ok := a.(actions.Preview)
+	if !ok {
+		t.Fatal("source_end_session has no Preview")
+	}
+	res, err := pv.Preview(ctx, blockedSlotFix.Params)
+	if err != nil || !strings.Contains(res.Current, "identity withheld") {
+		t.Fatalf("Preview = %v %+v", err, res)
 	}
 
-	other := withBlockerUser(t, sc, "devctl_blocker")
-	reg, err = LiveActions(other.Resources, other.Recordings)
+	own := withBlockerUser(t, sc, "piperoom")
+	reg, err = LiveActions(own.Resources, own.Recordings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a, _ = reg.Get("source_end_session")
-	if err := a.Validate(ctx, blockedSlotFix.Params); err != nil {
-		t.Fatalf("Validate with the blocker on another role: %v", err)
-	}
-	fix := []events.ProposalStep{blockedSlotFix}
-	g := graded(other, fix)
-	r, tr := evalOnce(t, g, canPassScript(t, g, fix))
-	if !r.Pass || r.RightAction == nil || !r.RightAction.OK {
-		t.Fatalf("pass=%v right action=%+v failures=%v attempts=%+v", r.Pass, r.RightAction, r.Failures, tr.Attempts)
+	if err := a.Validate(ctx, blockedSlotFix.Params); err == nil || !strings.Contains(err.Error(), "own database.user") {
+		t.Fatalf("Validate with the connector's role = %v, want the connector-role refusal", err)
 	}
 }
 
 // withBlockerUser returns sc with the blocking session of its
-// older_than_minutes 20 recording owned by user.
+// older_than_minutes 20 recording owned by user, as the action's unscoped
+// check would read it.
 func withBlockerUser(t *testing.T, sc Scenario, user string) Scenario {
 	t.Helper()
 	sc.Recordings = slices.Clone(sc.Recordings)
@@ -233,9 +246,6 @@ func TestQ2AdminWritesAreRecordedNoOps(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.method, func(t *testing.T) {
 			sc := loadQ2(t, c.scenario)
-			if c.scenario == "blocked-slot" {
-				sc = withBlockerUser(t, sc, "devctl_blocker")
-			}
 			reg, wl, err := liveActions(sc.Resources, sc.Recordings)
 			if err != nil {
 				t.Fatal(err)

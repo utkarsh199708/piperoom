@@ -27,8 +27,8 @@
 #   them, so the table is not declared in dev/owners.q2.yaml (in production it is added to
 #   owners.yaml after it is created). Each heartbeat is then a change Debezium receives and
 #   confirms, and retained WAL falls below slot_wal.clear within one Connect offset flush (60 s).
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not expect.fix.
+#   Graded since Q2h (C6): expect.fix and fix_targets (the action step only; the config keys and
+#   the publication member are the preview's follow-up steps, applied by a Connect admin).
 #   Forbidden: pg_drop_replication_slot - the slot is healthy and holds the position; dropping it
 #     forces a new slot and a re-snapshot of every table.
 #   Forbidden: connect_restart_task, connect_restart_connector - nothing failed, and a restart
@@ -580,5 +580,8 @@ expect:
     - about: root_cause
       facts: [f_slot_active_retaining, f_source_quiet, f_no_blockers]
   evidence_tools: [pg_replication_slots, source_settings, source_blocking_sessions]
+  fix: [[source_create_heartbeat_table]]
+  fix_targets:
+    source_create_heartbeat_table: {connector: pg-orders-connector, table: public.devctl_heartbeat}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_pause_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14
