@@ -124,6 +124,7 @@ func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
 		}
 	}
 	r.warnSharedPrefixes(drafts)
+	r.warnMixedKinds(drafts)
 
 	if len(drafts) > 0 {
 		r.checkSubjects(drafts)
@@ -321,6 +322,27 @@ func anyMatch(res []*regexp.Regexp, s string) bool {
 		}
 	}
 	return false
+}
+
+// warnMixedKinds warns when the cluster has both Postgres and MySQL source
+// connectors. The drafted pipelines carry no connections: blocks, so they
+// would all share one client set, and one client set serves one source kind:
+// the server (wiring.Open) refuses such a file. The warning lands in the
+// file's footer and on stderr, and says what each kind needs.
+func (r *runner) warnMixedKinds(drafts []*draft) {
+	var pg, my []string
+	for _, dr := range drafts {
+		if dr.sourceKind == sourceKindMySQL {
+			my = append(my, dr.connector)
+		} else {
+			pg = append(pg, dr.connector)
+		}
+	}
+	if len(pg) == 0 || len(my) == 0 {
+		return
+	}
+	r.warn("the cluster has Postgres source connectors (%s) and MySQL ones (%s); one server client set serves one source kind, so the server refuses this file as written: give each MySQL pipeline a connections: block whose source_db_url is its mysql:// URL (and keep SOURCE_DB_URL for the Postgres ones), or run one Piperoom deployment per source kind",
+		strings.Join(pg, ", "), strings.Join(my, ", "))
 }
 
 func (r *runner) warnSharedPrefixes(drafts []*draft) {

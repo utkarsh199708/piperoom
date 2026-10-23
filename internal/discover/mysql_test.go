@@ -68,6 +68,55 @@ func TestMySQLSourceTables(t *testing.T) {
 
 // A MySQL pipeline has no replication slot: no slot note, and with only MySQL
 // pipelines the slots are not listed at all (a failing source is never read).
+// A cluster with both a Postgres and a MySQL connector yields a file the
+// server refuses as written (one client set serves one source kind): the run
+// warns, naming the connections: block each MySQL pipeline needs, and the
+// warning is in the rendered file (PR #934 review, minor 6). One kind alone
+// gets no such warning.
+func TestMixedSourceKindsWarn(t *testing.T) {
+	const want = "one server client set serves one source kind"
+	d := single(mysqlConfig("topic.prefix", "shop", "table.include.list", "shop.orders"), "shop.shop.orders")
+	d.Connect.(*fakeConnect).configs["pg-orders-connector"] = pgConfig("topic.prefix", "pg", "table.include.list", "public.orders")
+	res := run(t, d, Options{})
+	var w string
+	for _, s := range res.Warnings {
+		if strings.Contains(s, want) {
+			w = s
+		}
+	}
+	if w == "" {
+		t.Fatalf("no mixed-kind warning in %q", res.Warnings)
+	}
+	for _, part := range []string{"pg-orders-connector", "(c)", "connections: block", "source_db_url", "mysql://", "one Piperoom deployment per source kind"} {
+		if !strings.Contains(w, part) {
+			t.Errorf("warning lacks %q: %s", part, w)
+		}
+	}
+	for name, render := range map[string]func(*bytes.Buffer) error{
+		"draft": func(b *bytes.Buffer) error { return Render(b, res) },
+		"owned": func(b *bytes.Buffer) error { return RenderOwned(b, res, "alice") },
+	} {
+		var b bytes.Buffer
+		if err := render(&b); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("%s file lacks the warning:\n%s", name, b.String())
+		}
+	}
+
+	for name, d := range map[string]Deps{
+		"mysql only":    single(mysqlConfig("topic.prefix", "shop", "table.include.list", "shop.orders"), "shop.shop.orders"),
+		"postgres only": single(pgConfig("topic.prefix", "pg", "table.include.list", "public.orders"), "pg.public.orders"),
+	} {
+		for _, s := range run(t, d, Options{}).Warnings {
+			if strings.Contains(s, want) {
+				t.Errorf("%s: mixed-kind warning: %s", name, s)
+			}
+		}
+	}
+}
+
 func TestMySQLNoSlotCheck(t *testing.T) {
 	d := single(mysqlConfig("topic.prefix", "shop", "table.include.list", "shop.orders"), "shop.shop.orders")
 	d.Source = &fakeSource{err: errBoom}
