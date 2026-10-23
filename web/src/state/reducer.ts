@@ -40,6 +40,18 @@ import type {
   RoomCreatedPayload,
   RoomEscalatedPayload,
   RoomLabelledPayload,
+  SetupAwaitingChangePayload,
+  SetupBlockedPayload,
+  SetupMaintenanceWindowPayload,
+  SetupPipelineExtendedPayload,
+  SetupPlanPayload,
+  SetupRequest,
+  SetupRunnerAttachedPayload,
+  SetupRunnerLostPayload,
+  SetupTargetClassedPayload,
+  SetupTargetRegisteredPayload,
+  SetupVerifiedPayload,
+  PipelineRegisteredPayload,
   SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
@@ -51,12 +63,40 @@ import { alertSource } from '../lib/alerts'
 import { driftFacts } from '../lib/drift'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
-import { checklistKey, snapshotStaging, snapshotWriteMode } from './types'
+import { checklistKey, advanceSetupStep, newSetupState, snapshotStaging, snapshotWriteMode } from './types'
 import { stageLiftsRequirement } from '../lib/staging'
 import type { AlertInfo, HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
+}
+
+// room.created.alert holds the SetupRequest on a setup room. A malformed body (an older
+// server, a hand-written fixture) leaves the setup member without the form's values: the
+// runner, plan and thread still fold.
+function parseSetupRequest(raw: unknown): SetupRequest | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const req = raw as Partial<SetupRequest>
+  if (typeof req.pipeline_id !== 'string' || typeof req.title !== 'string') return undefined
+  return {
+    pipeline_id: req.pipeline_id,
+    title: req.title,
+    source_kind: typeof req.source_kind === 'string' ? req.source_kind : '',
+    target: typeof req.target === 'string' ? req.target : '',
+    topic_prefix: typeof req.topic_prefix === 'string' ? req.topic_prefix : '',
+    tables: Array.isArray(req.tables) ? req.tables.filter((t): t is string => typeof t === 'string') : [],
+    targets: Array.isArray(req.targets)
+      ? req.targets.filter((t) => t && typeof t.address === 'string').map((t) => ({
+          kind: typeof t.kind === 'string' ? t.kind : '',
+          address: t.address,
+          ...(t.class ? { class: t.class } : {}),
+        }))
+      : [],
+    ...(typeof req.tenant === 'string' && req.tenant ? { tenant: req.tenant } : {}),
+    ...(Array.isArray(req.connectors)
+      ? { connectors: req.connectors.filter((c): c is string => typeof c === 'string') }
+      : {}),
+  }
 }
 
 /**
@@ -281,6 +321,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
         opened_at: event.at,
         driver,
         alert,
+        // U: a setup room's alert is its SetupRequest; the setup member starts with no runner.
+        ...(p.mode === 'setup' ? { setup: newSetupState(parseSetupRequest(p.alert)) } : {}),
         members:
           event.actor.kind === 'human'
             ? [{ id: event.actor.id, name: event.actor.name, verified: event.actor.verified === true, role: 'driver' }]
@@ -329,7 +371,14 @@ function applyCore(state: RoomState, event: Event): RoomState {
 
     case 'agent.status': {
       const p = as<AgentStatusPayload>(event)
-      next = { ...state, agent_status: { state: p.state, detail: p.detail } }
+      next = {
+        ...state,
+        agent_status: { state: p.state, detail: p.detail },
+        // U: the agent went back to work, so the setup question no longer asks (server Apply).
+        ...(state.setup?.blocked && p.state !== 'idle'
+          ? { setup: { ...state.setup, blocked: undefined } }
+          : {}),
+      }
       break
     }
 
@@ -842,6 +891,18 @@ function applyCore(state: RoomState, event: Event): RoomState {
               }
             : prop,
         ),
+        // U: the setup stepper advances past the step the plan is on.
+        ...(state.setup
+          ? {
+              setup: advanceSetupStep({
+                ...state.setup,
+                executed: {
+                  ...state.setup.executed,
+                  [p.step_index]: { ok: p.ok, at: event.at, ...(p.outcome_unknown ? { outcome_unknown: true } : {}) },
+                },
+              }),
+            }
+          : {}),
       }
       break
     }
@@ -967,6 +1028,150 @@ function applyCore(state: RoomState, event: Event): RoomState {
     case 'shadow.labelled':
       next = { ...state, shadow_labelled: true }
       break
+
+    // ---- U wave: setup rooms ----
+
+    case 'setup.runner_attached': {
+      if (!state.setup) break
+      const p = as<SetupRunnerAttachedPayload>(event)
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          runner: { label: p.runner_label, connected: true, tools: p.tools ?? {} },
+        },
+      }
+      break
+    }
+
+    case 'setup.runner_lost': {
+      if (!state.setup) break
+      const p = as<SetupRunnerLostPayload>(event)
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          runner: {
+            label: p.runner_label || state.setup.runner?.label || '',
+            connected: false,
+            tools: state.setup.runner?.tools ?? {},
+          },
+        },
+      }
+      break
+    }
+
+    case 'setup.plan': {
+      if (!state.setup) break
+      const p = as<SetupPlanPayload>(event)
+      const phases = p.phases ?? []
+      next = {
+        ...state,
+        setup: advanceSetupStep({
+          ...state.setup,
+          plan_id: p.plan_id,
+          phases,
+          executed: {},
+        }),
+      }
+      break
+    }
+
+    case 'setup.blocked': {
+      if (!state.setup) break
+      const p = as<SetupBlockedPayload>(event)
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          blocked: {
+            reason: p.reason,
+            question: p.question,
+            ...(p.step_index !== undefined ? { step_index: p.step_index } : {}),
+          },
+        },
+      }
+      break
+    }
+
+    case 'setup.target_registered': {
+      if (!state.setup) break
+      const p = as<SetupTargetRegisteredPayload>(event)
+      const targets = state.setup.targets.some((t) => t.address === p.address)
+        ? state.setup.targets.map((t) => (t.address === p.address ? { ...t, kind: p.kind, class: p.class } : t))
+        : [...state.setup.targets, { kind: p.kind, address: p.address, class: p.class }]
+      next = { ...state, setup: { ...state.setup, targets } }
+      break
+    }
+
+    case 'setup.target_classed': {
+      if (!state.setup) break
+      const p = as<SetupTargetClassedPayload>(event)
+      // A class only rises (docs/api.md): the same floor the server applies.
+      const rank = (c: string) => (c === 'production' ? 3 : c === 'shared' ? 2 : c === 'local' ? 1 : 0)
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          targets: state.setup.targets.map((t) =>
+            t.address === p.target && rank(p.class) > rank(t.class) ? { ...t, class: p.class } : t,
+          ),
+        },
+      }
+      break
+    }
+
+    case 'setup.pipeline_extended': {
+      if (!state.setup) break
+      const p = as<SetupPipelineExtendedPayload>(event)
+      const add = (list: string[], more?: string[]) =>
+        [...new Set([...list, ...(more ?? [])])].filter((name) => name !== '')
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          provisional: {
+            ...state.setup.provisional,
+            tables: add(state.setup.provisional.tables, p.add_tables),
+            connectors: add(state.setup.provisional.connectors, p.add_connectors),
+          },
+        },
+      }
+      break
+    }
+
+    case 'setup.maintenance_window': {
+      if (!state.setup) break
+      const p = as<SetupMaintenanceWindowPayload>(event)
+      next = {
+        ...state,
+        setup: { ...state.setup, maintenance_window: { start: p.start, end: p.end } },
+      }
+      break
+    }
+
+    case 'setup.verified': {
+      if (!state.setup) break
+      const p = as<SetupVerifiedPayload>(event)
+      // A run of an older plan says nothing about this one.
+      if (state.setup.plan_id && p.plan_id !== state.setup.plan_id) break
+      next = { ...state, setup: { ...state.setup, verified: p.rungs ?? [] } }
+      break
+    }
+
+    case 'setup.awaiting_change': {
+      if (!state.setup) break
+      const p = as<SetupAwaitingChangePayload>(event)
+      next = { ...state, setup: { ...state.setup, awaiting_change: p } }
+      break
+    }
+
+    case 'pipeline.registered': {
+      if (!state.setup) break
+      const p = as<PipelineRegisteredPayload>(event)
+      next = { ...state, setup: { ...state.setup, watched_by: p.watched_by } }
+      break
+    }
 
     default:
       break

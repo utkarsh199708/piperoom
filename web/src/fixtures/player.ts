@@ -5,13 +5,22 @@ import type { Event, RoomSnapshot, Topology } from '../api/types'
 import schemaChangeRaw from './schema-change.json'
 import roomsRaw from './rooms.json'
 import topologyRaw from './topology.json'
+import { SETUP_ROOM_ID, planCreated, runnerAttached, setupCreated, setupRoomSnapshot } from './setup'
 
 const schemaChange = schemaChangeRaw as unknown as {
   snapshot: RoomSnapshot
   events: Event[]
 }
 
-export const fixtureRooms: RoomSnapshot[] = roomsRaw as unknown as RoomSnapshot[]
+// U1-12a: a setup room in the story, so the stepper and the setup bar are reachable without a runner.
+const setupSnapshot: RoomSnapshot = setupRoomSnapshot({
+  runner: { label: 'arjun-laptop', connected: true, tools: { docker: '27.1.1' } },
+  plan_id: 'pl_1',
+  phase: 'prerequisites',
+  step_index: 0,
+})
+
+export const fixtureRooms: RoomSnapshot[] = [setupSnapshot, ...(roomsRaw as unknown as RoomSnapshot[])]
 export const fixtureTopology: Topology = topologyRaw as unknown as Topology
 
 export const FIXTURE_ROOM_ID = schemaChange.snapshot.id
@@ -57,6 +66,7 @@ export function fixtureRoom(id: string): RoomSnapshot | undefined {
 
 export function fixtureEvents(id: string): Event[] {
   if (id === schemaChange.snapshot.id) return schemaChange.events
+  if (id === SETUP_ROOM_ID) return [setupCreated(), runnerAttached(), planCreated()]
   return webhookAlertEvents[id] ?? []
 }
 

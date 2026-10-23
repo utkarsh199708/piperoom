@@ -19,6 +19,14 @@ import type {
   RoomLabelledPayload,
   RoomMode,
   RoomSnapshot,
+  SetupAwaitingChangePayload,
+  SetupBounds,
+  SetupPlanPhase,
+  SetupRequest,
+  SetupRung,
+  SetupRunnerSummary,
+  SetupSnapshot,
+  SetupTargetSummary,
   ToolCall,
   TraceStage,
 } from '../api/types'
@@ -379,6 +387,116 @@ export interface ActivityEntry {
   tool?: string
 }
 
+/** One action.executed of a setup step, keyed by the plan step index. */
+export interface SetupExecutedState {
+  ok: boolean
+  at: string
+  /** The runner may or may not have run the step; it is never retried. */
+  outcome_unknown?: boolean
+}
+
+/**
+ * A setup room (U wave). Folded from the snapshot and the log: the snapshot carries runner,
+ * plan id, phase and step index; `phases` and `executed` come from setup.plan and
+ * action.executed, so the stepper can name every step before it runs.
+ */
+export interface SetupState {
+  runner: SetupRunnerSummary | null
+  plan_id: string
+  phase: string
+  /** The first step of the plan no action.executed has run yet. */
+  step_index: number
+  bounds: SetupBounds
+  targets: SetupTargetSummary[]
+  provisional: { topic_prefix: string; tables: string[]; connectors: string[] }
+  maintenance_window?: { start: string; end: string }
+  verified: SetupRung[]
+  blocked?: { reason: string; question: string; step_index?: number }
+  /** pipeline.registered.watched_by: "server", "local", or "" before registration. */
+  watched_by: string
+  /** The request room.created carries (the form's values); absent until the replay reaches it. */
+  request?: SetupRequest
+  /** The current setup.plan's phases; [] before the first plan. */
+  phases: SetupPlanPhase[]
+  /** Plan step index -> its action.executed. */
+  executed: Record<number, SetupExecutedState>
+  /** setup.awaiting_change: rung 8 waits for a change the person makes to `table`. */
+  awaiting_change?: SetupAwaitingChangePayload
+}
+
+export const DEFAULT_SETUP_BOUNDS: SetupBounds = {
+  attempts_per_step: 3,
+  steps_per_plan: 12,
+  wall_clock_s: 2700,
+  token_budget: 2_000_000,
+}
+
+/** The UI's view of a setup snapshot: absent fields read as their empty value. */
+export function setupFromSnapshot(snapshot: SetupSnapshot): SetupState {
+  return {
+    runner: snapshot.runner ?? null,
+    plan_id: snapshot.plan_id ?? '',
+    phase: snapshot.phase ?? '',
+    step_index: snapshot.step_index ?? 0,
+    bounds: snapshot.bounds ?? DEFAULT_SETUP_BOUNDS,
+    targets: snapshot.targets ?? [],
+    provisional: {
+      topic_prefix: snapshot.provisional?.topic_prefix ?? '',
+      tables: snapshot.provisional?.tables ?? [],
+      connectors: snapshot.provisional?.connectors ?? [],
+    },
+    ...(snapshot.maintenance_window ? { maintenance_window: snapshot.maintenance_window } : {}),
+    verified: snapshot.verified ?? [],
+    ...(snapshot.blocked ? { blocked: snapshot.blocked } : {}),
+    watched_by: snapshot.watched_by ?? '',
+    phases: [],
+    executed: {},
+  }
+}
+
+/**
+ * The setup member room.created opens: no runner, no plan, the request as the person typed it.
+ * The snapshot of a just-created room may arrive before the replay; this is the same shape.
+ */
+export function newSetupState(request?: SetupRequest): SetupState {
+  return {
+    runner: null,
+    plan_id: '',
+    phase: '',
+    step_index: 0,
+    bounds: DEFAULT_SETUP_BOUNDS,
+    targets: (request?.targets ?? []).map((t) => ({
+      kind: t.kind,
+      address: t.address,
+      class: t.class && t.class !== '' ? t.class : 'shared',
+    })),
+    provisional: {
+      topic_prefix: request?.topic_prefix ?? '',
+      tables: request?.tables ?? [],
+      connectors: request?.connectors ?? [],
+    },
+    verified: [],
+    watched_by: '',
+    ...(request ? { request } : {}),
+    phases: [],
+    executed: {},
+  }
+}
+
+/** Move `step_index` to the first step of the plan no action.executed has run yet. */
+export function advanceSetupStep(setup: SetupState): SetupState {
+  for (const phase of setup.phases) {
+    for (const step of phase.steps) {
+      if (!setup.executed[step.index]) {
+        return { ...setup, phase: phase.name, step_index: step.index }
+      }
+    }
+  }
+  const last = setup.phases[setup.phases.length - 1]
+  const lastStep = last?.steps[last.steps.length - 1]
+  return { ...setup, phase: last?.name ?? setup.phase, step_index: lastStep?.index ?? setup.step_index }
+}
+
 export interface RoomState {
   id: string
   title: string
@@ -466,6 +584,8 @@ export interface RoomState {
   origin?: string
   /** X3: the snapshot's newest forecast signal (lane ETA badge, forecast room chart); absent when none. */
   forecast?: ForecastSummary
+  /** U wave: present on a setup room only (room.created.mode "setup" or the snapshot's setup). */
+  setup?: SetupState
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -525,6 +645,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_by: snapshot.closed_by,
     postmortem: postmortemFromSnapshot(snapshot),
     ...(snapshot.origin ? { origin: snapshot.origin } : {}),
+    ...(snapshot.setup ? { setup: setupFromSnapshot(snapshot.setup) } : {}),
     ...forecastField(snapshot),
     last_seq: 0,
     shadow: snapshot.shadow === true,

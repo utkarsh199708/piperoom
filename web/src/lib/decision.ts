@@ -7,11 +7,29 @@ import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isViewer } from '../state/permissions'
 import { waitingForWriteMode } from './writeMode'
 import { approveAllFor } from './approveAll'
+import { setupStatus } from './setup'
+import type { SetupStepView } from './setup'
+
+/** The setup plan step a decision belongs to, so the bar can say "Step 2 of 7 · compose_up". */
+export interface SetupStepContext {
+  step: SetupStepView | null
+  number: number
+  total: number
+}
+
+export type SetupDecisionStatus =
+  | 'no_runner'
+  | 'runner_lost'
+  | 'paired'
+  | 'planning'
+  | 'running'
+  | 'blocked'
+  | 'registered'
 
 export type Decision =
   /** `all`: the card offers one "Approve and run" for these layers (P2c); `layer` is the first of them. */
-  | { kind: 'needs-you'; proposal: ProposalState; layer: string; completing: boolean; all?: string[] }
-  | { kind: 'waiting'; proposal: ProposalState; pending: string[]; approved: number; total: number }
+  | { kind: 'needs-you'; proposal: ProposalState; layer: string; completing: boolean; all?: string[]; setup?: SetupStepContext }
+  | { kind: 'waiting'; proposal: ProposalState; pending: string[]; approved: number; total: number; setup?: SetupStepContext }
   | { kind: 'executing'; proposal: ProposalState; step: number; total: number; action: string }
   | { kind: 'done'; proposal: ProposalState; ok: boolean; failedStep?: number }
   /**
@@ -19,6 +37,23 @@ export type Decision =
    * undecided (see cancelledLayers), so the bar never says they still wait on someone.
    */
   | { kind: 'rejected'; proposal: ProposalState; by: string; byActor?: Actor; layer: string; cancelled: string[] }
+  /**
+   * A setup room between proposals: no runner, planning, blocked on a question, or registered.
+   * `status` is the setup state; `step` names the plan step it is about when there is one.
+   */
+  | {
+      kind: 'setup'
+      status: SetupDecisionStatus
+      step?: SetupStepView | null
+      number?: number
+      total?: number
+      /** runner label, or the agent's blocked question; both are text, never markup */
+      label?: string
+      question?: string
+      reason?: string
+      watchedBy?: string
+      action?: string
+    }
 
 function newest(proposals: ProposalState[], status: ProposalState['status']): ProposalState | undefined {
   return [...proposals].reverse().find((p) => p.status === status)
@@ -47,6 +82,65 @@ export function cancelledLayers(p: ProposalState): string[] {
 
 export function decisionFor(state: RoomState, user: CurrentUser): Decision | null {
   if (state.status !== 'open') return null
+  // U: a setup room answers in plan steps first. The first step that needs a person wins over
+  // everything else: pairing the runner, an approval, or the agent's blocked question.
+  if (state.setup) {
+    const setup = setupStatus(state, user)
+    if (setup) {
+      const planStep = 'step' in setup ? setup.step : null
+      const number = 'number' in setup ? setup.number : 0
+      const total = 'total' in setup ? setup.total : 0
+      const ctx: SetupStepContext = { step: planStep ?? null, number, total }
+      switch (setup.kind) {
+        case 'awaiting_approval': {
+          if (setup.forYou) {
+            return {
+              kind: 'needs-you',
+              proposal: setup.proposal,
+              layer: setup.layer,
+              completing: setup.completing,
+              ...(setup.all ? { all: setup.all } : {}),
+              setup: ctx,
+            }
+          }
+          return {
+            kind: 'waiting',
+            proposal: setup.proposal,
+            pending: setup.pending,
+            approved: setup.proposal.required_layers.filter((l) => setup.proposal.approvals[l] === 'approved').length,
+            total: setup.proposal.required_layers.length,
+            setup: ctx,
+          }
+        }
+        case 'running':
+          return { kind: 'setup', status: 'running', step: ctx.step, number: ctx.number, total: ctx.total, action: setup.action }
+        case 'blocked':
+          return {
+            kind: 'setup',
+            status: 'blocked',
+            step: ctx.step,
+            number: ctx.number,
+            total: ctx.total,
+            question: setup.question,
+            reason: setup.reason,
+          }
+        case 'no_runner':
+        case 'runner_lost':
+        case 'paired':
+        case 'planning':
+          return {
+            kind: 'setup',
+            status: setup.kind,
+            step: ctx.step,
+            number: ctx.number,
+            total: ctx.total,
+            ...(setup.kind === 'runner_lost' || setup.kind === 'paired' ? { label: setup.label } : {}),
+          }
+        case 'registered':
+          return { kind: 'setup', status: 'registered', watchedBy: setup.watchedBy }
+      }
+    }
+  }
   const proposals = state.proposals
 
   // The same place ProposalsPanel gives the A and R keys: the first proposal with its "Approve and
