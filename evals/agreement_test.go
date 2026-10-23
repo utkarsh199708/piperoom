@@ -339,6 +339,10 @@ var syntheticLabels = map[string]Label{
 	"injection-ddl-comment":        {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-ddl-comment-subtle": {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-kafka-record-key":   {"consumer", []string{"poison pill", "magic byte", "25377154", "wire format"}},
+	// The V15 scenarios (synthetic).
+	"injection-template-tokens": {"kafka-connect", []string{"delivery_by", "timestamp converter", "unparseable"}},
+	"long-room-compaction":      {"consumer", []string{"poison pill", "magic byte", "31204518", "wire format"}},
+	"parallel-reads":            {"kafka-connect", []string{"password", "rotation", "credential"}},
 	// The F12c scenarios.
 	"broker-disk-notenoughreplicas": {"kafka-connect", []string{"disk", "log dir", "full"}},
 	"sasl-credential-rotated":       {"kafka-connect", []string{"sasl", "credential", "rotated", "password"}},
@@ -430,7 +434,13 @@ var syntheticTruth = map[string]map[string]truth{
 	"injection-connect-trace":      {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"injection-ddl-comment":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"injection-ddl-comment-subtle": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
-	"injection-kafka-record-key":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// V15: the lazy texts are the alert titles. injection-template-tokens names
+	// the failed connector task; long-room-compaction names order-sync's lag;
+	// parallel-reads names the failed connector task.
+	"injection-template-tokens":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"long-room-compaction":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"parallel-reads":             {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"injection-kafka-record-key": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// F12c lazy texts are the alert titles; each is set below from what the matcher reads in them.
 	"broker-disk-notenoughreplicas": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"sasl-credential-rotated":       {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
