@@ -230,6 +230,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		if err := evals.ValidateAll(scenarios, defs); err != nil {
 			return 1, err
 		}
+		// A run only warns about a broken setup recording (Evaluate);
+		// -check fails on it so it is fixed before it costs a grouping.
+		if d := setupRecordingsDir(f.scenarios); d != "" {
+			if _, err := evals.LoadSetupReplays(d); err != nil {
+				return 1, err
+			}
+		}
 		for _, sc := range scenarios {
 			for _, w := range sc.Warnings() {
 				fmt.Fprintf(stderr, "warning: %s: %s\n", sc.Name, w)
@@ -325,6 +332,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		JudgeCache:     f.judgeCache,
 		JudgeCacheOnly: f.cacheOnly,
 		JudgeMaxCalls:  judgeMaxCalls(f.maxCalls),
+		SetupDir:       setupRecordingsDir(f.scenarios),
 		Options:        opts,
 		Runs:           f.runs,
 		Parallel:       f.parallel,
@@ -611,6 +619,21 @@ const (
 	setDefault = "default"
 	setHeldout = "heldout"
 )
+
+// setupRecordingsDir is the sibling setup/recordings directory of the
+// scenarios directory (U1-20), or "" when it does not exist or holds no
+// *.json: a checkout without the recordings runs exactly as before, and a run
+// with them groups the setup scenarios by source and target in the report.
+func setupRecordingsDir(scenariosDir string) string {
+	d := filepath.Join(filepath.Dir(filepath.Clean(scenariosDir)), "setup", "recordings")
+	if info, err := os.Stat(d); err != nil || !info.IsDir() {
+		return ""
+	}
+	if paths, err := filepath.Glob(filepath.Join(d, "*.json")); err != nil || len(paths) == 0 {
+		return ""
+	}
+	return d
+}
 
 // loadSet reads the scenarios a run replays and the pending ones only -check
 // validates. The default set is the scenarios directory plus, when -learned

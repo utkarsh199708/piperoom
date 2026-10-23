@@ -205,10 +205,11 @@ func (r *Runner) dropDone(ids []string) {
 // confirmation), executes through the catalogue (or the runner's built-in
 // secret_set), redacts the result literally under the secret store and mints
 // its OutMAC, and reports Result or Refused.
-func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
-	opCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+//
+// opCtx is the op's own context and cancel its cancel func, registered by the
+// read loop before this goroutine started (watchConfirm), so a FrameCancel
+// that arrives during the checks below is never lost.
+func (r *Runner) runOp(ctx, opCtx context.Context, cancel context.CancelFunc, req *protocol.OpRequest) {
 	if !req.Deadline.IsZero() && !r.now().Before(req.Deadline) {
 		r.refuse(ctx, req, protocol.RefuseDeadline)
 		return
@@ -294,9 +295,7 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		// (or reports unknown) the step, so a "y" typed after it must not
 		// start the op.
 		if req.Tier == protocol.TierT3 {
-			unwatch := r.watchConfirm(req.ID, cancel)
 			ok, err := r.confirmT3(opCtx, req)
-			unwatch()
 			switch {
 			case err != nil && ctx.Err() != nil:
 				return // the connection ended; the op does not run
@@ -335,6 +334,9 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 			}
 		}
 
+		if r.stoppedBeforeStart(ctx, opCtx, req) {
+			return
+		}
 		if err := r.markStarted(req, target, eff, cancel); err != nil {
 			if errors.Is(err, errDuplicateStep) {
 				r.refuse(ctx, req, protocol.RefuseDuplicateStep)
@@ -349,6 +351,9 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		}
 		r.printOp(req, target)
 	} else {
+		if r.stoppedBeforeStart(ctx, opCtx, req) {
+			return
+		}
 		r.setInflight(&protocol.OpStatus{ID: req.ID, State: protocol.StateRunning}, cancel)
 	}
 
@@ -570,15 +575,17 @@ func (r *Runner) markStarted(req *protocol.OpRequest, target, eff string, cancel
 func (r *Runner) refuse(ctx context.Context, req *protocol.OpRequest, reason string) {
 	target := r.catalogue.Target(*req)
 	ref := &protocol.Refusal{ID: req.ID, Op: req.Op, Reason: reason, ProposalID: req.ProposalID, StepIndex: req.StepIndex}
-	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: ref}); err != nil {
-		r.log.Debug("writing refusal failed", "op", req.Op, "reason", reason, "err", err)
-	}
+	// Log before sending: once the server has the refusal it may hang up, and
+	// a Run that returns closes the op log, so a later append would be lost.
 	if lerr := r.logEntry(opLogEntry{
 		ID: req.ID, Op: req.Op, Target: target, ProposalID: req.ProposalID,
 		StepIndex: req.StepIndex, Tier: req.Tier, Class: r.effectiveClass(req, target),
 		State: opLogRefused, Reason: reason, At: r.now(),
 	}, false); lerr != nil {
 		r.log.Debug("op log write failed", "op", req.Op, "err", lerr)
+	}
+	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: ref}); err != nil {
+		r.log.Debug("writing refusal failed", "op", req.Op, "reason", reason, "err", err)
 	}
 }
 
@@ -647,6 +654,28 @@ func (r *Runner) printOp(req *protocol.OpRequest, target string) {
 		scrub(req.ProposalID, maxPrintedFieldLen), step)
 }
 
+// stoppedBeforeStart reports whether the op must not start because its
+// context already ended: a FrameCancel (or the deadline) that landed during
+// the checks or just after the "y" stops the op here, before its start
+// record, so a cancelled op never starts. It is refused, except when the
+// runner itself is stopping (ctx ended), where there is nobody to tell.
+func (r *Runner) stoppedBeforeStart(ctx, opCtx context.Context, req *protocol.OpRequest) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	err := opCtx.Err()
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, context.DeadlineExceeded):
+		r.refuse(ctx, req, protocol.RefuseDeadline)
+	default:
+		// The server withdrew the op; nobody confirmed it.
+		r.refuse(ctx, req, protocol.RefuseNotConfirmed)
+	}
+	return true
+}
+
 // minT3StartLeft is the least time a T3 op must have before its deadline
 // after the person's "y" for it to start.
 const minT3StartLeft = 5 * time.Second
@@ -665,29 +694,39 @@ func (r *Runner) confirmT3(ctx context.Context, req *protocol.OpRequest) (bool, 
 func (r *Runner) cancelOp(id string) {
 	r.opMu.Lock()
 	op := r.inflight[id]
-	waiting := r.confirming[id]
+	waiting := append([]*context.CancelFunc(nil), r.confirming[id]...)
 	r.opMu.Unlock()
 	if op != nil && op.cancel != nil {
 		op.cancel()
 	}
-	if waiting != nil {
-		(*waiting)()
+	for _, c := range waiting {
+		(*c)()
 	}
 }
 
-// watchConfirm registers the cancel of a T3 op waiting for its "y", so a
-// FrameCancel reaches the prompt; the returned func unregisters it. A second
-// request with the same id does not unregister the first one's entry.
+// watchConfirm registers the cancel of an op that is not started yet (in its
+// checks, or a T3 op waiting for its "y"), so a FrameCancel reaches it; the
+// returned func unregisters it. Every request with the same id (a resend
+// after a reconnect) keeps its own entry, so one FrameCancel stops them all.
 func (r *Runner) watchConfirm(id string, cancel context.CancelFunc) (unwatch func()) {
 	entry := &cancel
 	r.opMu.Lock()
-	r.confirming[id] = entry
+	r.confirming[id] = append(r.confirming[id], entry)
 	r.opMu.Unlock()
 	return func() {
 		r.opMu.Lock()
-		if r.confirming[id] == entry {
-			delete(r.confirming, id)
+		defer r.opMu.Unlock()
+		entries := r.confirming[id]
+		for i, e := range entries {
+			if e == entry {
+				entries = append(entries[:i:i], entries[i+1:]...)
+				break
+			}
 		}
-		r.opMu.Unlock()
+		if len(entries) == 0 {
+			delete(r.confirming, id)
+		} else {
+			r.confirming[id] = entries
+		}
 	}
 }

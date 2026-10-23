@@ -38,8 +38,16 @@ func Provisional(req events.SetupRequest) (Pipeline, error) {
 		// these values as the pipeline's hosts.
 		conns[key] = ConnRef{Value: strings.TrimSpace(t.Address)}
 	}
+	// Only mysql is carried: postgres is the default and needs no key, and
+	// the other setup source kinds have no cdc pipeline shape here yet, so
+	// they keep today's provisional pipeline.
+	sourceKind := ""
+	if req.SourceKind == SourceKindMySQL {
+		sourceKind = SourceKindMySQL
+	}
 	return Pipeline{
 		ID:           req.PipelineID,
+		SourceKind:   sourceKind,
 		Title:        req.Title,
 		Tenant:       req.Tenant,
 		TopicPrefix:  req.TopicPrefix,
@@ -56,7 +64,7 @@ func Provisional(req events.SetupRequest) (Pipeline, error) {
 // confluent, aiven, host) answer "" and are not written into connections:.
 func targetConnKey(kind string) string {
 	switch kind {
-	case "postgres":
+	case "postgres", SourceKindMySQL:
 		return "source_db_url"
 	case "kafka":
 		return "kafka_brokers"

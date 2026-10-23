@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
-# Piperoom pilot image: the Go server plus the built web UI, in one container.
+# Piperoom pilot image: the Go server, the setup runner and the built web UI,
+# in one container. The entrypoint is unchanged (the server); /piperoom-setup
+# is the runner a setup room pairs with (U1-22).
 #
 #   docker build -t piperoom:pilot .
 #   docker compose -f deploy/docker-compose.pilot.yml up     # see deploy/README.md
@@ -20,7 +22,7 @@ COPY web/ ./
 # WebSocket on the origin that served it (see web/src/api/client.ts).
 RUN npm run build
 
-# ---- stage 2: server binary -> /out/piperoom --------------------------------
+# ---- stage 2: server and setup binaries -> /out/piperoom, /out/piperoom-setup
 FROM golang:1.27.3-alpine AS server
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -29,6 +31,10 @@ COPY go.mod go.sum ./
 # ~133 MB zipped). go build below downloads only what it compiles; the cache
 # mounts keep those modules and the build cache between builds (BuildKit).
 COPY cmd/server ./cmd/server
+# piperoom-setup (U1-22, cmd/setup) links internal/setup/** and the setup
+# drivers; both binaries come from the same module, so they share one stage,
+# one module cache and one version stamp.
+COPY cmd/setup ./cmd/setup
 COPY internal ./internal
 COPY migrations ./migrations
 # CGO off: a static binary that runs on distroless/static. -trimpath keeps the
@@ -40,7 +46,8 @@ COPY migrations ./migrations
 ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom-setup ./cmd/setup
 
 # ---- stage 3: runtime --------------------------------------------------------
 # distroless/static has CA certificates (needed for api.anthropic.com and TLS to
@@ -48,6 +55,15 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=server /out/piperoom /piperoom
+# The setup runner (cmd/setup, U1-22). It is not the entrypoint: the server is.
+# Run it with the container command set to /piperoom-setup (the planned
+# in-cluster runner Job of docs/design/setup-strimzi.md is that consumer) or
+# with `docker exec`. `--standalone` is
+# for the person's own machine: it insists on a loopback address, and this
+# image sets PIPEROOM_HTTP_ADDR to 0.0.0.0, so it refuses here by design.
+# When cmd/piperoom (U1-21) lands, the image ships that one binary and this
+# becomes `piperoom setup`.
+COPY --from=server /out/piperoom-setup /piperoom-setup
 COPY --from=web /app/dist /web
 
 # The server serves this directory at "/" (internal/config: PIPEROOM_WEB_DIR).

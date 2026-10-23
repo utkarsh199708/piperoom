@@ -144,7 +144,9 @@ func (b *builder) infoOnce(key, msg string, args ...any) {
 }
 
 // topicFeed is the one source table, and its connector, a topic carries.
-type topicFeed struct{ table, connector string }
+// topicFeed is the source table a topic carries: its table name, its source
+// node id (sourceNodeID: pg: or mysql:) and the connector that writes it.
+type topicFeed struct{ table, source, connector string }
 
 // topicFeeds maps each real topic to the source table it carries, by the
 // rule planFlow names topics with (<topic.prefix>.<table>, routed). A topic
@@ -169,10 +171,11 @@ func topicFeeds(p owners.Pipeline, info *collected, fp flowPlan) map[string]topi
 			if fp.placeholder[t] {
 				continue
 			}
-			if prev, ok := out[t]; ok && prev != (topicFeed{tbl, cn}) {
+			feed := topicFeed{tbl, sourceNodeID(p, tbl), cn}
+			if prev, ok := out[t]; ok && prev != feed {
 				shared[t] = true
 			}
-			out[t] = topicFeed{tbl, cn}
+			out[t] = feed
 		}
 	}
 	for t := range shared {
@@ -222,7 +225,7 @@ func topicHop(topic, cn string, info *collected, lr *columnReads, feeds map[stri
 		return nil
 	}
 	up, modeled := sourceFlow(cols, info.connect[cn].config)
-	return matchColumns("pg:"+f.table, up, fields, !modeled, false)
+	return matchColumns(f.source, up, fields, !modeled, false)
 }
 
 // sinkHop maps the writer's input to the sink table's columns. The input is
@@ -267,7 +270,7 @@ func sinkHop(edges []Edge, writer string, ref owners.SinkRef, info *collected, f
 		if !ok || !okCols {
 			return nil
 		}
-		input, inferred = "pg:"+f.table, true
+		input, inferred = f.source, true
 		up, _ = sourceFlow(cols, info.connect[f.connector].config)
 	}
 	return matchColumns(input, applyChain(up, steps), down, inferred, native)

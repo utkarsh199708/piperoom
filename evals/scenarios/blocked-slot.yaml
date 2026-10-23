@@ -181,7 +181,7 @@ recordings:
       pipeline_id: orders
   - tool: source_blocking_sessions
     summary: |-
-      pid=48213 state=active age=25m blocks_slot=yes (outside the pipeline's tables; identity hidden)
+      pid=48213 state=active age=25m blocks_slot=yes started_at=2026-10-23T09:14:12Z (outside the pipeline's tables; identity hidden)
     data:
       - pid: 48213
         started_at: "2026-10-23T09:14:12Z"

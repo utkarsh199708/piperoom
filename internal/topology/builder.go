@@ -350,8 +350,11 @@ func (b *builder) layerOwner(layer string) string {
 }
 
 func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Node {
+	if p.IsMySQL() {
+		return b.mysqlSourceNode(p, tbl, info)
+	}
 	n := Node{
-		ID:     "pg:" + tbl,
+		ID:     sourceNodeID(p, tbl),
 		Kind:   KindSourceTable,
 		Name:   tbl,
 		Layer:  "postgres",
@@ -696,27 +699,31 @@ func (b *builder) warnBadListEntry(entry string) {
 }
 
 // streamMatcher decides which pipeline tables a connector streams, following
-// Debezium: the table lists match the whole schema.table id, the schema lists
-// match its schema part.
+// Debezium: the table lists match the whole schema.table id (db.table on
+// MySQL), the schema lists (Postgres) and the database lists (MySQL, Q8d)
+// match its first part. A connector has only one kind of the two, so the
+// other matches everything.
 type streamMatcher struct {
-	tables  listMatcher
-	schemas listMatcher
+	tables    listMatcher
+	schemas   listMatcher
+	databases listMatcher
 }
 
 func newStreamMatcher(cfg map[string]string, warn func(string)) streamMatcher {
 	return streamMatcher{
-		tables:  newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"], warn),
-		schemas: newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"], warn),
+		tables:    newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"], warn),
+		schemas:   newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"], warn),
+		databases: newListMatcher(cfg["database.include.list"], cfg["database.exclude.list"], warn),
 	}
 }
 
 func (m streamMatcher) streams(tbl string) bool {
-	schema, _, _ := strings.Cut(tbl, ".")
-	return m.tables.matches(tbl) && m.schemas.matches(schema)
+	first, _, _ := strings.Cut(tbl, ".")
+	return m.tables.matches(tbl) && m.schemas.matches(first) && m.databases.matches(first)
 }
 
 // exact reports whether streams gives the connector's own answer.
-func (m streamMatcher) exact() bool { return m.tables.exact && m.schemas.exact }
+func (m streamMatcher) exact() bool { return m.tables.exact && m.schemas.exact && m.databases.exact }
 
 // streamsTable reports whether a connector with the given config streams tbl.
 // An empty include list streams every table in the pipeline. warn, when

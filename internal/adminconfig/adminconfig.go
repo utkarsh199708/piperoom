@@ -21,7 +21,6 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/connprobe"
-	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/wiring"
@@ -360,7 +359,7 @@ func (p *Provider) pipelineView(pl owners.Pipeline) PipelineView {
 	if pl.HasConnections() {
 		v.Connections = "own"
 	}
-	for _, layer := range events.Layers {
+	for _, layer := range owners.KnownLayers() {
 		ps := p.own.Layers[layer]
 		if r, ok := pl.Owners[layer]; ok {
 			ps = r.Approvers
