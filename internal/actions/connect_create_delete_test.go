@@ -577,3 +577,45 @@ func TestConfigSecretKeyExemptions(t *testing.T) {
 		}
 	}
 }
+
+// slowListFake fails the first list calls with queued errors, as Connect does
+// while its workers rebalance right after a delete.
+type slowListFake struct {
+	*lifecycleFake
+	listErrs []error
+}
+
+func (f *slowListFake) ListConnectors(ctx context.Context) ([]string, error) {
+	if len(f.listErrs) > 0 {
+		err := f.listErrs[0]
+		f.listErrs = f.listErrs[1:]
+		return nil, err
+	}
+	return f.lifecycleFake.ListConnectors(ctx)
+}
+
+func TestCreateConnectorValidateRetriesATimedOutList(t *testing.T) {
+	repl := strings.Replace(createIn, `"connector":"pg-orders-connector",`, `"connector":"pg-orders-connector","replace":true,`, 1)
+
+	f := &slowListFake{lifecycleFake: newLifecycleFake(), listErrs: []error{context.DeadlineExceeded, connect.ErrRebalancing}}
+	f.names = nil // the delete step removed it
+	if err := createAction(t, f).Validate(scoped(), json.RawMessage(repl)); err != nil {
+		t.Fatalf("Validate after a timed-out and a rebalancing list: %v", err)
+	}
+
+	// Other errors are not retried.
+	boom := errors.New("boom")
+	f2 := &slowListFake{lifecycleFake: newLifecycleFake(), listErrs: []error{boom}}
+	if err := createAction(t, f2).Validate(scoped(), json.RawMessage(repl)); !errors.Is(err, boom) {
+		t.Fatalf("Validate on a list error: %v, want boom", err)
+	}
+	if f2.listCalls != 0 {
+		t.Fatalf("a non-timeout list error was retried %d times", f2.listCalls)
+	}
+
+	// A list that keeps timing out still fails, after three attempts.
+	f3 := &slowListFake{lifecycleFake: newLifecycleFake(), listErrs: []error{context.DeadlineExceeded, context.DeadlineExceeded, context.DeadlineExceeded}}
+	if err := createAction(t, f3).Validate(scoped(), json.RawMessage(repl)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Validate on a list that keeps timing out: %v", err)
+	}
+}

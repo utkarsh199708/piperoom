@@ -142,7 +142,14 @@ func (a *createConnector) Validate(ctx context.Context, raw json.RawMessage) err
 	if err := ctxConnectorScope(ctx, p.Connector); err != nil {
 		return err
 	}
-	ctx, cancel := a.d.ctx(ctx)
+	// A replace step runs right after its delete step, while Connect's
+	// workers rebalance and can hold reads past the 10 s read bound: it gets
+	// the write budget, and present retries a timed-out list inside it.
+	cctx := a.d.ctx
+	if p.Replace {
+		cctx = a.d.writeCtx
+	}
+	ctx, cancel := cctx(ctx)
 	defer cancel()
 	if err := a.checkCreateHosts(ctx, p.Config); err != nil {
 		return err
@@ -158,13 +165,25 @@ func (a *createConnector) Validate(ctx context.Context, raw json.RawMessage) err
 	return nil
 }
 
-// present reports whether Connect lists name.
+// present reports whether Connect lists name. A list that times out or hits
+// a rebalance is retried while ctx has time left: right after a delete,
+// Connect's workers rebalance and one read can outlast the HTTP client's bound.
 func (a *createConnector) present(ctx context.Context, name string) (bool, error) {
-	present, err := a.d.listed(ctx, name)
-	if err != nil {
-		return false, fmt.Errorf("actions: %s: %w", CreateConnectorName, err)
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		var present bool
+		if present, err = a.d.listed(ctx, name); err == nil {
+			return present, nil
+		}
+		if ctx.Err() != nil || (!isTimeoutErr(err) && !errors.Is(err, connect.ErrRebalancing)) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	return present, nil
+	return false, fmt.Errorf("actions: %s: %w", CreateConnectorName, err)
 }
 
 // Preview runs Connect's config validation and refuses when it reports errors.
