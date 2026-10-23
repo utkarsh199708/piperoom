@@ -340,3 +340,36 @@ services:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
       interval: 5s
       retries: 40
+
+  # MongoDB source (U7c, dev/mongo/README.md): a one-member replica set rs0
+  # with auth, for the setup checks of internal/clients/mongodb and the
+  # `devctl setup-break` scenarios standalone-mongod and no-oplog-role.
+  # Profile "mongo": `docker compose --profile mongo up -d --wait mongo`;
+  # without the profile nothing here starts and nothing depends on it.
+  mongo:
+    profiles: ["mongo"]
+    # MongoDB 7.0, exact release and multi-arch index digest (verified with
+    # `docker pull` and the Docker Hub tags API, 2026-10-23).
+    image: mongo:7.0.43@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b
+    # start.sh generates the keyFile auth + --replSet needs inside the
+    # container (a bind-mounted one cannot be mode 0400 on Windows).
+    command: ["bash", "/piperoom-mongo/start.sh", "--replSet", "rs0"]
+    environment:
+      # Dev-only credentials, never real secrets.
+      MONGO_INITDB_ROOT_USERNAME: piperoom_admin
+      MONGO_INITDB_ROOT_PASSWORD: piperoom-mongo-admin
+      MONGO_INITDB_DATABASE: inventory
+    # Host loopback only. A host client connects with directConnection=true:
+    # the set's member is named mongo:27017, which only resolves on the
+    # compose network.
+    ports: ["127.0.0.1:27017:27017"]
+    volumes:
+      - ./mongo/start.sh:/piperoom-mongo/start.sh:ro
+      - ./mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Idempotent: initiates rs0 once (rs.status() throws until then), and is
+      # healthy only once this member is the writable primary.
+      test: ["CMD", "mongosh", "--quiet", "--norc", "-u", "piperoom_admin", "-p", "piperoom-mongo-admin", "--authenticationDatabase", "admin", "--eval", "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}) } if (!db.hello().isWritablePrimary) { quit(1) }"]
+      start_period: 60s
+      interval: 2s
+      retries: 60
