@@ -11,7 +11,6 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
-	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -166,7 +165,7 @@ func (a *grantSelect) checkConnectorUser(ctx context.Context, p grantParams) err
 }
 
 func (a *grantSelect) roleInfo(ctx context.Context, p grantParams) (RoleInfo, error) {
-	r, ok := srcneutral.Wrap(a.d.Source).(RoleInfoReader)
+	r, ok := a.d.Source.(RoleInfoReader)
 	if !ok {
 		return RoleInfo{}, fmt.Errorf("sourceactions: %s: the source client cannot read roles (no RoleInfo)", GrantSelectName)
 	}

@@ -16,8 +16,9 @@ import (
 	"piperoom/internal/tools"
 )
 
-// fakeMySQL is a MySQL source client as *mysql.DB is: the item 2 reads typed
-// with the mysql package's DTOs, which srcneutral.Wrap re-types.
+// fakeMySQL is a MySQL source client as *mysql.DB is: the item 2 reads (the
+// mysql DTOs alias the clients ones) and the binlog reader, which marks a
+// client as MySQL when the call carries no room pipeline.
 type fakeMySQL struct {
 	clients.SourceDB
 
@@ -54,9 +55,28 @@ func (f *fakeMySQL) BlockersOnTables(context.Context, time.Duration, []string) (
 	return f.sessions, nil
 }
 
+func (f *fakeMySQL) BinlogStatus(context.Context) (clients.BinlogStatus, error) {
+	return clients.BinlogStatus{}, nil
+}
+
+// fakeMySQLConnector adds the MySQL reader's connector-aware scoped read
+// (mysql.DB.BlockersForConnector): sessions are what it answers for the
+// connector's user, so BlocksSlot there means the connector waits.
+type fakeMySQLConnector struct {
+	*fakeMySQL
+	users []string
+}
+
+func (f *fakeMySQLConnector) BlockersForConnector(_ context.Context, _ time.Duration, _ []string, user string) ([]clients.DBSession, error) {
+	f.users = append(f.users, user)
+	return f.sessions, nil
+}
+
 var (
-	_ mysql.SourceSettingsReader = (*fakeMySQL)(nil)
-	_ mysql.ScopedBlockerReader  = (*fakeMySQL)(nil)
+	_ clients.SourceSettingsReader = (*fakeMySQL)(nil)
+	_ clients.ScopedBlockerReader  = (*fakeMySQL)(nil)
+	_ clients.BinlogReader         = (*fakeMySQL)(nil)
+	_ connectorBlockerReader       = (*fakeMySQLConnector)(nil)
 )
 
 const mysqlClass = "io.debezium.connector.mysql.MySqlConnector"
@@ -86,23 +106,23 @@ func TestLayerFor(t *testing.T) {
 		NewEndSession(EndSessionDeps{}),
 	}
 	for _, a := range neutral {
-		if _, ok := a.(SourceLayered); !ok {
+		if _, ok := a.(actions.SourceLayered); !ok {
 			t.Fatalf("%s is not SourceLayered", a.Name())
 		}
 		if a.Layer() != "postgres" {
 			t.Errorf("%s Layer() = %q, want postgres (the value a caller without a pipeline shows)", a.Name(), a.Layer())
 		}
 		for kind, want := range map[string]string{"": "postgres", "postgres": "postgres", "mysql": "mysql", "oracle": ""} {
-			if got := LayerFor(a, kind); got != want {
+			if got := actions.LayerFor(a, kind); got != want {
 				t.Errorf("LayerFor(%s, %q) = %q, want %q", a.Name(), kind, got, want)
 			}
 		}
 	}
 	ri := NewSetReplicaIdentity(ReplicaIdentityDeps{})
-	if _, ok := ri.(SourceLayered); ok {
+	if _, ok := ri.(actions.SourceLayered); ok {
 		t.Fatal("pg_set_replica_identity must not be SourceLayered: it is Postgres-only")
 	}
-	if got := LayerFor(ri, "mysql"); got != "postgres" {
+	if got := actions.LayerFor(ri, "mysql"); got != "postgres" {
 		t.Errorf("LayerFor(pg_set_replica_identity, mysql) = %q, want postgres", got)
 	}
 }
@@ -317,6 +337,74 @@ func TestEndSessionMySQLZeroStartedAtRefused(t *testing.T) {
 	}
 	if len(w.calls) != 0 {
 		t.Fatalf("writer called: %v", w.calls)
+	}
+}
+
+// The review's blocker 1 (PR #934): app A holds an old transaction on
+// shop.inventory (not a source table), app B's ALTER waits behind it, so the
+// scoped read lists A hidden with blocks_slot. On MySQL that is never this
+// room's session to end: Validate, Preview and Execute refuse it, and the
+// preview never claims the connector waits.
+func TestEndSessionMySQLRefusesHiddenBlocker(t *testing.T) {
+	hidden := mysql.DBSession{PID: 41, StartedAt: testStart, XactStart: testStart, State: "Sleep",
+		BlocksSlot: true, InScope: false, OldXact: true, SameDB: true, ClientBackend: true}
+	for name, src := range map[string]clients.SourceDB{
+		"scoped read":          &fakeMySQL{sessions: []mysql.DBSession{hidden}},
+		"connector-aware read": &fakeMySQLConnector{fakeMySQL: &fakeMySQL{sessions: []mysql.DBSession{hidden}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := &fakeWriter{}
+			a := &endSession{d: EndSessionDeps{Connect: mysqlConnect(), Source: src, Writer: w,
+				now: func() time.Time { return testStart.Add(2 * time.Hour) }}}
+			raw := esMySQLParams(t, 41, testStart)
+			if err := a.Validate(mysqlCtx(), raw); !errors.Is(err, tools.ErrOutOfScope) {
+				t.Fatalf("Validate = %v, want ErrOutOfScope", err)
+			}
+			pr, err := a.Preview(mysqlCtx(), raw)
+			if err != nil || !strings.Contains(pr.Expected, "refused") || strings.Contains(pr.Current+pr.Expected, "connector's snapshot locking waits") {
+				t.Fatalf("Preview = %+v, %v", pr, err)
+			}
+			if _, err := a.Execute(mysqlCtx(), raw); !errors.Is(err, tools.ErrOutOfScope) {
+				t.Fatalf("Execute = %v, want ErrOutOfScope", err)
+			}
+			if len(w.calls) != 0 {
+				t.Fatalf("writer called: %v", w.calls)
+			}
+		})
+	}
+}
+
+// An in-scope MySQL lock holder is allowed. The preview says the connector
+// waits only when the connector-aware read established it.
+func TestEndSessionMySQLInScopeBlocker(t *testing.T) {
+	holder := mysql.DBSession{PID: 42, StartedAt: testStart, XactStart: testStart, User: "app", App: "orders-api", State: "Sleep",
+		Query: "SELECT 1", BlocksSlot: true, InScope: true, OldXact: true, SameDB: true, ClientBackend: true}
+	for _, tc := range []struct {
+		name, want, not string
+		src             clients.SourceDB
+	}{
+		{"scoped read", "another session waits for (which session was not checked)", "database.user waits", &fakeMySQL{sessions: []mysql.DBSession{holder}}},
+		{"connector-aware read", "a session of the connector's database.user waits for", "not checked", &fakeMySQLConnector{fakeMySQL: &fakeMySQL{sessions: []mysql.DBSession{holder}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &fakeWriter{}
+			a := &endSession{d: EndSessionDeps{Connect: mysqlConnect(), Source: tc.src, Writer: w,
+				now: func() time.Time { return testStart.Add(2 * time.Hour) }}}
+			raw := esMySQLParams(t, 42, testStart)
+			if err := a.Validate(mysqlCtx(), raw); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			pr, err := a.Preview(mysqlCtx(), raw)
+			if err != nil || !strings.Contains(pr.Current, tc.want) || strings.Contains(pr.Current, tc.not) {
+				t.Fatalf("Preview current = %q, %v; want %q", pr.Current, err, tc.want)
+			}
+			if _, err := a.Execute(mysqlCtx(), raw); err != nil || len(w.calls) != 1 {
+				t.Fatalf("Execute = %v, calls %v", err, w.calls)
+			}
+			if c, ok := tc.src.(*fakeMySQLConnector); ok && (len(c.users) == 0 || c.users[0] != "debezium") {
+				t.Fatalf("connector-aware read got users %v, want debezium", c.users)
+			}
+		})
 	}
 }
 

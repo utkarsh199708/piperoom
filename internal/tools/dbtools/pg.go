@@ -13,7 +13,6 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
-	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -247,7 +246,7 @@ func longTransactionsTool(d Deps, name, desc string, blockersFallback bool) tool
 					// A client without the table filter but with the scoped
 					// blocking-session read (MySQL) answers from that read:
 					// the same rule, in-scope identity only.
-					if sb, ok := srcneutral.Wrap(d.Src).(scopedBlockersClient); ok && blockersFallback {
+					if sb, ok := d.Src.(scopedBlockersClient); ok && blockersFallback {
 						return scopedLongFromBlockers(ctx, name, sb, olderThan, sc.Pipeline())
 					}
 					return tools.Result{}, fmt.Errorf("dbtools: %s: the source client cannot filter transactions by table, so none are shown", name)

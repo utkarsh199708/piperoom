@@ -13,6 +13,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"piperoom/internal/clients"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -21,23 +23,21 @@ import (
 )
 
 // The Q2a read-only source settings surface (Q board Q0 item 2,
-// clients.SourceSettingsReader). Q0 has not moved it into clients.go yet, so
-// it lives in internal/clients/postgres (settings.go, Q2a #859). The DTOs here
-// are aliases of those types, so *postgres.DB satisfies the reader interfaces
-// below directly; each interface is the subset one action reads. The MySQL
-// client (Q8b) declares its own copies of the DTOs, so the actions assert
-// these interfaces on srcneutral.Wrap(Source), which re-types it (Q8n).
+// clients.SourceSettingsReader, in internal/clients/clients.go). The DTOs
+// here are aliases of the clients types, which the postgres and the mysql
+// client alias too, so *postgres.DB and *mysql.DB satisfy the reader
+// interfaces below directly; each interface is the subset one action reads.
 
 // TableReplication is a table's primary key presence and replica identity.
-type TableReplication = postgres.TableReplication
+type TableReplication = clients.TableReplication
 
 // RoleInfo is a source role's login and replication rights and its SELECT
 // privilege per table.
-type RoleInfo = postgres.RoleInfo
+type RoleInfo = clients.RoleInfo
 
 // DBSession is one session that can hold back logical replication. Query is
 // untrusted text; InScope is false for a session a scoped read anonymised.
-type DBSession = postgres.DBSession
+type DBSession = clients.DBSession
 
 // TableReplicationReader is SourceSettingsReader.TableReplication: one entry
 // per table, in order; a missing table is clients.ErrNotFound.
@@ -64,11 +64,25 @@ type ScopedBlockerReader interface {
 	BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error)
 }
 
+// connectorBlockerReader is the MySQL reader's scoped read for a known
+// connector user (mysql.DB.BlockersForConnector, design §6.5): BlocksSlot is
+// then "holds a metadata lock a session of connectorUser waits for", not
+// "some session waits for it". source_end_session prefers it on MySQL.
+type connectorBlockerReader interface {
+	BlockersForConnector(ctx context.Context, olderThan time.Duration, tables []string, connectorUser string) ([]DBSession, error)
+}
+
 var (
 	_ TableReplicationReader = (*postgres.DB)(nil)
 	_ RoleInfoReader         = (*postgres.DB)(nil)
 	_ BlockerReader          = (*postgres.DB)(nil)
 	_ ScopedBlockerReader    = (*postgres.DB)(nil)
+
+	_ TableReplicationReader = (*mysql.DB)(nil)
+	_ RoleInfoReader         = (*mysql.DB)(nil)
+	_ BlockerReader          = (*mysql.DB)(nil)
+	_ ScopedBlockerReader    = (*mysql.DB)(nil)
+	_ connectorBlockerReader = (*mysql.DB)(nil)
 )
 
 // opTimeout bounds every read of Validate and Preview and Execute's re-checks

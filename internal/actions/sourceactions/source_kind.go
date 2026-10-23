@@ -17,33 +17,10 @@ import (
 // run on a Postgres or a MySQL pipeline over the same reader and writer
 // interfaces; pg_set_replica_identity is Postgres-only and refuses a MySQL
 // pipeline. The approving layer of a source-neutral step is the pipeline's
-// source layer (postgres or mysql), which the contract carries as
-// actions.SourceLayered and actions.LayerFor (Q0 item 7, design §5.3). That
-// contract has not landed, so the marker and the helper are declared here
-// under the design's names (contract change request in the Q8n PR); when it
-// lands, both become the actions ones and the three actions keep their
-// SourceLayered method unchanged.
-
-// SourceLayered marks an action on the pipeline's source database whose
-// approving layer is the pipeline's source layer, not Layer(). Layer() of
-// such an action answers "postgres", the value a caller without a pipeline
-// shows. Local copy of design §5.3's actions.SourceLayered.
-type SourceLayered interface {
-	actions.Action
-	// SourceLayered has no behaviour; it only marks the action.
-	SourceLayered()
-}
-
-// LayerFor returns the layer whose owner approves a step of a on a pipeline
-// whose source_kind is sourceKind ("" = postgres): the source layer for a
-// SourceLayered action ("" for an unknown kind, which no owner owns),
-// a.Layer() otherwise. Local copy of design §5.3's actions.LayerFor.
-func LayerFor(a actions.Action, sourceKind string) string {
-	if _, ok := a.(SourceLayered); ok {
-		return owners.SourceLayerOf(sourceKind)
-	}
-	return a.Layer()
-}
+// source layer (postgres or mysql): the three actions implement the
+// contract's actions.SourceLayered marker (Q0 item 7, design §5.3), so
+// actions.LayerFor and actions.StepLayer give the mysql layer on a MySQL
+// pipeline.
 
 // SourceDescribed is implemented by an action whose description depends on
 // the source kind: the agent's action list of a MySQL room (Q8g) shows
@@ -54,9 +31,9 @@ type SourceDescribed interface {
 }
 
 var (
-	_ SourceLayered = (*grantSelect)(nil)
-	_ SourceLayered = (*createHeartbeatTable)(nil)
-	_ SourceLayered = (*endSession)(nil)
+	_ actions.SourceLayered = (*grantSelect)(nil)
+	_ actions.SourceLayered = (*createHeartbeatTable)(nil)
+	_ actions.SourceLayered = (*endSession)(nil)
 
 	_ SourceDescribed = (*createHeartbeatTable)(nil)
 	_ SourceDescribed = (*endSession)(nil)

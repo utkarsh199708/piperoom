@@ -18,8 +18,8 @@ import (
 // §3, §7.1 and §7.4).
 //
 // The four Q2a source_* tools read the MySQL client through the same item 2
-// interfaces as Postgres (srcneutral.Wrap re-types the MySQL DTOs until the
-// contract move lands); their per-source wording comes from the setting
+// interfaces as Postgres (both clients alias the clients contract's DTOs);
+// their per-source wording comes from the setting
 // names and TableReplication.Engine. source_row and source_long_transactions
 // are pg_row and pg_long_transactions under neutral names, registered only
 // for a MySQL source in this wave (design D5): a Postgres set's tool list,

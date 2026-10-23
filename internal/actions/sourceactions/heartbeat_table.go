@@ -12,7 +12,6 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
-	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -320,7 +319,7 @@ type tableState struct {
 }
 
 func (a *createHeartbeatTable) tableState(ctx context.Context, table string) tableState {
-	r, ok := srcneutral.Wrap(a.d.Source).(TableReplicationReader)
+	r, ok := a.d.Source.(TableReplicationReader)
 	if !ok {
 		return tableState{note: "the source client cannot read tables, so whether " + table + " exists was not read"}
 	}

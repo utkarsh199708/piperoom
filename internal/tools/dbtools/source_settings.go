@@ -13,7 +13,6 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/mysql"
 	"piperoom/internal/clients/postgres"
-	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
@@ -31,13 +30,11 @@ const (
 	blockerSummaryBudget = tools.MaxSummaryBytes - 400
 )
 
-// sourceSettingsClient is the read side of the Q2a source reader. The
-// interface and its DTOs live in internal/clients/postgres until Q0 adopts
-// them into clients.SourceSettingsReader (contract change request in the PR);
-// the tool finds the implementation by type assertion on
-// srcneutral.Wrap(Src), so the MySQL client (whose item 2 DTOs are the mysql
-// package's copies) is read through it too (Q8n), and a source client with
-// neither (a fake) is refused before any I/O.
+// sourceSettingsClient is the read side of the Q2a source reader,
+// clients.SourceSettingsReader (the postgres DTOs alias the clients ones).
+// The tool finds the implementation by type assertion on Src, so the MySQL
+// client (which aliases the same DTOs) is read through it too (Q8n), and a
+// source client with neither (a fake) is refused before any I/O.
 type sourceSettingsClient interface {
 	Settings(ctx context.Context) ([]postgres.DBSetting, error)
 	TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error)
@@ -56,7 +53,7 @@ type scopedBlockersClient interface {
 // settingsReader returns the source client's settings reader, or an error
 // naming the missing capability.
 func (d Deps) settingsReader(tool string) (sourceSettingsClient, error) {
-	c, ok := srcneutral.Wrap(d.Src).(sourceSettingsClient)
+	c, ok := d.Src.(sourceSettingsClient)
 	if !ok {
 		return nil, fmt.Errorf("dbtools: %s: the source client cannot read database settings", tool)
 	}
@@ -561,7 +558,7 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 				// belongs to another pipeline, user or database and appears
 				// anonymised. A client that cannot filter is refused, never
 				// read in full (the pg_long_transactions rule).
-				l, ok := srcneutral.Wrap(d.Src).(scopedBlockersClient)
+				l, ok := d.Src.(scopedBlockersClient)
 				if !ok {
 					return tools.Result{}, errors.New("dbtools: source_blocking_sessions: the source client cannot scope sessions to the pipeline's tables, so none are shown")
 				}
