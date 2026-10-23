@@ -156,9 +156,10 @@ type Runner struct {
 	proposals map[string]events.ProposalCreatedPayload
 	floors    map[string]string
 	inflight  map[string]*inflightOp
-	// confirming holds the cancel of each T3 op still waiting for its "y":
-	// such an op is not started (not in inflight), but a FrameCancel must
-	// still drop its prompt.
+	// confirming holds the cancel of each op from the moment its frame is
+	// read until runOp returns: an op still in its checks or waiting for its
+	// T3 "y" is not started (not in inflight), but a FrameCancel must still
+	// stop it.
 	confirming map[string]*context.CancelFunc
 	opLog      *opLog
 	opLogDone  bool // op log closed; late appends are no-ops
@@ -636,7 +637,16 @@ func (r *Runner) serve(ctx context.Context) error {
 			}
 		case protocol.FramePong:
 		case protocol.FrameOp:
-			go r.runOp(ctx, f.Op)
+			// The op's cancel is registered before its goroutine starts, so
+			// a FrameCancel read next always reaches it, even while its
+			// checks or its T3 prompt are still running.
+			opCtx, cancel := context.WithCancel(ctx)
+			unwatch := r.watchConfirm(f.Op.ID, cancel)
+			go func(req *protocol.OpRequest) {
+				defer cancel()
+				defer unwatch()
+				r.runOp(ctx, opCtx, cancel, req)
+			}(f.Op)
 		case protocol.FrameCancel:
 			r.cancelOp(f.Cancel.ID)
 		case protocol.FrameSecret:
