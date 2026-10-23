@@ -1,9 +1,13 @@
-// Package compose is the Compose target of the setup runner (row U1-3a,
-// docs/design/setup-agent.md §2.5): the four service templates the driver
-// renders with pinned images from internal/setup/knowledge, the validator
-// every render and every Compose file the runner is pointed at must pass, and
-// the two write ops of this row — compose_write and properties_write —
-// registered into the U1-2 operation catalogue (internal/setup/ops).
+// Package compose is the Compose target of the setup runner (rows U1-3a and
+// U1-3b, docs/design/setup-agent.md §2.5): the four service templates the
+// driver renders with pinned images from internal/setup/knowledge, the
+// validator every render and every Compose file the runner is pointed at must
+// pass, and the catalogue ops of this target — compose_write and
+// properties_write (T1); the reads docker_info, compose_ps, compose_config
+// (masked) and container_inspect (T0, env names only); the stack writes
+// compose_up, compose_restart and compose_down (T1, volumes always kept); and
+// plugin_install (T1), which downloads one connector archive from an
+// allow-listed host and verifies the digest the knowledge index pins.
 //
 // The S1 rule of §2.5 is what makes a Compose file T1: the model never writes
 // one. compose_write takes a template name and typed params (templates, a
@@ -15,12 +19,17 @@
 //
 // Wiring (one line, outside this package, after ops.New(cfg)):
 //
-//	drv, err := compose.Register(reg, compose.Options{Class: class})
+//	drv, err := compose.Register(reg, compose.Options{Class: class, PluginHosts: setup.PluginHosts})
 //
-// where class is the class of the Compose target the room resolved. Register
-// adds compose_write and properties_write to reg and adds the plugin
-// directory to reg's mount list, so file_write refuses to write into it; every
-// later render registers the directories it mounts the same way.
+// where class is the class of the Compose target the room resolved and
+// PluginHosts is config.ParseSetup(cfg).PluginHosts. Register adds the ops to
+// reg and adds the plugin directory to reg's mount list, so file_write refuses
+// to write into it; every later render registers the directories it mounts the
+// same way.
+//
+// Every Docker command goes through ops.Env.Exec, the injectable command
+// runner the catalogue already carries: unit tests replace it with a fake and
+// no Docker is needed, and an op never builds a shell string.
 //
 // Files this package writes go through the U1-2 path rule (ops.Confiner, the
 // design's §2.3 lexical check plus the Lstat walk) and then through an
@@ -32,6 +41,7 @@ package compose
 import (
 	"errors"
 	"fmt"
+	"net/http"
 
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/protocol"
@@ -79,17 +89,43 @@ type Options struct {
 	// interface the target exists for, and the validator accepts that form
 	// only for a raised class.
 	Class string
+	// PluginHosts are the hosts plugin_install may download a connector
+	// archive from (PIPEROOM_SETUP_PLUGIN_HOSTS; an entry is a host name, or
+	// host:port). Empty means the documented default,
+	// config.DefaultSetupPluginHosts; the wiring passes the parsed config.
+	PluginHosts []string
+	// PluginArtifact resolves a Debezium release and connector to the archive
+	// URL, its pinned sha512 digest and the archive's one top-level directory.
+	// nil resolves through internal/setup/knowledge; it is a seam for tests
+	// that serve an archive from a local server.
+	PluginArtifact PluginResolver
+	// HTTPClient overrides the plugin download client (tests). nil builds the
+	// guarded one: no proxy, no redirects, a timeout, and a dial hook that
+	// refuses link-local and metadata addresses.
+	HTTPClient *http.Client
+	// GOOS and Getenv are the platform the runner thinks it is on, for the
+	// Docker Desktop differences (socket path, host networking). nil means
+	// runtime.GOOS and os.Getenv; tests pass fakes.
+	GOOS   string
+	Getenv func(string) string
 }
 
 // Driver renders templates and registers this package's ops.
 type Driver struct {
 	reg   *ops.Registry
 	class string
+
+	pluginHosts    []string
+	pluginArtifact PluginResolver
+	httpClient     *http.Client
+	goos           string
+	getenv         func(string) string
 }
 
-// Register adds compose_write and properties_write to r and returns the
+// Register adds the Compose read (T0) and write (T1) ops to r and returns the
 // driver that renders for it. The mount list starts with the Connect plugin
-// directory, so the U1-2 file ops refuse it before the first render.
+// directory, so the U1-2 file ops refuse it before the first render;
+// plugin_install is the one writer that fills it.
 func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	if r == nil {
 		return nil, errors.New("compose: a registry is required")
@@ -99,8 +135,33 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("compose: unknown target class %q", opts.Class)
 	}
-	d := &Driver{reg: r, class: opts.Class}
-	for _, op := range []ops.Op{composeWriteOp{d: d}, propertiesWriteOp{d: d}} {
+	hosts, err := normalizePluginHosts(opts.PluginHosts)
+	if err != nil {
+		return nil, err
+	}
+	d := &Driver{
+		reg:            r,
+		class:          opts.Class,
+		pluginHosts:    hosts,
+		pluginArtifact: opts.PluginArtifact,
+		httpClient:     opts.HTTPClient,
+		goos:           opts.GOOS,
+		getenv:         opts.Getenv,
+	}
+	writes := []ops.Op{
+		composeWriteOp{d: d}, propertiesWriteOp{d: d},
+		&stackWriteOp{d: d, name: "compose_up", sub: "up", flags: []string{"-d"},
+			describe: "start the rendered Compose stack in the background"},
+		&stackWriteOp{d: d, name: "compose_restart", sub: "restart", flags: nil,
+			describe: "restart the services of the rendered Compose stack"},
+		&stackWriteOp{d: d, name: "compose_down", sub: "down", flags: nil, down: true,
+			describe: "stop and remove the rendered stack's containers; volumes are kept"},
+		pluginInstallOp{d: d},
+	}
+	reads := []ops.Op{
+		dockerInfoOp{d: d}, composePSOp{d: d}, composeConfigOp{d: d}, containerInspectOp{d: d},
+	}
+	for _, op := range append(reads, writes...) {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("compose: registering %s: %w", op.Name(), err)
 		}

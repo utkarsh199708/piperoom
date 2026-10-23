@@ -23,6 +23,23 @@ var (
 	// ${secret:name} reference is allowed. The value is in no error, summary
 	// or Data.
 	ErrSecretValue = errors.New("compose: plain-text credential")
+	// ErrStack: the rendered stack is not ready for the requested compose
+	// command (no compose file, no .env, no container for a service).
+	ErrStack = errors.New("compose: the stack is not ready")
+	// ErrPluginHost: the plugin archive's host is not in
+	// PIPEROOM_SETUP_PLUGIN_HOSTS, or the URL is not an allowed form.
+	ErrPluginHost = errors.New("compose: plugin host not allowed")
+	// ErrPluginDigest: the downloaded archive does not carry the digest the
+	// knowledge index pins.
+	ErrPluginDigest = errors.New("compose: plugin digest mismatch")
+	// ErrPluginArchive: the archive has an entry this driver refuses (a link,
+	// a second top-level directory, an oversized file, a traversal).
+	ErrPluginArchive = errors.New("compose: plugin archive refused")
+	// ErrPluginDir: the target directory holds something plugin_install did
+	// not put there, or another release of the same plugin.
+	ErrPluginDir = errors.New("compose: plugin directory is occupied")
+	// ErrDownload: the plugin download failed (transport, status, timeout).
+	ErrDownload = errors.New("compose: plugin download failed")
 )
 
 // Rule names a refusal class. A validator failure makes the step T2 with the
