@@ -1042,3 +1042,49 @@ func TestCancelDuringChecksStopsTheOp(t *testing.T) {
 		t.Fatalf("op ran %d time(s) after it was cancelled during its checks", n)
 	}
 }
+
+// TestCancelBeforeThePromptDropsAStaleYes: a T3 op cancelled while still in
+// its checks never shows its prompt, but a "y" typed meanwhile (for it) must
+// not confirm the next T3 op either.
+func TestCancelBeforeThePromptDropsAStaleYes(t *testing.T) {
+	cat := &slowCheckCatalogue{
+		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}},
+		entered:       make(chan struct{}, 2),
+		release:       make(chan struct{}),
+	}
+	start := time.Now()
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		a.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		<-cat.entered
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
+		time.Sleep(300 * time.Millisecond)
+		close(cat.release)
+		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+		// The "y" is typed at ~600 ms; B arrives at ~1.2 s and nobody
+		// answers it.
+		time.Sleep(time.Until(start.Add(1200 * time.Millisecond)))
+		p2 := testProposalWithAction("p2", "source_restart")
+		b := opReqPtr("b", "source_restart", protocol.TierT3, "p2", 0, proposalHash(t, p2), proposalRaw(t, p2))
+		b.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: b})
+		time.Sleep(300 * time.Millisecond)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "b"}})
+		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+	})
+	defer srv.Close()
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(600 * time.Millisecond)}, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 0 {
+		t.Fatalf("an op ran %d time(s) on a \"y\" typed before its prompt", n)
+	}
+}
