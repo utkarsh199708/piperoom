@@ -25,6 +25,10 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"pg_publication_tables":    `{"pipeline_id":"orders"}`,
 		"pg_connector_scope_gap":   `{"pipeline_id":"orders"}`,
 		"pg_toast_risk":            `{"pipeline_id":"orders"}`,
+		"source_settings":          `{}`,
+		"source_table_replication": `{"pipeline_id":"orders"}`,
+		"source_role_grants":       `{"pipeline_id":"orders"}`,
+		"source_blocking_sessions": `{}`,
 		"warehouse_freshness":      `{"table":"analytics.orders","ts_column":"updated_at"}`,
 		"warehouse_row":            `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"1"}`,
 		"warehouse_load_errors":    `{"table":"analytics.orders"}`,
@@ -45,6 +49,9 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"debezium_metrics":         `{"connector":"pg-orders-connector"}`,
 		"dlq_peek":                 `{"connector":"pg-orders-sink"}`,
 		"what_changed":             `{}`,
+
+		// Q4b
+		"connect_validate_config": `{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"topic.prefix":"pg"}}`,
 
 		// X6b
 		"debezium_snapshot_progress": `{"connector":"pg-orders-connector"}`,

@@ -30,7 +30,7 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 	defer cancel()
 
 	acts := s.actionsFor(pipelineID)
-	scoped := s.actionCtx(ctx, roomID, pipelineID)
+	scoped := s.actionCtxFor(ctx, roomID, s.setupSnapshot(ctx, roomID), pipelineID)
 
 	var graph *topology.Graph
 	if s.topo != nil {

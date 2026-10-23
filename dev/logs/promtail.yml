@@ -1,0 +1,43 @@
+# Promtail for the dev stack's `logs` profile (Q3d): tails the Kafka Connect
+# worker (compose service `connect` of project piperoom-dev, not connect-staging)
+# and pushes to Loki. Every line gets the labels service, container and level;
+# the server's WORKER_LOGS_SELECTOR for this stack is {service="connect"}.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: connect
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        # Docker ANDs label filters: both must match.
+        filters:
+          - name: label
+            values:
+              - com.docker.compose.project=piperoom-dev
+              - com.docker.compose.service=connect
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container
+    pipeline_stages:
+      # A stack trace is one entry with the line that logged it. Debezium's
+      # layout starts "2026-10-23 10:00:00,123 ERROR ...", Kafka's own
+      # "[2026-10-23 10:00:00,123] ERROR ..."; both are accepted.
+      - multiline:
+          firstline: '^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}'
+          max_wait_time: 3s
+      - regex:
+          expression: '^\[?\d{4}-\d{2}-\d{2}[ T][\d:.,]+\]?\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR|FATAL)\b'
+      - labels:
+          level:

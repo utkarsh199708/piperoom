@@ -5,6 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"piperoom/internal/agent"
+	"piperoom/internal/setup/plan"
 )
 
 // compensateCtx is the context for undoing a side-table write whose event
@@ -151,6 +154,12 @@ func setupDisabled() *Error {
 	return &Error{Status: http.StatusNotFound, Code: "setup_disabled", Msg: "setup is not enabled on this server"}
 }
 
+// noRunner is 409 no_runner: a setup route needs the room's paired runner and
+// none is connected (docs/api.md error table).
+func noRunner() *Error {
+	return &Error{Status: http.StatusConflict, Code: "no_runner", Msg: "no setup runner is paired to this room right now"}
+}
+
 // notTenantMember is 403 not_tenant_member: POST /api/setup for a tenant the
 // caller is not in (or one no tenants: block declares, which is the same
 // answer so a tenant name does not leak).
@@ -193,4 +202,34 @@ func classLowered(msg string) *Error {
 // more than 24 hours ahead.
 func windowTooLong(msg string) *Error {
 	return &Error{Status: http.StatusBadRequest, Code: "window_too_long", Msg: msg}
+}
+
+// notInPlan is 400 not_in_plan: a setup proposal step whose op is not in the
+// current setup.plan (docs/api.md, Setup rooms). The kind is
+// agent.ErrNotInPlan, so the agent recognises the one refusal it answers with
+// a new plan (design §3.3).
+func notInPlan(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "not_in_plan", Msg: msg, kind: agent.ErrNotInPlan}
+}
+
+// notAdmin is 403 not_admin: a T2 or T3 approval of a setup room on a team
+// server by someone who is neither a tenant admin nor an owner of an
+// overlapping pipeline (docs/api.md, Setup rooms; design §3.6). A driver who
+// is not a tenant admin gets it too: the driver's fallback grant applies only
+// in solo mode on the standalone server.
+func notAdmin() *Error {
+	return &Error{
+		Status: http.StatusForbidden, Code: "not_admin",
+		Msg: "this step is T2 or T3 of a setup room: a tenant admin, or an owner of the pipeline it overlaps, must approve it",
+	}
+}
+
+// setupGuardRefused is 400 validation for a step the guard table forbids on
+// its class. The kind is plan.ErrGuard and the message names the row's fixed
+// reason code, so the caller and the runner refuse the same pair with the
+// same word (design §3.5).
+func setupGuardRefused(msg string) *Error {
+	e := validation(msg)
+	e.kind = plan.ErrGuard
+	return e
 }

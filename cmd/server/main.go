@@ -302,6 +302,13 @@ func parseServer(cfg config.Config, m serveMode) (serverSettings, error) {
 	if s.setupCfg, err = config.ParseSetup(cfg); err != nil {
 		return serverSettings{}, fmt.Errorf("server: %w", err)
 	}
+	if s.setupCfg.Enabled {
+		// Every replica writes registered read credentials under
+		// PIPEROOM_SECRETS_DIR: one that cannot refuses the start (U1-5d).
+		if err := checkSetupSecretsDir(s.setupCfg.SecretsDir); err != nil {
+			return serverSettings{}, fmt.Errorf("server: %w", err)
+		}
+	}
 
 	// Spend limits and the price table (docs/design/cost.md): a bad value
 	// stops the server before it connects to anything.

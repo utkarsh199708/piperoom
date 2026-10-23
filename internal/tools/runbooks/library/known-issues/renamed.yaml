@@ -1,0 +1,196 @@
+# Known issues: renamed properties (plan docs/product/so-gaps-2026-10.md §6, theme 1).
+# Format: see LoadKnownIssues in ../../knownissues.go. "affected" is the range of
+# releases where the old name no longer works (or is deprecated); "fixed_in" is
+# empty because a rename is not fixed, it is followed.
+
+- id: dbz-topic-prefix
+  title: database.server.name was replaced by topic.prefix
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Beta1"
+  symptoms: [database.server.name, topic.prefix, missing required configuration, logical name, topic naming strategy]
+  workaround: >-
+    Rename database.server.name to topic.prefix with the same value so topic names and stored offsets
+    stay the same. Debezium 2.0 replaced the logical server name with the topic naming strategy.
+  renamed_keys:
+    - {old: database.server.name, new: topic.prefix}
+  source: https://issues.redhat.com/browse/DBZ-4180
+
+- id: dbz-mongodb-topic-prefix
+  title: MongoDB mongodb.name was replaced by topic.prefix
+  component: debezium-mongodb
+  theme: renamed
+  affected: ">=2.1.0.Final"
+  symptoms: [mongodb.name, topic.prefix, logical name, missing required configuration]
+  workaround: >-
+    Rename mongodb.name to topic.prefix with the same value. In 2.0 topic.prefix still defaulted to
+    mongodb.name; later 2.x releases document only topic.prefix.
+  renamed_keys:
+    - {old: mongodb.name, new: topic.prefix}
+  source: https://issues.redhat.com/browse/DBZ-5817
+
+- id: dbz-schema-history-internal
+  title: database.history.* properties were renamed to schema.history.internal.*
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Beta2"
+  symptoms:
+    - database.history.kafka.topic
+    - database.history.kafka.bootstrap.servers
+    - schema.history.internal
+    - history topic
+    - db history topic
+    - sasl ssl security history producer consumer
+  workaround: >-
+    Rename every database.history.* key to schema.history.internal.*, including the
+    database.history.producer.* and database.history.consumer.* security keys (SASL, SSL), or the
+    history producer cannot authenticate against a secured Kafka. Debezium 2.x stores history with
+    io.debezium.storage.kafka.history.KafkaSchemaHistory.
+  renamed_keys:
+    - {old: database.history.kafka.topic, new: schema.history.internal.kafka.topic}
+    - {old: database.history.kafka.bootstrap.servers, new: schema.history.internal.kafka.bootstrap.servers}
+    - {old: database.history.skip.unparseable.ddl, new: schema.history.internal.skip.unparseable.ddl}
+    - {old: database.history.store.only.captured.tables.ddl, new: schema.history.internal.store.only.captured.tables.ddl}
+    - {old: database.history.producer.security.protocol, new: schema.history.internal.producer.security.protocol}
+    - {old: database.history.consumer.security.protocol, new: schema.history.internal.consumer.security.protocol}
+    - {old: database.history.producer.*, new: schema.history.internal.producer.*}
+    - {old: database.history.consumer.*, new: schema.history.internal.consumer.*}
+    - {old: database.history.*, new: schema.history.internal.*}
+    - {old: database.history, new: schema.history.internal}
+  renamed_values:
+    - {old: io.debezium.relational.history.KafkaDatabaseHistory, new: io.debezium.storage.kafka.history.KafkaSchemaHistory}
+    - {old: io.debezium.relational.history.FileDatabaseHistory, new: io.debezium.storage.file.history.FileSchemaHistory}
+  source: https://issues.redhat.com/browse/DBZ-5043
+
+- id: dbz-table-include-list
+  title: table.whitelist and table.blacklist were removed for table.include.list and table.exclude.list
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [table.whitelist, table.blacklist, table.include.list, table.exclude.list, no tables captured]
+  workaround: >-
+    Rename table.whitelist to table.include.list and table.blacklist to table.exclude.list. The old
+    names were deprecated in 1.3 and removed with the other deprecated options in 2.0.
+  renamed_keys:
+    - {old: table.whitelist, new: table.include.list}
+    - {old: table.blacklist, new: table.exclude.list}
+  source: https://issues.redhat.com/browse/DBZ-5045
+
+- id: dbz-schema-include-list
+  title: schema.whitelist and schema.blacklist were removed for schema.include.list and schema.exclude.list
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [schema.whitelist, schema.blacklist, schema.include.list, schema.exclude.list]
+  workaround: Rename schema.whitelist to schema.include.list and schema.blacklist to schema.exclude.list.
+  renamed_keys:
+    - {old: schema.whitelist, new: schema.include.list}
+    - {old: schema.blacklist, new: schema.exclude.list}
+  source: https://issues.redhat.com/browse/DBZ-5045
+
+- id: dbz-database-include-list
+  title: database.whitelist and database.blacklist were removed for database.include.list and database.exclude.list
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [database.whitelist, database.blacklist, database.include.list, database.exclude.list]
+  workaround: Rename database.whitelist to database.include.list and database.blacklist to database.exclude.list.
+  renamed_keys:
+    - {old: database.whitelist, new: database.include.list}
+    - {old: database.blacklist, new: database.exclude.list}
+  source: https://issues.redhat.com/browse/DBZ-5045
+
+- id: dbz-column-include-list
+  title: column.whitelist and column.blacklist were removed for column.include.list and column.exclude.list
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [column.whitelist, column.blacklist, column.include.list, column.exclude.list]
+  workaround: Rename column.whitelist to column.include.list and column.blacklist to column.exclude.list.
+  renamed_keys:
+    - {old: column.whitelist, new: column.include.list}
+    - {old: column.blacklist, new: column.exclude.list}
+  source: https://issues.redhat.com/browse/DBZ-5045
+
+- id: dbz-mongodb-collection-include-list
+  title: MongoDB collection and field whitelist/blacklist options were removed
+  component: debezium-mongodb
+  theme: renamed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [collection.whitelist, collection.blacklist, field.blacklist, collection.include.list, field.exclude.list]
+  workaround: >-
+    Rename collection.whitelist to collection.include.list, collection.blacklist to
+    collection.exclude.list and field.blacklist to field.exclude.list.
+  renamed_keys:
+    - {old: collection.whitelist, new: collection.include.list}
+    - {old: collection.blacklist, new: collection.exclude.list}
+    - {old: field.blacklist, new: field.exclude.list}
+  source: https://issues.redhat.com/browse/DBZ-5045
+
+- id: dbz-topic-heartbeat-transaction
+  title: heartbeat.topics.prefix and transaction.topic were replaced by topic.heartbeat.prefix and topic.transaction
+  component: debezium
+  theme: renamed
+  affected: ">=2.0.0.Beta1"
+  symptoms: [heartbeat.topics.prefix, transaction.topic, topic.heartbeat.prefix, topic.transaction, heartbeat topic name]
+  workaround: >-
+    Rename heartbeat.topics.prefix to topic.heartbeat.prefix and transaction.topic to
+    topic.transaction. With the 2.0 topic naming strategy the heartbeat topic is
+    <topic.heartbeat.prefix>.<topic.prefix>.
+  renamed_keys:
+    - {old: heartbeat.topics.prefix, new: topic.heartbeat.prefix}
+    - {old: transaction.topic, new: topic.transaction}
+  source: https://issues.redhat.com/browse/DBZ-4180
+
+- id: dbz-sqlserver-database-names
+  title: SQL Server database.dbname was replaced by database.names
+  component: debezium-sqlserver
+  theme: renamed
+  affected: ">=2.0.0.Final"
+  symptoms: [database.dbname, database.names, sql server multiple databases]
+  workaround: >-
+    Replace database.dbname with database.names (a comma-separated list; one connector can now
+    capture several databases of one instance).
+  # No renamed_keys: database.dbname is still the key of the Postgres, MySQL and
+  # Oracle connectors, and RenamedKey is not per component.
+  source: https://debezium.io/documentation/reference/2.0/connectors/sqlserver.html
+
+- id: dbz-mongodb-connection-string
+  title: MongoDB mongodb.hosts was removed for mongodb.connection.string
+  component: debezium-mongodb
+  theme: renamed
+  affected: ">=2.4.0.Beta2"
+  symptoms: [mongodb.hosts, mongodb.members.autodiscover, mongodb.connection.string, replica set hosts]
+  workaround: >-
+    Replace mongodb.hosts (and mongodb.members.autodiscover) with mongodb.connection.string, a
+    standard mongodb:// URI that names the replica set or the mongos routers.
+  # No renamed_keys: the value changes form (a mongodb:// URI, not rs/host:port).
+  source: https://issues.redhat.com/browse/DBZ-6892
+
+- id: dbz-snapshot-mode-no-data
+  title: snapshot.mode schema_only and schema_only_recovery are deprecated for no_data and recovery
+  component: debezium
+  theme: renamed
+  affected: ">=2.6.0.CR1"
+  symptoms: [snapshot.mode, schema_only, schema_only_recovery, no_data, recovery, deprecated snapshot mode]
+  workaround: >-
+    Use snapshot.mode=no_data instead of schema_only and snapshot.mode=recovery instead of
+    schema_only_recovery. 2.6 aligned the snapshot modes of all connectors.
+  renamed_values:
+    - {old: schema_only, new: no_data}
+    - {old: schema_only_recovery, new: recovery}
+  source: https://issues.redhat.com/browse/DBZ-7308
+
+- id: dbz-unwrap-tombstone-handling
+  title: ExtractNewRecordState drop.tombstones and delete.handling.mode gave way to delete.tombstone.handling.mode
+  component: debezium
+  theme: renamed
+  affected: ">=2.5.0.Final"
+  symptoms: [drop.tombstones, delete.handling.mode, delete.tombstone.handling.mode, ExtractNewRecordState, unwrap, tombstone]
+  workaround: >-
+    Configure transforms.<name>.delete.tombstone.handling.mode (tombstone, drop, rewrite,
+    rewrite-with-tombstone, delete-to-tombstone) instead of the two older options; current docs list only
+    the new one.
+  # No renamed_keys: two options with other values became one; the value does
+  # not carry over (drop.tombstones=true is not a delete.tombstone.handling.mode).
+  source: https://issues.redhat.com/browse/DBZ-7062

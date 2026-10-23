@@ -1,0 +1,96 @@
+# Prometheus JMX exporter rules for the dev Connect worker (Q3d). The agent serves
+# them on :9404/metrics (KAFKA_OPTS in dev/docker-compose.yml); the server reads
+# that endpoint as DEBEZIUM_METRICS_URL for debezium_snapshot_progress /
+# debezium_metrics (prefix debezium_metrics_) and connect_worker_metrics
+# (CONNECT_METRICS_PREFIX, default kafka_connect_).
+#
+# The first rule that matches an attribute wins, and only matched attributes are
+# exported (no catch-all): the endpoint stays small, and nothing but numbers and
+# the status words leave the worker. cmd/devctl/jmx_exporter_test.go checks every
+# rule against sample MBean names.
+lowercaseOutputName: false
+lowercaseOutputLabelNames: false
+rules:
+  # Debezium (the rules of debezium-examples/monitoring, plus the task-keyed
+  # RowsScanned of Debezium 2+), names kept as they are
+  # (debezium_metrics_SnapshotRunning, ...).
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, server=([^,]+), task=([^,]+), context=([^,]+), key=([^>]+)><>RowsScanned'
+    name: debezium_metrics_RowsScanned
+    labels:
+      plugin: "$1"
+      name: "$2"
+      task: "$3"
+      context: "$4"
+      table: "$5"
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,]+), key=([^>]+)><>RowsScanned'
+    name: debezium_metrics_RowsScanned
+    labels:
+      plugin: "$1"
+      name: "$3"
+      context: "$2"
+      table: "$4"
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, server=([^,]+), task=([^,]+), context=([^,]+), database=([^>]+)><>([^:]+)'
+    name: debezium_metrics_$6
+    labels:
+      plugin: "$1"
+      name: "$2"
+      task: "$3"
+      context: "$4"
+      database: "$5"
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, server=([^,]+), task=([^,]+), context=([^>]+)><>([^:]+)'
+    name: debezium_metrics_$5
+    labels:
+      plugin: "$1"
+      name: "$2"
+      task: "$3"
+      context: "$4"
+  - pattern: 'debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^>]+)><>([^:]+)'
+    name: debezium_metrics_$4
+    labels:
+      plugin: "$1"
+      name: "$3"
+      context: "$2"
+
+  # Kafka Connect. Names are the exporter's rule-less default naming (prefix,
+  # MBean type, attribute; '-' -> '_'), which connect_worker_metrics reads
+  # (internal/tools/debeziumtools/worker.go): e.g.
+  # kafka_connect_task_error_metrics_total_records_skipped. The status rules
+  # come before the numeric ones: a string attribute matched by a numeric rule
+  # would be dropped there.
+  # kafka.connect:type=connector-metrics,connector={connector} status: running|paused|stopped|failed|...
+  - pattern: 'kafka.connect<type=connector-metrics, connector=([^>]+)><>status: ([a-z-]+)'
+    name: kafka_connect_connector_status
+    value: 1
+    labels:
+      connector: "$1"
+      status: "$2"
+  # kafka.connect:type=connector-task-metrics,connector={connector},task={task} status
+  - pattern: 'kafka.connect<type=connector-task-metrics, connector=([^,]+), task=([^>]+)><>status: ([a-z-]+)'
+    name: kafka_connect_connector_task_status
+    value: 1
+    labels:
+      connector: "$1"
+      task: "$2"
+      status: "$3"
+  # task-error-metrics: total-record-errors, total-record-failures,
+  # total-records-skipped, total-errors-logged, deadletterqueue-produce-requests,
+  # deadletterqueue-produce-failures, total-retries, last-error-timestamp;
+  # source-task-, sink-task- and connector-task-metrics likewise.
+  - pattern: 'kafka.connect<type=(task-error|source-task|sink-task|connector-task)-metrics, connector=([^,]+), task=([^>]+)><>([a-z-]+)'
+    name: kafka_connect_$1_metrics_$4
+    labels:
+      connector: "$2"
+      task: "$3"
+  # connect-worker-metrics per connector: connector-running-task-count, ...
+  - pattern: 'kafka.connect<type=connect-worker-metrics, connector=([^>]+)><>([a-z-]+)'
+    name: kafka_connect_connect_worker_metrics_$2
+    labels:
+      connector: "$1"
+  # connect-worker-metrics: task-startup-failure-total, connector-startup-failure-total,
+  # connector-count, task-count, ...
+  - pattern: 'kafka.connect<type=connect-worker-metrics><>([a-z-]+)'
+    name: kafka_connect_connect_worker_metrics_$1
+  # connect-worker-rebalance-metrics: rebalancing, completed-rebalances-total, epoch,
+  # rebalance-avg-time-ms, time-since-last-rebalance-ms, ...
+  - pattern: 'kafka.connect<type=connect-worker-rebalance-metrics><>([a-z-]+)'
+    name: kafka_connect_connect_worker_rebalance_metrics_$1

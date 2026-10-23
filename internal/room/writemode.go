@@ -38,7 +38,7 @@ func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnaps
 	if err != nil {
 		return RoomSnapshot{}, err
 	}
-	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloFor(u, snap.PipelineID), AutoApprove: s.autoApproveFor(snap.PipelineID), Staging: s.stagingOn(snap.PipelineID)}
+	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloForRoom(u, snap), AutoApprove: s.autoApproveFor(snap.PipelineID), Staging: s.stagingOn(snap.PipelineID)}
 	// X8: which steps can be staged and whether approval waits for a stage
 	// depend on the server's actions and owners.yaml; a stage past its
 	// expires_at is lost and no longer shown as running.

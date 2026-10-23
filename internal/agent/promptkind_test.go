@@ -58,16 +58,28 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // reads the prompt as before but for these words. To stay at 1335 words,
 // rule 7 reads "stop reading; call propose_fix or say" and the tools rule
 // lost its "also".
+// Q4b moved it a ninth time, on purpose: the "connector does not exist yet"
+// path validates the full config with connect_validate_config before a create
+// is proposed, proposes nothing on a validation error, validates from scratch
+// when there is no base connector, and names a known-issue id for a renamed
+// key. The new rule is ~30 words; to stay under the 1335-word ceiling
+// (LEAD-ARCH ruling on #659) repeated wording was tightened (the scheduling
+// and write-off notes, the reply_to and action-result phrasings, the id
+// examples) and three rule words were traded away: the pause bullet lost
+// "report backlog and retention headroom", the similar-incidents rule now
+// asks for the step id without "and reads", and Style lost "Short
+// sentences.". Restoring those needs the ceiling moved.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "8e70612c64ee9f166f5172cd1bc085c27f9b5724fcac4f86eb56fe9615aa9ef8"
+const cdcPromptSHA256 = "a3f8fbf037c533a8b2516627d729ef2d47bdfaf94c4687ab75abc9b6c04bd2be"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
-// snapshot cannot silently move it. X4c moved it with cdcPromptSHA256.
-const cdcPromptWriteOffSHA256 = "c9e21e8f84d4f28b03b09783421ccde3eb6b01de711902bef2c4ae5bc1024a14"
+// snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
+// did Q4b.
+const cdcPromptWriteOffSHA256 = "0ca80e3aa092e00890223016f782199a6b309ed032bab43b11766c3625ccf40a"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

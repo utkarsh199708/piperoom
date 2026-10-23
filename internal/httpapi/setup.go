@@ -176,6 +176,51 @@ func (s *Server) handleSetupMaintenanceWindow(w http.ResponseWriter, r *http.Req
 	writeEvent(w, http.StatusOK, ev)
 }
 
+// handleSetupSecret is POST /api/rooms/{id}/setup/secret: the driver typed a
+// value in the UI. It is forwarded to the paired runner in one secret frame
+// and stored nowhere on the server (docs/api.md). The value never reaches a
+// log line, an event or an error; the route is outside request logging
+// (setupSecretPath), so even a future change to that middleware cannot log a
+// body.
+func (s *Server) handleSetupSecret(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	if err := decodeBodyLimit(w, r, &body, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := s.svc.SetSetupSecret(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.Name, body.Value); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSetupCredentials is POST /api/rooms/{id}/setup/credentials: it asks
+// the paired runner for its read credentials and carries no body. The values
+// come back in the runner's credentials frame (runnerLoop), never here.
+func (s *Server) handleSetupCredentials(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.RegisterSetupCredentials(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id")); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// setupSecretPath reports whether path is the one route whose request body
+// carries a secret value (POST /api/rooms/{id}/setup/secret). The route leaves
+// no request log line at all: the log already names no body, and this keeps it
+// that way if the middleware ever grows one.
+func setupSecretPath(path string) bool {
+	path = strings.TrimSuffix(path, "/")
+	const roomPrefix = "/api/rooms/"
+	return strings.HasPrefix(path, roomPrefix) &&
+		strings.HasSuffix(path, "/setup/secret") &&
+		len(path) > len(roomPrefix)+len("/setup/secret")
+}
+
 // parseSetupTime parses one RFC 3339 time of a maintenance window.
 func parseSetupTime(field, raw string) (time.Time, error) {
 	raw = strings.TrimSpace(raw)

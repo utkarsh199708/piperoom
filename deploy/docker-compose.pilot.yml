@@ -93,6 +93,13 @@ services:
       # No colon in ${PIPEROOM_WRITE_MODE-on} on purpose: with ":-" an empty
       # value would silently become on.
       PIPEROOM_WRITE_MODE: ${PIPEROOM_WRITE_MODE-on}
+      # Setup rooms (U1-5d; docs/design/setup-agent.md §3.7). Off unless
+      # deploy/.env sets PIPEROOM_SETUP_ENABLED=on (which needs write mode on).
+      # Registered read credentials land under PIPEROOM_SECRETS_DIR/<pipeline>/
+      # <name>, 0600, so the directory is one volume every server container
+      # mounts; a server that cannot write it refuses to start.
+      PIPEROOM_SETUP_ENABLED: ${PIPEROOM_SETUP_ENABLED:-}
+      PIPEROOM_SECRETS_DIR: /secrets
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
       SOURCE_DB_URL: ${SOURCE_DB_URL:-}
@@ -177,6 +184,10 @@ services:
     volumes:
       # owners.yaml and users.yaml: who owns which layer, and who may approve.
       - ./config:/config:ro
+      # Registered read credentials (setup rooms): one shared volume, mounted
+      # at PIPEROOM_SECRETS_DIR above. Do not point it at a host directory you
+      # commit: the files are credentials.
+      - piperoom-setup-secrets:/secrets
       # Optional TLS files for Kafka / Registry / Connect (KAFKA_TLS_CA_FILE=/certs/ca.pem ...).
       - ./certs:/certs:ro
       # Optional, Vertex AI with a service-account key file. deploy/config is
@@ -205,3 +216,6 @@ services:
 
 volumes:
   piperoom-pgdata:
+  # One volume for PIPEROOM_SECRETS_DIR: every server container that mounts it
+  # sees the same registered credentials.
+  piperoom-setup-secrets:

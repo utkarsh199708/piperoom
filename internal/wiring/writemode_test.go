@@ -145,11 +145,13 @@ func ifaceOf[T any]() reflect.Type { return reflect.TypeOf((*T)(nil)).Elem() }
 // refusingAdapters are the only types reachable from the actions with write
 // mode off that carry a write method of the contract: each one refuses.
 var refusingAdapters = map[reflect.Type]bool{
-	reflect.TypeOf(readOnlyConnect{}):        true,
-	reflect.TypeOf(readOnlyConnectDryRun{}):  true,
-	reflect.TypeOf(readOnlyRegistry{}):       true,
-	reflect.TypeOf(readOnlyRegistryDryRun{}): true,
-	reflect.TypeOf(noRegistry{}):             true,
+	reflect.TypeOf(readOnlyConnect{}):              true,
+	reflect.TypeOf(readOnlyConnectDryRun{}):        true,
+	reflect.TypeOf(readOnlyConnectValidate{}):      true,
+	reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
+	reflect.TypeOf(readOnlyRegistry{}):             true,
+	reflect.TypeOf(readOnlyRegistryDryRun{}):       true,
+	reflect.TypeOf(noRegistry{}):                   true,
 }
 
 // readOnlyKafkaViews are the only types reachable from the actions with write
@@ -175,6 +177,12 @@ func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) 
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
 	for ty := range reachableTypes(areg) {
+		// A refusing adapter is exempt from the writer-interface checks
+		// below, so its own method set must carry nothing but known reads
+		// and refusing writes (a smuggled forwarding write hides there).
+		if refusingAdapters[ty] {
+			assertAdapterMethodSet(t, name, ty)
+		}
 		never := writers
 		if !readOnlyKafkaViews[ty] {
 			never = append(slices.Clone(writers), writerReads...)

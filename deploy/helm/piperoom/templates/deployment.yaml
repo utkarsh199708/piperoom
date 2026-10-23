@@ -79,6 +79,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if .Values.setupSecrets.enabled }}
+            # Setup rooms: one shared volume holds the registered read
+            # credentials (<pipeline>/<name>, 0600). The claim is
+            # ReadWriteMany, so every replica reads and writes the same files.
+            - name: PIPEROOM_SETUP_ENABLED
+              value: "on"
+            - name: PIPEROOM_SECRETS_DIR
+              value: {{ .Values.setupSecrets.mountPath | quote }}
+            {{- end }}
             {{- range $k, $v := .Values.env }}
             {{- if and (not (kindIs "invalid" $v)) (ne $k "PIPEROOM_PUBLIC_URL") (ne $k "PIPEROOM_AUTH_MODE") (ne $k "PIPEROOM_REPLICA_ID") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) }}
             - name: {{ $k }}
@@ -143,6 +152,10 @@ spec:
             # The root file system is read-only; /tmp is the only writable path.
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.setupSecrets.enabled }}
+            - name: setup-secrets
+              mountPath: {{ .Values.setupSecrets.mountPath }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -154,6 +167,11 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+        {{- if .Values.setupSecrets.enabled }}
+        - name: setup-secrets
+          persistentVolumeClaim:
+            claimName: {{ .Values.setupSecrets.existingClaim }}
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -332,7 +332,7 @@ func TestQuickstartServesRoomListWithin10s(t *testing.T) {
 	}
 	logs := stderr.String()
 	// Write mode is off, so run opens the stacks with ReadOnly (P1a-3).
-	for _, want := range []string{"mode=quickstart", "write mode off", "wrote a one-user users file", "TEST openStacks ReadOnly=true"} {
+	for _, want := range []string{"mode=quickstart", "write mode off", "wrote a users file", "TEST openStacks ReadOnly=true"} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("the log lacks %q:\n%s", want, logs)
 		}
@@ -549,7 +549,7 @@ func TestQuickstartListenErrorRemovesTempDir(t *testing.T) {
 	}
 	// The users file was written before the listen (the log says so), and the
 	// failed start removed it.
-	if !strings.Contains(string(out), "wrote a one-user users file") {
+	if !strings.Contains(string(out), "wrote a users file") {
 		t.Fatalf("the start did not reach the users file before the listen:\n%s", out)
 	}
 	if left, _ := filepath.Glob(filepath.Join(tmp, quickstart.TempDirPrefix+"*")); len(left) != 0 {

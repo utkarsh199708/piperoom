@@ -1,0 +1,113 @@
+# Known issues: removed or moved pieces and changed defaults (plan §6, theme 2).
+
+- id: dbz-wal2json-removed
+  title: The wal2json decoders were removed from the Postgres connector
+  component: debezium-postgres
+  theme: removed
+  affected: ">=2.0.0.Alpha1"
+  symptoms: [wal2json, wal2json_rds, wal2json_streaming, wal2json_rds_streaming, plugin.name, decoder]
+  workaround: >-
+    Set plugin.name=pgoutput (built into Postgres 10+, no server install). A new plug-in needs a new
+    replication slot: create the connector with a new slot.name and snapshot, or drop the old slot once
+    the connector no longer uses it.
+  renamed_values:
+    - {old: wal2json, new: pgoutput}
+    - {old: wal2json_rds, new: pgoutput}
+    - {old: wal2json_streaming, new: pgoutput}
+    - {old: wal2json_rds_streaming, new: pgoutput}
+  source: https://issues.redhat.com/browse/DBZ-4156
+
+- id: dbz-image-no-confluent-avro
+  title: The Debezium container images no longer ship the Confluent Avro converter
+  component: debezium-image
+  theme: removed
+  affected: ">=2.0.0.Alpha1"
+  symptoms:
+    - io.confluent.connect.avro.AvroConverter
+    - ClassNotFoundException
+    - Invalid value for configuration key.converter
+    - value.converter
+    - avro converter
+  workaround: >-
+    Add the Confluent Avro converter jars (kafka-connect-avro-converter and its dependencies) to a
+    plugin folder of the image, or use the Apicurio converter that the image can enable with
+    ENABLE_APICURIO_CONVERTERS=true.
+  source: https://issues.redhat.com/browse/DBZ-4952
+
+- id: dbz-mongodb-oplog-removed
+  title: The MongoDB connector no longer streams from the oplog
+  component: debezium-mongodb
+  theme: removed
+  affected: ">=2.0.0.Alpha2"
+  symptoms: [capture.mode, oplog, change streams, mongodb replica set]
+  workaround: >-
+    Use a change streams capture.mode (change_streams or change_streams_update_full). Change streams
+    need a replica set or sharded cluster, not a standalone mongod.
+  source: https://issues.redhat.com/browse/DBZ-4951
+
+- id: dbz-mysql-legacy-removed
+  title: The legacy MySQL connector implementation was removed
+  component: debezium-mysql
+  theme: removed
+  affected: ">=2.0.0.Alpha1"
+  symptoms: [legacy implementation, mysql connector legacy, internal option]
+  workaround: >-
+    Remove any option that selects the legacy implementation and run the default one; test snapshot
+    and streaming behaviour before upgrading production connectors.
+  source: https://issues.redhat.com/browse/DBZ-4950
+
+- id: dbz-mariadb-own-connector
+  title: MariaDB moved from the MySQL connector to its own connector
+  component: debezium-mariadb
+  theme: removed
+  affected: ">=2.7.0.Alpha1"
+  symptoms: [mariadb, mysql connector mariadb, gtid mariadb]
+  workaround: >-
+    Capture MariaDB with the separate Debezium MariaDB connector (its own plug-in archive) instead of
+    the MySQL connector class.
+  source: https://issues.redhat.com/browse/DBZ-7693
+
+- id: dbz-unwrap-class-renamed
+  title: The old unwrap SMT classes UnwrapFromEnvelope and UnwrapFromMongoDbEnvelope do not exist
+  component: debezium
+  theme: removed
+  affected: ">=1.2.0.Alpha1"
+  symptoms: [UnwrapFromEnvelope, UnwrapFromMongoDbEnvelope, ClassNotFoundException, transforms, unwrap]
+  workaround: >-
+    Use io.debezium.transforms.ExtractNewRecordState for relational connectors and
+    io.debezium.connector.mongodb.transforms.ExtractNewDocumentState for MongoDB.
+  renamed_values:
+    - {old: io.debezium.transforms.UnwrapFromEnvelope, new: io.debezium.transforms.ExtractNewRecordState}
+    - {old: io.debezium.connector.mongodb.transforms.UnwrapFromMongoDbEnvelope, new: io.debezium.connector.mongodb.transforms.ExtractNewDocumentState}
+  source: https://issues.redhat.com/browse/DBZ-1968
+
+- id: dbz-schema-name-adjustment-none
+  title: The default schema.name.adjustment.mode changed from avro to none
+  component: debezium
+  theme: removed
+  affected: ">=2.0.0.CR1"
+  symptoms: [schema.name.adjustment.mode, SchemaParseException, Illegal character, avro schema name]
+  workaround: >-
+    With the Avro converter and table or column names that are not valid Avro names, set
+    schema.name.adjustment.mode=avro (and field.name.adjustment.mode=avro for field names).
+  source: https://issues.redhat.com/browse/DBZ-5541
+
+- id: dbz-skipped-operations-truncate
+  title: skipped.operations now defaults to t, so TRUNCATE events are not emitted
+  component: debezium
+  theme: removed
+  affected: ">=2.0.0.Beta2"
+  symptoms: [skipped.operations, truncate, missing truncate events]
+  workaround: Set skipped.operations=none to emit truncate events again; check that consumers handle them.
+  source: https://issues.redhat.com/browse/DBZ-5497
+
+- id: kafka4-old-clients-refused
+  title: Kafka 4.0 brokers refuse clients (including Connect) older than 2.1
+  component: kafka
+  theme: removed
+  affected: ">=4.0.0"
+  symptoms: [UnsupportedVersionException, old protocol api versions, KIP-896, kafka 4.0, client version]
+  workaround: >-
+    Upgrade every Java client, Connect worker and Debezium runtime to Kafka client 2.1 or later before
+    the brokers move to 4.0.
+  source: https://kafka.apache.org/40/documentation.html#upgrade_servers_400_notable

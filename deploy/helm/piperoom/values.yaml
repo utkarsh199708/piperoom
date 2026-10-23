@@ -219,6 +219,19 @@ files:
   users: ""
   mountPath: /config        # OWNERS_FILE and USERS_FILE point into it
 
+# Setup rooms (U1; docs/design/setup-agent.md §3.7). Registered read
+# credentials are written under PIPEROOM_SECRETS_DIR/<pipeline>/<name>, 0600,
+# on the replica that received them, so every replica must mount the same
+# directory. Create a ReadWriteMany claim you manage (NFS, EFS, Azure Files, a
+# CSI Secret store) and name it here; the chart then sets
+# PIPEROOM_SETUP_ENABLED=on, mounts the claim read-write at mountPath and
+# exports PIPEROOM_SECRETS_DIR. env.PIPEROOM_WRITE_MODE must stay "on". A
+# replica that cannot write the directory refuses to start.
+setupSecrets:
+  enabled: false
+  existingClaim: ""         # a ReadWriteMany PersistentVolumeClaim
+  mountPath: /var/lib/piperoom/secrets
+
 # Extra volumes, for example Kafka/Connect TLS files from a Secret at /certs.
 extraVolumes: []
 #  - name: certs

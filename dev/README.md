@@ -120,6 +120,48 @@ block on the `orders` pipeline (`docs/api.md`, "X8 staging"); start the server w
 of X8b use `testenv.RequireStaging(t)`, which skips when the profile is not up;
 `go test -tags integration -run TestStagingProfile ./internal/testenv/` checks the profile itself against a running stack.
 
+## Worker metrics and the `logs` profile (Q3d)
+
+**Metrics, always on.** The `connect` image carries the Prometheus JMX exporter 1.0.1 (checksum-verified in
+`dev/connect/Dockerfile`), loaded through `KAFKA_OPTS` with the rules in `dev/connect/jmx-exporter.yml`. It serves
+`http://localhost:9404/metrics` (host loopback; no login): Debezium's `debezium_metrics_*` (snapshot, streaming,
+`RowsScanned` per table) and Kafka Connect's `kafka_connect_*` (task errors, skipped records, DLQ produce failures,
+task and connector startup failures, rebalance state, connector and task status). Only those families are exported:
+the rules have no catch-all. A JVM you start with `docker exec` in the `connect` container inherits `KAFKA_OPTS`
+and cannot bind 9404 again; give it `-e KAFKA_OPTS=`. After pulling this change, rebuild the image
+(`devctl up` builds; or `docker compose -f dev/docker-compose.yml build connect`).
+
+**Logs, profile `logs`.** Loki 3.5.7 and Promtail 3.5.7. Promtail finds the `connect` container (project
+`piperoom-dev`, service `connect`; not `connect-staging`) through the read-only Docker socket, joins stack traces to
+the line that logged them, labels each entry `service`, `container` and `level`, and pushes to Loki on
+`http://localhost:3100` (host loopback; no auth). Storage lives in the container and goes with `docker compose
+down`.
+
+```
+docker compose -f dev/docker-compose.yml --profile logs up -d --wait   # the default stack plus loki and promtail
+docker compose -f dev/docker-compose.yml --profile logs down           # stops them too (a plain `down` leaves them)
+```
+
+Promtail turns healthy once it tails the Connect container, so `--wait` returning means logs flow. Server settings
+for this stack:
+
+| Variable | Value | Tools |
+|---|---|---|
+| `DEBEZIUM_METRICS_URL` | `http://localhost:9404/metrics` | `debezium_snapshot_progress`, `debezium_metrics`, `connect_worker_metrics` (Q3b) |
+| `CONNECT_METRICS_PREFIX` | unset (default `kafka_connect_`) | `connect_worker_metrics` |
+| `WORKER_LOGS_LOKI_URL` | `http://localhost:3100` | `connect_worker_logs` (Q3c) |
+| `WORKER_LOGS_SELECTOR` | `{service="connect"}` | `connect_worker_logs` |
+
+Quick checks: `curl -s localhost:9404/metrics | grep -c '^kafka_connect_'` (non-zero once the connector runs) and
+`curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode 'query={service="connect"}' --data-urlencode limit=5`.
+**Not run yet:** written without Docker (2026-10-23); the compose file passes `docker compose config` and the rules,
+the Promtail regexes and the compose structure are unit-tested (`go test ./cmd/devctl -run 'JMX|LogsProfile|ConnectJMX'`).
+The rules were also run once in the real `jmx_prometheus_javaagent` 1.0.1 (same checksum) against stand-in Connect and
+Debezium MBeans: names as `connect_worker_metrics` reads them, except that exporter 1.x drops a trailing `_total`
+(`..._task_startup_failure`), which the tool accepts. Nobody has seen the profile come up healthy or the two tools
+return data on the stack. The first live run should record
+the time to healthy here (the row's target is under 2 minutes).
+
 ## The dev-only break/fix API (`devctl serve`)
 
 For the web "Break something" menu (A6) there is a tiny local HTTP API:

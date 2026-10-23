@@ -64,6 +64,20 @@ export type EventType =
   | 'proposal.scheduled'
   | 'proposal.cancelled'
   | 'room.escalated'
+  // U wave: setup rooms (docs/design/setup-agent.md, docs/api.md "U-wave events").
+  | 'setup.pairing'
+  | 'setup.runner_attached'
+  | 'setup.runner_lost'
+  | 'setup.runner_refused'
+  | 'setup.plan'
+  | 'setup.blocked'
+  | 'setup.target_registered'
+  | 'setup.target_classed'
+  | 'setup.pipeline_extended'
+  | 'setup.maintenance_window'
+  | 'setup.verified'
+  | 'setup.awaiting_change'
+  | 'pipeline.registered'
 
 export interface Event {
   room_id: string
@@ -116,6 +130,8 @@ export interface RoomCreatedPayload {
   shadow?: boolean
   /** X3: "forecast" for a room a forecast signal opened (sev4, no agent until someone asks); absent otherwise. */
   origin?: string
+  /** U0: "setup" for a room POST /api/setup opened; absent otherwise. Never set with `shadow`. */
+  mode?: 'setup'
 }
 
 /** room.escalated (X3, system actor): a watcher signal raised an open room's severity; a room is never lowered. */
@@ -749,6 +765,172 @@ export interface TriageSummary {
   at: string
 }
 
+// ---- setup rooms (U wave; mirror of internal/events/events.go and the snapshot docs) ----
+
+/** The body of POST /api/setup (events.SetupRequest). `tenant` is required only with a tenants: block. */
+export interface SetupRequest {
+  pipeline_id: string
+  tenant?: string
+  title: string
+  source_kind: string // postgres | mysql | sqlserver | mongodb | oracle
+  target: string // compose | host | strimzi | msk | confluent | aiven | dbzserver | embedded
+  topic_prefix: string
+  tables: string[]
+  connectors?: string[]
+  targets: SetupTargetInput[]
+  repos?: string[]
+}
+
+/** One host or account a setup room may reach (events.SetupTarget). Class is a floor; "" lets the server decide. */
+export interface SetupTargetInput {
+  kind: string // postgres | kafka | connect | registry | kubernetes | aws | confluent | aiven | host
+  address: string
+  class?: string // local | shared | production
+}
+
+/** POST /api/setup's answer: the room, its single-use pairing code and the line to paste. */
+export interface CreateSetupResponse {
+  room: RoomSnapshot
+  code: string
+  expires_at: string
+  command: string
+}
+
+/** The document's snapshot shape of a setup room (`setup` on the room GET; absent on list rows). */
+export interface SetupSnapshot {
+  mode: boolean
+  /** null before pairing; a lost runner keeps its record with connected false. */
+  runner: SetupRunnerSummary | null
+  plan_id?: string
+  phase?: string
+  step_index?: number
+  bounds?: SetupBounds
+  targets?: SetupTargetSummary[]
+  provisional?: { topic_prefix?: string; tables?: string[]; connectors?: string[] }
+  maintenance_window?: { start: string; end: string }
+  verified?: SetupRung[]
+  blocked?: { reason: string; question: string }
+  watched_by?: string
+}
+
+export interface SetupRunnerSummary {
+  label: string
+  connected: boolean
+  tools?: Record<string, string>
+}
+
+export interface SetupBounds {
+  attempts_per_step: number
+  steps_per_plan: number
+  wall_clock_s: number
+  token_budget: number
+}
+
+export interface SetupTargetSummary {
+  kind: string
+  address: string
+  class: string
+}
+
+/** setup.plan: the current plan; a new plan names the one it replaces in `supersedes`. */
+export interface SetupPlanStep {
+  index: number
+  op: string
+  target: string
+  tier: string // T0..T3
+  layer: string
+  verify?: string
+}
+
+export interface SetupPlanPhase {
+  name: string
+  steps: SetupPlanStep[]
+}
+
+export interface SetupPlanPayload {
+  plan_id: string
+  supersedes?: string
+  phases: SetupPlanPhase[]
+}
+
+export interface SetupRunnerAttachedPayload {
+  runner_label: string
+  os: string
+  arch: string
+  tools?: Record<string, string>
+  project_dir?: string
+  catalogue_version?: string
+  protocol_version?: number
+  protocol_minor?: number
+}
+
+export interface SetupRunnerLostPayload {
+  runner_label: string
+  last_seen: string
+}
+
+/** setup.blocked: a bound stopped the run; `question` is agent text (untrusted). */
+export interface SetupBlockedPayload {
+  reason: string
+  step_index?: number
+  question: string
+}
+
+export interface SetupRung {
+  name: string
+  ok: boolean
+  step_id?: string
+  receipt_id?: string
+  note?: string
+}
+
+export interface SetupVerifiedPayload {
+  plan_id: string
+  nonce_hash: string
+  rungs: SetupRung[]
+  first_event_latency_ms?: number
+}
+
+/** setup.awaiting_change (rung 8): the person must change the table; example_sql comes from the driver. */
+export interface SetupAwaitingChangePayload {
+  table: string
+  example_sql: string
+}
+
+export interface SetupTargetRegisteredPayload {
+  kind: string
+  address: string
+  class: string
+}
+
+export interface SetupTargetClassedPayload {
+  target: string
+  class: string
+  reason: string
+  by: string // "server" | "person"
+}
+
+export interface SetupPipelineExtendedPayload {
+  add_connectors?: string[]
+  add_tables?: string[]
+  add_consumer_groups?: string[]
+  add_sink_tables?: string[]
+}
+
+export interface SetupMaintenanceWindowPayload {
+  start: string
+  end: string
+}
+
+/** pipeline.registered: the owners entry was written (or opened as a PR); `watched_by` is server | local. */
+export interface PipelineRegisteredPayload {
+  pipeline_id: string
+  tenant?: string
+  path?: string
+  pull_request_url?: string
+  watched_by: string
+}
+
 export interface RoomSnapshot {
   id: string
   title: string
@@ -783,6 +965,8 @@ export interface RoomSnapshot {
   origin?: string
   /** X3: the newest forecast signal of the room's evidence; absent when none. */
   forecast?: ForecastSummary
+  /** U wave: present on a setup room only (docs/api.md "U-wave snapshot fields"). */
+  setup?: SetupSnapshot
 }
 
 /**
