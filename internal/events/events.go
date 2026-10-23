@@ -104,6 +104,14 @@ const (
 	ProposalStageStarted Type = "proposal.stage_started"
 	ProposalStaged       Type = "proposal.staged"
 
+	// AutonomyGranted and AutonomyRevoked are the trust ledger of one
+	// (pipeline, action): the action earned policy approval (PolicyEarned)
+	// after a streak of verified recoveries, or lost it. System actor, except
+	// a revoke by a person (reason "human"), whose actor is that person.
+	// Written to the room whose verification or click caused them. (AU1)
+	AutonomyGranted Type = "autonomy.granted"
+	AutonomyRevoked Type = "autonomy.revoked"
+
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
 	// the seq of the agent.hypothesis it answers; a later agent.hypothesis
@@ -1432,7 +1440,45 @@ const (
 	// with the delay "0" every T1 step waits for a click instead. Never for
 	// T2 or T3, never on a shared or production target. (U)
 	PolicySetupLocal = "setup_local"
+	// PolicyEarned names the owners.yaml autonomy: block: the action earned
+	// policy approval on this pipeline (autonomy.granted) and has not lost it.
+	// Scheduled and approved exactly like PolicyAutoApprove (countdown,
+	// cancel, system actor); never for a step above the block's max_tier,
+	// never with write mode off or PIPEROOM_AUTONOMY=off, and never by the
+	// agent: the system actor approves, the agent only proposed. (AU1)
+	PolicyEarned = "earned_autonomy"
 )
+
+// AutonomyGrantedPayload: Action earned policy approval on the room's
+// pipeline after Streak consecutive verified recoveries inside Window, the
+// owners.yaml value as written ("30d"). A verified recovery is an
+// agent.verification with recovered true (for a recovery-class proposal,
+// outcome RecoveryRecovered; X2) on an agent proposal of the action that no
+// member disputed. Evidence are the proposal ids of the streak, oldest
+// first. (AU1)
+type AutonomyGrantedPayload struct {
+	Action   string   `json:"action"`
+	Streak   int      `json:"streak"`
+	Window   string   `json:"window"`
+	Evidence []string `json:"evidence"`
+}
+
+// Reasons of AutonomyRevokedPayload.Reason. (AU1)
+const (
+	AutonomyRevokedVerifyFailed  = "verify_failed"  // a verification of the action was not a recovery (recovered false: partial, not_recovered or unverifiable fail closed)
+	AutonomyRevokedHuman         = "human"          // a layer owner or tenant admin revoked it (By set)
+	AutonomyRevokedConfigChanged = "config_changed" // the autonomy: entry changed or went away in owners.yaml
+	AutonomyRevokedExpired       = "expired"        // the streak fell out of its window
+)
+
+// AutonomyRevokedPayload: Action lost policy approval on the room's
+// pipeline and starts earning again from a zero streak. By is the person
+// for AutonomyRevokedHuman (also the event actor), nil otherwise. (AU1)
+type AutonomyRevokedPayload struct {
+	Action string `json:"action"`
+	Reason string `json:"reason"`
+	By     *Actor `json:"by,omitempty"`
+}
 
 // ApprovalRejectedPayload is one layer owner's rejection.
 type ApprovalRejectedPayload struct {
