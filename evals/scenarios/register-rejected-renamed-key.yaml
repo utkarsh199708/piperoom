@@ -440,14 +440,22 @@ inputs:
 
 expect:
   root_cause:
-    - [database server name]
-    - [topic prefix, rename*, replaced]
-  # The wrong stories of a connector that will not start.
+    # Either key names the fix: the old one, or the new one Debezium 2.0 requires.
+    - [database server name, topic prefix]
+    - [rename*, replaced, removed, require*, instead]
+  # The wrong stories of a connector that will not start. The Debezium
+  # connector is itself a plugin, so the plugin row names a missing plugin.
   root_cause_forbidden:
     - ['schema change']
     - [schema registry]
     - ['permission denied']
-    - ['plugin']
+    - ['plugin is missing']
+    - ['missing plugin']
+    - ['plugin is not installed']
+    - ['plugin isn t installed']
+    - ['plugin not found']
+    - ['plugin jar*']
+    - ['plugin path']
     - ['slot was lost']
     - ['disk full']
   first_failing_layer: kafka-connect

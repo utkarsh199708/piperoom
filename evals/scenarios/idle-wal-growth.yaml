@@ -541,10 +541,26 @@ inputs:
 expect:
   root_cause:
     - [slot, replication slot]
-    - [idle, quiet, nothing to decode, nothing to confirm, no changes to capture, confirms nothing, no changes]
+    # What is idle is the captured table, not the slot or the connector: a
+    # bare "idle" or "no changes" fits the dead-slot story the steer rules out.
+    - [heartbeat*, no writes, no source writes, no changes to capture, nothing to decode, nothing to confirm,
+       confirms nothing, confirms only, orders is idle, orders stays idle, orders is quiet, orders stays quiet,
+       table is idle, table stays idle, table is quiet, has no changes, never confirms, per database]
     - [wal, retained, hold*]
-  # The wrong stories of WAL growth: nothing failed and nothing is behind.
+  # The wrong stories of WAL growth: nothing failed and nothing is behind,
+  # and the slot is active (not dead, so not one to drop).
   root_cause_forbidden:
+    - ['drop the slot']
+    - ['drop slot']
+    - ['dropping the slot']
+    - [dead slot]
+    - [orphan*]
+    - [abandoned]
+    - ['slot is inactive']
+    - ['stopped consuming']
+    - [restart*, connector]
+    - [slow]
+    - [lagging]
     - ['task failed']
     - ['connector failed']
     - ['schema change']
