@@ -24,6 +24,11 @@ func TestTableSize(t *testing.T) {
 	if a := q.args[0]; a[0] != "public" || a[1] != "orders" || strings.Contains(q.sqls[0], "orders") {
 		t.Fatalf("identifiers must travel as parameters: %v\n%s", a, q.sqls[0])
 	}
+	// pg_partition_tree is empty for an ordinary table; the table's own oid
+	// must be in the sum or every ordinary table would read as 0 bytes.
+	if !strings.Contains(q.sqls[0], "UNION") {
+		t.Fatalf("the query must sum the table itself too: %s", q.sqls[0])
+	}
 }
 
 func TestTableSizeMissingRelation(t *testing.T) {

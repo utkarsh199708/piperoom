@@ -25,15 +25,20 @@ type TableSize struct {
 	TotalBytes int64 `json:"total_bytes"`
 }
 
-// tableSizeSQL reads the sizes of table $1.$2. pg_partition_tree returns the
-// table itself when it is not partitioned, so one expression covers both; the
-// internal nodes of a partition tree carry no storage and add 0. No row: no
-// ordinary or partitioned table of that schema and name.
+// tableSizeSQL reads the sizes of table $1.$2. pg_partition_tree is empty for
+// a table outside a partition tree, so the table's own oid is unioned in (the
+// same rule as publishedCTEs); the internal nodes of a partition tree carry
+// no storage and add 0. No row: no ordinary or partitioned table of that
+// schema and name.
 const tableSizeSQL = `
-		SELECT COALESCE((SELECT sum(pg_table_size(t.relid))::bigint
-		                 FROM pg_partition_tree(c.oid) t), 0),
-		       COALESCE((SELECT sum(pg_indexes_size(t.relid))::bigint
-		                 FROM pg_partition_tree(c.oid) t), 0)
+		SELECT COALESCE((SELECT sum(pg_table_size(x.relid))::bigint
+		                 FROM (SELECT t.relid FROM pg_partition_tree(c.oid) t
+		                       UNION
+		                       SELECT c.oid) x), 0),
+		       COALESCE((SELECT sum(pg_indexes_size(x.relid))::bigint
+		                 FROM (SELECT t.relid FROM pg_partition_tree(c.oid) t
+		                       UNION
+		                       SELECT c.oid) x), 0)
 		FROM pg_namespace n
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = $2::name
 		WHERE n.nspname = $1::name AND c.relkind IN ('r', 'p')`
