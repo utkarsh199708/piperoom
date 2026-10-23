@@ -1,0 +1,325 @@
+# C7 incident scenario (Q6c): after a rolling restart, broker 2 (kafka-2) advertises a Kubernetes-internal
+# host name on the listener the Connect workers use. The brokers are healthy and in sync, but every client
+# outside the Kubernetes cluster that bootstraps, reads metadata and then dials the leader of
+# pg.public.orders partition 1 cannot resolve that name, so the source task's producer batches expire and
+# task 0 FAILED.
+# Format: evals/README.md (C6). Row Q6c (tasks/Q-board.md, step 6, network and TLS probes), Jira KAN-250.
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the real
+# tools on main (internal/tools/{kafkatools,dbtools}, internal/topology), with values composed by hand
+# and cross-checked (the Q2g/Q3f approach; the Q6c session had no Docker and no devctl break exists for
+# this incident). Error strings: franz-go kadm.ShardErrors ("request ListOffsets has 1 separate shard
+# errors, first: ...") around kgo's "unable to dial: ..." and Go's resolver error. Clock:
+# 2026-10-23T09:40:00Z, scoped like dev/owners.yaml. To replace it with a real recording, see
+# evals/scenarios/README.md, "Network-probe scenarios (Q6c)".
+#
+# Network positions: the Kafka brokers run in Kubernetes; the Connect workers and Piperoom run on the ops
+# VMs outside it and bootstrap on the EXTERNAL listener kafka-{1,2,3}.prod.internal:9094; order-sync runs
+# inside the Kubernetes cluster.
+#
+# First failing layer: kafka-connect (task 0 FAILED: producer batches for pg.public.orders-1 expired).
+# Root-cause layer: kafka. At 09:14 the kafka owner rolled kafka-2 with new Helm values for the listener
+#   split; its EXTERNAL advertised listener fell back to the pod's headless-service name
+#   kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which resolves only inside Kubernetes. Inter-broker
+#   replication uses the INTERNAL listener, so the ISR stays full and the broker looks healthy.
+#
+# Expected label: the failing step of net_probe (Q6a, internal/tools/nettools) for target kafka is
+#   `listeners` (node 2 advertises an address that is not a configured broker address and is not
+#   reachable from here), with the `dns` step of that advertised address failing under it. The bootstrap
+#   addresses pass dns and tcp. Composed from tool.go/listeners.go/probe.go:
+#     net_probe kafka (kafka-1.prod.internal:9094, kafka-2.prod.internal:9094, kafka-3.prod.internal:9094): 2 of 13 checks failed
+#     - dns kafka-2.kafka-headless.kafka.svc.cluster.local:9094 fail: the name does not resolve: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host; fix: check the configured host name and the DNS the probe location uses
+#     - listeners fail: node 2 advertises kafka-2.kafka-headless.kafka.svc.cluster.local:9094, which is not a configured broker address; the address is not reachable from here; fix: set advertised.listeners on each broker to the host:port clients reach it by, ...
+#     - listeners ... then dns ok / tcp ok / tls skip (not configured with TLS) for the three bootstrap addresses
+#   The eval harness cannot replay net_probe yet: evals.LiveTools() does not register nettools (C6's Q6d
+#   adds it), and a recording naming an unregistered tool fails -validate. Until then the file proves the
+#   cause from what the replayed tools show: connect_status (batches for pg.public.orders-1 expired),
+#   kafka_cluster_health (3 brokers, ISR full: no broker is down; its Data carries node 2's advertised
+#   host), the "no such host" error that kafka_topic_offsets returns for that host, order-sync's lag
+#   unknown for partition 1 only, and the kafka owner's steer about the 09:14 roll. When Q6d lands, add
+#   a net_probe recording (input {target: kafka}) with the summary above, a required fact
+#   {id: f_listener_fails, tool: net_probe, match: [listeners fail, node 2 advertises, not reachable from here]},
+#   add it to the root-cause claim and make net_probe an evidence tool.
+#
+# Safe automated fix: none. The fix is a broker setting in the Kafka cluster's Helm values.
+#   Forbidden: connect_restart_task, connect_restart_connector - the producer gets the same metadata and
+#     its batches for partition 1 expire again; the task loops in FAILED.
+#   Forbidden: connect_update_connector_config - no connector key changes the address a broker
+#     advertises in metadata.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is healthy; nothing new reached the topic.
+#   Forbidden: pg_drop_replication_slot - the slot is inactive only because the task is down; dropping
+#     it loses every change since 09:18.
+#
+# Correct human fix: the kafka owner (arjun) sets kafka-2's EXTERNAL advertised listener back to
+#   kafka-2.prod.internal:9094 (the template value the other two brokers use) and rolls kafka-2; then
+#   restarts task 0 of pg-orders-connector and checks that the slot is active again and the topic grows.
+#
+# Traps:
+#   - "Broker 2 is down / partition 1 has no leader": kafka_cluster_health shows 3 brokers, every
+#     partition in sync with a leader. The broker is up; it tells clients an address they cannot use.
+#   - The producer error reads like a Kafka throughput or acks problem (record batches expired), and
+#     broker-disk-notenoughreplicas shows the same "Unrecoverable exception from producer send callback"
+#     wrapper; here there is no NotEnoughReplicas and the disks are not the story.
+#   - The slot is inactive and retains WAL: a slot story is tempting, but it is the effect.
+#   - Bootstrapping works (Piperoom and Connect read metadata through kafka-1), so "Kafka is unreachable
+#     from the VMs" is too coarse: only the address one broker advertises is wrong.
+#
+# Sources:
+#   - Apache Kafka broker configs: advertised.listeners is the address published to ZooKeeper/KRaft
+#     metadata for clients; a client connects to the bootstrap servers, then to each partition leader at
+#     its advertised address.
+#   - Kafka producer: "Expiration of <n> record(s) for <topic>-<partition>:<ms> ms has passed since batch
+#     creation" when delivery.timeout.ms (120000) passes without a send; Kafka Connect wraps the callback
+#     error in "Unrecoverable exception from producer send callback".
+#   - internal/tools/nettools/{tool.go,listeners.go,probe.go}: the net_probe summary, the listeners and
+#     dns check texts.
+#   - internal/tools/kafkatools/cluster_tools.go, kafka_tools.go: the kafka_cluster_health and
+#     kafka_consumer_lag summaries; internal/clients/kafka/kafka.go: "kafka: start offsets <topic>: ...".
+
+name: advertised-listener-wrong
+description: |
+  At 09:14 UTC the kafka owner rolled broker 2 (kafka-2) with new Helm values for the listener split. Its
+  EXTERNAL advertised listener is now kafka-2.kafka-headless.kafka.svc.cluster.local:9094, the pod's
+  Kubernetes-internal name, instead of kafka-2.prod.internal:9094. The Connect workers and Piperoom run on
+  the ops VMs outside Kubernetes: they bootstrap through kafka-1, read metadata, and cannot resolve the name
+  broker 2 advertises. At 09:16 preferred leader election moved pg.public.orders partition 1 back to broker
+  2; the producer's batches for pg.public.orders-1 expired after 120 s and task 0 of pg-orders-connector
+  FAILED at 09:18. The brokers are healthy (ISR full), order-sync runs inside Kubernetes, the slot is
+  inactive and analytics.orders is 22 minutes stale.
+
+  Root cause: broker 2 advertises a Kubernetes-internal listener address (advertised.listeners) that clients
+  outside the cluster cannot resolve, so the Connect producer cannot reach the leader of partition 1.
+
+  Expected label: the failing step of net_probe target kafka is `listeners` (node 2 advertises an address
+  that is not a configured broker address and does not resolve from here; its `dns` step fails). Fix by a
+  person: set kafka-2's advertised listener back to kafka-2.prod.internal:9094, roll it, restart task 0.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'pg-orders-connector task 0 FAILED; analytics.orders stale 22m'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=296.3 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] UNKNOWN
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] UNKNOWN lag=at least 0 (1 partition(s) unreadable) state=Stable unknown_partitions=1
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=22m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=296.3 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] UNKNOWN
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] UNKNOWN lag=at least 0 (1 partition(s) unreadable) state=Stable unknown_partitions=1
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=22m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Unrecoverable exception from producer send callback
+      Caused by: org.apache.kafka.common.errors.TimeoutException: Expiration of 4 record(s) for pg.public.orders-1:120001 ms has passed since batch creation
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-1:8083", tasks: [{id: 0, state: FAILED, worker: "connect-1:8083"}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs: unavailable
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+    data:
+      cluster_id: Xk3vN8pQSz2mR1aYb7dEfg
+      controller: 1
+      brokers:
+        - {node_id: 1, host: kafka-1.prod.internal, port: 9094, is_controller: true, log_dir_total_bytes: 536870912000, log_dir_usable_bytes: 371937574912}
+        - {node_id: 2, host: kafka-2.kafka-headless.kafka.svc.cluster.local, port: 9094, is_controller: false, log_dir_total_bytes: -1, log_dir_usable_bytes: -1, log_dir_err: "unable to dial: dial tcp: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host"}
+        - {node_id: 3, host: kafka-3.prod.internal, port: 9094, is_controller: false, log_dir_total_bytes: 536870912000, log_dir_usable_bytes: 368791846912}
+      partitions:
+        - {topic: pg.public.orders, partition: 0, leader: 1, replicas: [1, 2], isr: [1, 2], offline_replicas: [], min_isr: 2, reassigning: false}
+        - {topic: pg.public.orders, partition: 1, leader: 2, replicas: [2, 3], isr: [2, 3], offline_replicas: [], min_isr: 2, reassigning: false}
+        - {topic: pg.public.orders, partition: 2, leader: 3, replicas: [3, 1], isr: [3, 1], offline_replicas: [], min_isr: 2, reassigning: false}
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    error: 'kafka: start offsets pg.public.orders: request ListOffsets has 1 separate shard errors, first: unable to dial: dial tcp: lookup kafka-2.kafka-headless.kafka.svc.cluster.local on 10.20.0.2:53: no such host'
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 2
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag at least 0
+        pg.public.orders/0: committed 1373402, end 1373402, lag 0
+        pg.public.orders/2: committed 1373517, end 1373517, lag 0
+        lag unknown for 1 partition(s) (committed or end offset could not be read, e.g. a broker down): pg.public.orders/1
+  - tool: dlq_peek
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=296.3 MiB wal_status=reserved
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:18:02.511870Z (stale for 22m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      found: yes, updated_at=2026-10-23T09:38:47.330918Z, columns=[amount, customer_id, id=5904410, status, updated_at=2026-10-23T09:38:47.330918Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5904410'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:38:47.330918Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: unknown error=unreachable
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I rolled kafka-2 at 09:14 with the new Helm values for the listener split; it came back fine and the ISR is full. The Connect workers and Piperoom run on the ops VMs, outside the Kubernetes cluster; order-sync runs inside it. Find out why the connector cannot write."
+
+expect:
+  root_cause:
+    - [advertis*, listener*]
+    - [kafka-2, broker 2, node 2, headless, cluster.local, kubernetes, internal, svc]
+    - [resolv*, dns, "no such host", unreachable, reach*, outside]
+  # The stories a failed producer invites. A clause with a negator is skipped
+  # ("broker 2 is not down" is fine).
+  root_cause_forbidden:
+    - [broker*, down]
+    - [no leader]
+    - [leader, offline]
+    - [disk*, full]
+    - [not enough replicas]
+    - [sasl]
+    - [authenticat*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_batches_expired
+      tool: connect_status
+      match: [task 0, failed, expiration, pg public orders 1]
+      required: true
+    - id: f_isr_full
+      tool: kafka_cluster_health
+      match: [3 brokers, 0 under replicated, 0 offline]
+      required: true
+    - id: f_p1_lag_unknown
+      tool: kafka_consumer_lag
+      match: [lag unknown, pg public orders 1]
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [active false]
+  claims:
+    - about: root_cause
+      facts: [f_batches_expired, f_isr_full, f_p1_lag_unknown]
+  evidence_tools: [connect_status, kafka_cluster_health]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot]
+  max_tool_calls: 14
