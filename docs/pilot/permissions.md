@@ -22,9 +22,9 @@ the read access and the original Connect and Registry writes.
 | Warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md); see each warehouse's section) | **none** |
 | Airflow (batch orchestrator) | `dag_runs`, `task_instances`, `task_log_tail`, `dag_schedule_gap` | `Viewer` role; REST `GET` only | **none** |
 | dbt (batch transform) | `dbt_run_results`, `dbt_model_lineage`, `dbt_model_sql` | read `run_results.json` / `manifest.json` (a directory, or dbt Cloud with a read-only service token) | **none** |
-| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
+| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record`, `connect_worker_info` (Connect worker group and internal topics) | describe topics/groups, describe topic configs, read pipeline topics | **none** |
 | Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go`) | none | none |
-| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config`, `connect_source_offsets` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
+| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config`, `connect_source_offsets`, `connect_plugins`, `connect_validate_config`, `connect_worker_info` | REST `GET` (and the validate `PUT`, which creates nothing) | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | 2 actions: `schema_set_compatibility`, `schema_register` |
 | Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
 | Model provider | agent | `anthropic`: API key (env var). `bedrock`: AWS identity with invoke rights in `AWS_REGION`. `vertex`: Google identity with Vertex AI access in `VERTEX_PROJECT_ID` | n/a |
@@ -373,6 +373,8 @@ Minimum ACLs for a principal such as `User:piperoom`:
 | Topic `<prefix>*` | `DescribeConfigs` | `kafka_topic_config` (retention, cleanup policy, min in-sync replicas, partitions, replication factor). Calls `DescribeTopicConfigs` (`internal/clients/kafka/kafka.go`; `internal/tools/kafkatools/kafka_tools.go`) |
 | Group `<consumer group>` (literal, one per consumer in `owners.yaml`) | `Describe` | `kafka_consumer_lag` |
 | Cluster | `Describe` only if your brokers require it for group listing | `kafka_list_groups` |
+| Group `<connect GROUP_ID>` (literal, the Connect cluster's `group.id`) | `Describe` | `connect_worker_info` (Q3a): `ListGroups` keeps groups with protocol type `connect`, then `DescribeGroups` reads their members (`internal/clients/kafka/connect_cluster.go`) |
+| Topic: the Connect internal topics (`config.storage.topic`, `offset.storage.topic`, `status.storage.topic`, literal) | `Describe`, `DescribeConfigs` | `connect_worker_info`: partitions, replication and `cleanup.policy` / `min.insync.replicas`; never `Read` (their values are never consumed). Without `CONNECT_INTERNAL_TOPICS` the tool lists all topics' metadata to find them by name |
 
 Do **not** grant `Write`, `Create`, `Delete`, `Alter`, `AlterConfigs`, `ClusterAction`, or `Read`
 on groups (that would allow committing offsets). Do not grant `Read` on topics outside the
@@ -422,7 +424,10 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 | `GET /connectors/{name}/status` | `connect_status`; actions read state and poll it | `connect.go` |
 | `GET /connectors/{name}/config` | `connect_config`; the config action reads it before and after its write | `connect.go`, `internal/actions/connector_config.go` |
 | `GET /connectors/{name}/offsets` | `connect_source_offsets` (Kafka Connect 3.5+, KIP-875; positions only, no record data) | `internal/clients/connect/lifecycle.go` (`SourceOffsets`); `internal/tools/kafkatools/connect_offsets.go` |
-| `GET /` | `connect_source_offsets`, only to name the worker's version when the offsets endpoint is missing | `lifecycle.go` (`ServerInfo`) |
+| `GET /` | `connect_source_offsets`, only to name the worker's version when the offsets endpoint is missing; `connect_plugins` and `connect_worker_info` (the worker's Kafka version) | `lifecycle.go` (`ServerInfo`) |
+| `GET /connector-plugins?connectorsOnly=false` | `connect_plugins` (Q1c), `connect_worker_info` (Q3a), and once per room for `runbook_lookup`'s running versions (Q1d, `internal/agent/versions.go`) | `internal/clients/connect/plugins.go` (`Plugins`) |
+| `GET /connector-plugins/{class}/config` and `PUT /connector-plugins/{class}/config/validate` | `connect_validate_config` (Q4b) and `connect_create_connector`'s proposal and preview; validate is a `PUT` that creates nothing | `connect.go` (`PluginConfigDef`, `ValidateConfig`) |
+| `GET /admin/loggers` | `connect_worker_info` (Q3a): logger names and levels of the worker at `CONNECT_URL`, Kafka Connect 2.4+ | `internal/clients/connect/loggers.go` (`Loggers`) |
 
 **Write calls (only for approved fixes, one per action):**
 
@@ -436,8 +441,9 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 Notes on the table:
 
 - These are the original four. Write mode adds the pause and the N-key config patch, and the connector lifecycle
-  actions (stop, offsets reset, create, delete; not registered yet, Q5d); every one of those calls, with the Kafka
-  Connect version it needs, is in [write-roles.md](write-roles.md#kafka-connect). The staged config change
+  actions (stop, offsets reset, create, delete; registered in both modes since Q5d, but they write only with write
+  mode on); every one of those calls, with the Kafka Connect version it needs, is in
+  [write-roles.md](write-roles.md#kafka-connect). The staged config change
   (`internal/actions/stage.go`) sends `PUT /connectors/{name}/config` (`PutConnectorConfig`,
   `internal/clients/connect/put_config.go`); it is not covered on these two pages.
 - `connect_update_connector_config` may change only these keys and values
@@ -459,7 +465,9 @@ Notes on the table:
 
 **Read-only mode (recommended default):** allow these `GET` calls:
 `GET /connectors`, `GET /connectors/{name}/status`, `GET /connectors/{name}/config`, and for
-`connect_source_offsets` `GET /connectors/{name}/offsets` and `GET /`.
+`connect_source_offsets` `GET /connectors/{name}/offsets` and `GET /`; for `connect_plugins` and
+`connect_worker_info` also `GET /connector-plugins` and `GET /admin/loggers`, and for config validation
+`GET /connector-plugins/{class}/config` and `PUT /connector-plugins/{class}/config/validate`.
 Proposals that need a write will then fail, by design.
 
 **Write mode (only to allow approved fixes):** additionally allow exactly these four calls:
