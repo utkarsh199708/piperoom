@@ -127,7 +127,7 @@ func newComposeProject(t *testing.T) *composeProject {
 	// need. The password is the dev stack's test credential, never a secret.
 	p.exec(t, "compose_write", compose.WriteParams{
 		Templates: []string{compose.TemplateKafka, compose.TemplateConnect},
-		Project:   "it-guard",
+		Project:   "piperoom-it-guard",
 	})
 	p.exec(t, "properties_write", compose.PropertiesParams{File: compose.EnvFileName, Entries: map[string]string{
 		"POSTGRES_DB": "orders", "POSTGRES_USER": "piperoom",

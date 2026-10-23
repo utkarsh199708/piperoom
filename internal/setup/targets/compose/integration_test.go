@@ -203,7 +203,7 @@ func integrationProjectName(t *testing.T) string {
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatalf("generating a project name: %v", err)
 	}
-	return "it-" + hex.EncodeToString(b[:])
+	return "piperoom-it-" + hex.EncodeToString(b[:])
 }
 
 // waitForConnectorPlugin polls Connect's plugin list until class appears.

@@ -197,6 +197,13 @@ func (s replaySource) blockers(olderThan time.Duration) ([]postgres.DBSession, e
 	if !ok || json.Unmarshal(b, &out) != nil {
 		return nil, fmt.Errorf("evals: blocking sessions older than %s: %w (record source_blocking_sessions with data for that older_than_minutes)", olderThan, errNotReplayed)
 	}
+	// The tool never shows OldXact, SameDB or ClientBackend, so a recording
+	// cannot carry them. A scenario's sessions are client backends of the
+	// recorded pipeline's own database, listed for that older_than_minutes,
+	// which is what the live read reports for them.
+	for i := range out {
+		out[i].OldXact, out[i].SameDB, out[i].ClientBackend = true, true, true
+	}
 	return out, nil
 }
 

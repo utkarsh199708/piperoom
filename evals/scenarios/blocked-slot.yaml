@@ -33,17 +33,18 @@
 #
 # Traps:
 #   - pg_long_transactions shows nothing: the blocker holds an xid but touches no table of the
-#     pipeline, so only source_blocking_sessions lists it (blocks_slot=yes).
+#     pipeline, so only source_blocking_sessions lists it (blocks_slot=yes, identity hidden: it
+#     is outside the pipeline's tables). Its pid and started_at are all the action needs.
 #   - pg_replication_slots says the slot is missing, which reads like the failover story
 #     (replication-slot-lost-failover) where re-snapshotting is the answer. Here the connector
 #     is creating it right now and only the open transaction stops it.
 #   - connect_status shows the task UNASSIGNED and no trace: "the task failed" is wrong.
 #
 # Sources:
-#   - cmd/devctl/scenarios_q2.go breakBlockedSlot (#866, role since the Q batch 3 review): a
-#     detached psql session as the analyst's own role devctl_blocker (application_name=
-#     devctl-blocker, BEGIN; SELECT pg_current_xact_id(); SELECT pg_sleep(1800))
-#     then stop the connector, drop the slot, clear its offsets, resume, and wait until a
+#   - cmd/devctl/scenarios_q2.go breakBlockedSlot (#866): a detached psql session
+#     as the analyst's own role devctl_blocker (not the connector's database.user piperoom, whose
+#     sessions source_end_session never ends; application_name=devctl-blocker, BEGIN;
+#     SELECT pg_current_xact_id(); SELECT pg_sleep(1800)) then stop the connector, drop the slot, clear its offsets, resume, and wait until a
 #     walsender waits on a transactionid lock (backend_type=walsender, wait_event_type=Lock,
 #     wait_event=transactionid).
 #   - https://www.postgresql.org/docs/17/functions-admin.html: CREATE_REPLICATION_SLOT exports a
@@ -59,14 +60,15 @@ description: |
   At 09:14 UTC the platform team moved pg-orders-connector to a new host and set it up again:
   the connector was stopped, its slot debezium_orders dropped and its stored offsets cleared,
   then resumed, so Debezium is creating the slot and taking a fresh snapshot. An analyst's psql
-  session (role devctl_blocker) had opened a transaction at 09:14 and left it open.
+  session (role devctl_blocker, application_name=devctl-blocker) had opened a transaction at
+  09:14 and left it open.
   CREATE_REPLICATION_SLOT waits for every transaction that was running when it started, so task
   0 never gets past start: no slot exists, nothing reaches Kafka and analytics.orders is 26
   minutes stale. Nothing FAILED: Connect reports no trace, the task has not started yet.
 
-  Root cause: the analyst's open transaction (pid 48213; it locks no pipeline table, so the room
-  sees it with identity hidden and blocks_slot=yes) holds back the slot creation, so the
-  connector cannot start streaming.
+  Root cause: the analyst's open transaction (pid 48213, devctl-blocker; the room sees it as a
+  session outside the pipeline's tables with blocks_slot=yes) holds back the slot creation, so
+  the connector cannot start streaming.
 
   Expected fix (label): source_end_session on that session (pid and started_at from
   source_blocking_sessions); the slot creation then completes and Debezium snapshots and streams.
@@ -93,8 +95,8 @@ alert:
   pipeline_map: |
     pipeline orders
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.orders [postgres, owner priya] UNKNOWN slot=unknown
-    2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN task_0=UNASSIGNED
+    1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN tasks_paused=1
       from: pg:public.orders
     3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=26m ago
       from: connect:pg-orders-connector
@@ -109,8 +111,8 @@ recordings:
     summary: |
       pipeline orders
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.orders [postgres, owner priya] UNKNOWN slot=unknown
-      2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN task_0=UNASSIGNED
+      1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN tasks_paused=1
         from: pg:public.orders
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=26m ago
         from: connect:pg-orders-connector
@@ -131,7 +133,7 @@ recordings:
           to: wh:analytics.orders
       nodes:
         - facts:
-            slot: unknown
+            slot: missing
           health: unknown
           id: pg:public.orders
           kind: source_table
@@ -139,7 +141,7 @@ recordings:
           name: public.orders
           owner: priya
         - facts:
-            task_0: UNASSIGNED
+            tasks_paused: "1"
           health: warn
           id: connect:pg-orders-connector
           kind: connector
@@ -240,7 +242,7 @@ recordings:
       slot debezium_orders: not found in pg_replication_slots
     data: []
   - tool: pg_streaming_liveness
-    error: 'dbtools: pg_streaming_liveness: verdict unknown: no slot for connector "pg-orders-connector" (pipeline "orders"; no replication slot named debezium_orders in pg_replication_slots)'
+    error: 'dbtools: pg_streaming_liveness: verdict unknown: no slot for connector "pg-orders-connector" (pipeline "orders"; no replication slot named "debezium_orders" in pg_replication_slots)'
   - tool: pg_long_transactions
     summary: |
       (no long transactions on this pipeline's tables)
@@ -262,13 +264,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: source_role_grants
     input: {pipeline_id: orders}
@@ -470,7 +472,7 @@ expect:
   expected_facts:
     - id: f_blocker
       tool: source_blocking_sessions
-      match: [pid 48213, blocks slot yes]
+      match: [pid 48213, blocks slot yes, identity hidden]
       required: true
     - id: f_no_slot
       tool: pg_replication_slots
