@@ -318,6 +318,24 @@ type Endpoint struct {
 	spend *spendSettings
 }
 
+// maxModelConcurrency caps the requests in flight per new-provider endpoint;
+// it is far above any provider's concurrent-request limit.
+const maxModelConcurrency = 4096
+
+// modelConcurrency converts the configured bound for the limiter. It clamps
+// instead of refusing: the value can come from PIPEROOM_MAX_AGENTS, which a
+// Claude-only deployment sets freely, and it sizes a semaphore channel, so a
+// huge value must not allocate one (or overflow int on a 32-bit build).
+func modelConcurrency(n int64) int {
+	if n <= 0 {
+		return 0
+	}
+	if n > maxModelConcurrency {
+		return maxModelConcurrency
+	}
+	return int(n)
+}
+
 // NewEndpoint checks cfg and builds the model client. It returns an error for
 // an unknown provider, a missing region or project, or a bad token budget, so
 // the server refuses to start instead of failing on the first alert. It reads
@@ -335,7 +353,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		return nil, err
 	}
 	b := clientBuilder{c: cfg, getenv: getenv, ld: ld, log: log, extra: extra,
-		limits: retry.NewLimiters(retry.Limits{MaxConcurrency: int(cfg.MaxConcurrency), TPM: cfg.knobs().TPM}, log)}
+		limits: retry.NewLimiters(retry.Limits{MaxConcurrency: modelConcurrency(cfg.MaxConcurrency), TPM: cfg.knobs().TPM}, log)}
 	mainRole := cfg.mainRole()
 	mainRole.Provider = cfg.Provider
 	m, err := b.build(ctx, "PIPEROOM_MODEL", mainRole, true)
