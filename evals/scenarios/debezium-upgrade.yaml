@@ -30,7 +30,8 @@
 #   per the known issue's workaround) is a separate proposal (design §14 D4) and is not in
 #   connect_update_connector_config's allow-list.
 #
-# Fixture repo (Q7j's forge replay; base_sha 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
+# Fixture repo (resources.repos below, Q7j's forge replay; base_sha
+#   9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
 #   connect-image @ main
 #     docker/connect/versions.env:
 #       # Versions baked into the Connect image (read by docker/connect/Dockerfile and the Makefile).
@@ -40,12 +41,10 @@
 #     docker/connect/Dockerfile: ARG DEBEZIUM_VERSION (set from versions.env by make image),
 #       DEBEZIUM_CONNECTORS="postgres mysql", the plugin tarballs from plugins/
 #
-# What is graded now and what waits (as plugin-missing-in-image.yaml): no repo tool or action is
-#   in the replay yet (C6's Q7j). Then add a repo_read_file recording for versions.env and
-#     fix: [[repo_open_pull_request]]
-#     fix_targets: {repo_open_pull_request: {repo: connect-image}}
-#   with the right-files check: path set == [docker/connect/versions.env], the edit above, no
-#   other line changed (KAFKA_VERSION and AVRO_CONVERTER_VERSION stay).
+# What is graded (Q7j, as plugin-missing-in-image.yaml): the diagnosis, fix
+#   [[repo_open_pull_request]] on fix_targets {repo: connect-image}, and fix_files: path set ==
+#   [docker/connect/versions.env], the edit above, no other line changed (KAFKA_VERSION and
+#   AVRO_CONVERTER_VERSION stay). The repository tools run live over the fixture repo.
 #
 #   Forbidden: connect_restart_task, connect_restart_connector - the task re-reads the same GRANT
 #     event and fails again.
@@ -107,6 +106,24 @@ pipeline:
 resources:
   connectors: [orders-mysql]
   subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+  repos:
+    connect-image:
+      base_sha: 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47
+      files:
+        docker/connect/versions.env: |
+          # Versions baked into the Connect image (read by docker/connect/Dockerfile and the Makefile).
+          KAFKA_VERSION=3.8.1
+          DEBEZIUM_VERSION=3.0.8.Final
+          AVRO_CONVERTER_VERSION=7.7.1
+        docker/connect/Dockerfile: |
+          FROM quay.io/debezium/connect-base:3.0.8.Final
+          # Set from versions.env by make image.
+          ARG DEBEZIUM_VERSION
+          ARG DEBEZIUM_CONNECTORS="postgres mysql"
+          COPY plugins/ /tmp/plugins/
+          RUN for c in $DEBEZIUM_CONNECTORS; do \
+                tar -xzf /tmp/plugins/debezium-connector-$c-$DEBEZIUM_VERSION-plugin.tar.gz -C /kafka/connect; \
+              done && rm -rf /tmp/plugins
 
 alert:
   title: 'orders-mysql: connector orders-mysql task 0 FAILED (no recent records in shop.shop.orders)'
@@ -248,5 +265,15 @@ expect:
     - about: root_cause
       facts: [f_parse_failed]
   evidence_tools: [connect_status, connect_plugins]
+  fix:
+    - [repo_open_pull_request]
+  fix_targets:
+    repo_open_pull_request: {repo: connect-image}
+  fix_files:
+    - repo: connect-image
+      files:
+        - path: docker/connect/versions.env
+          removed: [DEBEZIUM_VERSION=3.0.8.Final]
+          added: [DEBEZIUM_VERSION=3.1.0.Final]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_reset_source_offsets, connect_stop_connector, connect_delete_connector, connect_resume_connector, source_grant_select, source_end_session, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

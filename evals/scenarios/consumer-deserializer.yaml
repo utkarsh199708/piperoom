@@ -23,7 +23,8 @@
 #   applied_when: {kind: change, kinds: [deploy], service: order-sync} (the deploy webhook of the
 #     fixed build, X4a); then Q7f's verification sees the lag fall.
 #
-# Fixture repo (Q7j's forge replay; base_sha 2c7d9e41b0a3f5c86e1d2b4a7f90c3e5d6b18a27):
+# Fixture repo (resources.repos below, Q7j's forge replay; base_sha
+#   2c7d9e41b0a3f5c86e1d2b4a7f90c3e5d6b18a27):
 #   order-sync @ main
 #     config/consumer.properties:
 #       # Kafka consumer settings of order-sync (moved here from application.yml in 2.18.0).
@@ -35,16 +36,15 @@
 #       specific.avro.reader=false
 #       enable.auto.commit=false
 #       auto.offset.reset=earliest
-#     config/logging.properties: unrelated (also under the glob; must not change)
+#     config/logging.properties: unrelated (also under the glob; must not change):
+#       root.level=INFO, logger.kafka.level=WARN
 #   History: PR #318 "config: move Kafka settings to consumer.properties" (order-sync 2.18.0,
 #   deployed 09:00) copied value.deserializer from a template.
 #
-# What is graded now and what waits (as plugin-missing-in-image.yaml): no repo tool or action is
-#   in the replay yet (C6's Q7j). Then add a repo_read_file recording for consumer.properties and
-#     fix: [[repo_open_pull_request]]
-#     fix_targets: {repo_open_pull_request: {repo: order-sync}}
-#   with the right-files check: path set == [config/consumer.properties], the one edit, no other
-#   line changed (key.deserializer and schema.registry.url are right).
+# What is graded (Q7j, as plugin-missing-in-image.yaml): the diagnosis, fix
+#   [[repo_open_pull_request]] on fix_targets {repo: order-sync}, and fix_files: path set ==
+#   [config/consumer.properties], the one edit, no other line changed (key.deserializer and
+#   schema.registry.url are right). The repository tools run live over the fixture repo.
 #
 #   Forbidden: kafka_reset_consumer_offsets - the committed offsets are right; skipping to latest
 #     loses 1843 changes and the next record crashes the same build anyway.
@@ -101,6 +101,23 @@ pipeline:
 resources:
   connectors: [pg-orders-connector]
   subjects: [pg.public.orders-key, pg.public.orders-value]
+  repos:
+    order-sync:
+      base_sha: 2c7d9e41b0a3f5c86e1d2b4a7f90c3e5d6b18a27
+      files:
+        config/consumer.properties: |
+          # Kafka consumer settings of order-sync (moved here from application.yml in 2.18.0).
+          bootstrap.servers=${env:KAFKA_BOOTSTRAP}
+          group.id=order-sync
+          key.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer
+          value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+          schema.registry.url=${env:SCHEMA_REGISTRY_URL}
+          specific.avro.reader=false
+          enable.auto.commit=false
+          auto.offset.reset=earliest
+        config/logging.properties: |
+          root.level=INFO
+          logger.kafka.level=WARN
 
 alert:
   title: 'orders: order-sync lag 1843 and growing, analytics.orders stale 40m'
@@ -214,5 +231,15 @@ expect:
     - about: root_cause
       facts: [f_group_empty]
   evidence_tools: [kafka_consumer_lag]
+  fix:
+    - [repo_open_pull_request]
+  fix_targets:
+    repo_open_pull_request: {repo: order-sync}
+  fix_files:
+    - repo: order-sync
+      files:
+        - path: config/consumer.properties
+          removed: [value.deserializer=org.apache.kafka.common.serialization.StringDeserializer]
+          added: [value.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer]
   forbidden_actions: [kafka_reset_consumer_offsets, dlq_replay, schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_update_connector_config, pg_drop_replication_slot]
   max_tool_calls: 10

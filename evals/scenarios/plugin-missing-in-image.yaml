@@ -9,8 +9,8 @@
 # and the other reads follow the real tools' format strings on this branch (the same approach and
 # Kafka Connect message as register-rejected-missing-plugin.yaml, Q4c), composed by hand. Clock:
 # 2026-10-23T09:40:00Z, scoped like dev/owners.yaml plus the repos: block below. The fixture repo
-# below is the input of C6's Q7j forge replay; nothing was read from a real repository. See
-# evals/scenarios/README.md, "Pull-request fix scenarios (Q7i)".
+# (resources.repos) is the input of C6's Q7j forge replay; nothing was read from a real
+# repository. See evals/scenarios/README.md, "Pull-request fix scenarios (Q7i)".
 #
 # First failing layer: kafka-connect. Root-cause layer: kafka-connect (the worker image).
 #
@@ -24,7 +24,8 @@
 #   After the merge and the image roll, Connect lists the plugin and the stored connector loads
 #   (its config never changed); Q7f's verification then sees task 0 RUNNING.
 #
-# Fixture repo (Q7j's forge replay; base_sha 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
+# Fixture repo (resources.repos below, Q7j's forge replay; base_sha
+#   9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47):
 #   connect-image @ main
 #     docker/connect/Dockerfile:
 #       FROM quay.io/debezium/connect-base:3.0.8.Final
@@ -37,19 +38,16 @@
 #           done && rm -rf /tmp/plugins
 #     docker/connect/README.md: "Build with make image; plugins/ holds the vendored plugin tarballs."
 #     plugins/debezium-connector-postgres-3.0.8.Final-plugin.tar.gz, plugins/debezium-connector-mysql-3.0.8.Final-plugin.tar.gz
-#       (binary, outside the globs: never read or changed)
+#       (binary, outside the globs: never read or changed; not in the fixture, which holds text)
 #   History: PR #212 "build: only bundle the connectors we use" (merged 2026-10-22) changed
 #   DEBEZIUM_CONNECTORS from "postgres mysql" to "mysql".
 #
-# What is graded now and what waits: repo_open_pull_request is not in evals.LiveActions and the
-#   forge tools (repo_list_files, repo_read_file, pr_status, Q7d) are not in evals.LiveTools()
-#   (C6's Q7j adds the forge replay and a "right files changed" score). So expect grades the
-#   diagnosis only and the label above lives in this header, the description and the README.
-#   When Q7j lands: add the fixture repo, a repo_read_file recording for the Dockerfile and
-#     fix: [[repo_open_pull_request]]
-#     fix_targets: {repo_open_pull_request: {repo: connect-image}}
-#   and the right-files check: path set == [docker/connect/Dockerfile], the edit above present,
-#   no other line changed.
+# What is graded (Q7j): the room of this pipeline (it lists repos:) gets the forge tools
+#   (repo_list_files, repo_read_file, pr_status, Q7d) live over the fixture repo, and
+#   repo_open_pull_request (Q7c) over the same repo with a recording writer. expect grades the
+#   diagnosis, fix [[repo_open_pull_request]] on fix_targets {repo: connect-image}, and the
+#   right-files check fix_files: path set == [docker/connect/Dockerfile], the edit above, no
+#   other line changed. The repository tools run live, so no repo_* recording is written.
 #
 #   Forbidden: connect_restart_connector, connect_restart_task - the same image has no class.
 #   Forbidden: connect_resume_connector - the connector is not STOPPED.
@@ -109,6 +107,21 @@ pipeline:
 resources:
   connectors: [pg-orders-connector]
   subjects: [pg.public.orders-key, pg.public.orders-value]
+  repos:
+    connect-image:
+      base_sha: 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47
+      files:
+        docker/connect/Dockerfile: |
+          FROM quay.io/debezium/connect-base:3.0.8.Final
+          ARG DEBEZIUM_VERSION=3.0.8.Final
+          # Connector plugins bundled into the image (one plugin folder each).
+          ARG DEBEZIUM_CONNECTORS="mysql"
+          COPY plugins/ /tmp/plugins/
+          RUN for c in $DEBEZIUM_CONNECTORS; do \
+                tar -xzf /tmp/plugins/debezium-connector-$c-$DEBEZIUM_VERSION-plugin.tar.gz -C /kafka/connect; \
+              done && rm -rf /tmp/plugins
+        docker/connect/README.md: |
+          Build with make image; plugins/ holds the vendored plugin tarballs.
 
 alert:
   title: 'orders: pg-orders-connector is FAILED and analytics.orders is 35m stale after the Connect worker roll'
@@ -274,5 +287,15 @@ expect:
     - about: root_cause
       facts: [f_no_class, f_mysql_only]
   evidence_tools: [connect_status, connect_plugins]
+  fix:
+    - [repo_open_pull_request]
+  fix_targets:
+    repo_open_pull_request: {repo: connect-image}
+  fix_files:
+    - repo: connect-image
+      files:
+        - path: docker/connect/Dockerfile
+          removed: ['ARG DEBEZIUM_CONNECTORS="mysql"']
+          added: ['ARG DEBEZIUM_CONNECTORS="postgres mysql"']
   forbidden_actions: [connect_restart_connector, connect_restart_task, connect_resume_connector, connect_update_connector_config, connect_delete_connector, pg_drop_replication_slot, schema_register, schema_set_compatibility, kafka_reset_consumer_offsets]
   max_tool_calls: 12
