@@ -790,7 +790,7 @@ func TestNewRefuses(t *testing.T) {
 	private, _ := config.ParseBaseURL("x", "http://10.0.0.5:8000/v1", true)
 	for name, o := range map[string]Options{
 		"unknown flavor":            {Flavor: "acme", Key: testKey},
-		"V3b flavor":                {Flavor: "deepseek", Key: testKey},
+		"hosted flavor without key": {Flavor: FlavorDeepSeek},
 		"openai without key":        {Flavor: FlavorOpenAI},
 		"azure without base URL":    {Flavor: FlavorAzure, Key: testKey},
 		"generic without base URL":  {Flavor: FlavorGeneric, Key: testKey},
