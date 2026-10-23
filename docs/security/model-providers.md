@@ -31,7 +31,7 @@ By provider, from the code:
 | `openai` flavors | the flavor's default base URL or `PIPEROOM_MODEL_BASE_URL` (`config.FlavorDefaultBaseURL`, `ParseBaseURL`) | hosted flavors need their key; `ollama` takes none |
 | `openai` flavor `openrouter` | OpenRouter, which forwards to third parties | the adapter always sends `provider.data_collection = "deny"` (`openai/encode.go:205`) |
 | `gemini` | `generativelanguage.googleapis.com`, or Vertex `<region>-aiplatform.googleapis.com` (`gemini.go` `vertexBase`) | Vertex keeps data in the chosen region |
-| `bedrock-converse` | the regional Bedrock endpoint | **not wired**: `EndpointConfig` (`internal/wiring/model.go:22`) never sets `Converse`, so start refuses it (`internal/agent/roles.go:149`) |
+| `bedrock-converse` | the regional Bedrock endpoint | wired by the V5 wiring (#954): `clientBuilder.bedrockConverse` (`internal/agent/roles_converse.go:157`, called from `internal/agent/roles.go:139`); AWS config shared through `wiring.LoadAWS`; one limiter per region |
 
 China-operated endpoints (DeepSeek, DashScope, other listed PRC hosts, any `.cn` host) start only with
 `PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes`, checked twice: `config.ParseModelKnobs` (`config.go:2258`) and
@@ -222,7 +222,7 @@ Severity as in `findings.md`. Each is a proposed V fix row; none is fixed by thi
 - **Row:** `[V-fix] llm: one shared netguard for the openai and gemini adapters`
 
 ### MP4 — A transient AWS credential failure in Converse is unretryable auth
-- **Severity:** medium (availability; Converse is not wired yet, so it applies when V6 wires it).
+- **Severity:** medium (availability; applies to every `bedrock-converse` role now that the V5 wiring serves them).
   **Where:** `converse/transport.go:144` (`markedCredentials.Retrieve`), `converse/errors.go:88-93`.
 - **Scenario:** every `Retrieve` error becomes `ErrAuth`, which `llm.Unretryable` stops on. An IMDS or ECS-credentials
   timeout or 5xx during a turn fails the run for good; the test (`review_test.go:21`) covers only "no role found".
