@@ -5,6 +5,7 @@ package host
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"piperoom/internal/setup/ops"
@@ -29,7 +30,7 @@ func TestJavaHomeConfinedRefusesAnUnresolvableProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = javaHomeConfined(ops.Env{Confine: c}, t.TempDir()+"/jdk")
-	if !errors.Is(err, ErrDetect) {
+	if !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "resolving the project directory") {
 		t.Fatalf("javaHomeConfined with an unresolvable project: %v, want ErrDetect", err)
 	}
 }
