@@ -682,7 +682,11 @@ expect:
   #     schema_registry_versions (the schema has the column), similar_incidents, and one re-read of
   #     kafka_consumer_lag / reconcile to say lag is still 0 and the count is unchanged = 4
   #   That is 14 reads (one of them a re-read); 14 + 4 for the re-reads a trap-walking run adds
-  #   after each input = 18. This is a derivation, not a
-  #   measurement: the transcripts of live run 39994729845 were not available to W4b (W4-0 is
-  #   pending), so which reads that run made, and whether it hit the old 14, is unchecked.
+  #   after each input = 18.
+  #   Measured since (W4-0, reviews/evals-2026-10-23/misses.md, run 39994729845): 16, 17 and 15
+  #   calls, every one of them in the alert turn; Kabir's comment and the steer drew 0 calls in all
+  #   three runs. Runs 1 and 2 failed on the budget alone (16 > 14, 17 > 14), run 3 also on the root
+  #   cause, so no run passed and no passing-run budget exists yet. 18 covers the measured 17 with
+  #   one call to spare (max + 2 over a budget-only failure would give 19); re-derive it as the
+  #   highest passing count + 2 from W4b's verification run.
   max_tool_calls: 18
