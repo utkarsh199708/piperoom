@@ -2074,6 +2074,11 @@ type RepoRef struct {
 	Owner string `json:"owner"` // from repos[].url: https://<host>/<owner>/<name>
 	Name  string `json:"name"`
 	Base  string `json:"base"` // repos[].base, the branch PRs target
+	// Host is the repo URL's host, lower case with any port. A forge client
+	// refuses a RepoRef whose Host is set and is not its own web host, so a
+	// repo of one forge never reaches another forge's API. "" skips the
+	// check (callers that built the ref from the forge itself).
+	Host string `json:"host,omitempty"`
 }
 
 // RepoInfo is what a fix PR needs to know about the repository itself. (Q7)
@@ -2155,15 +2160,26 @@ type FileChange struct {
 	Content []byte
 }
 
+// String names the file and its size, never its content, so a FileChange
+// printed with %v in a log or error does not leak the file. (Q7)
+func (f FileChange) String() string {
+	return fmt.Sprintf("FileChange{%s, %d bytes}", f.Path, len(f.Content))
+}
+
 // PullRequest is the state of one pull request. Checks.Failed holds check
 // names written by the repository's CI: untrusted, redacted, cut. (Q7)
 type PullRequest struct {
-	Repo     string            `json:"repo"` // RepoRef.ID
-	Number   int               `json:"number"`
-	URL      string            `json:"url"`   // the html URL on the forge's web host
-	State    string            `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
-	HeadRef  string            `json:"head_ref"`
-	HeadSHA  string            `json:"head_sha"`
+	Repo    string `json:"repo"` // RepoRef.ID
+	Number  int    `json:"number"`
+	URL     string `json:"url"`   // the html URL on the forge's web host
+	State   string `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
+	HeadRef string `json:"head_ref"`
+	HeadSHA string `json:"head_sha"`
+	// HeadRepo is "owner/name" of the repository the head branch lives in;
+	// "" when that repository was deleted (a removed fork). A PR whose
+	// HeadRef is a fix branch but whose HeadRepo is not the RepoRef's own
+	// repository was opened from a fork and is never Piperoom's.
+	HeadRepo string            `json:"head_repo,omitempty"`
 	MergeSHA string            `json:"merge_sha,omitempty"`
 	MergedAt time.Time         `json:"merged_at,omitzero"`
 	Checks   PullRequestChecks `json:"checks"`
