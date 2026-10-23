@@ -33,9 +33,10 @@ func sourceActionParams(id string) map[string]json.RawMessage {
 
 // assertSourceActionsRefuse runs Validate and Execute of every Q2 action of
 // areg with params it accepts in ctx (the room's scope) and wants the "no
-// write credentials" refusal of a missing admin writer from both. A typed nil
-// writer would get past the actions' nil check and fail differently, or
-// panic.
+// write credentials" refusal of a missing admin writer from Execute only:
+// Validate must not refuse for it, so the agent can still propose the step
+// with write mode off (P0 ruling #606). A typed nil writer would get past the
+// actions' nil check and fail differently, or panic.
 func assertSourceActionsRefuse(t *testing.T, areg *actions.Registry, ctx context.Context, params map[string]json.RawMessage) {
 	t.Helper()
 	const want = "no write credentials"
@@ -45,8 +46,8 @@ func assertSourceActionsRefuse(t *testing.T, areg *actions.Registry, ctx context
 			t.Errorf("%s not registered", n)
 			continue
 		}
-		if err := a.Validate(ctx, params[n]); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s Validate without the admin writer = %v, want the %q refusal", n, err, want)
+		if err := a.Validate(ctx, params[n]); err != nil && strings.Contains(err.Error(), want) {
+			t.Errorf("%s Validate without the admin writer = %v, want no %q refusal at Validate", n, err, want)
 		}
 		if _, err := a.Execute(ctx, params[n]); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s Execute without the admin writer = %v, want the %q refusal", n, err, want)
@@ -147,8 +148,8 @@ func (p plainSourceWriter) InsertSnapshotSignal(ctx context.Context, a, b string
 func (p plainSourceWriter) Close() { p.w.Close() }
 
 // TestRegisterSourceActionsTypedNil: a typed-nil admin writer is handed to
-// the actions as an untyped nil, so each refuses cleanly at Validate and
-// Execute instead of reaching a nil *postgres.Writer.
+// the actions as an untyped nil, so each refuses cleanly at Execute instead
+// of reaching a nil *postgres.Writer.
 func TestRegisterSourceActionsTypedNil(t *testing.T) {
 	areg := actions.NewRegistry()
 	if err := RegisterSourceActions(areg, SourceActionDeps{Admin: (*postgres.Writer)(nil)}); err != nil {

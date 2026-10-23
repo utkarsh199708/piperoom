@@ -326,8 +326,8 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 			assertP3ExecuteRefuses(t, pa.Actions, tools.WithPipeline(ctx, pipe), p3Params("pa"))
 
 			// The Q2 source admin actions too (Q2e): listed in every set, and
-			// each refuses at Validate and Execute for want of the admin
-			// writer, which write mode off never builds.
+			// each refuses at Execute (not Validate, P0 ruling #606) for want
+			// of the admin writer, which write mode off never builds.
 			for _, s := range st.All() {
 				for _, n := range sourceActionNames {
 					if _, ok := s.Actions.Get(n); !ok {

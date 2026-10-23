@@ -19,8 +19,9 @@ import (
 // a source write URL: it is the set's own source writer (*postgres.Writer on
 // SOURCE_DB_WRITE_URL, or the pipeline's connections.source_db_write_url),
 // which implements postgres.SourceAdminWriter (Q2b). Off, every writer below
-// is an untyped nil, so Validate refuses ("no write credentials") and
-// Execute refuses before any I/O.
+// is an untyped nil, so Execute refuses ("no write credentials") before any
+// I/O, while Validate still passes so the agent can propose the step
+// (P0 ruling #606).
 
 // adminWriter returns w's source admin writer: nil unless w was opened with
 // write mode on and its source writer has the Q2b admin methods. It is never

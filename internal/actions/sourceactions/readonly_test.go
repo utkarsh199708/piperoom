@@ -76,15 +76,16 @@ func TestPreviewNeverWrites(t *testing.T) {
 }
 
 // TestPreviewWorksWithoutWriter: write mode off still lets a reviewer see
-// the step; Validate refuses it.
+// the step and the agent propose it (Validate passes); only Execute refuses
+// (P0 ruling #606).
 func TestPreviewWorksWithoutWriter(t *testing.T) {
 	for _, tc := range allActions(readySource(), newConnect(), nil) {
 		t.Run(tc.a.Name(), func(t *testing.T) {
 			if _, err := tc.a.(actions.Preview).Preview(scopedCtx(), tc.params); err != nil {
 				t.Fatalf("Preview without writer: %v", err)
 			}
-			if err := tc.a.Validate(scopedCtx(), tc.params); err == nil || !errors.Is(err, errNoWriter) {
-				t.Fatalf("Validate without writer = %v, want errNoWriter", err)
+			if err := tc.a.Validate(scopedCtx(), tc.params); err != nil {
+				t.Fatalf("Validate without writer = %v, want nil", err)
 			}
 			if _, err := tc.a.Execute(scopedCtx(), tc.params); !errors.Is(err, errNoWriter) {
 				t.Fatalf("Execute without writer = %v, want errNoWriter", err)

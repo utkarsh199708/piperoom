@@ -50,7 +50,7 @@ type EndSessionDeps struct {
 	// a room, and BlockerReader for the explicit unscoped opt-out.
 	Source clients.SourceDB
 	// Writer is used by Execute only; nil (untyped) when write mode is off
-	// or SOURCE_DB_WRITE_URL is empty, and then Validate refuses.
+	// or SOURCE_DB_WRITE_URL is empty, and then Execute refuses.
 	Writer SessionEnder
 
 	// now is the clock of the preview's ages; tests only (nil = time.Now).
@@ -226,9 +226,11 @@ func (a *endSession) check(ctx context.Context, p endSessionParams, pl *owners.P
 }
 
 // Validate refuses bad params, a connector outside the room's pipeline (when
-// ctx carries it), a missing writer and a pid that is not, with its start
-// time, in the blocking-session list now; with the room's pipeline in ctx the
-// list is scoped to its source_tables and an out-of-scope pid is refused.
+// ctx carries it) and a pid that is not, with its start time, in the
+// blocking-session list now; with the room's pipeline in ctx the list is
+// scoped to its source_tables and an out-of-scope pid is refused. A missing
+// writer is refused at Execute only, so the agent can still propose the step
+// with write mode off (P0 ruling #606).
 func (a *endSession) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseEndSession(raw)
 	if err != nil {
@@ -236,9 +238,6 @@ func (a *endSession) Validate(ctx context.Context, raw json.RawMessage) error {
 	}
 	if err := validateScope(ctx, func(pl owners.Pipeline) error { return pipelineScope(EndSessionName, pl, p.Connector) }); err != nil {
 		return err
-	}
-	if a.d.Writer == nil {
-		return fmt.Errorf("sourceactions: %s: %w", EndSessionName, errNoWriter)
 	}
 	var scope *owners.Pipeline
 	if pl, ok := tools.PipelineFrom(ctx); ok {

@@ -55,7 +55,7 @@ type HeartbeatDeps struct {
 	// optional and only informs the preview's follow-up steps.
 	Source clients.SourceDB
 	// Writer is used by Execute only; nil (untyped) when write mode is off
-	// or SOURCE_DB_WRITE_URL is empty, and then Validate refuses.
+	// or SOURCE_DB_WRITE_URL is empty, and then Execute refuses.
 	Writer HeartbeatWriter
 
 	// timeout overrides opTimeout; tests only.
@@ -162,8 +162,8 @@ func (a *createHeartbeatTable) connectorConfig(ctx context.Context, connector st
 }
 
 // Validate refuses bad params, a target outside the room's pipeline (when
-// ctx carries it), a missing writer and a connector that is not a Debezium
-// source.
+// ctx carries it) and a connector that is not a Debezium source. A missing
+// writer is refused at Execute only (P0 ruling #606).
 func (a *createHeartbeatTable) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseHeartbeat(raw)
 	if err != nil {
@@ -171,9 +171,6 @@ func (a *createHeartbeatTable) Validate(ctx context.Context, raw json.RawMessage
 	}
 	if err := validateScope(ctx, func(pl owners.Pipeline) error { return heartbeatInScope(pl, p) }); err != nil {
 		return err
-	}
-	if a.d.Writer == nil {
-		return fmt.Errorf("sourceactions: %s: %w", CreateHeartbeatTableName, errNoWriter)
 	}
 	ctx, cancel := withTimeout(ctx, a.d.timeout)
 	defer cancel()
