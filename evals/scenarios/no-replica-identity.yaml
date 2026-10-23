@@ -47,7 +47,7 @@
 #     write: "cannot update table ... because it does not have a replica identity and publishes
 #     updates".
 #   - internal/tools/dbtools/source_settings.go: source_table_replication's summary and Data
-#     (replica_identity=nothing, primary_key=yes).
+#     (replica_identity=nothing, has_primary_key=yes).
 #   - internal/actions/sourceactions/replica_identity.go: pg_set_replica_identity's params and
 #     preview.
 
@@ -172,9 +172,10 @@ recordings:
     input: {pipeline_id: orders}
     summary: |-
       tables=1 without_primary_key=0 replica_identity_nothing=1
-      public.orders: primary_key=yes replica_identity=nothing
+      public.orders: has_primary_key=yes replica_identity=nothing
     data:
       - table: public.orders
+        has_primary_key: true
         replica_identity: nothing
   - tool: connect_list_connectors
     summary: |-

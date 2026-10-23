@@ -238,9 +238,10 @@ recordings:
     input: {pipeline_id: orders}
     summary: |-
       tables=1 without_primary_key=0 replica_identity_nothing=0
-      public.orders: primary_key=yes replica_identity=full
+      public.orders: has_primary_key=yes replica_identity=full
     data:
       - table: public.orders
+        has_primary_key: true
         replica_identity: full
   - tool: source_settings
     summary: |-

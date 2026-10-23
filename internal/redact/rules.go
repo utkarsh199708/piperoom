@@ -669,6 +669,14 @@ var keyQualifiers = map[string]bool{
 	"license": true, "service": true,
 }
 
+// keyPredicates before "primary key" make the name a yes/no or count about a
+// table's primary key (has_primary_key, without_primary_key), never the
+// secret. A bare primary_key / primaryKey stays a secret key name (Azure
+// storage and Cosmos DB keys).
+var keyPredicates = map[string]bool{
+	"has": true, "without": true, "no": true, "missing": true, "lacks": true,
+}
+
 // metaWords end key names that describe a secret without holding one:
 // password_encryption, token_type, auth.method, secret_name, key_id...
 var metaWords = map[string]bool{
@@ -725,6 +733,9 @@ func secretKey(k string) keyStrength {
 		case strongWords[w]:
 			return keyStrong
 		case w == "key" && i > 0 && keyQualifiers[words[i-1]]:
+			if words[i-1] == "primary" && i > 1 && keyPredicates[words[i-2]] {
+				continue // has_primary_key: a table property, not Azure's primary key
+			}
 			return keyStrong
 		case w == "id" && i > 0 && words[i-1] == "session":
 			best = keyWeak
