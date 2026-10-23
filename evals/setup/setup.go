@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -357,8 +358,7 @@ func LoadDir(dir string) (map[string]*Recording, error) {
 
 // Session replays one Recording as a protocol.RunnerExecutor. Every op is
 // served at most once, in the recording's order, and only for a request the
-// recording states (same op, the recorded params present with equal values):
-// a second identical request is a miss, as it would be for a real runner that
+// recording states (same op and params, see match): a second identical request is a miss, as it would be for a real runner that
 // already answered it. Session is safe for concurrent calls.
 type Session struct {
 	rec  Recording
@@ -447,29 +447,84 @@ func (s *Session) Execute(ctx context.Context, roomID string, req protocol.OpReq
 }
 
 // match returns the index of the recording that answers req, or -1 and why.
+// A recorded op answers only the request a real runner would have answered
+// the same way: the same op and exactly the same params, a tier no lower than
+// the recorded one, and the recorded proposal ID and params hash when the
+// recording has them. Anything else is a miss, never the recorded success.
 // The caller holds s.mu.
 func (s *Session) match(req protocol.OpRequest) (int, string) {
-	sameOp := -1
+	why := ""
 	for i, op := range s.rec.Ops {
 		if s.used[i] || op.Op != req.Op {
 			continue
 		}
-		if sameOp < 0 {
-			sameOp = i
-		}
-		if paramsMatch(op.Params, req.Params) {
+		switch {
+		case !paramsEqual(op.Params, req.Params):
+			why = "the recorded params differ from the request's"
+		case tierRank(req.Tier) < tierRank(op.Tier):
+			why = fmt.Sprintf("the request's tier %q is below the recorded %q", req.Tier, op.Tier)
+		case op.ProposalID != "" && op.ProposalID != req.ProposalID:
+			why = "the request's proposal_id differs from the recorded one"
+		case op.ParamsHash != "" && op.ParamsHash != req.ParamsHash:
+			why = "the request's params_hash differs from the recorded one"
+		default:
 			return i, ""
 		}
 	}
-	if sameOp >= 0 {
-		return -1, "the recorded params differ from the request's"
+	if why != "" {
+		return -1, why
 	}
 	return -1, "the session recorded no " + req.Op
 }
 
+// tierRank orders tiers T0..T3, as the runner does; an empty or unknown tier
+// ranks as T0.
+func tierRank(t string) int {
+	switch t {
+	case protocol.TierT3:
+		return 3
+	case protocol.TierT2:
+		return 2
+	case protocol.TierT1:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// paramsEqual reports whether want and got decode to the same JSON value:
+// every key, every array element, nothing extra. Absent params, null and {}
+// are the same empty object.
+func paramsEqual(want, got json.RawMessage) bool {
+	w, ok := decodeParams(want)
+	if !ok {
+		return false
+	}
+	g, ok := decodeParams(got)
+	if !ok {
+		return false
+	}
+	return reflect.DeepEqual(w, g)
+}
+
+// decodeParams decodes raw op params, reading absent or null as {}.
+func decodeParams(raw json.RawMessage) (any, bool) {
+	var v any
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, false
+		}
+	}
+	if v == nil {
+		v = map[string]any{}
+	}
+	return v, true
+}
+
 // paramsMatch reports whether every key of want is in got with an equal
-// value (the recordings' rule: a recorded param may leave out a field the
-// model chooses freely). An empty want matches any params.
+// value. It matches a ladder read's input only (the ladder runner chooses
+// its reads, not the model); a runner op is matched exactly by paramsEqual.
+// An empty want matches any input.
 func paramsMatch(want, got json.RawMessage) bool {
 	if len(bytes.TrimSpace(want)) == 0 {
 		return true

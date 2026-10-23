@@ -71,7 +71,8 @@ type Config struct {
 	// and target kinds it reports under when it names none, so the report's
 	// per-source and per-target pass rates cover the setup scenarios; the
 	// recordings are also the replay a setup run's runner needs (evals/setup).
-	// Empty reads none.
+	// Empty reads none. A directory that fails to load is logged as a warning
+	// and the run goes on without it.
 	SetupDir string
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
@@ -122,7 +123,11 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	if cfg.SetupDir != "" {
 		recs, err := evalsetup.LoadDir(cfg.SetupDir)
 		if err != nil {
-			return Report{}, err
+			// A broken recording costs the setup grouping, not every other
+			// scenario's run: warn and run the set without the recordings'
+			// kinds. evalrun -check fails on the same error.
+			cfg.Logger.Warn("evals: setup recordings not loaded; setup scenarios report without their source and target", "dir", cfg.SetupDir, "err", err)
+			recs = nil
 		}
 		// Copy the slice: attaching the recordings' kinds must not mutate the
 		// caller's scenarios.

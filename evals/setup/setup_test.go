@@ -190,3 +190,69 @@ func TestSessionHonoursContext(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
+
+// TestSessionRefusesRequestsARunnerWouldRefuse: a recorded success answers
+// only the request it records. A lower tier, another proposal or params hash,
+// an extra key, a longer array or params against a {} recording is a miss.
+func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
+	const raw = `{
+	  "scenario": "setup/strict",
+	  "ops": [
+	    {"op": "env_detect", "tier": "T0", "params": {},
+	     "result": {"ok": true, "summary": "docker present", "receipt": {"out_mac": "aa"}}},
+	    {"op": "compose_write", "tier": "T2", "proposal_id": "pr_1", "params_hash": "h1",
+	     "params": {"templates": ["postgres"], "dir": "/srv"},
+	     "result": {"ok": true, "summary": "written", "receipt": {"out_mac": "bb"}}}
+	  ]
+	}`
+	rec, err := Parse([]byte(raw), "strict.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := protocol.OpRequest{
+		Op: "compose_write", Tier: protocol.TierT2, ProposalID: "pr_1", ParamsHash: "h1",
+		Params: json.RawMessage(`{"dir":"/srv","templates":["postgres"]}`),
+	}
+	tests := []struct {
+		name string
+		req  func(r protocol.OpRequest) protocol.OpRequest
+		want string
+	}{
+		{"lower tier", func(r protocol.OpRequest) protocol.OpRequest { r.Tier = protocol.TierT1; return r }, "below the recorded"},
+		{"no tier", func(r protocol.OpRequest) protocol.OpRequest { r.Tier = ""; return r }, "below the recorded"},
+		{"wrong params hash", func(r protocol.OpRequest) protocol.OpRequest { r.ParamsHash = "h2"; return r }, "params_hash differs"},
+		{"wrong proposal", func(r protocol.OpRequest) protocol.OpRequest { r.ProposalID = "pr_2"; return r }, "proposal_id differs"},
+		{"extra key", func(r protocol.OpRequest) protocol.OpRequest {
+			r.Params = json.RawMessage(`{"dir":"/srv","templates":["postgres"],"privileged":true}`)
+			return r
+		}, "params differ"},
+		{"longer array", func(r protocol.OpRequest) protocol.OpRequest {
+			r.Params = json.RawMessage(`{"dir":"/srv","templates":["postgres","kafka"]}`)
+			return r
+		}, "params differ"},
+		{"{} recording with params", func(protocol.OpRequest) protocol.OpRequest {
+			return protocol.OpRequest{Op: "env_detect", Tier: protocol.TierT0, Params: json.RawMessage(`{"path":"/"}`)}
+		}, "params differ"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSession(rec)
+			_, err := s.Execute(context.Background(), "r_1", tt.req(good))
+			if !errors.Is(err, ErrNoRecording) || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want ErrNoRecording with %q", err, tt.want)
+			}
+			if s.Remaining() != 2 {
+				t.Errorf("remaining = %d, want 2: a miss uses no op", s.Remaining())
+			}
+		})
+	}
+
+	// The recorded request itself, and a higher tier, still answer.
+	s := NewSession(rec)
+	if res, err := s.Execute(context.Background(), "r_1", good); err != nil || !res.OK {
+		t.Fatalf("recorded request: res %+v err %v", res, err)
+	}
+	if _, err := s.Execute(context.Background(), "r_1", protocol.OpRequest{Op: "env_detect", Tier: protocol.TierT1, Params: json.RawMessage(`null`)}); err != nil {
+		t.Fatalf("higher tier, null params: %v", err)
+	}
+}

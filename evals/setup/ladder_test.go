@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"piperoom/internal/events"
@@ -163,5 +164,62 @@ func TestFakeLadderRejectsUnknownTarget(t *testing.T) {
 	ladder := NewFakeLadder(LadderConfig{Source: "postgres", Target: "laptop", PlanID: "pl_1"}, NewRecordingReader(nil), &MemorySink{})
 	if _, err := ladder.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "no verification ladder") {
 		t.Fatalf("err = %v, want plan.ErrLadder", err)
+	}
+}
+
+// TestFakeLadderStopsOnCancel: a context cancelled between rungs stops the
+// ladder; it returns the context's error and writes no setup.verified.
+func TestFakeLadderStopsOnCancel(t *testing.T) {
+	recs, err := LoadDir("recordings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := recs["setup/missing-grant"]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inner := NewRecordingReader(rec)
+	reads := 0
+	r := ReadFunc(func(ctx context.Context, req ReadRequest) (json.RawMessage, error) {
+		reads++
+		if reads == 1 {
+			cancel()
+		}
+		return inner.Read(context.Background(), req)
+	})
+	sink := &MemorySink{}
+	ladder := NewFakeLadder(LadderConfig{
+		Source: rec.SourceKind(), Target: rec.Target, Sink: rec.SinkKind(), PlanID: rec.Ladder.PlanID,
+	}, r, sink)
+	if _, err := ladder.Verify(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	for _, ev := range sink.Events() {
+		if ev.Type == events.SetupVerified {
+			t.Fatalf("a cancelled ladder wrote setup.verified: %+v", ev)
+		}
+	}
+	if reads != 1 {
+		t.Errorf("reads = %d, want 1: no rung after the cancel", reads)
+	}
+}
+
+// TestLadderSinksAreSafeForConcurrentUse is for -race: the memory sink and
+// the agent's counters take concurrent writers.
+func TestLadderSinksAreSafeForConcurrentUse(t *testing.T) {
+	mem := &MemorySink{}
+	agent := AgentSink(mem)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = agent.Emit(context.Background(), Event{Type: events.SetupAwaitingChange})
+			_ = agent.Emit(context.Background(), Event{Type: events.SetupVerified})
+			_ = mem.Events()
+		}()
+	}
+	wg.Wait()
+	if agent.Forwarded() != 8 || agent.Refused() != 8 || len(mem.Events()) != 8 {
+		t.Errorf("forwarded %d refused %d events %d, want 8 each", agent.Forwarded(), agent.Refused(), len(mem.Events()))
 	}
 }

@@ -1,8 +1,13 @@
 package evals
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	evalsetup "piperoom/evals/setup"
@@ -156,5 +161,30 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 	}
 	if rep.Overall.Runs != 6 || rep.Overall.Passes != 6 || rep.Overall.PassRate != 1 {
 		t.Errorf("overall = %+v, want the unchanged 6/6 fields", rep.Overall)
+	}
+}
+
+// TestEvaluateRunsWithABrokenSetupDir: a malformed setup recording costs the
+// setup grouping only. Every scenario still runs, and the load error is
+// logged as a warning rather than swallowed.
+func TestEvaluateRunsWithABrokenSetupDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte(`{"scenario":"x","ops":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	rep, err := Evaluate(context.Background(), []Scenario{loadSeed()}, Config{
+		Runner:   scriptedRunner(goodSchemaChangeScript()),
+		Logger:   slog.New(slog.NewTextHandler(&logs, nil)),
+		SetupDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(rep.Results) != 1 || !rep.Results[0].Pass {
+		t.Errorf("results = %+v, want the scenario's run to pass", rep.Results)
+	}
+	if s := logs.String(); !strings.Contains(s, "level=WARN") || !strings.Contains(s, "ops is empty") {
+		t.Errorf("logs = %q, want a warning naming the broken recording", s)
 	}
 }

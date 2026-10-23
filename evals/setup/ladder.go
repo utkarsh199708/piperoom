@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
@@ -58,19 +59,27 @@ type SinkFunc func(ctx context.Context, ev Event) error
 // Emit implements Sink.
 func (f SinkFunc) Emit(ctx context.Context, ev Event) error { return f(ctx, ev) }
 
-// MemorySink is a Sink that keeps every event, in order.
+// MemorySink is a Sink that keeps every event, in order. It is safe for
+// concurrent use.
 type MemorySink struct {
+	mu     sync.Mutex
 	events []Event
 }
 
 // Emit implements Sink.
 func (m *MemorySink) Emit(_ context.Context, ev Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.events = append(m.events, ev)
 	return nil
 }
 
 // Events returns the recorded events.
-func (m *MemorySink) Events() []Event { return append([]Event(nil), m.events...) }
+func (m *MemorySink) Events() []Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]Event(nil), m.events...)
+}
 
 // AgentSink wraps s as the agent's side of the room: every event is
 // attributed to the agent, and setup.verified is refused before it can reach
@@ -78,29 +87,42 @@ func (m *MemorySink) Events() []Event { return append([]Event(nil), m.events...)
 // a test can see the agent tried.
 func AgentSink(s Sink) *AgentEvents { return &AgentEvents{next: s} }
 
-// AgentEvents is AgentSink's sink.
+// AgentEvents is AgentSink's sink. It is safe for concurrent use when the
+// wrapped sink is.
 type AgentEvents struct {
 	next      Sink
+	mu        sync.Mutex
 	refused   int
 	forwarded int
 }
 
 // Emit implements Sink.
 func (a *AgentEvents) Emit(ctx context.Context, ev Event) error {
+	a.mu.Lock()
 	if ev.Type == events.SetupVerified {
 		a.refused++
+		a.mu.Unlock()
 		return ErrAgentVerified
 	}
 	a.forwarded++
+	a.mu.Unlock()
 	ev.Actor = events.Actor{Kind: events.ActorAgent, ID: "eval-agent", Name: "agent"}
 	return a.next.Emit(ctx, ev)
 }
 
 // Refused is how many setup.verified events the agent tried to write.
-func (a *AgentEvents) Refused() int { return a.refused }
+func (a *AgentEvents) Refused() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.refused
+}
 
 // Forwarded is how many other events reached the wrapped sink.
-func (a *AgentEvents) Forwarded() int { return a.forwarded }
+func (a *AgentEvents) Forwarded() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.forwarded
+}
 
 // LadderConfig is what a FakeLadder needs to run one setup's ladder: the
 // target shape plan.Ladder keys on, the plan the run verified, and rung 8's
@@ -132,6 +154,7 @@ type FakeLadder struct {
 	r    Reader
 	sink Sink
 
+	mu       sync.Mutex // guards requests and rungs
 	requests []ReadRequest
 	rungs    []events.SetupRung
 }
@@ -144,11 +167,15 @@ func NewFakeLadder(cfg LadderConfig, r Reader, sink Sink) *FakeLadder {
 
 // Requests returns the read requests the ladder issued, in order.
 func (l *FakeLadder) Requests() []ReadRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return append([]ReadRequest(nil), l.requests...)
 }
 
 // Rungs returns the last verification's rungs.
 func (l *FakeLadder) Rungs() []events.SetupRung {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return append([]events.SetupRung(nil), l.rungs...)
 }
 
@@ -156,7 +183,9 @@ func (l *FakeLadder) Rungs() []events.SetupRung {
 // shape, each read issued through the Reader until its predicate decides.
 // Rungs 1 to 7 are the ladder's; rung 8 is the person's, reported as awaited
 // (and with setup.awaiting_change) unless WaitForChange asks the reader once.
-// It writes one setup.verified with every rung's outcome and returns it.
+// It writes one setup.verified with every rung's outcome and returns it. A
+// context cancelled between rungs stops the ladder: Verify returns ctx.Err()
+// and writes no setup.verified for the partial run.
 func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, error) {
 	if l.r == nil {
 		return events.SetupVerifiedPayload{}, errors.New("evals/setup: a ladder needs a reader")
@@ -171,6 +200,9 @@ func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, e
 	out := events.SetupVerifiedPayload{PlanID: l.cfg.PlanID, NonceHash: l.cfg.NonceHash}
 	var awaiting bool
 	for _, rung := range rungs {
+		if err := ctx.Err(); err != nil {
+			return events.SetupVerifiedPayload{}, err
+		}
 		gr := events.SetupRung{Name: rung.Name}
 		switch {
 		case rung.NotApplicable != "":
@@ -187,7 +219,12 @@ func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, e
 		}
 		out.Rungs = append(out.Rungs, gr)
 	}
+	if err := ctx.Err(); err != nil {
+		return events.SetupVerifiedPayload{}, err
+	}
+	l.mu.Lock()
 	l.rungs = out.Rungs
+	l.mu.Unlock()
 	if awaiting {
 		if err := l.sink.Emit(ctx, Event{
 			Type:    events.SetupAwaitingChange,
@@ -213,7 +250,9 @@ func (l *FakeLadder) runRung(ctx context.Context, rung plan.Rung) (bool, string)
 	note := "the rung issued no read"
 	for _, tool := range rung.Reads {
 		req := ReadRequest{Tool: tool}
+		l.mu.Lock()
 		l.requests = append(l.requests, req)
+		l.mu.Unlock()
 		data, err := l.r.Read(ctx, req)
 		if err != nil {
 			note = "the read " + tool + " failed: " + err.Error()
