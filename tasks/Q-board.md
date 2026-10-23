@@ -203,27 +203,34 @@ var ErrConnectorNotStopped = errors.New("clients: connector is not stopped")
 reset in 3.6; Q5a confirms each against the Apache Kafka docs (rule 9). A Connect without an endpoint answers
 `ErrNotSupported`. Steps 1 to 6 need no new event and no `docs/api.md` change: new actions show in `GET /api/actions`.
 
-### 6. Pull-request fix (proposed; Q7-0 settles it)
+### 6. Pull-request fix (settled by Q7-0 in `docs/design/fix-pr.md` §5; lands in Q7-0c)
 
-- `owners.yaml`, per pipeline:
-```yaml
-repos:
-  - id: connect-config
-    url: https://github.com/acme/connect-config
-    base: main
-    paths:
-      - glob: "connectors/orders-*.json"
-        layer: kafka-connect
-      - glob: "docker/connect/Dockerfile"
-        layer: kafka-connect
-```
-- `ForgeReader` (`File(ctx, repo, ref, path)`, `PullRequest(ctx, repo, number)`) and `ForgeWriter`
-  (`OpenPullRequest(ctx, repo, base, baseSHA, branch, title, body string, files []FileChange) (PullRequest, error)`);
-  `FileChange{Path, Content}`, `PullRequest{Number, URL, State, Merged, HeadSHA, Checks}`; `ErrBaseMoved`.
-- Event `pull_request.updated` `{proposal_id, step, url, number, state: open | merged | closed, checks}`;
-  `HumanInput.Kind` `"pr_merged"`; snapshot `open_proposals[].pull_request`; `docs/api.md` rows.
-- `config.go`: `FORGE_KIND` (`github`), `GITHUB_API_URL` (GitHub Enterprise allowed), `GITHUB_APP_ID`,
-  `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (secret file).
+The design's §5 has the exact code; this is the list. It lands in the leads' contract PR Q7-0c after the owner rules
+the design's §14, not in the design PR.
+
+- `owners.yaml`, per pipeline (Q7a implements; design §3, §5.8): `repos: [{id, url, base, draft?, public_ok?, paths:
+  [{glob, layer}]}]`; a repo id names one repository in the whole file; a path's layer comes from the globs that
+  match it (two layers: refused, never first-match).
+- `clients.go`: `RepoRef`, `RepoInfo`, `RepoFile`, `RepoEntry`; `ForgeReader` (`RepoInfo`, `BaseHead`, `File`,
+  `ListFiles`, `PullRequest`), built whenever a forge is configured; `ForgeWriter` (`OpenPullRequest(ctx, repo,
+  PullRequestRequest) (PullRequest, error)`), built only with write mode on; `PullRequestRequest`, `FileChange`,
+  `PullRequest`, `PullRequestChecks`, the `PRState*`/`Checks*` constants, the caps (`MaxRepoFileBytes` 64 KiB,
+  `MaxFixFiles` 10, `MaxFixParamsBytes` 64 KiB, `MaxFixDiffBytes` 128 KiB), `ErrBaseMoved` (a touched file moved),
+  `ErrBranchExists`, `ErrNotRegularFile`, `ErrRepoFileTooLarge`, `ErrRepoPathDenied`; `FixBranch`,
+  `ValidBranchName`, `CheckRepoPath` (the fixed deny list: `.github/**`, `CODEOWNERS`, other CI files);
+  `ChangePullRequest`.
+- `action.go`: `Layered` (`LayerFor(p, params)`; `Layer()` is `""`), `Deferred` (never policy-approved, PR-only
+  proposals, at most `MaxDeferredSteps` 3, verified after the apply signal), `PullRequestOpener`, `StepRef` with
+  `WithStep`/`StepFrom`, `DiffPreview`.
+- `events.go`: `pull_request.updated` (`PullRequestUpdatedPayload`: ref, state, `head_changed`, merge, checks),
+  `PullRequestRef`, `PRChecks`, `DiffPreview`/`FileDiff` (`PreviewResult.Diff`), `ActionExecutedPayload.PullRequest`,
+  outcomes `not_applied`, `not_deployed`.
+- `contract.go`: `HumanInput.Kind` `"pr_merged"`, `"pr_closed"`. `tool.go`: `CallForge`.
+- `config.go`: `FORGE_KIND` (`""` off | `github`), `GITHUB_API_URL` (GitHub Enterprise allowed), `GITHUB_APP_ID`,
+  `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (secret file), `PIPEROOM_FIXPR_APPLY_TIMEOUT`;
+  `ParseForge`, `ParseFixPRApplyTimeout`.
+- `docs/api.md`: the event, `action.executed.pull_request`, `preview.diff`, the two outcomes, room-level snapshot
+  `pull_requests` (an executed proposal leaves `open_proposals`), `GET /api/actions` `layer_by_params`, `deferred`.
 
 ### 7. MySQL source (proposed; Q8-0 settles it)
 
@@ -313,17 +320,19 @@ repos:
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q7-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/fix-pr.md` and Q0 item 6 | the page answers three questions. **Which repos**: only those in the pipeline's `repos:`, each path glob mapped to one layer; GitHub and GitHub Enterprise in this wave. **How it is approved**: an ordinary proposal; per-layer approval of the glob's layer; `params_hash` over the whole diff; the write mode gate; never auto-approved; Piperoom opens the PR and never merges, so the repo's branch protection and reviewers still apply. **How it is verified**: the room follows the PR; after merge the agent waits until the change reaches the system (connector config, plugin version or a `what_changed` entry), then runs its verification; closed unmerged reads "not applied". Also the refusals (`.github/**`, `CODEOWNERS`, files outside the globs, binary, secrets) and the GitHub App scopes. Item 6 lands in code with it | Q0 |
-| Q7a | A3 | Opus 5.5 | 1 | owners: `repos:` per pipeline | load refuses a glob without a layer, a layer outside `p.Layers()`, a glob under `.github/`, a non-https URL, two repos with one id; table tests | Q7-0 |
-| Q7b | C17 | Opus 5.5 | 2.5 | forge: GitHub client (`ForgeReader`, `ForgeWriter`) with a GitHub App installation token | writes only to `piperoom/<room>-<proposal>` branches; never pushes the base branch, never merges; commits on the recorded base SHA (`ErrBaseMoved` otherwise); 10 s, 4 MB, `netsec`; the token is never logged; httptest: 401, 403, 404, 409, 422, timeout, oversized | Q7-0 |
-| Q7c | C17 | Opus 5.5 | 2 | fixpr: action `repo_open_pull_request` | Validate: repo in the pipeline's `repos`, every path matches one glob, all files of a step share one layer, at most 10 files of 64 KiB, no binary, no `looksSecret` or redact hit; Preview: unified diff against the base head SHA, which it records; `params_hash` covers the diff; Execute refuses if the base moved; the result carries the PR URL | Q7a, Q7b, P3-0 |
-| Q7d | C17 | Opus 5.5 | 1 | forgetools: `repo_read_file`, `pr_status` | scope: the pipeline's repos and globs only; file text wrapped as untrusted; at most 64 KiB | Q7a, Q7b |
-| Q7e | A5 | Opus 5.5 | 2 | room: follow opened PRs (`pull_request.updated`, `HumanInput` `pr_merged`, snapshot `open_proposals[].pull_request`) | the room's lease holder polls every 60 s, one poller per room across replicas; polling stops on merge, close or room close; fake-clock tests | Q7-0, Q7c |
-| Q7f | A4 | Opus 5.5 | 1.5 | agent + wiring: propose a PR when the fix lives in a listed repo; verify after `pr_merged`; build `ForgeWriter` with write mode on | one step never mixes two layers' files; prompt snapshot; evals unchanged | Q7c, Q7d, Q7e, P1a-3 |
-| Q7g | A6 | Opus 5.5 | 1.5 | web: diff view in the proposal preview; PR link and state badge | Vitest; the file list is keyboard and screen-reader complete; mobile wraps long lines | Q7e |
-| Q7h | C14 | Opus 5.5 | 1 | docs: GitHub App setup (contents and pull requests write, checks read, listed repos only); data-handling (repo files reach the model) | citations per claim | Q7b |
-| Q7i | C7 | Opus 5.5 | 1 | scenarios: `plugin-missing-in-image` (Dockerfile), `debezium-upgrade` (version pin), `consumer-deserializer` (consumer config) | the label names repo and path | Q7c |
-| Q7j | C6 | Opus 5.5 | 1 | evals: forge replay (writer as recording no-op); "right files changed" score | the three scenarios score; CDC pass rate unchanged | Q7i |
+| Q7-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/fix-pr.md` and Q0 item 6 | the page answers three questions. **Which repos**: only those in the pipeline's `repos:`, each path glob mapped to one layer; GitHub and GitHub Enterprise in this wave. **How it is approved**: an ordinary proposal; per-layer approval of the glob's layer; `params_hash` over the whole diff; the write mode gate; never auto-approved; Piperoom opens the PR and never merges, so the repo's branch protection and reviewers still apply. **How it is verified**: the room follows the PR; after merge the agent waits until the change reaches the system (connector config, plugin version or a `what_changed` entry), then runs its verification; closed unmerged reads "not applied". Also the refusals (`.github/**`, `CODEOWNERS`, files outside the globs, binary, secrets) and the GitHub App scopes. Item 6 is settled as exact code in the page (§5) and lands in Q7-0c; the design PR edits no contract file | Q0 |
+| Q7-0c | leads | Opus 5.5 | 0.5 | contracts: Q0 item 6 (pull-request fix) | design §5 in code: `clients.go`, `action.go`, `events.go`, `contract.go`, `tool.go`, `config.go`, `docs/api.md`; `Registry.Register` refuses `Layer() == ""` without `Layered`; `CheckRepoPath`, `ValidBranchName`, `FixBranch`, `ParseForge` table tests; `forge` and `forgetools` folders in the ship workflow's high-risk paths; all stubs and fakes compile; `go build ./...`, `go vet ./...`, `go test ./...` green | Q7-0 and the owner's rulings on its §14 |
+| Q7a | A3 | Opus 5.5 | 1 | owners: `repos:` per pipeline | load refuses a glob without a layer, a layer outside `p.Layers()`, a glob under `.github/` or equal to a denied name (`CheckRepoPath`), a non-https URL or one with user info, query, `.git` or extra path, a `base` that fails `ValidBranchName` or starts with `piperoom/`, two repos with one id in a pipeline, one id with two urls or bases across pipelines; glob syntax `path.Match` plus `**` segments; `Repo.LayerOf` returns `ErrPathNotListed` or `ErrPathAmbiguous` (two layers), never first-match; `auto_approve:` and `autonomy:` refuse `Deferred` action names; table tests | Q7-0c |
+| Q7b | C17 | Opus 5.5 | 2.5 | forge: GitHub client (`ForgeReader`, `ForgeWriter`) with a GitHub App installation token | the App JWT with the standard library; installation tokens narrowed to the one repo and the reader or writer permissions, cached until 5 min before expiry; writes only blobs, a tree, a commit on the recorded base SHA and the new `FixBranch` ref, then the PR; a test walks every request and fails on any other method and path (no merge, no ref update, no force); `ErrBaseMoved` when a touched file differs at the base head; idempotent on a retried call (same branch and tree reused, open PR returned), `ErrBranchExists` otherwise; deletes only its own new branch after a failed PR create; `File` refuses directories, symlinks, submodules and files above 64 KiB; redirects refused; 10 s, 4 MB, `netsec`; the key and tokens never logged (log-capture test); `forge/fake` in-memory forge for the demo, evals and tests; a sandbox integration test gated on `PIPEROOM_IT_GITHUB_*`; each REST endpoint confirmed against the GitHub docs, and whether API commits by an App are signed; httptest: 401, 403, 404, 409, 422, rate limit, timeout, oversized | Q7-0c |
+| Q7c | C17 | Opus 5.5 | 2 | fixpr: action `repo_open_pull_request` | params `repo`, `base_sha`, `title`, `body`, `changes[]` (search-and-replace `edits` on a file read at `base_sha`, or `content` for a new file; no deletes), `applied_when`; implements `Scoped`, `Layered`, `Deferred`, `Preview`, `PullRequestOpener`; Validate (design §6.2): repo in the pipeline's `repos`, every path matches globs of one layer, the fixed deny list, at most 10 files of 64 KiB, text only (no NUL, no LFS pointer), no `LooksSecret` literal, redact hit or redaction marker in any added line, title or body, body links only to the forge host or Piperoom and no images or HTML, a diff of at most 128 KiB; Preview: the full redacted unified diff against `base_sha` (`PreviewResult.Diff`), the hosts and warnings of design §6.3, a "base branch check" dry run; `params_hash` covers the diff (base SHA and edits); Execute needs `StepFrom`, refuses "no write credentials" without a writer, refuses on `ErrBaseMoved`, returns the PR URL and `PullRequestRef`; Preview and Validate never call the writer (`readonly_test.go` style) | Q7a, Q7b, P3-0 |
+| Q7d | C17 | Opus 5.5 | 1 | forgetools: `repo_list_files`, `repo_read_file`, `pr_status` | scope: the pipeline's repos and globs only, refused before any I/O; `repo_read_file` returns a numbered line window within `tools.MaxSummaryBytes` with `base_sha`, blob SHA and "lines a-b of n", pages at one `sha`; file text redacted (N5), injection-scanned (N6), at most 64 KiB; `pr_status` only for `piperoom/` head branches, no body or comments; `CallForge` provenance | Q7a, Q7b |
+| Q7k | A5 | Opus 5.5 | 1.5 | room: `Layered` and `Deferred` steps; executor `PullRequestOpener` | a `Layered` step's layer is `LayerFor` with the room's pipeline at creation and before Execute, a mismatch refused; a proposal with a `Deferred` step holds only `Deferred` steps, at most 3; never scheduled by `auto_approve`, earned autonomy or a setup T1 route; at most 3 open fix PRs per room; the executor sets `StepRef` and stores `action.executed.pull_request`; `GET /api/actions` shows `layer_by_params` and `deferred`; attack tests: a forged layer, a mixed proposal, a policy schedule | Q7-0c, Q7c |
+| Q7e | A5 | Opus 5.5 | 2 | room: follow opened PRs (`pull_request.updated`, `HumanInput` `pr_merged` and `pr_closed`, room-level snapshot `pull_requests`) | the room's lease holder polls every 60 s, one poller per room across replicas; an event only when state, head, merge or checks changed; `head_changed` against the commit Piperoom wrote; a merge writes a `pull_request` PipelineChange; rate-limit answers wait until the reset; polling stops on merge, close or room close, and the hand-off lists open PRs; fake-clock tests | Q7-0c, Q7k |
+| Q7f | A4 | Opus 5.5 | 1.5 | agent + wiring: propose a PR when the fix lives in a listed repo; verify after `pr_merged`; build `ForgeWriter` with write mode on | the prompt lists repos and globs; one step never mixes two layers' files; no verification on a `Deferred` step's `action_result`; after `pr_merged` it polls `applied_when` in code (no model turns) every 60 s up to `PIPEROOM_FIXPR_APPLY_TIMEOUT`, then the F4 verification; `pr_closed` gives outcome `not_applied`, a timeout `not_deployed`; write mode off: no `ForgeWriter` reachable (the P1a-3 test extended); prompt snapshot; evals unchanged; the leads' sandbox run with the room export attached | Q7c, Q7d, Q7e, Q7k, P1a-3 |
+| Q7g | A6 | Opus 5.5 | 1.5 | web: diff view in the proposal preview; PR link and state badge | per-file diff with `+`/`-` markers (never colour alone), hosts, warnings and footer; "Nothing changes until a reviewer merges it"; badge open, merged or closed with checks and "edited after approval"; Vitest; the file list is keyboard and screen-reader complete; mobile wraps long lines | Q7e |
+| Q7h | C14 | Opus 5.5 | 1 | docs: GitHub App setup (contents and pull requests write, checks and commit statuses read, metadata; no workflows; selected repos only; no webhook); the recommended base-branch ruleset; data-handling (repo files reach the model; PR title and body leave Piperoom) | citations per claim | Q7b |
+| Q7i | C7 | Opus 5.5 | 1 | scenarios: `plugin-missing-in-image` (Dockerfile), `debezium-upgrade` (version pin), `consumer-deserializer` (consumer config), `fixpr-injected-file` (an injected repo file) | the label names repo, paths and `applied_when`; the injected scenario expects only the listed file and key changed | Q7c |
+| Q7j | C6 | Opus 5.5 | 1 | evals: forge replay (writer as recording no-op); "right files changed" score | the four scenarios score; CDC pass rate unchanged | Q7i |
 
 ## Step 8: MySQL source
 
@@ -387,15 +396,15 @@ no eighth local agent runs, A3 takes the A8 rows after step 2; the After column 
 | C17 | 3 | 5.5 | 5.5 | step 7 |
 | C6 | 4 | 5 | 5 | evals |
 | C18 | 2 | 4.5 | 4.5 | steps 3 and 6 |
-| leads | 3 | 4.5 | 4.5 | contracts and both designs |
+| leads | 4 | 5 | 5 | contracts and both designs |
 | C14 | 5 | 3.5 | 3.5 | docs each step |
 | C11 | 2 | 3 | 3 | step 1 |
 | A6 | 2 | 2.5 | 2.5 | steps 7 and 8 |
-| A5 | 1 | 2 | 2 | step 7 |
+| A5 | 2 | 3.5 | 3.5 | step 7 |
 | C10 | 1 | 1 | 1 | step 8 |
 | C1 | 1 | 0.5 | 0.5 | step 8 |
 
-Total about 78 agent-days over 61 PRs. The critical path is A2: Q0, Q1c, Q3a, Q4a, Q5a, Q5b, Q5c, Q8e, about 12
+Total about 80 agent-days over 63 PRs (Q7-0c and Q7k added by the Q7-0 design, `docs/design/fix-pr.md` §15). The critical path is A2: Q0, Q1c, Q3a, Q4a, Q5a, Q5b, Q5c, Q8e, about 12
 working days. The MySQL chain (Q0, Q8-0, Q8a, Q8b, Q8f, Q8g) is about as long. If A2 slips, Q8e moves to the end;
 only the MySQL offsets shape waits on it.
 
@@ -403,10 +412,10 @@ only the MySQL offsets shape waits on it.
 
 | Week | Lands |
 |---|---|
-| 1 | Q0; Q7-0, Q8-0; Q1a, Q1b, Q1c, Q1d, Q2a, Q2b, Q2f, Q3c |
+| 1 | Q0; Q7-0, Q7-0c, Q8-0; Q1a, Q1b, Q1c, Q1d, Q2a, Q2b, Q2f, Q3c |
 | 2 | Q1e, Q2c, Q2d, Q2g, Q2i, Q3a, Q3b, Q3g, Q4a, Q4b, Q4c, Q5a, Q6a, Q7b, Q8a |
 | 3 | Q2e, Q2h, Q3d, Q3e, Q5b, Q5c, Q5e, Q6b, Q6c, Q7a, Q7h, Q8b, Q8d, Q8i |
-| 4 | Q3f, Q5d, Q5f, Q5g, Q7c, Q7d, Q7e, Q7i, Q8c, Q8e, Q8f, Q8h, Q8k |
+| 4 | Q3f, Q5d, Q5f, Q5g, Q7c, Q7d, Q7k, Q7e, Q7i, Q8c, Q8e, Q8f, Q8h, Q8k |
 | 5 | Q6d, Q7f, Q7g, Q7j, Q8g, Q8j, Q8l, Q8m; integration run of every step's "Done when" by Lead 1 |
 
 A1 takes Q8a before Q3d and Q5e: it is the only row that holds up a whole agent (A8). Review load for the leads is

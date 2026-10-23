@@ -55,7 +55,8 @@ const (
 	RulePort       = "port"       // a port not bound to 127.0.0.1 on a local target
 	RuleBuild      = "build"      // a build: section
 	RuleExtends    = "extends"    // extends
-	RuleNetwork    = "network"    // network_mode other than bridge/none
+	RuleNetwork    = "network"    // network_mode other than bridge/none, top-level networks
+	RuleField      = "field"      // a service field outside the allow-list of rendered fields
 	RuleSecret     = "secret"     // a credential value in plain text
 	RuleProperties = "properties" // an unknown properties file, key or value
 )

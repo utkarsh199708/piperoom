@@ -39,6 +39,10 @@ const maxPorts = 8
 // renders: it is also what Argv passes as a service argument.
 var serviceNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
+// projectNameRE is a compose project name in the piperoom- namespace
+// (ProjectPrefix), within compose's 63-character name vocabulary.
+var projectNameRE = regexp.MustCompile(`^piperoom-[a-z0-9_-]{1,54}$`)
+
 // WriteParams are compose_write's typed params (design §2.5: templates,
 // project name, ports; there is no field that carries YAML text).
 type WriteParams struct {
@@ -83,8 +87,8 @@ func (d *Driver) Render(p WriteParams) (Rendered, error) {
 	if project == "" {
 		project = DefaultProject
 	}
-	if !serviceNameRE.MatchString(project) {
-		return Rendered{}, fmt.Errorf("%w: project name %s is not a compose project name", ErrParams, q(project))
+	if !projectNameRE.MatchString(project) {
+		return Rendered{}, fmt.Errorf("%w: project name %s is not a %s compose project name", ErrParams, q(project), ProjectPrefix)
 	}
 	file := p.File
 	if file == "" {
