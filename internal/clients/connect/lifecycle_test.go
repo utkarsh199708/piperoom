@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -609,5 +610,46 @@ func TestCreateConnectorErrorBodyRuneSafe(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "…") {
 		t.Fatalf("oversized body not truncated: %v", err)
+	}
+}
+
+// IsRebalancing tells Connect's transient rebalance answers (a 409 or a 500
+// whose envelope message names a rebalance) from real failures, also when the
+// error is wrapped.
+func TestIsRebalancing(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		body string
+		want bool
+	}{
+		{"500 rebalance expected", 500, `{"error_code":500,"message":"Request cannot be completed because a rebalance is expected"}`, true},
+		{"409 stale config", 409, `{"error_code":409,"message":"Cannot complete request momentarily due to stale configuration (typically caused by a worker rebalance)"}`, true},
+		{"500 other", 500, `{"error_code":500,"message":"Failed to read offsets"}`, false},
+		{"409 exists", 409, `{"error_code":409,"message":"Connector x already exists"}`, false},
+		{"400 echoing rebalance", 400, `{"error_code":400,"message":"bad value","rebalance":"x"}`, false},
+		{"500 not json", 500, `rebalance`, false},
+		{"503 rebalance", 503, `{"error_code":503,"message":"rebalance is expected"}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.code)
+				_, _ = io.WriteString(w, tt.body)
+			})
+			_, err := c.Config(unscoped(), "x")
+			if err == nil {
+				t.Fatal("no error")
+			}
+			if got := IsRebalancing(fmt.Errorf("wrapped: %w", err)); got != tt.want {
+				t.Fatalf("IsRebalancing(%v) = %v, want %v", err, got, tt.want)
+			}
+		})
+	}
+	if !IsRebalancing(fmt.Errorf("x: %w", ErrRebalancing)) {
+		t.Fatal("ErrRebalancing not recognised")
+	}
+	if IsRebalancing(nil) || IsRebalancing(errors.New("rebalance")) {
+		t.Fatal("a nil or untyped error recognised")
 	}
 }
