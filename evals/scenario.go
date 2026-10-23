@@ -111,6 +111,12 @@ type Resources struct {
 	// kafka_topic_offsets refuses (it reads CDC topics only) and
 	// kafka_replay_range writes to (X2e). Each is empty: start = end = 0.
 	Topics map[string]TopicState `yaml:"topics"`
+	// SourceKind is the room's source kind, pipeline.source_kind as
+	// owners.yaml spells it ("" is postgres). It is not a field of the file:
+	// ParseScenario copies it from the pipeline, so LiveActions builds the
+	// actions a room of that source gets (Q8j: a MySQL room's binlog reader
+	// and no pg_* action).
+	SourceKind string `yaml:"-"`
 }
 
 // TopicState is one topic of resources.topics.
@@ -386,7 +392,22 @@ func ParseScenario(b []byte) (Scenario, error) {
 	if raw.Pipeline.Kind != 0 {
 		s.pipelineYAML = &raw.Pipeline
 	}
+	s.Resources.SourceKind = s.Pipeline.SourceKind
 	return s, nil
+}
+
+// sourceKind is the scenario room's source kind: pipeline.source_kind,
+// postgres when unset (owners.Pipeline.SourceKindOrDefault).
+func (s Scenario) sourceKind() string {
+	return s.Pipeline.SourceKindOrDefault()
+}
+
+// resources returns s.Resources with SourceKind set to the room's source
+// kind, for a scenario built in code rather than parsed.
+func (s Scenario) resources() Resources {
+	r := s.Resources
+	r.SourceKind = s.sourceKind()
+	return r
 }
 
 // LoadScenario reads one scenario file. The name defaults to the file name.

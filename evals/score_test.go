@@ -877,6 +877,11 @@ func TestEveryScenarioCanPass(t *testing.T) {
 	for name, fix := range q6Fixes {
 		p3Fixes[name] = fix
 	}
+	// The MySQL fixes (Q8j): offered only in a MySQL room, whose replay
+	// wires a binlog reader.
+	for name, fix := range q8jFixes {
+		p3Fixes[name] = fix
+	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)

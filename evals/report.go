@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/owners"
 	"piperoom/internal/redact"
 )
 
@@ -22,16 +23,21 @@ type Report struct {
 	Entry string `json:"entry,omitempty"`
 	// PromptHashes are every prompt hash the model tap saw; one when the
 	// prompt was the same for every run. Empty when untapped.
-	PromptHashes []string          `json:"prompt_hashes,omitempty"`
-	Model        string            `json:"model"`
-	Effort       string            `json:"effort"`
-	MaxTurns     int               `json:"max_turns,omitempty"`
-	Runs         int               `json:"runs_per_scenario"`
-	StartedAt    time.Time         `json:"started_at"`
-	DurationMS   int64             `json:"duration_ms"`
-	Overall      Summary           `json:"overall"`
-	Scenarios    []ScenarioSummary `json:"scenarios"`
-	Results      []RunResult       `json:"results"`
+	PromptHashes []string  `json:"prompt_hashes,omitempty"`
+	Model        string    `json:"model"`
+	Effort       string    `json:"effort"`
+	MaxTurns     int       `json:"max_turns,omitempty"`
+	Runs         int       `json:"runs_per_scenario"`
+	StartedAt    time.Time `json:"started_at"`
+	DurationMS   int64     `json:"duration_ms"`
+	Overall      Summary   `json:"overall"`
+	// BySourceKind is Overall per room source kind (postgres, mysql; Q8j,
+	// docs/design/mysql-source.md §10.4), in that order, computed the same
+	// way (each scenario weighs the same). Set only when the scenarios span
+	// more than one kind: with one, it would be Overall again.
+	BySourceKind []SourceKindSummary `json:"by_source_kind,omitempty"`
+	Scenarios    []ScenarioSummary   `json:"scenarios"`
+	Results      []RunResult         `json:"results"`
 	// Calibration and Evidence are over every run (calibration.go). Nil in
 	// reports written before they existed.
 	Calibration *Calibration    `json:"calibration,omitempty"`
@@ -98,7 +104,51 @@ type Summary struct {
 // ScenarioSummary aggregates one scenario's runs.
 type ScenarioSummary struct {
 	Name string `json:"name"`
+	// SourceKind is the scenario room's source kind; "" in a report written
+	// before Q8j, which reads as postgres.
+	SourceKind string `json:"source_kind,omitempty"`
 	Summary
+}
+
+// SourceKindSummary aggregates the scenarios of one room source kind.
+type SourceKindSummary struct {
+	SourceKind string `json:"source_kind"`
+	Scenarios  int    `json:"scenarios"`
+	Summary
+}
+
+// bySourceKind combines the scenario summaries with runs per source kind,
+// postgres first, then the others by name. Nil when fewer than two kinds ran.
+func bySourceKind(ss []ScenarioSummary) []SourceKindSummary {
+	groups := map[string][]Summary{}
+	for _, s := range ss {
+		if s.Runs == 0 {
+			continue
+		}
+		k := s.SourceKind
+		if k == "" {
+			k = owners.SourceKindPostgres
+		}
+		groups[k] = append(groups[k], s.Summary)
+	}
+	if len(groups) < 2 {
+		return nil
+	}
+	kinds := make([]string, 0, len(groups))
+	for k := range groups {
+		kinds = append(kinds, k)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		if (kinds[i] == owners.SourceKindPostgres) != (kinds[j] == owners.SourceKindPostgres) {
+			return kinds[i] == owners.SourceKindPostgres
+		}
+		return kinds[i] < kinds[j]
+	})
+	out := make([]SourceKindSummary, 0, len(kinds))
+	for _, k := range kinds {
+		out = append(out, SourceKindSummary{SourceKind: k, Scenarios: len(groups[k]), Summary: combine(groups[k])})
+	}
+	return out
 }
 
 func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started time.Time) Report {
@@ -121,12 +171,13 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	var withRuns []Summary
 	for _, sc := range scenarios {
 		s := summarize(byName[sc.Name])
-		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{Name: sc.Name, Summary: s})
+		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{Name: sc.Name, SourceKind: sc.sourceKind(), Summary: s})
 		if s.Runs > 0 {
 			withRuns = append(withRuns, s)
 		}
 	}
 	rep.Overall = combine(withRuns)
+	rep.BySourceKind = bySourceKind(rep.Scenarios)
 	rep.Overall.Infra = totalInfra(rep.Scenarios)
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
@@ -325,6 +376,7 @@ func (r Report) Restrict(names []string) Report {
 	}
 	out.Overall = combine(withRuns)
 	out.Overall.Infra = totalInfra(out.Scenarios)
+	out.BySourceKind = bySourceKind(out.Scenarios)
 	return out
 }
 
@@ -377,6 +429,9 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	for _, k := range r.BySourceKind {
+		writeSummaryRow(&b, fmt.Sprintf("**%s** (%d scenarios)", mdCell(k.SourceKind), k.Scenarios), k.Summary)
+	}
 	writeInvalidLine(&b, r.Overall, r.Results)
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)

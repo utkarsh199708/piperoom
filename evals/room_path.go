@@ -361,7 +361,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, wl, err := liveActions(sc.Resources, sc.Recordings)
+	live, wl, err := liveActions(sc.resources(), sc.Recordings)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}

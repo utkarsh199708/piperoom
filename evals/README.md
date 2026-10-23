@@ -951,6 +951,27 @@ read is a miss (at most two per run) and no versions are passed, as before.
 Every lifecycle write (`StopConnector`, `ResetSourceOffsets`, `AlterSourceOffsets`, `CreateConnector`,
 `DeleteConnector`) is a no-op recorded in the run's write log, without config values or positions.
 
+### MySQL rooms (Q8j)
+
+A scenario whose `pipeline.source_kind` is `mysql` runs in a MySQL room, built the way wiring builds a MySQL
+client set (Q8g): `LiveToolsFor("mysql")` gives dbtools' MySQL list (no `pg_*` tool; `source_row` and
+`source_long_transactions` instead), `mysql_binlog_status` and `kafka_schema_history`, and the agent reads the
+room as MySQL from that list (its MySQL prompt). Its actions are every production action but the `pg_*` ones,
+and the Connect actions get a binlog reader, so `connect_update_connector_config` offers `database.server.id`
+and `snapshot.mode`. A Postgres scenario's room is unchanged: `LiveTools()` is `LiveToolsFor("postgres")`, byte
+for byte the list it was. `-check` validates a MySQL file against the MySQL tools, and its `fix_targets` against
+the MySQL actions; `forbidden_actions` may still name a `pg_*` action.
+
+| read | from |
+|---|---|
+| binlog status (`@@server_id`, binlog files, GTID sets) | the first `mysql_binlog_status` recording with `data.server` (the tool's own Data) |
+| connector config (class, `snapshot.mode`, the pipeline's other `database.server.id`s) | as for the P3 actions (`connect_config` data, `resources.connector_configs`) |
+
+Without a `mysql_binlog_status` recording a `database.server.id` step fails Validate: the id cannot be checked
+against the server's. When the scenarios span both source kinds the report adds a row per kind under
+**overall** (`by_source_kind` in the JSON; each scenario weighs the same, as in overall), and each scenario row
+carries its `source_kind`.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from

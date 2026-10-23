@@ -14,11 +14,14 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
+	"piperoom/internal/tools/mysqltools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
 )
@@ -39,23 +42,56 @@ type Miss struct {
 	Input json.RawMessage `json:"input"`
 }
 
-// LiveTools returns the read-only tools the agent gets in production, in
-// production order. For tools that read live systems only the names,
-// descriptions and schemas are used: the harness wraps each one and never
-// calls its Run, which is why the clients can be nil here. Pure tools (see
-// runsLive) are the exception and run for real.
+// LiveTools returns the read-only tools the agent gets in production in a
+// Postgres room (the default source kind), in production order. For tools
+// that read live systems only the names, descriptions and schemas are used:
+// the harness wraps each one and never calls its Run, which is why the
+// clients can be nil here. Pure tools (see runsLive) are the exception and
+// run for real. LiveToolsFor gives another source kind's list.
 func LiveTools() ([]tools.Tool, error) {
+	return LiveToolsFor(owners.SourceKindPostgres)
+}
+
+// LiveToolsFor returns the read-only tools of a room whose source is of
+// sourceKind (owners.yaml source_kind; "" is postgres), the way wiring builds
+// them for a client set of that kind (Q8g): a MySQL room gets dbtools' MySQL
+// list (no pg_* tool; source_row and source_long_transactions),
+// mysql_binlog_status and kafka_schema_history; a Postgres room gets none of
+// them, so its list is the one it had before MySQL, byte for byte. Every tool
+// then passes agent.ToolServesSource, as wiring filters it.
+func LiveToolsFor(sourceKind string) ([]tools.Tool, error) {
+	sk, err := agent.SourceKind(sourceKind)
+	if err != nil {
+		return nil, fmt.Errorf("evals: %w", err)
+	}
+	mysqlRoom := sk == owners.SourceKindMySQL
 	reg := tools.NewRegistry()
 	// kafkatools registers the F12 reads, and the Q1c, Q3a, Q4a and Q5a reads
 	// (Q6d), only for clients that have them, so the definition-only clients
-	// below say they do.
-	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: definitionKafka{}, Connect: definitionConnect{}}); err != nil {
+	// below say they do. kafka_schema_history (Q8e) is registered for a
+	// SchemaHistoryReader, which only the MySQL room's client says it is.
+	var kc clients.KafkaAdmin = definitionKafka{}
+	if mysqlRoom {
+		kc = definitionHistoryKafka{}
+	}
+	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: kc, Connect: definitionConnect{}}); err != nil {
 		return nil, fmt.Errorf("evals: kafka tool definitions: %w", err)
 	}
 	// dbtools refuses a nil Owners (a wiring guard); an empty one is enough
-	// for definitions.
-	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
+	// for definitions. Its SourceKind picks the list (Q8n); a Postgres room
+	// keeps the zero value it always had.
+	dd := dbtools.Deps{Owners: &owners.Owners{}}
+	if mysqlRoom {
+		dd.SourceKind = sk
+	}
+	if err := dbtools.Register(reg, dd); err != nil {
 		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
+	// mysql_binlog_status (Q8c), as wiring registers it: on a MySQL room only.
+	if mysqlRoom {
+		if err := mysqltools.Register(reg, mysqltools.Deps{Owners: &owners.Owners{}}); err != nil {
+			return nil, fmt.Errorf("evals: mysql tool definitions: %w", err)
+		}
 	}
 	// Definition only: no Connect client and no metrics URL; the harness never runs it.
 	if err := debeziumtools.Register(reg, debeziumtools.Deps{Owners: &owners.Owners{}}); err != nil {
@@ -72,7 +108,43 @@ func LiveTools() ([]tools.Tool, error) {
 	if err := similarincidents.Register(reg, similarincidents.Deps{}); err != nil {
 		return nil, fmt.Errorf("evals: similar_incidents tool definition: %w", err)
 	}
-	return reg.All(), nil
+	var out []tools.Tool
+	for _, t := range reg.All() {
+		if agent.ToolServesSource(t.Name(), sk) {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// definitionHistoryKafka is definitionKafka plus the schema history reader,
+// so kafkatools registers kafka_schema_history (Q8e) for a MySQL room. It is
+// never called either.
+type definitionHistoryKafka struct{ definitionKafka }
+
+func (definitionHistoryKafka) SchemaHistoryTail(context.Context, string, int) ([]kafka.SchemaHistoryRecord, error) {
+	return nil, errNotReplayed
+}
+
+// scenarioTools returns the tool definitions of sc's room: pg are the
+// Postgres room's (the caller's list, LiveTools() in production), a MySQL
+// scenario gets LiveToolsFor(mysql). my caches that list across calls; a nil
+// my builds it every time.
+func scenarioTools(sc Scenario, pg []tools.Tool, my *[]tools.Tool) ([]tools.Tool, error) {
+	if sc.sourceKind() != owners.SourceKindMySQL {
+		return pg, nil
+	}
+	if my != nil && *my != nil {
+		return *my, nil
+	}
+	defs, err := LiveToolsFor(owners.SourceKindMySQL)
+	if err != nil {
+		return nil, err
+	}
+	if my != nil {
+		*my = defs
+	}
+	return defs, nil
 }
 
 // definitionKafka is a Kafka client for tool definitions only. It implements the
@@ -115,12 +187,32 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 	if err != nil {
 		return nil, nil, err
 	}
+	sk, err := agent.SourceKind(res.SourceKind)
+	if err != nil {
+		return nil, nil, fmt.Errorf("evals: resources: %w", err)
+	}
 	wl := &writeLog{}
 	reg := actions.NewRegistry()
-	if err := actions.Register(reg, actions.Deps{
+	deps := actions.Deps{
 		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl},
 		Registry: replayRegistry{subjects: res.Subjects, log: wl},
-	}); err != nil {
+	}
+	// A MySQL room's actions get the source's binlog reader (Q8g wires the
+	// MySQL client as actions.Deps.Binlog): connect_update_connector_config
+	// then offers database.server.id and snapshot.mode, whose guards read
+	// the connector's config, so its Connect also answers Config from the
+	// recordings (replayConfig). A Postgres room keeps replayConnect, whose
+	// Config is not replayed, so its Validate behaves as before.
+	var binlog mysql.BinlogReader
+	if sk == owners.SourceKindMySQL {
+		binlog = replayBinlog{recs: recs}
+		deps.Connect = replayMySQLConnect{
+			replayConnect: replayConnect{connectors: res.Connectors, statuses: statuses, log: wl},
+			cfg:           replayConfig{res: res, recs: recs},
+		}
+		deps.Binlog = binlog
+	}
+	if err := actions.Register(reg, deps); err != nil {
 		return nil, nil, fmt.Errorf("evals: action definitions: %w", err)
 	}
 	if err := registerP3(reg, res, recs, wl); err != nil {
@@ -129,10 +221,59 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 	if err := registerSourceActions(reg, res, recs, wl); err != nil {
 		return nil, nil, err
 	}
-	if err := registerLifecycle(reg, res, recs, wl); err != nil {
+	if err := registerLifecycle(reg, res, recs, wl, binlog); err != nil {
 		return nil, nil, err
 	}
-	return reg, wl, nil
+	if sk == owners.SourceKindPostgres {
+		return reg, wl, nil
+	}
+	// Only the source's actions reach the room (agent.ActionServesSource), as
+	// wiring registers them: a MySQL room has no pg_* action.
+	out, err := agent.ActionsForSource(reg, sk)
+	if err != nil {
+		return nil, nil, fmt.Errorf("evals: %w", err)
+	}
+	return out, wl, nil
+}
+
+// replayMySQLConnect is a MySQL room's Connect client for actions.Register's
+// actions: replayConnect with Config answered from the recordings, which the
+// MySQL key guards of connect_update_connector_config read (the connector
+// class, the current snapshot.mode, the pipeline's other server ids).
+type replayMySQLConnect struct {
+	replayConnect
+	cfg replayConfig
+}
+
+func (c replayMySQLConnect) Config(ctx context.Context, name string) (map[string]string, error) {
+	return c.cfg.Config(ctx, name)
+}
+
+// replayBinlog is a MySQL room's binlog reader (mysql.BinlogReader): the
+// server state of the first mysql_binlog_status recording with data (its
+// Data.server carries mysql.BinlogStatus's fields under the same names), so
+// an action checks a position or a database.server.id against what the
+// agent's read showed.
+type replayBinlog struct{ recs []Recording }
+
+var _ mysql.BinlogReader = replayBinlog{}
+
+func (b replayBinlog) BinlogStatus(context.Context) (mysql.BinlogStatus, error) {
+	var st mysql.BinlogStatus
+	found := firstData(b.recs, mysqltools.NameBinlogStatus, func(_ Recording, data []byte) bool {
+		var d struct {
+			Server *mysql.BinlogStatus `json:"server"`
+		}
+		if json.Unmarshal(data, &d) != nil || d.Server == nil {
+			return false
+		}
+		st = *d.Server
+		return true
+	})
+	if !found {
+		return mysql.BinlogStatus{}, fmt.Errorf("evals: binlog status: %w (record %s with data.server)", errNotReplayed, mysqltools.NameBinlogStatus)
+	}
+	return st, nil
 }
 
 // connectStatusData is the part of connect_status's Data that action
