@@ -42,6 +42,10 @@ itself; the row named in it applies it.
     marker once `SetupStack` exists.
   - Effect: W4z-1 (KAN-511) covers **40** scenarios, and W4z-2 (KAN-512) reports the pair apart. A C1 follow-up
     (after W4t, KAN-509) excludes pending scenarios from `n_scenarios`.
+  - Amended 2026-10-24: U1-10 landed (#1012) and released the `U1-10` marker, but the harness still runs the pair
+    as CDC rooms. U1-29 (KAN-550, #1048) re-parks the pair under `pending_harness: setup-room-eval`, whose condition
+    is a top-level `SetupRoomAlert` in package `evals`. The C6 hookup above is row U1-30 on `tasks/U-board.md`; it
+    must declare exactly `SetupRoomAlert` so the guard releases the pair when it lands.
 
   Ruled 2026-10-23 and amended the same day (leads, owner-delegated).
 - **R7 — C6 `on_error` facts.** A fact is not established from an errored result: `on_error` facts stay unsupported.
