@@ -3,7 +3,9 @@ package host
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"piperoom/internal/setup/ops"
@@ -35,6 +37,14 @@ import (
 // The ACLs close the planted exe, jar, plugin and service record; the worker
 // file needs either an elevated properties_write on Windows or a ruling, and
 // the PR records that as the remaining risk.
+//
+// The same holds for the project directory itself and its parents: they stay
+// the person's, so while the service is stopped that account can rename bin\
+// (or the whole project directory) aside and put its own in its place, since
+// deleting or renaming an entry needs only delete-child on its parent, whatever
+// the entry's own DACL says. Closing that needs the service's files outside
+// every user-writable directory (an admin-only install location), which is the
+// same design change; docs/design/setup-agent.md records the ruling.
 
 // aclTarget is one path install hardens: a directory the service executes or
 // loads from, or one it writes.
@@ -50,12 +60,44 @@ type aclTarget struct {
 // service runs. The Windows build implements it (acl_windows.go); the tests
 // record the calls.
 type aclAPI interface {
-	// Harden gives every target a protected DACL and takes its ownership:
+	// Harden gives every target, and everything under it, a protected DACL and
+	// takes its ownership (hardenOrder):
 	// Administrators and SYSTEM full control, the account named by account read
 	// and execute (read, write, execute and delete where the target is
 	// writable), and Users read and execute, each inherited by everything the
 	// directory holds.
 	Harden(account string, targets []aclTarget) error
+}
+
+// hardenOrder lists root and everything under it in the order Harden sets
+// them: every entry before the directory that holds it. Each entry gets its own
+// protected DACL and owner, not only the directory: SetNamedSecurityInfo passes
+// inherited ACEs down but never the owner, so a jar the person's account
+// extracted would otherwise stay theirs, and an owner can always rewrite a
+// file's DACL and then the file. Children go first because only their old,
+// inherited DACL still lets a non-elevated caller set them, and a protected
+// child is skipped by the directory's own propagation afterwards. A symlink,
+// junction or other reparse point is refused rather than followed: setting its
+// security would change the file it points at, outside the project.
+func hardenOrder(root string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && !d.Type().IsRegular() {
+			return fmt.Errorf("%w: %s is a link or another reparse point; the service's files must be plain files and directories", ErrDetect, q(path))
+		}
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("host: listing %s to harden: %w", q(root), err)
+	}
+	for i, j := 0, len(paths)-1; i < j; i, j = i+1, j-1 {
+		paths[i], paths[j] = paths[j], paths[i]
+	}
+	return paths, nil
 }
 
 // serviceACLTargets is what install hardens for s: the directories the SCM runs

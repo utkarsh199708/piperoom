@@ -39,8 +39,10 @@
 // file the person's account writes can no longer become code the service runs
 // (winsvc.go, serviceAccountPrefix; acl.go). One file is still theirs: the
 // worker properties file at the project root, which properties_write (T1)
-// writes unelevated and which decides what the service loads — the remaining
-// risk, and the reason a Windows install wants its own host. Row U8e documents
+// writes unelevated and which decides what the service loads, and the project
+// directory itself, which that account can rename aside while the service is
+// stopped. Both are the remaining risk (docs/design/setup-agent.md), and the
+// reason a Windows install wants its own host. Row U8e documents
 // the account, the ACLs and where to install.
 //
 // The unit file is written to systemd/<unit> under the project directory and

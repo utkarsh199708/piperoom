@@ -90,9 +90,13 @@ const (
 // What is left: the worker properties file at the project root stays writable
 // by the person's account, because properties_write (T1) writes it through an
 // unelevated run. That file names plugin.path and the connectors' classes, so
-// it still decides what the service loads. Closing it needs an elevated
-// properties_write on Windows or a design ruling (acl.go, and the U8b row's
-// PR). A virtual account also authenticates to a domain as the machine account
+// it still decides what the service loads. The project directory and its
+// parents stay the person's too, so while the service is stopped that account
+// can rename bin\ or the project aside and plant its own (acl.go). Both need
+// the service's files in an admin-only location and an elevated
+// properties_write; until then docs/design/setup-agent.md records them as the
+// accepted risk: the person's account can become NT SERVICE\<service>, not
+// SYSTEM. A virtual account also authenticates to a domain as the machine account
 // (DOMAIN\HOST$) rather than as the person; that network identity is the
 // reason U8e tells the operator to install on a host the person does not share.
 //

@@ -108,14 +108,20 @@ func (a windowsACL) Harden(account string, targets []aclTarget) error {
 		pin.Pin(sid)
 	}
 	for _, t := range targets {
-		if err := hardenPath(t, owner, admins, system, users, service); err != nil {
+		paths, err := hardenOrder(t.Path)
+		if err != nil {
 			return err
+		}
+		for _, p := range paths {
+			if err := hardenPath(aclTarget{Path: p, Write: t.Write}, owner, admins, system, users, service); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-// hardenPath writes the protected DACL and the owner of one target.
+// hardenPath writes the protected DACL and the owner of one path.
 func hardenPath(t aclTarget, owner, admins, system, users, service *windows.SID) error {
 	mask := windows.ACCESS_MASK(aclReadExecute)
 	if t.Write {

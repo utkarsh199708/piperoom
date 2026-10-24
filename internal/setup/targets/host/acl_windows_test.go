@@ -165,3 +165,67 @@ func readACEs(t *testing.T, path string) []aceWant {
 	}
 	return out
 }
+
+// TestWindowsACLHardensTheFilesInside: a file the person's account put in a
+// target before install (a jar, an older exe) gets the same protected DACL as
+// the directory, not only the directory's inherited ACEs: SetNamedSecurityInfo
+// never passes the owner down, and an owner can always rewrite a file's DACL.
+func TestWindowsACLHardensTheFilesInside(t *testing.T) {
+	self := currentUserSID(t)
+	dir := t.TempDir()
+	libs := filepath.Join(dir, DistDir, "libs")
+	jar := filepath.Join(libs, "kafka-clients.jar")
+	if err := os.MkdirAll(libs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jar, []byte("jar"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The hardened entries grant this (non-elevated) test read and execute
+	// only, so give it back full control before t.TempDir removes them.
+	t.Cleanup(func() { restoreForCleanup(t, filepath.Join(dir, DistDir), self) })
+
+	if err := testACL(t).Harden(`NT SERVICE\piperoom-connect`, []aclTarget{{Path: filepath.Join(dir, DistDir)}}); err != nil {
+		t.Fatalf("Harden: %v", err)
+	}
+	for _, p := range []string{libs, jar} {
+		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatalf("GetNamedSecurityInfo(%s): %v", p, err)
+		}
+		control, _, err := sd.Control()
+		if err != nil {
+			t.Fatalf("Control: %v", err)
+		}
+		if control&windows.SE_DACL_PROTECTED == 0 {
+			t.Errorf("%s: the DACL is not protected", p)
+		}
+		aces := readACEs(t, p)
+		if len(aces) != 4 || aces[2].sid != self.String() || aces[2].mask != aclReadExecute {
+			t.Errorf("%s: ACEs %v, want the four of the target with the service read and execute", p, aces)
+		}
+	}
+}
+
+// restoreForCleanup gives the test's own account full control of root and
+// everything under it, parents first so each directory can be listed again.
+func restoreForCleanup(t *testing.T, root string, self *windows.SID) {
+	t.Helper()
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		accessEntry(aclFullControl, self, windows.TRUSTEE_IS_USER),
+	}, nil)
+	if err != nil {
+		t.Errorf("cleanup ACL: %v", err)
+		return
+	}
+	_ = filepath.WalkDir(root, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if err := windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+			t.Errorf("cleanup %s: %v", p, err)
+		}
+		return nil
+	})
+}
