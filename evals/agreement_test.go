@@ -329,7 +329,7 @@ var syntheticLabels = map[string]Label{
 	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
 	"consumer-offsets-out-of-range-retention": {"consumer", []string{"retention", "log start", "data loss"}}, // R14 (W4n-3): order-sync fails first, Kafka holds the cause
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
-	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
+	"replication-slot-lost-failover":          {"kafka-connect", []string{"failover", "promoted", "new primary"}}, // R1 (W4n-2)
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 	// The two scenarios added by #100.
 	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},

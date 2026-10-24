@@ -28,6 +28,9 @@ func TestW4nLayerLabels(t *testing.T) {
 		// R1: Postgres answers every read; the task that never gets past
 		// start is the first failing layer, Postgres the root cause.
 		{"blocked-slot", "kafka-connect", "postgres", nil},
+		// R1, same reading (W4n-2, KAN-497): the failed task fails first, the
+		// slot lost in the failover is the root cause.
+		{"replication-slot-lost-failover", "kafka-connect", "postgres", nil},
 		// R14 (W4n-3, amends R2): order-sync's own read shows it failed
 		// (crash loop); Kafka answers every read, so it is the root cause.
 		{"consumer-offsets-out-of-range-retention", "consumer", "kafka", nil},
