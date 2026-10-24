@@ -13,7 +13,8 @@ name: evals-live
 #
 # Model providers (docs/design/model-providers.md 12, V12). A dispatch picks
 # the provider, flavor and model to run (a "gate run", evals/README.md "The
-# gate"). The job holds only the secret of that provider: every key below is
+# gate"). The job holds only the secret of that provider (and the judge's
+# Anthropic key): every key below is
 # set from `secrets` only when the leg's key_env names it, and the resolve job
 # that reads the inputs has no environment and no secret at all.
 
@@ -224,7 +225,9 @@ jobs:
           KEY_ENV: ${{ matrix.key_env }}
           PROVIDER: ${{ matrix.provider }}
           FLAVOR: ${{ matrix.flavor }}
-          MODEL_BASE_URL: ${{ vars.EVALS_MODEL_BASE_URL }}
+          # Only the self-hosted flavors take a base URL, so no other leg's key
+          # can be sent to that endpoint; azure has its own variable.
+          MODEL_BASE_URL: ${{ matrix.provider == 'openai' && (matrix.flavor == 'azure' && vars.EVALS_AZURE_BASE_URL || ((matrix.flavor == 'ollama' || matrix.flavor == 'vllm' || matrix.flavor == 'generic') && vars.EVALS_MODEL_BASE_URL)) || '' }}
           AWS_REGION_VAR: ${{ vars.EVALS_AWS_REGION }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ matrix.key_env == 'OPENAI_API_KEY' && secrets.OPENAI_API_KEY || '' }}
@@ -249,7 +252,8 @@ jobs:
           if [ "$PROVIDER" = "openai" ]; then
             case "$FLAVOR" in ollama|vllm|generic|azure)
               if [ -z "$MODEL_BASE_URL" ]; then
-                echo "::notice::flavor ${FLAVOR} needs the variable EVALS_MODEL_BASE_URL (an https endpoint a hosted runner can reach) in the evals environment; skipping. A local model is run on a developer machine (evals/README.md)."
+                var=EVALS_MODEL_BASE_URL; [ "$FLAVOR" = "azure" ] && var=EVALS_AZURE_BASE_URL
+                echo "::notice::flavor ${FLAVOR} needs the variable ${var} (an https endpoint a hosted runner can reach) in the evals environment; skipping. A local model is run on a developer machine (evals/README.md)."
                 run=false
               fi;;
             esac
@@ -304,7 +308,9 @@ jobs:
           XAI_API_KEY: ${{ matrix.key_env == 'XAI_API_KEY' && secrets.XAI_API_KEY || '' }}
           GEMINI_API_KEY: ${{ matrix.key_env == 'GEMINI_API_KEY' && secrets.GEMINI_API_KEY || '' }}
           AWS_BEARER_TOKEN_BEDROCK: ${{ matrix.key_env == 'AWS_BEARER_TOKEN_BEDROCK' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
-          MODEL_BASE_URL: ${{ vars.EVALS_MODEL_BASE_URL }}
+          # Only the self-hosted flavors take a base URL, so no other leg's key
+          # can be sent to that endpoint; azure has its own variable.
+          MODEL_BASE_URL: ${{ matrix.provider == 'openai' && (matrix.flavor == 'azure' && vars.EVALS_AZURE_BASE_URL || ((matrix.flavor == 'ollama' || matrix.flavor == 'vllm' || matrix.flavor == 'generic') && vars.EVALS_MODEL_BASE_URL)) || '' }}
           AWS_REGION_VAR: ${{ vars.EVALS_AWS_REGION }}
           PROVIDER: ${{ matrix.provider }}
           FLAVOR: ${{ matrix.flavor }}
@@ -368,7 +374,9 @@ jobs:
             # come from variables of the evals environment.
             export PIPEROOM_MODEL_PRICING_STRICT=off
             [ "$LISTED" = "true" ] || export PIPEROOM_MODEL_UNVERIFIED=on
-            [ -z "$MODEL_BASE_URL" ] || export PIPEROOM_MODEL_BASE_URL="$MODEL_BASE_URL"
+            if [ "$PROVIDER" = "openai" ] && [ -n "$MODEL_BASE_URL" ]; then
+              case "$FLAVOR" in azure|ollama|vllm|generic) export PIPEROOM_MODEL_BASE_URL="$MODEL_BASE_URL";; esac
+            fi
             [ -z "$AWS_REGION_VAR" ] || export AWS_REGION="$AWS_REGION_VAR"
           fi
           [ -z "$MODEL" ] || args+=(-model "$MODEL")

@@ -188,7 +188,9 @@ variable the adapter reads: `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `DEEPSEEK_
 `AWS_BEARER_TOKEN_BEDROCK`. The job gets the secret of the chosen provider only. `ANTHROPIC_API_KEY` stays for the
 judge, which is Anthropic for every model so a candidate is judged like the reference; without it the judge is off
 and the run is for development, not for admission. Variables of the same environment: `EVALS_MODEL_BASE_URL` (the
-https endpoint of `azure`, `ollama`, `vllm` and `generic`) and `EVALS_AWS_REGION` (`bedrock-converse`).
+https endpoint of `ollama`, `vllm` and `generic`), `EVALS_AZURE_BASE_URL` (`azure`) and `EVALS_AWS_REGION`
+(`bedrock-converse`). Each is passed only to the legs it belongs to, so no other provider's key reaches that endpoint.
+`vllm` and `generic` legs run without a key.
 
 **A missing secret skips, it does not fail.** The first step checks that the chosen provider's secret (and, where it
 applies, the variable above) is set, prints a `::notice::` naming it, and the job ends green with no checkout, no build

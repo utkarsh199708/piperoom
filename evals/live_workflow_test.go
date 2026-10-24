@@ -44,4 +44,13 @@ func TestEvalsLiveHasEveryProviderKey(t *testing.T) {
 			t.Errorf("evals-live.yml reads a secret outside its leg condition: %s", strings.TrimSpace(line))
 		}
 	}
+	// A base URL variable reaches only the legs it belongs to (V12 review):
+	// otherwise another provider's key would be sent to that endpoint.
+	for _, line := range strings.Split(wf, "\n") {
+		if strings.Contains(line, "vars.EVALS_MODEL_BASE_URL") || strings.Contains(line, "vars.EVALS_AZURE_BASE_URL") {
+			if !strings.Contains(line, "matrix.flavor ==") {
+				t.Errorf("evals-live.yml reads a base URL variable outside a flavor condition: %s", strings.TrimSpace(line))
+			}
+		}
+	}
 }
