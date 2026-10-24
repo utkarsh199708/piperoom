@@ -229,14 +229,16 @@ func setupBlockedQuestion(reason string, s *setupRun) string {
 // post_message. They emit through the run's sink, so the room log holds the
 // plan and the verification request.
 //
-// The catalogue and the class resolver below are the local adapter of the
-// contract change request in the PR: until agent.Deps carries the runner's
-// real op catalogue and the room's endpoint resolver, the run derives both
-// from what it holds (the registered actions, the request's targets), and
-// every derived value errs on the side the room corrects rather than the
-// side it cannot: a tier or class that is too low is raised by the room at
-// proposal time from the step's real params, a tier or class that is too
-// high would need approvals no step earned.
+// The catalogue and the class resolver below derive the plan's tiers from
+// what the run holds: the registered actions, which are what the room routes
+// a proposal on (actions.Tiered), and the request's targets. The leads kept
+// them over a Deps change (review of #1012): the runner's op catalogue would
+// be a second tier source beside the one that routes, and a plan step has no
+// params, so no per-step endpoint exists to resolve at plan time. Every
+// derived value errs on the side the room corrects rather than the side it
+// cannot: a tier or class that is too low is raised by the room at proposal
+// time from the step's real params, a tier or class that is too high would
+// need approvals no step earned.
 func (r *runner) setupRoomTools() ([]tools.Tool, error) {
 	var sink setuptools.Emitter
 	if r.deps.Sink != nil {
