@@ -5123,15 +5123,35 @@ expect:
       tool: reconcile
       match: [sink is missing 40 rows]
       required: true
+    # W4n-4 (KAN-497; lead audit after R17): the replayed phase (R17) changed what a re-check
+    # reads, and the root-cause claim must stay backable from either side of the replay. Claims
+    # are an OR (evals/evidence.go claimSupported: a cited step that established ANY listed
+    # fact backs the claim), so the claim lists one fact that only the skipped phase gives, one
+    # the first read of either phase gives, and one that holds in both phases:
+    #   f_in_topic: any kafka_find_by_key that found one record of the key. It dropped the
+    #     key-specific "offset 433": the key a run reads is its choice (only 1301 and 1302 sit
+    #     at offset 433, so that term made two keys of 40 the ones that counted). "not found:
+    #     no record with key" and "found 0 records" never match (the term needs the count 1).
+    #     The marker 1341 (loaded, never skipped) now counts too: its summary has the same shape.
+    #   f_trace_committed: a pre-replay trace (stopped at warehouse). After the replay the
+    #     trace reaches the warehouse, so it no longer matches; that is why the next fact exists.
+    #   f_trace_behind_commit: the trace of a skipped key shows the record on the topic and the
+    #     group's committed offset (447) beyond it, in both phases: the cause itself, and the
+    #     one a post-replay citation can still show. Its terms are the matcher's tokens, not the
+    #     summary's text ("offset=433" is the tokens offset, 433). The marker's trace (1341)
+    #     matches it as well (committed 447, offset 446): same shape, no term tells it apart.
     - id: f_in_topic
       tool: kafka_find_by_key
-      match: [found 1 record, offset 433]
+      match: [found 1 record]
     - id: f_trace_committed
       tool: trace_record
       match: [consumer order sync seen committed, stopped at warehouse]
+    - id: f_trace_behind_commit
+      tool: trace_record
+      match: [kafka pg public orders seen offset, consumer order sync seen committed 447]
   claims:
     - about: root_cause
-      facts: [f_in_topic, f_trace_committed]
+      facts: [f_in_topic, f_trace_committed, f_trace_behind_commit]
   fix:
     - [kafka_replay_range]
   fix_targets:
