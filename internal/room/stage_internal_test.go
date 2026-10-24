@@ -194,15 +194,28 @@ func (r *stageRig) stage(roomID, pid string) events.ProposalStagedPayload {
 	if _, err := r.svc.StageProposal(context.Background(), r.user("arjun"), pid); err != nil {
 		r.t.Fatalf("stage: %v", err)
 	}
-	var out events.ProposalStagedPayload
+	var (
+		out events.ProposalStagedPayload
+		seq int64
+	)
 	waitForCond(r.t, 5*time.Second, func() bool {
 		evs := logOf(r.t, r.st, roomID, events.ProposalStaged)
 		if len(evs) <= before {
 			return false
 		}
 		out, _ = events.Decode[events.ProposalStagedPayload](evs[len(evs)-1])
+		seq = evs[len(evs)-1].Seq
 		return true
 	}, "proposal.staged never written")
+	// The store holds the event as soon as runStage appends it, but runStage
+	// still holds the room's lock (it folds the event and may schedule the
+	// proposal); the snapshot that GetRoom and RoomFor answer from without a
+	// lock is published only when it lets go. Wait for that publish, not for
+	// a bare append, before reading the room.
+	waitForCond(r.t, 5*time.Second, func() bool {
+		snap, err := r.svc.GetRoom(context.Background(), roomID)
+		return err == nil && snap.LastSeq >= seq
+	}, "proposal.staged never published")
 	return out
 }
 

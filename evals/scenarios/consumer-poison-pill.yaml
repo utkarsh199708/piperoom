@@ -314,6 +314,47 @@ recordings:
       User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
       User:ops-admin: ALLOW ALL cluster; ALLOW ALL topic pg. (PREFIXED)
       User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: pg.public.orders p1 holds 97% of order-sync's lag
+      pg.public.orders: 16200 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Empty, 0 members): lag 14307; pg.public.orders p1 97% (13908)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "15m"}
+    summary: |-
+      orders last 15m: pg.public.orders p1 holds 97% of order-sync's lag
+      pg.public.orders: 16200 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Empty, 0 members): lag 14307; pg.public.orders p1 97% (13908)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: pg.public.orders p1 holds 97% of order-sync's lag
+      pg.public.orders: 32400 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Empty, 0 members): lag 14307; pg.public.orders p1 97% (13908)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: pg.public.orders p1 holds 97% of order-sync's lag
+      pg.public.orders: 64800 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Empty, 0 members): lag 14307; pg.public.orders p1 97% (13908)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_dup_keys
+    input: {topic: "pg.public.orders", since: "2026-10-10T09:40:00Z", max_scan: 20000}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 20 000 records
+      scanned 20 000 (capped): max_scan stopped the scan before the end of partition(s) [0 1 2]; newer records were not checked, use a later since
+  - tool: kafka_dup_keys
+    input: {topic: "pg.public.orders"}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 38 417 records
+      1 record had no usable key or source.lsn (no_lsn 1) and were not checked; only Debezium Postgres change events carry source.lsn
 
 inputs:
   - kind: comment

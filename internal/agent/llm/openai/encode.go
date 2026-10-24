@@ -18,6 +18,22 @@ type wireRequest struct {
 	MaxTokens           int64               `json:"max_tokens,omitempty"`
 	ReasoningEffort     string              `json:"reasoning_effort,omitempty"`
 	ResponseFormat      *wireResponseFormat `json:"response_format,omitempty"`
+	// ParallelToolCalls is sent only where the host's default is off (qwen).
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+	// EnableThinking is DashScope's thinking switch (qwen).
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
+	// ReasoningFormat is Groq's: hidden keeps a reasoning model's thinking
+	// out of the content.
+	ReasoningFormat string `json:"reasoning_format,omitempty"`
+	// Provider is OpenRouter's routing preferences, sent on every request.
+	Provider *wireProviderPrefs `json:"provider,omitempty"`
+}
+
+// wireProviderPrefs is OpenRouter's provider object. DataCollection deny
+// routes only to upstream providers that do not store or train on the
+// request (design 10.4); it is not configurable.
+type wireProviderPrefs struct {
+	DataCollection string `json:"data_collection"`
 }
 
 type wireMessage struct {
@@ -27,6 +43,11 @@ type wireMessage struct {
 	Content    any            `json:"content,omitempty"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+	// Name is the tool's name on a tool message (mistral documents it).
+	Name string `json:"name,omitempty"`
+	// ReasoningContent is DeepSeek's thinking, sent back on the assistant
+	// turns of the current question (deepSeekReasoning).
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type wireText struct {
@@ -76,8 +97,19 @@ const outputSchemaName = "output"
 // results go on the wire as the agent built them; the encoder never
 // HTML-escapes, so the decoded text is byte for byte the neutral one.
 func (m *Model) encode(req llm.Request) ([]byte, error) {
+	if m.flavor.name == FlavorQwen && qwenThinkingOnly(req.Model) {
+		return nil, fmt.Errorf("qwen model %q answers only in thinking mode, which DashScope serves only streamed; this adapter does not stream (pick a hybrid or instruct model)", req.Model)
+	}
 	caps := m.Capabilities(req.Model)
+	var mc modelCaps
+	if m.flavor.hosted {
+		mc = m.flavor.models(req.Model)
+	}
 	w := wireRequest{Model: req.Model}
+	echoFrom := len(req.Messages) // no reasoning goes back
+	if m.flavor.name == FlavorDeepSeek {
+		echoFrom = currentQuestion(req.Messages)
+	}
 
 	if req.System != "" {
 		role := "system"
@@ -87,7 +119,11 @@ func (m *Model) encode(req llm.Request) ([]byte, error) {
 		w.Messages = append(w.Messages, wireMessage{Role: role, Content: req.System})
 	}
 	for i, msg := range req.Messages {
-		out, err := encodeMessage(msg)
+		out, err := encodeMessage(msg, msgOptions{
+			toolName: m.flavor.name == FlavorMistral,
+			echo:     i > echoFrom,
+			model:    req.Model,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("message %d: %w", i, err)
 		}
@@ -116,22 +152,27 @@ func (m *Model) encode(req llm.Request) ([]byte, error) {
 		}
 	}
 	if req.MaxTokens > 0 {
-		if m.flavor.hosted {
+		if m.flavor.completionTokens {
 			w.MaxCompletionTokens = req.MaxTokens
 		} else {
 			w.MaxTokens = req.MaxTokens
 		}
 	}
 	if caps.Effort {
-		w.ReasoningEffort = reasoningEffort(req.Effort)
+		if m.flavor.effort != nil {
+			w.ReasoningEffort = m.flavor.effort(req.Model, req.Effort)
+		} else {
+			w.ReasoningEffort = reasoningEffort(req.Effort)
+		}
 	}
 	if req.OutputSchema != nil && caps.StructuredOutput {
 		w.ResponseFormat = &wireResponseFormat{Type: "json_schema", JSONSchema: wireJSONSchema{
 			Name:   outputSchemaName,
 			Schema: req.OutputSchema,
-			Strict: m.flavor.hosted && strictSchema(req.OutputSchema),
+			Strict: mc.strictOutput && strictSchema(req.OutputSchema),
 		}}
 	}
+	m.flavorFields(&w, req)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -140,6 +181,53 @@ func (m *Model) encode(req llm.Request) ([]byte, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// flavorFields sets the request fields only one host takes. None of them
+// touches the prompt or the tools.
+func (m *Model) flavorFields(w *wireRequest, req llm.Request) {
+	switch m.flavor.name {
+	case FlavorQwen:
+		// Non-streamed calls must not think (DashScope refuses
+		// enable_thinking true without stream), and the open-weight Qwen3
+		// models think by default, so it is always sent, false.
+		off := false
+		w.EnableThinking = &off
+		if len(w.Tools) > 0 {
+			on := true
+			w.ParallelToolCalls = &on
+		}
+	case FlavorGroq:
+		if groqQwen3(req.Model) {
+			w.ReasoningFormat = "hidden"
+		}
+	case FlavorOpenRouter:
+		w.Provider = &wireProviderPrefs{DataCollection: "deny"}
+	}
+}
+
+// currentQuestion is the index of the last user message that asks a new
+// question (text and no tool result): the assistant turns after it are the
+// tool loop of that question. -1 when there is none.
+func currentQuestion(msgs []llm.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != llm.RoleUser {
+			continue
+		}
+		text, results := false, false
+		for _, p := range msgs[i].Parts {
+			switch p.Kind {
+			case llm.PartText:
+				text = true
+			case llm.PartToolResult:
+				results = true
+			}
+		}
+		if text && !results {
+			return i
+		}
+	}
+	return -1
 }
 
 // reasoningEffort maps the agent's effort to reasoning_effort: low, medium
@@ -155,11 +243,20 @@ func reasoningEffort(e string) string {
 	return ""
 }
 
+// msgOptions are the flavor's message quirks.
+type msgOptions struct {
+	toolName bool   // name the tool on a tool message (mistral)
+	echo     bool   // send this assistant turn's DeepSeek reasoning back
+	model    string // the request's model: reasoning goes back only to the model that made it
+}
+
 // encodeMessage renders one neutral message. A user message's tool results
 // go first, one tool message each, then its text in one user message; an
 // assistant message is one message with its text and tool calls. A
-// reasoning part is provider state this adapter never makes; it is dropped.
-func encodeMessage(msg llm.Message) ([]wireMessage, error) {
+// reasoning part goes back only as DeepSeek's reasoning_content, when o.echo
+// and the part is this adapter's own for o.model (deepSeekReasoning); any
+// other reasoning part is dropped.
+func encodeMessage(msg llm.Message, o msgOptions) ([]wireMessage, error) {
 	var texts []string
 	var out []wireMessage
 	switch msg.Role {
@@ -172,7 +269,11 @@ func encodeMessage(msg llm.Message) ([]wireMessage, error) {
 				}
 				// IsError has no wire flag: the agent's wrapped text already
 				// says error (design 7.3).
-				out = append(out, wireMessage{Role: "tool", ToolCallID: p.ToolResult.CallID, Content: p.ToolResult.Content})
+				tm := wireMessage{Role: "tool", ToolCallID: p.ToolResult.CallID, Content: p.ToolResult.Content}
+				if o.toolName {
+					tm.Name = p.ToolResult.Name
+				}
+				out = append(out, tm)
 			case llm.PartText:
 				texts = append(texts, p.Text)
 			case llm.PartToolCall:
@@ -200,6 +301,12 @@ func encodeMessage(msg llm.Message) ([]wireMessage, error) {
 				}})
 			case llm.PartToolResult:
 				return nil, fmt.Errorf("a tool result in an assistant message")
+			case llm.PartReasoning:
+				if o.echo {
+					if rc, ok := deepSeekReasoning(p, o.model); ok {
+						a.ReasoningContent += rc
+					}
+				}
 			}
 		}
 		switch {
