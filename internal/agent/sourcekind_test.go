@@ -253,8 +253,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
 // silently.
 const (
-	mysqlPromptSHA256         = "58413e4711792bcfa501618ac1febfd44fc528e8153839cfa5a29f2731f84062"
-	mysqlPromptWriteOffSHA256 = "18286b09569817dde84bfecb0357dff425ec75abb47331cc2b499dd9e584d7b5"
+	mysqlPromptSHA256         = "2b19fea8da1249365611dd31ed8a6a60a9b5c09215c705c776d0fec9a460c833"
+	mysqlPromptWriteOffSHA256 = "5e7cce2a8ce4b9472f9f6438a9d724c264a46cbdbcabbe6b50db6891d8840bae"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
@@ -271,9 +271,12 @@ func TestSystemPromptSnapshotMySQL(t *testing.T) {
 		if h := hex.EncodeToString(sum[:]); h != tt.sum {
 			t.Fatalf("%s: sha256 = %s, want %s", tt.file, h, tt.sum)
 		}
-		// The CDC word ceiling holds for the MySQL prompt too.
-		if wc := len(strings.Fields(got)); wc > 1335 {
-			t.Fatalf("%s: %d words, over the 1335 limit", tt.file, wc)
+		// The CDC word ceiling plus 20: W4h (#988) rewrote the shared CDC
+		// fixes, and the MySQL binlog, server id and schema history bullets
+		// are longer than the Postgres ones they replace (1351 words after
+		// the merge of #934 and #988).
+		if wc := len(strings.Fields(got)); wc > 1355 {
+			t.Fatalf("%s: %d words, over the 1355 limit", tt.file, wc)
 		}
 	}
 }
