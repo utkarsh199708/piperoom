@@ -32,7 +32,7 @@ type DatabaseInfo struct {
 	LogMode      string              `json:"log_mode"`      // ARCHIVELOG | NOARCHIVELOG
 	ForceLog     string              `json:"force_logging"` // YES | NO
 	Supplemental SupplementalLogging `json:"supplemental_logging"`
-	Version      string              `json:"version"` // first "Oracle Database …" banner from V$VERSION
+	Version      string              `json:"version"` // first database product banner from V$VERSION ("Oracle Database …" or "Oracle AI Database …")
 	Edition      string              `json:"edition"` // edition keyword parsed from the banner; "" when unknown
 }
 

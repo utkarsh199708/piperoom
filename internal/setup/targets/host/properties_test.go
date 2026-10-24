@@ -45,6 +45,7 @@ func with(base map[string]string, kv ...string) map[string]string {
 }
 
 func TestPropertiesWriteDistributed(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	res, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()})
 	if err != nil {
@@ -83,6 +84,7 @@ func TestPropertiesWriteDistributed(t *testing.T) {
 }
 
 func TestPropertiesWriteStandaloneAndPaths(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	entries := map[string]string{
 		"bootstrap.servers": "127.0.0.1:29092",
@@ -227,6 +229,7 @@ func TestPropertiesWriteRefusals(t *testing.T) {
 }
 
 func TestPropertiesWritePluginPathTrailingSlash(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	if _, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties",
 		Entries: with(distributedEntries(), "plugin.path", "connect-plugins/,connect-plugins/debezium/")}); err != nil {
@@ -262,6 +265,7 @@ func TestPropertiesWriteReplacesAHardLink(t *testing.T) {
 // TestPropertiesWriteFixesTheMode: the same bytes at a wider mode are
 // rewritten at 0600.
 func TestPropertiesWriteFixesTheMode(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	params := PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}
 	if _, err := f.run("properties_write", params); err != nil {
@@ -402,6 +406,7 @@ func TestPropertiesRead(t *testing.T) {
 }
 
 func TestPreviewsAreDiffs(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	env := f.env()
