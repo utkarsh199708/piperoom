@@ -139,7 +139,11 @@ U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 | U4b | A10 | Opus 5.5 | 1.5 | setup/sources/sqlserver: the driver, canary table, connector config | each check names its fix op and floor; Agent stopped is a check whose fix is T2 (`service_restart` on a host target) or a documented ask on managed SQL | U4a, U1-9, U1-2b |
 | U4c | A1 | Opus 5.5 | 1 | dev: compose profile `mssql` (`mcr.microsoft.com/mssql/server`, CDC off by default), `setup-break` `agent-stopped`, `cdc-not-enabled-table` | profile healthy in < 3 min; each break fails at the named check | U4a |
 | U4d | C7 + C6 | Opus 5.5 | 1 | scenarios: `setup/compose-sqlserver-clean` and the two U4c breaks; eval replay | the three score | U4c |
-| U4-R | A10 | Opus 5.5 | 1 | real runs: SQL Server 2022 on Compose, Linux; Azure SQL as a manual check (the sandbox of plan §7 item 6) | exports in the write-up; the Azure run marked manual with its date | U4b, U1-R |
+| U4-0 | leads | Opus 5.5 | 0.25 | design ruling (`docs/design/setup-agent.md`): may `service_restart` reach a SQL Server unit (`mssql-server` on Linux, `SQLSERVERAGENT` / `SQLAgent$<instance>` on Windows) when the host target accepts only `piperoom-<name>` units (`host.UnitPrefix`, a security property); if yes, the allow-list shape and its tier | the section names the allowed units and who may add one, or records that the Agent fix on a host target stays an ask | U4b |
+| U4e | A9 | Opus 5.5 | 1 | setup/remoteclients + runner catalogue: the SQL Server read ops `source_server_info`, `source_agent_state`, `source_database_cdc`, `source_table_cdc`, `source_role_info` over `*sqlserver.Client`; a SQL Server target for the source write ops (`CreatePublication`, `CreateCanaryTable`, `InsertCanary`, `CreateReadRole` through `sqlserver.SetupWriter`); the source-kind dispatch line that constructs the U4b driver beside the Postgres one | every U4b check runs through a paired runner in a recorded test; the write ops keep their U1-2b floors; `remoteclients.Ops()` lists the new ops | U4b, U1-10 |
+| U4f | A3 | Opus 5.5 | 0.25 | owners: `sqlserver` as a `source_kind` (the U4d scenarios name the layer `postgres` today) | a scenario labels the SQL Server layer by its own kind | U4b |
+| U4g | A10 | Opus 5.5 | 0.75 | clients/sqlserver: `RoleInfo` reports `SELECT ON SCHEMA::cdc`, `VIEW DATABASE STATE` and whether the login has a database user in the captured database; U4b's grants check reads them | the grants check passes only on a login that can read the cdc schema; a missing grant names itself in the ask. A `GrantSelect` write, if wanted, is a Contract change request to `clients.SetupSourceWriter`, not this row | U4b |
+| U4-R | A10 | Opus 5.5 | 1 | real runs: SQL Server 2022 on Compose, Linux; Azure SQL as a manual check (the sandbox of plan §7 item 6) | exports in the write-up; the Azure run marked manual with its date | U4b, U4e, U1-R |
 
 ## Step 5: container and worker logs in the loop
 
@@ -161,9 +165,10 @@ U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| U7a | A10 | Opus 5.5 | 2 | clients/mongodb: read-only client (replica set status, version, change streams support, the user's roles) and `SetupSourceWriter` (the oplog user as the read role, canary collection and insert; the rest `ErrNotSupported`) | the MongoDB Go driver listed with why; 10 s per call; integration on the mongo profile | U0 |
-| U7b | A10 | Opus 5.5 | 1.5 | setup/sources/mongodb: the driver, canary collection, connector config (`mongodb.connection.string` with a `${secret:}` reference) | each check names its fix op and floor; a standalone `mongod` is a check whose fix is T1 only when this room created it (by receipt) | U7a, U1-9, U1-2b |
-| U7c | A1 | Opus 5.5 | 1 | dev: compose profile `mongo` (a one-member replica set), `setup-break` `standalone-mongod`, `no-oplog-role` | profile healthy in < 2 min; each break fails at the named check | U7a |
+| U7a-1 | A10 | Opus 5.5 | 1 | clients/mongodb: read-only client (replica set status, version, change streams support, the user's roles) | the MongoDB Go driver listed with why; 10 s per call; integration on the mongo profile | U0 |
+| U7a-2 | A10 | Opus 5.5 | 1 | clients/mongodb: `SetupSourceWriter` (the oplog user as the read role, canary collection and insert; the rest `ErrNotSupported`), built only with write mode on, on a write connection | unit tests with fakes for each method and the error paths (existing user, bad name, scope refusal, timeout, `ErrNotSupported`); the password in no return value, log, event or recorded command; the integration test skips until U7c with a dated `.github/integration-skip-allow.txt` entry | U7a-1 |
+| U7b | A10 | Opus 5.5 | 1.5 | setup/sources/mongodb: the driver, canary collection, connector config (`mongodb.connection.string` with a `${secret:}` reference) | each check names its fix op and floor; a standalone `mongod` is a check whose fix is T1 only when this room created it (by receipt) | U7a-2, U1-9, U1-2b |
+| U7c | A1 | Opus 5.5 | 1 | dev: compose profile `mongo` (a one-member replica set), `setup-break` `standalone-mongod`, `no-oplog-role` | profile healthy in < 2 min; each break fails at the named check | U7a-1 |
 | U7d | C7 + C6 | Opus 5.5 | 0.5 | scenarios: `setup/compose-mongodb-clean` and the two U7c breaks; eval replay | the three score | U7c |
 | U7-R | A10 | Opus 5.5 | 0.5 | real runs: MongoDB 7 on Compose, Linux; Atlas as a manual check | exports in the write-up | U7b, U1-R |
 
@@ -176,8 +181,9 @@ U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 | U8c | A1 | Opus 5.5 | 1 | devctl: `setup-break` `wrong-standalone-args`, `plugin-path-unset`, `java-too-old` on a host target (a container that plays a host on Linux) | each break fails at the named check | U8a |
 | U8d | C7 | Opus 5.5 | 0.5 | scenarios: the three U8c breaks | labels name the properties key or the argv | U8c |
 | U8e | C14 | Opus 5.5 | 0.5 | docs: the host target (systemd, Windows service), what the agent needs (sudo or not, a service account) | citations per claim | U8b |
+| U8f | A9 | Opus 5.5 | 0.75 | setup/setupcmd + setup/actions: wire the host target: `piperoom-setup` registers the host driver in its catalogue beside the Compose one (`host.Register`, exclusive with `compose.Register` in one registry, chosen by the target the Welcome names); `EnvironmentSpecs` gains `service_status`, `service_install`, `service_restart`, `journal_tail`, `properties_read`, and its `properties_write` file enum matches the host driver's file names | a catalogue test shows the host ops registered with their floors only when the target is a host; `EnvironmentSpecs` round-trips every host op's params; `ops.New` alone still registers the nine generic ops | U8b |
 | U8-C | leads | Opus 5.5 | 0.25 | cleanup: delete `cmd/setup-spike/**` (the U1-0 spikes) and its leads line in `AGENTS.md` and `docs/process/ownership.json` | the directory is gone; nothing imports it; `go build ./...`, `go vet ./...` green | U8b, U1-2 |
-| U8-R | A1 (Windows), C19 (Linux) | Opus 5.5 | 1 | real runs: Ubuntu 24.04 with systemd, Windows 11 as a service, from an empty directory | two exports in the write-up | U8b |
+| U8-R | A1 (Windows), C19 (Linux) | Opus 5.5 | 1 | real runs: Ubuntu 24.04 with systemd, Windows 11 as a service, from an empty directory | two exports in the write-up | U8b, U8f |
 
 ## Step 9: Oracle prerequisites
 
@@ -194,7 +200,7 @@ U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
 | U10a | C22 | Opus 5.5 | 1.5 | setup/knowledge: tuning index (heap, `max.batch.size`, `max.queue.size`, `poll.interval.ms`, snapshot fetch size, `tasks.max` per source, producer settings) with the symptom each answers | at least 25 entries citing the docs; `setup_config_help {kind: tuning}` | U3a |
-| U10b | A4 | Opus 5.5 | 0.5 | agent: the plan proposes a tuning step only after a symptom (a slow snapshot, OOM in the logs), never by default | prompt snapshot; evals unchanged | U10a, U5b |
+| U10b | A4 | Opus 5.5 | 0.5 | agent: the plan proposes a tuning step only after a symptom (a slow snapshot, OOM in the logs), never by default | prompt snapshot (the U1-10 setup frame, `testdata/system_prompt_setup.txt`); a tuning step is one whose config keys map to a U10a entry (`knowledge.Tuning(connector)`), no new step kind or op; a table-driven gate test in the `tuning_gate.go` style: a cited symptom step (slow or stalled snapshot, OOM or heap error in `container_logs` / `connect_worker_logs`) allows it, none refuses it with `tools.ErrBadInput`; evals unchanged | U10a, U5b, U1-10 |
 
 ## Step 11: Debezium Server
 
@@ -294,10 +300,10 @@ driver can be reviewed against the protocol fakes and merge first.
 | Week | Lands |
 |---|---|
 | 1 | U0; U1-0, U12-0, U13-0; U1-1, U1-5a, U1-5c, U1-13, U1-23, U1-24, U4a, U13a |
-| 2 | U1-2, U1-2b, U1-3a, U1-4, U1-5b, U1-5d, U1-8, U1-12a, U3a, U4c, U6a, U7a, U9a, U12a, U13b1 |
+| 2 | U1-2, U1-2b, U1-3a, U1-4, U1-5b, U1-5d, U1-8, U1-12a, U3a, U4c, U6a, U7a-1, U7a-2, U9a, U12a, U13b1 |
 | 3 | U1-3b, U1-6, U1-7, U1-8b, U1-9, U1-11, U1-14b, U1-17, U2a, U2b, U3b, U4b, U5a, U7b, U7c, U8a, U9b, U9c, U12b, U13b2, U13c, U13d |
 | 4 | U1-10, U1-12b, U1-14, U1-15, U1-16, U1-18, U1-19, U1-20, U1-22, U1-R, U2c, U3c, U3d, U3e, U4d, U5b, U5c, U6b, U6c, U7d, U8b, U8c, U9d, U10a, U11a, U12c, U13e, U13f |
-| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U8-C, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R; U14 |
+| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U8-C, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R, U4-0, U4e, U4f, U4g, U8f; U14 |
 
 Review load for the leads peaks at about 25 PRs in weeks 3 and 4; the code review of C* PRs goes to `[LEAD-CLOUD]`
 as usual, and every target row's real run is checked by Lead 1 from the attached export before the merge.
