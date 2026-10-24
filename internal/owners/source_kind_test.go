@@ -92,9 +92,9 @@ layers:
 
 func TestSourceKindLoadErrors(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
-		{"unknown kind", strings.Replace(mysqlPipeline(""), "source_kind: mysql", "source_kind: oracle", 1), `source_kind "oracle": want postgres or mysql`},
+		{"unknown kind", strings.Replace(mysqlPipeline(""), "source_kind: mysql", "source_kind: db2", 1), `source_kind "db2": want postgres, mysql, sqlserver, mongodb, oracle`},
 		{"secret-looking kind", strings.Replace(mysqlPipeline(""), "source_kind: mysql", "source_kind: 'mysql://u:p@h'", 1), "not a plain name"},
-		{"upper case", strings.Replace(mysqlPipeline(""), "source_kind: mysql", "source_kind: MySQL", 1), "want postgres or mysql"},
+		{"upper case", strings.Replace(mysqlPipeline(""), "source_kind: mysql", "source_kind: MySQL", 1), "want postgres, mysql, sqlserver, mongodb, oracle"},
 		{"batch", `
 pipelines:
   - id: nightly
@@ -156,6 +156,9 @@ func TestLayersOfSource(t *testing.T) {
 		{"", "", "postgres", 7},
 		{"cdc", "postgres", "postgres", 7},
 		{"cdc", "mysql", "mysql", 7},
+		{"cdc", "sqlserver", "sqlserver", 7},
+		{"cdc", "mongodb", "mongodb", 7},
+		{"cdc", "oracle", "oracle", 7},
 		{"batch", "mysql", "orchestrator", 3},
 		{"cdc", "db2", "", 0},
 		{"stream", "", "", 0},
@@ -346,5 +349,103 @@ func TestDevOwnersFilesLoad(t *testing.T) {
 				t.Errorf("%s: pipeline %s source layer %q", f, p.ID, p.SourceLayer())
 			}
 		}
+	}
+}
+
+// kindPipeline is mysqlPipeline with another source kind.
+func kindPipeline(kind, extra string) string {
+	return strings.Replace(mysqlPipeline(extra), "source_kind: mysql", "source_kind: "+kind, 1)
+}
+
+func TestNewSourceKindsLoad(t *testing.T) {
+	for _, kind := range []string{"sqlserver", "mongodb", "oracle"} {
+		t.Run(kind, func(t *testing.T) {
+			o, err := Load(writeTemp(t, kindPipeline(kind, "    owners:\n      "+kind+": {approvers: [dana]}\n"+
+				"    watch: {enabled: true, signals: {connector_down: {for: 2m}}}\n")))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			p, _ := o.Pipeline("orders-mysql")
+			if p.SourceKindOrDefault() != kind || p.SourceLayer() != kind || p.IsMySQL() {
+				t.Fatalf("kind %q, layer %q, mysql %v", p.SourceKindOrDefault(), p.SourceLayer(), p.IsMySQL())
+			}
+			if l := p.Layers(); len(l) != 7 || l[0] != kind {
+				t.Fatalf("layers = %v", l)
+			}
+			if _, ok := o.CanApprove("orders-mysql", kind, "dana", nil); !ok {
+				t.Fatalf("dana approves the %s layer", kind)
+			}
+			if w := p.Watch(); w.SlotInactive.Enabled || w.SlotWAL.Enabled {
+				t.Fatalf("slot signals must be off: %+v", w)
+			}
+			if got := SourceLayerOf(kind); got != kind {
+				t.Fatalf("SourceLayerOf = %q", got)
+			}
+			if !slices.Contains(KnownLayers(), kind) {
+				t.Fatalf("KnownLayers lacks %s", kind)
+			}
+		})
+	}
+}
+
+func TestNewSourceKindsLoadErrors(t *testing.T) {
+	for _, kind := range []string{"sqlserver", "mongodb", "oracle"} {
+		for _, tc := range []struct{ name, extra, want string }{
+			{"watch slot", "    watch: {slot: debezium}\n", "watch.slot: a " + kind + " source has no replication slot"},
+			{"watch wal", "    watch: {wal_headroom_bytes: 50GiB}\n", "watch.wal_headroom_bytes: a " + kind + " source has no WAL"},
+			{"slot_inactive", "    watch: {signals: {slot_inactive: {enabled: false}}}\n", "watch.signals.slot_inactive: a " + kind + " source"},
+			{"slot_wal", "    watch: {signals: {slot_wal: {fire: 1GiB}}}\n", "watch.signals.slot_wal: a " + kind + " source"},
+			{"postgres owner", "    owners: {postgres: {approvers: [priya]}}\n", `owners: layer "postgres" is not a cdc layer`},
+			{"mysql owner", "    owners: {mysql: {approvers: [priya]}}\n", `owners: layer "mysql" is not a cdc layer`},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				_, err := Load(writeTemp(t, kindPipeline(kind, tc.extra)))
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+			})
+		}
+		t.Run(kind+"/batch", func(t *testing.T) {
+			y := "\npipelines:\n  - id: nightly\n    kind: batch\n    source_kind: " + kind + "\n    dags: [nightly]\n"
+			if _, err := Load(writeTemp(t, y)); err == nil || !strings.Contains(err.Error(), "source_kind is a cdc field") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+		t.Run(kind+"/owner on postgres pipeline", func(t *testing.T) {
+			y := strings.Replace(validYAML, "    topic_prefix: pg", "    owners: {"+kind+": {approvers: [dana]}}\n    topic_prefix: pg", 1)
+			if _, err := Load(writeTemp(t, y)); err == nil || !strings.Contains(err.Error(), `layer "`+kind+`" is not a cdc layer`) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+	for _, bad := range []string{"SQLServer", "mssql", "mongo", "'oracle://u:p@h'"} {
+		if _, err := Load(writeTemp(t, kindPipeline(bad, ""))); err == nil {
+			t.Fatalf("source_kind %s must be refused", bad)
+		}
+	}
+}
+
+func TestNewSourceKindsDefaultPorts(t *testing.T) {
+	for _, tc := range []struct{ kind, scheme, port string }{
+		{SourceKindSQLServer, "sqlserver", "1433"},
+		{SourceKindMongoDB, "mongodb", "27017"},
+		{SourceKindOracle, "oracle", "1521"},
+		{SourceKindMySQL, "mysql", "3306"},
+		{"", "postgres", "5432"},
+	} {
+		p := Pipeline{SourceKind: tc.kind}
+		if got := p.defaultPortFor("source_db_url"); got != tc.port {
+			t.Errorf("%q: defaultPortFor = %q, want %q", tc.kind, got, tc.port)
+		}
+		if got := schemeDefaultPort(tc.scheme); got != tc.port {
+			t.Errorf("scheme %q: %q, want %q", tc.scheme, got, tc.port)
+		}
+	}
+	// A batch pipeline ignores the kind; a non-source key keeps its default.
+	if got := (Pipeline{Kind: events.PipelineKindBatch, SourceKind: "oracle"}).defaultPortFor("source_db_url"); got != "5432" {
+		t.Errorf("batch: %q", got)
+	}
+	if got := (Pipeline{SourceKind: "oracle"}).defaultPortFor("connect_url"); got != "8083" {
+		t.Errorf("connect_url: %q", got)
 	}
 }
