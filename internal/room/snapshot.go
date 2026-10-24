@@ -167,6 +167,10 @@ type Proposal struct {
 	// ("layer -> display name"): the executor's actions.StepRef.Approvals
 	// (Q7k). Copy-on-write in Apply.
 	approvers map[string]string
+	// approvalActors is the actor of each layer's approval.given
+	// ("layer -> actor"): pipeline_register's ApprovedBy and the overlap
+	// approver check read it (U1-14). Copy-on-write in Apply.
+	approvalActors map[string]events.Actor
 	// outcomes is each step's action.executed outcome so far, by step index
 	// (outcomeNotRun until one arrives). Copy-on-write in Apply. It feeds the
 	// proposal_executed input of a driver's proposal (proposalExecutedInput).
@@ -907,6 +911,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		setApproval(snap.OpenProposals, p.ProposalID, p.Layer, "approved")
 		setApprover(snap.OpenProposals, p.ProposalID, p.Layer, e.Actor.Name)
+		setApproverActor(snap.OpenProposals, p.ProposalID, p.Layer, e.Actor)
 		foldScheduleDecision(snap.OpenProposals, p.ProposalID, e.Actor.Kind == events.ActorSystem && p.Grant == events.GrantPolicy)
 
 	case events.ProposalScheduled:
@@ -1211,6 +1216,23 @@ func setApprover(proposals []Proposal, proposalID, layer, name string) {
 			}
 			m[layer] = name
 			proposals[i].approvers = m
+			return
+		}
+	}
+}
+
+// setApproverActor records the actor who gave a layer's approval
+// (copy-on-write; U1-14: pipeline_register's ApprovedBy and the overlap
+// approver check).
+func setApproverActor(proposals []Proposal, proposalID, layer string, actor events.Actor) {
+	for i := range proposals {
+		if proposals[i].ProposalID == proposalID {
+			m := make(map[string]events.Actor, len(proposals[i].approvalActors)+1)
+			for k, v := range proposals[i].approvalActors {
+				m[k] = v
+			}
+			m[layer] = actor
+			proposals[i].approvalActors = m
 			return
 		}
 	}

@@ -52,6 +52,21 @@ type SetupSnapshot struct {
 	// snapshot's documented shape has no tenant, but tenant visibility of a
 	// setup room, whose pipeline owners.yaml does not define yet, needs it.
 	tenant string
+	// creator is the room.created event's actor: the person the
+	// pipeline_register requester is (PipelineRegisteredPayload.By) and the
+	// one whose own approval the gate refuses on a team server (U1-14).
+	// Unexported, like tenant.
+	creator events.Actor
+	// verifiedSeq is the seq of the latest setup.verified for the current
+	// plan; execSeq is the seq of the latest action.executed event. The
+	// pipeline_register gate needs both: rungs 1 to 7 OK with no executed
+	// step after the verified event (design §3.9). Unexported.
+	verifiedSeq int64
+	execSeq     int64
+	// regPullRequestURL is pipeline.registered.pull_request_url when the
+	// registration went out as a PR (repos:): the room then waits for that
+	// PR's merge before it closes (registerPRMerged). Unexported.
+	regPullRequestURL string
 	// req is the request room.created carries. The provisional pipeline is
 	// rebuilt from it on demand (SetupProvisional); the JSON lists below are
 	// what the view shows.
@@ -378,6 +393,7 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 		}
 		snap.Setup = newSetupSnapshot(req)
+		snap.Setup.creator = e.Actor
 		return snap
 
 	case events.SetupRunnerAttached:
@@ -411,20 +427,32 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		if snap.Setup.firstPlanSeq == 0 {
 			snap.Setup.firstPlanSeq = e.Seq
 		}
+		// A new plan supersedes what the ladder verified: the gate reads a
+		// verified event only of the current plan, so its stale rungs (and
+		// seq) must not survive the plan change (design §3.9).
+		snap.Setup.Verified = []events.SetupRung{}
+		snap.Setup.verifiedSeq = 0
 		snap.Setup.advance()
 
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
+		if !ok || snap.Setup == nil {
+			return snap
+		}
+		snap.Setup = snap.Setup.clone()
+		// The register gate's "no executed step after the verified event"
+		// counts every executed step, also one outside the plan (a driver's
+		// own fix invalidates the verification too: it changed the machine).
+		snap.Setup.execSeq = e.Seq
 		// Only PlanStepIndex may key the executed map: StepIndex is the
 		// step's index inside its PROPOSAL (service_executor emits it per
 		// proposal step), while the map and advance() are keyed by the plan's
 		// own step index (events.SetupPlanStep.Index). An event without a
 		// plan index — a driver's own fix outside the plan, a refusal that
 		// never ran, an event from before U1-6 — consumes no plan step.
-		if !ok || snap.Setup == nil || len(snap.Setup.phases) == 0 || p.PlanStepIndex == nil {
+		if len(snap.Setup.phases) == 0 || p.PlanStepIndex == nil {
 			return snap
 		}
-		snap.Setup = snap.Setup.clone()
 		if snap.Setup.executed == nil {
 			snap.Setup.executed = map[int]bool{}
 		}
@@ -504,6 +532,7 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		if snap.Setup.Verified == nil {
 			snap.Setup.Verified = []events.SetupRung{}
 		}
+		snap.Setup.verifiedSeq = e.Seq
 
 	case events.SetupBlocked:
 		p, ok := decode[events.SetupBlockedPayload](e)
@@ -529,6 +558,7 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		snap.Setup = snap.Setup.clone()
 		snap.Setup.WatchedBy = p.WatchedBy
+		snap.Setup.regPullRequestURL = p.PullRequestURL
 	}
 	return snap
 }

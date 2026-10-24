@@ -26,6 +26,18 @@ const stepTimeout = 30 * time.Second
 // such a step is kept fresh while it runs (keepClaimFresh).
 const setupT3StepTimeout = 5*time.Minute + stepTimeout
 
+// stepsContainRegister reports whether any step of a proposal is the
+// pipeline_register action (U1-14): its Create gate, its approval guard and
+// the Execute re-check all key on it.
+func stepsContainRegister(steps []events.ProposalStep) bool {
+	for _, st := range steps {
+		if st.Action == registerActionName {
+			return true
+		}
+	}
+	return false
+}
+
 // placeholderTexts are values a model or a form writes when it has nothing to
 // say. They look filled in but say nothing about the risk or the undo plan, so
 // a proposal may not carry one. Compared lowercased and trimmed.
@@ -309,8 +321,24 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		if rerr != nil {
 			return "", events.Event{}, rerr
 		}
+		// pipeline_register's own gates (U1-14; design §3.9, §3.6): a green
+		// setup.verified for the current plan with no executed step after
+		// it, and an overlap whose owners can never approve this proposal.
+		if stepsContainRegister(p.Steps) {
+			if gerr := setupRegisterGate(&st.snap); gerr != nil {
+				return "", events.Event{}, gerr
+			}
+			if oerr := s.registerCreateRefusal(&st.snap); oerr != nil {
+				return "", events.Event{}, oerr
+			}
+		}
 		p.RequiredLayers, p.FallbackLayers = s.setupLayers(&st.snap, route, p.Steps)
 	} else {
+		// pipeline_register writes a setup room's provisional pipeline; an
+		// incident room has no setup state to register.
+		if stepsContainRegister(p.Steps) {
+			return "", events.Event{}, validation("pipeline_register is a setup-room step; this room is not a setup room")
+		}
 		// The required layers are the union of the step layers: a proposal needs
 		// approval from every layer it writes to, never fewer.
 		required := make([]string, 0, len(p.Steps))

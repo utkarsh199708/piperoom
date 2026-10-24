@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -78,6 +79,18 @@ func dedupeActions(all []actions.Action) []actions.Action {
 		out = append(out, a)
 	}
 	return out
+}
+
+// ownersNow returns the current owners config: the Deps.OwnersNow snapshot
+// when one is wired (a Live holder; the registration reloads it), the
+// process-start set otherwise. Nil means no owners config is loaded.
+func (s *Service) ownersNow() *owners.Owners {
+	if s.ownersNowFn != nil {
+		if o := s.ownersNowFn(); o != nil {
+			return o
+		}
+	}
+	return s.owners
 }
 
 // TenancyOn reports whether owners.yaml has a tenants: block. Without one

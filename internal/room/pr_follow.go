@@ -365,6 +365,12 @@ func (s *Service) pollPR(ctx context.Context, roomID string, d duePR) {
 		s.recordPRMerge(ctx, d.pipelineID, d.pr, upd)
 	}
 	s.appendPRUpdate(ctx, roomID, d.key, upd)
+	if upd.State == clients.PRStateMerged {
+		// A pipeline_register PR (repos:) closes its room on the merge
+		// (U1-14): the follower is what observed pr_merged. The call is a
+		// no-op for every other room and PR.
+		s.registerPRMerged(ctx, roomID, d.pr.ProposalID, d.pr.URL)
+	}
 }
 
 // checkFollowedPR refuses an answer that is not the PR the step opened: a

@@ -513,6 +513,13 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 	}
 	s.setProposalStatus(p.ProposalID, "executed")
+	// A setup room whose pipeline_register step executed in full closes
+	// "pipeline live" when the registration wrote the owners file and
+	// reloaded (setup_register.go, U1-14). A repos: registration stays open
+	// until the PR merges, which the follower closes (registerPRMerged).
+	if stepsContainRegister(steps) {
+		s.closeRegisteredSetup(ctx, p.RoomID)
+	}
 	// A setup room closes "rolled back" once the last step its plan executed
 	// has been undone (setup_rollback.go, U1-14b). A proposal that is not part
 	// of a setup, or a setup with steps left, closes nothing.

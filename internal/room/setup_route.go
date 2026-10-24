@@ -634,7 +634,7 @@ func (s *Service) setupOverlapLayers(snap *RoomSnapshot) []string {
 	out := []string{}
 	for _, layer := range owners.KnownLayers() {
 		for _, p := range pipelines {
-			if !seen[layer] && s.owners.IsOwned(p.ID, layer) {
+			if !seen[layer] && s.ownersNow().IsOwned(p.ID, layer) {
 				seen[layer] = true
 				out = append(out, layer)
 			}
@@ -647,7 +647,8 @@ func (s *Service) setupOverlapLayers(snap *RoomSnapshot) []string {
 // overlap the room's provisional pipeline (owners.Overlap). It is also the
 // source of the refusal's wording in pipeline_register (U1-14).
 func (s *Service) setupOverlapPipelines(snap *RoomSnapshot) []owners.Pipeline {
-	if s.owners == nil || snap == nil || snap.Setup == nil {
+	o := s.ownersNow()
+	if o == nil || snap == nil || snap.Setup == nil {
 		return nil
 	}
 	prov, ok := snap.SetupProvisional()
@@ -656,11 +657,11 @@ func (s *Service) setupOverlapPipelines(snap *RoomSnapshot) []owners.Pipeline {
 	}
 	var out []owners.Pipeline
 	seen := map[string]bool{}
-	for _, ov := range s.owners.Overlap(prov, nil) {
+	for _, ov := range o.Overlap(prov, nil) {
 		if ov.PipelineID == "" || seen[ov.PipelineID] {
 			continue
 		}
-		if p, ok := s.owners.Pipeline(ov.PipelineID); ok {
+		if p, ok := o.Pipeline(ov.PipelineID); ok {
 			seen[p.ID] = true
 			out = append(out, p)
 		}
@@ -672,7 +673,7 @@ func (s *Service) setupOverlapPipelines(snap *RoomSnapshot) []owners.Pipeline {
 // an overlapping pipeline, and the principal detail ("user:…", "group:…").
 func (s *Service) setupOverlapApprover(snap *RoomSnapshot, user User, layer string) (string, bool) {
 	for _, p := range s.setupOverlapPipelines(snap) {
-		if g, ok := s.owners.CanApprove(p.ID, layer, user.ID, user.Groups); ok {
+		if g, ok := s.ownersNow().CanApprove(p.ID, layer, user.ID, user.Groups); ok {
 			return g, true
 		}
 	}

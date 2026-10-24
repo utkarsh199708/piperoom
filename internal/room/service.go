@@ -62,6 +62,24 @@ type Deps struct {
 	Topology        topology.Builder
 	Users           *Users
 	Owners          *owners.Owners // pipeline definitions for actions.Scoped checks
+	// OwnersNow, when set, returns the current owners config (the snapshot a
+	// Live holder publishes; U1-14). pipeline_register reloads the owners
+	// set, so every check that must see the newly registered pipeline — the
+	// registration's own overlap and approver checks, PipelinesFor, the
+	// approval routing of a setup room — reads through it. Nil falls back to
+	// Owners.
+	OwnersNow func() *owners.Owners
+	// ReloadOwners re-reads OWNERS_FILE and OWNERS_DIR after a registration
+	// wrote its per-pipeline file (owners.Live.Reload). Nil: a registration
+	// refuses on this server ("no OWNERS_DIR").
+	ReloadOwners func() error
+	// OnOwnersReloaded runs once after a successful ReloadOwners. cmd/server
+	// uses it to rebuild the watcher, whose next tick then lists the new
+	// pipeline. It must return quickly and never block the registration.
+	OnOwnersReloaded func()
+	// SetupForge wires the repos: registration path (SetupForge). Nil: a
+	// registration with repos: refuses.
+	SetupForge *SetupForge
 	Run             agent.Runner
 	WriteHandoff    agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
@@ -337,6 +355,17 @@ type Service struct {
 	topo            topology.Builder
 	users           *Users
 	owners          *owners.Owners
+	// ownersNowFn, reloadOwners, onOwnersReloaded and setupForge are the
+	// U1-14 registration deps (see Deps). regAt remembers each
+	// pipeline.registered event's time by pipeline id, for GET
+	// /api/pipelines' setup rows (directory.go); it is filled by the fold
+	// (foldLocked), so it survives restarts and replicas.
+	ownersNowFn     func() *owners.Owners
+	reloadOwners    func() error
+	onOwnersReloaded func()
+	setupForge      *SetupForge
+	regMu           sync.Mutex
+	regAt           map[string]time.Time
 	run             agent.Runner
 	writeHandoff    agent.HandoffWriter
 	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
@@ -519,6 +548,11 @@ func New(d Deps) *Service {
 		topo:            topo,
 		users:           users,
 		owners:          d.Owners,
+		ownersNowFn:     d.OwnersNow,
+		reloadOwners:    d.ReloadOwners,
+		onOwnersReloaded: d.OnOwnersReloaded,
+		setupForge:      d.SetupForge,
+		regAt:           map[string]time.Time{},
 		run:             run,
 		writeHandoff:    wh,
 		writePostmortem: d.WritePostmortem,
