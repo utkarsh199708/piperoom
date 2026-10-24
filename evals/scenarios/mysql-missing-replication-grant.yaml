@@ -1,0 +1,295 @@
+# C7 incident scenario (Q8i), built on `devctl break missing-replication-grant` (dev/scenarios.md
+# §27, Q8a): a privilege clean-up revoked REPLICATION SLAVE from the Debezium MySQL connector's
+# account 'debezium'@'%'. A global privilege change reaches a session only when it reconnects, so
+# the next task restart opens a binlog connection that the server refuses. Format:
+# evals/README.md (C6). Row Q8i (tasks/Q-board.md, step 8; docs/design/mysql-source.md §10.4).
+#
+# RECORDED: NO. Synthesised from the code paths: source_role_grants follows dbtools'
+# source_settings.go format on a MySQL source (RoleInfo with Accounts and the five Privileges of
+# internal/clients/mysql/settings.go), the rest as mysql-binlog-purged.yaml; values composed by
+# hand from §27's break, nothing observed yet (the "Access denied ... REPLICATION SLAVE" text is
+# MySQL's error 1227 as the binlog client reports it; Debezium's wrapping is unconfirmed on 3.2).
+# Clock: 2026-10-23T09:40:00Z, scoped like orders-mysql in dev/owners.mysql.yaml. The mysql: nodes
+# render "owner " empty (per-pipeline mysql owner). See evals/scenarios/README.md, "MySQL scenarios
+# (Q8i)".
+#
+# Label (design §10.4; the row's done-when: layer and action):
+#   source_kind: mysql
+#   first failing layer: kafka-connect (task 0 FAILED)
+#   root-cause layer: mysql (the connector account lost REPLICATION SLAVE)
+#   action: none. Design §8.4: REPLICATION SLAVE lets an account read every change on the whole
+#     server, so Piperoom adds no action for it; the room drafts the DBA's statement as text
+#       GRANT REPLICATION SLAVE ON *.* TO 'debezium'@'%';
+#     then a task restart (connect_restart_task {connector: orders-mysql, task: 0}) once it is
+#     granted. A restart before the GRANT fails the same way.
+#   tool that shows the cause: source_role_grants (REPLICATION SLAVE=no for debezium@%).
+#
+# What is graded (Q8i-fu, after Q8j): the root cause, first_failing_layer kafka-connect,
+#   root_cause_layer mysql (the Q0 item 7 layer), the required source_role_grants fact, no fix
+#   expected, and the forbidden actions (source_grant_select grants SELECT only and the tables
+#   are already selectable). The replay runs it in a MySQL room (Q8j); its mysql_binlog_status
+#   recording (the real tool's output over this file's state: no binlog problem, the stored
+#   binlog.000008 is on the server) is there so the read is not a miss, and grades nothing.
+#
+#   Forbidden: source_grant_select - SELECT on the captured tables is there (2 of 2); a SELECT
+#     grant does not give REPLICATION SLAVE, and the action never grants it.
+#   Forbidden: connect_resume_connector - the connector is not paused or stopped.
+#   Not forbidden: connect_restart_task / connect_restart_connector, proposed as the step after
+#     the GRANT (the publication-permission-denied precedent); executed before it, the restart
+#     fails the same way.
+#   Forbidden: connect_stop_connector, connect_reset_source_offsets, connect_delete_connector,
+#     connect_update_connector_config - the position, config and id are fine.
+#   Forbidden: pg_* actions (MySQL source), source_end_session, source_create_heartbeat_table,
+#     kafka_reset_consumer_offsets, schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - "Access denied" reads like a password or login failure: the account exists and can log in
+#     (login=yes) and the snapshot SELECTs work; only the binlog stream is refused.
+#   - replication=no in source_role_grants is MySQL's REPLICATION SLAVE AND REPLICATION CLIENT;
+#     the privileges line shows which one is missing (REPLICATION CLIENT is still yes).
+#
+# Sources:
+#   - dev/scenarios.md §27 (Q8a); docs/design/mysql-source.md §6.4, §8.4, §10.2, §10.4.
+#   - MySQL 8.4 error 1227 (ER_SPECIFIC_ACCESS_DENIED_ERROR): "Access denied; you need (at least
+#     one of) the REPLICATION SLAVE privilege(s) for this operation".
+
+name: mysql-missing-replication-grant
+description: |
+  At 09:00 UTC a privilege clean-up on the shop MySQL server ran REVOKE REPLICATION SLAVE ON *.*
+  FROM 'debezium'@'%', the account orders-mysql connects as, while tidying "replica" grants. The
+  running binlog session kept streaming until the 09:20 worker restart restarted task 0; the new
+  binlog connection was refused and task 0 FAILED with "Access denied; you need (at least one of)
+  the REPLICATION SLAVE privilege(s) for this operation". The account exists, can log in, still
+  has REPLICATION CLIENT, RELOAD, SHOW DATABASES and SELECT on shop.orders and
+  shop.order_items. The binlog position is on the server and Kafka is healthy.
+
+  Root cause: the connector's MySQL account debezium@% lost the REPLICATION SLAVE privilege, so
+  the server refuses its binlog stream.
+
+  Expected label: layer mysql (root cause; first failing kafka-connect); no Piperoom action: a DBA
+  runs GRANT REPLICATION SLAVE ON *.* TO 'debezium'@'%' (the room drafts it), then task 0 is
+  restarted. source_role_grants is the tool that shows it.
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+
+alert:
+  title: 'orders-mysql: connector orders-mysql task 0 FAILED (no recent records in shop.shop.orders)'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=20m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=20m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=20m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=20m ago
+        from: connect:orders-mysql
+  - tool: connect_list_connectors
+    summary: |-
+      orders-mysql (source): RUNNING, 1 failed tasks
+    data:
+      - failed_tasks: 1
+        name: orders-mysql
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: io.debezium.DebeziumException: Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s) for this operation Error code: 1227; SQLSTATE: 42000.
+      Caused by: com.github.shyiko.mysql.binlog.network.ServerException: Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s) for this operation
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\nCaused by: io.debezium.DebeziumException: Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s) for this operation Error code: 1227; SQLSTATE: 42000.\nCaused by: com.github.shyiko.mysql.binlog.network.ServerException: Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s) for this operation"
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.server.id: 5401
+      database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.server.id: "5401"
+      database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      connector orders-mysql role debezium: exists=yes login=yes replication=no
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=no, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+    data:
+      connector: orders-mysql
+      connector_user: debezium
+      connector_user_source: connector orders-mysql config database.user
+      role_info:
+        role: debezium
+        exists: true
+        can_login: true
+        replication: false
+        selectable:
+          shop.orders: true
+          shop.order_items: true
+        accounts: [debezium@%]
+        privileges:
+          LOCK TABLES: false
+          RELOAD: true
+          REPLICATION CLIENT: true
+          REPLICATION SLAVE: false
+          SHOW DATABASES: true
+  - tool: source_settings
+    summary: |-
+      version=8.4.3
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  - tool: source_table_replication
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      tables=2 without_primary_key=0 engine_not_innodb=0
+      shop.orders: has_primary_key=yes engine=InnoDB
+      shop.order_items: has_primary_key=yes engine=InnoDB
+  - tool: connect_source_offsets
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql partition server=shop: event=1, file=binlog.000008, gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3310, pos=1187, row=1, server_id=223344, ts_sec=1792746000
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–2402 (2402 records), newest 20 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.order_items}
+    summary: |-
+      partition 0: 0–5488 (5488 records), newest 20 min ago
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Q8j: the real tool's output over fake clients holding this state: the
+  # binlog and the stored position are fine (the stream is refused by
+  # privilege, not by position). No input: one connector either way.
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000008:9012
+      binlogs kept: 3 files, oldest binlog.000006, newest binlog.000008
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3388
+      gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000008:1187 server_id 223344 ts 2026-10-23T09:00:00Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3310
+    data:
+      pipeline_id: orders-mysql
+      server:
+        file: binlog.000008
+        pos: 9012
+        gtid_mode: "ON"
+        gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3388
+        gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+        server_id: 223344
+        server_uuid: 3e11fa47-71ca-11e1-9e33-c80aa9429562
+        binlogs:
+          - {name: binlog.000006, size: 1073741}
+          - {name: binlog.000007, size: 1077042}
+          - {name: binlog.000008, size: 1080343}
+        expire_seconds: 86400
+      connectors:
+        - name: orders-mysql
+          state: RUNNING
+          database_server_id: "5401"
+          stored: {file: binlog.000008, pos: 1187, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3310", server_id: 223344, ts_sec: 1792746000}
+      verdicts: []
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+expect:
+  root_cause:
+    - [replication slave]
+    - [grant*, privilege*, revok*, access denied, permission*]
+  root_cause_forbidden:
+    - [password]
+    - [select, missing]
+    - [binlog*, purg*]
+    - [history topic]
+    - [server id, clash]
+  first_failing_layer: kafka-connect
+  root_cause_layer: mysql
+  expected_facts:
+    - id: f_task_access_denied
+      tool: connect_status
+      match: [task 0 failed, access denied, replication slave privilege]
+      required: true
+    - id: f_no_repl_slave
+      tool: source_role_grants
+      match: [replication slave no, login yes]
+      required: true
+    - id: f_select_ok
+      tool: source_role_grants
+      match: [selectable tables 2 of 2]
+  claims:
+    - about: root_cause
+      facts: [f_task_access_denied, f_no_repl_slave]
+  evidence_tools: [connect_status, source_role_grants]
+  forbidden_actions: [source_grant_select, connect_resume_connector, connect_stop_connector, connect_reset_source_offsets, connect_delete_connector, connect_update_connector_config, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

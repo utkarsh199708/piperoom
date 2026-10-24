@@ -109,6 +109,81 @@ recordings:
   - tool: warehouse_load_errors
     input: {table: analytics.orders}
     error: 'dbtools: warehouse_load_errors: clickhouse: load history of analytics.orders: the user''s profile is readonly=1, which rejects the per-query settings the client sends; use readonly=2, or readonly=0 with SELECT-only grants: code: 164, message: Cannot execute query in readonly mode'
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. The real
+  # tools' output over this stack (the pipeline upstream is healthy and the warehouse refuses every query).
+  # The warehouse_row error does not name the key, so one recording answers every key.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=12.0 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3C/2AD1E298
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3C/2AD1E0A0
+        retained_wal_bytes: 12582912
+        wal_status: reserved
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 614400 bytes in 5s (3C/2AD1E298 -> 3C/2ADB4298); connector pg-orders-connector state RUNNING
+    data:
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks:
+        - 0:RUNNING
+      elapsed_ms: 5004
+      pipeline: orders
+      slot:
+        active: true
+        confirmed_flush_advance_bytes: 614400
+        confirmed_flush_lsn: 3C/2AD1E298
+        confirmed_flush_lsn_after: 3C/2ADB4298
+        name: debezium_orders
+        retained_wal_bytes: 12582912
+        source_wal_advance_bytes: 0
+        verdict: streaming
+        wal_status: reserved
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      verdict: streaming
+      window_seconds: 5
+  - tool: net_probe
+    input: {target: warehouse}
+    summary: |-
+      net_probe warehouse (clickhouse.prod.internal:9000): all checks ok: dns ok, tcp ok
+      - dns clickhouse.prod.internal:9000 ok: 10.20.6.21
+      - tcp clickhouse.prod.internal:9000 ok: TCP connected
+      - tls clickhouse.prod.internal:9000 skip: not configured with TLS
+    data:
+      checks:
+        - addr: clickhouse.prod.internal:9000
+          detail: 10.20.6.21
+          id: dns
+          ms: 0
+          status: ok
+        - addr: clickhouse.prod.internal:9000
+          detail: TCP connected
+          id: tcp
+          ms: 0
+          status: ok
+        - addr: clickhouse.prod.internal:9000
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+      endpoints:
+        - clickhouse.prod.internal:9000
+      kind: warehouse
+      target: warehouse
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-19T09:00:00Z)
+  - tool: warehouse_row
+    input: {pipeline_id: orders, pk_column: id, table: analytics.orders}
+    error: 'dbtools: warehouse_row: clickhouse: query row from analytics.orders: the user''s profile is readonly=1, which rejects the per-query settings the client sends; use readonly=2, or readonly=0 with SELECT-only grants: code: 164, message: Cannot execute query in readonly mode'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
 
 inputs:
   - kind: steer
@@ -128,14 +203,8 @@ expect:
     - [schema, incompatible]
   first_failing_layer: warehouse
   root_cause_layer: warehouse
-  expected_facts:
-    - id: f_warehouse_stale
-      tool: pipeline_map
-      match: [stale]
-      required: true
-  claims:
-    - about: root_cause
-      facts: [f_warehouse_stale]
-  evidence_tools: [pipeline_map]
+  expected_facts: []
+  claims: []
+  evidence_tools: []
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

@@ -655,10 +655,12 @@ func (r *Runner) printOp(req *protocol.OpRequest, target string) {
 }
 
 // stoppedBeforeStart reports whether the op must not start because its
-// context already ended: a FrameCancel (or the deadline) that landed during
-// the checks or just after the "y" stops the op here, before its start
-// record, so a cancelled op never starts. It is refused, except when the
-// runner itself is stopping (ctx ended), where there is nobody to tell.
+// context already ended: a FrameCancel (or the deadline) read before this
+// point, during the checks or just after the "y", stops the op here, before
+// its start record. One that lands after it is a cancel of a running op: the
+// executor sees a dead context and the result reports OK false. The op is
+// refused, except when the runner itself is stopping (ctx ended), where there
+// is nobody to tell.
 func (r *Runner) stoppedBeforeStart(ctx, opCtx context.Context, req *protocol.OpRequest) bool {
 	if ctx.Err() != nil {
 		return true
@@ -702,6 +704,18 @@ func (r *Runner) cancelOp(id string) {
 	for _, c := range waiting {
 		(*c)()
 	}
+}
+
+// opHeld reports whether an op with this id is still held: in its checks or
+// T3 prompt (confirming) or running (inflight, not yet done).
+func (r *Runner) opHeld(id string) bool {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if len(r.confirming[id]) > 0 {
+		return true
+	}
+	op, ok := r.inflight[id]
+	return ok && op.status.State == protocol.StateRunning
 }
 
 // watchConfirm registers the cancel of an op that is not started yet (in its

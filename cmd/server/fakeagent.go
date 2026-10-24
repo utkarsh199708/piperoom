@@ -70,6 +70,10 @@ type wireAgentInput struct {
 	fakeAgent  bool
 	pmMode     string
 	writeOn    bool
+	// live is the swappable endpoint of a standalone or quickstart server
+	// (models.go); nil elsewhere, where a model that does not build refuses
+	// the start.
+	live *liveModel
 }
 
 // wireAgent wires a non-demo server. When fakeAgent is on it replaces every
@@ -81,7 +85,7 @@ type wireAgentInput struct {
 func wireAgent(
 	ctx context.Context,
 	openStacks func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts wiring.StackOptions) (*wiring.Stacks, error),
-	newAgentEndpoint func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error),
+	newAgentEndpoint func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error),
 	in wireAgentInput,
 ) (agentWiring, error) {
 	// One AWS config for the process, shared by Bedrock and MSK IAM.
@@ -97,8 +101,13 @@ func wireAgent(
 		if in.pmMode == config.PostmortemModelAuto {
 			paths.writePM = demo.WritePostmortem
 		}
+	} else if in.live != nil {
+		if paths, err = wireLive(ctx, in.live, in, awsCfg, newAgentEndpoint); err != nil {
+			return agentWiring{}, err
+		}
 	} else {
-		ep, err := newAgentEndpoint(ctx, in.cfg, in.log, awsCfg)
+		// A team server reads its keys from the process environment (nil).
+		ep, err := newAgentEndpoint(ctx, in.cfg, in.log, awsCfg, nil)
 		if err != nil {
 			return agentWiring{}, fmt.Errorf("server: %w", err)
 		}

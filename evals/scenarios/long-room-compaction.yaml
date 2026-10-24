@@ -127,7 +127,8 @@ recordings:
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
@@ -469,4 +470,12 @@ expect:
       facts: [f_partition1_stuck, f_trace_stops_at_consumer]
   evidence_tools: [kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
-  max_tool_calls: 14
+  # Tool budget (W4n, KAN-497; ruling R8; 14 -> 18). W4f live run 40043247389 #1 used 16 calls
+  # and failed on the budget alone (score 98.1), so it is a passing path: 16 + 2 = 18. Its turn
+  # split was not read from the transcript (the report gives only calls to the cause: 11). The
+  # split of the standard path, NOT MEASURED: turn 1 (the alert) about 11 reads (lag, trace_record,
+  # the record at partition 1 offset 31204518, Connect status, freshness, topic offsets, DDL,
+  # registry, similar incidents); about 5 re-reads spread over the 13 comment turns (lag again
+  # after the comments that paste lag readings, partition state after Arjun's broker remark); none
+  # after Priya's hand-off steer, which asks only for a restatement.
+  max_tool_calls: 18

@@ -117,7 +117,7 @@ func TestLongStepClaimSurvivesTheSweep(t *testing.T) {
 	long := 4 * claimTimings.ClaimStale
 
 	svc, cs := claimRig(t)
-	out, err := svc.executeStep(context.Background(), "p1", sleepAction(long), nil, stepTimeout+time.Minute)
+	out, _, err := svc.executeStep(context.Background(), "p1", sleepAction(long), nil, stepTimeout+time.Minute)
 	if err != nil || out != "ok" {
 		t.Fatalf("executeStep = %q, %v; want ok", out, err)
 	}
@@ -127,7 +127,7 @@ func TestLongStepClaimSurvivesTheSweep(t *testing.T) {
 
 	// Control: the sweep does take a claim nobody refreshes.
 	svc, cs = claimRig(t)
-	if _, err := svc.executeStep(context.Background(), "p1", sleepAction(long), nil, stepTimeout); err != nil {
+	if _, _, err := svc.executeStep(context.Background(), "p1", sleepAction(long), nil, stepTimeout); err != nil {
 		t.Fatal(err)
 	}
 	if taken, touches := cs.state(); !taken || touches != 0 {
@@ -147,7 +147,7 @@ func TestClaimRefreshStopsWithTheStep(t *testing.T) {
 	}
 
 	svc, cs := claimRig(t)
-	if _, err := svc.executeStep(context.Background(), "p1", sleepAction(3*claimTimings.LeaseRenew), nil, stepTimeout+time.Minute); err != nil {
+	if _, _, err := svc.executeStep(context.Background(), "p1", sleepAction(3*claimTimings.LeaseRenew), nil, stepTimeout+time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	quiet(t, cs)
@@ -163,7 +163,7 @@ func TestClaimRefreshStopsWithTheStep(t *testing.T) {
 				t.Fatal("the action's panic was swallowed")
 			}
 		}()
-		_, _ = svc.executeStep(context.Background(), "p1", boom, nil, stepTimeout+time.Minute)
+		_, _, _ = svc.executeStep(context.Background(), "p1", boom, nil, stepTimeout+time.Minute)
 	}()
 	quiet(t, cs)
 }
@@ -177,7 +177,7 @@ func TestLostClaimCancelsTheStep(t *testing.T) {
 	cs.taken = true
 	cs.mu.Unlock()
 	start := time.Now()
-	_, err := svc.executeStep(context.Background(), "p1", sleepAction(time.Hour), nil, stepTimeout+time.Minute)
+	_, _, err := svc.executeStep(context.Background(), "p1", sleepAction(time.Hour), nil, stepTimeout+time.Minute)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("executeStep = %v, want context.Canceled", err)
 	}

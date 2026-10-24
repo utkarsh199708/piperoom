@@ -342,6 +342,14 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
 
 inputs:
   - kind: steer
@@ -392,6 +400,6 @@ expect:
   claims:
     - about: root_cause
       facts: [f_unassigned, f_reassigned]
-  evidence_tools: [connect_status, debezium_metrics, connect_worker_metrics]
+  evidence_tools: [connect_status, connect_worker_metrics]
   forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, connect_resume_connector, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 14

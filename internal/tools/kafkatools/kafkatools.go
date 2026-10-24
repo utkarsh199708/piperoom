@@ -140,6 +140,13 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
+	// Q8e: the schema history record read is optional on the Kafka client,
+	// so a fake or eval replay without it gets no tool it could not answer.
+	if _, ok := d.Kafka.(kafka.SchemaHistoryReader); ok {
+		if err := reg.Register(&schemaHistory{d: d}); err != nil {
+			return err
+		}
+	}
 	// Q3a: the Connect worker-group read is optional on the Kafka client.
 	if _, ok := d.Kafka.(kafka.ConnectClusterReader); ok {
 		if err := reg.Register(&workerInfo{d: d}); err != nil {

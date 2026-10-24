@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/actions/sourceactions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/forge"
 	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
@@ -211,7 +212,7 @@ var adminWriterIfaces = []reflect.Type{
 // SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](), ifaceOf[connect.ConnectLifecycleWriter]()}, adminWriterIfaces...)
+	writers := append([]reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](), ifaceOf[connect.ConnectLifecycleWriter](), ifaceOf[forge.ForgeWriter]()}, adminWriterIfaces...)
 	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
@@ -234,7 +235,7 @@ func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) 
 		// Resume and UpdateConfig are the Connect writes the actions assert
 		// for; the rest are the Q5 lifecycle writes (Q5d), any one of which
 		// is enough.
-		for _, m := range []string{"Resume", "UpdateConfig", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
+		for _, m := range []string{"Resume", "UpdateConfig", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector", "OpenPullRequest"} {
 			if _, ok := ty.MethodByName(m); ok {
 				t.Errorf("%s: an action can reach %s, which has the write method %s", name, ty, m)
 			}

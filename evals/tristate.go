@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 )
 
 // The tri-state keyword pass (#454). The keyword grader decides the clear
@@ -46,6 +47,9 @@ type Ambiguity struct {
 	RootCause      bool `json:"root_cause,omitempty"`
 	Layer          bool `json:"layer,omitempty"`
 	RootCauseLayer bool `json:"root_cause_layer,omitempty"`
+	// Healthy: a healthy scenario's verdict text has a healthy phrase and a
+	// fault word (gradeHealthy).
+	Healthy bool `json:"healthy_verdict,omitempty"`
 	// Reasons name the trigger per clause, e.g. `clause 2: "not" with root
 	// cause term "amount"`.
 	Reasons []string `json:"reasons,omitempty"`
@@ -65,7 +69,7 @@ type Ambiguity struct {
 
 // Any reports whether some item is ambiguous.
 func (a Ambiguity) Any() bool {
-	return a.RootCause || a.Layer || a.RootCauseLayer
+	return a.RootCause || a.Layer || a.RootCauseLayer || a.Healthy
 }
 
 // Items lists the ambiguous items by name.
@@ -79,6 +83,9 @@ func (a Ambiguity) Items() []string {
 	}
 	if a.RootCauseLayer {
 		out = append(out, "root_cause_layer")
+	}
+	if a.Healthy {
+		out = append(out, "healthy_verdict")
 	}
 	return out
 }
@@ -121,7 +128,7 @@ func GradeKeywords(sc Scenario, text string) KeywordGrades {
 
 // keywordLayer is layerGraded for a text: true when the scenario sets no layer.
 func keywordLayer(sc Scenario, layer, text string) bool {
-	return layer == "" || namesLayer(layerTermsFor(sc.Pipeline, layer), text)
+	return layer == "" || namesPipelineLayer(sc.Pipeline, layer, text)
 }
 
 // keywordRootCauseLayer is the root-cause-layer grade of a text: true when
@@ -159,13 +166,11 @@ func ambiguityOf(sc Scenario, text string) Ambiguity {
 	if sc.Expect.outcome() != OutcomeDiagnose {
 		return a
 	}
-	var first, rcLayer []string
+	var first []string
 	if l := sc.Expect.FirstFailingLayer; l != "" {
-		first = layerTermsFor(sc.Pipeline, l)
+		first = []string{l}
 	}
-	for _, l := range sc.Expect.rootCauseLayers() {
-		rcLayer = append(rcLayer, layerTermsFor(sc.Pipeline, l)...)
-	}
+	rcLayer := sc.Expect.rootCauseLayers()
 	for n, clause := range clauseSplit.Split(text, -1) {
 		toks := tokenize(clause)
 		if len(toks) == 0 {
@@ -183,11 +188,11 @@ func ambiguityOf(sc Scenario, text string) Ambiguity {
 				a.RootCause = true
 				a.Reasons = append(a.Reasons, fmt.Sprintf("%s: %q with forbidden row [%s]", where, trigger, strings.Join(row, " + ")))
 			}
-			if t := firstPresent(toks, first); t != "" {
+			if t := layerPresent(sc.Pipeline, first, toks); t != "" {
 				a.Layer = true
 				a.Reasons = append(a.Reasons, fmt.Sprintf("%s: %q with first-failing-layer term %q", where, trigger, t))
 			}
-			if t := firstPresent(toks, rcLayer); t != "" {
+			if t := layerPresent(sc.Pipeline, rcLayer, toks); t != "" {
 				a.RootCauseLayer = true
 				a.Reasons = append(a.Reasons, fmt.Sprintf("%s: %q with root-cause-layer term %q", where, trigger, t))
 			}
@@ -233,6 +238,22 @@ func firstPresent(toks []string, terms []string) string {
 	for _, t := range terms {
 		if len(findTerm(toks, t)) > 0 {
 			return t
+		}
+	}
+	return ""
+}
+
+// layerPresent returns the first word of layers (layerTermsFor) that occurs
+// in toks outside a longer name (layerShadows), or "".
+func layerPresent(p owners.Pipeline, layers []string, toks []string) string {
+	for _, l := range layers {
+		shadows := layerShadows(p, l)
+		for _, t := range layerTermsFor(p, l) {
+			for _, i := range findTerm(toks, t) {
+				if !shadowed(toks, i, t, shadows) {
+					return t
+				}
+			}
 		}
 	}
 	return ""

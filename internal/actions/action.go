@@ -269,6 +269,149 @@ func ClassOf(a Action) string {
 	return ClassFix
 }
 
+// SourceLayered marks an action on the pipeline's source database whose
+// approving layer is the pipeline's source layer (events.SourceLayer of its
+// source_kind: postgres or mysql), not Layer(). Layer() of such an action
+// answers "postgres", the value a caller without a pipeline shows. The room
+// and the agent take the layer from LayerFor. (Q8)
+type SourceLayered interface {
+	Action
+	// SourceLayered has no behaviour; it only marks the action.
+	SourceLayered()
+}
+
+// LayerFor returns the layer whose owner approves a step of a on a pipeline
+// whose source_kind is sourceKind ("" = postgres): SourceLayer(sourceKind)
+// for a SourceLayered action ("" for an unknown kind, which no owner owns),
+// a.Layer() otherwise. (Q8)
+//
+// It does not know Layered (Q7) and answers "" for such an action: it stays
+// for callers that only describe an action without params (builders, the
+// action catalogue). The room service and the agent take a step's layer from
+// StepLayer, the one entry point of both rules (tasks/Q-board.md, "7. MySQL
+// source").
+func LayerFor(a Action, sourceKind string) string {
+	if _, ok := a.(SourceLayered); ok {
+		return events.SourceLayer(sourceKind)
+	}
+	return a.Layer()
+}
+
+// ---- Q7: actions whose layer depends on params, and deferred actions ----
+
+// Layered is implemented by an action whose approving layer depends on its
+// params (repo_open_pull_request: the layer of the path globs the files
+// match). Its Layer() returns "" (Registry.Register refuses "" from an action
+// that is not Layered). The room service takes the step's layer from
+// StepLayer, which asks LayerFor with the room's pipeline, at creation and
+// again before Execute, and refuses a step whose Layer differs: the proposer
+// never picks the approver. It must not do I/O. (Q7)
+type Layered interface {
+	LayerFor(p owners.Pipeline, params json.RawMessage) (string, error)
+}
+
+// StepLayer is the layer whose owner approves one step of a with params on
+// pipeline p, the one rule the room service (Q7k, Q8o) and the agent call:
+//   - a Layered action: LayerFor(p, params);
+//   - a SourceLayered action: events.SourceLayer(p.SourceKindOrDefault());
+//   - any other action: a.Layer().
+//
+// The source kind is p's owners.yaml source_kind (Q8d; "" = postgres).
+// An empty answer is an error, never a layer: no owner owns "", so a step
+// without a layer fails closed instead of reaching an approver by accident.
+// It does no I/O. (Q7, Q8)
+func StepLayer(a Action, p owners.Pipeline, params json.RawMessage) (string, error) {
+	var layer string
+	if l, ok := a.(Layered); ok {
+		v, err := l.LayerFor(p, params)
+		if err != nil {
+			return "", fmt.Errorf("actions: %s: layer from params: %w", a.Name(), err)
+		}
+		layer = v
+	} else if _, ok := a.(SourceLayered); ok {
+		sourceKind := p.SourceKindOrDefault()
+		layer = events.SourceLayer(sourceKind)
+		if layer == "" {
+			return "", fmt.Errorf("actions: %s: unknown source_kind %q", a.Name(), sourceKind)
+		}
+	} else {
+		layer = a.Layer()
+	}
+	if layer == "" {
+		return "", fmt.Errorf("actions: %s: no approving layer", a.Name())
+	}
+	return layer, nil
+}
+
+// Deferred is implemented by an action whose Execute only asks for a change
+// that people apply later outside Piperoom (repo_open_pull_request: the
+// repo's reviewers merge the PR, the customer's CD deploys it). Rules the
+// room service and the agent apply to every step of such an action:
+//   - never approved by a policy: not in owners.yaml auto_approve: or
+//     autonomy: (Load refuses it), never scheduled, never a setup T1 step;
+//   - a proposal holding a Deferred step holds only Deferred steps, at most
+//     MaxDeferredSteps;
+//   - the agent does not verify on action_result; it waits for the apply
+//     signal (HumanInput "pr_merged") and the change to reach the system
+//     (docs/design/fix-pr.md §8).
+//
+// Deferred has no method beyond the marker. Registry.Register refuses a
+// Deferred action of class recovery or performance: a deferred change cannot
+// be measured by Verify on the executor's timeline. (Q7)
+type Deferred interface {
+	Deferred()
+}
+
+// MaxDeferredSteps caps the Deferred steps of one proposal. (Q7)
+const MaxDeferredSteps = 3
+
+// PullRequestOpener is implemented by an action whose Execute opens a pull
+// request. The executor prefers ExecutePullRequest over Execute when an
+// action implements it and stores the reference on action.executed
+// (ActionExecutedPayload.PullRequest), which starts the room's follower
+// (Q7e). The string is Execute's short result. (Q7)
+type PullRequestOpener interface {
+	ExecutePullRequest(ctx context.Context, params json.RawMessage) (string, events.PullRequestRef, error)
+}
+
+// StepRef identifies the proposal step being executed. The executor puts it
+// in ctx before Execute (WithStep); an action that names something after the
+// step (the fix branch) reads it with StepFrom and refuses to run without it.
+// Approvals are "layer: display name" of the approval.given events, in
+// required_layers order. (Q7)
+type StepRef struct {
+	RoomID     string
+	ProposalID string
+	StepIndex  int
+	Title      string // the proposal title, sanitized as stored
+	Approvals  []string
+}
+
+// stepKey is the context key of a StepRef.
+type stepKey struct{}
+
+// WithStep returns ctx carrying s. Approvals is copied, so a later change to
+// the caller's slice does not reach the action. (Q7)
+func WithStep(ctx context.Context, s StepRef) context.Context {
+	s.Approvals = slices.Clone(s.Approvals)
+	return context.WithValue(ctx, stepKey{}, s)
+}
+
+// StepFrom returns the StepRef the executor put in ctx, and false when there
+// is none (a call outside the executor: Validate at creation, Preview, a
+// test). The Approvals slice is the caller's own copy. (Q7)
+func StepFrom(ctx context.Context) (StepRef, bool) {
+	s, ok := ctx.Value(stepKey{}).(StepRef)
+	if !ok {
+		return StepRef{}, false
+	}
+	s.Approvals = slices.Clone(s.Approvals)
+	return s, true
+}
+
+// DiffPreview is the event type (PreviewResult.Diff). (Q7)
+type DiffPreview = events.DiffPreview
+
 // Default poll schedule of a recovery verification: the agent calls Verify
 // first RecoveryVerifyFirstPoll after the step ran, doubles the wait up to
 // RecoveryVerifyMaxPoll, and stops when After is 0 or RecoveryVerifyTimeout
@@ -654,13 +797,23 @@ func NewRegistry() *Registry {
 // Register adds a. It fails on an empty or duplicate name, an unknown class,
 // and a recovery action that does not implement Verifier (X2): a repair that
 // cannot be counted afterwards is never registered. A performance action
-// needs Verifier and Preview (X6).
+// needs Verifier and Preview (X6). An empty Layer() needs Layered, so no
+// step is ever without an approving layer, and a Deferred action must be a
+// fix: a recovery or performance verdict cannot wait for a merge (Q7).
 func (r *Registry) Register(a Action) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := a.Name()
 	if name == "" {
 		return errors.New("actions: empty action name")
+	}
+	if _, layered := a.(Layered); !layered && a.Layer() == "" {
+		return fmt.Errorf("actions: action %q has an empty Layer() and does not implement Layered", name)
+	}
+	if _, deferred := a.(Deferred); deferred {
+		if class := ClassOf(a); class != ClassFix {
+			return fmt.Errorf("actions: deferred action %q has class %q; a deferred action is a fix", name, class)
+		}
 	}
 	switch class := ClassOf(a); class {
 	case ClassFix:

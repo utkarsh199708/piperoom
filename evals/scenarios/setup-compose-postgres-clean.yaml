@@ -57,6 +57,10 @@
 #     wrote; the .env holds references, the runner materialises them.
 
 name: setup/compose-postgres-clean
+# Held out until U1-10 (the agent's setup mode, wiring.SetupStack) lands: without it the agent cannot read the
+# compose file or the validator output (live run 40030412424: 0/2, every read errored). -validate refuses
+# this marker once internal/wiring declares SetupStack.
+pending_harness: U1-10
 description: |
   The person wrote their own compose.yaml for the project, with a postgres service whose
   environment holds the database password in plain text (POSTGRES_PASSWORD: orders). The setup run
@@ -100,8 +104,8 @@ inputs:
 
 expect:
   root_cause:
-    - [postgres password, password, credential, postgres_password]
-    - [plain text, plaintext, literal, interpolation, env file, reference]
+    - [postgres password, postgres_password]
+    - [secret reference, secret store, env file, interpolat*, literal, hardcoded]
   # The wrong stories of a stack that never started.
   root_cause_forbidden:
     - ['schema change']
