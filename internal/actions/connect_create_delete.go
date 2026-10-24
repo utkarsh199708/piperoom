@@ -656,7 +656,7 @@ func lifecycleConfigSecretKey(k string) bool {
 			return false
 		}
 	}
-	for _, suffix := range []string{"key.ignore", "message.key.columns", "key.format", "key.fields"} {
+	for _, suffix := range []string{"key.ignore", "message.key.columns", "key.format", "key.fields", "primary.key.mode", "primary.key.fields"} {
 		if lk == suffix || strings.HasSuffix(lk, "."+suffix) {
 			return false
 		}

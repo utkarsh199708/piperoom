@@ -231,10 +231,11 @@ func plaintextSecretKey(k string) bool {
 	}
 	// Common connector keys whose bare "key" segment means the record key,
 	// not a credential: Elasticsearch's key.ignore, Debezium's
-	// message.key.columns, and the *.key.format / *.key.fields family. Their
+	// message.key.columns, the *.key.format / *.key.fields family and the JDBC
+	// sink's primary.key.mode / primary.key.fields. Their
 	// values are booleans and column lists; refusing them would make the tool
 	// unusable for ordinary configs.
-	for _, suffix := range []string{"key.ignore", "message.key.columns", "key.format", "key.fields"} {
+	for _, suffix := range []string{"key.ignore", "message.key.columns", "key.format", "key.fields", "primary.key.mode", "primary.key.fields"} {
 		if lk == suffix || strings.HasSuffix(lk, "."+suffix) {
 			return false
 		}
