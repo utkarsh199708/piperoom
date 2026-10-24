@@ -702,6 +702,7 @@ func mergeOutcome(a, b actionOutcome) actionOutcome {
 	a.needsModel = a.needsModel || b.needsModel
 	a.statusSet = a.statusSet || b.statusSet
 	a.notes = append(a.notes, b.notes...)
+	a.failures = append(a.failures, b.failures...)
 	return a
 }
 

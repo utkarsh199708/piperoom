@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -148,6 +149,7 @@ WantedBy=default.target
 }
 
 func TestServiceInstall(t *testing.T) {
+	skipOnWindows(t)
 	for _, mode := range []string{ModeDistributed, ModeStandalone} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t, Options{})
@@ -178,6 +180,7 @@ func TestServiceInstall(t *testing.T) {
 }
 
 func TestServiceInstallJavaHomeIsResolved(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{ResolvePath: func(p string) (string, error) {
 		if p != "/usr/bin/java" {
 			t.Errorf("resolved %q", p)
@@ -200,33 +203,41 @@ func TestServiceInstallRefusals(t *testing.T) {
 		params  any
 		setup   func(f *fixture)
 		wantErr error
+		// windowsSkip marks a case a Windows file system cannot express: it
+		// reports 0666 for a writable file, so os.Chmod(0644) cannot make a
+		// script non-executable there (requireFile's exec check is a POSIX
+		// assertion).
+		windowsSkip bool
 	}{
-		{"unknown field exec_start", map[string]string{"exec_start": "/bin/sh -c id"}, nil, ErrParams},
-		{"unknown field user", map[string]string{"user": "root"}, nil, ErrParams},
-		{"unknown field environment", map[string]string{"environment": "LD_PRELOAD=/x.so"}, nil, ErrParams},
-		{"bad mode", ServiceParams{Mode: "cluster"}, nil, ErrParams},
+		{"unknown field exec_start", map[string]string{"exec_start": "/bin/sh -c id"}, nil, ErrParams, false},
+		{"unknown field user", map[string]string{"user": "root"}, nil, ErrParams, false},
+		{"unknown field environment", map[string]string{"environment": "LD_PRELOAD=/x.so"}, nil, ErrParams, false},
+		{"bad mode", ServiceParams{Mode: "cluster"}, nil, ErrParams, false},
 		{"distribution missing", ServiceParams{}, func(f *fixture) {
 			f.write("connect-distributed.properties", "x=y\n", 0o600)
-		}, ErrDetect},
+		}, ErrDetect, false},
 		{"script not executable", ServiceParams{}, func(f *fixture) {
 			f.distribution()
 			f.write("kafka/bin/connect-distributed.sh", "#!/bin/sh\n", 0o644)
-		}, ErrDetect},
+		}, ErrDetect, true},
 		{"worker file missing", ServiceParams{Mode: ModeStandalone}, func(f *fixture) {
 			f.write("kafka/bin/connect-standalone.sh", "#!/bin/sh\n", 0o755)
-		}, ErrDetect},
-		{"java missing", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "" }, ErrDetect},
-		{"java is a shim", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/home/u/.asdf/shims/java" }, ErrDetect},
-		{"JAVA_HOME with a space", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/my jdk/bin/java" }, ErrDetect},
-		{"JAVA_HOME with a specifier", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/%h/bin/java" }, ErrDetect},
-		{"JAVA_HOME with a variable", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/$HOME/bin/java" }, ErrDetect},
+		}, ErrDetect, false},
+		{"java missing", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "" }, ErrDetect, false},
+		{"java is a shim", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/home/u/.asdf/shims/java" }, ErrDetect, false},
+		{"JAVA_HOME with a space", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/my jdk/bin/java" }, ErrDetect, false},
+		{"JAVA_HOME with a specifier", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/%h/bin/java" }, ErrDetect, false},
+		{"JAVA_HOME with a variable", ServiceParams{}, func(f *fixture) { f.distribution(); f.java = "/opt/$HOME/bin/java" }, ErrDetect, false},
 		{"JAVA_HOME with a newline", ServiceParams{}, func(f *fixture) {
 			f.distribution()
 			f.java = "/opt/x\nExecStartPre=/bin/sh/bin/java"
-		}, ErrDetect},
+		}, ErrDetect, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if c.windowsSkip && runtime.GOOS == "windows" {
+				t.Skip("a Windows file system reports every writable file as 0666, so the exec bit cannot be cleared")
+			}
 			f := newFixture(t, Options{})
 			if c.setup != nil {
 				c.setup(f)
@@ -243,6 +254,7 @@ func TestServiceInstallRefusals(t *testing.T) {
 }
 
 func TestServiceInstallRefusesSymlinks(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	elsewhere := t.TempDir()
@@ -351,6 +363,7 @@ func TestServiceRestart(t *testing.T) {
 // unit file is written; and a valid install's ExecStart, WorkingDirectory and
 // Environment lines are exactly the detected paths, with no User= at all.
 func TestNoParamReachesTheUnit(t *testing.T) {
+	skipOnWindows(t)
 	payloads := []string{
 		"connect\nExecStartPre=/bin/sh -c id", "connect\n[Service]\nUser=root", "a=b", "User=root",
 		"$HOME", "${HOME}", "%h", "%%", `"q"`, "'q'", `a\b`, "a b", "a;b", "a|b", "../x", "/etc/passwd",
@@ -508,6 +521,7 @@ func TestServiceRestartRefusesAnotherProjectsUnit(t *testing.T) {
 // from another file is refused before the unit file is written or enable
 // runs.
 func TestServiceInstallRefusesATakenName(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	f.exec.respond = func([]string) ([]byte, int, error) {
@@ -542,6 +556,7 @@ func TestServiceInstallRefusesATakenName(t *testing.T) {
 // daemon-reload and removes the unit file it created; a failed daemon-reload
 // is reported the same way.
 func TestServiceInstallCommandFailures(t *testing.T) {
+	skipOnWindows(t)
 	show, _ := SystemctlArgv("show", "piperoom-connect.service")
 	for _, c := range []struct {
 		verb     string
@@ -599,12 +614,13 @@ func TestServiceInstallCommandFailures(t *testing.T) {
 // the unit runs, so it must be under a mount directory file_write cannot
 // change.
 func TestJavaHomeInsideTheProject(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	for _, java := range []string{f.dir + "/jdk/bin/java", f.dir + "/bin/java", f.dir + "/logs/jdk/bin/java"} {
 		f.java = java
-		if _, err := f.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
-			t.Errorf("JAVA_HOME of %s: %v, want ErrDetect", java, err)
+		if _, err := f.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "inside the project directory") {
+			t.Errorf("JAVA_HOME of %s: %v, want the inside-the-project refusal", java, err)
 		}
 	}
 	if calls := f.exec.argvs(); len(calls) != 0 {
@@ -618,9 +634,10 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 		t.Errorf("unit:\n%s", u)
 	}
 	// The project reached through a symlink: the resolved JDK path is
-	// still recognised as inside it.
-	// EvalSymlinks: a temp dir can itself sit behind a symlink (macOS's
-	// /var is /private/var), and the JDK path a unit runs is a resolved one.
+	// still recognised as inside it. javaHome only ever sees a fully
+	// resolved path (ResolvePath is filepath.EvalSymlinks in production),
+	// so real is resolved too: t.TempDir() itself can sit under a
+	// symlinked parent (macOS /var -> /private/var).
 	real, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -630,8 +647,75 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 	g := newFixtureIn(t, link, Options{})
 	g.distribution()
 	g.java = real + "/jdk/bin/java"
-	if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) {
+	if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "inside the project directory") {
 		t.Errorf("JAVA_HOME inside the symlinked project: %v", err)
+	}
+}
+
+// TestJavaHomeUnderASymlinkedParent: the project directory is given through
+// a symlinked parent (as t.TempDir() is on macOS, /var -> /private/var) and
+// java is found through that unresolved path. With the production resolver
+// the JDK inside the project is still refused, whichever spelling PATH used.
+func TestJavaHomeUnderASymlinkedParent(t *testing.T) {
+	parent := t.TempDir()
+	via := t.TempDir() + "/var"
+	mustSymlink(t, parent, via)
+	project := via + "/proj"
+	if err := os.MkdirAll(parent+"/proj/jdk/bin", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parent+"/proj/jdk/bin/java", []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := newFixtureIn(t, project, Options{ResolvePath: filepath.EvalSymlinks})
+	g.distribution()
+	for _, java := range []string{project + "/jdk/bin/java", parent + "/proj/jdk/bin/java"} {
+		g.java = java
+		if _, err := g.run("service_install", ServiceParams{}); !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "inside the project directory") {
+			t.Errorf("JAVA_HOME via %s: %v, want the inside-the-project refusal", java, err)
+		}
+	}
+	if calls := g.exec.argvs(); len(calls) != 0 {
+		t.Errorf("commands ran: %q", calls)
+	}
+}
+
+// TestJavaHomeConfinedComparesIdentity: the project is recognised by
+// identity, not spelling. A JDK reached through a second name for the project
+// (a symlink the resolver left in place, standing in for a case-insensitive
+// filesystem or a bind mount) is still inside it; a JDK under another mount
+// directory than DistDir is refused, since T1 ops write those; and a project
+// inside the JDK is refused.
+func TestJavaHomeConfinedComparesIdentity(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.distribution()
+	alias := t.TempDir() + "/alias"
+	mustSymlink(t, f.dir, alias)
+	for _, java := range []string{alias + "/jdk/bin/java", f.dir + "/" + PluginDir + "/x/jdk/bin/java", f.dir + "/" + UnitDir + "/jdk/bin/java"} {
+		f.java = java
+		_, err := f.run("service_install", ServiceParams{})
+		if !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "inside the project directory") {
+			t.Errorf("JAVA_HOME of %s: %v, want the inside-the-project refusal", java, err)
+		}
+	}
+	f.java = alias + "/" + DistDir + "/jdk/bin/java"
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Errorf("JDK under %s/ through the alias: %v", DistDir, err)
+	}
+
+	jdk := t.TempDir()
+	if err := os.MkdirAll(jdk+"/lib/proj", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := newFixtureIn(t, jdk+"/lib/proj", Options{})
+	g.distribution()
+	g.java = jdk + "/bin/java"
+	_, err := g.run("service_install", ServiceParams{})
+	if !errors.Is(err, ErrDetect) || !strings.Contains(err.Error(), "inside JAVA_HOME") {
+		t.Errorf("project inside the JDK: %v, want the inside-JAVA_HOME refusal", err)
+	}
+	if calls := g.exec.argvs(); len(calls) != 0 {
+		t.Errorf("commands ran: %q", calls)
 	}
 }
 

@@ -480,3 +480,35 @@ services:
       start_period: 30s
       interval: 5s
       retries: 30
+
+  # Local model server (V17, dev/README.md "Local models"). Profile "llm":
+  # `docker compose --profile llm up -d` starts it next to the default stack;
+  # without the profile nothing here starts. `devctl llm-up` also pulls a model.
+  ollama:
+    profiles: ["llm"]
+    # Pinned release. Not pulled when this was written (no Docker there).
+    image: ollama/ollama:0.40.1
+    environment:
+      # Ollama cuts a prompt longer than its context window without an error
+      # (docs/design/model-providers.md §6.2); its default is 2k to 4k tokens,
+      # far under one investigation turn. 131072 is the window of llama3.1:8b,
+      # the model `devctl llm-up` pulls.
+      OLLAMA_CONTEXT_LENGTH: "131072"
+      # Unset by default (Ollama's own defaults). On a memory-capped Docker,
+      # OLLAMA_FLASH_ATTENTION=1 with OLLAMA_KV_CACHE_TYPE=q8_0 roughly halves
+      # the KV cache of the 131072 window (dev/README.md "Local models").
+      OLLAMA_FLASH_ATTENTION: "${OLLAMA_FLASH_ATTENTION:-}"
+      OLLAMA_KV_CACHE_TYPE: "${OLLAMA_KV_CACHE_TYPE:-}"
+    # Host loopback only: Ollama has no auth.
+    ports: ["127.0.0.1:11434:11434"]
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # The image has the ollama CLI but no curl or wget; `list` asks the server.
+      test: ["CMD", "ollama", "list"]
+      start_period: 10s
+      interval: 5s
+      retries: 24
+
+volumes:
+  ollama-models:

@@ -376,9 +376,33 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
   `is not the cause`/`problem`/`issue`, `isn't the cause`/`problem`, `not to blame`, `not at fault`,
   `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
 
+A denial stops at a **barrier**, which opens a clause of its own polarity: `because` and `when`
+always; `since`, `after`, `before` and `until` only after a verb between the denial and the barrier
+(for layers, also a verb before the denial with a verb after the barrier). A verb is an auxiliary
+such as `is`/`was`/`had` (`'s` only after a pronoun: "it's", not "Tuesday's"), a modal, a common
+irregular past such as `read` or `reset`, or a word ending in `-ed` that no determiner precedes ("no
+unprocessed records" is a noun phrase). So "no consumer read them before they were deleted" states
+the deletion, while in "no changes before the outage were lost" and "it is clear that no records since
+the restart were lost" `before`/`since` is a preposition and the denial reaches `lost`. The barriers are in the
+shared denial pass, so they apply to **layer naming too**, not only to root-cause terms: "the slot is
+not the cause because the connector failed" and "it's not the registry since the connector crashed"
+now name Connect (before W4b-2 the forward denial ran through the conjunction), while "no errors since
+the connector restart" and "there are no errors since the connector restart" still do not.
+
 `no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
-without amount", "nothing reads the slot" all state the cause). A term that starts with a negator
-(`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
+without amount", "nothing reads the slot" all state the cause), except before a **loss word**
+(`lost`, `loss*`, `lose*`, `losing`, `delet*`, `purg*`, `expir*`, `gone`, `skipped`, `discard*`,
+`remov*`, `dropped`, `aged`; W4b-2). A root-cause term holding one does not count when, with no
+barrier in between, `nothing`, `none` or `nobody` stands anywhere before it in its part of the
+fragment; `without` or `zero` up to three words before it ("zero data loss", "without any data loss",
+"zero records lost"); or `not`, `n't` or `never` up to three words before it with only `be`, `been`,
+`being`, `yet`, `actually`, `really`, `ever` or `even` in between ("were not lost", "has not yet been
+deleted"). Layer naming does not use this rule. So "nothing was lost", "none of the changes were
+lost", "records were not lost" and "no events since the restart were lost" name no loss, while
+"records were lost before the consumer read them", "the changes that order-sync never read were
+deleted", "messages that weren't consumed expired", "consumer lag is zero yet records were lost" and
+"not all changes were lost" still do. A term that starts with
+a negator (`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
 `healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not `not healthy`) clears what
 comes before it up to the previous `,` or `and`: "Connect is healthy" does not name Connect, while
 "Connect is healthy and order-sync crashes" and "order-sync is stuck on partition 1, partitions 0 and
@@ -393,7 +417,16 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
   denial set off by commas ("it was not, as some thought, the amount") is not seen;
 - a self-answered rhetorical question ("Restarting now? No: it would fail again.", "Why did it fail?
   Because ...") or a quoted "?" counts as asking the driver;
-- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass.
+- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass;
+- loss words (W4b-2): a negator after the loss word ("retention deleted nothing that ...", "retention
+  removed no records", "data loss: none"), a digit zero ("0 records were lost"), a negator out of
+  reach ("I don't see any data loss", "not one record was lost", "it is not true that records
+  were lost") or a hedge after it ("data loss is unlikely") still name the loss; `nobody`, a strong
+  negator, still denies a loss it does not govern ("the records nobody read were deleted"); a
+  barrier after a present-tense verb is not seen ("no events reach the warehouse since the slot was
+  dropped" denies the drop), and a participle after a pronoun counts as a verb ("nothing produced
+  after the restart was deleted" names the loss); a colon inside a time ("01:00") cuts the fragment, so
+  "none of the 01:00-03:00 changes were lost" names the loss.
 
 **Healthy verdict and the judge** (W4d): a healthy verdict is cancelled only by an affirmed, present
 fault. When the verdict's text has both a healthy phrase and such a fault word ("The pipeline is healthy
@@ -408,9 +441,9 @@ the call cap; `-judge llm` asks live; `-judge terms` keeps the keyword grade. Wi
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). A slot or database stall that stops the connector makes kafka-connect the first failing layer and postgres the root cause (ruling R1). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `source_tables` (outside a topic name), topics, `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). A slot or database stall that stops the connector makes kafka-connect the first failing layer and postgres the root cause (ruling R1). A consumer that crash-loops while Kafka answers every read is the first failing component, and Kafka at most the root cause (`consumer-offsets-out-of-range-retention`: consumer, root cause kafka; ruling R14). A healthy-now verdict with a past finding has no first failing layer: leave the field unset (`consumer-duplicates`; ruling R15). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `source_tables` (outside a topic name), topics, `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
-| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (the diagnosis names two: a consumer down for 87 h against a 48 h retention is a consumer story and a retention story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
+| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (`consumer-duplicates`: copies of change events on the topic are a Kafka story, and, since an unclean connector restart usually produces them, a Connect story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
 | `expected_facts` | list | what the diagnosis must rest on, see below |
 | `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts **before** the hypothesis was posted |
