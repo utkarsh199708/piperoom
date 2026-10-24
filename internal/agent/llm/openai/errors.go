@@ -18,13 +18,15 @@ import (
 // maxErrorBody caps APIError.Body.
 const maxErrorBody = 2 << 10
 
-// wireError is an error body: OpenAI and Azure nest it under "error"; vLLM
-// and some proxies put message, type and code at the top level.
+// wireError is an error body: OpenAI, Azure and most hosts nest it under
+// "error"; vLLM, Mistral and some proxies put message, type and code at the
+// top level; xAI sends "error" as the message string beside a "code"
+// sentence.
 type wireError struct {
-	Error   *wireErrorDetail `json:"error"`
-	Message string           `json:"message"`
-	Type    string           `json:"type"`
-	Code    json.RawMessage  `json:"code"`
+	Error   json.RawMessage `json:"error"` // an object (wireErrorDetail) or a string
+	Message string          `json:"message"`
+	Type    string          `json:"type"`
+	Code    json.RawMessage `json:"code"`
 }
 
 type wireErrorDetail struct {
@@ -35,12 +37,18 @@ type wireErrorDetail struct {
 		Code                string                      `json:"code"`
 		ContentFilterResult map[string]wireFilterResult `json:"content_filter_result"`
 	} `json:"innererror"`
+	// Metadata is OpenRouter's: reasons is set when its moderation flagged
+	// the input.
+	Metadata *struct {
+		Reasons []string `json:"reasons"`
+	} `json:"metadata"`
 }
 
 // parsedError is the classification input of an error body.
 type parsedError struct {
 	message, typ, code, innerCode string
 	filter                        map[string]wireFilterResult
+	moderated                     bool // OpenRouter's moderation flagged the input
 }
 
 func parseError(raw []byte) parsedError {
@@ -49,11 +57,23 @@ func parseError(raw []byte) parsedError {
 		return parsedError{message: string(raw)}
 	}
 	p := parsedError{message: w.Message, typ: w.Type, code: codeString(w.Code)}
-	if d := w.Error; d != nil {
+	e := bytes.TrimSpace(w.Error)
+	switch {
+	case len(e) > 0 && e[0] == '"':
+		var msg string
+		if json.Unmarshal(e, &msg) == nil {
+			p.message = msg
+		}
+	case len(e) > 0 && e[0] == '{':
+		var d wireErrorDetail
+		if json.Unmarshal(e, &d) != nil {
+			return parsedError{message: string(raw)}
+		}
 		p.message, p.typ, p.code = d.Message, d.Type, codeString(d.Code)
 		if d.InnerError != nil {
 			p.innerCode, p.filter = d.InnerError.Code, d.InnerError.ContentFilterResult
 		}
+		p.moderated = d.Metadata != nil && len(d.Metadata.Reasons) > 0
 	}
 	return p
 }
@@ -68,23 +88,34 @@ func codeString(raw json.RawMessage) string {
 	return ""
 }
 
-// filteredPrompt answers Azure's 400 content_filter (the prompt tripped the
-// content filter) as a refusal, not an error (design 3): the room reports
-// it as the model refusing. Usage is estimated from the request: the
-// estimate counts against the caps, the safe side.
+// filteredPrompt answers a prompt the host's filter refused as a refusal,
+// not an error (design 3): the room reports it as the model refusing.
+// Azure's 400 content_filter, DashScope's 400 data_inspection_failed, and
+// OpenRouter's 403 with moderation reasons. Usage is estimated from the
+// request: the estimate counts against the caps, the safe side.
 func (m *Model) filteredPrompt(status int, raw []byte, reqBytes int) (llm.Response, bool) {
-	if status != http.StatusBadRequest {
+	if status != http.StatusBadRequest && status != http.StatusForbidden {
 		return llm.Response{}, false
 	}
 	p := parseError(raw)
-	if p.code != "content_filter" && p.innerCode != "ResponsibleAIPolicyViolation" {
+	var detail, stop string
+	switch {
+	case status == http.StatusBadRequest && (p.code == "content_filter" || p.innerCode == "ResponsibleAIPolicyViolation"):
+		detail, stop = filterDetail(p.filter), "content_filter"
+	case status == http.StatusBadRequest && p.code == "data_inspection_failed":
+		detail, stop = "data_inspection_failed", "data_inspection_failed"
+	case status == http.StatusForbidden && m.flavor.name == FlavorOpenRouter && p.moderated:
+		// The reasons are not copied: flagged_input beside them echoes the
+		// prompt, and the category names add nothing the room acts on.
+		detail, stop = "moderation", "moderation"
+	default:
 		return llm.Response{}, false
 	}
 	return llm.Response{
 		Message:      llm.Message{Role: llm.RoleAssistant},
 		Stop:         llm.StopRefusal,
-		StopDetail:   filterDetail(p.filter),
-		ProviderStop: "content_filter",
+		StopDetail:   detail,
+		ProviderStop: stop,
 		Usage:        llm.Usage{Input: estimateTokens(reqBytes), Estimated: true},
 	}, true
 }
@@ -117,6 +148,7 @@ var knownCodes = map[string]bool{
 	"context_length_exceeded": true, "model_not_found": true, "invalid_api_key": true,
 	"unsupported_parameter": true, "unsupported_value": true, "deploymentnotfound": true,
 	"string_above_max_length": true, "tokens_exceeded": true,
+	"arrearage": true, "insufficient_balance": true,
 }
 
 // Kind classifies an error answer by its status and its error code, type
@@ -124,8 +156,9 @@ var knownCodes = map[string]bool{
 //
 //   - 5xx (529 too), 408 and 409 are overloaded; 401 is auth;
 //   - insufficient_quota and billing_hard_limit_reached (OpenAI answers them
-//     with 429), "exceeded your current quota", and any 402 are billing:
-//     they are never retried;
+//     with 429), DashScope's Arrearage (an overdue account, a 400),
+//     "exceeded your current quota", "insufficient balance" and any 402
+//     (DeepSeek, OpenRouter) are billing: they are never retried;
 //   - any other 429 is rate_limited;
 //   - 413, context_length_exceeded, and a 400 about the context length
 //     ("maximum context length", "context window", "too long") are too_long;
@@ -144,7 +177,9 @@ func Kind(status int, code, typ, message string) llm.ErrorKind {
 	case status == http.StatusUnauthorized:
 		return llm.ErrAuth
 	case c == "insufficient_quota" || t == "insufficient_quota" || c == "billing_hard_limit_reached" ||
-		strings.Contains(msg, "exceeded your current quota") || status == http.StatusPaymentRequired:
+		c == "arrearage" || c == "insufficient_balance" ||
+		strings.Contains(msg, "exceeded your current quota") || strings.Contains(msg, "insufficient balance") ||
+		status == http.StatusPaymentRequired:
 		return llm.ErrBilling
 	case status == http.StatusTooManyRequests:
 		return llm.ErrRateLimited

@@ -74,6 +74,7 @@ type flags struct {
 	learned     string
 	failOnRegr  bool
 	check       bool
+	list        bool
 	fromShadow  string
 	owners      string
 	name        string
@@ -134,6 +135,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.agreement, "agreement", "", "FILE-OR-DIR of saved GET /shadow?include=data,room responses: score the agent's final hypothesis against the human label and print the agreement table; offline, never for graders before they grade (-out writes the JSON summary, -judge claude uses the LLM judge)")
 	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
+	fs.BoolVar(&f.list, "list", false, "print the names of the scenarios a run would replay, one per line, without those held out by pending_harness; no model calls (the evals-live workflow counts them with `evalrun -list | wc -l`)")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
 	fs.BoolVar(&f.check, "validate", false, "same as -check")
 	fs.StringVar(&f.fromShadow, "from-shadow", "", "build a scenario from a saved GET /api/rooms/{id}/shadow?include=room response and exit; YAML goes to stdout or -out/-o; no model calls")
@@ -215,8 +217,28 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	// A pending_harness marker whose row has landed is refused by -check and by a
+	// run alike: the scenario must then be scored.
+	if err := evals.CheckPendingHarness(scenarios, evals.FindRepoRoot(".")); err != nil {
+		return 1, err
+	}
+	if f.list {
+		runnable, _ := evals.SplitPending(scenarios)
+		for _, sc := range runnable {
+			fmt.Fprintln(stdout, sc.Name)
+		}
+		return 0, nil
+	}
 	if scenarios, err = filter(scenarios, f.only); err != nil {
 		return 1, err
+	}
+	// Without -only the held-out scenarios are skipped; an explicit -only runs
+	// them, labelled in the report and kept out of the baseline comparison.
+	var heldOut, ranPending []string
+	if f.only == "" && !f.check {
+		scenarios, heldOut = evals.SplitPending(scenarios)
+	} else {
+		ranPending = evals.PendingNames(scenarios)
 	}
 	if f.check {
 		// -check also validates learned/pending/ so a fresh export is at least
@@ -364,6 +386,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		},
 	})
 	usage.Apply(&rep)
+	rep.PendingHarness, rep.PendingHarnessRan = heldOut, ranPending
 	// A stopped or partly failed evaluation still writes what finished.
 	if err := writeReport(rep, f, stdout); err != nil {
 		return 1, errors.Join(runErr, err)
@@ -384,6 +407,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 }
 
 func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
+	// Scenarios held out by pending_harness (skipped, or run by an explicit
+	// -only) are in neither side of the comparison: a skipped one would read as
+	// missing from the candidate, and a pending one cannot regress a baseline
+	// recorded before its harness existed.
+	if skip := append(append([]string(nil), cand.PendingHarness...), cand.PendingHarnessRan...); len(skip) > 0 {
+		base, cand = withoutScenarios(base, skip), withoutScenarios(cand, skip)
+	}
 	subset := f.only != ""
 	total := 0
 	if subset {
@@ -414,6 +444,22 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 		return exitRegressed, nil
 	}
 	return 0, nil
+}
+
+// withoutScenarios is the report with the named scenarios dropped from its rows,
+// results and rates.
+func withoutScenarios(r evals.Report, drop []string) evals.Report {
+	gone := map[string]bool{}
+	for _, n := range drop {
+		gone[n] = true
+	}
+	var keep []string
+	for _, s := range r.Scenarios {
+		if !gone[s.Name] {
+			keep = append(keep, s.Name)
+		}
+	}
+	return r.Restrict(keep)
 }
 
 // liveJudge builds the live LLM judge a run needs. -judge llm (or a
