@@ -81,10 +81,11 @@ func assertKeyNotInChildEnv(t *testing.T, secrets ...string) {
 }
 
 // TestModelKeyChildEnvHelper is the child of assertKeyNotInChildEnv: it prints
-// its environment, and does nothing in a normal test run.
+// its environment. In a normal test run it passes without doing anything: a
+// skip here would fail CI's fail-on-skips gate (it is not a stack skip).
 func TestModelKeyChildEnvHelper(t *testing.T) {
 	if os.Getenv(childEnvProbe) != "1" {
-		t.Skip("helper process of assertKeyNotInChildEnv")
+		return
 	}
 	for _, kv := range os.Environ() {
 		fmt.Fprintln(os.Stdout, kv)
