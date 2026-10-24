@@ -75,7 +75,11 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
-	host := &modelHost{startKeys: quickstart.NewKeys(nil, qs.ModelEnv)}
+	st := memstore.New()
+	host := &modelHost{
+		startKeys: quickstart.NewKeys(nil, qs.ModelEnv),
+		ledger:    standaloneSpendLedger{st: st},
+	}
 	host.wire(ctx, log, qs.Config, prices)
 	run := s.Agent
 	var write agent.HandoffWriter
@@ -85,7 +89,6 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		run = host.Run
 		write = host.WriteHandoff
 	}
-	st := memstore.New()
 	sessions := auth.NewMemStore()
 	deps := room.Deps{
 		Store:        st,

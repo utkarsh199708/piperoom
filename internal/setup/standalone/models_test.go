@@ -5,6 +5,7 @@ package standalone
 // key overlay, and no key ever enters the process or a child's environment.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,32 +64,40 @@ func assertKeyNotInChildEnv(t *testing.T, secrets ...string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestModelKeyChildEnvHelper$")
 	cmd.Env = append(os.Environ(), childEnvProbe+"=1")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("run the child env probe: %v\n%s", err, out)
+	var probeInput bytes.Buffer
+	if err := json.NewEncoder(&probeInput).Encode(secrets); err != nil {
+		t.Fatalf("encode the child env probe input: %v", err)
 	}
-	env := string(out)
-	for _, name := range modelKeyVars {
-		if strings.Contains(env, name+"=") {
-			t.Fatalf("the child process inherited %s", name)
-		}
-	}
-	for _, s := range secrets {
-		if strings.Contains(env, s) {
-			t.Fatalf("the child process inherited a secret value (%d bytes)", len(s))
-		}
+	cmd.Stdin = &probeInput
+	if _, err := cmd.Output(); err != nil {
+		t.Fatalf("run the child env probe: %v", err)
 	}
 }
 
-// TestModelKeyChildEnvHelper is the child of assertKeyNotInChildEnv: it prints
-// its environment. In a normal test run it passes without doing anything: a
-// skip here would fail CI's fail-on-skips gate (it is not a stack skip).
+// TestModelKeyChildEnvHelper is the child of assertKeyNotInChildEnv: it reports
+// only a generic failure if a key or secret is present. In a normal test run
+// it passes without doing anything: a skip here would fail CI's fail-on-skips
+// gate (it is not a stack skip).
 func TestModelKeyChildEnvHelper(t *testing.T) {
 	if os.Getenv(childEnvProbe) != "1" {
 		return
 	}
+	var secrets []string
+	if err := json.NewDecoder(os.Stdin).Decode(&secrets); err != nil {
+		t.Fatal("read the child env probe input")
+	}
+	for _, name := range modelKeyVars {
+		if _, ok := os.LookupEnv(name); ok {
+			t.Fatal("the child process inherited a model key variable")
+		}
+	}
 	for _, kv := range os.Environ() {
-		fmt.Fprintln(os.Stdout, kv)
+		_, value, _ := strings.Cut(kv, "=")
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(value, secret) {
+				t.Fatal("the child process inherited a secret value")
+			}
+		}
 	}
 }
 

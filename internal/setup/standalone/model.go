@@ -18,6 +18,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/quickstart"
+	"piperoom/internal/store"
 	"piperoom/internal/wiring"
 )
 
@@ -30,6 +31,9 @@ var errNoModel = errors.New("setup: no model is configured yet: choose one in th
 // changes the model under a running request.
 type modelHost struct {
 	cur atomic.Pointer[modelEndpoint]
+	// ledger is shared by every picker endpoint, so replacing a model does
+	// not reset a room's token budget.
+	ledger agent.SpendLedger
 	// build makes a candidate endpoint for the picker (quickstart.BuildFunc).
 	build quickstart.BuildFunc
 	// startKeys are the picker's keys at start (model.env's stored key over
@@ -164,9 +168,10 @@ func (h *modelHost) wire(ctx context.Context, log *slog.Logger, cfg config.Confi
 			err = reqCtx.Err()
 		}
 		if err == nil {
-			// Prices alone: standalone keeps no pipeline daily caps, so no
-			// ledger; usage events still carry the cost.
-			err = ep.SetSpend(agent.SpendOptions{Prices: prices})
+			// The standalone room store is in memory; sharing it as the spend
+			// ledger keeps room totals across picker endpoint replacements. No
+			// pipeline daily caps are enabled here.
+			err = ep.SetSpend(agent.SpendOptions{Prices: prices, Ledger: h.ledger})
 		}
 		if err != nil {
 			cancel()
@@ -180,4 +185,43 @@ func (h *modelHost) wire(ctx context.Context, log *slog.Logger, cfg config.Confi
 	} else {
 		commit()
 	}
+}
+
+// standaloneSpendLedger adapts the standalone room store's spend records to
+// the agent's budget contract.
+type standaloneSpendLedger struct {
+	st store.SpendStore
+}
+
+// AddSpend records an endpoint's estimate or finished model usage in the
+// standalone room store, shared by all picker endpoints.
+func (l standaloneSpendLedger) AddSpend(ctx context.Context, c agent.SpendChange) (agent.SpendTotals, error) {
+	sc := store.SpendChange{
+		RoomID:     c.RoomID,
+		PipelineID: c.PipelineID,
+		Day:        c.Day,
+		Tokens:     c.Tokens,
+		CostMicros: c.CostMicros,
+	}
+	if c.Call != nil {
+		sc.Call = &store.SpendCall{
+			Model:                    c.Call.Model,
+			InputTokens:              c.Call.InputTokens,
+			CacheCreationInputTokens: c.Call.CacheCreationInputTokens,
+			CacheReadInputTokens:     c.Call.CacheReadInputTokens,
+			OutputTokens:             c.Call.OutputTokens,
+			CostMicros:               c.Call.CostMicros,
+			Priced:                   c.Call.Priced,
+		}
+	}
+	t, err := l.st.AddSpend(ctx, sc)
+	if err != nil {
+		return agent.SpendTotals{}, err
+	}
+	return agent.SpendTotals{
+		RoomTokens:         t.RoomTokens,
+		RoomCostMicros:     t.RoomCostMicros,
+		PipelineTokens:     t.PipelineTokens,
+		PipelineCostMicros: t.PipelineCostMicros,
+	}, nil
 }
