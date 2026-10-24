@@ -455,6 +455,8 @@ var layerTerms = map[string][]string{
 	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
 	"consumer":        {"consumer*"},
 	"warehouse":       {"warehouse*", "sink table"},
+	// The MySQL source (Q0 item 7, Q8j). tokenize splits "MySQL" into "my sql".
+	"mysql": {"mysql*", "my sql", "binlog*", "binary log*", "gtid*"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its

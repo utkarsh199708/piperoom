@@ -576,7 +576,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		}
 	}
 
+	// Q7e: the follower of opened fix PRs; nil with FORGE_KIND empty.
+	prReader, err := forgeSetup(cfg, own, log)
+	if err != nil {
+		return err
+	}
+
 	svc := newRoomService(room.Deps{
+		PullRequests:      prReader,
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,

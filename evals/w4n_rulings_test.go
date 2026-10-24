@@ -28,15 +28,19 @@ func TestW4nLayerLabels(t *testing.T) {
 		// R1: Postgres answers every read; the task that never gets past
 		// start is the first failing layer, Postgres the root cause.
 		{"blocked-slot", "kafka-connect", "postgres", nil},
-		// R2: no relabel (P3-W3d-2 stands).
-		{"consumer-offsets-out-of-range-retention", "kafka", "kafka", []string{"consumer"}},
+		// R1, same reading (W4n-2, KAN-497): the failed task fails first, the
+		// slot lost in the failover is the root cause.
+		{"replication-slot-lost-failover", "kafka-connect", "postgres", nil},
+		// R14 (W4n-3, amends R2): order-sync's own read shows it failed
+		// (crash loop); Kafka answers every read, so it is the root cause.
+		{"consumer-offsets-out-of-range-retention", "consumer", "kafka", nil},
 		// R3: the uncompacted offsets topic is the most upstream component
 		// that no longer does its job. Both root-cause readings stay accepted.
 		{"internal-topic-not-compacted", "kafka", "kafka", []string{"kafka-connect"}},
 	}
 	for _, tt := range tests {
 		e := w4nScenario(t, tt.scenario).Expect
-		if e.FirstFailingLayer != tt.first || e.RootCauseLayer != tt.root || !slices.Equal(e.RootCauseLayerAlt, tt.alt) {
+		if e.FirstFailingLayer != tt.first || e.RootCauseLayer != tt.root || !slices.Equal(e.RootCauseLayerAlt, tt.alt) || (tt.alt == nil && len(e.RootCauseLayerAlt) > 0) {
 			t.Errorf("%s: first %q root %q alt %v, want %q %q %v", tt.scenario,
 				e.FirstFailingLayer, e.RootCauseLayer, e.RootCauseLayerAlt, tt.first, tt.root, tt.alt)
 		}
@@ -176,6 +180,7 @@ func TestW4nBudgets(t *testing.T) {
 		"sink-connector-paused-warehouse-stale":   17, // run 40044762858: 15 calls
 		"long-room-compaction":                    18, // run 40043247389: 16 calls
 		"internal-topic-not-compacted":            14, // run 40044762858 also failed the layer: not a passing path
+		"blocked-slot":                            21, // R18 (W4n-3): run 40066306931: 19 calls, budget only
 	} {
 		if got := w4nScenario(t, name).Expect.MaxToolCalls; got != want {
 			t.Errorf("%s: max_tool_calls = %d, want %d", name, got, want)

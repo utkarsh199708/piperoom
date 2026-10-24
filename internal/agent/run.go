@@ -15,6 +15,7 @@ import (
 
 	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/runbooks"
 )
@@ -59,6 +60,10 @@ type runner struct {
 	// kind is the room's pipeline kind, normalised (RoomKind): it picks the
 	// system prompt section and the verification of a fix.
 	kind string
+	// source is the room's source kind, normalised (SourceKind): postgres or
+	// mysql. It picks the CDC prompt's source wording, and the layer and
+	// description of each action propose_fix lists (Q8g).
+	source string
 	// mode is the room's mode for wording (P2d). It defaults to write mode on;
 	// the room service fills it once the contract change lands (see mode.go).
 	mode  RoomMode
@@ -137,6 +142,16 @@ type runner struct {
 	// repeated input reports it instead of checking again. Lost on restart.
 	driverVerdicts map[string]bool
 
+	// repos are the room pipeline's owners.yaml repos: when the room offers
+	// the fix PR (scopeForge), nil otherwise (Q7f, fixpr.go).
+	repos []owners.Repo
+	// deferred are the fix-PR proposals the run follows, by id; applies runs
+	// their apply waits and applyResults holds the finished ones until the
+	// loop handles them. Only applies is touched by another goroutine.
+	deferred     map[string]*deferredProposal
+	applies      *applyWaits
+	applyResults map[string]applyDone
+
 	// compact is the client-side compaction state (compaction.go); off on a
 	// model that compacts on the server.
 	compact compactor
@@ -188,6 +203,19 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		return nil, err
 	}
 	deps.Actions = kindActions
+	// Then only the tools and actions of the room's source kind (Q8g): a
+	// MySQL room offers no pg_* name and a Postgres room no mysql_* one. The
+	// kind is read off the registry until Alert carries it (sourcekind.go).
+	source, err := RoomSourceKind(deps.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if deps.Tools, err = ToolsForSource(deps.Tools, source); err != nil {
+		return nil, err
+	}
+	if deps.Actions, err = ActionsForSource(deps.Actions, source); err != nil {
+		return nil, err
+	}
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
 	}
@@ -215,6 +243,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	return &runner{
 		alert:     alert,
 		kind:      kind,
+		source:    source,
 		mode:      RoomMode{Write: true},
 		deps:      deps,
 		opts:      opts,
@@ -227,15 +256,23 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		gaps:      gaps,
 		causes:    newExternalCauses(alert, time.Now()),
 		versions:  newVersionReads(),
+		applies:   newApplyWaits(),
 
 		noneSubjects: map[string]bool{},
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions),
+	// Every apply wait (fixpr.go) ends with the run.
+	defer r.applies.stop()
+	if err := r.scopeForge(ctx); err != nil {
+		return err
+	}
+	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
+	setRoomSource(room, r.source)
+	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
-	r.system = systemPromptForMode(r.kind, r.mode)
+	r.system = systemPromptForSource(r.kind, r.source, r.mode)
 	r.initCompaction()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
@@ -494,6 +531,10 @@ func appendUser(messages []llm.Message, blocks ...llm.Part) []llm.Message {
 func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
 	blocks := make([]llm.Part, 0, len(inputs))
 	for _, in := range inputs {
+		if in.Kind == kindApplyChecked {
+			// The runner's own input: its verdict is a [verification] note.
+			continue
+		}
 		text := formatInput(in, idle)
 		blocks = append(blocks, textPart(text))
 		r.compact.noteInput(in, text)
@@ -507,9 +548,9 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 	inputs, err := r.deps.Inbox.Drain(ctx)
 	if err != nil {
 		r.log.Warn("agent: inbox drain failed", "err", err)
-		return r.takeHeld(nil)
+		return r.takeHeld(r.takeApplied())
 	}
-	return r.takeHeld(inputs)
+	return r.takeHeld(append(inputs, r.takeApplied()...))
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
@@ -544,6 +585,7 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			}
 			continue
 		}
+		inputs = append(inputs, r.takeApplied()...)
 		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) {
 			return r.takeHeld(inputs), nil
 		}
@@ -551,7 +593,7 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 		// them for the next batch and wait on.
 		r.held = append(r.held, inputs...)
 		backoff = r.timing.drainBackoffMin
-		if err := r.deps.Inbox.Wait(ctx); err != nil {
+		if err := r.waitInbox(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -635,7 +677,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]llm.Message,
 // a model turn.
 func hasHumanInput(inputs []HumanInput) bool {
 	for _, in := range inputs {
-		if in.Kind != "action_result" && in.Kind != "alert_update" {
+		if in.Kind != "action_result" && in.Kind != "alert_update" && in.Kind != kindApplyChecked {
 			return true
 		}
 	}

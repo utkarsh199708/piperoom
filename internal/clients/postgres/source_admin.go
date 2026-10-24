@@ -14,50 +14,32 @@ import (
 	"piperoom/internal/tools"
 )
 
-// SourceAdminWriter is the admin write contract of the Q board (row Q2b). It
-// is not in internal/clients/clients.go yet (the Q0 gap): this local copy is
-// the exact shape proposed there, and the PR asks for it in a
-// "Contract change request". The writer's admin methods below implement it.
-//
-// It is built only with write mode on, on the SOURCE_DB_WRITE_URL pool, never
-// on the read-only SourceDB pool. No SOURCE_DB_WRITE_URL = no writer
-// (NewWriter answers ErrNoWriter and every method of a nil Writer refuses).
-// The fail-closed scope rule of Writer applies to every method: the room's
-// whole pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped
+// SourceAdminWriter is clients.SourceAdminWriter (Q0 item 2, moved into the
+// contract file by Q8-0). The writer's admin methods below implement it. It
+// is built only with write mode on, on the SOURCE_DB_WRITE_URL pool, never on
+// the read-only SourceDB pool. No SOURCE_DB_WRITE_URL = no writer (NewWriter
+// answers ErrNoWriter and every method of a nil Writer refuses). The
+// fail-closed scope rule of Writer applies to every method: the room's whole
+// pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped
 // opt-out, tools.ErrNoScope / tools.ErrOutOfScope before any I/O. Identifiers
 // are checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted with
 // pgx.Identifier.Sanitize; values are $n parameters; no statement is built
 // from untrusted text.
-type SourceAdminWriter interface {
-	// SetReplicaIdentity sets ALTER TABLE ... REPLICA IDENTITY: mode full |
-	// default | index, where index is the unique index's name and only mode
-	// index takes one.
-	SetReplicaIdentity(ctx context.Context, table, mode, index string) error
-	// GrantSelect grants SELECT and nothing else on tables to role.
-	GrantSelect(ctx context.Context, role string, tables []string) error
-	// CreateHeartbeatTable creates the Debezium heartbeat table if it does
-	// not exist.
-	CreateHeartbeatTable(ctx context.Context, table string) error
-	// EndSession ends the backend pid, refused as ErrSessionChanged when pid
-	// no longer names the session that started at startedAt.
-	EndSession(ctx context.Context, pid int64, startedAt time.Time) error
-}
+type SourceAdminWriter = clients.SourceAdminWriter
 
 var _ SourceAdminWriter = (*Writer)(nil)
 
-// ErrSessionChanged is returned (wrapped) by EndSession when pid no longer
-// names the session that was read: the backend is gone, or the pid now names
-// a session that started at another time. Nothing was terminated. It is the
-// contract's sentinel (Q board item 2); the message keeps the contract's
-// prefix until clients.ErrSessionChanged lands.
-var ErrSessionChanged = errors.New("clients: database session changed since it was read")
+// ErrSessionChanged is clients.ErrSessionChanged: EndSession's pid no longer
+// names the session that was read. Nothing was terminated.
+var ErrSessionChanged = clients.ErrSessionChanged
 
-// ErrSessionProtected is returned (wrapped) by EndSession for a session
-// Piperoom must never end: the write pool's own backend, another session of
-// the writer's role, a walsender (the pipeline's connector or a standby
-// streaming from the source), or a session whose application_name marks it as
-// Piperoom's (piperoom-reader, piperoom-writer). Nothing was terminated.
-var ErrSessionProtected = errors.New("postgres: refusing to end a protected session")
+// ErrSessionProtected is clients.ErrSessionProtected. EndSession returns it
+// (wrapped) for a session Piperoom must never end: the write pool's own
+// backend, another session of the writer's role, a walsender (the pipeline's
+// connector or a standby streaming from the source), or a session whose
+// application_name marks it as Piperoom's (piperoom-reader, piperoom-writer).
+// Nothing was terminated.
+var ErrSessionProtected = clients.ErrSessionProtected
 
 // maxAdminRoleBytes is NAMEDATALEN - 1: longer role names cannot exist, so a
 // longer one is refused before any I/O.

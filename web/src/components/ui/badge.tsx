@@ -30,6 +30,7 @@ const badgeVariants = cva(
         'layer-warehouse': 'bg-layer-warehouse/[.12] text-layer-warehouse',
         'layer-orchestrator': 'bg-layer-orchestrator/[.12] text-layer-orchestrator',
         'layer-transform': 'bg-layer-transform/[.12] text-layer-transform',
+        'layer-mysql': 'bg-layer-mysql/[.12] text-layer-mysql',
       },
       mono: {
         true: 'font-mono text-[11.5px]',
@@ -61,6 +62,8 @@ export const LAYER_VARIANTS: Record<string, BadgeVariant> = {
   warehouse: 'layer-warehouse',
   orchestrator: 'layer-orchestrator',
   transform: 'layer-transform',
+  // Q8: the source layer of a source_kind: mysql pipeline, in place of postgres.
+  mysql: 'layer-mysql',
 }
 
 /** The badge variant for a pipeline layer name; unknown layers get the neutral badge. */
@@ -68,4 +71,15 @@ function layerVariant(layer: string): BadgeVariant {
   return Object.hasOwn(LAYER_VARIANTS, layer) ? LAYER_VARIANTS[layer] : 'neutral'
 }
 
-export { Badge, badgeVariants, layerVariant }
+// Display names of layer ids (docs/design/mysql-source.md §10.5 names the mysql layer "MySQL"). Every other layer
+// shows its id, so the Postgres and Kafka badges read as they always have.
+const LAYER_LABELS: Record<string, string> = {
+  mysql: 'MySQL',
+}
+
+/** The text a layer badge shows: a display name for the layers that have one, else the layer id itself. */
+function layerLabel(layer: string): string {
+  return Object.hasOwn(LAYER_LABELS, layer) ? LAYER_LABELS[layer] : layer
+}
+
+export { Badge, badgeVariants, layerLabel, layerVariant }

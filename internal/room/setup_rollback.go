@@ -232,8 +232,15 @@ func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]
 				"step %d (%s): its recorded rollback names the action %q, which this server does not have",
 				r.PlanIndex+1, cleanPlanName(r.Action), cleanPlanName(op)))
 		}
+		// The undo step's layer comes from the one rule (actions.StepLayer)
+		// with the setup room's provisional pipeline, as createProposal will
+		// check it: never a.Layer() alone (Q7k).
+		layer, err := s.stepLayer(snap, snap.PipelineID, a, params)
+		if err != nil {
+			return nil, nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
+		}
 		ranClass := setupRanClass(snap.Setup, r)
-		undo, err := routeSetupSteps(snap, acts, []events.ProposalStep{{Action: op, Layer: a.Layer(), Params: params}}, false, false, 0, s.now().UTC())
+		undo, err := routeSetupSteps(snap, acts, []events.ProposalStep{{Action: op, Layer: layer, Params: params}}, false, false, 0, s.now().UTC())
 		if err != nil {
 			return nil, nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
 		}
@@ -247,7 +254,7 @@ func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]
 		}
 		steps = append(steps, events.ProposalStep{
 			Action: op,
-			Layer:  a.Layer(),
+			Layer:  layer,
 			Params: params,
 			Description: fmt.Sprintf("undo step %d (%s): %s",
 				r.PlanIndex+1, cleanPlanName(r.Action), cleanPlanName(op)),

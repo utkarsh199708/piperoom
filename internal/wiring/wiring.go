@@ -16,13 +16,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/clients/schemareg"
 	"piperoom/internal/config"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/logtools"
@@ -114,12 +117,22 @@ type Wired struct {
 	// the actions get the whole Connect and Schema Registry clients, and only
 	// then does writers hold anything. A Wired built any other way is read-only.
 	write bool
+	// source is the source kind of the set's CDC pipelines (sourceKindOf):
+	// postgres or mysql. Open sets it after checking it against the source
+	// URLs' scheme; RegisterTools derives it from Owners for a Wired built by
+	// hand. It picks the driver and which source's tools and actions the set
+	// registers (Q8g).
+	source string
 	// lifecycleHosts are the endpoints this set was opened with (Kafka
 	// brokers, Schema Registry, source database): the hosts a connector
 	// created by connect_create_connector may name before any connector of
 	// the pipeline is registered (registerLifecycle).
 	lifecycleHosts []string
 	writers        writeClients
+	// forge is the process's forge (forge.go): the repository tools and
+	// repo_open_pull_request use it; its writer only with write mode on.
+	// Zero (no forge) unless the caller of openClients sets it.
+	forge forgeSet
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.
@@ -258,7 +271,16 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 	if err != nil {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
-	return openClients(ctx, cfg, awsCfg, o, write)
+	fs, err := openForge(cfg, write)
+	if err != nil {
+		return nil, err
+	}
+	w, err := openClients(ctx, cfg, awsCfg, o, write)
+	if err != nil {
+		return nil, err
+	}
+	w.forge = fs
+	return w, nil
 }
 
 // openClients builds one client set from the connection settings of cfg and
@@ -273,8 +295,11 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 // clientOpeners are openClients' constructors; tests replace them to see which
 // clients a set opens without any stack.
 type clientOpeners struct {
-	a2        func(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error)
+	a2 func(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error)
+	// source opens a Postgres source and mysql a MySQL one; the set's source
+	// kind picks which (checkSourceURLs).
 	source    func(ctx context.Context, dsn string) (clients.SourceDB, func(), error)
+	mysql     func(ctx context.Context, dsn string) (clients.SourceDB, func(), error)
 	warehouse warehouseOpeners
 	writers   writerOpeners
 	batch     batchOpeners
@@ -285,6 +310,13 @@ func defaultClientOpeners() clientOpeners {
 		a2: buildA2Clients,
 		source: func(ctx context.Context, dsn string) (clients.SourceDB, func(), error) {
 			src, err := postgres.New(ctx, dsn)
+			if err != nil {
+				return nil, nil, err
+			}
+			return src, src.Close, nil
+		},
+		mysql: func(ctx context.Context, dsn string) (clients.SourceDB, func(), error) {
+			src, err := mysql.New(ctx, dsn)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -312,8 +344,14 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 		return nil, err
 	}
 
+	// The source kind of the set's CDC pipelines must be the source URLs'
+	// scheme (Q8g): a mismatch is a config mistake, refused before any client.
+	srcKind := events.SourceKindPostgres
 	var dm config.DebeziumMetrics
 	if ks.cdc() {
+		if srcKind, err = checkSourceURLs(cfg, o); err != nil {
+			return nil, err
+		}
 		if dm, err = config.ParseDebeziumMetrics(cfg); err != nil {
 			return nil, err
 		}
@@ -348,10 +386,19 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 		}
 		opened = append(opened, a2.Kafka.Close)
 
-		s, closeSrc, err := op.source(ctx, cfg.SourceDBURL)
+		openSrc := op.source
+		if srcKind == events.SourceKindMySQL {
+			openSrc = op.mysql
+		}
+		if openSrc == nil {
+			closeOpened()
+			return nil, fmt.Errorf("wiring: source %s: no client constructor", srcKind)
+		}
+		s, closeSrc, err := openSrc(ctx, cfg.SourceDBURL)
 		if err != nil {
 			closeOpened()
-			return nil, fmt.Errorf("wiring: source postgres: %w", err)
+			// Both clients keep the URL out of their errors.
+			return nil, fmt.Errorf("wiring: source %s: %w", srcKind, err)
 		}
 		src = s
 		opened = append(opened, closeSrc)
@@ -370,7 +417,7 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	var wc writeClients
 	if write && ks.cdc() {
 		var closeWriters func()
-		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, op.writers)
+		wc, closeWriters, err = openWritersFor(ctx, cfg, awsCfg, op.writers, srcKind)
 		if err != nil {
 			closeOpened()
 			return nil, err
@@ -382,6 +429,7 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	w.DebeziumMetrics = dm
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
+	w.source = srcKind
 	w.conn = cfg
 	if ks.cdc() {
 		w.lifecycleHosts = lifecycleHosts(cfg)
@@ -490,6 +538,9 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if !reg.ReadOnly() {
 		return fmt.Errorf("wiring: register tools: %w: registry is not from tools.NewReadOnlyRegistry", tools.ErrNotReadOnly)
 	}
+	if _, err := w.sourceKind(); err != nil {
+		return fmt.Errorf("wiring: register tools: %w", err)
+	}
 	if w.Builder == nil {
 		w.Builder = newTopologyBuilder(w)
 	}
@@ -523,24 +574,78 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // staging is the pipeline's staging client set (X8a, staging.go), handed to
 // the actions as Deps.Staging with write mode on only: off, Deps.Staging is
 // nil whatever is passed, so nothing can be staged.
+//
+// Only the actions of the set's source kind reach areg (Q8g,
+// agent.ActionServesSource): a MySQL set gets no pg_* action
+// (pg_set_replica_identity and every pgactions action), and its actions get
+// the MySQL client as their binlog reader (binlogReader).
 func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging) error {
+	src, err := w.sourceKind()
+	if err != nil {
+		return err
+	}
+	all := actions.NewRegistry()
+	binlog := binlogReader(w)
 	if w.write {
-		if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w), Staging: staging}); err != nil {
+		if err := actions.Register(all, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w), Staging: staging, Binlog: binlog}); err != nil {
 			return err
 		}
-	} else if err := actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)}); err != nil {
+	} else if err := actions.Register(all, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w), Binlog: binlog}); err != nil {
 		return err
 	}
-	if err := registerTuning(areg, w, staging); err != nil {
+	if err := registerTuning(all, w, staging); err != nil {
 		return err
 	}
-	if err := registerP3Actions(areg, w); err != nil {
+	if err := registerP3Actions(all, w); err != nil {
 		return err
 	}
-	if err := registerSourceActions(areg, w); err != nil {
+	if err := registerSourceActions(all, w); err != nil {
 		return err
 	}
-	return registerLifecycle(areg, w)
+	if err := registerLifecycle(all, w); err != nil {
+		return err
+	}
+	if err := registerFixPR(all, w); err != nil {
+		return err
+	}
+	for _, a := range all.All() {
+		if !agent.ActionServesSource(a.Name(), src) {
+			continue
+		}
+		if err := areg.Register(a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// binlogReader is the MySQL source's binlog reader that the Connect actions
+// check a MySQL position and database.server.id against (Q8e): the set's
+// source client on a MySQL set, nil otherwise (a nil interface, never a typed
+// nil: the actions treat a non-nil reader as a MySQL room).
+func binlogReader(w *Wired) mysql.BinlogReader {
+	if w.source != events.SourceKindMySQL || isNilIface(w.Source) {
+		return nil
+	}
+	if b, ok := w.Source.(mysql.BinlogReader); ok {
+		return b
+	}
+	return nil
+}
+
+// sourceKind returns the set's source kind: the one Open checked, or for a
+// Wired built by hand the one its Owners' CDC pipelines have (sourceKindOf),
+// stored on w. Two kinds in one set is an error.
+func (w *Wired) sourceKind() (string, error) {
+	if w.source != "" {
+		return w.source, nil
+	}
+	k, err := sourceKindOf(w.Owners)
+	if err != nil {
+		return "", err
+	}
+	w.source = k
+	return k, nil
 }
 
 // registerTuning registers the performance action connect_tune_throughput

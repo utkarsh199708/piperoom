@@ -18,9 +18,12 @@
 # here, not `start: watcher`: the eval watcher (evals/watcher_start.go, C6) has no Kafka client
 # and accepts connector_down, slot_inactive and slot_wal only.
 #
-# First failing layer: kafka (the topic holds each of the 10 events twice). Root-cause layer:
-# kafka, or kafka-connect (an unclean connector restart that replays from its last flushed
-# offset is the usual producer of such copies; nothing here proves which writer it was).
+# First failing layer: none (ruling R15, tasks/W4-evals-to-100.md, 2026-10-24, refines R4; applied
+# in W4n-3, KAN-497). A healthy-now verdict with a past finding has no component failing now, so
+# first_failing_layer is not set and the layer is not graded. Root-cause layer: kafka (the topic
+# holds each of the 10 events twice), or kafka-connect (an unclean connector restart that replays
+# from its last flushed offset is the usual producer of such copies; nothing here proves which
+# writer it was).
 #
 # Outcome: healthy now, with a past finding (ruling R4, tasks/W4-evals-to-100.md, applied in W4n,
 # KAN-497; prompt rule 7). The sink fully absorbed the redelivery, so "the pipeline is healthy
@@ -724,10 +727,13 @@ expect:
   root_cause:
     # 'same lsn' and dedup* (W4n round 2, run 40044762858): the healthy-now answer R4 rules right
     # ("re-sent a burst of 10 same-LSN events ... the sink deduplicated them") names the copies
-    # that way; "deduplicated" is not a word starting with duplicat*, so the group missed it. The
-    # alert title and the steer still fail the lsn group below.
-    - [duplicat*, twice, redeliver*, republish*, replay*, copies, same lsn, same-lsn, dedup*]
-    - [lsn*, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
+    # that way; "deduplicated" is not a word starting with duplicat*, so the group missed it.
+    # R15 (W4n-3) adds the redelivery wording to both groups: re-sent, resent, sent again, and
+    # at-least-once in the second. The alert title and the steer still fail the second group, and
+    # "inserted twice" or "the application wrote 10 orders twice" still fail (forbidden row, second
+    # group).
+    - [duplicat*, twice, redeliver*, republish*, replay*, copies, same lsn, same-lsn, dedup*, re-sent, resent, sent again]
+    - [lsn*, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload', 'at-least-once', 'at least once', 're-sent', 'resent', 'sent again']
   root_cause_forbidden:
     - ['false positive']
     - ['false alarm']
@@ -738,7 +744,7 @@ expect:
     - [retention, delet*]
     - ['poison pill']
     - [rebalanc*]
-  first_failing_layer: kafka
+  # R15: no first_failing_layer (healthy now, with a past finding); the root-cause layer stays.
   root_cause_layer: kafka
   root_cause_layer_alt: [kafka-connect]
   evidence_tools: [kafka_dup_keys]
