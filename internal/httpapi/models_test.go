@@ -14,6 +14,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/room"
@@ -59,13 +60,13 @@ func gatewayConfig() config.Config {
 	return c
 }
 
-func newModelsServer(t *testing.T, m *fakeModels) (http.Handler, *syncBuf, *memstore.Store) {
+func newModelsServer(t *testing.T, m *fakeModels, opts ...httpapi.Option) (http.Handler, *syncBuf, *memstore.Store) {
 	t.Helper()
 	logs := &syncBuf{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	st := memstore.New()
 	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun, Logger: log})
-	h := httpapi.New(svc, st, log, httpapi.WithModels(m))
+	h := httpapi.New(svc, st, log, append([]httpapi.Option{httpapi.WithModels(m)}, opts...)...)
 	t.Cleanup(h.Close)
 	return h, logs, st
 }
@@ -224,5 +225,52 @@ func TestPutModelsAppliesAndNeverLogsKey(t *testing.T) {
 	rooms, err := st.ListRooms(context.Background())
 	if err != nil || len(rooms) != 0 {
 		t.Fatalf("rooms = %v, %v; the route writes no event", rooms, err)
+	}
+}
+
+// DNS rebinding: a page on evil.example whose name now resolves to 127.0.0.1
+// sends a Host and an Origin that match each other. hostGuard answers 421;
+// with the name on the allow-list the route's own Host check still refuses.
+func TestPutModelsRebindingHostIsRefused(t *testing.T) {
+	rebind := func(r *http.Request) {
+		r.Host = "evil.example:8090"
+		r.Header.Set("Origin", "http://evil.example:8090")
+	}
+	m := &fakeModels{editable: true, solo: "priya"}
+	h, _, _ := newModelsServer(t, m)
+	if w := putModels(h, `{"provider":"anthropic","model":"claude-opus-5-5"}`, rebind); w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("PUT = %d %s, want 421", w.Code, w.Body)
+	}
+	settings := auth.Default()
+	settings.AllowedHosts = []string{"evil.example:8090"}
+	h, _, _ = newModelsServer(t, m, httpapi.WithAuth(settings))
+	if w := putModels(h, `{"provider":"anthropic","model":"claude-opus-5-5"}`, rebind); w.Code != http.StatusForbidden || modelsErrCode(t, w) != "origin" {
+		t.Fatalf("PUT with the host allowed = %d %s, want 403 origin", w.Code, w.Body)
+	}
+	// localhost and [::1] are this machine.
+	for _, host := range []string{"localhost:8090", "[::1]:8090"} {
+		w := putModels(h, `{"provider":"anthropic","model":"claude-opus-5-5"}`, func(r *http.Request) {
+			r.Host = host
+			r.Header.Set("Origin", "http://"+host)
+		})
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT on %s = %d %s", host, w.Code, w.Body)
+		}
+	}
+	if m.calls() != 2 {
+		t.Fatalf("Apply calls = %d, want 2 (the loopback hosts only)", m.calls())
+	}
+}
+
+// A viewer gets 403 viewer on PUT, before Apply.
+func TestPutModelsViewer(t *testing.T) {
+	m := &fakeModels{editable: true, solo: "priya"}
+	e := newOIDCEnv(t, oidcOpts{extra: []httpapi.Option{httpapi.WithModels(m)}})
+	c := e.mustLogin(t, idpViewer)
+	resp := e.do(t, http.MethodPut, "/api/models", `{"provider":"anthropic","model":"claude-opus-5-5"}`, ck(c),
+		"Origin: "+e.srv.URL, "Content-Type: application/json")
+	wantErrCode(t, resp, http.StatusForbidden, "viewer")
+	if m.calls() != 0 {
+		t.Fatal("a viewer reached Apply")
 	}
 }

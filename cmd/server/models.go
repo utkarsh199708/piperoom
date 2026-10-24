@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,10 +45,76 @@ type liveEndpoint struct {
 	// options were built from the start config, so a run on a newer endpoint
 	// gets its model id from here.
 	model string
+	// cancel ends the context the endpoint was built on. Vertex keeps that
+	// context for every later token refresh, so it is cancelled only once
+	// the endpoint is replaced and its last in-flight call has returned.
+	cancel context.CancelFunc
+
+	mu      sync.Mutex
+	refs    int  // calls running on this endpoint
+	retired bool // replaced by a newer endpoint
+	done    bool // cancel called: no new call may start here
 }
 
-func (l *liveModel) install(ep *agent.Endpoint, model string) {
-	l.cur.Store(&liveEndpoint{ep: ep, model: model})
+// acquire counts a call starting on e; false once e's context is cancelled.
+func (e *liveEndpoint) acquire() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.done {
+		return false
+	}
+	e.refs++
+	return true
+}
+
+// release ends a call; the last call on a replaced endpoint cancels it.
+func (e *liveEndpoint) release() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.refs--
+	e.endLocked()
+}
+
+// retire marks e replaced; with no call running it is cancelled now.
+func (e *liveEndpoint) retire() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.retired = true
+	e.endLocked()
+}
+
+func (e *liveEndpoint) endLocked() {
+	if e.retired && e.refs == 0 && !e.done {
+		e.done = true
+		if e.cancel != nil {
+			e.cancel()
+		}
+	}
+}
+
+// install makes ep current. The endpoint it replaces keeps its context until
+// the runs, hand-offs and first looks that started on it end: cancelling it
+// at once would break a long Vertex run's next token refresh.
+// A call that never returns therefore keeps the endpoint it started on, and
+// that endpoint's context, alive until the server ends: the cost of one
+// stale endpoint is accepted over breaking a run mid-way.
+func (l *liveModel) install(ep *agent.Endpoint, model string, cancel context.CancelFunc) {
+	if prev := l.cur.Swap(&liveEndpoint{ep: ep, model: model, cancel: cancel}); prev != nil {
+		prev.retire()
+	}
+}
+
+// acquire returns the current endpoint with a call counted on it (release
+// it when done), nil when none is installed.
+func (l *liveModel) acquire() *liveEndpoint {
+	for {
+		c := l.cur.Load()
+		if c == nil || c.acquire() {
+			return c
+		}
+		// Replaced and cancelled between the load and the count: the
+		// newer endpoint is installed already.
+	}
 }
 
 // ready reports an endpoint is installed.
@@ -55,30 +122,33 @@ func (l *liveModel) ready() bool { return l.cur.Load() != nil }
 
 // Run is agent.Runner.
 func (l *liveModel) Run(ctx context.Context, a agent.Alert, d agent.Deps, o agent.Options) error {
-	c := l.cur.Load()
+	c := l.acquire()
 	if c == nil {
 		return errNoModel
 	}
+	defer c.release()
 	o.Model = c.model
 	return c.ep.Run(ctx, a, d, o)
 }
 
 // WriteHandoff is agent.HandoffWriter.
 func (l *liveModel) WriteHandoff(ctx context.Context, evs []events.Event, o agent.Options) (events.HandoffSummary, error) {
-	c := l.cur.Load()
+	c := l.acquire()
 	if c == nil {
 		return events.HandoffSummary{}, errNoModel
 	}
+	defer c.release()
 	o.Model = c.model
 	return c.ep.WriteHandoff(ctx, evs, o)
 }
 
 // Triage is agent.Triager.
 func (l *liveModel) Triage(ctx context.Context, a agent.Alert, d agent.Deps, o agent.Options) (agent.TriageResult, error) {
-	c := l.cur.Load()
+	c := l.acquire()
 	if c == nil {
 		return agent.TriageResult{}, errNoModel
 	}
+	defer c.release()
 	o.Model = c.model
 	return c.ep.Triage(ctx, a, d, o)
 }
@@ -96,17 +166,29 @@ func (l *liveModel) Forget(roomID string) {
 func wireLive(ctx context.Context, l *liveModel, in wireAgentInput, awsCfg *aws.Config,
 	newAgentEndpoint func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error),
 ) (agentWiring, error) {
-	l.build = func(ctx context.Context, cfg config.Config) (func(), error) {
-		ep, err := newAgentEndpoint(ctx, cfg, in.log, awsCfg)
+	// The endpoint lives on the server's context, not the PUT's: Vertex
+	// (Claude and Gemini) keeps the build context for later token refreshes,
+	// and a request context ends with the response. The request only bounds
+	// the build and its probe.
+	srvCtx := ctx
+	l.build = func(reqCtx context.Context, cfg config.Config) (func(), func(), error) {
+		bctx, cancel := context.WithCancel(srvCtx)
+		stop := context.AfterFunc(reqCtx, cancel)
+		ep, err := newAgentEndpoint(bctx, cfg, in.log, awsCfg)
+		if !stop() && err == nil {
+			// The request ended during the build, which cancelled bctx.
+			err = reqCtx.Err()
+		}
+		if err == nil {
+			err = ep.SetSpend(in.spend.options(in.spendStore, in.usage))
+		}
 		if err != nil {
-			return nil, err
+			cancel()
+			return nil, nil, err
 		}
-		if err := ep.SetSpend(in.spend.options(in.spendStore, in.usage)); err != nil {
-			return nil, err
-		}
-		return func() { l.install(ep, cfg.Model) }, nil
+		return func() { l.install(ep, cfg.Model, cancel) }, cancel, nil
 	}
-	if commit, err := l.build(ctx, in.cfg); err != nil {
+	if commit, _, err := l.build(ctx, in.cfg); err != nil {
 		// The agent's start errors name the variable to set, never a key.
 		in.log.Warn("server: no usable model: the server starts without one; choose a model in the web", "reason", err.Error())
 	} else {
@@ -159,16 +241,14 @@ func (teamModels) Apply(context.Context, httpapi.ModelChoice) (httpapi.ModelPane
 }
 
 // modelsOption builds the model routes' option: the picker on a standalone
-// or quickstart server, the read-only panel elsewhere; none in --demo.
+// or quickstart server, the read-only panel elsewhere. --demo gets the
+// read-only panel too, so the web shell's GET /api/models never 404s there.
 func modelsOption(m serveMode, cfg config.Config, prices agent.Prices, live *liveModel, soloUser string, users *room.Users) (httpapi.Option, error) {
-	if m.demo {
-		return nil, nil
-	}
 	supported, err := llm.SupportedModels()
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
-	if live == nil {
+	if live == nil || m.demo {
 		return httpapi.WithModels(teamModels{cfg: cfg, prices: prices, supported: supported}), nil
 	}
 	if soloUser == "" {
