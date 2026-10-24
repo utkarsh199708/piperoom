@@ -311,12 +311,17 @@ func dockerComposeRun(t *testing.T, ctx context.Context, dir string, args ...str
 	return docker(ctx, argv...)
 }
 
-// waitForPostgres polls pg_isready inside the source container.
+// waitForPostgres polls pg_isready inside the source container, over TCP. On
+// a fresh volume the image's entrypoint first runs a temporary server that
+// listens on the Unix socket only, runs its init, and shuts it down before the
+// real server starts: a socket check answers ready for that temporary server,
+// and the next psql can land on "the database system is shutting down". The
+// temporary server never listens on TCP, so 127.0.0.1 is the real one.
 func waitForPostgres(t *testing.T, ctx context.Context, dir string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		if out, code := dockerComposeRun(t, ctx, dir, "exec", "-T", SourceService, "pg_isready", "-U", "piperoom", "-d", "orders"); code == 0 {
+		if out, code := dockerComposeRun(t, ctx, dir, "exec", "-T", SourceService, "pg_isready", "-h", "127.0.0.1", "-U", "piperoom", "-d", "orders"); code == 0 {
 			return
 		} else if time.Now().After(deadline) {
 			t.Fatalf("postgres never became ready:\n%s\n%s", out, stackDiagnostics(ctx, dir))
