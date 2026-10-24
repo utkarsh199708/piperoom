@@ -460,6 +460,20 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The setup check plugin-layout fails: the Debezium Postgres plugin jars sit directly in the Connect worker's plugin root (/kafka/connect) outside their own directory, so the worker's plugin scan misses io.debezium.connector.postgresql.PostgresConnector and pg-orders-connector FAILED with 'Failed to find any class'. Run plugin_install {release: 3.2.0.Final, connector: postgres} (it installs into connect-plugins/debezium-connector-postgres, one plugin per directory), then compose_restart {services: [connect]} so the worker rescans plugin.path.",
 		wrong: "pg-orders-connector failed because its config is invalid after the image upgrade; restart the connector and task 0.",
 	},
+	// The U9d Oracle setup scenarios. Each wrong text tells another of the
+	// three breaks' stories (a revoked grant, the log mode, dropped logging).
+	"setup/no-archivelog": {
+		good:  "Task 0 of ora-orders-connector FAILED at start because the source database runs in NOARCHIVELOG mode: a DBA restarted it at 09:30 with ALTER DATABASE NOARCHIVELOG to keep the recovery area from filling, and LogMiner reads archived redo, so the setup check oracle-archive-log-mode fails with LOG_MODE=NOARCHIVELOG. Switching back is a T3 step in a maintenance window, because it restarts a database the person owns: a DBA runs SHUTDOWN IMMEDIATE, STARTUP MOUNT, ALTER DATABASE ARCHIVELOG and ALTER DATABASE OPEN, with a recovery area sized for the archives (source_alter_system archive_log is the allow-listed op, and the setup writer refuses it on an OPEN instance). Then connect_restart_task for task 0.",
+		wrong: "The LogMiner user C##DBZUSER lost its LOGMINING privilege, so its mining session fails; a DBA grants it again.",
+	},
+	"setup/no-supplemental-logging": {
+		good:  "Task 0 of ora-orders-connector FAILED at start because supplemental logging on the source database was dropped at 09:30: a DBA's redo-volume cleanup removed the database-level minimal supplemental logging and the ALL COLUMNS log group of PIPEROOM.ORDERS, and Debezium checks both before it mines. The setup check oracle-supplemental-logging fails on the minimal logging flag and the missing ALL COLUMNS group. The fix: a DBA runs ALTER DATABASE ADD SUPPLEMENTAL LOG DATA in the CDB root (a DBA step, outside the setup ops), source_create_publication for PIPEROOM.ORDERS adds the ALL COLUMNS group back at T2, then connect_restart_task for task 0. Changes written while the logging was off carry incomplete redo, so a re-snapshot of those rows follows.",
+		wrong: "The database runs in NOARCHIVELOG mode, so LogMiner lacks archived redo; switch it back to ARCHIVELOG.",
+	},
+	"setup/missing-logminer-grant": {
+		good:  "Task 0 of ora-orders-connector FAILED with ORA-01031: insufficient privileges when it started its next LogMiner session at 09:31, because a privilege review revoked LOGMINING from the LogMiner user C##DBZUSER on the source database at 09:30. The setup check oracle-logminer-grants reports C##DBZUSER is missing LOGMINING; its other grants are intact. The fix: a DBA runs GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL, since the user is the person's own (the setup's alternative is its own LogMiner user from source_create_read_role at T2, with the Debezium grant set), then connect_restart_task for task 0.",
+		wrong: "Supplemental logging was dropped on the source, so the connector mines incomplete changes; add it back.",
+	},
 	"setup/wal-level-replica": {
 		good:  "The setup check postgres-wal-level fails: the source Postgres runs with wal_level=replica, so logical decoding and every logical replication slot are unavailable. pg-orders-connector task 0 FAILED with 'logical decoding requires wal_level >= logical'. Set wal_level=logical with source_alter_system and restart the server with source_restart (or re-render the source-postgres template with compose_write when the compose command line pins -c wal_level=replica), then take a new slot and snapshot.",
 		wrong: "The Postgres failover lost the replication slot, so pg-orders-connector task 0 failed; recreate the slot and restart the connector.",
