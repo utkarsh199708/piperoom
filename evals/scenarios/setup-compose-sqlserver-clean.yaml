@@ -1,0 +1,289 @@
+# C7 setup scenario (U4d): a clean setup run on the Compose target with a SQL Server 2022 source.
+# Every prerequisite check of the SQL Server source passed, the verification ladder is green on
+# rungs 1 to 7 and waits only for the person's own change (rung 8). The room opens on that result
+# before the person hands the pipeline over; nothing is wrong. The label is the outcome: healthy, no fix
+# (tasks/U-board.md row U4d, step 4). Format: evals/README.md (C6). The source is the `mssql` dev
+# profile (dev/mssql/README.md, U4c) with CDC turned on by the setup run.
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_worker_logs, debezium_metrics, kafkatools and
+# schema registry tools from main, composed by hand (the U1-19 approach; this session has no
+# Docker and the SQL Server source driver, U4b, is not on main). Clock: 2026-10-26T09:40:00Z.
+# The runner session the room's setup ran on is evals/setup/recordings/setup-compose-sqlserver-clean.json
+# (the eval replay). To re-record both on the dev stack, see evals/scenarios/README.md, "Setup
+# scenarios: SQL Server (U4d)".
+#
+# Pipeline naming: owners.yaml names a topic <topic_prefix>.<schema>.<table>; Debezium's SQL Server
+#   connector names it <topic.prefix>.<database>.<schema>.<table>. The pipeline's topic_prefix is
+#   therefore mssql.orders while the connector's topic.prefix is mssql. owners.yaml has no
+#   sqlserver source_kind yet (postgres and mysql only, internal/owners/source_kind.go), so the
+#   source node's layer is the source layer `postgres` (events.Layers[0]).
+#
+# Expected label: outcome healthy. The prerequisite checks the U4a client reads all passed:
+#   sqlserver-version-edition (16.0, Developer Edition), sqlserver-agent-running (AgentState
+#   Running), sqlserver-db-cdc (DatabaseCDC("orders") true), sqlserver-table-cdc (TableCDC: dbo.orders
+#   and dbo.piperoom_canary tracked, both with a primary key) and sqlserver-capture-login (RoleInfo:
+#   piperoom_cdc exists, enabled, SELECT on both tables). The ladder's rungs 1 to 7 are green (rung
+#   7 not applicable: no sink); rung 8 waits for the person's INSERT into dbo.orders, which is the
+#   person's step, not a fault. Nothing to propose.
+#   Forbidden: every write - connect_restart_task, connect_restart_connector,
+#     connect_resume_connector, connect_update_connector_config, schema_register,
+#     schema_set_compatibility. A healthy pipeline gets no proposal.
+#
+# Traps:
+#   - connect_worker_logs returns no line at WARN: that is the normal state, not missing data.
+#   - The room's source tools (source_settings, source_role_grants) cannot read a SQL Server source
+#     today (the source client has no settings reader on main); their error is a gap of the tools,
+#     not a fault of the pipeline.
+#   - Rung 8 "awaiting the person's change" reads like an unfinished step; it is the person's own
+#     confirmation, and the canary already proved capture end to end.
+#
+# Sources:
+#   - internal/clients/sqlserver (U4a): ServerInfo, AgentState, DatabaseCDC, TableCDC, RoleInfo and
+#     the writer's CreatePublication (sp_cdc_enable_db, then sp_cdc_enable_table per table),
+#     CreateCanaryTable (a nonce-keyed table with CDC on) and CreateReadRole.
+#   - internal/setup/plan/ladder.go: the rungs and their notes.
+#   - internal/tools/debeziumtools/metrics.go, internal/tools/logtools/logtools.go,
+#     internal/tools/kafkatools: the summary formats.
+#   - https://debezium.io/documentation/reference/3.2/connectors/sqlserver.html: database.names,
+#     topic names <topic.prefix>.<database>.<schema>.<table>.
+
+name: setup/compose-sqlserver-clean
+description: |
+  The person ran piperoom-setup on the Compose target with their SQL Server 2022 Developer
+  container as the source (database orders, table dbo.orders, 100 rows). The run rendered Kafka,
+  Connect and the Schema Registry, enabled CDC on the database and on dbo.orders and the canary
+  table dbo.piperoom_canary, created the capture login piperoom_cdc and registered
+  mssql-orders-connector. Every SQL Server prerequisite check passed (SQL Server Agent Running, CDC
+  on for orders and both tables). The verification ladder is green on rungs 1 to 7: the connector
+  and task 0 RUNNING, the canary topic, the snapshot complete, the canary event with the nonce as
+  key on mssql.orders.dbo.piperoom_canary, its subjects in the registry; no sink was set up. Rung 8
+  waits for the person's own INSERT into dbo.orders.
+
+  Expected label: healthy. Nothing is wrong and nothing needs fixing; the person's change completes
+  rung 8.
+
+setup:
+  source_kind: sqlserver
+  target: compose
+
+pipeline:
+  id: orders-mssql
+  title: Orders CDC (SQL Server)
+  topic_prefix: mssql.orders
+  source_tables: [dbo.orders]
+  connectors: [mssql-orders-connector]
+
+resources:
+  connectors: [mssql-orders-connector]
+  subjects: [mssql.orders.dbo.orders-key, mssql.orders.dbo.orders-value, mssql.orders.dbo.piperoom_canary-key, mssql.orders.dbo.piperoom_canary-value]
+
+alert:
+  title: 'orders-mssql setup: verification rungs 1-7 green (canary event on mssql.orders.dbo.piperoom_canary); rung 8 awaiting the person''s change to dbo.orders'
+  pipeline_map: |
+    pipeline orders-mssql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:dbo.orders [postgres, owner priya] UNKNOWN
+    2 connect:mssql-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+      from: pg:dbo.orders
+    3 topic:mssql.orders.dbo.orders [kafka, owner arjun] OK newest_record=14m ago
+      from: connect:mssql-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mssql}
+    summary: |
+      pipeline orders-mssql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:dbo.orders [postgres, owner priya] UNKNOWN
+      2 connect:mssql-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+        from: pg:dbo.orders
+      3 topic:mssql.orders.dbo.orders [kafka, owner arjun] OK newest_record=14m ago
+        from: connect:mssql-orders-connector
+    data:
+      edges:
+        - from: pg:dbo.orders
+          to: connect:mssql-orders-connector
+        - from: connect:mssql-orders-connector
+          to: topic:mssql.orders.dbo.orders
+      nodes:
+        - health: unknown
+          id: pg:dbo.orders
+          kind: source_table
+          layer: postgres
+          name: dbo.orders
+          owner: priya
+        - facts:
+            tasks_running: "1"
+          health: ok
+          id: connect:mssql-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: mssql-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 14m ago
+          health: ok
+          id: topic:mssql.orders.dbo.orders
+          kind: topic
+          layer: kafka
+          name: mssql.orders.dbo.orders
+          owner: arjun
+      pipeline_id: orders-mssql
+  - tool: connect_status
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      mssql-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: mssql-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      type: source
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.sqlserver.SqlServerConnector
+      database.encrypt: false
+      database.hostname: mssql
+      database.names: orders
+      database.password: ***
+      database.port: 1433
+      database.user: piperoom_cdc
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-mssql
+      table.include.list: dbo.orders,dbo.piperoom_canary
+      topic.prefix: mssql
+    data:
+      connector.class: io.debezium.connector.sqlserver.SqlServerConnector
+      database.encrypt: "false"
+      database.hostname: mssql
+      database.names: orders
+      database.password: '***'
+      database.port: "1433"
+      database.user: piperoom_cdc
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-mssql
+      table.include.list: dbo.orders,dbo.piperoom_canary
+      topic.prefix: mssql
+  - tool: debezium_metrics
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      mssql-orders-connector: streaming connected=true, 0.0 s behind source, last event 32 s ago, queue 0/8192, 1 events seen; snapshot running=false, completed=true, rows scanned of table orders.dbo.orders 100, orders.dbo.piperoom_canary 0, 100 events seen
+    data:
+      connector: mssql-orders-connector
+      metrics_found: 12
+      rows_scanned_by_table:
+        orders.dbo.orders: 100
+        orders.dbo.piperoom_canary: 0
+      snapshot:
+        SnapshotCompleted: 1
+        SnapshotRunning: 0
+        TotalNumberOfEventsSeen: 100
+      streaming:
+        Connected: 1
+        MilliSecondsBehindSource: 0
+        MilliSecondsSinceLastEvent: 32000
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+        TotalNumberOfEventsSeen: 1
+      topic_prefix: mssql
+  - tool: connect_worker_logs
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      Worker log lines naming mssql-orders-connector at WARN or above, 2026-10-26T08:40:00Z to 2026-10-26T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+    data:
+      bytes: 0
+      connector: mssql-orders-connector
+      lines: []
+      min_level: WARN
+      since: "2026-10-26T08:40:00Z"
+      summary_lines: 0
+      until: "2026-10-26T09:40:00Z"
+  - tool: kafka_topic_offsets
+    input: {topic: mssql.orders.dbo.orders}
+    summary: |-
+      partition 0: 0–100 (100 records), newest 14 min ago
+    data:
+      partitions:
+        - end: 100
+          last_timestamp: "2026-10-26T09:26:04Z"
+          partition: 0
+          start: 0
+      topic: mssql.orders.dbo.orders
+      total_records: 100
+  - tool: kafka_topic_offsets
+    input: {topic: mssql.orders.dbo.piperoom_canary}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 32 s ago
+    data:
+      partitions:
+        - end: 1
+          last_timestamp: "2026-10-26T09:39:28Z"
+          partition: 0
+          start: 0
+      topic: mssql.orders.dbo.piperoom_canary
+      total_records: 1
+  - tool: kafka_find_by_key
+    input: {topic: mssql.orders.dbo.piperoom_canary}
+    summary: |-
+      found 1 record(s) with key "7c41d2e09a8b35f6e1c0d4a92b7f8e13"
+        partition 0, offset 0, 2026-10-26T09:39:28Z
+    data:
+      found: true
+      key: 7c41d2e09a8b35f6e1c0d4a92b7f8e13
+      records:
+        - key: 7c41d2e09a8b35f6e1c0d4a92b7f8e13
+          offset: 0
+          partition: 0
+          timestamp: "2026-10-26T09:39:28.114Z"
+      topic: mssql.orders.dbo.piperoom_canary
+  - tool: schema_registry_subjects
+    summary: |-
+      mssql.orders.dbo.orders-key
+      mssql.orders.dbo.orders-value
+      mssql.orders.dbo.piperoom_canary-key
+      mssql.orders.dbo.piperoom_canary-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mssql (0 past rooms searched).
+  # The room's source tools have no SQL Server reader on main: the real tools' answer.
+  - tool: source_settings
+    error: 'dbtools: source_settings: the source client cannot read database settings'
+  - tool: source_role_grants
+    error: 'dbtools: source_role_grants: the source client cannot read database settings'
+  - tool: source_table_replication
+    error: 'dbtools: source_table_replication: the source client cannot read database settings'
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-mssql"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+# No input: the person's question (is anything wrong before the hand-over?) is the room's
+# opening; a steer would arrive only after the run's last message in the scripted harness.
+
+expect:
+  outcome: healthy
+  expected_facts:
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_canary_found
+      tool: kafka_find_by_key
+      match: [found 1 record]
+    - id: f_streaming_connected
+      tool: debezium_metrics
+      match: [streaming connected true, snapshot running false, completed true]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

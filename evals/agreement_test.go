@@ -410,6 +410,11 @@ var syntheticLabels = map[string]Label{
 	"setup/wal-level-replica":           {"kafka-connect", []string{"wal_level", "replica"}},
 	"setup/missing-grant":               {"kafka-connect", []string{"devctl_setup_grant", "select on", "needs replication"}},
 	"setup/db-unreachable-from-connect": {"kafka-connect", []string{"192.0.2.1", "black-hole", "etc/hosts"}},
+	// The U4d SQL Server setup scenarios. The alert titles name the rung and
+	// the failing check, not the check's message, so no title states a label
+	// term.
+	"setup/agent-stopped":         {"postgres", []string{"sql server agent", "capture job"}},
+	"setup/cdc-not-enabled-table": {"postgres", []string{"not tracked", "capture instance", "is_tracked_by_cdc"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -584,6 +589,13 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
 	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U4d: the source layer is postgres (owners.yaml has no sqlserver kind).
+	// Both lazy titles name a SQL Server check (the source layer) and no cause.
+	// The agent-stopped wrong text blames the connector (kafka-connect); the
+	// cdc-not-enabled-table one blames the stopped Agent on the source: the
+	// right layer, the wrong cause.
+	"setup/agent-stopped":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/cdc-not-enabled-table": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit
