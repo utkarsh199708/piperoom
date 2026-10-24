@@ -164,7 +164,7 @@ func (r *runner) stopForSetupBound(ctx context.Context, reason string) *BudgetEr
 	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: question})
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: question})
 	used, limit := s.usedLimit(reason)
-	return &BudgetError{Used: used, Limit: limit, scope: budgetSetup, setupReason: reason}
+	return &BudgetError{Used: used, Limit: limit, scope: budgetSetupRun, setupReason: reason}
 }
 
 // usedLimit fills the BudgetError's counts for the reason; the wall clock

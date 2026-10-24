@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/setup/plan"
 )
 
