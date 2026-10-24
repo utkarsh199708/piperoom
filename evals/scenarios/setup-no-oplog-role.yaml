@@ -40,7 +40,7 @@
 #
 # Sources:
 #   - cmd/devctl/setupbreaks_mongo.go: breakNoOplogRole (revokeRolesFromUser('piperoom_cdc',
-#     [{role: 'read', db: 'local'}])), verifyMongoOplogRead's detail "capture user <user> cannot
+#     [{role: 'read', db: 'local'}])), verifyMongoOplogRead's detail "capture user piperoom_cdc cannot
 #     read local.oplog.rs (no read role on local)", check name mongo-oplog-read; fixNoOplogRole
 #     (grantRolesToUser of the same role).
 #   - dev/mongo/init/01-capture-user.js and dev/scenarios.md: "readAnyDatabase never covers
