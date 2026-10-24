@@ -257,11 +257,12 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // id rule folded into the config-setting bullet, a shorter intro, purged
 // binlog and resume lines) bring the prompt back under the CDC ceiling; its
 // fix round (rule 4's "correctly refusing" and <layer> <component> form,
-// rule 5's steer and tool clause) is word-neutral: 1335 words with write
-// mode off, 1334 with it on.
+// rule 5's steer and tool clause) is word-neutral. With KAN-515's hold rule
+// the MySQL prompt is the CDC prompt's size: 1353 words with write mode off,
+// 1352 with it on.
 const (
-	mysqlPromptSHA256         = "13fd169a4f9abf290a1927fb7ca05ac79faaeacee4dc6170367914f18b8176ae"
-	mysqlPromptWriteOffSHA256 = "8af38f23fdc2a685e823db5e0ce23b8e2a0b3e3fc5c83995bd6257061c0f4537"
+	mysqlPromptSHA256         = "6753392d63527b2257c237149edf5048ef8778e04935dab1671d38c635e4d50e"
+	mysqlPromptWriteOffSHA256 = "c8b9bed8cc8af55ff16286faacdc4f38eac45f2c870ac3c19f0fb36a233540ef"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
@@ -279,11 +280,13 @@ func TestSystemPromptSnapshotMySQL(t *testing.T) {
 			t.Fatalf("%s: sha256 = %s, want %s", tt.file, h, tt.sum)
 		}
 		// The CDC word ceiling holds for the MySQL prompt too. #994 raised
-		// it to 1355 for the merge of #934 and #988 (1351 words); W4g's
-		// MySQL-only trims bring the prompt back to 1335, so the ceiling is
-		// the CDC one again.
-		if wc := len(strings.Fields(got)); wc > 1335 {
-			t.Fatalf("%s: %d words, over the 1335 limit", tt.file, wc)
+		// it by 20 for the merge of #934 and #988 (W4h's shared fixes made
+		// the MySQL bullets replace a clause, not a bullet), and KAN-515 by
+		// 20 more for the hold rule; W4g's MySQL-only trims bring the prompt
+		// back to the CDC prompt's size, so the ceiling is the CDC one
+		// again (1355 since KAN-515).
+		if wc := len(strings.Fields(got)); wc > 1355 {
+			t.Fatalf("%s: %d words, over the 1355 limit", tt.file, wc)
 		}
 	}
 }

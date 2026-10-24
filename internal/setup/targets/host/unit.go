@@ -277,26 +277,69 @@ func (d *Driver) javaHome(env ops.Env) (string, error) {
 }
 
 // javaHomeConfined refuses a JDK inside the project directory unless it is
-// under a registered mount directory. The unit runs that JDK on every start,
-// so a JDK file_write could change (jdk/conf/security/java.security, a
-// jdk/lib jar) would let a T1 write alter what the T2-approved service loads.
-// The project directory is compared both as given and with its symlinks
-// resolved, since home is a resolved path.
+// under DistDir, and refuses a project directory inside the JDK. The unit
+// runs that JDK on every start, so a JDK file_write could change
+// (jdk/conf/security/java.security, a jdk/lib jar) would let a T1 write alter
+// what the T2-approved service loads. DistDir is the one directory no T1 op
+// may change (the other mount directories are written by T1 ops such as
+// plugin_install). Directories are compared by identity (os.SameFile), not by
+// spelling, so a symlinked parent, a case-insensitive filesystem or a bind
+// mount cannot make the project look like another directory. Any directory
+// that cannot be examined fails closed.
 func javaHomeConfined(env ops.Env, home string) error {
 	if env.Confine == nil {
 		return errors.New("host: the project root is not open")
 	}
-	dirs := []string{env.Confine.Dir()}
-	if real, err := filepath.EvalSymlinks(dirs[0]); err == nil && real != dirs[0] {
-		dirs = append(dirs, real)
+	project, err := filepath.EvalSymlinks(env.Confine.Dir())
+	if err != nil {
+		return fmt.Errorf("%w: resolving the project directory: %v", ErrDetect, err)
 	}
-	for _, dir := range dirs {
-		rel, err := filepath.Rel(dir, home)
-		if err != nil || !filepath.IsLocal(rel) {
-			continue
+	projectInfo, err := os.Stat(project)
+	if err != nil {
+		return fmt.Errorf("%w: resolving the project directory: %v", ErrDetect, err)
+	}
+	// home is resolved, so it exists; a component that does not (only in a
+	// test, or a JDK removed meanwhile) cannot be the project directory, and
+	// a nonexistent home cannot hold the project. Any other stat error fails
+	// closed.
+	homeInfo, err := os.Stat(home)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: JAVA_HOME %s: %v", ErrDetect, q(home), err)
+	}
+	// The JDK inside the project: some ancestor of home (home included) is
+	// the project directory.
+	for dir := home; ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: JAVA_HOME %s: %v", ErrDetect, q(home), err)
 		}
-		if rel == "." || !ops.MountedPath(filepath.ToSlash(rel), env.MountDirs) {
-			return fmt.Errorf("%w: JAVA_HOME %s is inside the project directory but not under %s/ or another directory file_write cannot change; install the JDK there or outside the project", ErrDetect, q(home), DistDir)
+		if err == nil && os.SameFile(info, projectInfo) {
+			rel, err := filepath.Rel(dir, home)
+			if err != nil {
+				return fmt.Errorf("%w: JAVA_HOME %s: %v", ErrDetect, q(home), err)
+			}
+			first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+			if rel == "." || first != DistDir {
+				return fmt.Errorf("%w: JAVA_HOME %s is inside the project directory but not under %s/, the one directory no T1 op can change; install the JDK there or outside the project", ErrDetect, q(home), DistDir)
+			}
+			break
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	// The project inside the JDK: a file_write would add files to the tree
+	// the unit runs.
+	for dir := filepath.Dir(project); homeInfo != nil; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("%w: resolving the project directory: %v", ErrDetect, err)
+		}
+		if os.SameFile(info, homeInfo) {
+			return fmt.Errorf("%w: the project directory is inside JAVA_HOME %s; move the project out of the JDK", ErrDetect, q(home))
+		}
+		if filepath.Dir(dir) == dir {
+			break
 		}
 	}
 	return nil

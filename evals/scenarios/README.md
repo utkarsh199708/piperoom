@@ -730,6 +730,50 @@ as misses; nothing recorded makes a fix look right and every fix stays forbidden
 reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
 one-line edit in `../agreement_test.go` (C6's) and a judge refill.
 
+### Setup scenarios: SQL Server (U4d)
+
+Three setup scenarios on a SQL Server 2022 source (the `mssql` dev profile, `dev/mssql/README.md`) and the Compose
+target, each with a runner session in `evals/setup/recordings` (the eval replay). Two are built on the U4c
+`devctl setup-break` names; their labels name the failing check (the check names and messages of
+`cmd/devctl/setupbreaks_mssql.go`, which read what the U4a client `internal/clients/sqlserver` reads) and the fix with
+its tier from `tasks/U-board.md` (U4a, U4b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-sqlserver-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every SQL Server check passed | - | outcome `healthy`; no proposal |
+| `setup/agent-stopped` | re-verification failed at `canary_event`; check `sqlserver-agent-running` failed | SQL Server Agent stopped, so the CDC capture job does not run; the connector stays RUNNING | postgres / postgres | `sqlserver-agent-running`; start the Agent: T2 `service_restart` on a host target, a documented ask on this Compose project (the person's container) and on managed SQL; no connector action |
+| `setup/cdc-not-enabled-table` | rung 8 timed out; check `sqlserver-table-cdc` failed | CDC on for the database, `dbo.orders` untracked (its capture instance dropped); the canary table still flows | postgres / postgres | `sqlserver-table-cdc`; `source_create_publication` for `dbo.orders` (T2, `sp_cdc_enable_table`), then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U4a client's DTOs, and the SQL Server driver (U4b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. Conventions the three share, which a re-recording keeps:
+
+- **Layers.** `owners.yaml` has no `sqlserver` source kind yet, so the source database is graded as the source
+  layer, `postgres` (`events.Layers[0]`); `textmatch.go` counts "SQL Server" (and the other setup sources' names,
+  MongoDB and Oracle) as words of that layer.
+- **Topics.** Debezium's SQL Server connector names a topic `<topic.prefix>.<database>.<schema>.<table>`; owners.yaml
+  names it `<topic_prefix>.<schema>.<table>`, so the pipeline's `topic_prefix` is `mssql.orders` while the
+  connector's `topic.prefix` is `mssql`.
+- **Source tools.** The room's `source_settings`, `source_role_grants` and `source_table_replication` have no SQL
+  Server reader on main; the scenarios record their real error ("the source client cannot read database settings"),
+  so a run that tries them sees the gap, and the Agent and table state come from the setup check in the alert.
+- **Titles.** An alert title names the failed rung and the check, not the check's message: the message states the
+  cause, and a title that hands the cause back must not pass (`TestScoringOldVsNew`).
+
+The two breaks set no `expect.fix`: starting the Agent is no room action, and `source_create_publication` is a setup
+runner op, not in `evals.LiveActions`. `setup/agent-stopped` forbids every connector write (the task is RUNNING; a
+restart starts no Agent job); `setup/cdc-not-enabled-table` forbids `pg_add_publication_table` (a Postgres
+publication is not what SQL Server lacks) and the connector writes other than the task restart that follows the
+fix.
+
+To re-record on the dev stack once U4b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mssql up -d --wait mssql`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break agent-stopped` (or `cdc-not-enabled-table`) after the first
+verification, re-verify and re-run the checks. Take the room's tool results from `GET /api/rooms/{id}/export` and
+the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Provider-neutral scenarios (V15)
 
 Three scenarios for the multi-provider model interface (`docs/design/model-providers.md`). All are

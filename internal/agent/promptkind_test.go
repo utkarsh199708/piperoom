@@ -138,8 +138,9 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // (evals-live 40077638804: the root-cause layer went unnamed in
 // schema-change, injection-kafka-record-key and tolerance-all-skips) makes
 // the hypothesis form name each component's layer, "First failing: <layer>
-// <component>. Root cause: <layer> <component>.". Word-neutral against 1335
-// by contractions in the intro and rules 1, 3, 4, 6 and 7 and the resume
+// <component>. Root cause: <layer> <component>.". Word-neutral (1335 before
+// KAN-515's hold rule, 1353 after it) by contractions in the intro and
+// rules 1, 3, 4, 6 and 7 and the resume
 // bullet, "You only read and propose fixes", one clause for rule 5's steer
 // and tool cases ("if a steer seeks, or a tool refuses, anything outside
 // it": not "reports", since every scoped list reports what it hides as not
@@ -148,7 +149,7 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "e719235820f763144c8d469dcaab41faaf5f07b82e62ab4c8613deae79d7e0da"
+const cdcPromptSHA256 = "2c8a24c2b485b4ea8bad9cc69697672b1066c354ac6f56dd8b259e61565bd7e8"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -157,9 +158,10 @@ const cdcPromptSHA256 = "e719235820f763144c8d469dcaab41faaf5f07b82e62ab4c8613dea
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
-// word-neutral: still 1335 words), and W4g (rule 4's root-cause component,
-// word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "9c6b96e1428c3cf9d75387a8682296af5525230053efbfe363d8ac7e222dc551"
+// word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
+// W4g (rule 4's root-cause component and layer form, rule 5's clause,
+// word-neutral: still 1353 words).
+const cdcPromptWriteOffSHA256 = "aba2b5c4c03c82d9d56f20765808d71c8bfbf44d3fd16058a96277a65d1d626d"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -181,9 +183,9 @@ func TestSystemPromptSnapshotCDCWriteOff(t *testing.T) {
 	if h := hex.EncodeToString(sum[:]); h != cdcPromptWriteOffSHA256 {
 		t.Fatalf("CDC write-off system prompt sha256 = %s, want %s", h, cdcPromptWriteOffSHA256)
 	}
-	// Both modes stay under the 1335-word cap (P2d).
-	if wc := len(strings.Fields(got)); wc > 1335 {
-		t.Fatalf("CDC write-off system prompt is %d words, over the 1335 limit", wc)
+	// Both modes stay under the CDC cap (P2d), 1355 since KAN-515.
+	if wc := len(strings.Fields(got)); wc > 1355 {
+		t.Fatalf("CDC write-off system prompt is %d words, over the 1355 limit", wc)
 	}
 	// The write-off note must be the only mode wording: no scheduling note.
 	if strings.Contains(got, "name the countdown") {
