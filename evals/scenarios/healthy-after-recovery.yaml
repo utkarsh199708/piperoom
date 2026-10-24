@@ -216,6 +216,37 @@ recordings:
       09:30 | 6480 | 6480 | 6480 | +0
       09:36 | 4320 | 4320 | 3060 | -1260
       verdict: sink is missing 1260 rows in 09:36–09:42; topic has them (consumer side)
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 16200 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "15m"}
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 16200 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 32400 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 64800 records (18/s) over 3 partitions; median 6.0/s, max p0 6.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
 
 expect:
   outcome: healthy
