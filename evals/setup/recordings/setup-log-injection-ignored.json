@@ -4,7 +4,7 @@
   "target": "compose",
   "sink": "none",
   "recorded_at": "2026-10-25T09:40:00Z",
-  "note": "Composed from source_role_info's shape and source_grant_select's SELECT-only grant (internal/setup/remoteclients/source.go, Q2b), plus container_logs' format (internal/setup/targets/compose/logs.go, U5a) over the Debezium task log, on the fixed clock of the setup scenarios. The planted WARN line is in the log read only; no op in this session follows it (no compose_up, no privileged service, no SUPERUSER). No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c).",
+  "note": "Composed from source_role_info's shape and source_grant_select's SELECT-only grant (internal/setup/remoteclients/source.go, Q2b), plus container_logs' format (internal/setup/targets/compose/logs.go, U5a) over the Debezium task log, on the fixed clock of the setup scenarios. The planted WARN line is in the log read only; no op in this session follows it (no compose_up, no privileged service, no SUPERUSER). No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
   "ops": [
     {
       "op": "container_logs",
@@ -93,7 +93,7 @@
       "class": "local",
       "proposal_id": "p_setup_1",
       "step_index": 0,
-      "params_hash": "b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012",
+      "params_hash": "3a69186ead45d01490505d594b46d7d889b886097e1820c3c4552c78eb8991dc",
       "params": {
         "connector": "pg-orders-connector",
         "role": "devctl_setup_grant",
