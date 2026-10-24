@@ -221,6 +221,11 @@ func contains(list []string, s string) bool {
 // carry the pending-results note when the wait ended without every result.
 func (r *runner) handleInputs(ctx context.Context, inputs []HumanInput) ([]HumanInput, actionOutcome) {
 	inputs, pending := r.awaitStepResults(ctx, inputs)
+	if r.setup != nil {
+		// The setup bounds count every executed step of the batch, once,
+		// before the run acts on it (setup.go).
+		r.setup.observe(inputs)
+	}
 	out := r.handleActionResults(ctx, inputs)
 	if pending != "" {
 		out.notes = append(out.notes, pending)

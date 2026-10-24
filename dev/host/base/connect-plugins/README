@@ -1,0 +1,7 @@
+The Connect plugin directory of this fake host (U8c plugin-path-unset).
+
+A real host target's plugin.path names a directory that plugin_install fills
+with the Debezium connector archive. The U8c checks read plugin.path and that
+this directory exists; a worker loads the connector only from here, so an
+unset plugin.path is the classic "Failed to find any class that implements
+Connector" (dev/scenarios.md, "Setup breaks: host target").

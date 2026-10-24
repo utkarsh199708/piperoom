@@ -25,6 +25,12 @@ import (
 // follow it too: a MySQL set registers no pg_* tool or action, a Postgres set
 // no mysql_* one (agent.ToolServesSource, agent.ActionServesSource).
 
+// servedSourceKinds are the source kinds the wiring builds a client, tools and
+// actions for. owners.yaml also accepts sqlserver, mongodb and oracle (KAN-529)
+// before their clients are wired; Open refuses such a set (KAN-541) instead of
+// handling it as Postgres.
+var servedSourceKinds = []string{events.SourceKindPostgres, events.SourceKindMySQL}
+
 // sourceKindOf returns the source kind of the CDC pipelines o serves:
 // postgres when it has none (a batch-only set, a Wired built by hand with no
 // owners), else their one kind. Two kinds in one set is an error naming the
@@ -117,6 +123,10 @@ func checkSourceURLs(cfg config.Config, o *owners.Owners) (string, error) {
 	kind, err := sourceKindOf(o)
 	if err != nil {
 		return "", err
+	}
+	if !slices.Contains(servedSourceKinds, kind) {
+		return "", fmt.Errorf("wiring: %s: source_kind %s has no source client in this build (want %s); the set would be wired as Postgres",
+			cdcPipelinesLabel(o), kind, strings.Join(servedSourceKinds, " or "))
 	}
 	for _, u := range []struct{ name, raw string }{
 		{"source database URL (SOURCE_DB_URL or connections.source_db_url)", cfg.SourceDBURL},

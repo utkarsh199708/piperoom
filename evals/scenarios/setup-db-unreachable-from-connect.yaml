@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the Connect worker resolves the source's host name to a black-hole
 # address, so its task can never open the database connection although the database is healthy.
-# The label names the failing check and the fixing op (tasks/U-board.md row U1-19, step 1).
+# The label names the failing check and the fixing op (Jira KAN-5 row U1-19, step 1).
 # Format: evals/README.md (C6). Built on `devctl setup-break db-unreachable-from-connect`
 # (dev/scenarios.md, "Setup breaks", PR #880).
 #
@@ -84,21 +84,23 @@
 #   f_server_answers now comes from net_probe's tcp check (Piperoom opens a TCP connection to
 #   postgres:5432), the read the agent used instead of source_settings, so source_settings is no
 #   longer required evidence (W4a: no duplicate evidence); its recording stays.
+# KAN-526 (C18): net_probe now has a connect_resolve check (nettools.ConnectResolveCheck): through
+#   a WorkerResolver it asks the Connect worker what it resolves the running connector's
+#   database.hostname to and whether the first address answers TCP from the worker. The net_probe
+#   {target: source} recording below is that tool's real output over fakes of this world
+#   (nettools scenarioWorld, pinned by TestToolConnectResolveScenarioWorld): the worker resolves
+#   postgres to 192.0.2.1 and the SYN gets no answer within the 3 s step, while Piperoom resolves
+#   172.18.0.2 and connects. f_worker_resolves_black_hole makes that line required evidence.
 
 name: setup/db-unreachable-from-connect
-# Held out until W4c-resolver (lead ruling R10, #939): cause not observable by any read tool. The
-# root cause is the Connect container's name resolution (a stale /etc/hosts entry), and no read
-# shows what the Connect worker resolved postgres to. net_probe's connect_view keeps only Connect's
-# validation messages (internal/tools/nettools/connectview.go). The failed task's trace and any
-# worker log carry the JDK's "Connect timed out" (sun.nio.ch.NioSocketImpl.timedFinishConnect,
-# rethrown unchanged as an InterruptedIOException) under pgjdbc's "The connection attempt failed."
-# (org.postgresql.core.v3.ConnectionFactoryImpl, IOException branch): neither names an address.
-# The setup compose project also has no Loki (connect_worker_logs: not configured), and the
-# runner's net_probe op probes from the runner, not from the Connect container. Live run
-# 40043829982 named the network path, as R10 predicted. -validate refuses this marker once
-# internal/tools/nettools declares ConnectResolveCheck (the follow-up resolver probe; ticket to
-# be opened by the leads).
-pending_harness: W4c-resolver
+# Held out until container-resolve-op (lead ruling on #996, KAN-526; was W4c-resolver under R10).
+# The check that observes the cause exists, but only over fakes: a WorkerResolver needs the
+# setup runner's container_resolve op (KAN-526's contract change request), and no op runs inside
+# the Connect container today, so a live room's net_probe has no connect_resolve line. Scoring
+# the scenario now would credit a capability live rooms lack. The recording and the required
+# fact are ready: -validate refuses this marker once a package under internal/setup declares the
+# runner op container_resolve (evals/pending.go, opDeclared), and the scenario then runs as is.
+pending_harness: container-resolve-op
 description: |
   The person re-ran piperoom-setup after moving the project between hosts. The run stopped at its
   reachability step: check connect-source-reachable fails, because the Connect container resolves
@@ -113,9 +115,11 @@ description: |
   postgres to an address that routes nowhere, so the worker's task can never open a TCP
   connection to postgres:5432, while Piperoom's own DNS and TCP checks reach the database. The
   room's reads show that contrast (net_probe: Connect's view does not finish, Piperoom's dns and
-  tcp pass), not the bad address itself: a hypothesis that places the cause in the Connect
-  container's name resolution (DNS or its hosts file) states the root cause; neither the address
-  192.0.2.1 nor the exact hosts entry is required. Saying only that the task cannot reach
+  tcp pass), and net_probe's connect_resolve check shows the bad address itself: the Connect
+  worker resolves postgres to 192.0.2.1 and TCP to 192.0.2.1:5432 gets no answer, while Piperoom
+  resolves 172.18.0.2. A hypothesis that places the cause in the Connect container's name
+  resolution (DNS or its hosts file) states the root cause; neither the address 192.0.2.1 nor
+  the exact hosts entry is required. Saying only that the task cannot reach
   postgres:5432, or blaming a broken network path without naming name resolution, is the
   symptom, not the cause; a hypothesis that calls DNS fine is wrong.
 
@@ -391,10 +395,16 @@ recordings:
   # the compose network gives the database, as in the runner's post-fix probe); Connect's
   # validation of the running config does not finish within the 3 s step (connectView: Fix is
   # the generic one, Problem the timeout text; no Detail before validation returns).
+  # KAN-526: connect_resolve, generated by the real net_probe code over fakes of this world
+  # (internal/tools/nettools/resolve_test.go, scenarioWorld with the 3 s step; the summary is
+  # pinned there as scenarioSummary): the Connect worker resolves postgres to 192.0.2.1 and its
+  # TCP connect to 192.0.2.1:5432 does not answer within the step. It runs before connect_view,
+  # so the decisive check gets the tool's budget first.
   - tool: net_probe
     input: {target: source}
     summary: |-
-      net_probe source (postgres:5432): 1 of 4 checks failed
+      net_probe source (postgres:5432): 2 of 5 checks failed
+      - connect_resolve postgres:5432 fail: the Connect worker connect resolves postgres to 192.0.2.1, a documentation address that routes nowhere (Piperoom resolves it to 172.18.0.2); TCP from the worker to 192.0.2.1:5432 did not connect within the step's time; fix: the worker resolves postgres differently from Piperoom: check the worker's hosts file (extra_hosts, an edited /etc/hosts) and its DNS servers, then restart the worker so its JVM drops any cached address
       - connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time; fix: check that Connect is up, that the plugin class is installed on every worker, and that the Connect login may validate configs
       - dns postgres:5432 ok: 172.18.0.2
       - tcp postgres:5432 ok: TCP connected
@@ -404,21 +414,27 @@ recordings:
         - addr: postgres:5432
           detail: 172.18.0.2
           id: dns
-          ms: 1
+          ms: 0
           status: ok
         - addr: postgres:5432
           detail: TCP connected
           id: tcp
-          ms: 1
+          ms: 0
           status: ok
         - addr: postgres:5432
           detail: not configured with TLS
           id: tls
           ms: 0
           status: skip
+        - addr: postgres:5432
+          fix: "the worker resolves postgres differently from Piperoom: check the worker's hosts file (extra_hosts, an edited /etc/hosts) and its DNS servers, then restart the worker so its JVM drops any cached address"
+          id: connect_resolve
+          ms: 3001
+          problem: "the Connect worker connect resolves postgres to 192.0.2.1, a documentation address that routes nowhere (Piperoom resolves it to 172.18.0.2); TCP from the worker to 192.0.2.1:5432 did not connect within the step's time"
+          status: fail
         - fix: check that Connect is up, that the plugin class is installed on every worker, and that the Connect login may validate configs
           id: connect_view
-          ms: 3001
+          ms: 3000
           problem: Connect did not finish validating connector pg-orders-connector within the step's time
           status: fail
       endpoints:
@@ -562,8 +578,9 @@ inputs:
 expect:
   root_cause:
     # The Connect side's name resolution (lead ruling R10, #939): what net_probe's contrast shows,
-    # Piperoom's dns and tcp passing while Connect's view of the same host does not finish. The
-    # real tool cannot show what the worker resolved, so the address (192.0.2.1) is not required.
+    # Piperoom's dns and tcp passing while Connect's view of the same host does not finish, and
+    # (KAN-526) connect_resolve's line that the worker resolves postgres to 192.0.2.1. The terms
+    # stay R10's; the address is not required (a change to that is the leads' ruling).
     # No path or symptom word: "network path" and "route*" let the judged-wrong hypotheses of
     # 39994729845 pass, and "cannot reach postgres:5432" alone is the symptom.
     - [resolv*, dns, hosts, name resolution]
@@ -629,9 +646,16 @@ expect:
     - id: f_connect_view_times_out
       tool: net_probe
       match: [connect view fail, did not finish validating]
+    # KAN-526: the cause itself, observed from the worker: it resolves postgres to the black-hole
+    # address, and that address does not answer. Same net_probe read as f_server_answers, so it
+    # adds no call to the budget.
+    - id: f_worker_resolves_black_hole
+      tool: net_probe
+      match: [connect resolve postgres 5432 fail, resolves postgres to 192.0.2.1, did not connect]
+      required: true
   claims:
     - about: root_cause
-      facts: [f_connect_timeout, f_server_answers]
+      facts: [f_connect_timeout, f_server_answers, f_worker_resolves_black_hole]
   # W4c fix round, ruling R9: source_settings leaves (W4a rule: f_server_answers comes from
   # net_probe, so it would be duplicate evidence; run 3 of 39994729845 and run 1 of 40034120325
   # never called it).

@@ -93,6 +93,12 @@ func newFixtureIn(t *testing.T, dir string, opts Options) *fixture {
 	if opts.ResolvePath == nil {
 		opts.ResolvePath = func(p string) (string, error) { return p, nil }
 	}
+	if opts.geteuid == nil {
+		// An unprivileged runner unless a test says otherwise: a CI
+		// container that runs tests as root must not flip every fixture to
+		// the system scope.
+		opts.geteuid = func() int { return 1000 }
+	}
 	drv, err := Register(reg, opts)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
@@ -145,6 +151,10 @@ func (f *fixture) read(name string) string {
 	}
 	return string(b)
 }
+
+// slashed is a host path in the forward slash form a worker properties value
+// carries: the same on Linux, C:/... for a C:\... project directory.
+func slashed(p string) string { return strings.ReplaceAll(p, "\\", "/") }
 
 // distribution lays out a Kafka distribution and both worker files.
 func (f *fixture) distribution() {
@@ -212,18 +222,21 @@ func TestRegisterRefusesUnknownClass(t *testing.T) {
 }
 
 func TestUnsupportedOSRefusesServiceOps(t *testing.T) {
-	f := newFixture(t, Options{GOOS: "windows"})
+	// A target OS this build has no service manager for: no systemd unit, no
+	// service control manager. (Windows is a manager now: row U8b, tested in
+	// winsvc_test.go with a fake and on the Windows dev machine.)
+	f := newFixture(t, Options{GOOS: "plan9"})
 	f.distribution()
 	for _, op := range []string{"service_status", "service_install", "service_restart"} {
 		if _, err := f.run(op, map[string]string{}); !errors.Is(err, ErrUnsupported) {
-			t.Errorf("%s on windows: %v, want ErrUnsupported", op, err)
+			t.Errorf("%s on an OS without a service manager: %v, want ErrUnsupported", op, err)
 		}
 	}
 	if len(f.exec.argvs()) != 0 {
 		t.Errorf("commands ran: %v", f.exec.argvs())
 	}
 	if _, err := f.run("properties_read", map[string]string{"file": "connect-distributed.properties"}); err != nil {
-		t.Errorf("properties_read on windows: %v", err)
+		t.Errorf("properties_read on an OS without a service manager: %v", err)
 	}
 }
 
@@ -236,8 +249,16 @@ var shellNames = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": 
 // internal/setup/ops/shell_ast_test.go): no non-test file imports os/exec or
 // syscall, and every call of an Exec field names a program that is a string
 // constant of this package and not a shell, so argv is the only way a
-// command is built.
+// command is built. Two files are exempt, each for one call into a Windows API
+// that starts a process without a shell: child.go (exec.Command with the argv
+// slice the service template built; a service must keep its child alive and
+// watch its exit, which ops.Env.Exec cannot do) and winsvc_windows.go (syscall
+// for the Win32 error mapping; it starts nothing).
 func TestNoShellExecution(t *testing.T) {
+	exempt := map[string]map[string]bool{
+		"child.go":          {"os/exec": true},
+		"winsvc_windows.go": {"syscall": true},
+	}
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -273,10 +294,17 @@ func TestNoShellExecution(t *testing.T) {
 	}
 	calls := 0
 	for _, f := range files {
+		name := fset.Position(f.Pos()).Filename
+		name = name[strings.LastIndexAny(name, `/\`)+1:]
 		for _, imp := range f.Imports {
-			if p, _ := strconv.Unquote(imp.Path.Value); p == "os/exec" || p == "syscall" || p == "golang.org/x/sys/unix" {
-				t.Errorf("%s imports %s: commands go through ops.Env.Exec with an argv", fset.Position(imp.Pos()), p)
+			p, _ := strconv.Unquote(imp.Path.Value)
+			if p != "os/exec" && p != "syscall" && p != "golang.org/x/sys/unix" {
+				continue
 			}
+			if exempt[name][p] {
+				continue
+			}
+			t.Errorf("%s imports %s: commands go through ops.Env.Exec with an argv", fset.Position(imp.Pos()), p)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)

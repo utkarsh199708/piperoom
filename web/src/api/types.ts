@@ -75,6 +75,8 @@ export type EventType =
   | 'setup.target_classed'
   | 'setup.pipeline_extended'
   | 'setup.maintenance_window'
+  | 'setup.secret_set'
+  | 'setup.credentials_registered'
   | 'setup.verified'
   | 'setup.awaiting_change'
   | 'pipeline.registered'
@@ -913,6 +915,14 @@ export interface SetupTargetInput {
   class?: string // local | shared | production
 }
 
+/** The body of POST /api/rooms/{id}/setup/pipeline: every list is optional; the server merges. */
+export interface SetupPipelineExtendBody {
+  add_connectors?: string[]
+  add_tables?: string[]
+  add_consumer_groups?: string[]
+  add_sink_tables?: string[]
+}
+
 /** POST /api/setup's answer: the room, its single-use pairing code and the line to paste. */
 export interface CreateSetupResponse {
   room: RoomSnapshot
@@ -1045,6 +1055,19 @@ export interface SetupPipelineExtendedPayload {
 export interface SetupMaintenanceWindowPayload {
   start: string
   end: string
+}
+
+/** setup.secret_set: the runner stored a secret or the driver sent one; the value is in no event. */
+export interface SetupSecretSetPayload {
+  name: string
+  actor?: string
+}
+
+/** setup.credentials_registered: the runner's Credentials frame landed; names only, never values. */
+export interface SetupCredentialsRegisteredPayload {
+  pipeline_id: string
+  names: string[]
+  runner_label: string
 }
 
 /** pipeline.registered: the owners entry was written (or opened as a PR); `watched_by` is server | local. */

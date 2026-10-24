@@ -2,35 +2,56 @@
 // docs/design/setup-agent.md §2.5 and §5): a Kafka Connect worker that runs
 // from a Kafka distribution under the project directory as a service of the
 // host's service manager. On Linux that is a user-level systemd unit
-// (`systemctl --user`); the Windows service of row U8b slots in behind the
-// same ops as another serviceManager.
+// (`systemctl --user`); on Windows it is a service of the service control
+// manager (row U8b, file: winsvc.go), which cannot start java.exe directly:
+// the installed service is a copy of piperoom-setup itself running its
+// run-service subcommand (dispatched by setupcmd.Run, file: servicehost.go),
+// and it supervises the Connect JVM.
 //
 // Ops: service_status, properties_read and journal_tail (T0, row U5a);
-// properties_write (T1, the project directory only); service_install and
-// service_restart (T2).
+// properties_write (T1 for a worker file at the project root; T2 for a worker
+// file outside the project directory, lead ruling on U8a: PropertiesWriteTier);
+// service_install and service_restart (T2).
 //
-// The S1 rule of §2.5 for the unit: service_install takes a service name and
-// a worker mode, nothing else. ExecStart, WorkingDirectory and Environment
-// come from the one unit template (RenderUnit) and from what the driver
-// detects: the project directory, the distribution at kafka/ under it, the
-// worker properties file the mode names, and the JDK the java on PATH
-// resolves to. The template has no User= line (a user unit runs as the
-// runner's own user) and no op param reaches the unit text; a detected path
-// with anything outside a small safe set (a space, %, $, a quote, a backslash,
-// a control character) is refused, never escaped.
+// The S1 rule of §2.5 for the service: service_install takes a service name and
+// a worker mode, nothing else. ExecStart, WorkingDirectory and Environment (the
+// systemd unit) and the exe, its arguments and the JVM argv (the Windows
+// service) come from the driver's templates and from what it detects: the
+// project directory, the distribution at kafka/ under it, the worker properties
+// file the mode names, and the JDK the java on PATH resolves to. No op param
+// reaches the rendered text. A detected path is checked against the shape of
+// the artifact it goes into (pathrule.go): a systemd unit takes POSIX values of
+// safe characters only (a space, %, $, a quote or a backslash is refused,
+// because systemd would split or expand it), while a Windows service definition
+// takes a drive-absolute path with a space or a parenthesis, which
+// mgr.CreateService and the argv slice pass through unchanged.
 //
-// Why user scope only: a system unit file must be root-owned and outside every
-// user-writable directory, or its owner can edit it into a root service. The
-// confinement rule (§2.3) puts every file the runner writes under the project
-// directory, so a system unit linked from there would be exactly that hole. A
-// system-scope install needs a design ruling (a root-owned unit directory
-// outside the project) and is not in this row.
+// Unit scope on Linux (lead ruling on U8a, scope.go): a user unit by default.
+// A system unit file must be root-owned and outside every user-writable
+// directory, or its owner can edit it into a root service, so a project file
+// is never linked into the system manager. A system unit is selected only by
+// detection (the runner runs as root) or by the target class (production),
+// never by a param; its file is written to SystemUnitDir from the same
+// template, and it is installed and restarted only while the project, the
+// distribution, the worker file and the JDK are root-only. A Windows service
+// always installs into the machine's service database and therefore needs an
+// elevated prompt; for the same reason it never runs from the project. Install
+// stages a release into an admin-only home under Program Files (servicehome.go:
+// the runner, the distribution's libs and config, the plugins and a re-validated
+// worker file), checks that only administrators can change the release, the
+// home, the JDK and every directory above them, and points the service at that
+// release; the service runs as its own virtual account (NT SERVICE\<service>,
+// never LocalSystem) with a token that keeps one privilege (winsvc.go,
+// serviceAccountPrefix). A change under the project takes effect at the next
+// service_install. Row U8e documents the account and where to install.
 //
 // The unit file is written to systemd/<unit> under the project directory and
 // linked into the user's unit search path by `systemctl --user enable
-// <absolute path>`. The distribution, the plugin directory and the unit
-// directory are registered as mount directories, so file_write and
-// file_delete can never change what the unit executes or loads.
+// <absolute path>`. On Windows the project holds services/<name>.txt, a marker
+// of the definition install recorded (the record install trusts is the one in
+// the home). The distribution, the plugin directory and the unit and services
+// directories are registered as mount directories, so file_write and
+// file_delete can never change what a service executes or loads.
 //
 // Wiring (one line outside this package, after ops.New(cfg), in place of
 // compose.Register for a room whose SetupRequest.Target is "host"):
@@ -45,6 +66,8 @@ package host
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -75,6 +98,20 @@ const (
 	// DefaultService is the service name when the params name none.
 	DefaultService = "connect"
 
+	// BinDir holds, in a Windows service's release, the copy of
+	// piperoom-setup.exe the service control manager runs (row U8b).
+	BinDir = "bin"
+	// ServiceDir holds the markers of the Windows service definitions
+	// service_install records (the unit file's counterpart).
+	ServiceDir = "services"
+	// RunnerExe is that copy's fixed name.
+	RunnerExe = "piperoom-setup.exe"
+	// RunServiceSubcommand is the subcommand the installed service runs.
+	// setupcmd.Run dispatches it before it parses the runner's flags, and
+	// service_install refuses a binary that is not piperoom-setup, because
+	// only that binary answers it (file: servicehost.go).
+	RunServiceSubcommand = "run-service"
+
 	hostTarget = "host"
 	hostLayer  = "environment"
 )
@@ -99,8 +136,19 @@ var (
 	// ErrDetect: a path the unit needs (the distribution, the worker file,
 	// the JDK, the project directory) is missing or not safe to put in it.
 	ErrDetect = errors.New("host: detection failed")
-	// ErrUnsupported: the service ops have no manager on this OS yet.
+	// ErrUnsupported: this build has no service manager for the target's OS
+	// (the Windows binding is behind a build tag; a test that forces
+	// Options.GOOS="windows" elsewhere reaches this).
 	ErrUnsupported = errors.New("host: service ops are not supported on this OS")
+	// ErrServiceManager: a service control manager call failed or was refused
+	// (no elevated prompt, the service already exists, it is marked for
+	// deletion). The underlying error is wrapped too.
+	ErrServiceManager = errors.New("host: service manager refused")
+	// ErrTierRouting: the step needs a tier above the op's floor (a
+	// properties file outside the project directory is T2) and the
+	// catalogue does not route the op by its params' tier yet
+	// (Options.TierRouted).
+	ErrTierRouting = errors.New("host: the step's tier is not routed")
 )
 
 // Options configures a Driver.
@@ -117,18 +165,37 @@ type Options struct {
 	// unit pins the JDK that java_version reported. nil means
 	// filepath.EvalSymlinks; tests pass a fake.
 	ResolvePath func(string) (string, error)
+	// TierRouted says the catalogue and the server route properties_write
+	// by PropertiesWriteTier, so a step that names a file outside the
+	// project directory reaches the runner only at T2 with the driver's
+	// click. Until that routing lands (the PR's Contract change request:
+	// the registry's Floor and the setup action's Tier read the op's
+	// floor only), it is false and such a file is refused at Validate, so a
+	// T1 step can never write outside the project.
+	TierRouted bool
+
+	// Detection hooks for this package's tests: the runner's effective uid
+	// (nil: os.Geteuid), the system unit directory ("": SystemUnitDir) and a
+	// file's owner (nil: fileOwner). They are unexported, so no wiring and
+	// no param can select the system scope or move its unit directory.
+	geteuid       func() int
+	systemUnitDir string
+	owner         func(fs.FileInfo) (uint64, bool)
 }
 
 // Driver holds the target's options and the registry it registered with.
 type Driver struct {
-	reg     *ops.Registry
-	class   string
-	mgr     serviceManager
-	goos    string
-	resolve func(string) (string, error)
+	reg        *ops.Registry
+	class      string
+	mgr        serviceManager
+	goos       string
+	resolve    func(string) (string, error)
+	scope      UnitScope
+	unitDir    string
+	tierRouted bool
 }
 
-// Register adds the host ops to r and registers the directories the unit
+// Register adds the host ops to r and registers the directories the service
 // executes or loads from as mount directories, so the generic file ops refuse
 // them from the start.
 func Register(r *ops.Registry, opts Options) (*Driver, error) {
@@ -140,15 +207,28 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("host: unknown target class %q", opts.Class)
 	}
-	d := &Driver{reg: r, class: opts.Class, goos: opts.GOOS, resolve: opts.ResolvePath}
+	d := &Driver{reg: r, class: opts.Class, goos: opts.GOOS, resolve: opts.ResolvePath, tierRouted: opts.TierRouted}
 	if d.goos == "" {
 		d.goos = runtime.GOOS
 	}
 	if d.resolve == nil {
 		d.resolve = filepath.EvalSymlinks
 	}
-	if d.goos == "linux" {
-		d.mgr = systemdUser{resolve: d.resolve}
+	geteuid := opts.geteuid
+	if geteuid == nil {
+		geteuid = os.Geteuid
+	}
+	euid := geteuid()
+	d.scope = selectScope(d.goos, euid, opts.Class)
+	d.unitDir = opts.systemUnitDir
+	if d.unitDir == "" {
+		d.unitDir = SystemUnitDir
+	}
+	switch d.goos {
+	case "linux":
+		d.mgr = systemdManager{resolve: d.resolve, scope: d.scope, unitDir: d.unitDir, euid: euid, owner: opts.owner}
+	case "windows":
+		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable, defaultProgramFiles, defaultServiceACL(), defaultTrust())
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},
@@ -158,7 +238,14 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 			return nil, fmt.Errorf("host: registering %s: %w", op.Name(), err)
 		}
 	}
-	for _, dir := range []string{DistDir, PluginDir, UnitDir} {
+	dirs := []string{DistDir, PluginDir, UnitDir}
+	if d.goos == "windows" {
+		// install stages the distribution and the plugins into the service's
+		// release and marks services/<name>.txt: none may become file_write's
+		// target (the release itself is outside the project).
+		dirs = []string{DistDir, PluginDir, ServiceDir}
+	}
+	for _, dir := range dirs {
 		if err := r.RegisterMountDir(dir); err != nil {
 			return nil, fmt.Errorf("host: registering %s as a mount directory: %w", dir, err)
 		}
@@ -177,7 +264,7 @@ func (d *Driver) classOrDefault() string {
 // manager returns the platform's service manager or ErrUnsupported.
 func (d *Driver) manager() (serviceManager, error) {
 	if d.mgr == nil {
-		return nil, fmt.Errorf("%w (%s; the Windows service is row U8b)", ErrUnsupported, d.goos)
+		return nil, fmt.Errorf("%w (%s: this target has a systemd unit on Linux and a service control manager service on Windows)", ErrUnsupported, d.goos)
 	}
 	return d.mgr, nil
 }

@@ -26,9 +26,10 @@ type Pipeline struct {
 	// pipeline's layers with Layers.
 	Kind string `yaml:"kind"`
 	// SourceKind is the optional cdc `source_kind:` (Q8d, source_kind.go):
-	// "postgres" or empty for a Postgres source, "mysql" for a MySQL one. It
+	// "postgres" or empty for a Postgres source, else "mysql", "sqlserver",
+	// "mongodb" or "oracle". It
 	// picks the source layer (Layers()[0]) and refuses the Postgres-only
-	// watch fields on MySQL. Read it with SourceKindOrDefault.
+	// watch fields off Postgres. Read it with SourceKindOrDefault.
 	SourceKind string `yaml:"source_kind"`
 	// TopicPrefix is the Debezium topic prefix; pipeline topics are named
 	// "<TopicPrefix>.<schema>.<table>". A cdc field: a batch pipeline has none.
@@ -382,7 +383,7 @@ func (o *Owners) validate() error {
 		if err := resolveReconcileTables(*p, &w); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
-		if p.IsMySQL() {
+		if p.hasNoSlot() {
 			noSlotSignals(&w)
 		}
 		p.watch = &w

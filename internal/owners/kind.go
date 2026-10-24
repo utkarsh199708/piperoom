@@ -54,7 +54,7 @@ func (p *Pipeline) KindOrDefault() string {
 
 // Layers returns the layers of the pipeline's kind, upstream first
 // (events.LayersOf): the six CDC layers with the source layer of the
-// pipeline's source_kind first ("postgres" or "mysql", source_kind.go) and
+// pipeline's source_kind first ("postgres", "mysql", "sqlserver", "mongodb" or "oracle", source_kind.go) and
 // then environment, or orchestrator, transform and warehouse for batch. It is a new slice on every call, so the caller may keep
 // or change it. A nil pipeline, or one with an unknown Kind, has no layers
 // (nil): a caller must not read that as "every layer", and OwnsAll already

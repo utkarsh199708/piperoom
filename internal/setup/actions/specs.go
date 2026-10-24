@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/setup/protocol"
+	"piperoom/internal/setup/targets/host"
 )
 
 // EnvironmentSpecs is the setup-only action catalogue of this package: the
@@ -72,15 +76,20 @@ func EnvironmentSpecs() []Spec {
 			Name:     "properties_write",
 			Tier:     "T1",
 			Layer:    "environment",
-			Describe: "Write the .env or a worker properties file from an allow-listed key set; a credential key takes a ${secret:name} reference, never a value.",
+			Describe: "Write the .env or a worker properties file from an allow-listed key set; a credential key takes a ${secret:name} reference, never a value. On a host target the file may also be an absolute path outside the project directory named connect-distributed.properties or connect-standalone.properties (T2: the driver's approval).",
 			Schema: objectSchema(map[string]any{
-				"file": map[string]any{"type": "string", "enum": []string{".env", "worker.properties", "connect-distributed.properties"}},
+				"file": map[string]any{"type": "string", "minLength": 1, "maxLength": maxPropertiesPath, "pattern": propertiesFilePattern},
 				"entries": map[string]any{
 					"type": "object", "maxProperties": 64,
 					"additionalProperties": map[string]any{"type": "string", "maxLength": 4096},
 				},
 			}, "file", "entries"),
 			Scope: ScopeFree,
+			// A file outside the project directory is T2 (host target, lead
+			// ruling on U8a); the runner's catalogue raises the floor the
+			// same way (ops.Registry.FloorFor over host's TierFor).
+			CheckParams: checkPropertiesFile,
+			TierFor:     propertiesWriteTier,
 			// No PreviewOp until the runner registers preview_properties_write:
 			// Preview answers "no preview" without a runner round trip.
 		},
@@ -145,6 +154,110 @@ func EnvironmentSpecs() []Spec {
 
 // maxFileWriteBytes mirrors the runner's file_write cap (256 KiB).
 const maxFileWriteBytes = 256 << 10
+
+// maxPropertiesPath mirrors the host target's cap on one path (512 bytes).
+const maxPropertiesPath = 512
+
+// propertiesRootFiles are the files properties_write names by their
+// project-root name: the Compose target's .env and worker.properties, and the
+// host target's two worker files. The runner's target refuses the ones it
+// does not write.
+var propertiesRootFiles = map[string]bool{
+	".env":                           true,
+	"worker.properties":              true,
+	"connect-distributed.properties": true,
+	"connect-standalone.properties":  true,
+}
+
+// propertiesOutsideBases are the base names an absolute properties_write path
+// may have: the host target's worker files (host.workerFiles).
+var propertiesOutsideBases = map[string]bool{
+	"connect-distributed.properties": true,
+	"connect-standalone.properties":  true,
+}
+
+// propertiesFilePattern is the schema's statement of checkPropertiesFile for
+// the model: a project-root name, or an absolute POSIX or drive path ending in
+// a host worker file name.
+const propertiesFilePattern = `^(\.env|worker\.properties|connect-(distributed|standalone)\.properties|(/|[A-Za-z]:[\\/]).*[\\/]connect-(distributed|standalone)\.properties)$`
+
+// propertiesParams is the part of properties_write's params this package
+// reads; the runner decodes them strictly.
+type propertiesParams struct {
+	File string `json:"file"`
+}
+
+// checkPropertiesFile mirrors the host target's path rule without I/O and
+// without the runner's OS: the file is a project-root name, or an absolute
+// path (POSIX, or drive-absolute Windows) that passes host.CheckServicePath,
+// has no empty, dot or dot-dot component, and whose base name is a worker
+// file. The runner re-checks it against the real file system (no symlinked
+// component, not under the project directory, the parent exists).
+func checkPropertiesFile(params json.RawMessage) error {
+	var p propertiesParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("properties_write params: %v", err)
+	}
+	if propertiesRootFiles[p.File] {
+		return nil
+	}
+	if len(p.File) > maxPropertiesPath {
+		return fmt.Errorf("file is longer than %d bytes", maxPropertiesPath)
+	}
+	if !absolutePropertiesPath(p.File) {
+		return fmt.Errorf("file %q is neither a project-root properties file (%s) nor an absolute path", clipText(p.File), ".env, worker.properties, connect-distributed.properties, connect-standalone.properties")
+	}
+	if err := host.CheckServicePath(p.File); err != nil {
+		return fmt.Errorf("file: %v", err)
+	}
+	// Below the root (the leading separator, after a drive letter): every
+	// component is a plain name.
+	rest := p.File
+	if drivePathRE.MatchString(rest) {
+		rest = rest[2:]
+	}
+	parts := strings.FieldsFunc(rest[1:], func(r rune) bool { return r == '/' || r == '\\' })
+	if len(parts) < 2 {
+		return fmt.Errorf("file %q names no directory outside the project", clipText(p.File))
+	}
+	if all := strings.Split(strings.ReplaceAll(rest[1:], `\`, "/"), "/"); len(all) != len(parts) {
+		return fmt.Errorf("file %q has an empty component", clipText(p.File))
+	}
+	for _, c := range parts {
+		if c == "." || c == ".." {
+			return fmt.Errorf("file %q has a dot or dot-dot component", clipText(p.File))
+		}
+	}
+	if base := parts[len(parts)-1]; !propertiesOutsideBases[base] {
+		return fmt.Errorf("file %q outside the project directory must be named connect-distributed.properties or connect-standalone.properties", clipText(p.File))
+	}
+	return nil
+}
+
+// drivePathRE is a drive-absolute Windows path in either separator.
+var drivePathRE = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// absolutePropertiesPath reports whether p has the shape of an absolute path
+// on either OS, as the host target decides it (absoluteShape there).
+func absolutePropertiesPath(p string) bool {
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || drivePathRE.MatchString(p)
+}
+
+// propertiesWriteTier is properties_write's step tier: T1 for a project-root
+// file (both targets), and for an absolute path the host target's own rule,
+// host.PropertiesWriteTier (T2), so the room and the runner compute one tier
+// from one function.
+func propertiesWriteTier(params json.RawMessage) (string, error) {
+	var p propertiesParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return "", fmt.Errorf("properties_write params: %v", err)
+	}
+	if propertiesRootFiles[p.File] && !propertiesOutsideBases[p.File] {
+		// The Compose target's own files: host's rule does not name them.
+		return protocol.TierT1, nil
+	}
+	return host.PropertiesWriteTier(params)
+}
 
 // Register adds every environment action to reg.
 func Register(reg *actions.Registry, deps Deps) error {
