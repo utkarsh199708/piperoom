@@ -54,7 +54,7 @@ func sinkProbeResponse(req *http.Request, status int) *http.Response {
 
 func TestSinkProbeTable(t *testing.T) {
 	const secretQuery = "token=never-return-this"
-	target := events.SetupTarget{Kind: "http", Address: "sink.example:8090"}
+	target := events.SetupTarget{Kind: "host", Address: "sink.example:8090"}
 	cases := []struct {
 		name       string
 		roundTrip  sinkProbeRoundTripper
@@ -91,7 +91,7 @@ func TestSinkProbeTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest?"+secretQuery), []events.SetupTarget{target}, tc.roundTrip)
-			res, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "http"})
+			res, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "sink.example:8090"})
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tc.wantErr)
@@ -113,6 +113,9 @@ func TestSinkProbeTable(t *testing.T) {
 			if err := json.Unmarshal(res.Data, &data); err != nil {
 				t.Fatal(err)
 			}
+			if data.Target != target.Address {
+				t.Fatalf("data target = %q, want %q", data.Target, target.Address)
+			}
 			if tc.wantStatus != 0 && (!data.Reachable || !data.Configured || data.Status != tc.wantStatus) {
 				t.Fatalf("data = %+v", data)
 			}
@@ -120,13 +123,43 @@ func TestSinkProbeTable(t *testing.T) {
 	}
 }
 
+func TestSinkProbeMatchesRegistrationPayload(t *testing.T) {
+	payload := events.SetupTargetRegisteredPayload{
+		Kind:    "host",
+		Address: "sink.example:8090",
+		Class:   "shared",
+		By:      events.Actor{Kind: events.ActorHuman, ID: "driver", Name: "Driver", Verified: true},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target events.SetupTarget
+	if err := json.Unmarshal(raw, &target); err != nil {
+		t.Fatal(err)
+	}
+	rt := sinkProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != target.Address {
+			t.Errorf("request host = %q, want registered address %q", req.URL.Host, target.Address)
+		}
+		return sinkProbeResponse(req, http.StatusNoContent), nil
+	})
+	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{target}, rt)
+	res, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "sink.example:8090"})
+	if err != nil {
+		t.Fatalf("sink_probe: %v", err)
+	}
+	if res.Receipt.Target != target.Address {
+		t.Fatalf("receipt target = %q, want registered address %q", res.Receipt.Target, target.Address)
+	}
+}
 func TestSinkProbeRejectsNon2xx(t *testing.T) {
-	target := events.SetupTarget{Kind: "http", Address: "sink.example:8090"}
+	target := events.SetupTarget{Kind: "host", Address: "sink.example:8090"}
 	rt := sinkProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
 		return sinkProbeResponse(req, http.StatusUnauthorized), nil
 	})
 	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{target}, rt)
-	res, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "http"})
+	res, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "sink.example:8090"})
 	if !errors.Is(err, ErrSinkProbeFailed) {
 		t.Fatalf("err = %v, want ErrSinkProbeFailed", err)
 	}
@@ -139,7 +172,7 @@ func TestSinkProbeRejectsNon2xx(t *testing.T) {
 	}
 }
 func TestSinkProbeBadConfigurationTable(t *testing.T) {
-	target := events.SetupTarget{Kind: "http", Address: "sink.example:8090"}
+	target := events.SetupTarget{Kind: "host", Address: "sink.example:8090"}
 	cases := []struct {
 		name       string
 		properties string
@@ -148,37 +181,37 @@ func TestSinkProbeBadConfigurationTable(t *testing.T) {
 	}{
 		{
 			name:    "missing properties",
-			target:  "http",
+			target:  "sink.example:8090",
 			wantErr: ErrSinkProbeConfig,
 		},
 		{
 			name:       "unsupported sink type",
 			properties: "debezium.sink.type=redis\ndebezium.sink.redis.address=redis.example:6379\n",
-			target:     "http",
+			target:     "sink.example:8090",
 			wantErr:    ErrSinkProbeConfig,
 		},
 		{
 			name:       "missing HTTP URL",
 			properties: "debezium.sink.type=http\n",
-			target:     "http",
+			target:     "sink.example:8090",
 			wantErr:    ErrSinkProbeConfig,
 		},
 		{
 			name:       "URL outside registered target",
 			properties: validSinkProperties("http://elsewhere.example:8090/ingest"),
-			target:     "http",
+			target:     "sink.example:8090",
 			wantErr:    ErrTarget,
 		},
 		{
 			name:       "URL with credentials",
 			properties: validSinkProperties("http://alice:secret@sink.example:8090/ingest"),
-			target:     "http",
+			target:     "sink.example:8090",
 			wantErr:    ErrSinkProbeConfig,
 		},
 		{
 			name:       "duplicate sink key",
 			properties: "debezium.sink.type=http\ndebezium.sink.type=redis\ndebezium.sink.http.url=http://sink.example:8090/ingest\n",
-			target:     "http",
+			target:     "sink.example:8090",
 			wantErr:    ErrSinkProbeConfig,
 		},
 	}
@@ -205,14 +238,14 @@ func TestSinkProbeBadConfigurationTable(t *testing.T) {
 }
 
 func TestSinkProbeRejectsBadInput(t *testing.T) {
-	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{{Kind: "http", Address: "sink.example:8090"}}, nil)
+	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{{Kind: "host", Address: "sink.example:8090"}}, nil)
 	for _, tc := range []struct {
 		name   string
 		params map[string]string
 		want   error
 	}{
 		{name: "missing target", params: map[string]string{}, want: ErrParams},
-		{name: "unregistered target", params: map[string]string{"target": "postgres"}, want: ErrTarget},
+		{name: "unsupported target kind", params: map[string]string{"target": "http"}, want: ErrTarget},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := runOpErr(t, r, "sink_probe", tc.params); !errors.Is(err, tc.want) {
@@ -222,15 +255,21 @@ func TestSinkProbeRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestSinkProbeRejectsUnregisteredHost(t *testing.T) {
+	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), nil, nil)
+	if _, err := runOpErr(t, r, "sink_probe", map[string]string{"target": "169.254.169.254:80"}); !errors.Is(err, ErrTarget) {
+		t.Fatalf("err = %v, want ErrTarget", err)
+	}
+}
 func TestSinkProbeTimeout(t *testing.T) {
 	rt := sinkProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	})
-	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{{Kind: "http", Address: "sink.example:8090"}}, rt)
+	r := newSinkProbeRegistry(t, validSinkProperties("http://sink.example:8090/ingest"), []events.SetupTarget{{Kind: "host", Address: "sink.example:8090"}}, rt)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	params, _ := json.Marshal(map[string]string{"target": "http"})
+	params, _ := json.Marshal(map[string]string{"target": "sink.example:8090"})
 	res, err := r.Execute(ctx, protocol.OpRequest{ID: "op", Op: "sink_probe", Params: params, Tier: protocol.TierT0})
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrSinkProbeFailed) {
 		t.Fatalf("err = %v, want sink probe deadline failure", err)
@@ -243,7 +282,7 @@ func TestSinkProbeTimeout(t *testing.T) {
 func TestSinkProbeRefusesMetadataAddress(t *testing.T) {
 	r, err := New(Config{
 		ProjectDir: t.TempDir(),
-		Targets:    []events.SetupTarget{{Kind: "http", Address: "169.254.169.254:80"}},
+		Targets:    []events.SetupTarget{{Kind: "host", Address: "169.254.169.254:80"}},
 		HTTPClient: &http.Client{Transport: sinkProbeRoundTripper(func(*http.Request) (*http.Response, error) {
 			t.Fatal("request reached a client for a metadata address")
 			return nil, errors.New("unexpected request")
@@ -253,8 +292,8 @@ func TestSinkProbeRefusesMetadataAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	writeFile(t, r.env.ProjectDir, serverPropertiesPath, validSinkProperties("http://169.254.169.254/ingest"))
-	_, err = runOpErr(t, r, "sink_probe", map[string]string{"target": "http"})
+	writeFile(t, r.env.ProjectDir, serverPropertiesPath, validSinkProperties("http://169.254.169.254:80/ingest"))
+	_, err = runOpErr(t, r, "sink_probe", map[string]string{"target": "169.254.169.254:80"})
 	if !errors.Is(err, ErrTarget) {
 		t.Fatalf("err = %v, want ErrTarget", err)
 	}

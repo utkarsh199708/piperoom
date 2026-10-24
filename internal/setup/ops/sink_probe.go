@@ -44,7 +44,7 @@ var ErrSinkProbeFailed = errors.New("ops: sink_probe failed")
 type sinkProbeOp struct{}
 
 type sinkProbeParams struct {
-	// Target is the kind of the registered room target whose address must match
+	// Target is the exact address of the registered host target that must match
 	// the destination in the generated server properties.
 	Target string `json:"target"`
 }
@@ -71,7 +71,7 @@ func (sinkProbeOp) ParamsSchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"required": []string{"target"},
 		"properties": map[string]any{
-			"target": map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
+			"target": map[string]any{"type": "string", "minLength": 1, "maxLength": 512},
 		},
 	}
 }
@@ -95,12 +95,12 @@ func (sinkProbeOp) ParamTarget(params json.RawMessage, env Env) string {
 }
 
 func (sinkProbeOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
-	p, target, err := decodeSinkProbe(params, env)
+	_, target, err := decodeSinkProbe(params, env)
 	if err != nil {
 		return Result{}, err
 	}
 	started := opNow(env)
-	base := sinkProbeData{Sink: "http", Target: clip(target.Kind), Method: http.MethodHead}
+	base := sinkProbeData{Sink: "http", Target: clip(target.Address), Method: http.MethodHead}
 	properties, err := readServerProperties(env)
 	if err != nil {
 		return sinkProbeResult("sink_probe http: server configuration is unavailable", base, started, serverPropertiesPath, env), err
@@ -110,7 +110,7 @@ func (sinkProbeOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 			fmt.Errorf("%w: only the HTTP sink is supported", ErrSinkProbeConfig)
 	}
 	rawURL := properties[serverHTTPSinkURLKey]
-	safeURL, address, err := configuredSinkURL(rawURL, p.Target, env)
+	safeURL, address, err := configuredSinkURL(rawURL, target)
 	if err != nil {
 		return sinkProbeResult("sink_probe http: configured destination is invalid", base, started, serverPropertiesPath, env), err
 	}
@@ -171,15 +171,15 @@ func decodeSinkProbe(params json.RawMessage, env Env) (sinkProbeParams, events.S
 		return p, events.SetupTarget{}, err
 	}
 	p.Target = strings.TrimSpace(p.Target)
-	if p.Target == "" || len(p.Target) > 128 {
-		return p, events.SetupTarget{}, fmt.Errorf("%w: target is required and at most 128 bytes", ErrParams)
+	if p.Target == "" || len(p.Target) > 512 {
+		return p, events.SetupTarget{}, fmt.Errorf("%w: target address is required and at most 512 bytes", ErrParams)
 	}
 	for _, target := range env.Targets {
-		if strings.EqualFold(target.Kind, p.Target) {
+		if strings.EqualFold(target.Kind, "host") && target.Address == p.Target {
 			return p, target, nil
 		}
 	}
-	return p, events.SetupTarget{}, fmt.Errorf("%w: %q is not one of the room's targets", ErrTarget, clip(p.Target))
+	return p, events.SetupTarget{}, fmt.Errorf("%w: target address is not a registered host target", ErrTarget)
 }
 
 // readServerProperties opens U11a's generated properties file through the
@@ -245,7 +245,7 @@ func parseServerProperties(raw []byte) (map[string]string, error) {
 // then rebuilds it with that target's host and port rather than trusting the
 // file's host spelling. The guarded HTTP transport checks DNS-resolved
 // addresses at dial time.
-func configuredSinkURL(raw, targetKind string, env Env) (*url.URL, string, error) {
+func configuredSinkURL(raw string, target events.SetupTarget) (*url.URL, string, error) {
 	if raw == "" || len(raw) > maxURLLength {
 		return nil, "", fmt.Errorf("%w: HTTP sink URL is missing or too long", ErrSinkProbeConfig)
 	}
@@ -256,9 +256,9 @@ func configuredSinkURL(raw, targetKind string, env Env) (*url.URL, string, error
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return nil, "", fmt.Errorf("%w: HTTP sink URL must be http(s), without user info or fragment", ErrSinkProbeConfig)
 	}
-	_, host, port, ok := matchSinkTarget(env, u, targetKind)
+	host, port, ok := matchSinkTarget(target, u)
 	if !ok {
-		return nil, "", fmt.Errorf("%w: configured URL does not match target %q", ErrTarget, clip(targetKind))
+		return nil, "", fmt.Errorf("%w: configured URL does not match the registered host target", ErrTarget)
 	}
 	if port == "" {
 		port = schemeDefaultPort(u.Scheme)
@@ -277,31 +277,23 @@ func configuredSinkURL(raw, targetKind string, env Env) (*url.URL, string, error
 	return safe, hostPort, nil
 }
 
-func matchSinkTarget(env Env, u *url.URL, targetKind string) (events.SetupTarget, string, string, bool) {
+func matchSinkTarget(target events.SetupTarget, u *url.URL) (string, string, bool) {
 	reqHost := strings.ToLower(u.Hostname())
 	reqPort := u.Port()
 	if reqPort == "" {
 		reqPort = schemeDefaultPort(u.Scheme)
 	}
-	for _, target := range env.Targets {
-		if !strings.EqualFold(target.Kind, targetKind) {
-			continue
-		}
-		for _, address := range targetAddresses(target) {
-			host, port := splitTargetAddress(address)
-			if host == "" || !strings.EqualFold(host, reqHost) {
-				continue
-			}
-			effectivePort := port
-			if effectivePort == "" {
-				effectivePort = schemeDefaultPort(u.Scheme)
-			}
-			if effectivePort == reqPort {
-				return target, host, effectivePort, true
-			}
-		}
+	host, port := splitTargetAddress(target.Address)
+	if host == "" || !strings.EqualFold(host, reqHost) {
+		return "", "", false
 	}
-	return events.SetupTarget{}, "", "", false
+	if port == "" {
+		port = schemeDefaultPort(u.Scheme)
+	}
+	if port != reqPort {
+		return "", "", false
+	}
+	return host, port, true
 }
 
 func sinkProbeResult(summary string, data sinkProbeData, started time.Time, target string, env Env) Result {
