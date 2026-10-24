@@ -806,18 +806,17 @@ meaning. Drivers (`go-mssqldb`, the MongoDB Go driver, `go-ora`) are new modules
 - Oracle's prerequisites vary by edition and by `CDB`/`PDB`; the U9 driver covers the free editions and says so
   when it meets another.
 - Windows service ops are estimated, not measured; U1-0 re-estimates after the spike.
-- **Windows service: the person's account can still become the service's account (lead ruling, U8b, #928).** The
-  service runs as `NT SERVICE\<service>`, never LocalSystem, with a token that keeps `SeChangeNotifyPrivilege` only,
-  and `service_install` gives `bin\`, `kafka\`, `connect-plugins\` and `services\` (every file and directory in
-  them) a protected DACL owned by Administrators. Two paths stay open, and the leads accept them for this wave:
-  - the worker properties file at the project root, which `properties_write` (T1) writes unelevated and which names
-    `plugin.path` and the connectors' classes;
-  - the project directory and its parents, which stay the person's: while the service is stopped, that account can
-    rename `bin\` (or the whole project) aside and plant its own, because a rename needs only delete-child on the
-    parent.
-
-  Both give the person's own account code execution as `NT SERVICE\<service>` at the service's next start: not
-  SYSTEM (the token has no `SeImpersonatePrivilege`), but the machine's network identity (`DOMAIN\HOST$`) and a
-  start at boot. U8e tells the operator to install on a host the person does not share. Closing both needs the
-  service's files in an admin-only location outside the project (`%ProgramFiles%`) and an elevated
-  `properties_write` on Windows: a follow-up row, not U8b.
+- **Windows service: nothing it runs is writable by a non-administrator (lead ruling, U8b, #928).** A Windows
+  service is a machine service, so it never runs from the project (the person's workspace, which their account and
+  every unelevated op write). `service_install` (T2, elevated, approved) stages a release into
+  `%ProgramFiles%\Piperoom\<service>\releases\<id>` (Program Files from the known-folder API, never the
+  environment): the runner exe, the distribution's `libs` and `config`, the plugins, and the worker file validated
+  again by the properties allow-list, with `plugin.path` and the offsets file rewritten into the release and the
+  home. The id is the release's content digest, so the preview names what runs; a file that changes between the plan
+  and the copy is refused. The home is Administrators-owned with a protected DACL (the service writes only `logs\`
+  and `data\`), and install checks the release, the home and every directory above them before it records the
+  service. The JDK is not staged: one a non-administrator can change is refused at preview, and the service re-checks
+  its JDK and release at every start. The service runs as `NT SERVICE\<service>` with `SeChangeNotifyPrivilege` only.
+  A change under the project (`properties_write`, `plugin_install`) takes effect at the next `service_install`.
+  No residual escalation path is accepted; any new path the service reads must be staged or trust-checked the same
+  way.
