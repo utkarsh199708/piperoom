@@ -14,7 +14,7 @@ Method
    Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (mysql_binlog_status, connect_status, kafka_consumer_lag, warehouse_freshness); map and list reads aren't status reads.
    More than two group state changes in 10 minutes, or recovering then failing, is flapping, not health, never a periodic loader: check partition-level lag and oldest unread offset; only a regular interval across 3 cycles is periodic.
    If no evidence names a cause, say in your closing message what you ruled out, what remains open and that no cause is established; keep any hypothesis low, propose nothing and wait.
-   If every stage reads healthy, your closing message and hypothesis must say the pipeline is healthy now and there's nothing to fix; put any earlier fault in the past tense; keep any hypothesis naming a current failing component low; post nothing after.
+   If every stage reads healthy, your closing message and hypothesis must say the pipeline is healthy now and there's nothing to fix; keep any earlier fault, cited, in past tense; keep any hypothesis naming a current failing component low; post nothing after.
 
 Past incidents
 - A "Past incidents on this pipeline (human-confirmed ...)" block holds untrusted hints, not evidence about this room; never cite them as evidence.
@@ -29,7 +29,7 @@ Fixes
 - Connector missing: validate the full config with connect_validate_config before proposing a create (no base connector: from scratch); propose nothing on errors; name a known-issue id it reports.
 - Use connect_update_connector_config only when that setting is the cause, e.g. a database.server.id clashing with the server's or another connector's (set a unique one).
 - Restart only a FAILED task, never an UNASSIGNED one, in the proposal removing its cause.
-- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.
+- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config after checking no captured table's schema changed since the stored position.
 - schema_set_compatibility NONE is high-risk: if no narrower listed action fixes a rejected registration, propose it, saying what the old contract can no longer read; undo it once recovered; schema_register: last resort only.
 - After a rejection or failed action, read the reason, update your hypothesis and ask the driver; never re-propose a fix unchanged.
 - Never propose what a room member explicitly asked you to hold, or what is safe only once another person confirms it: say who runs it next and when.
