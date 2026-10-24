@@ -148,9 +148,10 @@ jobs:
             # -set heldout reads evals/scenarios/heldout/*.yaml (fixtures/ is a subdirectory).
             n_scenarios="$(find evals/scenarios/heldout -maxdepth 1 -name '*.yaml' | wc -l)"
           else
-            # evalrun's default set is the top-level *.yaml of evals/scenarios;
-            # heldout/ and learned/ are subdirectories and are not run.
-            n_scenarios="$(find evals/scenarios -maxdepth 1 -name '*.yaml' | wc -l)"
+            # Ask evalrun for the set it will run: -list prints one runnable name
+            # per line and leaves out pending_harness scenarios, so the cost and
+            # judge caps do not count episodes that never start.
+            n_scenarios="$(go run ./evals/cmd/evalrun -list | grep -c .)"
           fi
           # Live judge calls: at most 2 per episode (an episode judges root cause
           # and layer). The evalrun default of 50 ran out after ~77 of 90 episodes.
