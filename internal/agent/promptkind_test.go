@@ -124,10 +124,48 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
 // restart and offsets bullets and "Propose one fix at a time" (the PR lists
 // each word).
+// W4g (KAN-506) moved it a fourteenth time, on purpose, for evals run
+// 39994729845 and the W4h branch run 40071650402 (the agent put the root
+// cause in the component that failed on it: the consumer for a bad record
+// on the topic, the registry for a source change it rejected, the source
+// change for a connector setting that skipped the failures): rule 4's first
+// two sentences stay as the W4f ruling has them, and a sentence before the
+// hypothesis form says the root-cause component holds the fault (malformed
+// record: its topic), though only downstream fails (the example is
+// LEAD-ARCH's after runs=3 40090999753, paid by rule 1's "may differ" for
+// "may have changed"); a safeguard correctly refusing isn't it,
+// a non-default setting disabling one is ("correctly", not "as designed":
+// a validator whose design is the bug stays a candidate cause, LEAD-REVIEW
+// on #993). No scenario's setting or value is named. Its fix round
+// (evals-live 40077638804: the root-cause layer went unnamed in
+// schema-change, injection-kafka-record-key and tolerance-all-skips) makes
+// the hypothesis form name each layer, "First failing: <layer> <component>.
+// Root cause: <layer> <cause>." (the second run, 40085823038, filled a
+// "<layer> <component>" root-cause slot with the failing consumer, so the
+// slot asks for the cause). Word-neutral (1335 before
+// KAN-515's hold rule, 1353 after it) by contractions in the intro and
+// rules 1, 3, 4, 6 and 7 and the resume
+// bullet, "You only read and propose fixes", one clause for rule 5's steer
+// and tool cases ("if a steer seeks, or a tool refuses, anything outside
+// it": not "reports", since every scoped list reports what it hides as not
+// part of the pipeline), and the pause bullet's "cite it", "name the pause
+// as the incident" and "above" (the PR lists each word).
+// W4i (KAN-507) moved it a fifteenth time, on purpose, for evals run
+// 39994729845 and the audit of main run 40076876491: a negative claim needs
+// its read. Rule 1, beside the competing-explanation clause, says "confirm
+// a component with its own read before blaming or clearing it"
+// (sasl-credential-rotated cleared the ACLs without reading them), and rule
+// 3 keeps its general clause as "assert nothing tools didn't return"; the
+// restart bullet restarts only a FAILED task, never an UNASSIGNED one, in
+// the proposal removing its cause (blocked-slot); the offsets note replays
+// missing records above the log start kafka_topic_offsets reads, else
+// snapshots them (rows-lost-after-retention). Word-neutral (1353 with write
+// mode off): rule 3's "a tool" became "tools" and the resume check lost
+// "that" after "confirm" (the PR lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "7ff37205ff61d97bfd83a164b8df85530af0b3d917c7513fb420a7870767dbe3"
+const cdcPromptSHA256 = "6749f6c4e7759c1c0dcf42a70a1c1f7b6772c7224ddc2083de7b276f74fd685e"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -136,8 +174,12 @@ const cdcPromptSHA256 = "7ff37205ff61d97bfd83a164b8df85530af0b3d917c7513fb420a78
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
-// word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "76993d03120fc945c0fea5ced142a2e2b105a012ac56bf0a5d0ff2965bc27778"
+// word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
+// W4g (rule 4's root-cause component and layer form, rule 5's clause,
+// word-neutral: still 1353 words), and W4i (the negative claim's read in
+// rule 1, the restart bullet and the offsets note, word-neutral: still 1353
+// words).
+const cdcPromptWriteOffSHA256 = "db684be9e34f9ca3a73c1bf5b1fc046bae5126a72af4904d35e1c461102305b6"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

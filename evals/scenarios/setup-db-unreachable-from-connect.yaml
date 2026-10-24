@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the Connect worker resolves the source's host name to a black-hole
 # address, so its task can never open the database connection although the database is healthy.
-# The label names the failing check and the fixing op (tasks/U-board.md row U1-19, step 1).
+# The label names the failing check and the fixing op (Jira KAN-5 row U1-19, step 1).
 # Format: evals/README.md (C6). Built on `devctl setup-break db-unreachable-from-connect`
 # (dev/scenarios.md, "Setup breaks", PR #880).
 #

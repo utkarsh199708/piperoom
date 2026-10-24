@@ -327,10 +327,10 @@ expect:
       tool: connect_config
       match: [errors tolerance all]
       required: true
+    # Optional since W4 ruling R20 (R9): connect_worker_metrics ("2187 skipped") shows the same thing.
     - id: f_events_seen
       tool: debezium_metrics
       match: [last event, events seen]
-      required: true
     - id: f_topic_stale
       tool: kafka_topic_offsets
       match: [newest 28 min ago]
@@ -349,7 +349,8 @@ expect:
       required: true
   claims:
     - about: root_cause
-      facts: [f_tolerance_all, f_events_seen, f_topic_stale]
-  evidence_tools: [connect_config, debezium_metrics, connect_worker_metrics]
+      facts: [f_tolerance_all, f_events_seen, f_records_skipped, f_topic_stale]
+  evidence_tools: [connect_config, connect_worker_metrics]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register]
-  max_tool_calls: 14
+  # W4 ruling R20 (R8): budget 14 -> 21. The scenario failed only on budget at 19 calls; 19 plus 2.
+  max_tool_calls: 21

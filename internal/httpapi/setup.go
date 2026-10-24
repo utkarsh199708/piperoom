@@ -224,6 +224,20 @@ func (s *Server) handleSetupCredentials(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// handleSetupVerify is POST /api/rooms/{id}/setup/verify: the driver asks the
+// server's ladder runner to run the verification ladder now, the person's
+// equivalent of the agent's setup_request_verification. It carries no body and
+// answers 202: the outcome is setup.verified, written by the ladder runner
+// only (U1-8b). A room without a paired runner is 409 no_runner and a second
+// click while a run is in flight is 409 already_decided.
+func (s *Server) handleSetupVerify(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.RequestSetupVerification(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id")); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // setupSecretPath reports whether path is the one route whose request body
 // carries a secret value (POST /api/rooms/{id}/setup/secret). The route leaves
 // no request log line at all: the log already names no body, and this keeps it

@@ -361,6 +361,18 @@ type Welcome struct {
 	// setup.target_registered so far) with their classes: the runner's own
 	// floor registry starts from them.
 	Targets []events.SetupTarget `json:"targets,omitempty"`
+	// PublicOrigin is the server's PIPEROOM_PUBLIC_URL as the server states
+	// it; "" when none is configured. The in-cluster runner (target strimzi)
+	// has no terminal to show the origin it dialed, so the person compares
+	// this and Fingerprint with what the Set up card showed
+	// (docs/design/setup-strimzi.md §4).
+	PublicOrigin string `json:"public_origin,omitempty"`
+	// Fingerprint is the first 12 hex characters of SHA-256 over the public
+	// origin, room id, pipeline id, creator id and a server nonce drawn with
+	// the pairing code. The server computes it for every setup room, not only
+	// Strimzi ones, and POST /api/setup returns it as "fingerprint". The
+	// runner never computes it: it only displays what the Welcome carries.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Version is the server's version as this Welcome states it.

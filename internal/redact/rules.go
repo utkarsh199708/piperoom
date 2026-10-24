@@ -82,10 +82,12 @@ var baseRules = []rule{
 			return styleToken
 		},
 	},
-	// Slack incoming webhooks: the last path segment is the secret.
+	// Slack incoming webhooks: the last path segment is the secret. The host
+	// starts the text or follows a non-host character, so a look-alike such
+	// as evilhooks.slack.com is not taken for Slack's host.
 	{
 		kind: KindSlackHook,
-		re: regexp.MustCompile(`hooks\.slack\.com/(?:services/T[A-Z0-9]+/B[A-Z0-9]+/([A-Za-z0-9]{8,})` +
+		re: regexp.MustCompile(`(?:^|[^A-Za-z0-9-])hooks\.slack\.com/(?:services/T[A-Z0-9]+/B[A-Z0-9]+/([A-Za-z0-9]{8,})` +
 			`|(?:workflows|triggers)/([A-Za-z0-9/]{16,}))`),
 		groups: []int{1, 2},
 		style:  styleSecret,

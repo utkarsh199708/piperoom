@@ -148,10 +148,16 @@ type Config struct {
 	// NetProbe is Q6a's probe from the runner's position; nil uses the
 	// built-in DNS/TCP/TLS probe in net_probe.go.
 	NetProbe NetProbe
+	// Source is the runner's read-only source database reader (a
+	// *postgres.DB on its read-only pool). nil means this runner has no
+	// source connection: the source read ops stay in the catalogue and fail
+	// with ErrNoSource (error_code not_supported).
+	Source SourceReader
 }
 
 // Env is what an op sees: the project root, the targets, and the injected
-// clocks, resolver and probe. It holds no credential.
+// clocks, resolver and probe. It holds no credential: Source is a reader
+// over a connection the runner opened, never its DSN.
 type Env struct {
 	ProjectDir string
 	Targets    []events.SetupTarget
@@ -167,6 +173,7 @@ type Env struct {
 	HTTP         *http.Client
 	Dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	Probe        NetProbe
+	Source       SourceReader
 }
 
 // Registry holds the catalogue in registration order and implements the
@@ -212,12 +219,13 @@ func New(cfg Config) (*Registry, error) {
 	}
 	r := &Registry{
 		ops:    make(map[string]Op),
-		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Materialised: append([]string(nil), cfg.Materialised...), Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe},
+		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Materialised: append([]string(nil), cfg.Materialised...), Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe, Source: cfg.Source},
 		mounts: append([]string(nil), cfg.MountDirs...),
 	}
 	for _, op := range []Op{
 		envDetectOp{}, fileReadOp{}, dirListOp{}, jarListOp{}, javaVersionOp{},
 		httpGetOp{}, netProbeOp{}, fileWriteOp{}, fileDeleteOp{},
+		sourcePublicationTablesOp{},
 	} {
 		if err := r.Register(op); err != nil {
 			return nil, err

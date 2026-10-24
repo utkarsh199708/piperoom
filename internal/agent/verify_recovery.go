@@ -274,6 +274,12 @@ type recoveryVerdict struct {
 	outcome       string
 	before, after int64
 	unit          string
+	// atSink is set when every step counted rows at the sink
+	// (events.RecoveryUnitRows: pg_resnapshot_rows counts the sink). A count
+	// of records (kafka_replay_range) is of the replay's target topic: the
+	// rows are back only once a consumer loads them, which no count here
+	// reads, so such a verdict never says the data is back (KAN-527).
+	atSink bool
 }
 
 // counted reports whether the verdict carries counts (every outcome but
@@ -293,20 +299,21 @@ func recoveryOutcome(steps []*recoveryStep) recoveryVerdict {
 		}
 	}
 	unit := steps[0].last.Unit
-	same := true
+	same, atSink := true, true
 	var before, after int64
 	for _, st := range steps {
 		same = same && st.last.Unit == unit
+		atSink = atSink && st.last.Unit == events.RecoveryUnitRows
 		before += st.last.Before
 		after += st.last.After
 	}
 	if same {
-		return recoveryVerdict{outcome: events.RecoveryOutcomeFor(before, after), before: before, after: after, unit: unit}
+		return recoveryVerdict{outcome: events.RecoveryOutcomeFor(before, after), before: before, after: after, unit: unit, atSink: atSink}
 	}
 	rank := map[string]int{events.RecoveryRecovered: 0, events.RecoveryPartial: 1, events.RecoveryNotRecovered: 2}
 	var worst recoveryVerdict
 	for i, st := range steps {
-		v := recoveryVerdict{outcome: events.RecoveryOutcomeFor(st.last.Before, st.last.After), before: st.last.Before, after: st.last.After, unit: st.last.Unit}
+		v := recoveryVerdict{outcome: events.RecoveryOutcomeFor(st.last.Before, st.last.After), before: st.last.Before, after: st.last.After, unit: st.last.Unit, atSink: atSink}
 		if i == 0 || rank[v.outcome] > rank[worst.outcome] {
 			worst = v
 		}
@@ -314,9 +321,15 @@ func recoveryOutcome(steps []*recoveryStep) recoveryVerdict {
 	return worst
 }
 
+// recoveryNotAtSink is the recovered head's clause when a step counted
+// replayed records, not rows at the sink (recoveryVerdict.atSink).
+const recoveryNotAtSink = "; the replayed records are counted on their target topic, not at the sink"
+
 // recoveryHead is the verdict line (agent.verification.verdict and the head
 // of the model's note). Only a recovered outcome with every layer check
-// passing starts with "recovered:"; it holds counts and fixed words only.
+// passing starts with "recovered:"; it holds counts and fixed words only. A
+// recovered count of replayed records says it was not counted at the sink,
+// so the model's note does not read as the data being back (KAN-527).
 func recoveryHead(v recoveryVerdict, layersOK bool, timeout time.Duration) string {
 	switch {
 	case !v.counted():
@@ -324,7 +337,11 @@ func recoveryHead(v recoveryVerdict, layersOK bool, timeout time.Duration) strin
 	case !layersOK:
 		return fmt.Sprintf("NOT recovered: a layer check did not pass (the counts: %d %s missing before, %d after).\n", v.before, v.unit, v.after)
 	case v.outcome == events.RecoveryRecovered:
-		return fmt.Sprintf("recovered: the recovery count reached 0: %d %s were missing before the step, 0 are missing now.\n", v.before, v.unit)
+		head := fmt.Sprintf("recovered: the recovery count reached 0: %d %s were missing before the step, 0 are missing now", v.before, v.unit)
+		if !v.atSink {
+			head += recoveryNotAtSink
+		}
+		return head + ".\n"
 	case v.outcome == events.RecoveryPartial:
 		return fmt.Sprintf("NOT recovered (partial): %d %s were missing before the step and %d are still missing after %s.\n", v.before, v.unit, v.after, timeout)
 	default:
@@ -333,7 +350,9 @@ func recoveryHead(v recoveryVerdict, layersOK bool, timeout time.Duration) strin
 }
 
 // recoveryMessage is the room message citing the numbers, for people. It
-// never says the data is back unless the proposal is recovered.
+// never says the data is back unless the proposal is recovered and every
+// count was of rows at the sink: after a replay the count is of the target
+// topic, so the message says that and asks for a sink read (KAN-527).
 func recoveryMessage(v recoveryVerdict, layersOK bool, timeout time.Duration) string {
 	var msg string
 	switch {
@@ -341,11 +360,18 @@ func recoveryMessage(v recoveryVerdict, layersOK bool, timeout time.Duration) st
 		msg = "Recovery check: the counts could not be read (the source or sink cannot count them, or every count failed), so I cannot say whether the data is back. This is NOT verified as recovered."
 	case v.outcome == events.RecoveryRecovered:
 		msg = fmt.Sprintf("Recovery check: %d %s were missing before the recovery step and 0 are missing now.", v.before, v.unit)
-		if layersOK {
+		switch {
+		case layersOK && v.atSink:
 			msg += " The data is back."
+		case layersOK:
+			msg += " The replayed records are on their target topic, but their rows at the sink were not counted: read the sink before saying the data is back."
 		}
 	case v.outcome == events.RecoveryPartial:
-		msg = fmt.Sprintf("Recovery check: %d %s were missing before the recovery step and %d are still missing after %s. Only part of the data is back: NOT recovered.", v.before, v.unit, v.after, timeout)
+		back := "Only part of the data is back"
+		if v.unit == events.RecoveryUnitRecords {
+			back = "Only part of the replayed records reached their target topic"
+		}
+		msg = fmt.Sprintf("Recovery check: %d %s were missing before the recovery step and %d are still missing after %s. %s: NOT recovered.", v.before, v.unit, v.after, timeout, back)
 	default:
 		msg = fmt.Sprintf("Recovery check: %d %s were missing before the recovery step and %d are still missing after %s. The gap did not close: NOT recovered.", v.before, v.unit, v.after, timeout)
 	}

@@ -1,6 +1,6 @@
 name: Setup nightly (Windows)
 
-# U1-16 (tasks/U-board.md; plan docs/product/setup-2026-10.md section 7, item 7;
+# U1-16 (Jira KAN-5; plan docs/product/setup-2026-10.md section 7, item 7;
 # design docs/design/setup-agent.md section 8): the Compose integration on a
 # Windows machine running Docker Desktop in Linux-container mode. GitHub's
 # hosted Windows runners run Windows containers only, so this run happens on
