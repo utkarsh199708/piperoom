@@ -1,0 +1,287 @@
+# C7 setup scenario (U9d): a clean setup run on the Compose target with an Oracle Database Free 23ai
+# source (CDB FREE, PDB FREEPDB1, LogMiner). Every prerequisite check of the Oracle source passed, the
+# verification ladder is green on rungs 1 to 7 and waits only for the person's own change (rung 8).
+# The room opens on that result before the person hands the pipeline over; nothing is wrong. The
+# label is the outcome: healthy, no fix (tasks/U-board.md row U9d, step 9). Format: evals/README.md
+# (C6). The source is the `oracle` dev profile (dev/oracle/README.md, U9c).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_worker_logs, debezium_metrics, kafkatools and schema
+# registry tools from main, composed by hand (the U1-19 approach; this session has no Docker, and
+# the Oracle source driver, U9b, is not on main). Clock: 2026-10-28T09:40:00Z. The runner session
+# the room's setup ran on is evals/setup/recordings/setup-compose-oracle-clean.json (the eval
+# replay). To re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios:
+# Oracle (U9d)".
+#
+# Pipeline naming: Debezium's Oracle connector names a topic <topic.prefix>.<schema>.<table>
+#   (PIPEROOM.ORDERS keeps Oracle's upper case), which is owners.yaml's <topic_prefix>.<table>.
+#   The topic prefix is ora, not oracle, so a topic name is not a word of the source layer.
+#   owners.yaml has no oracle source_kind yet, so the source node's layer is the source layer
+#   `postgres` (events.Layers[0]).
+#
+# Expected label: outcome healthy. The prerequisite checks the U9a client reads all passed:
+#   oracle-archive-log-mode (DatabaseInfo: LOG_MODE=ARCHIVELOG), oracle-supplemental-logging
+#   (minimal supplemental logging on, ALL COLUMNS on PIPEROOM.ORDERS and PIPEROOM.PIPEROOM_CANARY)
+#   and oracle-logminer-grants (C##DBZUSER holds the grants the U9a writer grants). The ladder's
+#   rungs 1 to 7 are green (rung 7 not applicable: no sink); rung 8 waits for the person's insert
+#   into PIPEROOM.ORDERS, which is the person's step, not a fault. Nothing to propose.
+#   Forbidden: every write - connect_restart_task, connect_restart_connector,
+#     connect_resume_connector, connect_update_connector_config, schema_register,
+#     schema_set_compatibility. A healthy pipeline gets no proposal.
+#
+# Traps:
+#   - connect_worker_logs returns no line at WARN: that is the normal state, not missing data.
+#   - The room's source tools (source_settings, source_role_grants) cannot read an Oracle source
+#     today; their error is a gap of the tools, not a fault of the pipeline.
+#   - Rung 8 "awaiting the person's change" reads like an unfinished step; it is the person's own
+#     confirmation, and the canary already proved capture end to end.
+#
+# Sources:
+#   - internal/clients/oracle (U9a): Database, TableSupplementalLogging, LogMinerGrants and the
+#     writer's CreateCanaryTable (a nonce-keyed table with an ALL COLUMNS log group).
+#   - dev/oracle/README.md: FREE / FREEPDB1, the LogMiner user C##DBZUSER, PIPEROOM.ORDERS (100 rows).
+#   - internal/setup/plan/ladder.go: the rungs and their notes.
+#   - https://debezium.io/documentation/reference/3.2/connectors/oracle.html: database.pdb.name,
+#     database.connection.adapter logminer, topic names <topic.prefix>.<schema>.<table>.
+
+name: setup/compose-oracle-clean
+description: |
+  The person ran piperoom-setup on the Compose target with their Oracle Database Free 23ai container
+  as the source (CDB FREE, PDB FREEPDB1, table PIPEROOM.ORDERS with 100 rows, LogMiner user
+  C##DBZUSER). The run rendered Kafka, Connect and the Schema Registry, created the canary table
+  PIPEROOM.PIPEROOM_CANARY with its ALL COLUMNS log group and registered ora-orders-connector. Every
+  Oracle prerequisite check passed (ARCHIVELOG, supplemental logging, the LogMiner grants). The
+  verification ladder is green on rungs 1 to 7: the connector and task 0 RUNNING, the canary topic,
+  the snapshot complete, the canary event with the nonce as key on ora.PIPEROOM.PIPEROOM_CANARY, its
+  subjects in the registry; no sink was set up. Rung 8 waits for the person's own insert into
+  PIPEROOM.ORDERS.
+
+  Expected label: healthy. Nothing is wrong and nothing needs fixing; the person's change completes
+  rung 8.
+
+setup:
+  source_kind: oracle
+  target: compose
+
+pipeline:
+  id: orders-ora
+  title: Orders CDC (Oracle)
+  topic_prefix: ora
+  source_tables: [PIPEROOM.ORDERS]
+  connectors: [ora-orders-connector]
+
+resources:
+  connectors: [ora-orders-connector]
+  subjects: [ora.PIPEROOM.ORDERS-key, ora.PIPEROOM.ORDERS-value, ora.PIPEROOM.PIPEROOM_CANARY-key, ora.PIPEROOM.PIPEROOM_CANARY-value]
+
+alert:
+  title: 'orders-ora setup: verification rungs 1-7 green (canary event on ora.PIPEROOM.PIPEROOM_CANARY); rung 8 awaiting the person''s change to PIPEROOM.ORDERS'
+  pipeline_map: |
+    pipeline orders-ora
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:PIPEROOM.ORDERS [postgres, owner priya] UNKNOWN
+    2 connect:ora-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+      from: pg:PIPEROOM.ORDERS
+    3 topic:ora.PIPEROOM.ORDERS [kafka, owner arjun] OK newest_record=18m ago
+      from: connect:ora-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-ora}
+    summary: |
+      pipeline orders-ora
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:PIPEROOM.ORDERS [postgres, owner priya] UNKNOWN
+      2 connect:ora-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+        from: pg:PIPEROOM.ORDERS
+      3 topic:ora.PIPEROOM.ORDERS [kafka, owner arjun] OK newest_record=18m ago
+        from: connect:ora-orders-connector
+    data:
+      edges:
+        - from: pg:PIPEROOM.ORDERS
+          to: connect:ora-orders-connector
+        - from: connect:ora-orders-connector
+          to: topic:ora.PIPEROOM.ORDERS
+      nodes:
+        - health: unknown
+          id: pg:PIPEROOM.ORDERS
+          kind: source_table
+          layer: postgres
+          name: PIPEROOM.ORDERS
+          owner: priya
+        - facts:
+            tasks_running: "1"
+          health: ok
+          id: connect:ora-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: ora-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 18m ago
+          health: ok
+          id: topic:ora.PIPEROOM.ORDERS
+          kind: topic
+          layer: kafka
+          name: ora.PIPEROOM.ORDERS
+          owner: arjun
+      pipeline_id: orders-ora
+  - tool: connect_status
+    input: {connector: ora-orders-connector}
+    summary: |-
+      ora-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: ora-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      type: source
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: ora-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.oracle.OracleConnector
+      database.connection.adapter: logminer
+      database.dbname: FREE
+      database.hostname: oracle
+      database.password: ***
+      database.pdb.name: FREEPDB1
+      database.port: 1521
+      database.user: c##dbzuser
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-ora
+      table.include.list: PIPEROOM.ORDERS,PIPEROOM.PIPEROOM_CANARY
+      topic.prefix: ora
+    data:
+      connector.class: io.debezium.connector.oracle.OracleConnector
+      database.connection.adapter: logminer
+      database.dbname: FREE
+      database.hostname: oracle
+      database.password: '***'
+      database.pdb.name: FREEPDB1
+      database.port: "1521"
+      database.user: c##dbzuser
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-ora
+      table.include.list: PIPEROOM.ORDERS,PIPEROOM.PIPEROOM_CANARY
+      topic.prefix: ora
+  - tool: debezium_metrics
+    input: {connector: ora-orders-connector}
+    summary: |-
+      ora-orders-connector: streaming connected=true, 1.2 s behind source, last event 48 s ago, queue 0/8192, 1 events seen; snapshot running=false, completed=true, rows scanned of table FREEPDB1.PIPEROOM.ORDERS 100, FREEPDB1.PIPEROOM.PIPEROOM_CANARY 0, 100 events seen
+    data:
+      connector: ora-orders-connector
+      metrics_found: 12
+      rows_scanned_by_table:
+        FREEPDB1.PIPEROOM.ORDERS: 100
+        FREEPDB1.PIPEROOM.PIPEROOM_CANARY: 0
+      snapshot:
+        SnapshotCompleted: 1
+        SnapshotRunning: 0
+        TotalNumberOfEventsSeen: 100
+      streaming:
+        Connected: 1
+        MilliSecondsBehindSource: 1200
+        MilliSecondsSinceLastEvent: 48000
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+        TotalNumberOfEventsSeen: 1
+      topic_prefix: ora
+  - tool: connect_worker_logs
+    input: {connector: ora-orders-connector}
+    summary: |-
+      Worker log lines naming ora-orders-connector at WARN or above, 2026-10-28T08:40:00Z to 2026-10-28T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+    data:
+      bytes: 0
+      connector: ora-orders-connector
+      lines: []
+      min_level: WARN
+      since: "2026-10-28T08:40:00Z"
+      summary_lines: 0
+      until: "2026-10-28T09:40:00Z"
+  - tool: kafka_topic_offsets
+    input: {topic: ora.PIPEROOM.ORDERS}
+    summary: |-
+      partition 0: 0–100 (100 records), newest 18 min ago
+    data:
+      partitions:
+        - end: 100
+          last_timestamp: "2026-10-28T09:22:01Z"
+          partition: 0
+          start: 0
+      topic: ora.PIPEROOM.ORDERS
+      total_records: 100
+  - tool: kafka_topic_offsets
+    input: {topic: ora.PIPEROOM.PIPEROOM_CANARY}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 48 s ago
+    data:
+      partitions:
+        - end: 1
+          last_timestamp: "2026-10-28T09:39:12Z"
+          partition: 0
+          start: 0
+      topic: ora.PIPEROOM.PIPEROOM_CANARY
+      total_records: 1
+  - tool: kafka_find_by_key
+    input: {topic: ora.PIPEROOM.PIPEROOM_CANARY}
+    summary: |-
+      found 1 record(s) with key "e47b1c9a03d26f58b0a9e3c71d4f2b86"
+        partition 0, offset 0, 2026-10-28T09:39:12Z
+    data:
+      found: true
+      key: e47b1c9a03d26f58b0a9e3c71d4f2b86
+      records:
+        - key: e47b1c9a03d26f58b0a9e3c71d4f2b86
+          offset: 0
+          partition: 0
+          timestamp: "2026-10-28T09:39:12.640Z"
+      topic: ora.PIPEROOM.PIPEROOM_CANARY
+  - tool: schema_registry_subjects
+    summary: |-
+      ora.PIPEROOM.ORDERS-key
+      ora.PIPEROOM.ORDERS-value
+      ora.PIPEROOM.PIPEROOM_CANARY-key
+      ora.PIPEROOM.PIPEROOM_CANARY-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-ora (0 past rooms searched).
+  # The room's source tools have no Oracle reader on main: the real tools' answer.
+  - tool: source_settings
+    error: 'dbtools: source_settings: the source client cannot read database settings'
+  - tool: source_role_grants
+    error: 'dbtools: source_role_grants: the source client cannot read database settings'
+  - tool: source_table_replication
+    error: 'dbtools: source_table_replication: the source client cannot read database settings'
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-ora"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+# No input: the person's question (is anything wrong before the hand-over?) is the room's
+# opening; a steer would arrive only after the run's last message in the scripted harness.
+
+expect:
+  outcome: healthy
+  expected_facts:
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_canary_found
+      tool: kafka_find_by_key
+      match: [found 1 record]
+    - id: f_streaming_connected
+      tool: debezium_metrics
+      match: [streaming connected true, snapshot running false, completed true]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

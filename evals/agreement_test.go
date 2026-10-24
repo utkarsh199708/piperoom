@@ -385,6 +385,11 @@ var syntheticLabels = map[string]Label{
 	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
 	"blocked-slot":        {"kafka-connect", []string{"48213", "blocks_slot"}}, // R1 (W4n)
 	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
+	// The U9d Oracle setup scenarios: the alert titles name the failed task and
+	// the check, not the check's message.
+	"setup/no-archivelog":           {"kafka-connect", []string{"noarchivelog"}},
+	"setup/no-supplemental-logging": {"kafka-connect", []string{"minimal supplemental logging", "all columns"}},
+	"setup/missing-logminer-grant":  {"kafka-connect", []string{"logmining"}},
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
 	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
@@ -529,6 +534,14 @@ var syntheticTruth = map[string]map[string]truth{
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}}, // R1 (W4n): labelled kafka-connect; the lost-slot text blames postgres
 	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U9d: each good text leads with the failed task (kafka-connect, the label
+	// layer) and names the source database as the cause; each lazy title names
+	// the failed task and no cause; each wrong text blames another source
+	// setting (a grant, the log mode, the logging): a source story, not the
+	// failed task.
+	"setup/no-archivelog":           {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/no-supplemental-logging": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/missing-logminer-grant":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the
 	// missing-plugin one blames the connector's role (kafka-connect, the right
