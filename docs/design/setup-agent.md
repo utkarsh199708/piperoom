@@ -502,6 +502,13 @@ The standalone server therefore does hold read credentials, on the same machine 
 directory the runner wrote; the claim is that **credentials never cross the boundary to a team server except by
 the person's click, and the model never sees them**, not that no server process ever holds any.
 
+**Exception for MSK Connect (owner decision D6 of `docs/design/setup-managed.md`, accepted by the owner as OWNER-3,
+2026-10-24).** The second half of that claim does not hold for `CONNECT_KIND=msk`: `DescribeConnector` returns
+`ConnectorConfiguration` with the materialised DB password, so the server's watcher identity receives it on every
+status read. The `mskconnect` client redacts it before `Data` and never stores or logs it, the model still never
+sees it, and the registration card and the user page state the exception. It ends when the Secrets Manager config
+provider route (a later U13 row) replaces the materialised password.
+
 ### 3.8 Write mode and `PIPEROOM_SETUP_ENABLED`
 
 `PIPEROOM_SETUP_ENABLED=on` requires `PIPEROOM_WRITE_MODE=on`; the server refuses to start otherwise with an error
