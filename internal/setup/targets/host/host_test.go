@@ -47,18 +47,6 @@ func (f *fakeExec) argvs() [][]string {
 	return append([][]string(nil), f.calls...)
 }
 
-// requireLinuxPaths skips a test that needs the project directory to be a
-// path a systemd unit can carry and its files to keep POSIX modes. The host
-// target is Linux only: on Windows t.TempDir() is a drive path with
-// backslashes, which CheckUnitPath refuses by design (TestProjectDirMustBeUnitSafe
-// covers the refusal), and NTFS reports 0666 for every writable file.
-func requireLinuxPaths(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the host target writes Linux systemd units: a Windows project directory is not a unit path and NTFS has no POSIX modes")
-	}
-}
-
 // fixture is a project directory with a registry and the host driver.
 type fixture struct {
 	t    *testing.T
@@ -76,6 +64,13 @@ func newFixture(t *testing.T, opts Options) *fixture {
 
 func newFixtureIn(t *testing.T, dir string, opts Options) *fixture {
 	t.Helper()
+	if (opts.GOOS == "" || opts.GOOS == "linux") && runtime.GOOS == "windows" {
+		// A simulated Linux runner on a Windows test machine gets real
+		// backslash temp paths, which no systemd unit can hold (the unit-path
+		// rule refuses them, as it should) and NTFS modes. These run on the
+		// ubuntu and macOS legs; the GOOS "windows" fixtures still run here.
+		t.Skip("simulates a Linux runner; needs a POSIX temp dir (runs on ubuntu and macOS)")
+	}
 	f := &fixture{t: t, dir: dir, exec: &fakeExec{}, java: fakeJava}
 	reg, err := ops.New(ops.Config{
 		ProjectDir: dir,

@@ -84,6 +84,9 @@ func NewAgentEndpointWith(ctx context.Context, cfg config.Config, log *slog.Logg
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
 	}
 	ec.TriagePass, ec.TriagePassModel, ec.TriagePassTimeout = tp.On, tp.Model, tp.Timeout
+	if ec.FixPRApplyTimeout, err = config.ParseFixPRApplyTimeout(cfg); err != nil {
+		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+	}
 	// The roles and knobs of design section 9. A Claude deployment that sets
 	// none of them parses to today's values, and nothing below changes for it.
 	knobs, err := config.ParseModelKnobs(cfg)

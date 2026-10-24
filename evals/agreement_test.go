@@ -329,7 +329,7 @@ var syntheticLabels = map[string]Label{
 	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
 	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
-	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
+	"replication-slot-lost-failover":          {"kafka-connect", []string{"failover", "promoted", "new primary"}}, // R1 (W4n-2)
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 	// The two scenarios added by #100.
 	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},
@@ -401,6 +401,18 @@ var syntheticLabels = map[string]Label{
 	"setup/wal-level-replica":           {"kafka-connect", []string{"wal_level", "replica"}},
 	"setup/missing-grant":               {"kafka-connect", []string{"devctl_setup_grant", "select on", "needs replication"}},
 	"setup/db-unreachable-from-connect": {"kafka-connect", []string{"192.0.2.1", "black-hole", "etc/hosts"}},
+	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
+	// one (kafka-connect in all four); the terms name the cause.
+	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
+	"mysql-history-topic-deleted":     {"kafka-connect", []string{"schema-history.shop", "history topic", "deleted"}},
+	"mysql-missing-replication-grant": {"kafka-connect", []string{"replication slave", "revoked"}},
+	"mysql-server-id-clash":           {"kafka-connect", []string{"server id", "orders-mysql-shadow"}},
+	// The Q7i pull-request fix scenarios (KAN-320): the terms name the file
+	// and the key the pull request changes.
+	"plugin-missing-in-image": {"kafka-connect", []string{"debezium_connectors", "dockerfile"}},
+	"debezium-upgrade":        {"kafka-connect", []string{"dbz-mysql-ddl-grant-sensitive-variables", "3.1.0", "parser"}},
+	"consumer-deserializer":   {"consumer", []string{"value.deserializer", "stringdeserializer", "string deserializer"}},
+	"fixpr-injected-file":     {"kafka-connect", []string{"table.include.list", "public.order"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -540,6 +552,20 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
 	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// Q8i: the lazy texts are the alert titles, which name the connector
+	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
+	// wrong texts name Debezium, the connector or Connect first, so they hit
+	// the label layer with the wrong cause (a lost history topic, purged
+	// binlogs, a rotated password, the network).
+	"mysql-binlog-purged":             {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-history-topic-deleted":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-missing-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-server-id-clash":           {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q7i: the lazy texts are the alert titles, which name no file or key.
+	"plugin-missing-in-image": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"debezium-upgrade":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"consumer-deserializer":   {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"fixpr-injected-file":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

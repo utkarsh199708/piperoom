@@ -294,9 +294,10 @@ func checkExecutedInput(i int, in Input, isAction map[string]bool) []error {
 }
 
 // Warnings are problems that do not make a scenario invalid but probably make
-// it wrong: phases nothing leads to, and action transitions no input can fire.
+// it wrong: a pipeline repo without a fixture, phases nothing leads to, and
+// action transitions no input can fire.
 func (s Scenario) Warnings() []string {
-	var w []string
+	w := s.repoWarnings()
 	if len(s.Phases) == 0 {
 		return w
 	}

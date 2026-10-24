@@ -28,6 +28,9 @@ func TestW4nLayerLabels(t *testing.T) {
 		// R1: Postgres answers every read; the task that never gets past
 		// start is the first failing layer, Postgres the root cause.
 		{"blocked-slot", "kafka-connect", "postgres", nil},
+		// R1, same reading (W4n-2, KAN-497): the failed task fails first, the
+		// slot lost in the failover is the root cause.
+		{"replication-slot-lost-failover", "kafka-connect", "postgres", nil},
 		// R2: no relabel (P3-W3d-2 stands).
 		{"consumer-offsets-out-of-range-retention", "kafka", "kafka", []string{"consumer"}},
 		// R3: the uncompacted offsets topic is the most upstream component

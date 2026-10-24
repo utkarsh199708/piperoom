@@ -520,7 +520,8 @@ func TestPromptAndSchemaAskForScope(t *testing.T) {
 			t.Errorf("%s prompt: the update_hypothesis rule does not ask for the scope: %s", kind, line)
 		}
 	}
-	if !strings.Contains(systemPrompt(), "A change near the alert is a suspect, not a proven cause.") {
+	// W4h (KAN-505) shortened "not a proven cause" to "not proof".
+	if !strings.Contains(systemPrompt(), "A change near the alert is a suspect, not proof.") {
 		t.Error("CDC rule 2 lost the suspect wording")
 	}
 	s := (&updateHypothesisTool{}).InputSchema()
