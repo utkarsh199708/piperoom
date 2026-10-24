@@ -133,9 +133,13 @@ func Run(ctx context.Context, opts Options) error {
 			SetupEnabled: true,
 			OwnersPath:   p.owners,
 			Solo:         ok,
-			Stdout:       stdout,
-			Log:          log,
-			Serve:        srv.Serve,
+			// The model picker's model.env lives in the project directory, not
+			// the process's working directory: the standalone server starts on
+			// the model the solo user picked last time (V7, KAN-525).
+			ProjectDir: p.project,
+			Stdout:     stdout,
+			Log:        log,
+			Serve:      srv.Serve,
 		})
 	}
 	if !opts.Watch {

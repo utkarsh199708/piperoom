@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
@@ -65,16 +66,35 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
+	// The picker's price table and endpoint (V7, KAN-525). The stored key from
+	// .piperoom/model.env reaches the adapters through the key overlay
+	// (quickstart.Keys), never the process environment; a model that does not
+	// build is the no model state, not a refused start.
+	prices, err := agent.LoadModelPrices(qs.Config.ModelPrices)
+	if err != nil {
+		return fmt.Errorf("setup: %w", err)
+	}
+	host := &modelHost{startKeys: quickstart.NewKeys(nil, qs.ModelEnv)}
+	host.wire(ctx, log, qs.Config, prices)
+	run := s.Agent
+	var write agent.HandoffWriter
+	if run == nil {
+		// No injected runner: rooms and hand-offs use the picker's endpoint,
+		// so the stored key is the one their model calls read.
+		run = host.Run
+		write = host.WriteHandoff
+	}
 	st := memstore.New()
 	sessions := auth.NewMemStore()
 	deps := room.Deps{
-		Store:       st,
-		Users:       qs.Users,
-		Owners:      qs.Owners,
-		Run:         s.Agent,
-		Options:     agent.Options{Model: qs.Config.Model, Effort: qs.Config.Effort, MaxTurns: 40},
-		Sessions:    sessions,
-		SessionLive: authSettings.Liveness(),
+		Store:        st,
+		Users:        qs.Users,
+		Owners:       qs.Owners,
+		Run:          run,
+		WriteHandoff: write,
+		Options:      agent.Options{Model: qs.Config.Model, Effort: qs.Config.Effort, MaxTurns: 40},
+		Sessions:     sessions,
+		SessionLive:  authSettings.Liveness(),
 		// Write mode is on (quickstart refused "off"); nothing here may record
 		// an approved fix without running it.
 		WriteModeOff: false,
@@ -84,6 +104,8 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		SetupLocal: true,
 		SoloUser:   qs.Config.SoloUser,
 		Logger:     log,
+		// A closed room's token count is not kept on the endpoint.
+		OnRoomClosed: func(_ context.Context, roomID, _, _ string) { host.Forget(roomID) },
 	}
 	if s.Events != nil {
 		deps.OnRoomOpened = s.Events.Hook(st, log)
@@ -106,6 +128,33 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		httpapi.WithIdentities(auth.NewMemIdentities()),
 		httpapi.WithSetup(qs.SetupEnabled),
 	}
+	// The V7 models API: GET always, PUT on loopback for the solo user. The
+	// picker's Build rebuilds an endpoint from the same key overlay this
+	// server's start endpoint used, so a PUT's key never enters the
+	// environment either.
+	supported, err := llm.SupportedModels()
+	if err != nil {
+		svc.Close()
+		return fmt.Errorf("setup: %w", err)
+	}
+	soloUser := qs.Config.SoloUser
+	if soloUser == "" && qs.Users != nil {
+		// quickstart.Settings names the solo user only when --solo applied;
+		// a one-user directory is the same person (cmd/server's rule).
+		if all := qs.Users.All(); len(all) == 1 {
+			soloUser = all[0].ID
+		}
+	}
+	opts = append(opts, httpapi.WithModels(quickstart.NewModels(quickstart.ModelsOptions{
+		Mode:       qs.ModelMode(),
+		ProjectDir: qs.ProjectDir,
+		Config:     qs.Config,
+		Stored:     qs.ModelEnv,
+		Ready:      host.ready(),
+		SoloUser:   soloUser,
+		Build:      host.build,
+		Panel:      httpapi.PanelInput{Prices: prices, Supported: supported},
+	})))
 	if qs.Config.WebDir != "" {
 		// Fail at start, not at the first page load, when the built UI is
 		// missing from the path the operator configured (cmd/server's rule).
