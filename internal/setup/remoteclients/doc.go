@@ -103,4 +103,6 @@
 //     yet: this package sends the design's §2.5 names and params, and the ops
 //     that answer them land with the catalogue's Q work. Until then a real
 //     runner refuses each as unknown_op; the unit tests use a fake runner.
+//     source_publication_tables is the first that ships (ops.Config.Source);
+//     a runner built without a source reader answers it with not_supported.
 package remoteclients
