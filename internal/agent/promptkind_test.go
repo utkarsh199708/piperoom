@@ -146,10 +146,21 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // it": not "reports", since every scoped list reports what it hides as not
 // part of the pipeline), and the pause bullet's "cite it", "name the pause
 // as the incident" and "above" (the PR lists each word).
+// W4i (KAN-507) moved it a fifteenth time, on purpose, for evals run
+// 39994729845 and the audit of main run 40076876491: a negative claim needs
+// its read. Rule 3's "assert nothing a tool didn't return" moved into rule 1,
+// beside the competing-explanation clause, as "confirm a component with its
+// own read before blaming it or calling it absent, healthy or unchanged"
+// (sasl-credential-rotated cleared the ACLs without reading them); the
+// restart bullet restarts only a FAILED task, never an UNASSIGNED one, after
+// the step removing its cause (blocked-slot); the offsets note replays
+// missing rows above the log start kafka_topic_offsets reads, else snapshots
+// them (rows-lost-after-retention). Word-neutral (1353 with write mode off):
+// the resume check lost "that" after "confirm" (the PR lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "2c8a24c2b485b4ea8bad9cc69697672b1066c354ac6f56dd8b259e61565bd7e8"
+const cdcPromptSHA256 = "0a41c43f885401cf9fd942edd6136c3d8e3b36b9c10572f86ef0897c646d8b08"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -160,8 +171,10 @@ const cdcPromptSHA256 = "2c8a24c2b485b4ea8bad9cc69697672b1066c354ac6f56dd8b259e6
 // listed fix, the restart and compatibility bullets and the offsets note,
 // word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
 // W4g (rule 4's root-cause component and layer form, rule 5's clause,
-// word-neutral: still 1353 words).
-const cdcPromptWriteOffSHA256 = "aba2b5c4c03c82d9d56f20765808d71c8bfbf44d3fd16058a96277a65d1d626d"
+// word-neutral: still 1353 words), and W4i (the negative claim's read in
+// rule 1, the restart bullet and the offsets note, word-neutral: still 1353
+// words).
+const cdcPromptWriteOffSHA256 = "4939562bb0efd069ac6cc5231b5a4152e48ebc43dcedfb3e0610c668066bf50e"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

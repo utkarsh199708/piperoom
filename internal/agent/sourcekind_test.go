@@ -259,10 +259,13 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // fix round (rule 4's "correctly refusing" and <layer> <component> form,
 // rule 5's steer and tool clause) is word-neutral. With KAN-515's hold rule
 // the MySQL prompt is the CDC prompt's size: 1353 words with write mode off,
-// 1352 with it on.
+// 1352 with it on. W4i moved them with the shared method and fixes (rule 1's
+// negative claim, the restart bullet, the offsets note); the replacer
+// follows the restart bullet and the resume check's dropped "that", so the
+// MySQL prompt stays word-neutral too.
 const (
-	mysqlPromptSHA256         = "6753392d63527b2257c237149edf5048ef8778e04935dab1671d38c635e4d50e"
-	mysqlPromptWriteOffSHA256 = "c8b9bed8cc8af55ff16286faacdc4f38eac45f2c870ac3c19f0fb36a233540ef"
+	mysqlPromptSHA256         = "6cf545e0bd65dcc20b727edd0e6bfed253b4e9dbd869ba008773cfb34365b18f"
+	mysqlPromptWriteOffSHA256 = "fc77cac028d81ae9fd2b8e58e3492bf514002f512c72430ee31368cc0c902559"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
