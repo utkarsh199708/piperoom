@@ -106,7 +106,7 @@ type Op interface {
 }
 
 // ParamTargeter is implemented by an op whose target kind comes from its
-// params (http_get, net_probe): the runner raises the request's class to its
+// params (http_get, net_probe, sink_probe): the runner raises the request's class to its
 // floor for that kind before the guard runs.
 type ParamTargeter interface {
 	ParamTarget(params json.RawMessage, env Env) string
@@ -126,7 +126,7 @@ type Result struct {
 type Config struct {
 	ProjectDir string
 	// Targets are the hosts the room may reach (Welcome.Targets and every
-	// setup.target_registered); http_get and net_probe refuse anything else.
+	// setup.target_registered); http_get, net_probe and sink_probe refuse anything else.
 	Targets []events.SetupTarget
 	// MountDirs are directories a rendered template mounts into a container
 	// or builds from; file_write refuses every path under one (§2.5).
@@ -224,7 +224,7 @@ func New(cfg Config) (*Registry, error) {
 	}
 	for _, op := range []Op{
 		envDetectOp{}, fileReadOp{}, dirListOp{}, jarListOp{}, javaVersionOp{},
-		httpGetOp{}, netProbeOp{}, fileWriteOp{}, fileDeleteOp{},
+		httpGetOp{}, netProbeOp{}, sinkProbeOp{}, fileWriteOp{}, fileDeleteOp{},
 		sourcePublicationTablesOp{},
 	} {
 		if err := r.Register(op); err != nil {
@@ -319,7 +319,7 @@ func (r *Registry) LayerOf(op string) (string, bool) {
 }
 
 // Target returns the target kind the request reaches: the op's own kind, or
-// the kind its params name for http_get and net_probe. "" means no registered
+// the kind its params name for http_get, net_probe and sink_probe. "" means no registered
 // target and lets the runner's class floor for "" apply (it never raises).
 func (r *Registry) Target(req protocol.OpRequest) string {
 	op, ok := r.Get(req.Op)
@@ -389,7 +389,7 @@ func (r *Registry) CheckTarget(req protocol.OpRequest) string {
 }
 
 // targetChecker is implemented by an op that allow-lists a host from its
-// params (http_get, net_probe).
+// params (http_get, net_probe, sink_probe).
 type targetChecker interface {
 	checkTarget(params json.RawMessage, env Env) error
 }

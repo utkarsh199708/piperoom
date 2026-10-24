@@ -34,6 +34,7 @@ func TestFloorsAndTargets(t *testing.T) {
 		{"java_version", protocol.TierT0, ""},
 		{"http_get", protocol.TierT0, ""},
 		{"net_probe", protocol.TierT0, ""},
+		{"sink_probe", protocol.TierT0, ""},
 		{"file_write", protocol.TierT1, ""},
 		{"file_delete", protocol.TierT1, ""},
 		{"source_publication_tables", protocol.TierT0, "postgres"},
@@ -87,6 +88,10 @@ func TestParamTarget(t *testing.T) {
 	if got := r.Target(protocol.OpRequest{Op: "net_probe", Params: probe}); got != "postgres" {
 		t.Fatalf("net_probe Target = %q, want postgres", got)
 	}
+	sinkProbe, _ := json.Marshal(map[string]string{"target": "connect"})
+	if got := r.Target(protocol.OpRequest{Op: "sink_probe", Params: sinkProbe}); got != "connect" {
+		t.Fatalf("sink_probe Target = %q, want connect", got)
+	}
 	// An unregistered label raises no floor and is refused by Validate.
 	other, _ := json.Marshal(map[string]string{"target": "kafka"})
 	if got := r.Target(protocol.OpRequest{Op: "net_probe", Params: other}); got != "" {
@@ -109,6 +114,7 @@ func TestGuardTable(t *testing.T) {
 		{"dir_list", protocol.ClassProduction, false},
 		{"http_get", protocol.ClassProduction, false},
 		{"net_probe", protocol.ClassProduction, false},
+		{"sink_probe", protocol.ClassProduction, false},
 		{"file_write", "garbage", false},
 		{"no_such_op", protocol.ClassProduction, false},
 	}
@@ -157,6 +163,9 @@ func TestCheckTarget(t *testing.T) {
 		{"http_get", `{"url":"http://connect.acme:8083/","method":"POST"}`, protocol.RefuseSchema},
 		{"net_probe", `{"target":"connect"}`, ""},
 		{"net_probe", `{"target":"kafka"}`, protocol.RefuseTarget},
+		{"sink_probe", `{"target":"connect"}`, ""},
+		{"sink_probe", `{"target":"kafka"}`, protocol.RefuseTarget},
+		{"sink_probe", `{}`, protocol.RefuseSchema},
 		{"file_read", `{"path":"a.txt"}`, ""},
 		{"no_such_op", `{}`, protocol.RefuseUnknownOp},
 	}
