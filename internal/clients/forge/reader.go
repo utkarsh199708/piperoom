@@ -217,6 +217,14 @@ func (c *Client) File(ctx context.Context, repo RepoRef, sha, p string) (RepoFil
 }
 
 // BlobSHA is the git blob id of content: sha1("blob <len>\x00" + content).
+//
+// SHA-1 stays here on purpose: it is Git's blob object-id scheme, and the
+// GitHub API answers blob ids computed this way (the contents "sha" field,
+// the create-blob "sha"). The client only hashes bytes GitHub itself hashed
+// with the same scheme, to verify them (File, writeTree); any other
+// algorithm would never match the API's ids. Content that can hold secrets
+// (eval fixtures, proposed fixes) is never passed here: the in-memory fake
+// (internal/clients/forge/fake) computes its own SHA-256 ids instead.
 func BlobSHA(content []byte) string {
 	h := sha1.New()
 	fmt.Fprintf(h, "blob %d\x00", len(content))

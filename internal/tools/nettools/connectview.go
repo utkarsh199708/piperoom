@@ -17,7 +17,7 @@ import (
 // workers shows up here and nowhere else. It never takes a value from the
 // model: the config is the one Connect already holds, sent back to Connect on
 // the same authenticated connection, and only host and port messages are kept.
-func (t *netProbe) connectView(ctx context.Context, tgt Target) Check {
+func (t *netProbe) connectView(ctx context.Context, tgt Target, src *sourceConfig) Check {
 	const id = "connect_view"
 	skip := func(why string) Check { return Check{ID: id, Status: StatusSkip, Detail: why} }
 	if t.d.Connect == nil {
@@ -27,7 +27,7 @@ func (t *netProbe) connectView(ctx context.Context, tgt Target) Check {
 	if !ok {
 		return skip("the Connect client cannot validate configs")
 	}
-	name, cfg, why := t.runningSourceConfig(ctx, tgt)
+	name, cfg, why := src.get(ctx, t, tgt)
 	if name == "" {
 		return skip(why)
 	}

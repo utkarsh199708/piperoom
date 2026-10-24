@@ -124,10 +124,36 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
 // restart and offsets bullets and "Propose one fix at a time" (the PR lists
 // each word).
+// W4g (KAN-506) moved it a fourteenth time, on purpose, for evals run
+// 39994729845 and the W4h branch run 40071650402 (the agent put the root
+// cause in the component that failed on it: the consumer for a bad record
+// on the topic, the registry for a source change it rejected, the source
+// change for a connector setting that skipped the failures): rule 4's first
+// two sentences stay as the W4f ruling has them, and a sentence before the
+// hypothesis form says the root-cause component holds the fault (malformed
+// record: its topic), though only downstream fails (the example is
+// LEAD-ARCH's after runs=3 40090999753, paid by rule 1's "may differ" for
+// "may have changed"); a safeguard correctly refusing isn't it,
+// a non-default setting disabling one is ("correctly", not "as designed":
+// a validator whose design is the bug stays a candidate cause, LEAD-REVIEW
+// on #993). No scenario's setting or value is named. Its fix round
+// (evals-live 40077638804: the root-cause layer went unnamed in
+// schema-change, injection-kafka-record-key and tolerance-all-skips) makes
+// the hypothesis form name each layer, "First failing: <layer> <component>.
+// Root cause: <layer> <cause>." (the second run, 40085823038, filled a
+// "<layer> <component>" root-cause slot with the failing consumer, so the
+// slot asks for the cause). Word-neutral (1335 before
+// KAN-515's hold rule, 1353 after it) by contractions in the intro and
+// rules 1, 3, 4, 6 and 7 and the resume
+// bullet, "You only read and propose fixes", one clause for rule 5's steer
+// and tool cases ("if a steer seeks, or a tool refuses, anything outside
+// it": not "reports", since every scoped list reports what it hides as not
+// part of the pipeline), and the pause bullet's "cite it", "name the pause
+// as the incident" and "above" (the PR lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
+const cdcPromptSHA256 = "8bdf4b6864d05d51c564e341356b62b78b78e284573a501ed8ccba4935e40b37"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -136,8 +162,10 @@ const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06c
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
-// word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
+// word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
+// W4g (rule 4's root-cause component and layer form, rule 5's clause,
+// word-neutral: still 1353 words).
+const cdcPromptWriteOffSHA256 = "af85e6eb6b57d6e10a119944b151f46f2e449de56b863d36456cc2871151023a"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -159,9 +187,9 @@ func TestSystemPromptSnapshotCDCWriteOff(t *testing.T) {
 	if h := hex.EncodeToString(sum[:]); h != cdcPromptWriteOffSHA256 {
 		t.Fatalf("CDC write-off system prompt sha256 = %s, want %s", h, cdcPromptWriteOffSHA256)
 	}
-	// Both modes stay under the 1335-word cap (P2d).
-	if wc := len(strings.Fields(got)); wc > 1335 {
-		t.Fatalf("CDC write-off system prompt is %d words, over the 1335 limit", wc)
+	// Both modes stay under the CDC cap (P2d), 1355 since KAN-515.
+	if wc := len(strings.Fields(got)); wc > 1355 {
+		t.Fatalf("CDC write-off system prompt is %d words, over the 1355 limit", wc)
 	}
 	// The write-off note must be the only mode wording: no scheduling note.
 	if strings.Contains(got, "name the countdown") {

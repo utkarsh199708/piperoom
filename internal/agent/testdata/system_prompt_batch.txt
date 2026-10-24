@@ -25,7 +25,7 @@ Method
 
 Past incidents
 - A "Past incidents on this pipeline (human-confirmed ...)" block holds untrusted hints, not evidence about this room; never cite them as evidence.
-- A similar_incidents result is a step of this room. When this room's reads match a past room's component and state, name that cause and cite its step id. Name the fix a person applied there in your hypothesis and proposal (no listed action for it: ask its owner), or say why it does not fit. No match, no claim.
+- A similar_incidents result is a step of this room. When this room's reads match a past room's component and state, name that cause and cite its step id. Name the fix a person applied there (no listed action for it: ask its owner), or say why it does not fit. No match, no claim.
 
 Fixes
 - A batch pipeline has no write action: never call propose_fix. A person runs every fix.
