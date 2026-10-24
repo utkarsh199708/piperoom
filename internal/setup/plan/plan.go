@@ -203,6 +203,22 @@ func jsonDepth(raw []byte) (int, error) {
 // returned error wraps ErrEmptyPlan, ErrTooLarge, ErrUnknownOp, ErrClass,
 // ErrTier or ErrGuard.
 func (p *Plan) Resolve(cat Catalogue, facts func(Step) StepFacts) error {
+	return p.resolve(cat, factsGuard(facts))
+}
+
+// ResolveAtPlanTime is Resolve for a plan whose steps carry no params
+// (setup_plan). Its guard is ForbiddenAtPlan: a row that refuses its class
+// unconditionally still refuses the plan, and a row whose exception reads the
+// step's params is left to the room, which decides it with Forbidden and the
+// real params at Create, before Execute, on rollback and on the runner.
+// Everything else is Resolve's: the same caps, catalogue, class and tier
+// checks, and the same errors.
+func (p *Plan) ResolveAtPlanTime(cat Catalogue) error {
+	return p.resolve(cat, planTimeGuard)
+}
+
+// resolve is Resolve with the guard question as a parameter.
+func (p *Plan) resolve(cat Catalogue, guard stepGuard) error {
 	if cat == nil {
 		return fmt.Errorf("%w: nil catalogue", ErrPlan)
 	}
@@ -216,12 +232,32 @@ func (p *Plan) Resolve(cat Catalogue, facts func(Step) StepFacts) error {
 			step := &phase.Steps[si]
 			step.Index = total
 			total++
-			if err := resolveStep(cat, step, facts); err != nil {
+			if err := resolveStep(cat, step, guard); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// stepGuard is the guard question resolveStep asks about a step.
+type stepGuard func(Step) (GuardRow, bool)
+
+// factsGuard is Forbidden over the step's facts; nil facts give the zero
+// StepFacts, the strictest reading.
+func factsGuard(facts func(Step) StepFacts) stepGuard {
+	return func(step Step) (GuardRow, bool) {
+		var f StepFacts
+		if facts != nil {
+			f = facts(step)
+		}
+		return Forbidden(GuardRequest{Op: step.Op, Class: step.Class, Facts: f})
+	}
+}
+
+// planTimeGuard is ForbiddenAtPlan over a step.
+func planTimeGuard(step Step) (GuardRow, bool) {
+	return ForbiddenAtPlan(step.Op, step.Class)
 }
 
 // checkSize refuses an empty plan and every cap overrun, before any lookup.
@@ -269,7 +305,7 @@ func (p *Plan) checkSize() error {
 }
 
 // resolveStep validates one step and fills its tier.
-func resolveStep(cat Catalogue, step *Step, facts func(Step) StepFacts) error {
+func resolveStep(cat Catalogue, step *Step, guard stepGuard) error {
 	if step.Op == "" {
 		return fmt.Errorf("%w: step %d has no op", ErrUnknownOp, step.Index)
 	}
@@ -298,11 +334,7 @@ func resolveStep(cat Catalogue, step *Step, facts func(Step) StepFacts) error {
 		want = step.Tier
 	}
 	step.Tier = want
-	var f StepFacts
-	if facts != nil {
-		f = facts(*step)
-	}
-	if row, forbidden := Forbidden(GuardRequest{Op: step.Op, Class: step.Class, Facts: f}); forbidden {
+	if row, forbidden := guard(*step); forbidden {
 		return fmt.Errorf("%w: step %d: %s on %s (%s)", ErrGuard, step.Index, cleanText(step.Op, 64), step.Class, row.Reason)
 	}
 	return nil
