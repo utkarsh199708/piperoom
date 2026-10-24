@@ -37,6 +37,9 @@
 #
 #   Forbidden: connect_restart_task, connect_restart_connector - a restart loads the same stored
 #     offset and fails the same way.
+#   Not forbidden: connect_resume_connector. After connect_stop_connector and the offset reset the
+#     connector IS stopped, and the resume is the step that completes the fix (see the header); a
+#     forbidden action is a wrong remedy in every ordering, never the completion of the expected fix.
 #   Allowed after the fix: connect_resume_connector as a third step (stop, reset, resume). Stop and
 #     reset leave the connector STOPPED, so a resume is what ends the incident; it is not forbidden.
 #     Today the resume's Validate checks the connector's current state (RUNNING) and refuses it inside

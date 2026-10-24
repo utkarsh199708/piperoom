@@ -53,6 +53,16 @@
 #     10 kafka_consumer_lag again (the group is still rebalancing, a storm and not one rebalance)
 #   That is 10 reads; 10 + 2 margin = 12 <= 14, so the budget stays. The run of 17 reads (E6b)
 #   also skipped read 3, the one the steer asked for first: the budget did not cause that miss.
+#
+# W4k (KAN-495), max_tool_calls stays 14. Run 39994729845 made 14 calls in its passing run (9 before the
+#   steer, 5 after) and 16 and 15 in the two runs that failed on the budget alone (diagnosis right). The
+#   recordings below answer reads that missed (pg_streaming_liveness, source_blocking_sessions,
+#   kafka_throughput); recording a read does not change how many reads a run makes. A budget comes from
+#   passing runs only, and 14 + 2 = 16 would be the failing run plus margin, so it is not set. Prompt rule 7
+#   ("only a regular interval across 3 cycles is periodic") is what makes a third kafka_consumer_lag read
+#   after Kabir's comment legitimate: if the live run with misses 0 is correct at 15 calls (10 before the
+#   steer, 4 after it, 1 after the comment), the budget becomes 15 with that clause as its derivation.
+#   Never 16.
 
 name: consumer-rebalance-storm
 description: |
@@ -231,6 +241,259 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. The real tools'
+  # output over this stack: the slot streams (the source side is healthy), the bulk import is an
+  # open writer on the table, and the produce rate is the one kafka_partition_rates shows. Without
+  # the watcher's samples kafka_throughput says it has no consumed rate, as it does in the evals.
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 5242880 bytes in 5s (3B/3ED6F25A -> 3B/3F26F25A); connector pg-orders-connector state RUNNING
+    data:
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks:
+        - 0:RUNNING
+      elapsed_ms: 5000
+      pipeline: orders
+      slot:
+        active: true
+        confirmed_flush_advance_bytes: 5242880
+        confirmed_flush_lsn: 3B/3ED6F25A
+        confirmed_flush_lsn_after: 3B/3F26F25A
+        name: debezium_orders
+        retained_wal_bytes: 222717542
+        source_wal_advance_bytes: 0
+        verdict: streaming
+        wal_status: reserved
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      verdict: streaming
+      window_seconds: 5
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders, window_seconds: 8}
+    summary: |
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 8388608 bytes in 8s (3B/3ED6F25A -> 3B/3F56F25A); connector pg-orders-connector state RUNNING
+    data:
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks:
+        - 0:RUNNING
+      elapsed_ms: 8003
+      pipeline: orders
+      slot:
+        active: true
+        confirmed_flush_advance_bytes: 8388608
+        confirmed_flush_lsn: 3B/3ED6F25A
+        confirmed_flush_lsn_after: 3B/3F56F25A
+        name: debezium_orders
+        retained_wal_bytes: 222717542
+        source_wal_advance_bytes: 0
+        verdict: streaming
+        wal_status: reserved
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      verdict: streaming
+      window_seconds: 8
+  - tool: source_blocking_sessions
+    summary: |
+      pid=48211 user=import_svc app=orders-bulk-import state=active age=26m blocks_slot=yes started_at=2026-10-13T08:15:00Z query="INSERT INTO public.orders (id, customer_id, amount, status, updated_at) SELECT id, customer_id, amount, 'placed', now() FROM staging.orders_import"
+    data:
+      - application: orders-bulk-import
+        blocks_slot: true
+        in_scope: true
+        pid: 48211
+        query: INSERT INTO public.orders (id, customer_id, amount, status, updated_at) SELECT id, customer_id, amount, 'placed', now() FROM staging.orders_import
+        started_at: "2026-10-13T08:15:00Z"
+        state: active
+        user: import_svc
+        xact_start: "2026-10-13T10:04:00Z"
+  - tool: kafka_throughput
+    input: {window: 5m}
+    summary: |-
+      orders last 5m: no skew found
+      pg.public.orders: 285600 records (952/s) over 3 partitions; median 318/s, max p0 319/s → even
+      order-sync (PreparingRebalance, 1 members): lag 1913381; pg.public.orders p0 34% (659300)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          hot:
+            - lag: 659300
+              partition: 0
+              share_pct: 34
+              skewed: false
+              topic: pg.public.orders
+              topic_lag: 1913381
+          lag: 1913381
+          members: 1
+          state: PreparingRebalance
+      partitions:
+        - partition: 0
+          per_second: 319.11
+          records: 95733
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 317.87333333333333
+          records: 95362
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 315.01666666666665
+          records: 94505
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 319.11
+          median_per_second: 317.87333333333333
+          partitions: 3
+          per_second: 952
+          records: 285600
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 300
+  - tool: kafka_throughput
+    input: {window: 15m}
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 856800 records (952/s) over 3 partitions; median 318/s, max p0 319/s → even
+      order-sync (PreparingRebalance, 1 members): lag 1913381; pg.public.orders p0 34% (659300)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          hot:
+            - lag: 659300
+              partition: 0
+              share_pct: 34
+              skewed: false
+              topic: pg.public.orders
+              topic_lag: 1913381
+          lag: 1913381
+          members: 1
+          state: PreparingRebalance
+      partitions:
+        - partition: 0
+          per_second: 319.11
+          records: 287199
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 317.87333333333333
+          records: 286086
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 315.01666666666665
+          records: 283515
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 319.11
+          median_per_second: 317.87333333333333
+          partitions: 3
+          per_second: 952
+          records: 856800
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 900
+  - tool: kafka_throughput
+    input: {window: 30m}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 1599360 records (889/s) over 3 partitions; median 297/s, max p0 298/s → even
+      order-sync (PreparingRebalance, 1 members): lag 1913381; pg.public.orders p0 34% (659300)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          hot:
+            - lag: 659300
+              partition: 0
+              share_pct: 34
+              skewed: false
+              topic: pg.public.orders
+              topic_lag: 1913381
+          lag: 1913381
+          members: 1
+          state: PreparingRebalance
+      partitions:
+        - partition: 0
+          per_second: 297.8361111111111
+          records: 536105
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 296.6816666666667
+          records: 534027
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 294.0155555555556
+          records: 529228
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 297.8361111111111
+          median_per_second: 296.6816666666667
+          partitions: 3
+          per_second: 888.5333333333333
+          records: 1599360
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 1800
+  - tool: kafka_throughput
+    input: {window: 1h}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 2456160 records (682/s) over 3 partitions; median 228/s, max p0 229/s → even
+      order-sync (PreparingRebalance, 1 members): lag 1913381; pg.public.orders p0 34% (659300)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          hot:
+            - lag: 659300
+              partition: 0
+              share_pct: 34
+              skewed: false
+              topic: pg.public.orders
+              topic_lag: 1913381
+          lag: 1913381
+          members: 1
+          state: PreparingRebalance
+      partitions:
+        - partition: 0
+          per_second: 228.69583333333333
+          records: 823305
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 227.8088888888889
+          records: 820112
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 225.76194444444445
+          records: 812743
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 228.69583333333333
+          median_per_second: 227.8088888888889
+          partitions: 3
+          per_second: 682.2666666666667
+          records: 2456160
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 3600
   # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
   - tool: similar_incidents
     summary: |-
