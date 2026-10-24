@@ -1208,17 +1208,7 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 	// Before Apply: the step's proposal leaves OpenProposals with its last step.
 	s.actionExecutedLocked(st, e)
 	st.snap = Apply(st.snap, e)
-	// GET /api/pipelines' setup rows remember when each pipeline registered
-	// (U1-14): the fold sees the event on every replica and after a restart.
-	if e.Type == events.PipelineRegistered {
-		if p, ok := decode[events.PipelineRegisteredPayload](e); ok && p.PipelineID != "" {
-			s.regMu.Lock()
-			if _, seen := s.regAt[p.PipelineID]; !seen {
-				s.regAt[p.PipelineID] = e.At
-			}
-			s.regMu.Unlock()
-		}
-	}
+	s.noteRegistered(e)
 	// The store counts the same bytes (len of the payload JSON) for the
 	// room's log cap, whichever replica appended the event.
 	st.logBytes += int64(len(e.Payload))

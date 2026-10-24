@@ -1,6 +1,13 @@
 package room
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// registeredAtLoadTimeout bounds the one room load registeredAt makes for a
+// pipeline whose registration time this replica has not folded yet.
+const registeredAtLoadTimeout = 5 * time.Second
 
 // PickerUser is one entry of GET /auth/users: the dev login picker. Only the
 // id, name and layers of a users.yaml entry; never email, sub or admin.
@@ -46,6 +53,10 @@ type PipelineSetupInfo struct {
 	Target       string `json:"target"`
 	RegisteredAt string `json:"registered_at"`
 	WatchedBy    string `json:"watched_by"`
+	// UnreachableLayers lists the layers the server cannot read for this
+	// pipeline (owners.SetupSpec.UnreachableLayers, which the watcher skips
+	// with a reason); omitted when there are none.
+	UnreachableLayers []string `json:"unreachable_layers,omitempty"`
 }
 
 // PipelinesFor returns the owners.yaml pipelines u may see, in file order
@@ -64,14 +75,40 @@ func (s *Service) PipelinesFor(u User) []PipelineInfo {
 		info := PipelineInfo{ID: p.ID, Title: p.Title, Shadow: p.Shadow(), Kind: p.KindOrDefault()}
 		if spec, ok := p.Setup(); ok {
 			setup := &PipelineSetupInfo{RoomID: spec.RoomID, Target: spec.Target, WatchedBy: spec.WatchedBy}
-			s.regMu.Lock()
-			if at, ok := s.regAt[p.ID]; ok {
+			if len(spec.UnreachableLayers) > 0 {
+				setup.UnreachableLayers = append([]string{}, spec.UnreachableLayers...)
+			}
+			if at, ok := s.registeredAt(p.ID, spec.RoomID); ok {
 				setup.RegisteredAt = at.UTC().Format(time.RFC3339)
 			}
-			s.regMu.Unlock()
 			info.Setup = setup
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+// registeredAt is the time pipeline.registered was appended for pipelineID,
+// from the fold of the rooms this replica has loaded (noteRegistered). Rooms
+// load on demand, so after a restart the time is unknown until the setup room
+// is read by someone; when it is unknown, the setup room the owners entry
+// names (setup.room_id) is loaded once here, which folds its log and records
+// the time. A room that is gone, or a store that does not answer in time,
+// leaves it unknown (registered_at empty) for this call.
+func (s *Service) registeredAt(pipelineID, roomID string) (time.Time, bool) {
+	s.regMu.Lock()
+	at, ok := s.regAt[pipelineID]
+	s.regMu.Unlock()
+	if ok || roomID == "" {
+		return at, ok
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, registeredAtLoadTimeout)
+	defer cancel()
+	if _, err := s.readRoom(ctx, roomID); err != nil {
+		return time.Time{}, false
+	}
+	s.regMu.Lock()
+	at, ok = s.regAt[pipelineID]
+	s.regMu.Unlock()
+	return at, ok
 }

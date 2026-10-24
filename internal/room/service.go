@@ -1015,6 +1015,27 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 	return s.rebuildWith(ctx, roomID, nil)
 }
 
+// noteRegistered remembers a pipeline.registered event's time by pipeline id
+// for GET /api/pipelines' setup rows (directory.go; U1-14). It runs on every
+// path that folds an event: a live append and a remote replica's event
+// (foldLocked) and the rebuild of a room from the store (rebuildWith), so the
+// time is known on every replica and after a restart. The first registration
+// of an id wins.
+func (s *Service) noteRegistered(e events.Event) {
+	if e.Type != events.PipelineRegistered {
+		return
+	}
+	p, ok := decode[events.PipelineRegisteredPayload](e)
+	if !ok || p.PipelineID == "" {
+		return
+	}
+	s.regMu.Lock()
+	if _, seen := s.regAt[p.PipelineID]; !seen {
+		s.regAt[p.PipelineID] = e.At
+	}
+	s.regMu.Unlock()
+}
+
 // rebuildWith is rebuild that also hands every event read to visit (nil for
 // none), in log order, with the room folded through it.
 func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(RoomSnapshot, events.Event)) (loadedRoom, error) {
@@ -1040,6 +1061,7 @@ func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(Roo
 				}
 			}
 			st.snap = Apply(st.snap, e)
+			s.noteRegistered(e)
 			trackPending(st, e)
 			if visit != nil {
 				visit(st.snap, e)
