@@ -284,7 +284,16 @@ recordings:
       to_version: 1
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
+    data:
+      changes: []
+      from_version: 1
+      single_version: true
+      subject: pg.public.orders-value
+      to_version: 1
+      versions:
+        - 1
   - tool: pg_recent_ddl
     summary: |
       (no DDL since 2026-10-23T09:40:00Z)
@@ -448,6 +457,20 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, logtools}; the values are composed to agree with the recordings above.
+  # The stored offset is partition server=pg: the 1.x logical server name equals the topic.prefix to be set.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=263235684640, lsn_proc=263235684640, ts_usec=1792832878000000, txId=918223
+  # connect_worker_logs: the replay has no Loki (WORKER_LOGS_LOKI_URL is unset), so the real tool answers with its
+  # not-configured text (internal/tools/logtools/logtools.go) whatever the connector or window.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
 
 inputs:
   - kind: steer

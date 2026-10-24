@@ -22,15 +22,18 @@ func TestEnvironmentLayer(t *testing.T) {
 	if slices.Contains(events.LayersOf(events.PipelineKindBatch), events.LayerEnvironment) {
 		t.Fatalf("batch pipelines have no setup layer: %v", events.LayersOf(events.PipelineKindBatch))
 	}
-	if events.Layers[len(events.Layers)-1] != events.LayerEnvironment {
-		t.Fatalf("Layers = %v, want %q last so older lists keep their order", events.Layers, events.LayerEnvironment)
+	// environment was appended last by U0; Q8-0 appended mysql after it, so
+	// environment keeps its index and every older list keeps its order.
+	if events.Layers[8] != events.LayerEnvironment || events.Layers[len(events.Layers)-1] != events.LayerMySQL {
+		t.Fatalf("Layers = %v, want %q at index 8 and %q last so older lists keep their order", events.Layers, events.LayerEnvironment, events.LayerMySQL)
 	}
 }
 
-// IncidentLayers is exactly the pre-U Layers list (what the triage schema and
-// the label validators saw before U0), in order, and a fresh slice.
+// IncidentLayers is the pre-U Layers list (what the triage schema and the
+// label validators saw before U0), in order, plus the Q8 source layer mysql
+// at the end, and a fresh slice.
 func TestIncidentLayers(t *testing.T) {
-	want := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform"}
+	want := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform", "mysql"}
 	got := events.IncidentLayers()
 	if !slices.Equal(got, want) {
 		t.Fatalf("IncidentLayers() = %v, want %v", got, want)

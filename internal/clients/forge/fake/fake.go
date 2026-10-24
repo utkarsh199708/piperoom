@@ -1,5 +1,5 @@
-// Package fake is an in-memory forge (forge.ForgeReader and
-// forge.ForgeWriter) with repositories, commits, branches and pull requests,
+// Package fake is an in-memory forge (clients.ForgeReader and
+// clients.ForgeWriter) with repositories, commits, branches and pull requests,
 // for the demo, the eval replay and the room, tool and agent tests. Its
 // writer keeps the real one's rules: a new piperoom/ branch from BaseSHA,
 // ErrBaseMoved per touched file, idempotent retries, ErrBranchExists.
@@ -54,8 +54,8 @@ type Forge struct {
 }
 
 var (
-	_ forge.ForgeReader = (*Forge)(nil)
-	_ forge.ForgeWriter = (*Forge)(nil)
+	_ clients.ForgeReader = (*Forge)(nil)
+	_ clients.ForgeWriter = (*Forge)(nil)
 )
 
 // New returns an empty forge.
@@ -344,7 +344,8 @@ func (f *Forge) ListFiles(_ context.Context, ref forge.RepoRef, sha string) ([]f
 	return out, false, nil
 }
 
-// PullRequest implements forge.ForgeReader.
+// PullRequest implements clients.ForgeReader. A PR the fake opened has its
+// head in the repository itself until SetHeadRepo says otherwise.
 func (f *Forge) PullRequest(_ context.Context, ref forge.RepoRef, number int) (forge.PullRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

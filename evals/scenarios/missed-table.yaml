@@ -569,6 +569,21 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{dbtools}; the values are composed to agree with the recordings above.
+  - tool: pg_connector_scope_gap
+    input: {pipeline_id: orders}
+    summary: |
+      connector pg-orders-connector, publication dbz_publication (connector user piperoom)
+      public.orders: declared=yes, in_connector=yes, in_publication=yes
+      public.devctl_refunds: declared=yes, in_connector=yes, in_publication=no
+      public.devctl_signal: declared=no, in_connector=yes, in_publication=yes (in connector, outside declared scope)
+      public.devctl_signal is streamed by the connector but owners.yaml does not declare it: ask the pipeline owner to add it to source_tables before proposing a fix for it.
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3B/4C0AB078 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
 
 inputs:
   - kind: steer

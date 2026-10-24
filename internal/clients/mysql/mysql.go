@@ -2,7 +2,8 @@
 // docs/design/mysql-source.md §6). It implements clients.SourceDB
 // (LongTransactions and Row; ReplicationSlots and RecentDDL answer
 // clients.ErrNotSupported, because MySQL has neither), the item 2 readers
-// SourceSettingsReader and ScopedBlockerReader, and BinlogReader.
+// SourceSettingsReader and ScopedBlockerReader, and BinlogReader. The write
+// side, Writer (Q8f, writer.go), is a separate pool on SOURCE_DB_WRITE_URL.
 //
 // Safety, by construction:
 //   - The mysql:// URL is parsed here with a parameter allow-list (tls, tls_ca,

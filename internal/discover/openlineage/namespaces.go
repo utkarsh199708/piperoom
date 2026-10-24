@@ -15,7 +15,7 @@ import (
 // password and query parameters of a DSN never reach them. An empty
 // namespace leaves that kind of node out of every event.
 type Namespaces struct {
-	Source        string // "postgres://host:port" of SOURCE_DB_URL
+	Source        string // "postgres://host:port" or "mysql://host:port" of SOURCE_DB_URL
 	SourceDB      string // its database
 	Kafka         string // "kafka://host:port" of the first KAFKA_BROKERS entry
 	WarehouseKind string // WAREHOUSE_KIND, lower case; "" = postgres
@@ -35,6 +35,9 @@ func NamespacesFromConfig(c config.Config) Namespaces {
 		n.WarehouseKind = "postgres"
 	}
 	n.Source, n.SourceDB = postgresNamespace(c.SourceDBURL)
+	if n.Source == "" {
+		n.Source, n.SourceDB = mysqlNamespace(c.SourceDBURL)
+	}
 	if first, _, _ := strings.Cut(c.KafkaBrokers, ","); strings.TrimSpace(first) != "" {
 		if hp := hostPort(strings.TrimSpace(first), "9092"); hp != "" {
 			n.Kafka = "kafka://" + hp
@@ -107,6 +110,24 @@ func postgresNamespace(dsn string) (ns, db string) {
 	return "", ""
 }
 
+// mysqlNamespace reads a MySQL source URL, mysql://user:pass@host[:3306]/[db]
+// (docs/design/mysql-source.md §1): the namespace is "mysql://host:port". The
+// database is optional: a MySQL table node already names db.table.
+func mysqlNamespace(dsn string) (ns, db string) {
+	dsn = strings.TrimSpace(dsn)
+	if !strings.HasPrefix(dsn, "mysql://") {
+		return "", ""
+	}
+	u, err := url.Parse(dsn)
+	if err != nil || u.Host == "" || strings.Contains(u.Host, ",") {
+		return "", ""
+	}
+	if hp := hostPort(u.Host, "3306"); hp != "" {
+		return "mysql://" + hp, strings.Trim(u.Path, "/")
+	}
+	return "", ""
+}
+
 // snowflakeNamespace reads the account and database of a gosnowflake DSN,
 // user[:password]@<account>/<database>[/<schema>][?...]. The password is
 // URL-encoded, so the last '@' ends the credentials.
@@ -146,7 +167,16 @@ func hostPort(addr, def string) string {
 func (n Namespaces) dataset(node topology.Node) (ns, name string, ok bool) {
 	switch node.Kind {
 	case topology.KindSourceTable:
-		if !strings.HasPrefix(node.ID, "pg:") || n.Source == "" {
+		// A MySQL table (node "mysql:<db>.<table>") is named {database}.{table}
+		// in a mysql:// namespace; a Postgres one {database}.{schema}.{table}.
+		// A node of the other kind than SOURCE_DB_URL is left out.
+		if strings.HasPrefix(node.ID, "mysql:") {
+			if !strings.HasPrefix(n.Source, "mysql://") || !strings.Contains(node.Name, ".") {
+				return "", "", false
+			}
+			return n.Source, node.Name, true
+		}
+		if !strings.HasPrefix(node.ID, "pg:") || !strings.HasPrefix(n.Source, "postgres://") {
 			return "", "", false
 		}
 		return n.Source, n.SourceDB + "." + withSchema(node.Name), true

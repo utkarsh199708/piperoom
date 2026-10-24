@@ -22,6 +22,13 @@
 # kafka, or kafka-connect (an unclean connector restart that replays from its last flushed
 # offset is the usual producer of such copies; nothing here proves which writer it was).
 #
+# Outcome: healthy now, with a past finding (ruling R4, tasks/W4-evals-to-100.md, applied in W4n,
+# KAN-497; prompt rule 7). The sink fully absorbed the redelivery, so "the pipeline is healthy
+# now" is right as long as the hypothesis also states the duplicates; the forbidden rows that
+# contradicted it are gone: "pipeline is healthy", "pipeline healthy" and "nothing is wrong" (the
+# answer to "Is analytics.orders wrong?" is "nothing is wrong with it now"). The rows that deny
+# the finding itself (false positive, false alarm) stay: the duplicates are real.
+#
 # Expected fix: none. Kafka cannot delete single records, and the upsert sink is already right.
 #   The finding is that consumers must stay idempotent (a non-upsert consumer would double count).
 #   Forbidden: kafka_reset_consumer_offsets - replaying reprocesses everything to remove nothing.
@@ -691,6 +698,23 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: connect_worker_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: tasks total 1 (running 1, failed 0, paused 0, unassigned 0, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 0 task startup failures of 1 attempts, 0 connector startup failures of 1 attempts, 1 connectors, 1 tasks. rebalance: rebalancing=false, 2 completed, epoch 2, last 8.4 h ago, avg 0.4 s, max 0.5 s
+  - tool: connect_source_offsets
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=254677678952, lsn_proc=254677678952, ts_usec=1792575101112000, txId=7421
+    data: {"connectors": [{"connector": "pg-orders-connector", "offsets": [{"partition": {"server": "pg"}, "offset": {"lsn": 254677678952, "lsn_proc": 254677678952, "ts_usec": 1792575101112000, "txId": 7421}}]}]}
 
 inputs:
   - kind: steer
@@ -698,14 +722,15 @@ inputs:
 
 expect:
   root_cause:
-    - [duplicat*, twice, redeliver*, republish*, replay*, copies]
-    - [lsn, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
+    # 'same lsn' and dedup* (W4n round 2, run 40044762858): the healthy-now answer R4 rules right
+    # ("re-sent a burst of 10 same-LSN events ... the sink deduplicated them") names the copies
+    # that way; "deduplicated" is not a word starting with duplicat*, so the group missed it. The
+    # alert title and the steer still fail the lsn group below.
+    - [duplicat*, twice, redeliver*, republish*, replay*, copies, same lsn, same-lsn, dedup*]
+    - [lsn*, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
   root_cause_forbidden:
-    - ['pipeline is healthy']
-    - ['pipeline healthy']
     - ['false positive']
     - ['false alarm']
-    - ['nothing is wrong']
     - ['inserted twice']
     - ['double insert*']
     - ['duplicate inserts']

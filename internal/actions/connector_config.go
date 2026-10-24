@@ -71,13 +71,21 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 	if a.allow != nil {
 		return a.allow
 	}
-	return defaultConnectorConfigAllowList()
+	allow := defaultConnectorConfigAllowList()
+	if a.d.mysqlRoom() {
+		// Debezium MySQL source connectors only; checked by codeValueCheck
+		// (mysql_config_keys.go). Offered only where a binlog reader is wired
+		// (a MySQL room), so a Postgres room's action list does not change.
+		allow[keyServerID] = map[string]bool{}
+		allow[keySnapshotMode] = map[string]bool{}
+	}
+	return allow
 }
 
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one or more settings that set the connector's output schema or precision, in one request and one approval: params {connector, changes: {key: value, ...}} (the old one-key form {connector, key, value} is still accepted). Allowed: decimal.handling.mode precise|string (double is not offered: it loses precision); time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). On a Debezium source connector only: heartbeat.interval.ms 0 (off) or 1000..3600000, and heartbeat.action.query, one INSERT INTO or UPDATE of a schema-qualified heartbeat table (its name contains heartbeat; in a schema of the pipeline's source_tables), with literal values, NOW(), CLOCK_TIMESTAMP() or CURRENT_TIMESTAMP only (e.g. the query source_create_heartbeat_table names). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks once. To undo an output setting, set the old value."
+	return "Changes one or more settings that set the connector's output schema or precision, in one request and one approval: params {connector, changes: {key: value, ...}} (the old one-key form {connector, key, value} is still accepted). Allowed: decimal.handling.mode precise|string (double is not offered: it loses precision); time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). On a Debezium source connector only: heartbeat.interval.ms 0 (off) or 1000..3600000, and heartbeat.action.query, one INSERT INTO or UPDATE of a schema-qualified heartbeat table (its name contains heartbeat; in a schema of the pipeline's source_tables), with literal values, NOW(), CLOCK_TIMESTAMP() or CURRENT_TIMESTAMP only (e.g. the query source_create_heartbeat_table names). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks once. To undo an output setting, set the old value." + a.d.mysqlDescribe()
 }
 
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
@@ -98,8 +106,8 @@ func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 		}
 		sort.Strings(vals)
 		if len(vals) == 0 {
-			// A heartbeat key: checked in code (heartbeatValueCheck), not by enum.
-			changeProps[k] = map[string]any{"type": "string", "description": heartbeatSchemaText(k)}
+			// A heartbeat or MySQL key: checked in code (codeValueCheck), not by enum.
+			changeProps[k] = map[string]any{"type": "string", "description": a.d.codeKeySchemaText(k)}
 			continue
 		}
 		changeProps[k] = map[string]any{"type": "string", "enum": vals}
@@ -213,11 +221,11 @@ func checkConfigChange(allow map[string]map[string]bool, key, value string) erro
 	if len(value) > maxConfigValueLen {
 		return fmt.Errorf("actions: value for %s is longer than %d bytes", key, maxConfigValueLen)
 	}
-	if isHeartbeatKey(key) && len(values) == 0 {
-		if err := heartbeatValueCheck(key, value); err != nil {
+	if isCodeChecked(key) && len(values) == 0 {
+		if err := codeValueCheck(key, value); err != nil {
 			return err
 		}
-		if heartbeatValueLooksSecret(key, value) {
+		if isHeartbeatKey(key) && heartbeatValueLooksSecret(key, value) {
 			return fmt.Errorf("actions: the value for %s looks like a credential; secrets never travel through a proposal", key)
 		}
 		return nil
@@ -296,7 +304,14 @@ func (a *updateConnectorConfig) Validate(ctx context.Context, raw json.RawMessag
 	if err != nil {
 		return fmt.Errorf("actions: read config of %s: %w", set.connector, err)
 	}
-	return set.checkGuards(cfg)
+	if err := set.checkGuards(cfg); err != nil {
+		return err
+	}
+	if err := a.d.checkServerID(ctx, set, false); err != nil {
+		return err
+	}
+	_, err = a.d.checkRecoveryName(ctx, set, cfg)
+	return err
 }
 
 // hasGuarded reports whether the set holds a key checkVisibilityGuard checks.
@@ -305,17 +320,20 @@ func (s configChangeSet) hasGuarded() bool {
 	_, hdr := s.changes[dlq.KeyContextHeaders]
 	_, hbi := s.changes[keyHeartbeatInterval]
 	_, hbq := s.changes[keyHeartbeatQuery]
-	return log || hdr || hbi || hbq
+	_, sid := s.changes[keyServerID]
+	_, snap := s.changes[keySnapshotMode]
+	return log || hdr || hbi || hbq || sid || snap
 }
 
-// checkGuards runs checkVisibilityGuard on every key of the set.
+// checkGuards runs checkVisibilityGuard on every key of the set, then the
+// checks that need the new values (checkValueGuards).
 func (s configChangeSet) checkGuards(cfg map[string]string) error {
 	for _, k := range s.keys() {
 		if err := checkVisibilityGuard(s.connector, k, cfg); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.checkValueGuards(cfg)
 }
 
 // checkVisibilityGuard refuses the two errors.* switches where they would not
@@ -337,6 +355,8 @@ func checkVisibilityGuard(connector, key string, cfg map[string]string) error {
 		}
 	case keyHeartbeatInterval, keyHeartbeatQuery:
 		return checkHeartbeatGuard(connector, key, cfg)
+	case keyServerID, keySnapshotMode:
+		return checkMySQLKeyGuard(connector, key, cfg)
 	}
 	return nil
 }
@@ -427,6 +447,9 @@ func (a *updateConnectorConfig) Execute(ctx context.Context, raw json.RawMessage
 	if err := set.checkGuards(before); err != nil {
 		return "", err
 	}
+	if err := a.d.checkServerID(ctx, set, true); err != nil {
+		return "", err
+	}
 	todo, same := set.plan(before)
 	sameText := make([]string, 0, len(same))
 	for _, k := range same {
@@ -506,6 +529,12 @@ func (a *updateConnectorConfig) undoValues(ctx context.Context, cfg map[string]s
 	for _, k := range todoKeys {
 		v, set := cfg[k]
 		switch {
+		case isMySQLKey(k) && len(allow[k]) == 0:
+			undo, ok := mysqlKeyUndo(k, cfg)
+			if !ok {
+				return nil, ""
+			}
+			v = undo
 		case isHeartbeatKey(k) && len(allow[k]) == 0:
 			switch {
 			case k == keyHeartbeatInterval && !set:
