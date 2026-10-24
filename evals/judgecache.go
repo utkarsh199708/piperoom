@@ -151,10 +151,14 @@ func (c *JudgeCache) Put(sc Scenario, hypothesis, model string, v Verdict) error
 	if err != nil {
 		return fmt.Errorf("evals: encode judge cache entry: %w", err)
 	}
+	return c.write(JudgeCacheKey(JudgePromptVersion, sc.Name, hypothesis), b)
+}
+
+// write stores one encoded entry under key.
+func (c *JudgeCache) write(key string, b []byte) error {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return fmt.Errorf("evals: create judge cache: %w", err)
 	}
-	key := JudgeCacheKey(JudgePromptVersion, sc.Name, hypothesis)
 	tmp, err := os.CreateTemp(c.dir, ".put-*")
 	if err != nil {
 		return fmt.Errorf("evals: write judge cache entry: %w", err)

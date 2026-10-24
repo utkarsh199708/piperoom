@@ -72,7 +72,7 @@ accepts them (34 scenario(s) OK). The `good`/`wrong` hypothesis fixtures for the
 
 | Scenario | Alert | Root cause | First failing layer | Trap | Safe automated fix |
 |---|---|---|---|---|---|
-| `clickhouse-kafka-engine-stalled` | `analytics.orders` stale 45m | the ClickHouse Kafka engine table's consumer stalled and reports an exception, so the materialized view stops loading the MergeTree sink | warehouse | the topic is fresh and `order-sync` is at lag 0, so Kafka and the app consumer read as healthy; the stall is ClickHouse's own consumer, visible only in `warehouse_load_errors` | none: recreate/restart the Kafka engine table (warehouse owner) |
+| `clickhouse-kafka-engine-stalled` | `analytics.orders` stale 45m | the ClickHouse Kafka engine table's consumer stalled and reports an exception, so the materialized view stops loading the MergeTree sink | warehouse | the topic is fresh and `order-sync` is at lag 0, so Kafka and the app consumer read as healthy; the stall is ClickHouse's own consumer (not `order-sync`), visible only in `warehouse_load_errors` | none: recreate/restart the Kafka engine table (warehouse owner) |
 | `clickhouse-mv-schema-change` | `analytics.orders` stale 41m | schema v4 added `risk_score`; the ClickHouse sink table and materialized view `mv_orders` were not updated, so every `INSERT ... SELECT` fails with code 47 (unknown identifier) | warehouse | `schema_registry_diff` shows a backward compatible add, so it reads like the schema-change story; a restart or schema action cannot fix a warehouse column | none: add the column to the sink table and recreate the materialized view |
 | `clickhouse-readonly-profile` | warehouse unreadable | the ClickHouse service account's profile is `readonly=1`, which rejects the client's per-query settings, so every warehouse query fails with code 164 | warehouse | every upstream layer answers; only the warehouse tools fail, with an error that names the profile | none: change the profile to `readonly=2` (warehouse owner) |
 | `clickhouse-sink-table-dropped` | `analytics.orders` missing | the sink table `analytics.orders` was dropped, so the materialized view's loads fail with code 60 (unknown table) and freshness returns "not found" | warehouse | the alert reads like a slow warehouse; the freshness error is "not found" and the load errors show code 60 | none: recreate the table and reattach the materialized view |
@@ -558,6 +558,42 @@ diagnosis. Neither `plugin_install`, `compose_restart`, `source_alter_system`, `
 `expect.fix`, and forbids the restarts, resume, config update, slot drop and schema actions that repeat
 the failure.
 
+### Recorded misses and measured budgets (W4l, KAN-496)
+
+Run 39994729845 left 124 replay misses in six scenarios (the W4-0 table, `reviews/evals-2026-10-23/misses.md`) and
+failed all but `replication-slot-lost-failover` on `max_tool_calls` alone. W4l records every miss as the real
+tool's own answer over the scenario's state (the Q3f approach: the summary code of `internal/tools/**` run over
+composed values on the scenario clock; addresses are composed) and sets the budget per input turn.
+
+| Scenario | Misses | `max_tool_calls` | Basis |
+|---|---|---|---|
+| `removed-decoder-plugin` | 22 | 14 -> 15 | measured: step 1 (run 40034874651) passed at 13, + 2 |
+| `renamed-property-after-upgrade` | 24 | 14 -> 15 | standard path 11 + 2 reads + 2, provisional (no run passed) |
+| `avro-schema-id-deleted-sink-failed` | 10 | 18 (unchanged) | the 18 of the passing runs of 39212981319; the loop-free counts of 39994729845 (14, 13, 15) fit |
+| `rows-lost-after-retention` | 23 | 16 -> 21 | measured: step 1 passed at 19, + 2 |
+| `replication-slot-lost-failover` | 16 | 12 -> 13 | measured: highest passing run 11 + 2 |
+| `snapshot-stuck` | 29 | 12 -> 19 | measured: step 1 made 17 and failed on budget alone, + 2 |
+
+`renamed-property-after-upgrade` (15) is still provisional: no run passed, so it comes from the standard path + 2. Repeated calls are not budgeted for: the `schema_registry_diff` without `from_version`
+loop of `avro-schema-id-deleted-sink-failed` (8-9 calls a run, the real tool's bad-input error each time) is a W4m
+or A2 item.
+
+What the recordings say, where it is not the plain tool output: `connect_worker_logs` answers "not configured"
+(see "Tool gaps" below); in `removed-decoder-plugin` the stored `plugin.name=wal2json` is what Connect's own
+validation rejects, so `net_probe` source (a warning on `plugin.name`) and a `connect_validate_config` that leaves
+`plugin.name` out report it, while a config that sets `pgoutput` validates clean; in `renamed-property-after-upgrade`
+`pg_streaming_liveness` says `stuck` (the RUNNING task's blocked producer) and the validations name
+`heartbeat.topics.prefix` as renamed; in `rows-lost-after-retention` `pg_connector_scope_gap` names
+`public.devctl_signal` as outside `owners.yaml`, which the real tool does for this connector; in `snapshot-stuck`
+`pg_streaming_liveness` says `stuck` too (an initial snapshot pins the slot) and the stored offset carries
+`snapshot=true`.
+
+`replication-slot-lost-failover` answers the stored offset (the old primary's last committed LSN, ahead of what the
+async standby had replayed) and the new primary's ordinary settings, after step 1 showed the agent retrying both
+as misses; nothing recorded makes a fix look right and every fix stays forbidden. R1 (`tasks/W4-evals-to-100.md`)
+reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
+one-line edit in `../agreement_test.go` (C6's) and a judge refill.
+
 ### Setup scenarios: SQL Server (U4d)
 
 Three setup scenarios on a SQL Server 2022 source (the `mssql` dev profile, `dev/mssql/README.md`) and the Compose
@@ -616,6 +652,48 @@ header says `RECORDED: NO`). They run on Claude unchanged; their point is the no
 
 `internal/injectscan` flags the planted recording of `injection-template-tokens` (its test map lists
 the file with `connect_status`).
+
+### Recorded misses (W4k)
+
+Run 39994729845 (the full suite, `reviews/evals-2026-10-23/misses.md`) listed the calls each scenario had no recording
+for. W4k records the 75 misses of six scenarios; `../w4k_recordings_test.go` replays every one of them and checks
+that a read off the standard path (`net_probe` on another target, another connector, an unrecorded
+`kafka_throughput` window, `kafka_acls`) is still a miss.
+
+| Scenario | Misses | Recorded |
+|---|---|---|
+| `clickhouse-kafka-engine-stalled` | 24 | `connect_config`, `reconcile`, `schema_registry_versions` / `_subjects`, `pg_recent_ddl`, `connect_worker_logs`, `kafka_dup_keys`, `kafka_throughput`, `similar_incidents`, and the not-found answers every scenario records for names it does not know |
+| `dead-slot-wal-no-context` | 7 | `connect_source_offsets`, `pg_streaming_liveness`, `connect_worker_logs` |
+| `slot-inactive-wal-growth` | 7 | `connect_source_offsets`, `pg_streaming_liveness` (both phases), `source_blocking_sessions` |
+| `consumer-rebalance-storm` | 9 | `pg_streaming_liveness` (5 s and 8 s windows), `source_blocking_sessions`, `kafka_throughput` (5m, 15m, 30m, 1h) |
+| `clickhouse-readonly-profile` | 15 | `pg_replication_slots`, `pg_streaming_liveness`, `net_probe` (warehouse), `pg_recent_ddl`, `warehouse_row`, `similar_incidents` |
+| `clickhouse-sink-table-dropped` | 13 | `pg_replication_slots`, `net_probe` (warehouse), `pg_recent_ddl`, `warehouse_row`, `similar_incidents` |
+
+Each summary and data payload is the output of the real tool over the stack the scenario describes (fake clients under
+the production `kafkatools`, `dbtools`, `nettools` and `logtools` code, as `evals/gen` does). For the two Postgres
+slot scenarios `TestW4kRecordingsAreRealToolOutput` rebuilds the state and compares the tools' output with the
+file. The others hold timestamps and window arithmetic that depend on the wall clock (`reconcile`, `kafka_throughput`,
+`source_blocking_sessions`), so their text was generated in one wall-clock second and moved to the scenario's clock;
+regenerate them if a tool's format changes. Decisions a reader should know:
+
+- `pg_streaming_liveness` says `stuck` for `dead-slot-wal-no-context` and `slot-inactive-wal-growth`: the connector is
+  STOPPED, the slot is inactive and the source keeps writing (the WAL is growing), which is the tool's definition of
+  stuck. Its summary names the connector state and the inactive slot.
+- `source_blocking_sessions` in `consumer-rebalance-storm` lists the bulk import (pid 48211, the same session
+  `pg_long_transactions` shows) with `blocks_slot=yes`: it is the oldest open writer. The slot is streaming
+  (`pg_streaming_liveness`), so it is not the cause.
+- `clickhouse-kafka-engine-stalled`: order-sync is the application consumer, not ClickHouse's. The Kafka engine
+  table has its own group, `ch_orders_queue` (its `kafka_group_name`, derived by the topology, which the read tools
+  accept): `kafka_list_groups` shows both groups and `kafka_consumer_lag` shows it Stable with its commits frozen at
+  08:15 (lag 208575) while order-sync is at lag 0. Run 39994729845 took order-sync for the engine's group in all
+  three runs; the live run on 3fd6b3f listed only order-sync and its agent abstained. Meera's steer says only that the
+  two consumers differ, not the cause. Labels did not change. The alert's `pipeline_map` is still the hand-composed
+  one without the CH-3 group, engine and view nodes.
+- A budget comes from a passing path. In W4k only `clickhouse-kafka-engine-stalled` changed, 12 to 17: live run
+  40044065663 named the cause and layer and failed on the budget alone at 15 calls, which R8 (#939) counts as a passing
+  path (15 + 2). Its turn split was not measured (see the scenario header). `consumer-rebalance-storm` stays 14 (its
+  live run passed at 14; never 16), and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule
+  would give 13 and 12; a row that only records misses does not lower a budget).
 
 ## Outcome scenarios (E2)
 
@@ -707,5 +785,9 @@ All five can be solved with today's tools, but the agent has to infer things a t
   only, so the agent can check a `kafka_replay_range` copy only through the action's own Verify counts.
 - **Offsets by time are visible only through `reconcile`**, which counts what is retained: records that
   retention deleted look as if the connector never wrote them (`rows-lost-after-retention`).
-- **No scenario records `connect_worker_logs` yet** (Q3c): it is replayable since Q6d, and the agent's skip
-  rule (Q3e) sends the model to it in `tolerance-all-skips`, where a call is a replay miss.
+- **`connect_worker_logs` is recorded only as the tool's own answer for a server without a log store** (Q3c,
+  replayable since Q6d; W4k, KAN-495, in `clickhouse-kafka-engine-stalled` and `dead-slot-wal-no-context`; W4l,
+  KAN-496, in six more files): "Worker logs are not configured on this server ...", the real tool's output for every
+  window, level and limit. No scenario records log lines and it adds no log evidence the file's owner steer does not
+  already carry, so the agent's skip rule (Q3e) still sends the model to a call that is a replay miss in
+  `tolerance-all-skips`.

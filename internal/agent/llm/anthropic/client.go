@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -45,6 +46,43 @@ func WorkspaceOptions(getenv func(string) string) []RequestOption {
 		opts = append(opts, option.WithHeader(WorkspaceHeader, id))
 	}
 	return opts
+}
+
+// The first-party variables EnvOptions reads.
+const (
+	APIKeyEnv    = "ANTHROPIC_API_KEY"
+	AuthTokenEnv = "ANTHROPIC_AUTH_TOKEN"
+	BaseURLEnv   = "ANTHROPIC_BASE_URL"
+)
+
+// responseHeaderTimeout matches the SDK's default client, which
+// option.WithoutEnvironmentDefaults drops along with the autoload.
+const responseHeaderTimeout = 10 * time.Minute
+
+// EnvOptions returns the options that make a first-party client take its
+// credential and base URL from getenv instead of the process environment:
+// the SDK's environment autoload is skipped (option.WithoutEnvironmentDefaults),
+// then ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_BASE_URL
+// when set are read through getenv. ok is false when getenv has neither
+// credential. The key is never logged or returned in an error.
+func EnvOptions(getenv func(string) string) (opts []RequestOption, ok bool) {
+	hc := &http.Client{Transport: http.DefaultTransport}
+	if t, isT := http.DefaultTransport.(*http.Transport); isT {
+		t = t.Clone()
+		t.ResponseHeaderTimeout = responseHeaderTimeout
+		hc = &http.Client{Transport: t}
+	}
+	opts = []RequestOption{option.WithoutEnvironmentDefaults(), option.WithHTTPClient(hc)}
+	if u := strings.TrimSpace(getenv(BaseURLEnv)); u != "" {
+		opts = append(opts, option.WithBaseURL(u))
+	}
+	if k := strings.TrimSpace(getenv(APIKeyEnv)); k != "" {
+		return append(opts, option.WithAPIKey(k)), true
+	}
+	if t := strings.TrimSpace(getenv(AuthTokenEnv)); t != "" {
+		return append(opts, option.WithAuthToken(t)), true
+	}
+	return opts, false
 }
 
 // New returns the adapter for provider on an SDK client built from opts (the

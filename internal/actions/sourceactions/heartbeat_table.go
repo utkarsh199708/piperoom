@@ -84,7 +84,7 @@ func (a *createHeartbeatTable) Layer() string { return layerSource }
 func (a *createHeartbeatTable) Describe() string {
 	return "Create the Debezium heartbeat table on the source database (CREATE TABLE IF NOT EXISTS <schema.table> (id integer PRIMARY KEY, ts timestamptz NOT NULL DEFAULT now())). " +
 		"Use it when a replication slot keeps WAL because the captured tables are quiet: with heartbeat.interval.ms and heartbeat.action.query writing to this table, the connector confirms a newer LSN. " +
-		"The table's name must contain heartbeat; it must be in a schema that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up steps: adding the table to a filtered publication (pg_add_publication_table) and setting heartbeat.action.query on the connector."
+		"The table's name must contain heartbeat; it must be in a schema that holds one of the pipeline's source_tables and must not be a source table. The preview lists the follow-up step: setting heartbeat.action.query on the connector."
 }
 
 func (a *createHeartbeatTable) ParamsSchema() map[string]any {
