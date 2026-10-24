@@ -304,3 +304,60 @@ func TestW4kRebalanceStormBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestW4kSteerDoesNotNameTheCause: Meera's steer in clickhouse-kafka-engine-stalled
+// says order-sync is the application consumer and the Kafka engine has its own;
+// an agent that echoes it must not pass root_cause on that alone.
+func TestW4kSteerDoesNotNameTheCause(t *testing.T) {
+	sc, err := LoadScenario("scenarios/clickhouse-kafka-engine-stalled.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.Inputs) == 0 {
+		t.Fatal("no inputs")
+	}
+	steer := sc.Inputs[0].Text
+	if !strings.Contains(steer, "order-sync is our application consumer") {
+		t.Fatalf("the steer no longer says order-sync is the application consumer: %q", steer)
+	}
+	if rootCauseMatches(sc.Expect, steer) {
+		t.Errorf("the steer alone passes root_cause: %q", steer)
+	}
+}
+
+// TestW4kKafkaEngineGroupIsVisible: the ClickHouse Kafka engine consumes the
+// topic with its own group (ch_orders_queue), so the group listing and
+// kafka_consumer_lag show it, stalled, next to order-sync at lag 0. The live run
+// on 3fd6b3f listed only order-sync and its agent abstained for lack of the group.
+func TestW4kKafkaEngineGroupIsVisible(t *testing.T) {
+	sc, err := LoadScenario("scenarios/clickhouse-kafka-engine-stalled.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := newScenarioReplayer(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := func(tool, input string) string {
+		t.Helper()
+		rec, ok := rp.lookup(tool, json.RawMessage(input))
+		if !ok {
+			t.Fatalf("%s %s: no recording", tool, input)
+		}
+		return rec.obs[0].summary
+	}
+	for _, input := range []string{`{}`, `{"topic":"pg.public.orders"}`} {
+		list := answer("kafka_list_groups", input)
+		for _, want := range []string{"order-sync: Stable", "ch_orders_queue: Stable"} {
+			if !strings.Contains(list, want) {
+				t.Errorf("kafka_list_groups %s lacks %q:\n%s", input, want, list)
+			}
+		}
+	}
+	if got := answer("kafka_consumer_lag", `{"group":"ch_orders_queue"}`); !strings.Contains(got, "total lag 208575") || !strings.Contains(got, "pg.public.orders/0") {
+		t.Errorf("the engine's group lag = %q", got)
+	}
+	if got := answer("kafka_consumer_lag", `{"group":"order-sync"}`); !strings.Contains(got, "total lag 0") {
+		t.Errorf("order-sync lag = %q, want 0", got)
+	}
+}

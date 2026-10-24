@@ -34,8 +34,16 @@
 # order-sync is not ClickHouse (W4k, KAN-495). In run 39994729845 all three runs took order-sync for
 #   the Kafka engine table's consumer, and run 3 named the consumer as the first failing layer. order-sync
 #   is the application consumer (owner kabir); the Kafka engine table analytics.orders_queue reads the
-#   topic with its own consumer, which is part of the warehouse (owner meera) and is not one of the
-#   pipeline's declared groups, so no Kafka read lists it. Meera's steer says so. The labels do not change.
+#   topic with its own consumer group, ch_orders_queue (its kafka_group_name), which is part of the
+#   warehouse (owner meera). owners.yaml does not list it: the topology derives it from the engine's
+#   CREATE statement and the read tools accept it (owners.SetDerivedConsumerGroups), so kafka_list_groups
+#   shows both groups and kafka_consumer_lag shows ch_orders_queue Stable with its committed offsets
+#   frozen at 08:15 (lag 208575 on three partitions) while order-sync is at lag 0. The live run on 3fd6b3f
+#   (40039230615) listed only order-sync, so its agent hypothesised that the engine's group "is not
+#   visible on pg.public.orders" and abstained. Meera's steer says only that order-sync is the
+#   application consumer and the engine has its own, and not the cause (TestW4kSteerDoesNotNameTheCause).
+#   The labels do not change. The alert's pipeline_map (and its recording) is still the hand-composed
+#   one without the CH-3 group, engine and view nodes; the group reads above are where the agent finds it.
 #
 # W4k also records the reads that run made and no recording covered (misses table
 #   reviews/evals-2026-10-23/misses.md): connect_config, reconcile, schema_registry_*, pg_recent_ddl,
@@ -103,9 +111,6 @@ recordings:
       partition 0: 51206447–66706447 (15500000 records), newest just now
       partition 1: 51198902–66698902 (15500000 records), newest just now
       partition 2: 51211360–66711360 (15500000 records), newest just now
-  - tool: kafka_list_groups
-    summary: |-
-      order-sync: Stable
   - tool: kafka_consumer_lag
     input: {group: order-sync}
     summary: |-
@@ -170,7 +175,7 @@ recordings:
       08:48 | 31500 | 32445 | 0 | -31500
       08:55 | 13500 | 13905 | 0 | -13500
       verdict: sink is missing 193500 rows in 08:13–09:02; the topic carried 208575 change events for 202500 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
-      keys not compared: 328500 source / 135000 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      keys not compared: the warehouse client cannot list keys
       note: rows newer than 2026-10-20T08:58:00Z (the last 2m0s) are in flight and not judged
     data:
       buckets:
@@ -254,6 +259,43 @@ recordings:
     input: {connector: pg-orders-connector}
     summary: |-
       Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: kafka_list_groups
+    summary: |-
+      ch_orders_queue: Stable
+      order-sync: Stable
+    data:
+      - group: ch_orders_queue
+        state: Stable
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: ch_orders_queue}
+    summary: |-
+      ch_orders_queue: Stable, 1 members, total lag 208575
+        pg.public.orders/0: committed 66636922, end 66706447, lag 69525
+        pg.public.orders/1: committed 66629377, end 66698902, lag 69525
+        pg.public.orders/2: committed 66641835, end 66711360, lag 69525
+    data:
+      group: ch_orders_queue
+      members: 1
+      state: Stable
+      total_lag: 208575
+      worst_partitions:
+        - committed: 66636922
+          end: 66706447
+          lag: 69525
+          partition: 0
+          topic: pg.public.orders
+        - committed: 66629377
+          end: 66698902
+          lag: 69525
+          partition: 1
+          topic: pg.public.orders
+        - committed: 66641835
+          end: 66711360
+          lag: 69525
+          partition: 2
+          topic: pg.public.orders
   - tool: kafka_dup_keys
     input: {topic: pg.public.orders}
     summary: |-
@@ -436,7 +478,7 @@ recordings:
 inputs:
   - kind: steer
     from: Meera
-    text: "analytics.orders is 45 minutes stale but everything upstream looks fine. The ClickHouse Kafka engine table analytics.orders_queue reads pg.public.orders for the warehouse with its own consumer; order-sync is our application consumer, a different group. Find out why the ClickHouse warehouse stopped getting rows."
+    text: "analytics.orders is 45 minutes stale but everything upstream looks fine. order-sync is our application consumer; the ClickHouse Kafka engine table has a consumer of its own. Find out why the ClickHouse warehouse is not getting rows."
 
 expect:
   root_cause:

@@ -602,8 +602,13 @@ regenerate them if a tool's format changes. Decisions a reader should know:
 - `source_blocking_sessions` in `consumer-rebalance-storm` lists the bulk import (pid 48211, the same session
   `pg_long_transactions` shows) with `blocks_slot=yes`: it is the oldest open writer. The slot is streaming
   (`pg_streaming_liveness`), so it is not the cause.
-- `clickhouse-kafka-engine-stalled`: order-sync is the application consumer, not ClickHouse's; Meera's steer says so
-  (run 39994729845 took order-sync for the Kafka engine's group in all three runs). Labels did not change.
+- `clickhouse-kafka-engine-stalled`: order-sync is the application consumer, not ClickHouse's. The Kafka engine
+  table has its own group, `ch_orders_queue` (its `kafka_group_name`, derived by the topology, which the read tools
+  accept): `kafka_list_groups` shows both groups and `kafka_consumer_lag` shows it Stable with its commits frozen at
+  08:15 (lag 208575) while order-sync is at lag 0. Run 39994729845 took order-sync for the engine's group in all
+  three runs; the live run on 3fd6b3f listed only order-sync and its agent abstained. Meera's steer says only that the
+  two consumers differ, not the cause. Labels did not change. The alert's `pipeline_map` is still the hand-composed
+  one without the CH-3 group, engine and view nodes.
 - A budget is set only from a passing run. No `max_tool_calls` changed in W4k: `consumer-rebalance-storm` stays 14
   (15 only if a live run with misses 0 passes at 15 calls; never 16), `clickhouse-kafka-engine-stalled` stays 12 until a
   zero-miss run measures it, and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule would
