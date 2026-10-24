@@ -255,10 +255,13 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // W4g moved them again: the shared method and fixes carry W4g's wording, the
 // resume pattern follows W4g's resume check, and MySQL-only trims (the server
 // id rule folded into the config-setting bullet, a shorter intro, purged
-// binlog and resume lines) bring the prompt back under the CDC ceiling.
+// binlog and resume lines) bring the prompt back under the CDC ceiling; its
+// fix round (rule 4's "correctly refusing" and <layer> <component> form,
+// rule 5's steer and tool clause) is word-neutral: 1335 words with write
+// mode off, 1334 with it on.
 const (
-	mysqlPromptSHA256         = "444f9e19ae0b48e1cd7f9ad1b3429dcd07e9171d2b787d54dda84c107116c266"
-	mysqlPromptWriteOffSHA256 = "3542f5cac4dbb67a3697d0e502e46605b296f1b9beece8975d5c16526209396d"
+	mysqlPromptSHA256         = "a3ac7f0f4ab6e6222a1907019a05245e9f445c916e3c1facb4251d13525ba330"
+	mysqlPromptWriteOffSHA256 = "1c1913258e12693e59b2c2092789d1f14e8fa0ad6ee4d50ed12a8d294f6c0da2"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {

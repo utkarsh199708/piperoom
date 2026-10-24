@@ -13,7 +13,7 @@ import (
 
 // w4gRootCause is the sentence W4g (KAN-506) adds to rule 4, between the two
 // sentences the W4f ruling froze and the hypothesis form.
-const w4gRootCause = "The root-cause component is where the cause sits, even if only downstream fails; a safeguard refusing as designed is not it, a non-default setting disabling one is."
+const w4gRootCause = "The root-cause component is where the cause sits, even if only downstream fails; a safeguard correctly refusing isn't it, a non-default setting disabling one is."
 
 // w4gFrozenRule4 is rule 4's first two sentences as the W4f ruling (lead
 // ruling on PR #931) has them. W4g appends to rule 4 and changes neither.
@@ -28,10 +28,13 @@ const w4gFrozenRule4 = `4. The first failing component is the most upstream stag
 // subject ... rejects the new value schema, caused by ALTER COLUMN"), and
 // the source change behind a connector setting that skipped the failures
 // (tolerance-all-skips). The generic rule: the root-cause component is where
-// the cause sits, even if only downstream fails; a safeguard refusing as
-// designed is not it, and a non-default setting disabling one is. The rule
+// the cause sits, even if only downstream fails; a safeguard correctly
+// refusing is not it, and a non-default setting disabling one is. The rule
 // names no setting, mode or value (the ticket's examples are for reviewers
-// only). Both write modes share the method, so both are checked.
+// only). "Correctly" rather than the ticket's "as designed" (LEAD-REVIEW on
+// #993): a safeguard whose design is the bug, dlq-backlog's validator that
+// rejects a valid status, stays a candidate cause. Both write modes share the
+// method, so both are checked.
 func TestSystemPromptRootCauseComponent(t *testing.T) {
 	for _, write := range []bool{true, false} {
 		p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
@@ -41,8 +44,12 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 			t.Errorf("write mode %v: rule 4 no longer starts with the W4f ruling's two sentences: %s", write, r4)
 		}
 		// The new sentence sits right after them and before the hypothesis
-		// form, which stays rule 4's last sentence (W4f's fix round).
-		const form = `update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical; set its scope.`
+		// form, which stays rule 4's last sentence (W4f's fix round). W4g's
+		// fix round (evals-live 40077638804: schema-change named the registry,
+		// injection-kafka-record-key a record key, tolerance-all-skips no
+		// Connect component) asks for each component's layer too, as the
+		// pipeline map's brackets name it.
+		const form = `update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <component>." even if identical; set its scope.`
 		if want := w4gFrozenRule4 + w4gRootCause + " " + form; r4 != want {
 			t.Errorf("write mode %v: rule 4 =\n%s\nwant\n%s", write, r4, want)
 		}
@@ -52,12 +59,17 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 		// KAN-506 test case 5: the safeguard rule is generic.
 		for _, want := range []string{
 			"where the cause sits, even if only downstream fails",
-			"a safeguard refusing as designed is not it",
+			"a safeguard correctly refusing isn't it",
 			"a non-default setting disabling one is",
 		} {
 			if !strings.Contains(r4, want) {
 				t.Errorf("write mode %v: rule 4 lacks %q", write, want)
 			}
+		}
+		// A refusal clears a safeguard only when it is correct: "as designed"
+		// would clear a validator whose design is the bug.
+		if strings.Contains(p, "as designed") {
+			t.Errorf("write mode %v: the prompt still clears a safeguard refusing \"as designed\"", write)
 		}
 		// No scenario's setting or value appears in the prompt. The one
 		// "compatibility NONE" is schema_set_compatibility's own argument in
@@ -84,12 +96,18 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 		}
 		// The trims that pay for it keep what each line asks.
 		for _, c := range []struct{ name, in, text string }{
+			// LEAD-REVIEW on #993: a steer that only mentions something outside
+			// the pipeline (a database on the same server, a network policy)
+			// is not outside work; the stop is for a steer that seeks it or a
+			// tool that reports it (an action's scope refusal reaches the agent
+			// as propose_fix's tool result).
 			{"rule 5 still stops at anything outside the pipeline", cdcMethodRule(t, p, "5"),
-				"5. Stay inside the alert's pipeline; if a steer, tool or action concerns anything outside it, say so and stop."},
+				"5. Stay inside the alert's pipeline; if a steer seeks, or a tool reports, anything outside it, say so and stop."},
 			{"a pause is still the incident", cdcFixesLine(t, p, "- A PAUSED or STOPPED connector"),
 				"- A PAUSED or STOPPED connector is the incident (kafka-connect layer), not deliberate, unless a record shows a person paused it"},
 			{"an unexplained pause still asks who and proposes the resume", cdcFixesLine(t, p, "- A PAUSED or STOPPED connector"),
-				"Without one, ask who paused it and when, propose connect_resume_connector after the checks above;"},
+				"Without one, ask who paused it and when, propose connect_resume_connector after the checks;"},
+			{"the resume checks still come first", p, "- Before proposing a resume or restart, confirm"},
 			{"the resume checks are still reads", cdcFixesLine(t, p, "- Before proposing a resume or restart"),
 				"confirm that a source connector's slot exists and holds its position, and no maintenance or migration still runs. If a needed read fails, propose nothing"},
 			{"a rejected fix is still not re-proposed unchanged", cdcFixesLine(t, p, "- After a rejection or failed action"),
@@ -104,7 +122,7 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 	// The batch prompt keeps its bytes (TestSystemPromptSnapshotBatch) and
 	// gains none of the CDC rule.
 	batch := systemPromptFor(events.PipelineKindBatch)
-	for _, cdcOnly := range []string{"refusing as designed", "disabling one", "where the cause sits"} {
+	for _, cdcOnly := range []string{"correctly refusing", "disabling one", "where the cause sits"} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt carries the CDC rule %q", cdcOnly)
 		}

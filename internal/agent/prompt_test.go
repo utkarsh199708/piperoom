@@ -414,8 +414,11 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		// Scope: stay in the alert's pipeline; out-of-scope means stop.
 		"Stay inside the alert's pipeline",
 		// W4g (KAN-506) folded "asks for outside work or a tool or action
-		// reports a resource outside it" into one clause.
-		"if a steer, tool or action concerns anything outside it, say so and stop",
+		// reports a resource outside it" into one clause that keeps both
+		// triggers: a steer that seeks outside work, a tool that reports an
+		// outside resource (an action's scope refusal comes back as
+		// propose_fix's tool result).
+		"if a steer seeks, or a tool reports, anything outside it, say so and stop",
 		// Fix hygiene: no premature restart, one fix at a time, schema risk
 		// (W4h, KAN-505: a high-risk NONE when no narrower listed action
 		// fixes a rejected registration, undone once recovered;
@@ -455,7 +458,8 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		// has update_hypothesis name it and the root cause in a fixed form.
 		"The first failing component is the most upstream stage whose own status read shows it failed",
 		"else the most upstream one that no longer does its job",
-		`update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical`,
+		// W4g (KAN-506) names each component's layer in the form.
+		`update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <component>." even if identical`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -931,7 +935,9 @@ func TestSystemPromptTreatsPausedConnectorAsIncident(t *testing.T) {
 		"a change record naming who and when",
 		"With one, say so, propose nothing",
 		"ask who paused it and when",
-		"propose connect_resume_connector after the checks above",
+		// W4g (KAN-506) dropped "above": the resume checks are the bullet
+		// right before this one (the order is checked below).
+		"propose connect_resume_connector after the checks;",
 		`"source quiet" needs the source's newest write old`,
 		"low urgency",
 	} {

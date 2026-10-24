@@ -131,17 +131,23 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // change for a connector setting that skipped the failures): rule 4's first
 // two sentences stay as the W4f ruling has them, and a sentence before the
 // hypothesis form says the root-cause component is where the cause sits,
-// even if only downstream fails; a safeguard refusing as designed is not
-// it, a non-default setting disabling one is. No scenario's setting or
-// value is named. Word-neutral against 1335 by contractions in the intro
-// and rules 1, 3, 6 and 7 and the resume bullet, "You only read and
-// propose fixes", one clause for rule 5's steer and tool cases, and the
-// pause bullet's "cite it" and "name the pause as the incident" (the PR
-// lists each word).
+// even if only downstream fails; a safeguard correctly refusing isn't it,
+// a non-default setting disabling one is ("correctly", not "as designed":
+// a validator whose design is the bug stays a candidate cause, LEAD-REVIEW
+// on #993). No scenario's setting or value is named. Its fix round
+// (evals-live 40077638804: the root-cause layer went unnamed in
+// schema-change, injection-kafka-record-key and tolerance-all-skips) makes
+// the hypothesis form name each component's layer, "First failing: <layer>
+// <component>. Root cause: <layer> <component>.". Word-neutral against 1335
+// by contractions in the intro and rules 1, 3, 4, 6 and 7 and the resume
+// bullet, "You only read and propose fixes", one clause for rule 5's steer
+// and tool cases ("if a steer seeks, or a tool reports, anything outside
+// it"), and the pause bullet's "cite it", "name the pause as the incident"
+// and "above" (the PR lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "a7afa993d2b1920aa9ed34f8bc94ac1239dd7684c9515723c7ecd6bb27e04876"
+const cdcPromptSHA256 = "7976b312cfc3b73346cb055453f903ef23c047ed9b008fc9d81760abfefa0a8e"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -152,7 +158,7 @@ const cdcPromptSHA256 = "a7afa993d2b1920aa9ed34f8bc94ac1239dd7684c9515723c7ecd6b
 // listed fix, the restart and compatibility bullets and the offsets note,
 // word-neutral: still 1335 words), and W4g (rule 4's root-cause component,
 // word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "decd6e946548383d1fee196cbc715b5666e079974d5eee63897e4ea8036dd962"
+const cdcPromptWriteOffSHA256 = "bc4c3d06dfaefc76daf62926f3a465a67f6bf7b92c45947b7a77c9131f4b17ec"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
