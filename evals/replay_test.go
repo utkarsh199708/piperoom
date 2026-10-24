@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"piperoom/internal/agent"
 	"strings"
 	"testing"
 
@@ -332,5 +333,36 @@ func TestReplayUndeclaredConnectorConfigNotReplayed(t *testing.T) {
 	}
 	if _, err := (replayConnect{res: res, recs: sc.Recordings}).Config(context.Background(), "pg-orders-connector"); !errors.Is(err, errNotReplayed) {
 		t.Errorf("Config = %v, want errNotReplayed", err)
+	}
+}
+
+type otherMark struct{}
+
+// agentOwnRead is the production isLookup: a context the runner did not mark
+// (the model's own calls, or any other value) is never the agent's own read.
+// The marked cases (past-incidents, running versions, replan) cannot be built
+// outside internal/agent, so they are covered by that package's tests of
+// IsReplanRead and friends.
+func TestAgentOwnReadUnmarkedContexts(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"background", context.Background()},
+		{"unrelated value", context.WithValue(context.Background(), otherMark{}, true)},
+		{"cancelled", func() context.Context {
+			c, cancel := context.WithCancel(context.Background())
+			cancel()
+			return c
+		}()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if agentOwnRead(tt.ctx) {
+				t.Error("a model call counted as the agent's own read")
+			}
+			if agent.IsReplanRead(tt.ctx) {
+				t.Error("IsReplanRead true on an unmarked context")
+			}
+		})
 	}
 }

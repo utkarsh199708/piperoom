@@ -7,15 +7,24 @@ import (
 )
 
 // TestHypothesisFormGradesBothLayers checks rule 4's hypothesis form
-// (W4f, KAN-504: `"First failing: <component>. Root cause: <component>."`)
-// against the eval scorer's own keyword pass (evals.GradeKeywords, the pass
-// the evals-live run grades with). A hypothesis in that form must be graded
-// as naming the scenario's first failing layer and its root-cause layer,
-// with neither item left ambiguous for the judge. It also pins the two
-// shapes the fix round saw fail: the merged "First failing and root-cause
-// component: X" names one layer only, and a bare layer word "kafka" names
-// no layer (the scorer matches Kafka by its parts: topic, broker,
-// partition), which is why the form asks for a component, not a layer.
+// (W4f, KAN-504: `"First failing: <component>. Root cause: <component>."`;
+// W4g, KAN-506: `"First failing: <layer> <component>. Root cause: <layer>
+// <cause>."`) against the eval scorer's own keyword pass
+// (evals.GradeKeywords, the pass the evals-live run grades with). A
+// hypothesis in that form must be graded as naming the scenario's first
+// failing layer and its root-cause layer, with neither item left ambiguous
+// for the judge. It also pins the shapes the fix rounds saw fail: the merged
+// "First failing and root-cause component: X" names one layer only; a bare
+// layer word "kafka" names no layer (the scorer matches Kafka by its parts:
+// topic, broker, partition), which is why the form asks for the layer and
+// the component; and W4g's run 40077638804 put the root cause in the
+// component that failed on it, with no layer word for the real one
+// (schema-change: the registry; injection-kafka-record-key: a record key).
+// The same stories in the W4g form, the layer named, grade both layers. Its
+// second run (40085823038) filled a "Root cause: <layer> <component>" slot
+// with the failing consumer ("Root cause: consumer order-sync"), so the slot
+// is "<layer> <cause>"; the poison-pill and dropped-column shapes in that
+// form are pinned below.
 //
 // The test lives in an external package so the agent package itself never
 // imports evals (prompthash.go); the scenarios are read, never written.
@@ -43,6 +52,43 @@ func TestHypothesisFormGradesBothLayers(t *testing.T) {
 		// A bare layer word is not a Kafka component.
 		{"bare kafka layer word", "long-room-compaction",
 			"First failing: consumer order-sync. Root cause: kafka.", evals.GradePass, evals.GradeFail},
+		// W4g (KAN-506): the <layer> <component> form on the three targets
+		// whose root-cause layer went unnamed in evals-live 40077638804.
+		{"w4g form: schema-change", "schema-change",
+			"First failing: kafka-connect pg-orders-connector task 0 (FAILED, s_1). Root cause: postgres public.orders, where ALTER COLUMN amount TYPE numeric(12,2) changed the value schema (s_2).",
+			evals.GradePass, evals.GradePass},
+		{"w4g form: injection-kafka-record-key", "injection-kafka-record-key",
+			"First failing: consumer order-sync. Root cause: kafka topic pg.public.orders partition 1. A record there has a key that is not in wire format (s_2); order-sync crash-loops on it (s_1).",
+			evals.GradePass, evals.GradePass},
+		// The form ends the label at the component: a negated description
+		// in the label's own clause leaves the layer to the judge.
+		{"w4g form, description in the label's clause", "injection-kafka-record-key",
+			"First failing: consumer order-sync. Root cause: kafka topic pg.public.orders partition 1, a record whose key is not in wire format (s_2).",
+			evals.GradePass, evals.GradeAmbiguous},
+		{"w4g form: tolerance-all-skips", "tolerance-all-skips",
+			"First failing: kafka-connect pg-orders-connector task 0, records skipped (s_1). Root cause: kafka-connect pg-orders-connector, whose error setting skips every record that fails conversion since the amount type change (s_2).",
+			evals.GradePass, evals.GradePass},
+		// The run's own shapes, without the real root-cause layer.
+		{"run 40077638804: registry named as the cause", "schema-change",
+			"First failing: pg-orders-connector task 0 (FAILED, s_1). Root cause: Schema Registry rejects the new value schema after the ALTER COLUMN amount type change (s_2).",
+			evals.GradePass, evals.GradeFail},
+		// W4g's second run (40085823038): the root-cause slot as
+		// "<layer> <cause>".
+		{"w4g cause slot: consumer-poison-pill", "consumer-poison-pill",
+			"First failing: consumer order-sync. Root cause: kafka poison-pill record at pg.public.orders/1@25377154. Its key is not in wire format (s_2).",
+			evals.GradePass, evals.GradePass},
+		{"w4g cause slot: consumer-poison-pill, negator in the label's clause", "consumer-poison-pill",
+			"First failing: consumer order-sync. Root cause: kafka poison-pill record at pg.public.orders/1@25377154 whose key is not in wire format (s_2).",
+			evals.GradePass, evals.GradeAmbiguous},
+		{"w4g cause slot: source-column-dropped", "source-column-dropped",
+			"First failing: consumer order-sync. Root cause: postgres DROP COLUMN amount by app_migrator (s_2).",
+			evals.GradePass, evals.GradePass},
+		{"run 40085823038: the failing consumer in the root-cause slot", "consumer-poison-pill",
+			"First failing: consumer order-sync. Root cause: consumer order-sync fails to decode a record (s_2).",
+			evals.GradePass, evals.GradeFail},
+		{"run 40077638804: record key only", "injection-kafka-record-key",
+			"First failing: consumer order-sync (s_1). Root cause: a record key that is not in wire format (s_2).",
+			evals.GradePass, evals.GradeFail},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

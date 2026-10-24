@@ -96,6 +96,13 @@ var scenarioTermCases = map[string][]termCase{
 		{id: "T20", text: "Retention deleted those segments long after order-sync committed past them, so retention is not the cause; order-sync is just slow."},
 		{id: "T21", text: "Postgres WAL retention deleted the segments before Debezium read them, so the re-pricing changes never left the source; raise max_slot_wal_keep_size."},
 		{id: "T22", text: "Someone reset order-sync to earliest, so it is replaying everything since the log start; retention deleted the pre-incident segments long ago, which is normal; the old row versions are replayed writes that will be overwritten as it catches up."},
+		// KAN-493 test case 2b (W4b-2): a negated loss word does not name the
+		// loss. T23 passed both groups before the fix (retention, and the
+		// bare "lost"); T24 is the real loss wording it must not take with it.
+		// The "were not lost" wordings are pinned in negated_loss_test.go: a
+		// corpus row with "not" is ambiguous and would need a judge verdict.
+		{id: "T23", text: "Retention is fine and nothing was lost; order-sync is just slow after the re-pricing job, so scale it out and wait."},
+		{id: "T24", want: true, text: "Retention on pg.public.orders (6 h) deleted the 01:00-03:00 changes while order-sync was behind: those records were lost before the consumer read them, and the data loss already happened."},
 	},
 	// #362: the trap rows #341 changed, pinned with natural trap wordings
 	// (P*: the forbidden row must fire) and the correct wordings the old rows
@@ -460,11 +467,10 @@ func TestW4bRetentionLossGroup2(t *testing.T) {
 			t.Errorf("slow-consumer trap matches the root cause: %q", trap)
 		}
 	}
-	// "Nothing was lost" is accepted by the pre-existing term "lost": the
-	// matcher has no denial for "nothing" (strongNegators lack it). Logged, not
-	// failed; fixing it is a matcher change (C6/E2), not a term change.
+	// "Nothing was lost" negates the loss word "lost" (W4b-2, lossNegated in
+	// textmatch.go; more wordings in negated_loss_test.go).
 	if matchGroups(g2, "Nothing was lost; order-sync is just slow.") {
-		t.Log("matcher limit: group 2 accepts 'nothing was lost' through the existing term 'lost'")
+		t.Error("group 2 accepts 'nothing was lost'")
 	}
 	for _, bare := range []string{"deleted", "missing from", "not applied"} {
 		if slices.Contains(sc.Expect.RootCause[1], bare) {
@@ -1198,8 +1204,9 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 
 // TestW4cSetupDBUnreachableNetProbe pins the net_probe {target: source}
 // recording: Connect's view of the database times out while Piperoom's own
-// dns and tcp checks pass, and no read the room offers shows the bad address
-// (which is why the address group was dropped).
+// dns and tcp checks pass. Since KAN-526 its connect_resolve check shows the
+// worker resolving postgres to 192.0.2.1; no other read shows the bad address
+// (which is why the address group was dropped under R10).
 func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
 	rp, err := newScenarioReplayer(sc)
@@ -1213,7 +1220,9 @@ func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 	if rec.Error != "" {
 		t.Fatalf("net_probe recording is an error: %q", rec.Error)
 	}
-	if !strings.HasPrefix(rec.Summary, "net_probe source (postgres:5432): 1 of 4 checks failed\n- connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time") {
+	// KAN-526: connect_resolve runs first and fails on the worker's answer.
+	if !strings.HasPrefix(rec.Summary, "net_probe source (postgres:5432): 2 of 5 checks failed\n- connect_resolve postgres:5432 fail: the Connect worker connect resolves postgres to 192.0.2.1") ||
+		!strings.Contains(rec.Summary, "\n- connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time") {
 		t.Errorf("summary = %q", rec.Summary)
 	}
 	b, err := json.Marshal(rec.Data)
@@ -1247,11 +1256,15 @@ func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 			}
 		}
 	}
-	if want := map[string]string{"connect_view": "fail", "dns": "ok", "tcp": "ok", "tls": "skip"}; !reflect.DeepEqual(got, want) {
+	if want := map[string]string{"connect_resolve": "fail", "connect_view": "fail", "dns": "ok", "tcp": "ok", "tls": "skip"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("checks = %v, want %v", got, want)
 	}
-	// Negative: no recording answers with the bad address or the hosts file.
+	// Negative: no other recording answers with the bad address or the hosts
+	// file; since KAN-526 only net_probe's connect_resolve check shows it.
 	for _, r := range sc.Recordings {
+		if r.Tool == "net_probe" && r.Input["target"] == "source" {
+			continue
+		}
 		blob, _ := json.Marshal(r.Data)
 		for _, s := range []string{r.Summary, r.Error, string(blob)} {
 			if strings.Contains(s, "192.0.2.1") || strings.Contains(s, "/etc/hosts") {
@@ -1489,10 +1502,11 @@ func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
 
 // TestW4cRerunLabels pins the W4c re-run round (live run 40043829982): ruling R8
 // (#939) sets idle-wal-growth's budget to its 16 measured calls + 2, and
-// setup/db-unreachable-from-connect is held out until W4c-resolver (ruling
-// R10: its cause, the Connect container's name resolution, is in no read
-// tool's output). Negatives: idle-wal-growth is not held out, and the setup
-// scenario keeps its labels, so it scores as before once the marker goes.
+// setup/db-unreachable-from-connect is held out until container-resolve-op
+// (ruling R10; re-keyed by the KAN-526 ruling: nettools.ConnectResolveCheck
+// observes the cause, but live rooms get it only through the runner op
+// container_resolve). Negatives: idle-wal-growth is not held out, and the
+// setup scenario keeps its labels, so it scores as before once the marker goes.
 func TestW4cRerunLabels(t *testing.T) {
 	idle := w4cScenario(t, "idle-wal-growth")
 	if idle.Expect.MaxToolCalls != 18 {
@@ -1502,8 +1516,8 @@ func TestW4cRerunLabels(t *testing.T) {
 		t.Errorf("idle-wal-growth is held out: %q", idle.PendingHarness)
 	}
 	setup := w4cScenario(t, "setup/db-unreachable-from-connect")
-	if setup.PendingHarness != "W4c-resolver" {
-		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want W4c-resolver", setup.PendingHarness)
+	if setup.PendingHarness != "container-resolve-op" {
+		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want container-resolve-op", setup.PendingHarness)
 	}
 	if !reflect.DeepEqual(setup.Expect.RootCause, [][]string{{"resolv*", "dns", "hosts", "name resolution"}}) {
 		t.Errorf("setup/db-unreachable-from-connect root_cause = %v", setup.Expect.RootCause)

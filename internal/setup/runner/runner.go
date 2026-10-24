@@ -28,6 +28,7 @@ import (
 	"github.com/coder/websocket"
 
 	"piperoom/internal/events"
+	"piperoom/internal/setup/knowledge"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -94,6 +95,11 @@ type Options struct {
 	// (refuseTierDisabled) until the confirm redesign lands. Tests set it to
 	// keep the dormant confirm path exercised.
 	AllowT3 bool
+	// Check runs once before the runner pairs (at the start of Run); a
+	// non-nil error refuses to start and is wrapped in the returned error.
+	// nil = knowledge.Check, the digest check of the shipped knowledge index
+	// (U1-24): a corrupt index must never reach a template or a download.
+	Check func() error
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -112,6 +118,7 @@ type Runner struct {
 	catalogue  Catalogue
 	catalogueV string
 	backoff    func(attempt int) time.Duration
+	check      func() error
 	url        *url.URL
 	secretsF   string
 
@@ -182,6 +189,7 @@ func New(o Options) (*Runner, error) {
 		catalogue:  o.Catalogue,
 		catalogueV: orDefault(o.CatalogueVersion, catalogueVersion),
 		backoff:    o.Backoff,
+		check:      o.Check,
 		secretsF:   o.SecretsFile,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
@@ -207,6 +215,9 @@ func New(o Options) (*Runner, error) {
 	if r.catalogue == nil {
 		r.catalogue = nopCatalogue{}
 	}
+	if r.check == nil {
+		r.check = knowledge.Check
+	}
 	if r.serverURL == "" {
 		return nil, errors.New("setup: --server (or PIPEROOM_SETUP_SERVER_URL) is required")
 	}
@@ -231,6 +242,13 @@ func New(o Options) (*Runner, error) {
 // pairing code is required.
 func (r *Runner) Run(ctx context.Context) error {
 	defer r.closeOpLog()
+
+	// The digest check of the shipped knowledge index runs before anything is
+	// dialed: a corrupt index must never reach a template or a download, so
+	// the runner refuses to start instead of pairing (knowledge.Check, U1-24).
+	if err := r.check(); err != nil {
+		return fmt.Errorf("setup: refusing to start: %w", err)
+	}
 
 	loopback := r.isLoopback(ctx)
 	if r.yes && !loopback {

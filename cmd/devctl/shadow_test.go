@@ -256,9 +256,10 @@ func TestComposeShadowService(t *testing.T) {
 			reflect.DeepEqual(s.Profiles, []string{"mssql"}) ||
 			reflect.DeepEqual(s.Profiles, []string{mongoProfile}) ||
 			reflect.DeepEqual(s.Profiles, []string{"mysql"}) || // the MySQL source (Q8a)
-			reflect.DeepEqual(s.Profiles, []string{hostProfile}) // the fake host (U8c)
+			reflect.DeepEqual(s.Profiles, []string{hostProfile}) || // the fake host (U8c)
+			reflect.DeepEqual(s.Profiles, []string{"llm"}) // local Ollama (V17)
 		if name != shadowService && len(s.Profiles) != 0 && !allowedProfile {
-			t.Errorf("service %q has profiles %v: only the shadow server, batch, clickhouse, staging, logs, source (oracle, mssql, mongo, mysql) and host profiles may be opt-in", name, s.Profiles)
+			t.Errorf("service %q has profiles %v: only the shadow server, batch, clickhouse, staging, logs, llm, source (oracle, mssql, mongo, mysql) and host profiles may be opt-in", name, s.Profiles)
 		}
 	}
 	if len(svc.Ports) != 1 || !strings.HasPrefix(svc.Ports[0], "127.0.0.1:") {
