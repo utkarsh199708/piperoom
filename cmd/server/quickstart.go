@@ -51,6 +51,7 @@ func runQuickstart(ctx context.Context, d startDeps, cfg config.Config, ownersPa
 		Log:          log,
 		Serve: func(ctx context.Context, s quickstart.Settings) error {
 			m.stdout = s.Stdout
+			m.modelMode, m.projectDir, m.modelEnv = s.ModelMode(), s.ProjectDir, s.ModelEnv
 			settings, err := parseServer(s.Config, m)
 			if err != nil {
 				return err

@@ -195,7 +195,7 @@ recordings:
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, to_version: 3}
-    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+    error: 'bad tool input: to_version 3 is not a registered version of pg.public.orders-value (available versions: [1 2])'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, from_version: 2, to_version: 3}
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
@@ -204,7 +204,9 @@ recordings:
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value: v1 → v2 (latest vs previous; pass from_version to pick another pair)
+      + Value.status_reason: [null, string]
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
