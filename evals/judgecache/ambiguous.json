@@ -1507,10 +1507,11 @@
       "kind": "correct",
       "text": "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.",
       "want": false,
-      "keyword": false,
+      "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer"
+        "first_failing_layer",
+        "root_cause_layer"
       ],
       "sources": [
         "golden:r6.1"
@@ -1521,10 +1522,11 @@
       "kind": "correct",
       "text": "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.",
       "want": false,
-      "keyword": false,
+      "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer"
+        "first_failing_layer",
+        "root_cause_layer"
       ],
       "sources": [
         "golden:r6.1"
