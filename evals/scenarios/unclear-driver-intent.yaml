@@ -199,6 +199,16 @@ recordings:
     summary: |
       publication dbz_publication (connector user piperoom)
       public.orders: in_publication=yes, selectable=no
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{dbtools}; the values are composed to agree with the recordings above.
+  # Agrees with the pg_publication_tables recording above: the ownership change took the connector role's SELECT on public.orders.
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 0 of 1
+      public.orders: selectable=no
 
 inputs:
   - kind: steer

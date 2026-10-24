@@ -683,6 +683,17 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, dbtools}; the values are composed to agree with the recordings above.
+  # dlq_peek refuses a topic the pipeline does not declare in watch.dlq_topics (tools.Scope.CheckDLQTopic).
+  - tool: dlq_peek
+    input: {topic: pg.public.orders.dlq}
+    error: 'out of scope: DLQ topic "pg.public.orders.dlq" is not part of this room''s pipeline "orders" (none declared (use connector for a sink''s DLQ))'
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 6218804 rows inserted since stats reset, 2411 dead tuples, last autovacuum 2026-10-21T08:44:09Z, 0 session(s) waiting on a lock
 
 inputs:
   - kind: comment

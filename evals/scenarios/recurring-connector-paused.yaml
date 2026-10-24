@@ -237,6 +237,53 @@ recordings:
       08:50 | 78679 | 0 | 0 | -78679
       09:19 | 57960 | 0 | 0 | -57960
       verdict: sink is missing 938956 rows in 04:00–09:48; topic is missing them (connector side)
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, dbtools, logtools}; the values are composed to agree with the recordings above.
+  # The connector has been PAUSED since 02:00, so its stored position is the last one it committed.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=251730402856, lsn_proc=251730402856, ts_usec=1791684001000000, txId=6120553
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 163840 bytes in 5s (slot "debezium_orders", active=true, wal_status=reserved, retains 412.2 MiB); connector pg-orders-connector state PAUSED
+      the head-confirmed_flush lag grew from 412.0 MiB to 412.2 MiB in 5s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders, window_seconds: 8}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 262144 bytes in 8s (slot "debezium_orders", active=true, wal_status=reserved, retains 412.2 MiB); connector pg-orders-connector state PAUSED
+      the head-confirmed_flush lag grew from 412.0 MiB to 412.2 MiB in 8s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  # connect_worker_logs: the replay has no Loki (WORKER_LOGS_LOKI_URL is unset), so the real tool answers with its
+  # not-configured text (internal/tools/logtools/logtools.go) whatever the connector or window.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  # Window from 03:45: the sink's newest row is 02:03:12 and the topic has no event since the pause, so every bucket is short.
+  - tool: reconcile
+    input: {table: public.orders, since: "2026-10-11T03:45:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 30m0s from 2026-10-11T03:45:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      03:45 | 82086 | 0 | 0 | -82086
+      04:15 | 82827 | 0 | 0 | -82827
+      04:45 | 81920 | 0 | 0 | -81920
+      05:15 | 82663 | 0 | 0 | -82663
+      05:45 | 82581 | 0 | 0 | -82581
+      06:15 | 82497 | 0 | 0 | -82497
+      06:45 | 82415 | 0 | 0 | -82415
+      07:15 | 82333 | 0 | 0 | -82333
+      07:45 | 82251 | 0 | 0 | -82251
+      08:15 | 82167 | 0 | 0 | -82167
+      08:45 | 82910 | 0 | 0 | -82910
+      09:15 | 65774 | 0 | 0 | -65774
+      verdict: sink is missing 972424 rows in 03:45–09:45; the topic carried only 0 change events for 972424 source rows (connector side)
+      keys not compared: 972424 source / 0 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      note: rows newer than 2026-10-11T09:38:09.412785093Z (the last 2m0s) are in flight and not judged
 
 expect:
   root_cause:

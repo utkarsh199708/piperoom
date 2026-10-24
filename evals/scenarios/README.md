@@ -558,6 +558,42 @@ diagnosis. Neither `plugin_install`, `compose_restart`, `source_alter_system`, `
 `expect.fix`, and forbids the restarts, resume, config update, slot drop and schema actions that repeat
 the failure.
 
+### Recorded misses and measured budgets (W4l, KAN-496)
+
+Run 39994729845 left 124 replay misses in six scenarios (the W4-0 table, `reviews/evals-2026-10-23/misses.md`) and
+failed all but `replication-slot-lost-failover` on `max_tool_calls` alone. W4l records every miss as the real
+tool's own answer over the scenario's state (the Q3f approach: the summary code of `internal/tools/**` run over
+composed values on the scenario clock; addresses are composed) and sets the budget per input turn.
+
+| Scenario | Misses | `max_tool_calls` | Basis |
+|---|---|---|---|
+| `removed-decoder-plugin` | 22 | 14 -> 15 | measured: step 1 (run 40034874651) passed at 13, + 2 |
+| `renamed-property-after-upgrade` | 24 | 14 -> 15 | standard path 11 + 2 reads + 2, provisional (no run passed) |
+| `avro-schema-id-deleted-sink-failed` | 10 | 18 (unchanged) | the 18 of the passing runs of 39212981319; the loop-free counts of 39994729845 (14, 13, 15) fit |
+| `rows-lost-after-retention` | 23 | 16 -> 21 | measured: step 1 passed at 19, + 2 |
+| `replication-slot-lost-failover` | 16 | 12 -> 13 | measured: highest passing run 11 + 2 |
+| `snapshot-stuck` | 29 | 12 -> 19 | measured: step 1 made 17 and failed on budget alone, + 2 |
+
+`renamed-property-after-upgrade` (15) is still provisional: no run passed, so it comes from the standard path + 2. Repeated calls are not budgeted for: the `schema_registry_diff` without `from_version`
+loop of `avro-schema-id-deleted-sink-failed` (8-9 calls a run, the real tool's bad-input error each time) is a W4m
+or A2 item.
+
+What the recordings say, where it is not the plain tool output: `connect_worker_logs` answers "not configured"
+(see "Tool gaps" below); in `removed-decoder-plugin` the stored `plugin.name=wal2json` is what Connect's own
+validation rejects, so `net_probe` source (a warning on `plugin.name`) and a `connect_validate_config` that leaves
+`plugin.name` out report it, while a config that sets `pgoutput` validates clean; in `renamed-property-after-upgrade`
+`pg_streaming_liveness` says `stuck` (the RUNNING task's blocked producer) and the validations name
+`heartbeat.topics.prefix` as renamed; in `rows-lost-after-retention` `pg_connector_scope_gap` names
+`public.devctl_signal` as outside `owners.yaml`, which the real tool does for this connector; in `snapshot-stuck`
+`pg_streaming_liveness` says `stuck` too (an initial snapshot pins the slot) and the stored offset carries
+`snapshot=true`.
+
+`replication-slot-lost-failover` answers the stored offset (the old primary's last committed LSN, ahead of what the
+async standby had replayed) and the new primary's ordinary settings, after step 1 showed the agent retrying both
+as misses; nothing recorded makes a fix look right and every fix stays forbidden. R1 (`tasks/W4-evals-to-100.md`)
+reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
+one-line edit in `../agreement_test.go` (C6's) and a judge refill.
+
 ### Provider-neutral scenarios (V15)
 
 Three scenarios for the multi-provider model interface (`docs/design/model-providers.md`). All are
@@ -705,7 +741,9 @@ All five can be solved with today's tools, but the agent has to infer things a t
   only, so the agent can check a `kafka_replay_range` copy only through the action's own Verify counts.
 - **Offsets by time are visible only through `reconcile`**, which counts what is retained: records that
   retention deleted look as if the connector never wrote them (`rows-lost-after-retention`).
-- **Two scenarios record `connect_worker_logs`** (Q3c, replayable since Q6d), both as the tool's own answer for a
-  server with no log store (W4k): `clickhouse-kafka-engine-stalled` and `dead-slot-wal-no-context`. No scenario
-  records log lines, so the agent's skip rule (Q3e) still sends the model to a call that is a replay miss in
+- **`connect_worker_logs` is recorded only as the tool's own answer for a server without a log store** (Q3c,
+  replayable since Q6d; W4k, KAN-495, in `clickhouse-kafka-engine-stalled` and `dead-slot-wal-no-context`; W4l,
+  KAN-496, in six more files): "Worker logs are not configured on this server ...", the real tool's output for every
+  window, level and limit. No scenario records log lines and it adds no log evidence the file's owner steer does not
+  already carry, so the agent's skip rule (Q3e) still sends the model to a call that is a replay miss in
   `tolerance-all-skips`.
