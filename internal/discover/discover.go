@@ -14,9 +14,21 @@ import (
 	"piperoom/internal/clients"
 )
 
-const pgSourceClass = "io.debezium.connector.postgresql.PostgresConnector"
+const (
+	pgSourceClass    = "io.debezium.connector.postgresql.PostgresConnector"
+	mysqlSourceClass = "io.debezium.connector.mysql.MySqlConnector"
+)
 
-// plainTable is a schema.table include entry with no regex metacharacters.
+// sourceKindMySQL is owners.yaml's source_kind of a MySQL pipeline
+// (owners.SourceKindMySQL, Q8d). The package does not import owners: the CLI
+// stays light, and a test loads the rendered file with owners.Load.
+const sourceKindMySQL = "mysql"
+
+// sourceKinds maps a Debezium source class to its source_kind ("" = postgres,
+// the default owners.yaml leaves out).
+var sourceKinds = map[string]string{pgSourceClass: "", mysqlSourceClass: sourceKindMySQL}
+
+// plainTable is a schema.table (db.table on MySQL) include entry with no regex metacharacters.
 var plainTable = regexp.MustCompile(`^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$`)
 
 // sinkTable is a warehouse table name as written in a sink connector's
@@ -37,8 +49,9 @@ type sink struct {
 // draft is a pipeline under construction, before IDs are assigned.
 type draft struct {
 	connector  string
+	sourceKind string // "" = postgres, or sourceKindMySQL
 	prefix     string
-	slot       string
+	slot       string // "" on MySQL: it has no replication slot
 	tables     []string
 	topics     map[string]bool
 	groups     []string
@@ -70,8 +83,8 @@ func call[T any](r *runner, f func(context.Context) (T, error)) (T, error) {
 	return f(ctx)
 }
 
-// Discover reads the cluster and drafts one pipeline per Debezium Postgres
-// source connector. Only failures to list connectors or topics are fatal;
+// Discover reads the cluster and drafts one pipeline per Debezium Postgres or
+// MySQL source connector. Only failures to list connectors or topics are fatal;
 // everything else becomes a skipped connector, a pipeline note or a warning,
 // so a partly broken cluster still yields a useful draft.
 func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
@@ -111,6 +124,7 @@ func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
 		}
 	}
 	r.warnSharedPrefixes(drafts)
+	r.warnMixedKinds(drafts)
 
 	if len(drafts) > 0 {
 		r.checkSubjects(drafts)
@@ -133,7 +147,7 @@ func (r *runner) skip(name, reason string) {
 }
 
 // connector reads one connector's config. It returns a draft for a Debezium
-// Postgres source, or what a sink connector reads and writes (only the
+// Postgres or MySQL source, or what a sink connector reads and writes (only the
 // non-secret "topics" and "table.name.format" keys are looked at).
 func (r *runner) connector(name string, topics map[string]bool) (*draft, sink) {
 	cfg, err := call(r, func(ctx context.Context) (map[string]string, error) { return r.d.Connect.Config(ctx, name) })
@@ -147,11 +161,12 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, sink) {
 		return nil, sink{}
 	}
 	class := cfg["connector.class"]
-	if class != pgSourceClass {
+	kind, isSource := sourceKinds[class]
+	if !isSource {
 		if class == "" {
-			r.skip(name, "not a Debezium Postgres source (no connector.class)")
+			r.skip(name, "not a Debezium Postgres or MySQL source (no connector.class)")
 		} else {
-			r.skip(name, fmt.Sprintf("not a Debezium Postgres source (class %s)", class))
+			r.skip(name, fmt.Sprintf("not a Debezium Postgres or MySQL source (class %s)", class))
 		}
 		sk := sink{topics: splitList(cfg["topics"])}
 		if t := strings.TrimSpace(cfg["table.name.format"]); sinkTable.MatchString(t) {
@@ -160,7 +175,10 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, sink) {
 		return nil, sk
 	}
 
-	dr := &draft{connector: name, topics: map[string]bool{}, slot: cmp.Or(cfg["slot.name"], "debezium")}
+	dr := &draft{connector: name, sourceKind: kind, topics: map[string]bool{}}
+	if kind == "" {
+		dr.slot = cmp.Or(cfg["slot.name"], "debezium")
+	}
 	dr.prefix = cfg["topic.prefix"]
 	if dr.prefix == "" {
 		dr.prefix = cfg["database.server.name"]
@@ -255,10 +273,18 @@ func includeTables(dr *draft, entries, derived []string) []string {
 	return out
 }
 
+// guessTables keeps the derived tables the connector's filters let through.
+// The first part of a MySQL table is its database, filtered by
+// database.include.list / database.exclude.list where Postgres has
+// schema.include.list / schema.exclude.list.
 func guessTables(dr *draft, derived []string, cfg map[string]string) []string {
+	inKey, exKey := "schema.include.list", "schema.exclude.list"
+	if dr.sourceKind == sourceKindMySQL {
+		inKey, exKey = "database.include.list", "database.exclude.list"
+	}
 	tableEx := compileAll(dr, "exclude", splitList(cfg["table.exclude.list"]))
-	schemaIn := compileAll(dr, "include", splitList(cfg["schema.include.list"]))
-	schemaEx := compileAll(dr, "exclude", splitList(cfg["schema.exclude.list"]))
+	schemaIn := compileAll(dr, "include", splitList(cfg[inKey]))
+	schemaEx := compileAll(dr, "exclude", splitList(cfg[exKey]))
 	var out []string
 	for _, t := range derived {
 		schema, _, _ := strings.Cut(t, ".")
@@ -296,6 +322,27 @@ func anyMatch(res []*regexp.Regexp, s string) bool {
 		}
 	}
 	return false
+}
+
+// warnMixedKinds warns when the cluster has both Postgres and MySQL source
+// connectors. The drafted pipelines carry no connections: blocks, so they
+// would all share one client set, and one client set serves one source kind:
+// the server (wiring.Open) refuses such a file. The warning lands in the
+// file's footer and on stderr, and says what each kind needs.
+func (r *runner) warnMixedKinds(drafts []*draft) {
+	var pg, my []string
+	for _, dr := range drafts {
+		if dr.sourceKind == sourceKindMySQL {
+			my = append(my, dr.connector)
+		} else {
+			pg = append(pg, dr.connector)
+		}
+	}
+	if len(pg) == 0 || len(my) == 0 {
+		return
+	}
+	r.warn("the cluster has Postgres source connectors (%s) and MySQL ones (%s); one server client set serves one source kind, so the server refuses this file as written: give each MySQL pipeline a connections: block whose source_db_url is its mysql:// URL (and keep SOURCE_DB_URL for the Postgres ones), or run one Piperoom deployment per source kind",
+		strings.Join(pg, ", "), strings.Join(my, ", "))
 }
 
 func (r *runner) warnSharedPrefixes(drafts []*draft) {
@@ -377,8 +424,12 @@ func consumes(lag clients.GroupLag, topics map[string]bool) bool {
 	return false
 }
 
+// checkSlots notes a Postgres pipeline whose slot is missing or inactive. A
+// MySQL pipeline has no slot and is not looked at; with only MySQL pipelines
+// the slots are not even listed.
 func (r *runner) checkSlots(drafts []*draft) {
-	if r.d.Source == nil {
+	drafts = slices.DeleteFunc(slices.Clone(drafts), func(dr *draft) bool { return dr.slot == "" })
+	if r.d.Source == nil || len(drafts) == 0 {
 		return
 	}
 	slots, err := call(r, r.d.Source.ReplicationSlots)
@@ -450,6 +501,7 @@ func assignIDs(drafts []*draft) []Pipeline {
 		out = append(out, Pipeline{
 			ID:             id,
 			Connector:      dr.connector,
+			SourceKind:     dr.sourceKind,
 			TopicPrefix:    dr.prefix,
 			SourceTables:   sortedUnique(dr.tables),
 			Topics:         sortedKeys(dr.topics),

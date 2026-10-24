@@ -9,8 +9,11 @@ import (
 	"time"
 
 	evalsetup "piperoom/evals/setup"
+	"piperoom/internal/actions"
+	"piperoom/internal/actions/fixpr"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -41,8 +44,10 @@ type Config struct {
 	// it, see Provenance); it is copied into every result.
 	Commit string
 	// Tap, when set, is the model tap the runner's requests go through; it
-	// gives every result the models used and the prompt hash (modeltap.go).
-	Tap *ModelTap
+	// gives every result the models used and the prompt hash: the Anthropic
+	// HTTP tap (modeltap.go) or the in-process tap of the other adapters
+	// (neutraltap.go). Never a typed nil: leave it unset for an untapped run.
+	Tap PromptTap
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
 	// Judge forces the judge mode for every scenario ("terms", "claude" or
@@ -157,6 +162,15 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	if err := ValidateAll(scenarios, defs); err != nil {
 		return Report{}, err
 	}
+	// Each scenario's room gets its source kind's tools (Q8j): built here,
+	// once, so the workers below only read them.
+	var mysqlDefs []tools.Tool
+	roomDefs := make(map[string][]tools.Tool, len(scenarios))
+	for _, sc := range scenarios {
+		if roomDefs[sc.Name], err = scenarioTools(sc, defs, &mysqlDefs); err != nil {
+			return Report{}, err
+		}
+	}
 	for _, m := range []string{cfg.Judge, cfg.DefaultJudge} {
 		if !validJudge(m) {
 			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q (alias %q) or %q)", m, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto)
@@ -209,7 +223,7 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 					res = infraResult(j.sc.Name, j.run, "not started: the API refused an earlier run ("+s.String()+")")
 				} else {
 					var err error
-					res, tr, err = runOne(ctx, j.sc, j.run, defs, cfg)
+					res, tr, err = runOne(ctx, j.sc, j.run, roomDefs[j.sc.Name], cfg)
 					if err != nil {
 						status, refused := APIRefusal(err)
 						if !refused {
@@ -264,17 +278,36 @@ feeding:
 }
 
 // ValidateAll checks every scenario against the given tool definitions and
-// the production action names.
+// the production action names. defs are a Postgres room's tools (LiveTools in
+// production); a MySQL scenario is checked against LiveToolsFor(mysql), the
+// tools its room gets, and its fix_targets against a MySQL room's actions.
+// Action names are every production action of either source, so a MySQL
+// scenario can still forbid a pg_* action its room never offers.
 func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	toolInputs := ToolInputs(defs)
 	areg, err := LiveActions(Resources{}, nil)
 	if err != nil {
 		return err
 	}
-	var actionNames []string
-	for _, a := range areg.All() {
-		actionNames = append(actionNames, a.Name())
+	myAreg, err := LiveActions(Resources{SourceKind: owners.SourceKindMySQL}, nil)
+	if err != nil {
+		return err
 	}
+	var actionNames []string
+	known := map[string]bool{}
+	for _, r := range []*actions.Registry{areg, myAreg} {
+		for _, a := range r.All() {
+			if !known[a.Name()] {
+				known[a.Name()] = true
+				actionNames = append(actionNames, a.Name())
+			}
+		}
+	}
+	// repo_open_pull_request is offered only in a room whose pipeline lists
+	// repos: (Q7j); any scenario may still name it.
+	actionNames = append(actionNames, fixpr.Name)
+	var mysqlDefs []tools.Tool
+	var mysqlInputs map[string][]string
 	var errs []error
 	seen := map[string]bool{}
 	for _, sc := range scenarios {
@@ -284,8 +317,32 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 			errs = append(errs, fmt.Errorf("evals: duplicate scenario name %q", sc.Name))
 		}
 		seen[sc.Name] = true
-		errs = append(errs, sc.Validate(toolInputs, actionNames))
-		if fe := sc.checkFixTargets(areg); len(fe) > 0 {
+		inputs, scAreg := toolInputs, areg
+		if sc.sourceKind() == owners.SourceKindMySQL {
+			if mysqlInputs == nil {
+				d, err := sourceTools(sc, defs, &mysqlDefs)
+				if err != nil {
+					return err
+				}
+				mysqlInputs = ToolInputs(d)
+			}
+			inputs, scAreg = mysqlInputs, myAreg
+		}
+		if len(sc.Pipeline.Repos) > 0 {
+			// The room of a pipeline with repos: has the repository tools
+			// and repo_open_pull_request over its fixture repos.
+			d, err := scenarioTools(sc, defs, &mysqlDefs)
+			if err != nil {
+				return err
+			}
+			inputs = ToolInputs(d)
+			if scAreg, err = LiveActions(sc.resources(), nil); err != nil {
+				errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
+				continue
+			}
+		}
+		errs = append(errs, sc.Validate(inputs, actionNames))
+		if fe := sc.checkFixTargets(scAreg); len(fe) > 0 {
 			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, errors.Join(fe...)))
 		}
 		// Malformed connect_status data would only surface mid-run otherwise.

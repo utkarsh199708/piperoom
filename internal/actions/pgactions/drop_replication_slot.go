@@ -132,6 +132,9 @@ func (a *dropSlot) CheckScope(pl owners.Pipeline, raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseMySQL(DropSlotName, pl); err != nil {
+		return err
+	}
 	if !slices.Contains(pl.Connectors, p.Connector) {
 		return fmt.Errorf("pgactions: %s: %w: connector %q is not part of pipeline %q", DropSlotName, tools.ErrOutOfScope, capSlotParam(p.Connector), pl.ID)
 	}

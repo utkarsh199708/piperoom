@@ -4,6 +4,8 @@ import { ChevronRight, Menu } from 'lucide-react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { DialogDescription, DialogOverlay, DialogTitle } from '@/components/ui/dialog'
+import { FirstRunModelGate } from '@/components/models/FirstRunModelGate'
+import { ModelPopover } from '@/components/models/ModelPopover'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
@@ -212,6 +214,7 @@ export function AppShell() {
                   <Breadcrumb pipelineId={crumbPipeline ?? currentPipelineId} />
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <div ref={setSlotEl} className="flex min-w-0 items-center gap-2" data-testid="topbar-slot" />
+                    {roomId !== '' && <ModelPopover canEdit={user.role !== 'viewer'} />}
                     <ThemeToggle />
                     {BreakSomethingMenu && (
                       <Suspense fallback={null}>
@@ -232,6 +235,7 @@ export function AppShell() {
                 <CommandMenu open={paletteOpen} onOpenChange={setPaletteOpen} rooms={rooms} registry={registry} />
               </Suspense>
             )}
+            <FirstRunModelGate />
             <Toaster />
           </TooltipProvider>
          </BreadcrumbTailContext.Provider>

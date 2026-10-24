@@ -449,7 +449,9 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		// 3.7); its row is marked interrupted like the Load sweep does.
 		s.interruptShadowRunLocked(ctx, roomID, st)
 		s.dropLeaseLocked(roomID, st)
-	case (agentWasWorking(st) || len(st.pending) > 0) && s.resumeAllowedLocked(ctx, roomID):
+	// A fix PR that merged or closed with no verdict yet counts as work in
+	// flight: the old owner's run held its apply wait (Q7).
+	case (agentWasWorking(st) || len(st.pending) > 0 || len(prReplayInputs(st.snap)) > 0) && s.resumeAllowedLocked(ctx, roomID):
 		if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
 			Text: "the server that ran this room's agent stopped; the agent resumes on another server",
 		}); err != nil {

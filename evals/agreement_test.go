@@ -329,7 +329,7 @@ var syntheticLabels = map[string]Label{
 	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
 	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
-	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
+	"replication-slot-lost-failover":          {"kafka-connect", []string{"failover", "promoted", "new primary"}}, // R1 (W4n-2)
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 	// The two scenarios added by #100.
 	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},
@@ -368,7 +368,7 @@ var syntheticLabels = map[string]Label{
 	"toast-placeholder":   {"kafka-connect", []string{"replica identity", "toast*"}},
 	// The Q3f worker-visibility and Q5f stale-source-offsets scenarios.
 	"tolerance-all-skips":          {"kafka-connect", []string{"errors.tolerance", "skipp*"}},
-	"internal-topic-not-compacted": {"kafka-connect", []string{"compact*", "cleanup.policy", "offsets topic"}},
+	"internal-topic-not-compacted": {"kafka", []string{"compact*", "cleanup.policy", "offsets topic"}}, // R3 (W4n)
 	"rebalance-loop":               {"kafka-connect", []string{"rebalance loop", "group.id", "staging"}},
 	"stale-source-offsets":         {"kafka-connect", []string{"source offsets", "old orders database", "repointed"}},
 	// The Q6c network-probe scenarios (KAN-250).
@@ -383,7 +383,7 @@ var syntheticLabels = map[string]Label{
 	// the failed task, the missing slot or the retained WAL, never the cause.
 	"no-replica-identity": {"postgres", []string{"omits the old tuple"}},
 	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
-	"blocked-slot":        {"postgres", []string{"48213", "blocks_slot"}},
+	"blocked-slot":        {"kafka-connect", []string{"48213", "blocks_slot"}}, // R1 (W4n)
 	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
@@ -401,6 +401,18 @@ var syntheticLabels = map[string]Label{
 	"setup/wal-level-replica":           {"kafka-connect", []string{"wal_level", "replica"}},
 	"setup/missing-grant":               {"kafka-connect", []string{"devctl_setup_grant", "select on", "needs replication"}},
 	"setup/db-unreachable-from-connect": {"kafka-connect", []string{"192.0.2.1", "black-hole", "etc/hosts"}},
+	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
+	// one (kafka-connect in all four); the terms name the cause.
+	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
+	"mysql-history-topic-deleted":     {"kafka-connect", []string{"schema-history.shop", "history topic", "deleted"}},
+	"mysql-missing-replication-grant": {"kafka-connect", []string{"replication slave", "revoked"}},
+	"mysql-server-id-clash":           {"kafka-connect", []string{"server id", "orders-mysql-shadow"}},
+	// The Q7i pull-request fix scenarios (KAN-320): the terms name the file
+	// and the key the pull request changes.
+	"plugin-missing-in-image": {"kafka-connect", []string{"debezium_connectors", "dockerfile"}},
+	"debezium-upgrade":        {"kafka-connect", []string{"dbz-mysql-ddl-grant-sensitive-variables", "3.1.0", "parser"}},
+	"consumer-deserializer":   {"consumer", []string{"value.deserializer", "stringdeserializer", "string deserializer"}},
+	"fixpr-injected-file":     {"kafka-connect", []string{"table.include.list", "public.order"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -483,7 +495,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// names the failed task (kafka-connect). The wrong texts blame an idle source, a Kafka replay, a
 	// down broker and purged WAL.
 	"tolerance-all-skips":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
-	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}}, // R3 (W4n): labelled kafka; the wrong topic story names the right layer
 	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q6c: the lazy texts are the alert titles, which name the failed task
@@ -509,7 +521,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// watcher-start's), and those misses count against the accuracy.
 	"no-replica-identity": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}}, // R1 (W4n): labelled kafka-connect; the lost-slot text blames postgres
 	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the
@@ -540,6 +552,20 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
 	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// Q8i: the lazy texts are the alert titles, which name the connector
+	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
+	// wrong texts name Debezium, the connector or Connect first, so they hit
+	// the label layer with the wrong cause (a lost history topic, purged
+	// binlogs, a rotated password, the network).
+	"mysql-binlog-purged":             {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-history-topic-deleted":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-missing-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-server-id-clash":           {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q7i: the lazy texts are the alert titles, which name no file or key.
+	"plugin-missing-in-image": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"debezium-upgrade":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"consumer-deserializer":   {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"fixpr-injected-file":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

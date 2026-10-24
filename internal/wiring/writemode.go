@@ -11,9 +11,11 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/config"
+	"piperoom/internal/events"
 )
 
 // Write mode (PIPEROOM_WRITE_MODE, P0 item 1; P1a-3).
@@ -36,22 +38,37 @@ type (
 		clients.KafkaWriter
 		Close()
 	}
+	// closingAdminWriter is a MySQL source's writer (Q8f, Q8g): the source
+	// admin methods only, since MySQL has no slot, publication or signal
+	// table for clients.SourceWriter.
+	closingAdminWriter interface {
+		clients.SourceAdminWriter
+		Close()
+	}
 )
 
 // writeClients are one set's P3 write clients, built only with write mode on.
 // Only package actions may be handed them (clients.go, Reader/Writer split).
 type writeClients struct {
 	// source is nil without SOURCE_DB_WRITE_URL: the pg actions then refuse
-	// with "no write credentials".
+	// with "no write credentials". It is the Postgres writer, so it is nil on
+	// a MySQL set too.
 	source closingSourceWriter
-	kafka  closingKafkaWriter
+	// admin is the MySQL source writer (mysql.NewWriter) of a MySQL set with
+	// SOURCE_DB_WRITE_URL; nil otherwise. On a Postgres set the admin writer
+	// is source itself (adminWriter).
+	admin closingAdminWriter
+	kafka closingKafkaWriter
 }
 
 // writerOpeners build the write clients; tests replace them so no stack is
 // needed.
 type writerOpeners struct {
 	source func(ctx context.Context, dsn string) (closingSourceWriter, error)
-	kafka  func(brokers []string, sec netsec.Kafka) (closingKafkaWriter, error)
+	// mysql builds a MySQL set's source writer; readURL is the set's read
+	// URL, whose user the writer protects (mysql.WithReaderUser).
+	mysql func(ctx context.Context, dsn, readURL string) (closingAdminWriter, error)
+	kafka func(brokers []string, sec netsec.Kafka) (closingKafkaWriter, error)
 }
 
 // defaultWriterOpeners are the real constructors. A nil concrete writer is
@@ -61,6 +78,13 @@ func defaultWriterOpeners() writerOpeners {
 	return writerOpeners{
 		source: func(ctx context.Context, dsn string) (closingSourceWriter, error) {
 			w, err := postgres.NewWriter(ctx, dsn)
+			if err != nil {
+				return nil, err
+			}
+			return w, nil
+		},
+		mysql: func(ctx context.Context, dsn, readURL string) (closingAdminWriter, error) {
+			w, err := mysql.NewWriter(ctx, dsn, mysqlWriterOptions(readURL)...)
 			if err != nil {
 				return nil, err
 			}
@@ -85,7 +109,15 @@ func defaultWriterOpeners() writerOpeners {
 // own connections: block that pipeline's connections.source_db_write_url
 // (pipelineConfig), never the process-wide one. It returns a closer for what
 // it opened; on error nothing stays open and the error never carries a DSN.
+// It is openWritersFor a Postgres set.
 func openWriters(ctx context.Context, cfg config.Config, awsCfg *aws.Config, op writerOpeners) (writeClients, func(), error) {
+	return openWritersFor(ctx, cfg, awsCfg, op, events.SourceKindPostgres)
+}
+
+// openWritersFor is openWriters for a set of the given source kind
+// (checkSourceURLs): on mysql the source writer is mysql.NewWriter's,
+// protecting the read URL's user, and is held as the admin writer only.
+func openWritersFor(ctx context.Context, cfg config.Config, awsCfg *aws.Config, op writerOpeners, sourceKind string) (writeClients, func(), error) {
 	if err := checkSourceWriteURL(cfg); err != nil {
 		return writeClients{}, nil, err
 	}
@@ -100,6 +132,20 @@ func openWriters(ctx context.Context, cfg config.Config, awsCfg *aws.Config, op 
 	wc := writeClients{kafka: kw}
 	if strings.TrimSpace(cfg.SourceDBWriteURL) == "" {
 		return wc, kw.Close, nil
+	}
+	if sourceKind == events.SourceKindMySQL {
+		if op.mysql == nil {
+			kw.Close()
+			return writeClients{}, nil, errors.New("wiring: source mysql writer: no MySQL writer constructor")
+		}
+		aw, err := op.mysql(ctx, cfg.SourceDBWriteURL, cfg.SourceDBURL)
+		if err != nil {
+			kw.Close()
+			// mysql.NewWriter never puts the URL in its errors.
+			return writeClients{}, nil, fmt.Errorf("wiring: source mysql writer: %w", err)
+		}
+		wc.admin = aw
+		return wc, func() { aw.Close(); kw.Close() }, nil
 	}
 	sw, err := op.source(ctx, cfg.SourceDBWriteURL)
 	if err != nil {
@@ -155,7 +201,7 @@ func writeIsReadRole(cfg config.Config) bool {
 		return false
 	}
 	rd := strings.TrimSpace(cfg.SourceDBURL)
-	return wr == rd || sameSourceRole(rd, wr)
+	return wr == rd || sameSourceRole(rd, wr) || sameMySQLRole(rd, wr)
 }
 
 // sameSourceRole reports whether two DSNs name the same user on the same
