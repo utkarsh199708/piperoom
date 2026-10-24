@@ -694,6 +694,27 @@ diagnosis. Neither `plugin_install`, `compose_restart`, `source_alter_system`, `
 `expect.fix`, and forbids the restarts, resume, config update, slot drop and schema actions that repeat
 the failure.
 
+### Setup log re-plan scenarios (U5c, KAN-366)
+
+Two setup-labelled cases make the failing cause available only through `connect_worker_logs`. Each
+has a failed task restart input: U5b reads the connector's worker logs before the next plan, and the
+required fact and root-cause claim must cite that log result. The alert, steer, task status and failed
+action result carry no exception detail.
+
+| Scenario | Failing check | Fixing op (tier) | Log-only cause |
+|---|---|---|---|
+| `setup/source-authentication-log-only` | `canary_event` | `secret_set` (T1) | Postgres rejects the connector's password |
+| `setup/sink-authentication-log-only` | `canary_event` | `secret_set` (T1) | The warehouse rejects the sink service account |
+
+Both files set `setup.source_kind: postgres` and `setup.target: compose`, which keeps them grouped
+with setup runs. The current eval harness exposes the CDC `connect_worker_logs` tool and the failed
+step re-plan read, but not the setup runner's U5a `container_logs`/`journal_tail` reads or its
+runner operations. These scenarios therefore validate the existing worker-log re-plan path; they
+do not exercise the setup-mode container log path. `secret_set` is a runner op rather than a
+`LiveActions` action, so the files carry its name and tier in the label and grade diagnosis plus
+citation, not execution of the setup fix. Worker-log summaries are synthetic and follow the real
+tool's shape (`RECORDED: NO`).
+
 ### Recorded misses and measured budgets (W4l, KAN-496)
 
 Run 39994729845 left 124 replay misses in six scenarios (the W4-0 table, `reviews/evals-2026-10-23/misses.md`) and
