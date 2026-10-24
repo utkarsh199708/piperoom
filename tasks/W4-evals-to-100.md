@@ -47,6 +47,31 @@ itself; the row named in it applies it.
 - **R7 — C6 `on_error` facts.** A fact is not established from an errored result: `on_error` facts stay unsupported.
   W4a works without it. Ruled 2026-10-23 (leads, owner-delegated).
 
+- **R8 — Budgets.** A budget is the highest call count of a passing path plus 2. A run whose only failure is the
+  budget counts as a passing path; a run that also failed on anything else does not. A measured budget may lower or
+  raise the provisional one, and it overrides a ticket test case that named a different number (rows-lost-after-
+  retention: 21). When the turn split of the run cannot be read, the derivation comment gives the standard path's
+  per-turn split and says it is not measured. A scenario with no passing path keeps its provisional budget
+  (sink-dropped-column stays 18). Ruled 2026-10-24 (leads, owner-delegated).
+- **R9 — Evidence lists only what the story needs.** `evidence_tools` names only the reads the scenario's story needs
+  to establish the cause (W4a's rule). A read the ticket listed may move to an optional fact when the story does not
+  need it: `source_blocking_sessions` in idle-wal-growth (no open transaction), `source_settings` in
+  setup/db-unreachable-from-connect. Ruled 2026-10-24 (leads, owner-delegated).
+- **R10 — setup/db-unreachable-from-connect terms.** The cause (the Connect container resolves `postgres` to a dead
+  address) is not visible to any read tool, so the hypothesis must name name resolution: the root-cause group is
+  `[resolv*, dns, hosts, name resolution]`. "network path" and "route*" are not accepted (they passed judged-wrong
+  hypotheses), and an echo of net_probe's own "dns ok" line, or a hypothesis that clears DNS, must not pass.
+  Ruled 2026-10-24 (leads, owner-delegated).
+- **R11 — replication-slot-lost-failover retried reads.** The two reads the agent retries get honest recordings that
+  support no fix: `connect_source_offsets` returns the old primary's committed LSN, ahead of the new primary's, and
+  `source_settings` the new primary's ordinary settings. The ticket's "record nothing" is superseded; the test is that
+  no recording makes a fix look right, and every fix stays forbidden. Ruled 2026-10-24 (leads, owner-delegated).
+- **R12 — Model ids.** No model id in commit messages, PR text, code, comments or prose artifacts. A judge-cache
+  entry's `model` field is cache-schema data written by the tool and is allowed. Ruled 2026-10-24 (leads,
+  owner-delegated).
+- **R13 — W4j enabler.** KAN-510's "no code" covered the comparison itself; adding `set=heldout` to `evals-live`
+  (C1) is the enabler the dispatch needs and is accepted. Ruled 2026-10-24 (leads, owner-delegated).
+
 ### Related rulings
 
 - **W4f first-failing definition (KAN-504).** Rule 4 of the CDC prompt keeps the P3-W3 wording: "the most upstream
