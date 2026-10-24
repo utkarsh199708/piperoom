@@ -39,5 +39,8 @@ func registerLifecycle(areg *actions.Registry, w *Wired) error {
 	if !isNilIface(src) {
 		d.Source = src
 	}
+	// A MySQL position is checked against the source's binlog (Q8e); nil on
+	// a Postgres set.
+	d.Binlog = binlogReader(w)
 	return actions.RegisterLifecycle(areg, d)
 }

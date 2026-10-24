@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -618,7 +619,12 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 	}
 	// The project reached through a symlink: the resolved JDK path is
 	// still recognised as inside it.
-	real := t.TempDir()
+	// EvalSymlinks: a temp dir can itself sit behind a symlink (macOS's
+	// /var is /private/var), and the JDK path a unit runs is a resolved one.
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	link := t.TempDir() + "/p"
 	mustSymlink(t, real, link)
 	g := newFixtureIn(t, link, Options{})

@@ -89,15 +89,19 @@ func checkHeartbeatInterval(v string) error {
 }
 
 // heartbeatQuery is a parsed heartbeat.action.query: its target table
-// ("schema.table", unquoted) and its string literals (for the secret check).
+// ("schema.table", unquoted), its string literals (for the secret check) and
+// the dialect-only forms it uses, so checkHeartbeatDialect can refuse a
+// Postgres form on a MySQL connector and the other way round.
 type heartbeatQuery struct {
 	table    string
 	literals []string
+	mysql    []string // forms only MySQL takes (ON DUPLICATE KEY UPDATE, NOW(6), backticks)
+	pg       []string // forms only Postgres takes (ON CONFLICT, EXCLUDED, CLOCK_TIMESTAMP, double quotes)
 }
 
 // hbTok is one token of a heartbeat query.
 type hbTok struct {
-	kind byte // 'w' bare word, 'q' quoted identifier, 'n' number, 's' string literal, 'p' punctuation
+	kind byte // 'w' bare word, 'q' "quoted" identifier, 'b' `quoted` identifier, 'n' number, 's' string literal, 'p' punctuation
 	text string
 }
 
@@ -109,8 +113,10 @@ type hbTok struct {
 //	     | ON DUPLICATE KEY UPDATE c = v, ...]
 //	UPDATE s.t SET c = v, ... [WHERE c = v]
 //
-// where v is an integer, a short string literal, NOW(), CLOCK_TIMESTAMP() or
-// CURRENT_TIMESTAMP, and an optional trailing ";". Debezium runs the text on
+// where v is an integer, a short string literal, NOW(), CLOCK_TIMESTAMP(),
+// CURRENT_TIMESTAMP, MySQL's NOW(n) or CURRENT_TIMESTAMP(n) with n 0..6, and
+// an optional trailing ";". The grammar is the union of both dialects; the
+// connector's class picks one (checkHeartbeatDialect). Debezium runs the text on
 // the source database with the connector's credentials, so this is a
 // grammar of what a heartbeat needs, not a deny list: no sub-query, no other
 // function, no comment, no second statement can be written in it.
@@ -146,6 +152,7 @@ func parseHeartbeatQuery(q string) (heartbeatQuery, error) {
 	if !p.done() {
 		return fail("unexpected %q after the statement", shortText(p.peek().text))
 	}
+	out.mysql, out.pg = p.mysql, p.pg
 	return out, nil
 }
 
@@ -187,7 +194,11 @@ func lexHeartbeatQuery(q string) ([]hbTok, error) {
 			if !heartbeatIdentRe.MatchString(id) {
 				return nil, heartbeatErr(keyHeartbeatQuery, "quoted identifier %q: letters, digits and _ only, not starting with a digit, at most 63", shortText(id))
 			}
-			toks = append(toks, hbTok{'q', id})
+			kind := byte('q')
+			if c == '`' {
+				kind = 'b'
+			}
+			toks = append(toks, hbTok{kind, id})
 			i += end + 2
 		case c == '\'':
 			end := strings.IndexByte(q[i+1:], '\'')
@@ -219,6 +230,18 @@ type hbParser struct {
 	toks []hbTok
 	i    int
 	lits []string
+	// mysql and pg collect the dialect-only forms seen (heartbeatQuery).
+	mysql, pg []string
+}
+
+// uses records a dialect-only form once.
+func uses(list *[]string, form string) {
+	for _, f := range *list {
+		if f == form {
+			return
+		}
+	}
+	*list = append(*list, form)
 }
 
 func (p *hbParser) done() bool { return p.i >= len(p.toks) }
@@ -265,11 +288,44 @@ func (p *hbParser) expectPunct(s string) error {
 // ident consumes one identifier, bare or quoted, checked with rule 6.
 func (p *hbParser) ident() (string, error) {
 	t := p.peek()
-	if (t.kind != 'w' && t.kind != 'q') || !heartbeatIdentRe.MatchString(t.text) {
+	if (t.kind != 'w' && t.kind != 'q' && t.kind != 'b') || !heartbeatIdentRe.MatchString(t.text) {
 		return "", heartbeatErr(keyHeartbeatQuery, "expected an identifier, got %q", shortText(t.text))
+	}
+	switch t.kind {
+	case 'q':
+		uses(&p.pg, `"double-quoted" identifiers`)
+	case 'b':
+		uses(&p.mysql, "`backtick-quoted` identifiers")
 	}
 	p.i++
 	return t.text, nil
+}
+
+// fractionalPrecision consumes MySQL's optional fractional-seconds precision
+// "(n)", n 0..6, after NOW or CURRENT_TIMESTAMP; with paren it is NOW's
+// mandatory "(" ... ")" whose inside may be empty.
+func (p *hbParser) fractionalPrecision(paren bool) error {
+	if !paren && !p.punct("(") {
+		return nil
+	}
+	if paren {
+		if err := p.expectPunct("("); err != nil {
+			return err
+		}
+	}
+	if t := p.peek(); t.kind == 'n' {
+		if len(t.text) != 1 || t.text[0] > '6' {
+			return heartbeatErr(keyHeartbeatQuery, "fractional seconds precision %q: 0..6 only", shortText(t.text))
+		}
+		p.i++
+		if paren {
+			// Postgres has CURRENT_TIMESTAMP(n) too, but its now() takes none.
+			uses(&p.mysql, "NOW(n)")
+		}
+	} else if !paren {
+		return heartbeatErr(keyHeartbeatQuery, "CURRENT_TIMESTAMP( takes a precision 0..6")
+	}
+	return p.expectPunct(")")
 }
 
 // table consumes "schema.table". An unqualified table is refused: its schema
@@ -328,17 +384,22 @@ func (p *hbParser) value(excluded bool) error {
 		return nil
 	case 'w':
 		switch {
-		case strings.EqualFold(t.text, "NOW"), strings.EqualFold(t.text, "CLOCK_TIMESTAMP"):
+		case strings.EqualFold(t.text, "NOW"):
 			p.i++
+			return p.fractionalPrecision(true)
+		case strings.EqualFold(t.text, "CLOCK_TIMESTAMP"):
+			p.i++
+			uses(&p.pg, "CLOCK_TIMESTAMP()")
 			if err := p.expectPunct("("); err != nil {
 				return err
 			}
 			return p.expectPunct(")")
 		case strings.EqualFold(t.text, "CURRENT_TIMESTAMP"):
 			p.i++
-			return nil
+			return p.fractionalPrecision(false)
 		case excluded && strings.EqualFold(t.text, "EXCLUDED"):
 			p.i++
+			uses(&p.pg, "EXCLUDED")
 			if err := p.expectPunct("."); err != nil {
 				return err
 			}
@@ -407,6 +468,7 @@ func (p *hbParser) insert() (heartbeatQuery, error) {
 	if p.word("ON") {
 		switch {
 		case p.word("CONFLICT"):
+			uses(&p.pg, "ON CONFLICT")
 			if _, err := p.columns(); err != nil {
 				return heartbeatQuery{}, err
 			}
@@ -425,6 +487,7 @@ func (p *hbParser) insert() (heartbeatQuery, error) {
 				}
 			}
 		case p.word("DUPLICATE"):
+			uses(&p.mysql, "ON DUPLICATE KEY UPDATE")
 			for _, w := range []string{"KEY", "UPDATE"} {
 				if err := p.expectWord(w); err != nil {
 					return heartbeatQuery{}, err
@@ -539,6 +602,47 @@ func checkHeartbeatGuard(connector, key string, cfg map[string]string) error {
 	}
 	if key == keyHeartbeatQuery && strings.HasPrefix(class, "io.debezium.connector.mongodb.") {
 		return fmt.Errorf("actions: %s does not apply to %s: a MongoDB connector runs no SQL heartbeat query", key, connector)
+	}
+	return nil
+}
+
+// heartbeatDialect returns the SQL dialect of a Debezium connector class for
+// its heartbeat query: "mysql" (MySQL, MariaDB), "postgres", or "" for any
+// other source, which takes neither dialect's extensions.
+func heartbeatDialect(class string) string {
+	switch {
+	case strings.HasPrefix(class, "io.debezium.connector.mysql."), strings.HasPrefix(class, "io.debezium.connector.mariadb."):
+		return "mysql"
+	case strings.HasPrefix(class, "io.debezium.connector.postgresql."):
+		return "postgres"
+	}
+	return ""
+}
+
+// checkHeartbeatDialect refuses a heartbeat query that uses a form the
+// connector's database does not take: an ON CONFLICT on MySQL, an ON
+// DUPLICATE KEY UPDATE or NOW(6) on Postgres. Debezium would run it on every
+// heartbeat and fail every time. The connector class chooses the dialect
+// (design §8.3).
+func checkHeartbeatDialect(connector, query string, cfg map[string]string) error {
+	hq, err := parseHeartbeatQuery(query)
+	if err != nil {
+		return err
+	}
+	class := strings.TrimSpace(cfg["connector.class"])
+	var wrong []string
+	db := "this database"
+	switch heartbeatDialect(class) {
+	case "mysql":
+		wrong, db = hq.pg, "MySQL"
+	case "postgres":
+		wrong, db = hq.mysql, "Postgres"
+	default:
+		wrong = append(append(wrong, hq.mysql...), hq.pg...)
+	}
+	if len(wrong) > 0 {
+		return heartbeatErr(keyHeartbeatQuery, "%s (connector.class %q) is %s, which does not take %s; on MySQL use INSERT INTO db.t (id, ts) VALUES (1, NOW(6)) ON DUPLICATE KEY UPDATE ts = NOW(6), on Postgres ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts",
+			connector, shortText(class), db, strings.Join(wrong, ", "))
 	}
 	return nil
 }

@@ -327,9 +327,9 @@ var syntheticLabels = map[string]Label{
 	"topic-retention-data-loss":     {"kafka", []string{"retention", "log start"}},
 	// The five scenarios added by #87.
 	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
-	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
+	"consumer-offsets-out-of-range-retention": {"consumer", []string{"retention", "log start", "data loss"}}, // R14 (W4n-3): order-sync fails first, Kafka holds the cause
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
-	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
+	"replication-slot-lost-failover":          {"kafka-connect", []string{"failover", "promoted", "new primary"}}, // R1 (W4n-2)
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 	// The two scenarios added by #100.
 	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},
@@ -406,6 +406,18 @@ var syntheticLabels = map[string]Label{
 	// term.
 	"setup/agent-stopped":         {"postgres", []string{"sql server agent", "capture job"}},
 	"setup/cdc-not-enabled-table": {"postgres", []string{"not tracked", "capture instance", "is_tracked_by_cdc"}},
+	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
+	// one (kafka-connect in all four); the terms name the cause.
+	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
+	"mysql-history-topic-deleted":     {"kafka-connect", []string{"schema-history.shop", "history topic", "deleted"}},
+	"mysql-missing-replication-grant": {"kafka-connect", []string{"replication slave", "revoked"}},
+	"mysql-server-id-clash":           {"kafka-connect", []string{"server id", "orders-mysql-shadow"}},
+	// The Q7i pull-request fix scenarios (KAN-320): the terms name the file
+	// and the key the pull request changes.
+	"plugin-missing-in-image": {"kafka-connect", []string{"debezium_connectors", "dockerfile"}},
+	"debezium-upgrade":        {"kafka-connect", []string{"dbz-mysql-ddl-grant-sensitive-variables", "3.1.0", "parser"}},
+	"consumer-deserializer":   {"consumer", []string{"value.deserializer", "stringdeserializer", "string deserializer"}},
+	"fixpr-injected-file":     {"kafka-connect", []string{"table.include.list", "public.order"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -417,12 +429,18 @@ var syntheticTruth = map[string]map[string]truth{
 	"slot-inactive-wal-growth":      {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"source-column-dropped":         {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"topic-retention-data-loss":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// consumer-offsets (first_failing_layer consumer since R14, W4n-3:
+	// order-sync crash-loops while Kafka answers every read): good names
+	// order-sync's outage as what fails (lead ruling on #992; the recorded
+	// judge verdict agrees), and the matcher reads "log start" first, a
+	// counted miss; lazy is order-sync's crash-loop title; wrong blames an
+	// order-sync deploy, the right layer for the wrong reason.
 	// avro (first_failing_layer kafka-connect since P3-W3d-2; the registry
 	// still answers, the sink task is what breaks): good and wrong both blame
 	// the registry, so their layer misses; lazy is the sink task's failure
 	// title. rebalance lazy: the title names the consumer group's lag.
 	"avro-schema-id-deleted-sink-failed":      {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"sink-connector-paused-warehouse-stale":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
@@ -488,7 +506,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// names the failed task (kafka-connect). The wrong texts blame an idle source, a Kafka replay, a
 	// down broker and purged WAL.
 	"tolerance-all-skips":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
-	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}}, // R3 (W4n): labelled kafka; the wrong topic story names the right layer
 	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q6c: the lazy texts are the alert titles, which name the failed task
@@ -514,7 +532,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// watcher-start's), and those misses count against the accuracy.
 	"no-replica-identity": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}}, // R1 (W4n): labelled kafka-connect; the lost-slot text blames postgres
 	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the
@@ -552,6 +570,20 @@ var syntheticTruth = map[string]map[string]truth{
 	// right layer, the wrong cause.
 	"setup/agent-stopped":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/cdc-not-enabled-table": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q8i: the lazy texts are the alert titles, which name the connector
+	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
+	// wrong texts name Debezium, the connector or Connect first, so they hit
+	// the label layer with the wrong cause (a lost history topic, purged
+	// binlogs, a rotated password, the network).
+	"mysql-binlog-purged":             {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-history-topic-deleted":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-missing-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"mysql-server-id-clash":           {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q7i: the lazy texts are the alert titles, which name no file or key.
+	"plugin-missing-in-image": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"debezium-upgrade":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"consumer-deserializer":   {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"fixpr-injected-file":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.
@@ -583,8 +615,16 @@ func TestAgreementSyntheticAccuracy(t *testing.T) {
 			t.Errorf("scenario %q lacks synthetic hypotheses, label or truth; add them", sc.Name)
 			continue
 		}
-		if label.Layer != sc.Expect.FirstFailingLayer {
-			t.Errorf("%s: synthetic label layer %q != scenario %q", sc.Name, label.Layer, sc.Expect.FirstFailingLayer)
+		// A scenario with no first failing layer (R15: healthy now, with a
+		// past finding, consumer-duplicates) is labelled with its root-cause
+		// layer: the label is what a human would name, the component the
+		// finding is about.
+		want := sc.Expect.FirstFailingLayer
+		if want == "" {
+			want = sc.Expect.RootCauseLayer
+		}
+		if label.Layer != want {
+			t.Errorf("%s: synthetic label layer %q != scenario %q", sc.Name, label.Layer, want)
 		}
 		lazy := sc.Alert.Title
 		if sc.Start.By == StartWatcher {

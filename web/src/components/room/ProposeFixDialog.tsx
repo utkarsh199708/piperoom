@@ -175,7 +175,7 @@ export function ProposeFixDialog({
                 <option value="">Choose an action…</option>
                 {actions.map((a) => (
                   <option key={a.name} value={a.name}>
-                    {a.name} · {a.layer}
+                    {a.name} · {a.layer_by_params ? 'layer from the files it changes' : a.layer}
                   </option>
                 ))}
               </select>
@@ -183,6 +183,7 @@ export function ProposeFixDialog({
                 <p id="propose-action-describe" className="m-0 text-xs text-muted-foreground">
                   {action.describe}
                   {!action.preview && ' This action has no preview: approvers see its params only.'}
+                  {action.deferred && ' It opens a pull request: nothing changes until a reviewer merges it, and no policy approves it.'}
                 </p>
               )}
               {actionErr && (

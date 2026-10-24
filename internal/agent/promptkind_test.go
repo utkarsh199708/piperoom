@@ -85,17 +85,59 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // or unknown is not done." Q1d's upgrade rule is not in the prompt: it sits
 // beside the runbook_lookup result that shows an affected known issue
 // (versions.go), as X4c's ranking does.
+// W4f (KAN-504) moved it a twelfth time, on purpose, for evals run
+// 39994729845 (the agent named the component that still answered, or the one
+// an unreachable read named, as the first failing one): rule 4 now defines
+// the first failing component as the most upstream stage whose own status
+// read shows it failed, else the most upstream one that no longer does its
+// job (the P3-W3 ruling, kept so a stage that fails no status read, as in
+// missed-table or dead-slot-wal, is still named); if a stage failed, a
+// component that still answers requests is at most the root-cause component,
+// never the first failing one, and so is the component of an
+// "unreachable: <component>" read, which still forbids a healthy verdict.
+// The rule 4 text is the lead ruling on PR #931. Rule 6's unreachable
+// sentence moved into rule 4 and rule 6 keeps only the tool-error sentence.
+// Its fix round (evals-live 40029255155 and 40032876094: the agent stated
+// the root cause and never named the first failing component, or merged
+// the two) made rule 4's last sentence fix the form: update_hypothesis names
+// a cause as "First failing: <component>. Root cause: <component>." even if
+// identical. Word-neutral against 1335: rule 6 reads "Tool errors and
+// timeouts are evidence for what is unknown or blocked, not proof.", rule 1
+// "do not repeat its reads", the resume bullet "slot exists ... and no
+// maintenance", and the write-off note "won't" (the PR lists each word).
+// W4h (KAN-505) moved it a thirteenth time, on purpose, for evals run
+// 39994729845 (the agent asked which fix to take instead of proposing the
+// one listed action that fixed the cause, re-read rows from the source that
+// were still on the topic, and left a FAILED task's restart for later):
+// rule 7 carries the generic rule (instead of asking unprompted, propose the
+// smallest listed action that fixes the cause and say what it gives up; it
+// replaces the Fixes bullet "Fix the cause you established with the
+// smallest change"); a FAILED task's restart is the next step of the
+// proposal removing its cause, and pg_add_publication_table's snapshot
+// signal joins that sentence; a high-risk compatibility NONE is proposed
+// when no narrower listed action fixes a rejected registration, saying what
+// the old contract can no longer read, and undone once recovered (a later
+// fix: a restore step in the same proposal would run before Debezium
+// registers the new schema, LEAD-REVIEW on #988), while schema_register
+// stays a last resort; the offsets note replays a missing range still on the
+// topic and snapshots the rows otherwise. Word-neutral against 1335 by
+// meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
+// restart and offsets bullets and "Propose one fix at a time" (the PR lists
+// each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "fb477a7b3e01bb8429e84326cb09e6cbe32c8fb22c1f537ac8c37aec65f3d65b"
+const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
-// did Q4b and Q2e, and Q5d (its trims and the offsets bullet).
-const cdcPromptWriteOffSHA256 = "0c351d168f2f2f14c4375f0631defff132b308f234228283d9ea6bf8aa26ab91"
+// did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
+// 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
+// listed fix, the restart and compatibility bullets and the offsets note,
+// word-neutral: still 1335 words).
+const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

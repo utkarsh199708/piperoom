@@ -14,6 +14,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/agent/llm"
 	"piperoom/internal/config"
+	"piperoom/internal/wiring"
 )
 
 // PromptTap is what a run's provenance reads from a model tap: per room, the
@@ -204,18 +205,18 @@ func NeutralTapProvider(provider string) bool {
 }
 
 // NewTappedEndpointRunner builds the agent runner of NewEndpointRunner with
-// every role's model wrapped by wrap, and reports whether the wrap reached
-// the role models.
-//
-// Local adapter (V11): the Endpoint has no hook yet to wrap its role models
-// (it builds them inside internal/agent, A4's; the contract change request is
-// in the V11 PR). Until it lands this builds the plain Endpoint and returns
-// false, so the caller must not hand the tap to Evaluate: a tap that saw no
-// request would make every result "none" instead of "untapped". With the
-// hook, the body becomes the commented line below and returns true.
+// every role's model wrapped by wrap (wiring.WithModelWrap, the A4 hook), and
+// reports that the wrap reached the role models. A nil wrap builds the plain
+// Endpoint and reports false, so the caller does not hand Evaluate a tap that
+// saw no request.
 func NewTappedEndpointRunner(ctx context.Context, cfg config.Config, log *slog.Logger, wrap ModelWrap) (agent.Runner, bool, error) {
-	// ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, nil, wiring.WithModelWrap(wrap))
-	_ = wrap
-	run, err := NewEndpointRunner(ctx, cfg, log)
-	return run, false, err
+	if wrap == nil {
+		run, err := NewEndpointRunner(ctx, cfg, log)
+		return run, false, err
+	}
+	ep, err := wiring.NewAgentEndpointWith(ctx, cfg, log, nil, wiring.WithModelWrap(wrap))
+	if err != nil {
+		return nil, false, fmt.Errorf("evals: %w", err)
+	}
+	return ep.Run, true, nil
 }

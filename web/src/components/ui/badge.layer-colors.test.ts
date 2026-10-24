@@ -43,6 +43,7 @@ describe('layer badge colours', () => {
         'consumer',
         'kafka',
         'kafka-connect',
+        'mysql',
         'orchestrator',
         'postgres',
         'schema-registry',
