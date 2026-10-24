@@ -10,9 +10,13 @@
 # scoped by dev/owners.yaml. To replace it with a real recording, see
 # evals/scenarios/README.md, "Source-database settings (Q2g)".
 #
-# First failing layer: postgres (no slot can be created). Root-cause layer: postgres. Nothing
+# First failing layer: kafka-connect (the connector task never gets past start). Root-cause
+#   layer: postgres (the open transaction that CREATE_REPLICATION_SLOT waits on). Nothing
 #   FAILED: the connector and its task are RUNNING/UNASSIGNED and Connect reports no error,
 #   because start() has not returned. The warehouse is stale and the topic is idle.
+#   Ruling R1 (tasks/W4-evals-to-100.md, applied in W4n, KAN-497): a component that answers
+#   every read is not the first failing one. Postgres answers every read here; the task that
+#   never starts is the first failing layer, and Postgres is the root cause.
 #
 # Expected fix (the label): source_end_session {connector: pg-orders-connector, pid: 48213,
 #   started_at: 2026-10-23T09:14:12Z, older_than_minutes: 20} (the postgres owner approves; the
@@ -533,7 +537,8 @@ expect:
     - ['lost the slot']
     - ['consumer lag']
     - ['network']
-  first_failing_layer: postgres
+  # R1 (W4n): the task that never starts fails first; Postgres holds the cause.
+  first_failing_layer: kafka-connect
   root_cause_layer: postgres
   expected_facts:
     - id: f_blocker
