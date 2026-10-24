@@ -324,7 +324,7 @@ func TestParseIndexRejects(t *testing.T) {
   checks: [c]`, `plugin_ref: sink-a
   checks: []`, "check is required"},
 		{"bad class name", `class: org.example.SmtB`, `class: SmtB`, "Java class"},
-		{"unknown kind", `kind: smt`, `kind: tuning`, "kind"},
+		{"unknown kind", `kind: smt`, `kind: knob`, "kind"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
