@@ -550,9 +550,11 @@ func readRoleFix(d Driver, ev Evidence) (string, string) {
 	if !ev.Role.Exists {
 		return opCreateReadRole, ""
 	}
+	// The accounts come from the source's grant tables, data from the customer
+	// system: only account-shaped values are echoed into the ask (safeAccounts).
 	accts := "'" + clipName(d.Role) + "'@'<host>'"
-	if len(ev.Role.Accounts) > 0 {
-		accts = strings.Join(ev.Role.Accounts, ", ")
+	if a := safeAccounts(ev.Role.Accounts); a != "" {
+		accts = a
 	}
 	return "", "The user exists (" + accts + ") but is locked, has an expired password or lacks REPLICATION SLAVE or REPLICATION CLIENT: no setup op changes an existing user (it is never re-passworded). Run ALTER USER ... ACCOUNT UNLOCK or GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO the account, then re-read."
 }

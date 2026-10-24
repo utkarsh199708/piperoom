@@ -40,7 +40,35 @@ var (
 	topicPrefixRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 	// canaryNonceRe is the ladder's nonce: 16 random bytes in lower-case hex.
 	canaryNonceRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// accountRe is one account as the Q8 client reports it (user@host): the
+	// identifier rule for the user and hostRe for the host. A value read from
+	// mysql.user is echoed into an ask only when it has exactly this shape.
+	accountRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,31}@[A-Za-z0-9_.:%-]{1,255}$`)
 )
+
+// maxAskAccounts bounds how many accounts an ask lists; the rest are a count.
+const maxAskAccounts = 5
+
+// safeAccounts joins, for an ask, the accounts that pass accountRe: at most
+// maxAskAccounts, then a count. The accounts are rows of the source's grant
+// tables, data from the customer system that reaches the room's prompt through
+// the ask, so a value that is not shaped like an account is left out, never
+// echoed. It returns "" when no account qualifies.
+func safeAccounts(accounts []string) string {
+	var out []string
+	for _, a := range accounts {
+		if accountRe.MatchString(a) {
+			out = append(out, a)
+		}
+	}
+	switch {
+	case len(out) == 0:
+		return ""
+	case len(out) > maxAskAccounts:
+		return strings.Join(out[:maxAskAccounts], ", ") + fmt.Sprintf(" and %d more", len(out)-maxAskAccounts)
+	}
+	return strings.Join(out, ", ")
+}
 
 // readerUserHost is the host part of the account CreateReadRole makes. The
 // contract gives the method no host, and the connector's address is not known
