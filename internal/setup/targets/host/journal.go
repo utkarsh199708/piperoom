@@ -50,7 +50,9 @@ var ErrUnit = errors.New("host: unit not allowed")
 // the source databases of the U wave, and the units this project installs
 // (piperoom-*). A unit name must start with one of them followed by a
 // separator, so journal_tail cannot read sshd, sudo or a desktop session's
-// journal. When U8a's installed-unit record exists the op can narrow to it.
+// journal. It is not narrowed to the units service_install wrote: the
+// journals worth reading are mostly of units a package installed (kafka,
+// postgresql), which have no file under UnitDir.
 var unitPrefixes = []string{
 	"piperoom", "kafka", "connect", "confluent", "redpanda", "zookeeper",
 	"schema-registry", "debezium", "postgresql", "postgres", "mysql", "mysqld",
@@ -95,9 +97,7 @@ type journalData struct {
 
 // JournalTailOp is journal_tail (T0): the newest lines of one systemd unit's
 // journal, as `journalctl -u <unit> -n 200 --no-pager -o short-iso`. It has
-// no state. Nothing registers it yet: the host target that registers it with
-// its other ops comes in a later row, and until then a caller (or a test)
-// registers JournalTailOp{} itself.
+// no state. The host target's Register adds it with the other host ops.
 type JournalTailOp struct{}
 
 // Name is the catalogue name.
