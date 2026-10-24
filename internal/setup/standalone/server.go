@@ -40,7 +40,8 @@ type Server struct {
 	// Events receives every room event (the OnRoomOpened subscription). Nil
 	// logs none.
 	Events *EventLog
-	// Agent replaces the room service's agent runner; nil is agent.Run.
+	// Agent replaces the room service's agent runner; nil is the picker's
+	// endpoint (modelHost, model.go).
 	Agent agent.Runner
 }
 

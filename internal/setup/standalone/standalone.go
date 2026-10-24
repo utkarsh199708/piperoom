@@ -9,8 +9,9 @@
 // settings standalone may not change (loopback, dev login, write mode, setup),
 // loads the owners file, writes the one-user users file and then calls
 // Server.Serve, the standalone server composition. The HTTP API, the room
-// service and the event log are the real ones; the agent is the package's
-// default (a later row wires the setup-mode stack into it).
+// service, the models API and the event log are the real ones; the agent runs
+// on the model the picker stored (a later row wires the setup-mode tool stack
+// into it).
 package standalone
 
 import (
@@ -74,8 +75,8 @@ type Options struct {
 	Stdout io.Writer
 	// Log is the logger; nil is slog.Default.
 	Log *slog.Logger
-	// Agent replaces the room service's agent runner (tests); nil is the real
-	// agent (room.New's default).
+	// Agent replaces the room service's agent runner (tests); nil runs rooms
+	// and hand-offs on the model picker's endpoint (model.go).
 	Agent agent.Runner
 }
 
