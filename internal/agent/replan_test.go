@@ -355,7 +355,9 @@ func TestReplanSecondPlanCitesLogLine(t *testing.T) {
 	}
 	for _, p := range props.created {
 		raw, _ := json.Marshal(p)
-		if strings.Contains(string(raw), plantedConn) || strings.Contains(string(raw), "connect_delete_connector") || strings.Contains(string(raw), "T0") {
+		// "tier T0", not "T0": a step id the second plan cites is a random
+		// ULID and can contain "T0" by chance (s_01M5PSSG436Z55T0...).
+		if strings.Contains(string(raw), plantedConn) || strings.Contains(string(raw), "connect_delete_connector") || strings.Contains(string(raw), "tier T0") {
 			t.Errorf("a created proposal carries the planted action, target or tier: %s", raw)
 		}
 		// The tier is the action's, computed from the stored step as the room
