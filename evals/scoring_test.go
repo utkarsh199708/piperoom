@@ -452,6 +452,17 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The setup validator refused the compose file with rule secret: the postgres service sets POSTGRES_PASSWORD to a plain-text credential. Write the .env with properties_write (POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD: ${secret:postgres_password}), re-render the source-postgres template with compose_write so it interpolates the reference, and start the stack with compose_up.",
 		wrong: "The stack stays down because the postgres image lacks the pinned digest the setup allow-list requires; pull the pinned image and render the compose file again.",
 	},
+	// The U7d MongoDB setup scenarios. Each wrong text tells the other
+	// break's story (a standalone mongod, a network route), the trap between
+	// them.
+	"setup/standalone-mongod": {
+		good:  "The setup check mongo-change-streams fails: the source database runs mongod as a standalone since 09:30, when the recreated container's command lost --replSet rs0. Change streams need a replica set member, so the connector's MongoDB driver, which connects with replicaSet=rs0, finds a STANDALONE server, drops it from its cluster view and times out (MongoTimeoutException, servers=[]); task 0 of mongo-orders-connector FAILED. The fix is a documented ask to the person, who owns that mongod (this room created only Kafka, Connect and the registry): restart it with --replSet rs0 on the same volume, where the member's set config makes it primary again, then connect_restart_task for task 0. The resume token is still in the oplog on the volume, so the task picks up where it stopped.",
+		wrong: "The Connect worker lost its network route to mongo:27017, so the MongoDB driver times out; fix the Docker network between Connect and the source and restart the connector.",
+	},
+	"setup/no-oplog-role": {
+		good:  "The setup check mongo-oplog-read fails: the capture user piperoom_cdc on the source database holds readAnyDatabase, which leaves out the local database, so it lacks read on local.oplog.rs. The run stopped before it registered mongo-orders-connector. The fix: the person's user administrator grants it read on local (db.getSiblingDB('admin').grantRolesToUser('piperoom_cdc', [{role: 'read', db: 'local'}])), a documented ask because the user is the person's own; or the setup creates its own capture user with source_create_read_role (T2), which carries read on local. Then the run re-runs the checks.",
+		wrong: "The mongod runs as a standalone outside any replica set, so change streams are unavailable; restart it with --replSet rs0.",
+	},
 	"setup/compose-privileged-refused": {
 		good:  "The setup validator refused the compose file with rule privilege: the connect service declares privileged: true, which asks for host privileges. Re-render the stack from the driver's templates with compose_write (the connect template renders only the allow-listed service fields: image, command, environment, ports, volumes, depends_on and healthcheck) and bring it up with compose_up.",
 		wrong: "The connect service uses an image tag that is absent from the setup knowledge index, so the stack stays down; pin the image digest and run it again.",

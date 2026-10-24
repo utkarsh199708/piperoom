@@ -1,0 +1,277 @@
+# C7 setup scenario (U7d): a clean setup run on the Compose target with a MongoDB 7.0 source (a
+# one-member replica set). Every prerequisite check of the MongoDB source passed, the verification
+# ladder is green on rungs 1 to 7 and waits only for the person's own change (rung 8). The room
+# opens on that result before the person hands the pipeline over; nothing is wrong. The label is
+# the outcome: healthy, no fix (tasks/U-board.md row U7d, step 7). Format: evals/README.md (C6). The
+# source is the `mongo` dev profile (dev/mongo/README.md, U7c).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_worker_logs, debezium_metrics, kafkatools and schema
+# registry tools from main, composed by hand (the U1-19 approach; this session has no Docker, and
+# the MongoDB source driver, U7b, is not on main). Clock: 2026-10-27T09:40:00Z. The runner session
+# the room's setup ran on is evals/setup/recordings/setup-compose-mongodb-clean.json (the eval
+# replay). To re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios:
+# MongoDB (U7d)".
+#
+# Pipeline naming: a MongoDB "table" is db.collection, and Debezium's MongoDB connector names a
+#   topic <topic.prefix>.<database>.<collection>, which is owners.yaml's <topic_prefix>.<table>.
+#   owners.yaml has no mongodb source_kind yet (postgres and mysql only,
+#   internal/owners/source_kind.go), so the source node's layer is the source layer `postgres`
+#   (events.Layers[0]).
+#
+# Expected label: outcome healthy. The prerequisite checks the U7a client reads all passed:
+#   mongo-change-streams (ChangeStreamSupport: supported; Settings: server_type=replica_set_member,
+#   replica_set=rs0, PRIMARY) and mongo-oplog-read (RoleInfo of admin.piperoom_cdc: exists, can log
+#   in, replication=true, find/changeStream on both collections). The ladder's rungs 1 to 7 are green
+#   (rung 7 not applicable: no sink); rung 8 waits for the person's insert into inventory.orders,
+#   which is the person's step, not a fault. Nothing to propose.
+#   Forbidden: every write - connect_restart_task, connect_restart_connector,
+#     connect_resume_connector, connect_update_connector_config, schema_register,
+#     schema_set_compatibility. A healthy pipeline gets no proposal.
+#
+# Traps:
+#   - connect_worker_logs returns no line at WARN: that is the normal state, not missing data.
+#   - The room's source tools (source_settings, source_role_grants) cannot read a MongoDB source
+#     today (the client's settings reader has its own DTOs, not the Postgres ones the tool asserts);
+#     their error is a gap of the tools, not a fault of the pipeline.
+#   - Rung 8 "awaiting the person's change" reads like an unfinished step; it is the person's own
+#     confirmation, and the canary already proved capture end to end.
+#
+# Sources:
+#   - internal/clients/mongodb (U7a): Settings, RoleInfo, ChangeStreamSupport, ReplicaSetStatus.
+#   - dev/mongo/README.md: the capture user piperoom_cdc (readAnyDatabase, read on local and config)
+#     and the URI on the compose network (authSource=admin, replicaSet=rs0).
+#   - internal/setup/plan/ladder.go: the rungs and their notes.
+#   - internal/tools/debeziumtools/metrics.go, internal/tools/logtools/logtools.go,
+#     internal/tools/kafkatools: the summary formats.
+#   - https://debezium.io/documentation/reference/3.2/connectors/mongodb.html: mongodb.connection.string,
+#     collection.include.list, capture.mode, topic names <topic.prefix>.<db>.<collection>.
+
+name: setup/compose-mongodb-clean
+description: |
+  The person ran piperoom-setup on the Compose target with their MongoDB 7.0 container as the
+  source (replica set rs0, one member; collection inventory.orders, 3 documents). The run rendered
+  Kafka, Connect and the Schema Registry, created the canary collection inventory.piperoom_canary
+  and registered mongo-orders-connector with the capture user piperoom_cdc (its password a
+  ${secret:} reference in mongodb.connection.string). Every MongoDB prerequisite check passed
+  (change streams supported on the PRIMARY of rs0; piperoom_cdc reads local.oplog.rs). The
+  verification ladder is green on rungs 1 to 7: the connector and task 0 RUNNING, the canary topic,
+  the snapshot complete, the canary event with the nonce as key on mongo.inventory.piperoom_canary,
+  its subjects in the registry; no sink was set up. Rung 8 waits for the person's own insert into
+  inventory.orders.
+
+  Expected label: healthy. Nothing is wrong and nothing needs fixing; the person's change completes
+  rung 8.
+
+setup:
+  source_kind: mongodb
+  target: compose
+
+pipeline:
+  id: orders-mongo
+  title: Orders CDC (MongoDB)
+  topic_prefix: mongo
+  source_tables: [inventory.orders]
+  connectors: [mongo-orders-connector]
+
+resources:
+  connectors: [mongo-orders-connector]
+  subjects: [mongo.inventory.orders-key, mongo.inventory.orders-value, mongo.inventory.piperoom_canary-key, mongo.inventory.piperoom_canary-value]
+
+alert:
+  title: 'orders-mongo setup: verification rungs 1-7 green (canary event on mongo.inventory.piperoom_canary); rung 8 awaiting the person''s change to inventory.orders'
+  pipeline_map: |
+    pipeline orders-mongo
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:inventory.orders [postgres, owner priya] UNKNOWN
+    2 connect:mongo-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+      from: pg:inventory.orders
+    3 topic:mongo.inventory.orders [kafka, owner arjun] OK newest_record=20m ago
+      from: connect:mongo-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mongo}
+    summary: |
+      pipeline orders-mongo
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:inventory.orders [postgres, owner priya] UNKNOWN
+      2 connect:mongo-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+        from: pg:inventory.orders
+      3 topic:mongo.inventory.orders [kafka, owner arjun] OK newest_record=20m ago
+        from: connect:mongo-orders-connector
+    data:
+      edges:
+        - from: pg:inventory.orders
+          to: connect:mongo-orders-connector
+        - from: connect:mongo-orders-connector
+          to: topic:mongo.inventory.orders
+      nodes:
+        - health: unknown
+          id: pg:inventory.orders
+          kind: source_table
+          layer: postgres
+          name: inventory.orders
+          owner: priya
+        - facts:
+            tasks_running: "1"
+          health: ok
+          id: connect:mongo-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: mongo-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 20m ago
+          health: ok
+          id: topic:mongo.inventory.orders
+          kind: topic
+          layer: kafka
+          name: mongo.inventory.orders
+          owner: arjun
+      pipeline_id: orders-mongo
+  - tool: connect_status
+    input: {connector: mongo-orders-connector}
+    summary: |-
+      mongo-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: mongo-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      type: source
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: mongo-orders-connector}
+    summary: |-
+      capture.mode: change_streams_update_full
+      collection.include.list: inventory.orders,inventory.piperoom_canary
+      connector.class: io.debezium.connector.mongodb.MongoDbConnector
+      mongodb.connection.string: ***
+      topic.prefix: mongo
+    data:
+      capture.mode: change_streams_update_full
+      collection.include.list: inventory.orders,inventory.piperoom_canary
+      connector.class: io.debezium.connector.mongodb.MongoDbConnector
+      mongodb.connection.string: '***'
+      topic.prefix: mongo
+  - tool: debezium_metrics
+    input: {connector: mongo-orders-connector}
+    summary: |-
+      mongo-orders-connector: streaming connected=true, 0.0 s behind source, last event 51 s ago, queue 0/8192, 1 events seen; snapshot running=false, completed=true, rows scanned of table inventory.orders 3, inventory.piperoom_canary 0, 3 events seen
+    data:
+      connector: mongo-orders-connector
+      metrics_found: 12
+      rows_scanned_by_table:
+        inventory.orders: 3
+        inventory.piperoom_canary: 0
+      snapshot:
+        SnapshotCompleted: 1
+        SnapshotRunning: 0
+        TotalNumberOfEventsSeen: 3
+      streaming:
+        Connected: 1
+        MilliSecondsBehindSource: 0
+        MilliSecondsSinceLastEvent: 51000
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+        TotalNumberOfEventsSeen: 1
+      topic_prefix: mongo
+  - tool: connect_worker_logs
+    input: {connector: mongo-orders-connector}
+    summary: |-
+      Worker log lines naming mongo-orders-connector at WARN or above, 2026-10-27T08:40:00Z to 2026-10-27T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+    data:
+      bytes: 0
+      connector: mongo-orders-connector
+      lines: []
+      min_level: WARN
+      since: "2026-10-27T08:40:00Z"
+      summary_lines: 0
+      until: "2026-10-27T09:40:00Z"
+  - tool: kafka_topic_offsets
+    input: {topic: mongo.inventory.orders}
+    summary: |-
+      partition 0: 0–3 (3 records), newest 20 min ago
+    data:
+      partitions:
+        - end: 3
+          last_timestamp: "2026-10-27T09:20:05Z"
+          partition: 0
+          start: 0
+      topic: mongo.inventory.orders
+      total_records: 3
+  - tool: kafka_topic_offsets
+    input: {topic: mongo.inventory.piperoom_canary}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 51 s ago
+    data:
+      partitions:
+        - end: 1
+          last_timestamp: "2026-10-27T09:39:09Z"
+          partition: 0
+          start: 0
+      topic: mongo.inventory.piperoom_canary
+      total_records: 1
+  - tool: kafka_find_by_key
+    input: {topic: mongo.inventory.piperoom_canary}
+    summary: |-
+      found 1 record(s) with key "5d0e7a2c94b1f38e6a0c2d7b19e4f5a3"
+        partition 0, offset 0, 2026-10-27T09:39:09Z
+    data:
+      found: true
+      key: 5d0e7a2c94b1f38e6a0c2d7b19e4f5a3
+      records:
+        - key: 5d0e7a2c94b1f38e6a0c2d7b19e4f5a3
+          offset: 0
+          partition: 0
+          timestamp: "2026-10-27T09:39:09.233Z"
+      topic: mongo.inventory.piperoom_canary
+  - tool: schema_registry_subjects
+    summary: |-
+      mongo.inventory.orders-key
+      mongo.inventory.orders-value
+      mongo.inventory.piperoom_canary-key
+      mongo.inventory.piperoom_canary-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mongo (0 past rooms searched).
+  # The room's source tools have no MongoDB reader on main: the real tools' answer.
+  - tool: source_settings
+    error: 'dbtools: source_settings: the source client cannot read database settings'
+  - tool: source_role_grants
+    error: 'dbtools: source_role_grants: the source client cannot read database settings'
+  - tool: source_table_replication
+    error: 'dbtools: source_table_replication: the source client cannot read database settings'
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-mongo"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+# No input: the person's question (is anything wrong before the hand-over?) is the room's
+# opening; a steer would arrive only after the run's last message in the scripted harness.
+
+expect:
+  outcome: healthy
+  expected_facts:
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_canary_found
+      tool: kafka_find_by_key
+      match: [found 1 record]
+    - id: f_streaming_connected
+      tool: debezium_metrics
+      match: [streaming connected true, snapshot running false, completed true]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 10
