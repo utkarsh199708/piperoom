@@ -834,3 +834,38 @@ func TestRequestSetupVerification(t *testing.T) {
 		t.Fatalf("a non-driver = %v, want 403 not_driver", err)
 	}
 }
+
+func TestSetupLadderCanaryTableSkipsBadIdentifiers(t *testing.T) {
+	cases := []struct {
+		name   string
+		tables []string
+		want   string
+	}{
+		{"schema of the first table", []string{"sales.orders"}, "sales.piperoom_canary"},
+		{"dotted schema", []string{"db.sales.orders"}, "db.sales.piperoom_canary"},
+		{"no tables", nil, "public.piperoom_canary"},
+		{"no schema part", []string{"orders"}, "public.piperoom_canary"},
+		{"injected schema is skipped", []string{"x; DROP TABLE orders; --.t", "inventory.items"}, "inventory.piperoom_canary"},
+		{"quoted schema is skipped", []string{`"Sales".orders`}, "public.piperoom_canary"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := setupLadderCanaryTable(owners.Pipeline{SourceTables: tc.tables}); got != tc.want {
+				t.Fatalf("canary table = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A rung decided by its second read carries that read's note, not the first
+// read's failure.
+func TestSetupLadderGreenRungDropsAnEarlierReadsNote(t *testing.T) {
+	r := newLadderRig(t, tierOpts{})
+	l := &setupLadder{s: r.svc, connector: "orders-cdc", timings: r.svc.ladderTimings()}
+	rung := plan.Rung{Name: plan.RungConnector, Reads: []string{"metrics_nowhere", "connect_status"}}
+	pred := func(json.RawMessage) (bool, string) { return true, "" }
+	out, _ := l.onePass(context.Background(), events.SetupRung{Name: rung.Name, Note: "an earlier poll's note"}, rung, pred, false)
+	if !out.OK || out.Note != "" {
+		t.Fatalf("rung = %+v, want green with no note", out)
+	}
+}

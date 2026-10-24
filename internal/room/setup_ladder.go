@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -301,9 +302,13 @@ func (l *setupLadder) run(ctx context.Context) {
 
 	decided := make([]events.SetupRung, 0, len(l.rungs))
 	var latency *int64
-	for _, rung := range l.rungs {
+	var personRung *plan.Rung
+	for i, rung := range l.rungs {
 		if rung.Name == plan.RungPersonChange {
-			break
+			// Found by name, not position: the ladder's order is plan's to
+			// keep, and a missing rung 8 must not become an index panic.
+			personRung = &l.rungs[i]
+			continue
 		}
 		out := l.evaluate(ctx, rung)
 		if rung.Name == plan.RungCanaryEvent {
@@ -324,11 +329,11 @@ func (l *setupLadder) run(ctx context.Context) {
 	}
 	// Rungs 1 to 7 first: pipeline_register needs exactly these, and the
 	// person's change (rung 8) must not hold them up (design §3.4, §3.9).
-	if !l.emitVerified(ctx, decided, latency) {
+	if !l.emitVerified(ctx, decided, latency) || personRung == nil {
 		return
 	}
 
-	person := l.evaluate(ctx, l.rungs[len(l.rungs)-1])
+	person := l.evaluate(ctx, *personRung)
 	if !person.OK {
 		// A timeout is a note, not a failed step: nothing ran and nothing is
 		// wrong with the pipeline's first seven rungs.
@@ -507,6 +512,10 @@ func (l *setupLadder) evaluate(ctx context.Context, rung plan.Rung) events.Setup
 // issued is returned so the caller can.
 func (l *setupLadder) onePass(ctx context.Context, out events.SetupRung, rung plan.Rung, predicate plan.Predicate, record bool) (events.SetupRung, *ladderRead) {
 	var last *ladderRead
+	// Each pass starts with no note: a waiting rung's earlier polls, or a
+	// read before the deciding one, must not leave their failure on a rung
+	// this pass decides.
+	out.Note = ""
 	for _, tool := range rung.Reads {
 		input, err := l.readInput(rung.Name, tool)
 		if err != nil {
@@ -527,12 +536,12 @@ func (l *setupLadder) onePass(ctx context.Context, out events.SetupRung, rung pl
 			continue
 		}
 		ok, pnote := predicate(r.Data)
+		if ok {
+			out.OK, out.Note = true, pnote
+			return out, last
+		}
 		if pnote != "" {
 			out.Note = pnote
-		}
-		if ok {
-			out.OK = true
-			return out, last
 		}
 	}
 	return out, last
@@ -745,13 +754,30 @@ func setupLadderHash(nonce string) string {
 // setupLadderCanaryTable is the canary table in the schema of the pipeline's
 // first source table: the setup creates it there, and the connector publishes
 // it like any table of the schema.
+// A source table name comes from the setup request, and the schema part ends
+// up in the topic name and in exampleSQL's statement, which the person is
+// asked to run: a part that is not a plain identifier (rule 6) is skipped.
 func setupLadderCanaryTable(prov owners.Pipeline) string {
 	for _, t := range prov.SourceTables {
-		if i := strings.LastIndex(t, "."); i > 0 && i < len(t)-1 {
+		if i := strings.LastIndex(t, "."); i > 0 && i < len(t)-1 && setupLadderIdents(t[:i]) {
 			return t[:i] + "." + setupLadderCanaryName
 		}
 	}
 	return "public." + setupLadderCanaryName
+}
+
+// setupLadderIdentRe is AGENTS.md rule 6's identifier shape.
+var setupLadderIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// setupLadderIdents reports whether every dotted part of name is a plain
+// identifier.
+func setupLadderIdents(name string) bool {
+	for _, part := range strings.Split(name, ".") {
+		if !setupLadderIdentRe.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }
 
 // setupLadderTopic is the topic a table of the pipeline reaches
