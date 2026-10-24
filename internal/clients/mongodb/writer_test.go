@@ -272,12 +272,17 @@ func TestCreateReadRoleExistingUserIsError(t *testing.T) {
 		if !errors.Is(err, errUserExists) {
 			t.Fatalf("err = %v, want errUserExists", err)
 		}
-		if strings.Contains(err.Error(), store.value) {
+		if strings.Contains(err.Error(), sentPassword(t, f)) {
 			t.Fatal("error carries the password")
 		}
+		// The other creator's user is never dropped, and the losing call
+		// never overwrites the stored secret.
 		want := "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropRole"
 		if got := strings.Join(f.names(), ","); got != want {
 			t.Fatalf("commands = %s, want %s (the just-created role dropped, never updateUser)", got, want)
+		}
+		if store.calls != 0 {
+			t.Fatal("a losing createUser stored its password")
 		}
 	})
 
@@ -294,8 +299,17 @@ func TestCreateReadRoleExistingUserIsError(t *testing.T) {
 		if err == nil {
 			t.Fatal("want an error")
 		}
-		if store.value == "" || strings.Contains(err.Error(), store.value) {
+		if strings.Contains(err.Error(), sentPassword(t, echo.writeRunner)) {
 			t.Fatalf("error carries the password: %q", err)
+		}
+		// The user is dropped too (the create may have applied), and nothing
+		// is stored.
+		want := "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole"
+		if got := strings.Join(echo.names(), ","); got != want {
+			t.Fatalf("commands = %s, want %s", got, want)
+		}
+		if store.calls != 0 {
+			t.Fatal("a failed createUser stored its password")
 		}
 	})
 
@@ -309,21 +323,39 @@ func TestCreateReadRoleExistingUserIsError(t *testing.T) {
 		}
 	})
 
-	t.Run("a store that refuses leaves nothing created", func(t *testing.T) {
+	t.Run("a store that refuses gets the user and role dropped", func(t *testing.T) {
 		f := &writeRunner{replies: map[string]bson.M{
 			"admin.usersInfo": {"users": bson.A{}, "ok": 1},
 			"admin.rolesInfo": {"roles": bson.A{}, "ok": 1},
 		}}
-		_, err := testSetupWriter(f, &memStore{err: errors.New("disk full")}).CreateReadRole(unscoped(), "dbz", []string{"orders.customers"})
-		if err == nil {
-			t.Fatal("want the store error")
+		storeErr := errors.New("disk full")
+		_, err := testSetupWriter(f, &memStore{err: storeErr}).CreateReadRole(unscoped(), "dbz", []string{"orders.customers"})
+		if !errors.Is(err, storeErr) {
+			t.Fatalf("err = %v, want the store error", err)
 		}
-		for _, n := range f.names() {
-			if strings.HasSuffix(n, ".createRole") || strings.HasSuffix(n, ".createUser") {
-				t.Fatalf("sent %s after the store refused", n)
-			}
+		if strings.Contains(err.Error(), sentPassword(t, f)) {
+			t.Fatalf("error carries the password: %q", err)
+		}
+		want := "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole"
+		if got := strings.Join(f.names(), ","); got != want {
+			t.Fatalf("commands = %s, want %s", got, want)
 		}
 	})
+}
+
+// sentPassword returns the pwd of the createUser command f recorded, failing
+// the test when none was sent.
+func sentPassword(t *testing.T, f *writeRunner) string {
+	t.Helper()
+	for _, s := range f.sent {
+		if s.cmd[0].Key == "createUser" {
+			if pwd, _ := lookup(s.cmd, "pwd").(string); pwd != "" {
+				return pwd
+			}
+		}
+	}
+	t.Fatal("no createUser with a pwd was sent")
+	return ""
 }
 
 // echoRunner fails createUser with an error whose text is the whole command
@@ -336,6 +368,183 @@ func (e *echoRunner) runCommand(ctx context.Context, db string, cmd bson.D) (bso
 		return nil, fmt.Errorf("command failed: %v", cmd)
 	}
 	return r, err
+}
+
+func TestCreateReadRoleRollback(t *testing.T) {
+	empty := map[string]bson.M{
+		"admin.usersInfo": {"users": bson.A{}, "ok": 1},
+		"admin.rolesInfo": {"roles": bson.A{}, "ok": 1},
+	}
+	unauthorized := mongo.CommandError{Code: 13, Name: "Unauthorized", Message: "not authorized on admin"}
+	cases := []struct {
+		name      string
+		fail      map[string]error
+		wantCmds  string
+		wantIs    error // the error must wrap this, when set
+		wantCode  int   // or carry this server error code, when set
+		wantCount int   // errors joined in the message ("mongodb:" prefixes)
+	}{
+		{
+			name:     "createRole refused drops the role, in case it applied",
+			fail:     map[string]error{"admin.createRole": unauthorized},
+			wantCmds: "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.dropRole",
+			wantCode: 13,
+		},
+		{
+			name:     "createRole race leaves the other creator's role",
+			fail:     map[string]error{"admin.createRole": mongo.CommandError{Code: codeRoleExists, Name: "Location51002"}},
+			wantCmds: "admin.usersInfo,admin.rolesInfo,admin.createRole",
+			wantIs:   errUserExists,
+		},
+		{
+			name:     "createRole with an unknown outcome drops the role",
+			fail:     map[string]error{"admin.createRole": context.DeadlineExceeded},
+			wantCmds: "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.dropRole",
+			wantIs:   context.DeadlineExceeded,
+		},
+		{
+			name:     "createUser refused drops the user and the role, in case it applied",
+			fail:     map[string]error{"admin.createUser": unauthorized},
+			wantCmds: "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole",
+			wantCode: 13,
+		},
+		{
+			name:     "createUser with an unknown outcome drops the user and the role",
+			fail:     map[string]error{"admin.createUser": mongo.ErrClientDisconnected},
+			wantCmds: "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole",
+			wantIs:   mongo.ErrClientDisconnected,
+		},
+		{
+			name: "a failed drop is joined with the create error",
+			fail: map[string]error{
+				"admin.createUser": unauthorized,
+				"admin.dropRole":   errors.New("connection reset"),
+			},
+			wantCmds:  "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole",
+			wantCode:  13,
+			wantCount: 2,
+		},
+		{
+			name: "already-gone user and role are not drop errors",
+			fail: map[string]error{
+				"admin.createUser": context.DeadlineExceeded,
+				"admin.dropUser":   mongo.CommandError{Code: codeUserNotFound, Name: "UserNotFound"},
+				"admin.dropRole":   mongo.CommandError{Code: codeRoleNotFound, Name: "RoleNotFound"},
+			},
+			wantCmds:  "admin.usersInfo,admin.rolesInfo,admin.createRole,admin.createUser,admin.dropUser,admin.dropRole",
+			wantIs:    context.DeadlineExceeded,
+			wantCount: 1,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &writeRunner{replies: empty, fail: c.fail}
+			store := &memStore{}
+			_, err := testSetupWriter(f, store).CreateReadRole(unscoped(), "dbz", []string{"orders.customers"})
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if c.wantIs != nil && !errors.Is(err, c.wantIs) {
+				t.Fatalf("err = %v, want it to wrap %v", err, c.wantIs)
+			}
+			// mongo.CommandError holds a slice, so errors.Is cannot match it by
+			// value; the code is what callers branch on.
+			if c.wantCode != 0 && !hasCode(err, c.wantCode) {
+				t.Fatalf("err = %v, want server code %d", err, c.wantCode)
+			}
+			if got := strings.Join(f.names(), ","); got != c.wantCmds {
+				t.Fatalf("commands = %s, want %s", got, c.wantCmds)
+			}
+			if store.calls != 0 {
+				t.Fatal("a failed create stored a password")
+			}
+			for _, s := range f.sent {
+				if s.cmd[0].Key == "createUser" {
+					if pwd := sentPassword(t, f); strings.Contains(err.Error(), pwd) {
+						t.Fatalf("error carries the password: %q", err)
+					}
+				}
+			}
+			if c.wantCount > 0 {
+				if n := strings.Count(err.Error(), "mongodb:"); n != c.wantCount {
+					t.Fatalf("error %q joins %d errors, want %d", err, n, c.wantCount)
+				}
+			}
+			for _, s := range f.sent {
+				if s.cmd[0].Key == "dropUser" || s.cmd[0].Key == "dropRole" {
+					if s.db != "admin" {
+						t.Fatalf("%s sent to %s, want admin", s.cmd[0].Key, s.db)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("the drop runs under a fresh deadline after the call's ran out", func(t *testing.T) {
+		f := &writeRunner{replies: empty, fail: map[string]error{"admin.createUser": context.DeadlineExceeded}}
+		var dropCtxErr error
+		run := &ctxRunner{writeRunner: f, onDrop: func(ctx context.Context) { dropCtxErr = ctx.Err() }}
+		w := &SetupWriter{run: run, timeout: defaultTimeout, secrets: &memStore{}}
+		ctx, cancel := context.WithCancel(unscoped())
+		run.beforeCreateUser = cancel // the caller gives up mid-call
+		if _, err := w.CreateReadRole(ctx, "dbz", []string{"orders.customers"}); err == nil {
+			t.Fatal("want an error")
+		}
+		if dropCtxErr != nil {
+			t.Fatalf("drop ran under an ended context: %v", dropCtxErr)
+		}
+	})
+}
+
+// ctxRunner wraps writeRunner to cancel the call before createUser and to
+// observe the context the drops run under.
+type ctxRunner struct {
+	*writeRunner
+	beforeCreateUser func()
+	onDrop           func(context.Context)
+}
+
+func (c *ctxRunner) runCommand(ctx context.Context, db string, cmd bson.D) (bson.M, error) {
+	switch cmd[0].Key {
+	case "createUser":
+		if c.beforeCreateUser != nil {
+			c.beforeCreateUser()
+		}
+	case "dropUser", "dropRole":
+		if c.onDrop != nil {
+			c.onDrop(ctx)
+		}
+	}
+	return c.writeRunner.runCommand(ctx, db, cmd)
+}
+
+func TestCreateReadRoleReplyShapeFailsClosed(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		replies map[string]bson.M
+	}{
+		{"usersInfo without users", map[string]bson.M{"admin.usersInfo": {"ok": 1}}},
+		{"rolesInfo without roles", map[string]bson.M{
+			"admin.usersInfo": {"users": bson.A{}, "ok": 1},
+			"admin.rolesInfo": {"ok": 1},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := &writeRunner{replies: c.replies}
+			store := &memStore{}
+			if _, err := testSetupWriter(f, store).CreateReadRole(unscoped(), "dbz", []string{"orders.customers"}); err == nil {
+				t.Fatal("want an error for a reply without the array")
+			}
+			for _, n := range f.names() {
+				if strings.HasSuffix(n, ".createRole") || strings.HasSuffix(n, ".createUser") {
+					t.Fatalf("sent %s after an unreadable existence check", n)
+				}
+			}
+			if store.calls != 0 {
+				t.Fatal("stored a password after an unreadable existence check")
+			}
+		})
+	}
 }
 
 func TestCreateCanaryAndInsert(t *testing.T) {
@@ -441,7 +650,7 @@ func TestNotSupportedMethods(t *testing.T) {
 }
 
 func TestSetupWriterRefusesBadNames(t *testing.T) {
-	bad := []string{"a.b$c", "$where", "1abc", "", " ", "a\x00b", "orders.$cmd", "orders.a b", "orders", "admin.canary", "local.oplog", "config.x", "orders.a.b", strings.Repeat("a", 65) + ".c"}
+	bad := []string{"a.b$c", "$where", "1abc", "", " ", "a\x00b", "orders.$cmd", "orders.a b", "orders", "admin.canary", "local.oplog", "config.x", "Admin.canary", "LOCAL.oplog", "Config.x", "orders.a.b", strings.Repeat("a", 65) + ".c"}
 	type call struct {
 		name string
 		do   func(w *SetupWriter, n string) error

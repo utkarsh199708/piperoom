@@ -80,6 +80,8 @@ const (
 	codeNamespaceExists = 48    // create: the collection already exists
 	codeRoleExists      = 51002 // createRole: the role already exists
 	codeUserExists      = 51003 // createUser: the user already exists
+	codeUserNotFound    = 11    // dropUser: no such user
+	codeRoleNotFound    = 31    // dropRole: no such role
 )
 
 // SecretStore stores one generated credential under a name. The writer
@@ -271,8 +273,9 @@ const (
 // ("db.collection") and find on local.oplog.rs, nothing more, and a user role
 // in admin that holds only that role. The password is generated here (24
 // random bytes, hex), stored in the secret store under
-// readPasswordSecretName before anything is created (a store that refuses
-// leaves nothing created), and travels only in the createUser command's pwd
+// readPasswordSecretName only after the user is created (a store that refuses
+// gets the user and role dropped again, and a failed create never touches the
+// stored secret), and travels only in the createUser command's pwd
 // field: it is in no return value, log line or error. The method returns only
 // the store name. An existing user, or an existing role of the custom role's
 // name, is an error; updateUser is never sent.
@@ -316,19 +319,25 @@ func (w *SetupWriter) CreateReadRole(ctx context.Context, role string, tables []
 	if err != nil {
 		return "", err
 	}
-	if err := w.secrets.Store(ctx, readPasswordSecretName, password); err != nil {
-		return "", fmt.Errorf("mongodb: store read user password: %w", redactSecret(err, password))
-	}
 
+	// The password is stored only once the user exists (the Postgres
+	// writer's order): storing first would overwrite source_read_password on
+	// every attempt that fails later, and on a lost race keep the loser's
+	// password beside the winner's user.
 	if _, err := w.run.runCommand(ctx, "admin", bson.D{
 		{Key: "createRole", Value: roleName},
 		{Key: "privileges", Value: readPrivileges(list)},
 		{Key: "roles", Value: bson.A{}},
 	}); err != nil {
 		if hasCode(err, codeRoleExists) {
+			// Another creator holds the name; the role is not ours to drop.
 			return "", fmt.Errorf("%w: role %q in admin is already taken", errUserExists, roleName)
 		}
-		return "", fmt.Errorf("mongodb: createRole %q: %w", roleName, err)
+		// Any other failure may still have applied (a deadline, a network
+		// error, a write concern error), so the role is dropped; one that
+		// never existed is not a drop error.
+		roleErr := fmt.Errorf("mongodb: createRole %q: %w", roleName, err)
+		return "", errors.Join(roleErr, w.dropBestEffort(ctx, "", roleName))
 	}
 
 	if _, err := w.run.runCommand(ctx, "admin", bson.D{
@@ -337,22 +346,50 @@ func (w *SetupWriter) CreateReadRole(ctx context.Context, role string, tables []
 		{Key: "roles", Value: bson.A{bson.D{{Key: "role", Value: roleName}, {Key: "db", Value: "admin"}}}},
 	}); err != nil {
 		var userErr error
+		dropUser := ""
 		if hasCode(err, codeUserExists) {
+			// Another creator's user: never ours to drop.
 			userErr = fmt.Errorf("%w: user %q in admin; it is never updated or re-passworded", errUserExists, role)
 		} else {
+			// Any other failure may still have created the user (a deadline,
+			// a network error, a write concern error), with a password nobody
+			// stored; a retry would then stop at "user exists". usersInfo saw
+			// no such user, so it can only be this call's.
 			userErr = fmt.Errorf("mongodb: createUser %q: %w", role, redactSecret(err, password))
+			dropUser = role
 		}
-		// The role was created by this call and is held by nobody; drop it so
-		// a retry does not stop at "role already taken". Best effort, under a
-		// fresh deadline in case the createUser failure was ctx's own.
-		dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeout)
-		defer dcancel()
-		if _, derr := w.run.runCommand(dctx, "admin", bson.D{{Key: "dropRole", Value: roleName}}); derr != nil {
-			return "", errors.Join(userErr, fmt.Errorf("mongodb: drop role %q after createUser failed: %w", roleName, derr))
-		}
-		return "", userErr
+		// The role was created by this call and is held by nobody (or by a
+		// user this call is dropping); drop it so a retry does not stop at
+		// "role already taken".
+		return "", errors.Join(userErr, w.dropBestEffort(ctx, dropUser, roleName))
+	}
+
+	if err := w.secrets.Store(ctx, readPasswordSecretName, password); err != nil {
+		// The user exists with a password nobody can read: drop it and its
+		// role so a retry starts clean.
+		storeErr := fmt.Errorf("mongodb: store read user password: %w", redactSecret(err, password))
+		return "", errors.Join(storeErr, w.dropBestEffort(ctx, role, roleName))
 	}
 	return readPasswordSecretName, nil
+}
+
+// dropBestEffort drops user (when not "") and then role after a failed
+// CreateReadRole, under a fresh deadline because the call's own may be spent.
+// A user or role that is already gone is not an error. It returns the drop
+// errors, if any, for errors.Join.
+func (w *SetupWriter) dropBestEffort(ctx context.Context, user, role string) error {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.timeout)
+	defer cancel()
+	var errs []error
+	if user != "" {
+		if _, err := w.run.runCommand(dctx, "admin", bson.D{{Key: "dropUser", Value: user}}); err != nil && !hasCode(err, codeUserNotFound) {
+			errs = append(errs, fmt.Errorf("mongodb: drop user %q after the failed create: %w", user, err))
+		}
+	}
+	if _, err := w.run.runCommand(dctx, "admin", bson.D{{Key: "dropRole", Value: role}}); err != nil && !hasCode(err, codeRoleNotFound) {
+		errs = append(errs, fmt.Errorf("mongodb: drop role %q after the failed create: %w", role, err))
+	}
+	return errors.Join(errs...)
 }
 
 // readPrivileges is the custom role's privilege list: find and changeStream on
@@ -381,7 +418,12 @@ func (w *SetupWriter) userExists(ctx context.Context, user string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("mongodb: usersInfo %q: %w", user, err)
 	}
-	users, _ := asSlice(reply["users"])
+	// A reply without the array is not "absent": it fails closed, so a
+	// surprise reply shape never lets a create run over an existing user.
+	users, ok := asSlice(reply["users"])
+	if !ok {
+		return false, fmt.Errorf("mongodb: usersInfo %q: reply has no users array", user)
+	}
 	return len(users) > 0, nil
 }
 
@@ -393,7 +435,10 @@ func (w *SetupWriter) roleExists(ctx context.Context, role string) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("mongodb: rolesInfo %q: %w", role, err)
 	}
-	roles, _ := asSlice(reply["roles"])
+	roles, ok := asSlice(reply["roles"])
+	if !ok {
+		return false, fmt.Errorf("mongodb: rolesInfo %q: reply has no roles array", role)
+	}
 	return len(roles) > 0, nil
 }
 
@@ -470,7 +515,9 @@ func splitNamespace(ns string) (db, coll string, err error) {
 	if err := validateName("collection", coll); err != nil {
 		return "", "", err
 	}
-	if reservedDBs[db] {
+	// Case-folded: the server refuses "Admin" beside "admin" anyway, but the
+	// refusal should not depend on that.
+	if reservedDBs[strings.ToLower(db)] {
 		return "", "", fmt.Errorf("%w: database %q is a system database", errBadName, db)
 	}
 	return db, coll, nil
