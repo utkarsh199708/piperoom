@@ -9,8 +9,9 @@
 // The registry value implements the runner's Catalogue interface
 // (internal/setup/runner/catalogue.go) structurally, so the runner can use it
 // without importing this package: Execute, Floor, Target, GuardForbidden and
-// StepAction. Config.NetProbe is the seam Q6a's net_probe plugs into from the
-// runner's position (net_probe.go).
+// StepAction, plus the optional FloorFor (a floor raised by the params, for an
+// op that implements ParamTierer) and CheckTarget. Config.NetProbe is the
+// seam Q6a's net_probe plugs into from the runner's position (net_probe.go).
 //
 // Invariants, each a test:
 //   - every file path is checked lexically on every OS and then walked with
@@ -112,6 +113,17 @@ type ParamTargeter interface {
 	ParamTarget(params json.RawMessage, env Env) string
 }
 
+// ParamTierer is implemented by an op whose tier for one step depends on its
+// params (host properties_write: T1 for a worker file at the project root, T2
+// for one outside the project directory). TierFor must do no I/O and must not
+// consult the runner's OS, so the server can compute the same tier when it
+// builds the step. It can only raise the op's floor (Registry.FloorFor takes
+// the higher of the two); params it cannot classify are an error, never a
+// silent floor.
+type ParamTierer interface {
+	TierFor(params json.RawMessage) (string, error)
+}
+
 // Result is what an Op.Execute returns before it becomes a protocol.OpResult.
 type Result struct {
 	Summary string
@@ -148,10 +160,16 @@ type Config struct {
 	// NetProbe is Q6a's probe from the runner's position; nil uses the
 	// built-in DNS/TCP/TLS probe in net_probe.go.
 	NetProbe NetProbe
+	// Source is the runner's read-only source database reader (a
+	// *postgres.DB on its read-only pool). nil means this runner has no
+	// source connection: the source read ops stay in the catalogue and fail
+	// with ErrNoSource (error_code not_supported).
+	Source SourceReader
 }
 
 // Env is what an op sees: the project root, the targets, and the injected
-// clocks, resolver and probe. It holds no credential.
+// clocks, resolver and probe. It holds no credential: Source is a reader
+// over a connection the runner opened, never its DSN.
 type Env struct {
 	ProjectDir string
 	Targets    []events.SetupTarget
@@ -167,6 +185,7 @@ type Env struct {
 	HTTP         *http.Client
 	Dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	Probe        NetProbe
+	Source       SourceReader
 }
 
 // Registry holds the catalogue in registration order and implements the
@@ -212,12 +231,13 @@ func New(cfg Config) (*Registry, error) {
 	}
 	r := &Registry{
 		ops:    make(map[string]Op),
-		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Materialised: append([]string(nil), cfg.Materialised...), Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe},
+		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Materialised: append([]string(nil), cfg.Materialised...), Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe, Source: cfg.Source},
 		mounts: append([]string(nil), cfg.MountDirs...),
 	}
 	for _, op := range []Op{
 		envDetectOp{}, fileReadOp{}, dirListOp{}, jarListOp{}, javaVersionOp{},
 		httpGetOp{}, netProbeOp{}, fileWriteOp{}, fileDeleteOp{},
+		sourcePublicationTablesOp{},
 	} {
 		if err := r.Register(op); err != nil {
 			return nil, err
@@ -297,6 +317,52 @@ func (r *Registry) Floor(op string) (string, bool) {
 		return "", false
 	}
 	return o.Tier(), true
+}
+
+// FloorFor returns the tier floor of one request: the higher of the op's
+// fixed floor and, for a ParamTierer, the tier its params need. ok is false
+// for an op not in the catalogue. err is non-nil (wrapping ErrParams) when the
+// op's TierFor cannot classify the params or answers something that is not a
+// tier; the runner refuses such a request rather than fall back to the fixed
+// floor, so a step whose tier cannot be computed never runs at the lower one.
+// An op without TierFor answers exactly Floor.
+func (r *Registry) FloorFor(op string, params json.RawMessage) (tier string, ok bool, err error) {
+	o, ok := r.Get(op)
+	if !ok {
+		return "", false, nil
+	}
+	floor := o.Tier()
+	pt, isTierer := o.(ParamTierer)
+	if !isTierer {
+		return floor, true, nil
+	}
+	need, err := pt.TierFor(params)
+	if err != nil {
+		return floor, true, fmt.Errorf("%w: %s: the step's tier: %w", ErrParams, clipName(op), err)
+	}
+	rank, valid := tierRank(need)
+	if !valid {
+		return floor, true, fmt.Errorf("%w: %s: the step's tier %q is not T0..T3", ErrParams, clipName(op), clipName(need))
+	}
+	if base, _ := tierRank(floor); rank > base {
+		return need, true, nil
+	}
+	return floor, true, nil
+}
+
+// tierRank orders the four tiers and reports false for any other string.
+func tierRank(t string) (int, bool) {
+	switch t {
+	case protocol.TierT0:
+		return 0, true
+	case protocol.TierT1:
+		return 1, true
+	case protocol.TierT2:
+		return 2, true
+	case protocol.TierT3:
+		return 3, true
+	}
+	return 0, false
 }
 
 // LayerOf returns the owners layer of the op ("environment", ...), and false

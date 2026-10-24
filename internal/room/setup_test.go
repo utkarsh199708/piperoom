@@ -773,9 +773,8 @@ func TestSetupSnapshotFromRunnerEvents(t *testing.T) {
 	// on PlanStepIndex, which the executor fills from the resolved route.
 	planStep0 := 0
 	mustEmit(events.ActionExecuted, events.ActionExecutedPayload{ProposalID: "p_1", StepIndex: 0, PlanStepIndex: &planStep0, OK: true, Output: "ok"})
-	mustEmit(events.SetupVerified, events.SetupVerifiedPayload{
-		PlanID: "pl_1", Rungs: []events.SetupRung{{Name: "connector_running", OK: true}},
-	})
+	// Only the ladder runner writes setup.verified (U1-8b), so the generic
+	// EmitSetup refuses it by design; the ladder's own tests cover the fold.
 	mustEmit(events.SetupBlocked, events.SetupBlockedPayload{Reason: events.SetupBlockedAttempts, Question: "may I retry?"})
 	mustEmit(events.PipelineRegistered, events.PipelineRegisteredPayload{
 		PipelineID: "orders-setup", WatchedBy: events.WatchedByServer, By: events.Actor{Kind: events.ActorHuman, ID: "alice"},
@@ -791,9 +790,6 @@ func TestSetupSnapshotFromRunnerEvents(t *testing.T) {
 	}
 	if s.PlanID != "pl_1" || s.Phase != "stack" || s.StepIndex != 1 {
 		t.Fatalf("plan = %q phase %q step %d; want pl_1, stack, 1", s.PlanID, s.Phase, s.StepIndex)
-	}
-	if len(s.Verified) != 1 || s.Verified[0].Name != "connector_running" {
-		t.Fatalf("verified = %+v", s.Verified)
 	}
 	if s.Blocked == nil || s.Blocked.Reason != "attempts" || s.Blocked.Question != "may I retry?" {
 		t.Fatalf("blocked = %+v", s.Blocked)

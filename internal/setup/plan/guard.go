@@ -19,9 +19,14 @@ var ErrGuard = errors.New("plan: the guard table forbids this step")
 // these ops under exactly these names; the names live here so the server's
 // guard, the rollback path and the runner agree on one spelling.
 const (
-	OpSourceDropTable        = "source_drop_table"
-	OpSourceTruncateTable    = "source_truncate_table"
-	OpSourceDropSlot         = "source_drop_slot"
+	OpSourceDropTable     = "source_drop_table"
+	OpSourceTruncateTable = "source_truncate_table"
+	OpSourceDropSlot      = "source_drop_slot"
+	// OpPGDropReplicationSlot is the registered name of the incident drop-slot
+	// action (pgactions.DropSlotName). A setup room can propose a registered
+	// action under its own name, so the guard needs a row for that spelling
+	// too: without it a production drop-slot step matched no row.
+	OpPGDropReplicationSlot  = "pg_drop_replication_slot"
 	OpSourceDropPublication  = "source_drop_publication"
 	OpSourceAlterSystem      = "source_alter_system"
 	OpConnectDeleteConnector = "connect_delete_connector"
@@ -107,6 +112,7 @@ var guardRows = []GuardRow{
 	{Op: OpSourceDropTable, Class: ClassProduction, Reason: ReasonDropTable},
 	{Op: OpSourceTruncateTable, Class: ClassProduction, Reason: ReasonTruncateTable},
 	{Op: OpSourceDropSlot, Class: ClassProduction, Reason: ReasonDropSlot},
+	{Op: OpPGDropReplicationSlot, Class: ClassProduction, Reason: ReasonDropSlot},
 	{Op: OpSourceDropPublication, Class: ClassProduction, Reason: ReasonDropPublication},
 	{Op: OpSourceAlterSystem, Class: ClassProduction, Reason: ReasonAlterSystem,
 		Allowed: func(f StepFacts) bool { return AlterSystemAllowed(f.Param) }},

@@ -882,7 +882,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 		}
 		if !found {
-			m := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews)+1)
+			m := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
 			for k, v := range snap.pendingPreviews {
 				m[k] = v
 			}

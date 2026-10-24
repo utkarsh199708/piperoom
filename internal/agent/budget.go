@@ -52,7 +52,9 @@ func ParseRoomTokenBudget(s string) (int64, error) {
 // it is not a failure of the model call itself.
 type BudgetError struct {
 	// Used and Limit are tokens; for a pipeline's daily cost budget they are
-	// millionths of a USD.
+	// millionths of a USD. For a setup bound (scope budgetSetupRun) they are
+	// the count and the bound that stopped the run, where the reason has a
+	// natural pair (failed attempts, executed steps).
 	Used  int64
 	Limit int64
 
@@ -63,6 +65,9 @@ type BudgetError struct {
 	scope budgetScope
 	// pipeline and day name the pipeline-day of a daily budget.
 	pipeline, day string
+	// setupReason is the events.SetupBlocked* reason of a setup bound stop
+	// (scope budgetSetupRun).
+	setupReason string
 }
 
 // budgetScope is the limit a BudgetError is about.
@@ -72,7 +77,8 @@ const (
 	budgetRoom budgetScope = iota
 	budgetPipelineTokens
 	budgetPipelineCost
-	budgetStore // the spend store failed while a limit was set
+	budgetStore    // the spend store failed while a limit was set
+	budgetSetupRun // a setup run's SetupBounds stopped the run (attempts, steps, wall clock)
 )
 
 // Settings named in the budget texts.
@@ -95,6 +101,12 @@ func (e *BudgetError) Error() string {
 			e.pipeline, e.day, usdText(e.Used), usdText(e.Limit), pipelineCostEnv)
 	case budgetStore:
 		return storeUnavailableText
+	case budgetSetupRun:
+		reason := e.setupReason
+		if reason == "" {
+			reason = "a setup bound"
+		}
+		return fmt.Sprintf("setup bound reached: %s", reason)
 	}
 	if e.runLimit {
 		return runBudgetText(e.Used, e.Limit)

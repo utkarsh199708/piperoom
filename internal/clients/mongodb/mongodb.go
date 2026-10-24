@@ -1,10 +1,12 @@
 // Package mongodb implements a read-only client for a MongoDB CDC source (the
-// Debezium MongoDB connector reads the oplog / change streams). It is
-// read-only by construction: every exported method is a read command
-// (isMaster, buildInfo, replSetGetStatus, connectionStatus); there is no write
-// method. The connecting role must therefore be granted only the read roles it
-// needs (read on the captured databases, and find/changeStream on
-// local.oplog.rs for the cursor mode).
+// Debezium MongoDB connector reads the oplog / change streams), and, as a
+// separate type on its own connection, the setup write half (SetupWriter,
+// clients.SetupSourceWriter, writer.go). Client is read-only by construction:
+// every exported method is a read command (isMaster, buildInfo,
+// replSetGetStatus, connectionStatus); there is no write method on it. The
+// connecting role must therefore be granted only the read roles it needs (read
+// on the captured databases, and find/changeStream on local.oplog.rs for the
+// cursor mode). SetupWriter is built only with write mode on, on a write URI.
 //
 // Driver: go.mongodb.org/mongo-driver/v2 v2.9.2, the official MongoDB Go
 // driver (see the PR's "New dependencies"). v2's mongo.Connect takes no ctx
@@ -74,23 +76,35 @@ func (d *driverClient) disconnect(ctx context.Context) error {
 // is a MongoDB connection string (mongodb:// or mongodb+srv://); it may carry
 // credentials, so any error leaving New is redacted.
 func New(ctx context.Context, uri string) (*Client, error) {
+	cli, err := dial(ctx, uri, defaultTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{run: &driverClient{cli: cli}}, nil
+}
+
+// dial connects to uri and pings the primary, each step bounded by timeout.
+// The read client (New) and the setup writer (NewSetupWriter) share it, so
+// both decode replies with the BSON options the bsonx.go helpers rely on.
+// Every error is redacted of the URI's password.
+func dial(ctx context.Context, uri string, timeout time.Duration) (*mongo.Client, error) {
 	opts := options.Client().ApplyURI(uri).
-		SetConnectTimeout(defaultTimeout).
-		SetServerSelectionTimeout(defaultTimeout).
+		SetConnectTimeout(timeout).
+		SetServerSelectionTimeout(timeout).
 		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true})
 	cli, err := mongo.Connect(opts)
 	if err != nil {
 		return nil, fmt.Errorf("mongodb: connect: %w", redactErr(err, uri))
 	}
-	pctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := cli.Ping(pctx, readpref.Primary()); err != nil {
-		dctx, dcancel := context.WithTimeout(ctx, defaultTimeout)
+		dctx, dcancel := context.WithTimeout(ctx, timeout)
 		_ = cli.Disconnect(dctx)
 		dcancel()
 		return nil, fmt.Errorf("mongodb: ping: %w", redactErr(err, uri))
 	}
-	return &Client{run: &driverClient{cli: cli}}, nil
+	return cli, nil
 }
 
 // Close disconnects the client. A second call is a no-op: the driver's

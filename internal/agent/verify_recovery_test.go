@@ -248,6 +248,10 @@ func TestRecoveryVerifiedOnSecondPoll(t *testing.T) {
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "412 rows") || !strings.Contains(msgs[0], "0 are missing now") {
 		t.Fatalf("messages = %q, want one citing 412 and 0", msgs)
 	}
+	// Rows are counted at the sink (KAN-527 keeps this wording for them).
+	if !strings.HasSuffix(msgs[0], "0 are missing now. The data is back.") || strings.Contains(v.Verdict, "not at the sink") {
+		t.Fatalf("message %q, verdict %q: a sink row count says the data is back", msgs[0], v.Verdict)
+	}
 	if rec, _ := r.proposals.get("p_1"); !rec.verified || !rec.recovered {
 		t.Fatalf("proposal record = %+v, want verified and recovered", rec)
 	}
@@ -514,9 +518,13 @@ func TestRecoveryOutcomeAggregates(t *testing.T) {
 		steps []*recoveryStep
 		want  recoveryVerdict
 	}{
-		{"one unit sums", []*recoveryStep{step(400, 0, "rows"), step(12, 0, "rows")}, recoveryVerdict{events.RecoveryRecovered, 412, 0, "rows"}},
-		{"one unit partial", []*recoveryStep{step(400, 0, "rows"), step(12, 12, "rows")}, recoveryVerdict{events.RecoveryPartial, 412, 12, "rows"}},
-		{"mixed units: worst step", []*recoveryStep{step(400, 0, "rows"), step(100, 50, "records")}, recoveryVerdict{events.RecoveryPartial, 100, 50, "records"}},
+		{"one unit sums", []*recoveryStep{step(400, 0, "rows"), step(12, 0, "rows")}, recoveryVerdict{events.RecoveryRecovered, 412, 0, "rows", true}},
+		{"one unit partial", []*recoveryStep{step(400, 0, "rows"), step(12, 12, "rows")}, recoveryVerdict{events.RecoveryPartial, 412, 12, "rows", true}},
+		// KAN-527: a replay's records are counted on its target topic, not
+		// at the sink, alone or next to rows.
+		{"records are not at the sink", []*recoveryStep{step(40, 0, "records")}, recoveryVerdict{events.RecoveryRecovered, 40, 0, "records", false}},
+		{"mixed units: worst step", []*recoveryStep{step(400, 0, "rows"), step(100, 50, "records")}, recoveryVerdict{events.RecoveryPartial, 100, 50, "records", false}},
+		{"mixed units, both recovered: not at the sink", []*recoveryStep{step(400, 0, "rows"), step(40, 0, "records")}, recoveryVerdict{events.RecoveryRecovered, 400, 0, "rows", false}},
 		{"one step never counted", []*recoveryStep{step(400, 0, "rows"), {}}, recoveryVerdict{outcome: events.RecoveryUnverifiable}},
 	}
 	for _, tc := range cases {
@@ -585,6 +593,79 @@ func TestRecoveryCountsFromTheEventTime(t *testing.T) {
 			}
 			if !sameDurations(clk.sleeps(), tc.sleeps) {
 				t.Fatalf("sleeps = %v, want %v", clk.sleeps(), tc.sleeps)
+			}
+		})
+	}
+}
+
+// ---- KAN-527: a replay's count is of its target topic, not the sink ----
+
+func records(before, after int64) verifyAnswer {
+	return verifyAnswer{res: actions.VerifyResult{Before: before, After: after, Unit: events.RecoveryUnitRecords, Detail: "records found in the reprocess topic"}}
+}
+
+// TestRecoveryReplayMessageSaysWhatWasCounted pins KAN-527 (the W4 rule-4
+// audit of consumer-skipped-range, W4h live run 40069546437):
+// kafka_replay_range's Verify counts only the records written to the replay's
+// target topic, so a count that reached 0 says they were replayed, not that
+// the data is back; the rows are back only once a consumer loads them, which
+// a sink read shows. The verdict itself is unchanged (recovered, the counts),
+// and the model's note says the sink was not counted.
+func TestRecoveryReplayMessageSaysWhatWasCounted(t *testing.T) {
+	act := &fakeRecoveryAction{fakeAction: fakeAction{name: "fake_replay", layer: "kafka"}, answers: []verifyAnswer{records(40, 40), records(40, 0)}}
+	sink := &fakeSink{}
+	step := events.ProposalStep{Action: "fake_replay", Layer: "kafka", Params: json.RawMessage(`{"topic":"t"}`), Description: "replay the skipped range"}
+	r, _ := newRecoveryRunner(t, &scriptedModel{}, &fakeInbox{}, sink, nil, []events.ProposalStep{step}, act)
+
+	out := r.verifyActionResult(tools.WithPipeline(context.Background(), owners.Pipeline{ID: "orders"}), actionInput("proposal p_1 step 0: replayed", okPtr(true)))
+	if !out.recovered || act.callCount() != 2 {
+		t.Fatalf("outcome %+v after %d calls, want recovered after 2", out, act.callCount())
+	}
+	v := onlyVerification(t, sink)
+	wantCounts(t, v, events.RecoveryRecovered, 40, 0, events.RecoveryUnitRecords)
+	const head = "recovered: the recovery count reached 0: 40 records were missing before the step, 0 are missing now; the replayed records are counted on their target topic, not at the sink."
+	if v.Verdict != head {
+		t.Fatalf("verdict = %q, want %q", v.Verdict, head)
+	}
+	if len(out.notes) != 1 || !strings.HasPrefix(out.notes[0], verifyTag+head+"\n") {
+		t.Fatalf("model note = %q, want the head %q", out.notes, head)
+	}
+	msgs := agentMessages(sink)
+	const want = "Recovery check: 40 records were missing before the recovery step and 0 are missing now. The replayed records are on their target topic, but their rows at the sink were not counted: read the sink before saying the data is back."
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Fatalf("messages = %q, want [%q]", msgs, want)
+	}
+}
+
+// TestRecoveryMessageWording pins recoveryMessage per outcome and unit: only
+// a recovered count of rows at the sink, with every layer check passing,
+// says the data is back (KAN-527).
+func TestRecoveryMessageWording(t *testing.T) {
+	const timeout = 10 * time.Minute
+	for _, tc := range []struct {
+		name     string
+		v        recoveryVerdict
+		layersOK bool
+		want     string
+	}{
+		{"rows at the sink, recovered", recoveryVerdict{events.RecoveryRecovered, 412, 0, events.RecoveryUnitRows, true}, true,
+			"Recovery check: 412 rows were missing before the recovery step and 0 are missing now. The data is back."},
+		{"replayed records, recovered", recoveryVerdict{events.RecoveryRecovered, 40, 0, events.RecoveryUnitRecords, false}, true,
+			"Recovery check: 40 records were missing before the recovery step and 0 are missing now. The replayed records are on their target topic, but their rows at the sink were not counted: read the sink before saying the data is back."},
+		{"rows next to a replay, recovered", recoveryVerdict{events.RecoveryRecovered, 400, 0, events.RecoveryUnitRows, false}, true,
+			"Recovery check: 400 rows were missing before the recovery step and 0 are missing now. The replayed records are on their target topic, but their rows at the sink were not counted: read the sink before saying the data is back."},
+		{"replayed records, a layer check failed", recoveryVerdict{events.RecoveryRecovered, 40, 0, events.RecoveryUnitRecords, false}, false,
+			"Recovery check: 40 records were missing before the recovery step and 0 are missing now. A layer check did not pass, so the pipeline is NOT recovered."},
+		{"rows at the sink, partial", recoveryVerdict{events.RecoveryPartial, 412, 12, events.RecoveryUnitRows, true}, true,
+			"Recovery check: 412 rows were missing before the recovery step and 12 are still missing after 10m0s. Only part of the data is back: NOT recovered."},
+		{"replayed records, partial", recoveryVerdict{events.RecoveryPartial, 40, 12, events.RecoveryUnitRecords, false}, true,
+			"Recovery check: 40 records were missing before the recovery step and 12 are still missing after 10m0s. Only part of the replayed records reached their target topic: NOT recovered."},
+		{"rows partial next to a replay", recoveryVerdict{events.RecoveryPartial, 400, 12, events.RecoveryUnitRows, false}, true,
+			"Recovery check: 400 rows were missing before the recovery step and 12 are still missing after 10m0s. Only part of the data is back: NOT recovered."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := recoveryMessage(tc.v, tc.layersOK, timeout); got != tc.want {
+				t.Fatalf("recoveryMessage =\n%q\nwant\n%q", got, tc.want)
 			}
 		})
 	}

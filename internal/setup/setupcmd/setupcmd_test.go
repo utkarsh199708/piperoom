@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"piperoom/internal/setup/targets/host"
 )
 
 // --help prints the usage under the piperoom-setup name and exits 0, from
@@ -123,5 +125,20 @@ func TestUnexpectedArguments(t *testing.T) {
 				t.Fatalf("err = %v, want an unexpected-arguments refusal", err)
 			}
 		})
+	}
+}
+
+// TestRunDispatchesRunService: the Windows service control manager starts
+// `piperoom-setup run-service --release ...` (row U8b), so every build of the
+// runner answers that subcommand before it parses the runner's own flags — a
+// console run of it is refused with a reason instead of a flag error.
+func TestRunDispatchesRunService(t *testing.T) {
+	err := Run([]string{"run-service"}, io.Discard, io.Discard)
+	if err == nil || !errors.Is(err, host.ErrParams) || !strings.Contains(err.Error(), "--release") {
+		t.Fatalf("Run(run-service) = %v, want the run-service --release refusal, not a flag error", err)
+	}
+	err = Run([]string{"run-service", "--release", t.TempDir()}, io.Discard, io.Discard)
+	if err == nil || !errors.Is(err, host.ErrParams) || !strings.Contains(err.Error(), "--java") {
+		t.Fatalf("Run(run-service --release) = %v, want the run-service --java refusal", err)
 	}
 }

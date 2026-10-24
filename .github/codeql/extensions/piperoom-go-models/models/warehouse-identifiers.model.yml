@@ -1,0 +1,17 @@
+# Warehouse identifiers are SQL-injection barriers once validated.
+#
+# Each function below accepts a name only if it matches
+# ^[A-Za-z_][A-Za-z0-9_$]*$ (Snowflake) or ^[a-zA-Z_][a-zA-Z0-9_]*$
+# (BigQuery) per part (AGENTS.md section 4 rule 6), and callers quote the
+# result before it reaches SQL text. CodeQL's go/sql-injection query has no
+# regexp-check sanitizer, so without these rows it reports every identifier
+# that starts in a request body (the trace route's table name).
+#
+# Columns: package, type, subtypes, name, signature, ext, output, kind, provenance.
+extensions:
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      - ["piperoom/internal/clients/snowflake", "", False, "validateIdent", "", "", "ReturnValue[0]", "sql-injection", "manual"]
+      - ["piperoom/internal/clients/bigquery", "", False, "parseTable", "", "", "ReturnValue[0]", "sql-injection", "manual"]

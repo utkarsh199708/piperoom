@@ -3,11 +3,18 @@
 // for the demo, the eval replay and the room, tool and agent tests. Its
 // writer keeps the real one's rules: a new piperoom/ branch from BaseSHA,
 // ErrBaseMoved per touched file, idempotent retries, ErrBranchExists.
+//
+// Its commit, tree and blob ids are SHA-256 digests cut to Git's 40 hex
+// digits, never Git's SHA-1 object ids: the fake is in-memory only and its
+// ids never meet GitHub, while its file content (eval fixtures, proposed
+// fixes) can hold secrets, which must never be fed to a weak hash. The 40-hex
+// shape stays because the fixpr and repo_read_file tools validate the
+// base_sha they round-trip through this forge.
 package fake
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"path"
@@ -63,12 +70,32 @@ func New() *Forge { return &Forge{repos: map[string]*repo{}} }
 
 func key(r forge.RepoRef) string { return r.Owner + "/" + r.Name }
 
+// hashOf is the fake's object id of parts: the SHA-256 of their
+// length-prefixed concatenation, cut to Git's 40 hex digits. The fake's ids
+// never meet GitHub, so nothing ties them to Git's SHA-1 object ids; the
+// 40-hex shape stays because the tools that round-trip base_sha through this
+// forge require it. SHA-256 keeps secret-bearing content out of a weak hash
+// (see the package comment).
 func hashOf(parts ...string) string {
-	h := sha1.New()
+	h := sha256.New()
 	for _, p := range parts {
 		fmt.Fprintf(h, "%d:%s;", len(p), p)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))[:40]
+}
+
+// blobID is the fake's blob id of content: the Git blob-id construction
+// ("blob <len>\x00" + content) hashed with SHA-256 instead of Git's SHA-1,
+// cut to 40 hex digits. Equal ids still mean equal content. It exists so that
+// file content, which can hold secrets (eval fixtures, proposed fixes), is
+// never fed to a weak hash; the real forge's BlobSHA stays SHA-1 because the
+// GitHub API answers Git's SHA-1 object ids, but the fake's ids never meet
+// GitHub.
+func blobID(content []byte) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "blob %d\x00", len(content))
+	h.Write(content)
+	return hex.EncodeToString(h.Sum(nil))[:40]
 }
 
 func treeOf(files map[string][]byte) string {
@@ -79,7 +106,7 @@ func treeOf(files map[string][]byte) string {
 	sort.Strings(paths)
 	parts := []string{"tree"}
 	for _, p := range paths {
-		parts = append(parts, p, forge.BlobSHA(files[p]))
+		parts = append(parts, p, blobID(files[p]))
 	}
 	return hashOf(parts...)
 }
@@ -310,7 +337,7 @@ func (f *Forge) File(_ context.Context, ref forge.RepoRef, sha, p string) (forge
 		}
 		return forge.RepoFile{}, fmt.Errorf("fake forge: %s: %w", p, clients.ErrNotFound)
 	}
-	out := forge.RepoFile{Path: p, SHA: sha, BlobSHA: forge.BlobSHA(b), Size: len(b)}
+	out := forge.RepoFile{Path: p, SHA: sha, BlobSHA: blobID(b), Size: len(b)}
 	if len(b) > forge.MaxRepoFileBytes {
 		return out, fmt.Errorf("%w: %s", forge.ErrRepoFileTooLarge, p)
 	}
@@ -335,7 +362,7 @@ func (f *Forge) ListFiles(_ context.Context, ref forge.RepoRef, sha string) ([]f
 		if _, sp := r.special[p]; sp || forge.CheckRepoPath(p, false) != nil {
 			continue
 		}
-		out = append(out, forge.RepoEntry{Path: p, BlobSHA: forge.BlobSHA(b), Size: len(b)})
+		out = append(out, forge.RepoEntry{Path: p, BlobSHA: blobID(b), Size: len(b)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	if len(out) > forge.MaxRepoListEntries {

@@ -27,6 +27,12 @@ type SetupSpec struct {
 	// WatchedBy is events.WatchedByServer or events.WatchedByLocal: who reads
 	// the pipeline now that it is registered.
 	WatchedBy string `yaml:"watched_by"`
+	// UnreachableLayers names layers the server cannot read for this
+	// pipeline (for example "connect" on Strimzi without an Ingress, or a
+	// managed Connect the watcher identity cannot reach). The watcher skips
+	// them with a reason instead of raising a signal; the skip itself is a
+	// follow-up A7 row (docs/design/setup-managed.md §7).
+	UnreachableLayers []string `yaml:"unreachable_layers,omitempty"`
 }
 
 // setupTargets are the target kinds a setup: block may name. They match the
@@ -38,7 +44,7 @@ var setupTargets = []string{"compose", "host", "strimzi", "msk", "confluent", "a
 // typo such as `watched:` would otherwise silently drop who watches the
 // pipeline.
 func (s *SetupSpec) UnmarshalYAML(node *yaml.Node) error {
-	if err := checkKeys(node, "setup", "target", "runner_label", "room_id", "watched_by"); err != nil {
+	if err := checkKeys(node, "setup", "target", "runner_label", "room_id", "watched_by", "unreachable_layers"); err != nil {
 		return err
 	}
 	type plain SetupSpec
@@ -67,6 +73,15 @@ func (p Pipeline) validateSetup() error {
 	case events.WatchedByServer, events.WatchedByLocal:
 	default:
 		return fmt.Errorf("setup: watched_by %q: want %q or %q", s.WatchedBy, events.WatchedByServer, events.WatchedByLocal)
+	}
+	layers := p.Layers()
+	for i, l := range s.UnreachableLayers {
+		if !slices.Contains(layers, l) {
+			return fmt.Errorf("setup: unreachable_layers: %q is not a %s layer (want one of %s)", l, p.KindOrDefault(), strings.Join(layers, ", "))
+		}
+		if slices.Contains(s.UnreachableLayers[:i], l) {
+			return fmt.Errorf("setup: unreachable_layers: %q is listed twice", l)
+		}
 	}
 	return nil
 }

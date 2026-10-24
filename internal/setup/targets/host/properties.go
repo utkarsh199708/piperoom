@@ -97,13 +97,20 @@ var requiredKeys = map[string][]string{
 var (
 	// valueRE is every character a worker value may hold: no space, $, %,
 	// quote, backslash (a trailing one would join the next line), # or !.
-	valueRE    = regexp.MustCompile(`^[A-Za-z0-9._:/,+\[\]-]+$`)
-	classRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
-	intRE      = regexp.MustCompile(`^-?[0-9]{1,9}$`)
-	nameRE     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
-	hostnameRE = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}$`)
-	listenerRE = regexp.MustCompile(`^(https?)://([^/]*)$`)
-	offsetsRE  = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\.offsets$`)
+	valueRE = regexp.MustCompile(`^[A-Za-z0-9._:/,+\[\]-]+$`)
+	// pathValueRE is valueRE for a path value: a Windows path carries
+	// backslashes, and this driver rewrites every path value to the forward
+	// slash form Java reads on either OS (a backslash in a .properties value
+	// is an escape), so one more character set covers both shapes. It also
+	// allows a space, which a properties value keeps literally: a project
+	// under "C:/Program Files" or a profile with a space in it is served.
+	pathValueRE = regexp.MustCompile(`^[A-Za-z0-9._:/\\,+\[\]~@ ()-]+$`)
+	classRE     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+	intRE       = regexp.MustCompile(`^-?[0-9]{1,9}$`)
+	nameRE      = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
+	hostnameRE  = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}$`)
+	listenerRE  = regexp.MustCompile(`^(https?)://([^/]*)$`)
+	offsetsRE   = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}\.offsets$`)
 )
 
 // ruleFor returns the rule of key in mode, and whether the key belongs to the
@@ -166,10 +173,10 @@ func prepareProps(mode string, entries map[string]string, dir, class string) (wo
 			wp.defaults = append(wp.defaults, key)
 		}
 	}
-	add("plugin.path", dir+"/"+PluginDir)
+	add("plugin.path", projectValue(dir, PluginDir))
 	add("listeners", "http://127.0.0.1:8083")
 	if mode == ModeStandalone {
-		add("offset.storage.file.filename", dir+"/"+OffsetsFile)
+		add("offset.storage.file.filename", projectValue(dir, OffsetsFile))
 	}
 	var missing []string
 	for _, key := range requiredKeys[mode] {
@@ -189,16 +196,23 @@ func prepareProps(mode string, entries map[string]string, dir, class string) (wo
 }
 
 // checkValue validates one allow-listed value and returns it, path values
-// rewritten to absolute paths under dir.
+// rewritten to absolute paths under dir in the forward slash form.
 func checkValue(key, value string, rule keyRule, dir, class string) (string, error) {
-	if len(value) > maxValueBytes || !valueRE.MatchString(value) {
-		return "", fmt.Errorf("%w: key %s: the value is empty, too long or holds a character outside [A-Za-z0-9._:/,+[]-] (no space, $, %%, quote, backslash or line break)", ErrProperties, q(key))
+	bad := func(what string) error {
+		return fmt.Errorf("%w: key %s: %s", ErrProperties, q(key), what)
+	}
+	switch rule {
+	case rulePath, rulePathList:
+		if len(value) > maxValueBytes || !pathValueRE.MatchString(value) {
+			return "", bad("the value is empty, too long or holds a character a path cannot carry (no space, $, %, quote, # or line break)")
+		}
+	default:
+		if len(value) > maxValueBytes || !valueRE.MatchString(value) {
+			return "", bad("the value is empty, too long or holds a character outside [A-Za-z0-9._:/,+[]-] (no space, $, %, quote, backslash or line break)")
+		}
 	}
 	if masked, st := redact.Text(value); st.Total > 0 || masked != value {
 		return "", fmt.Errorf("%w: key %s: the value looks like a credential", ErrSecretValue, q(key))
-	}
-	bad := func(what string) error {
-		return fmt.Errorf("%w: key %s: %s", ErrProperties, q(key), what)
 	}
 	switch rule {
 	case ruleClass:
@@ -271,19 +285,32 @@ func checkValue(key, value string, rule keyRule, dir, class string) (string, err
 	return value, nil
 }
 
+// projectValue is dir/rel in the form a Java properties value carries: forward
+// slashes, which Java reads on every OS and which need no escaping (a
+// backslash in a .properties value is an escape, so C:\x would read as C:x).
+func projectValue(dir string, rel ...string) string {
+	return strings.ReplaceAll(filepath.Join(append([]string{dir}, rel...)...), "\\", "/")
+}
+
 // projectPath accepts an absolute path under dir or a project-relative one,
-// and returns both forms. The project root itself is refused: a plugin path
-// or offset file there would make the whole project something the worker
-// loads.
+// and returns both forms with forward slashes. Both path shapes are handled
+// explicitly rather than through filepath.Rel, so a Windows project directory
+// is checked on any OS (the tests run the Windows shape on Linux too); on a
+// Windows host dir is C:\... and a value may be written either way. The
+// project root itself is refused: a plugin path or offset file there would make
+// the whole project something the worker loads.
 func projectPath(dir, p string) (abs, rel string, err error) {
-	rel = p
-	if strings.HasPrefix(p, "/") {
-		r, rerr := filepath.Rel(dir, p)
-		if rerr != nil || !filepath.IsLocal(r) {
-			return "", "", fmt.Errorf("%w: %s is outside the project directory", ErrProperties, q(p))
+	base := strings.ReplaceAll(dir, "\\", "/")
+	value := strings.ReplaceAll(p, "\\", "/")
+	rel = value
+	if isDrivePath(value) || strings.HasPrefix(value, "/") {
+		r, rerr := relUnder(base, value)
+		if rerr != nil {
+			return "", "", rerr
 		}
-		rel = filepath.ToSlash(r)
+		rel = r
 	}
+	rel = strings.TrimPrefix(rel, "./")
 	if rel == "." || rel == "" {
 		return "", "", fmt.Errorf("%w: %s is the project root, not a path under it", ErrProperties, q(p))
 	}
@@ -293,14 +320,38 @@ func projectPath(dir, p string) (abs, rel string, err error) {
 	// A trailing slash ("connect-plugins/") names the same directory; the
 	// unit-safe check below wants the clean form.
 	rel = path.Clean(rel)
-	if rel == "." || rel == "" {
-		return "", "", fmt.Errorf("%w: %s is the project root, not a path under it", ErrProperties, q(p))
+	if rel == "." || rel == "" || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", "", fmt.Errorf("%w: %s is the project root or outside it, not a path under it", ErrProperties, q(p))
 	}
-	abs = dir + "/" + rel
-	if err := CheckUnitPath(abs); err != nil {
+	abs = base + "/" + rel
+	// A path value goes into a Java properties file, where a value runs to the
+	// end of the line, and (on Windows) into the service definition's argv: a
+	// space in a project under "C:/Program Files" is served, and only the
+	// systemd unit's own shape refuses it (CheckServicePath).
+	if err := CheckServicePath(abs); err != nil {
 		return "", "", fmt.Errorf("%w: %w", ErrProperties, err)
 	}
 	return abs, rel, nil
+}
+
+// relUnder returns p relative to dir when p names dir or a path under it. A
+// drive path is compared case-insensitively (Windows paths are), a POSIX path
+// exactly; either separator counts. Both are already in forward slash form.
+func relUnder(dir, p string) (string, error) {
+	fold := func(s string) string {
+		if isDrivePath(dir) {
+			return strings.ToLower(s)
+		}
+		return s
+	}
+	d, v := fold(dir), fold(p)
+	switch {
+	case v == d:
+		return "", nil
+	case len(v) > len(d) && strings.HasPrefix(v, d) && v[len(d)] == '/':
+		return p[len(d)+1:], nil
+	}
+	return "", fmt.Errorf("%w: %s is outside the project directory", ErrProperties, q(p))
 }
 
 // splitHostPort splits host:port (host may be [v6] or empty) and checks the

@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the person's own Compose file runs the Connect service with
 # privileged: true, and the setup validator refuses the document before anything starts. The label
-# names the validator rule and the fixing op (tasks/U-board.md row U1-19, step 1). Format:
+# names the validator rule and the fixing op (Jira KAN-5 row U1-19, step 1). Format:
 # evals/README.md (C6). The rule and its message are internal/setup/targets/compose's
 # (validator.go, knownRefusals, RulePrivilege).
 #
@@ -52,10 +52,6 @@
 #     the preview and nothing runs.
 
 name: setup/compose-privileged-refused
-# Held out until U1-10 (the agent's setup mode, wiring.SetupStack) lands: without it the agent cannot read the
-# compose file or the validator output (live run 40030412424: 0/2, every read errored). -validate refuses
-# this marker once internal/wiring declares SetupStack.
-pending_harness: U1-10
 description: |
   The person brought their own compose.yaml for the project (copied from a blog post), with the
   connect service declared as privileged: true. The setup run stopped at the compose step: the

@@ -24,8 +24,10 @@ type UnitParams struct {
 // PropertiesParams are properties_write's typed params.
 type PropertiesParams struct {
 	// File is connect-distributed.properties or
-	// connect-standalone.properties at the project root; the name picks the
-	// worker mode and its key allow-list.
+	// connect-standalone.properties at the project root (T1), or an
+	// absolute path outside the project directory with one of those base
+	// names (T2: PropertiesWriteTier). The base name picks the worker mode
+	// and its key allow-list.
 	File string `json:"file"`
 	// Entries are allow-listed keys and their values.
 	Entries map[string]string `json:"entries"`
@@ -48,8 +50,11 @@ func (serviceStatusOp) Name() string   { return "service_status" }
 func (serviceStatusOp) Target() string { return hostTarget }
 func (serviceStatusOp) Tier() string   { return protocol.TierT0 }
 func (serviceStatusOp) Layer() string  { return hostLayer }
-func (serviceStatusOp) Describe() string {
-	return "report the state of a piperoom service on this host (systemctl --user show)"
+func (o serviceStatusOp) Describe() string {
+	if o.d.goos == "windows" {
+		return "report the state of a piperoom service on this host (the service control manager's query)"
+	}
+	return "report the state of a piperoom service on this host (systemctl --user show; systemctl show where the driver installs system units)"
 }
 
 func (serviceStatusOp) ParamsSchema() map[string]any {
@@ -78,8 +83,11 @@ func (serviceRestartOp) Name() string   { return "service_restart" }
 func (serviceRestartOp) Target() string { return hostTarget }
 func (serviceRestartOp) Tier() string   { return protocol.TierT2 }
 func (serviceRestartOp) Layer() string  { return hostLayer }
-func (serviceRestartOp) Describe() string {
-	return "start or restart a piperoom service this project installed (systemctl --user restart)"
+func (o serviceRestartOp) Describe() string {
+	if o.d.goos == "windows" {
+		return "start or restart a piperoom service this project installed (service control manager stop and start)"
+	}
+	return "start or restart a piperoom service this project installed (systemctl --user restart; systemctl restart for a system unit)"
 }
 
 func (serviceRestartOp) ParamsSchema() map[string]any { return serviceStatusOp{}.ParamsSchema() }
@@ -97,13 +105,13 @@ func (o serviceRestartOp) Execute(ctx context.Context, params json.RawMessage, e
 	return mgr.restart(ctx, env, unit)
 }
 
-// decodeUnit decodes UnitParams and returns the unit name and the manager.
+// decodeUnit decodes UnitParams and returns the service name and the manager.
 func (d *Driver) decodeUnit(params json.RawMessage) (string, serviceManager, error) {
 	var p UnitParams
 	if err := decodeStrict(params, &p); err != nil {
 		return "", nil, err
 	}
-	unit, err := unitName(p.Name)
+	unit, err := d.serviceName(p.Name)
 	if err != nil {
 		return "", nil, err
 	}
@@ -120,7 +128,7 @@ func (serviceInstallOp) Target() string { return hostTarget }
 func (serviceInstallOp) Tier() string   { return protocol.TierT2 }
 func (serviceInstallOp) Layer() string  { return hostLayer }
 func (serviceInstallOp) Describe() string {
-	return "render the Kafka Connect worker unit from the template and enable it (systemctl --user enable)"
+	return "render the Kafka Connect worker unit from the template and enable it (a user unit, systemctl --user enable, by default; a system unit in /etc/systemd/system when the runner is root or the target is production)"
 }
 
 func (serviceInstallOp) ParamsSchema() map[string]any {
@@ -136,7 +144,7 @@ func (o serviceInstallOp) Validate(params json.RawMessage, _ ops.Env) error {
 	if err := decodeStrict(params, &p); err != nil {
 		return err
 	}
-	if _, _, err := p.normalize(); err != nil {
+	if _, err := p.normalize(); err != nil {
 		return err
 	}
 	_, err := o.d.manager()
@@ -164,7 +172,18 @@ func (o serviceInstallOp) Preview(ctx context.Context, params json.RawMessage, e
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
-	return o.d.diffPreview(ctx, env, s.UnitFile, string(text), "the unit "+s.Unit+" is enabled and runs "+strings.Join(s.Rendered.ExecStart, " "))
+	return o.d.diffPreview(ctx, env, s.UnitFile, string(text), installEffect(s))
+}
+
+// installEffect is the sentence a service_install preview ends with: what the
+// step runs, in the shape the platform's artifact has. A Windows service has no
+// ExecStart to read (the SCM runs the copied runner with the recorded
+// arguments), so the unit's line would read "runs ." there.
+func installEffect(s serviceSpec) string {
+	if s.ExePath == "" {
+		return "the unit " + s.Unit + " is enabled and runs " + strings.Join(s.Rendered.ExecStart, " ")
+	}
+	return "the service " + s.Unit + " is installed (automatic start) and runs " + s.ExePath + " " + strings.Join(s.Args, " ")
 }
 
 func (o serviceInstallOp) prepare(params json.RawMessage, env ops.Env) (serviceSpec, serviceManager, error) {
@@ -177,26 +196,62 @@ func (o serviceInstallOp) prepare(params json.RawMessage, env ops.Env) (serviceS
 		return serviceSpec{}, nil, err
 	}
 	s, err := o.d.spec(p, env)
+	if err != nil {
+		return serviceSpec{}, nil, err
+	}
+	s, err = mgr.complete(env, s)
 	return s, mgr, err
 }
 
-// ---- properties_write (T1) ----
+// ---- properties_write (T1 under the project, T2 outside it) ----
 
 type propertiesWriteOp struct{ d *Driver }
 
 func (propertiesWriteOp) Name() string   { return "properties_write" }
 func (propertiesWriteOp) Target() string { return hostTarget }
-func (propertiesWriteOp) Tier() string   { return protocol.TierT1 }
-func (propertiesWriteOp) Layer() string  { return hostLayer }
+
+// Tier is the op's floor, T1: a worker file at the project root. A file
+// outside the project directory raises the step to T2 (TierFor), which the
+// catalogue and the server must read for the step to run (Options.TierRouted).
+func (propertiesWriteOp) Tier() string  { return protocol.TierT1 }
+func (propertiesWriteOp) Layer() string { return hostLayer }
 func (propertiesWriteOp) Describe() string {
-	return "write a Kafka Connect worker properties file (distributed or standalone) from allow-listed keys"
+	return "write a Kafka Connect worker properties file (distributed or standalone) from allow-listed keys: at the project root (T1), or an absolute path outside the project directory (T2, the driver's click)"
+}
+
+// TierFor is the tier one properties_write step needs, from its params alone
+// (PropertiesWriteTier).
+func (propertiesWriteOp) TierFor(params json.RawMessage) (string, error) {
+	return PropertiesWriteTier(params)
+}
+
+// PropertiesWriteTier is the lead ruling on U8a as a function of the params,
+// with no I/O and no knowledge of the runner's OS, so the server can compute
+// it when it builds the step: a worker file named by its project-root name is
+// T1; an absolute path (necessarily outside the project directory: the
+// runner refuses an absolute path under it) is T2 and needs the driver's
+// click. Params that name neither are an error.
+func PropertiesWriteTier(params json.RawMessage) (string, error) {
+	var p PropertiesParams
+	if err := decodeStrict(params, &p); err != nil {
+		return "", err
+	}
+	if _, ok := workerFiles[p.File]; ok {
+		return protocol.TierT1, nil
+	}
+	if absoluteShape(p.File) {
+		return protocol.TierT2, nil
+	}
+	return "", fmt.Errorf("%w: file %s is neither a worker file at the project root nor an absolute path", ErrProperties, q(p.File))
 }
 
 func (propertiesWriteOp) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false,
 		"required": []string{"file", "entries"},
 		"properties": map[string]any{
-			"file": map[string]any{"type": "string", "enum": sortedKeys(workerFiles)},
+			// One of the project-root worker files, or an absolute path
+			// outside the project whose base name is one of them (T2).
+			"file": map[string]any{"type": "string", "minLength": 1, "maxLength": maxTemplatePath},
 			"entries": map[string]any{"type": "object", "minProperties": 1, "maxProperties": maxEntries,
 				"additionalProperties": map[string]any{"type": "string"}},
 		}}
@@ -215,7 +270,16 @@ func (o propertiesWriteOp) Execute(ctx context.Context, params json.RawMessage, 
 	// Every plugin.path entry is PluginDir or under it, a mount since
 	// Register, so the worker never loads from a directory file_write fills.
 	text := wp.render()
-	clean, changed, err := writeConfined(env, file, text, 0o600, false)
+	var (
+		clean   string
+		changed bool
+	)
+	if file.outside {
+		clean = file.name
+		changed, err = writeOutside(file.dir, file.base, env.Confine.Dir(), text, 0o600)
+	} else {
+		clean, changed, err = writeConfined(env, file.name, text, 0o600)
+	}
 	if err != nil {
 		return ops.Result{}, err
 	}
@@ -224,13 +288,16 @@ func (o propertiesWriteOp) Execute(ctx context.Context, params json.RawMessage, 
 		state = "unchanged"
 	}
 	summary := fmt.Sprintf("%s %s (%s worker, %d keys)", state, clean, wp.mode, len(wp.keys))
+	if file.outside {
+		summary += ", outside the project directory"
+	}
 	if len(wp.defaults) > 0 {
 		summary += "; defaults added: " + strings.Join(wp.defaults, ", ")
 	}
 	return ops.Result{
 		Summary: summary,
 		Data: map[string]any{"file": clean, "mode": wp.mode, "keys": wp.keys, "defaults_added": wp.defaults,
-			"changed": changed, "bytes": len(text)},
+			"changed": changed, "bytes": len(text), "outside_project": file.outside, "tier": file.tier},
 		Receipt: events.SetupReceipt{Kind: "file", Target: clean},
 	}, nil
 }
@@ -242,24 +309,78 @@ func (o propertiesWriteOp) Preview(ctx context.Context, params json.RawMessage, 
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
-	return o.d.diffPreview(ctx, env, file, string(wp.render()), "the "+wp.mode+" worker reads it at its next restart")
+	effect := "the " + wp.mode + " worker reads it at its next restart"
+	if file.outside {
+		effect = "a file outside the project directory is replaced (T2); the " + wp.mode + " worker that reads it picks it up at its next restart"
+	}
+	return o.d.diffPreview(ctx, env, file.name, string(wp.render()), effect)
 }
 
-func (o propertiesWriteOp) prepare(params json.RawMessage, env ops.Env) (string, workerProps, error) {
+// propsFile is the file a properties_write step names, resolved.
+type propsFile struct {
+	name    string // the project-root name, or the absolute path outside
+	outside bool
+	dir     string // outside only: the parent directory, native form
+	base    string // outside only: the base name
+	mode    string // the worker mode the base name picks
+	tier    string // PropertiesWriteTier
+}
+
+// resolvePropsFile classifies p: a project-root worker file (T1), or an
+// absolute path outside the project directory whose base name is a worker
+// file (T2). The mode, and so the key allow-list, comes from the base name in
+// both cases.
+func (o propertiesWriteOp) resolvePropsFile(name string, env ops.Env) (propsFile, error) {
+	if mode, ok := workerFiles[name]; ok {
+		return propsFile{name: name, mode: mode, tier: protocol.TierT1}, nil
+	}
+	if !absoluteShape(name) {
+		return propsFile{}, fmt.Errorf("%w: file %s is not one of %s (the worker files at the project root) nor an absolute path outside the project directory",
+			ErrProperties, q(name), strings.Join(sortedKeys(workerFiles), ", "))
+	}
+	dir, base, err := checkOutsidePath(name)
+	if err != nil {
+		return propsFile{}, err
+	}
+	mode, ok := workerFiles[base]
+	if !ok {
+		return propsFile{}, fmt.Errorf("%w: %s outside the project directory must be named %s",
+			ErrProperties, q(name), strings.Join(sortedKeys(workerFiles), " or "))
+	}
+	// Under the project by spelling: name it by its root name, so the
+	// project's own rule (and T1) applies. A path that reaches the project by
+	// identity (a bind mount, a case-insensitive volume) is refused at write
+	// time by openOutsideDir.
+	if _, rerr := relUnder(strings.ReplaceAll(env.Confine.Dir(), "\\", "/"), strings.ReplaceAll(name, "\\", "/")); rerr == nil {
+		return propsFile{}, fmt.Errorf("%w: %s is under the project directory; name it %s", ErrProperties, q(name), base)
+	}
+	return propsFile{name: name, outside: true, dir: dir, base: base, mode: mode, tier: protocol.TierT2}, nil
+}
+
+func (o propertiesWriteOp) prepare(params json.RawMessage, env ops.Env) (propsFile, workerProps, error) {
 	var p PropertiesParams
 	if err := decodeStrict(params, &p); err != nil {
-		return "", workerProps{}, err
-	}
-	mode, ok := workerFiles[p.File]
-	if !ok {
-		return "", workerProps{}, fmt.Errorf("%w: file %s is not one of %s (the worker files at the project root; nothing outside the project directory is written)",
-			ErrProperties, q(p.File), strings.Join(sortedKeys(workerFiles), ", "))
+		return propsFile{}, workerProps{}, err
 	}
 	if env.Confine == nil {
-		return "", workerProps{}, errors.New("host: the project root is not open")
+		return propsFile{}, workerProps{}, errors.New("host: the project root is not open")
 	}
-	wp, err := prepareProps(mode, p.Entries, env.Confine.Dir(), o.d.classOrDefault())
-	return p.File, wp, err
+	file, err := o.resolvePropsFile(p.File, env)
+	if err != nil {
+		return propsFile{}, workerProps{}, err
+	}
+	// The same allow-list and validators on both sides of the project
+	// boundary: path values (plugin.path, the offset file) still name the
+	// project's own directories.
+	wp, err := prepareProps(file.mode, p.Entries, env.Confine.Dir(), o.d.classOrDefault())
+	if err != nil {
+		return propsFile{}, workerProps{}, err
+	}
+	if file.outside && !o.d.tierRouted {
+		return propsFile{}, workerProps{}, fmt.Errorf("%w: %s is outside the project directory, which needs a T2 step, and this catalogue does not yet route properties_write by its params' tier; nothing outside the project is written",
+			ErrTierRouting, q(p.File))
+	}
+	return file, wp, nil
 }
 
 // ---- properties_read (T0) ----
@@ -360,7 +481,7 @@ func decodeRead(params json.RawMessage) (string, string, error) {
 // diffPreview is a PreviewResult whose Expected carries the line diff of the
 // file now → after the step.
 func (d *Driver) diffPreview(ctx context.Context, env ops.Env, file, after, effect string) (events.PreviewResult, error) {
-	before, exists, err := d.readCurrent(ctx, env, file)
+	before, exists, err := d.readAny(ctx, env, file)
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
@@ -377,6 +498,22 @@ func (d *Driver) diffPreview(ctx context.Context, env ops.Env, file, after, effe
 		Current:  current,
 		Expected: "after this step " + effect + ". Diff of " + file + " (- now, + after):\n" + diff,
 	}, nil
+}
+
+// readAny reads a project file through file_read, or an absolute file outside
+// the project (a system unit, an outside worker file) through readOutside.
+func (d *Driver) readAny(ctx context.Context, env ops.Env, file string) (string, bool, error) {
+	if !absoluteShape(file) {
+		return d.readCurrent(ctx, env, file)
+	}
+	if env.Confine == nil {
+		return "", false, errors.New("host: the project root is not open")
+	}
+	dir, base, err := checkOutsidePath(file)
+	if err != nil {
+		return "", false, err
+	}
+	return readOutside(dir, base, env.Confine.Dir())
 }
 
 // decodeStrict fills dst from params, refusing unknown fields and trailing
