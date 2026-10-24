@@ -61,11 +61,15 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 		// the root cause and either never named the first failing component
 		// or merged the two ("First failing and root-cause component: X").
 		// Rule 4's last sentence fixes the form, both labels even when the
-		// component is the same, with the scope.
+		// component is the same, with the scope. W4g (KAN-506, evals-live
+		// 40077638804) adds each layer, so the root-cause layer is named, not
+		// left to the judge, and (40085823038) asks for the cause, not a
+		// component, after the layer in the root-cause slot.
 		{"a cause is named in the fixed two-label form", "4",
-			`update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical; set its scope.`, true},
+			`update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <cause>." even if identical; set its scope.`, true},
+		// W4g (KAN-506) contracted "what is".
 		{"rule 6 keeps the tool-error sentence", "6",
-			"6. Tool errors and timeouts are evidence for what is unknown or blocked, not proof.", true},
+			"6. Tool errors and timeouts are evidence for what's unknown or blocked, not proof.", true},
 		{"rule 6 no longer carries the unreachable sentence", "6", "unreachable", false},
 		{"unreachable is no longer an outage", "", "means the component is down", false},
 		{"no name-it-in-the-hypothesis order for an unreachable read", "", "name it in the hypothesis", false},
@@ -91,7 +95,7 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 			t.Errorf("write mode %v: %d unreachable-read rules, want 1", write, n)
 		}
 		// The hypothesis form is rule 4's last sentence and is stated once.
-		const form = `"First failing: <component>. Root cause: <component>."`
+		const form = `"First failing: <layer> <component>. Root cause: <layer> <cause>."`
 		if r4 := cdcMethodRule(t, p, "4"); !strings.HasSuffix(r4, form+" even if identical; set its scope.") {
 			t.Errorf("write mode %v: rule 4 does not end with the hypothesis form: %s", write, r4)
 		}
