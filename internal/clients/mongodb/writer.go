@@ -87,7 +87,7 @@ var _ clients.SetupSourceWriter = (*SetupWriter)(nil)
 // the URI or its password. Each call is bounded by the write timeout whatever
 // ctx says.
 func NewSetupWriter(ctx context.Context, writeURI string, opts ...SetupWriterOption) (*SetupWriter, error) {
-	o := setupWriterOptions{timeout: defaultTimeout}
+	o := setupWriterOptions{timeout: 10 * time.Second}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -100,7 +100,7 @@ func NewSetupWriter(ctx context.Context, writeURI string, opts ...SetupWriterOpt
 		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true})
 	cli, err := mongo.Connect(clientOpts)
 	if err != nil {
-		return nil, fmt.Errorf("mongodb: setup connect: %w", redactErr(err, writeURI))
+		return nil, fmt.Errorf("mongodb: setup connect: %w", err)
 	}
 	pctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -108,7 +108,7 @@ func NewSetupWriter(ctx context.Context, writeURI string, opts ...SetupWriterOpt
 		dctx, dcancel := context.WithTimeout(ctx, o.timeout)
 		_ = cli.Disconnect(dctx)
 		dcancel()
-		return nil, fmt.Errorf("mongodb: setup ping: %w", redactErr(err, writeURI))
+		return nil, fmt.Errorf("mongodb: setup ping: %w", err)
 	}
 	// The database the canary collection and read user live in is the URI's
 	// database, or "admin" when none is given.
