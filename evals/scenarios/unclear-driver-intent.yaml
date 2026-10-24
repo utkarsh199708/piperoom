@@ -141,7 +141,8 @@ recordings:
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
@@ -199,6 +200,16 @@ recordings:
     summary: |
       publication dbz_publication (connector user piperoom)
       public.orders: in_publication=yes, selectable=no
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{dbtools}; the values are composed to agree with the recordings above.
+  # Agrees with the pg_publication_tables recording above: the ownership change took the connector role's SELECT on public.orders.
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 0 of 1
+      public.orders: selectable=no
 
 inputs:
   - kind: steer

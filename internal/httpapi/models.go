@@ -223,6 +223,9 @@ func loopbackPeer(remote string) bool {
 // this machine can reach a loopback server, so the request must come from the
 // server's own origin, same-origin by Sec-Fetch-Site when sent, and carry a
 // JSON body (no simple-request form post). Checked before the body is read.
+// The Host must be a loopback name or address too: a page on a rebound DNS
+// name sends a matching Origin and Host, and hostGuard's allow-list (which
+// an operator can widen) should not be this route's only defence.
 func modelsOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !sameOriginJSON(r) {
@@ -242,7 +245,7 @@ func sameOriginJSON(r *http.Request) bool {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if r.Host == "" || !strings.EqualFold(origins[0], scheme+"://"+r.Host) {
+	if r.Host == "" || !isLoopbackHostHeader(strings.ToLower(r.Host)) || !strings.EqualFold(origins[0], scheme+"://"+r.Host) {
 		return false
 	}
 	if sites := r.Header.Values("Sec-Fetch-Site"); len(sites) > 1 || (len(sites) == 1 && sites[0] != "same-origin") {

@@ -618,6 +618,18 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.5 s behind source, last event 18 min ago, queue 0/8192, 41 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 1321, 1321 events seen
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
 
 inputs:
   - kind: comment
