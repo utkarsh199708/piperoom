@@ -100,6 +100,14 @@ type timing struct {
 	perfWindow  time.Duration
 	perfSettle  time.Duration
 	perfTimeout time.Duration
+	// applyPoll, applyTimeout and applySettle are the wait of a merged fix
+	// PR for its applied_when (Q7f, fixpr.go): a check every applyPoll up to
+	// applyTimeout after the merge (PIPEROOM_FIXPR_APPLY_TIMEOUT through
+	// EndpointConfig.FixPRApplyTimeout), and the default settle of the merge
+	// kind.
+	applyPoll    time.Duration
+	applyTimeout time.Duration
+	applySettle  time.Duration
 }
 
 // defaultTiming returns the production waits and deadlines.
@@ -121,5 +129,9 @@ func defaultTiming() timing {
 		perfWindow:  actions.PerformanceVerifyWindow,
 		perfSettle:  actions.PerformanceVerifySettle,
 		perfTimeout: actions.PerformanceVerifyTimeout,
+
+		applyPoll:    defaultApplyPoll,
+		applyTimeout: defaultApplyTimeout,
+		applySettle:  defaultApplySettle,
 	}
 }

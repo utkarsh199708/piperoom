@@ -136,10 +136,22 @@ type Summary struct {
 // (U1-20); SourceKind defaults to postgres, Target is "" when the scenario
 // names none.
 type ScenarioSummary struct {
-	Name       string `json:"name"`
+	Name string `json:"name"`
+	// SourceKind is the scenario room's source kind (Q8j) or, for a setup
+	// scenario, its setup source kind; "" in a report written before Q8j,
+	// which reads as postgres.
 	SourceKind string `json:"source_kind,omitempty"`
 	Target     string `json:"target,omitempty"`
 	Summary
+}
+
+// sourceKindOf is the BySource key: a scenario row's source kind, postgres
+// when "" (a report written before Q8j).
+func sourceKindOf(s ScenarioSummary) string {
+	if s.SourceKind == "" {
+		return DefaultSourceKind
+	}
+	return s.SourceKind
 }
 
 func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started time.Time) Report {
@@ -170,7 +182,7 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	}
 	rep.Overall = combine(withRuns)
 	rep.Overall.Infra = totalInfra(rep.Scenarios)
-	rep.BySource = rateBy(rep.Scenarios, func(s ScenarioSummary) string { return s.SourceKind })
+	rep.BySource = rateBy(rep.Scenarios, sourceKindOf)
 	rep.ByTarget = rateBy(rep.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
@@ -369,7 +381,7 @@ func (r Report) Restrict(names []string) Report {
 	}
 	out.Overall = combine(withRuns)
 	out.Overall.Infra = totalInfra(out.Scenarios)
-	out.BySource = rateBy(out.Scenarios, func(s ScenarioSummary) string { return s.SourceKind })
+	out.BySource = rateBy(out.Scenarios, sourceKindOf)
 	out.ByTarget = rateBy(out.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	return out
 }

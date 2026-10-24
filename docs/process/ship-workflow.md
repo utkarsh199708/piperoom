@@ -41,7 +41,8 @@ High-risk paths, copied from the script's `RULES-BEGIN`..`RULES-END` block (if t
   `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/clients/postgres/**` (the code the writers
   share), `internal/clients/pgconv/**`, `internal/clients/netsec/**`; write clients
   (`internal/clients/*/writer*`); `internal/room/**`; `internal/owners/**`; `internal/wiring/**`; `cmd/server/**`;
-  `internal/tools/scope.go`.
+  `internal/tools/scope.go`; the pull-request fix's forge client and repo-reading tools, `internal/clients/forge/**`
+  and `internal/tools/forgetools/**` (the GitHub App key and tokens, repo writes, untrusted repo text; Q7).
 - Auth, storage and untrusted text: `internal/auth/**`; `internal/httpapi/auth*` and `internal/httpapi/server*`;
   `internal/alertin/**`; `internal/store/**`; `internal/redact/**`; `internal/injectscan/**`; the agent's
   untrusted-text, read-only guard and approval/prompt files (files in `internal/agent/` whose names start with

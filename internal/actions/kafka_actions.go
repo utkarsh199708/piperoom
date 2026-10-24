@@ -35,6 +35,10 @@ type Deps struct {
 	// Staging is the pipeline's staging client set (X8-0, action.go); nil
 	// when none. Only an action's Stage may use it.
 	Staging *Staging
+	// Binlog is optional and read-only: the MySQL source's binlog state.
+	// connect_update_connector_config compares a new database.server.id with
+	// the source's @@server_id through it (Q8e); nil refuses that key.
+	Binlog clients.BinlogReader
 
 	// validateTimeout overrides timeout for the I/O in Validate; tests only.
 	// Zero means the default.
