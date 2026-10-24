@@ -130,8 +130,10 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // on the topic, the registry for a source change it rejected, the source
 // change for a connector setting that skipped the failures): rule 4's first
 // two sentences stay as the W4f ruling has them, and a sentence before the
-// hypothesis form says the root-cause component is where the cause sits,
-// even if only downstream fails; a safeguard correctly refusing isn't it,
+// hypothesis form says the root-cause component holds the fault (malformed
+// record: its topic), though only downstream fails (the example is
+// LEAD-ARCH's after runs=3 40090999753, paid by rule 1's "may differ" for
+// "may have changed"); a safeguard correctly refusing isn't it,
 // a non-default setting disabling one is ("correctly", not "as designed":
 // a validator whose design is the bug stays a candidate cause, LEAD-REVIEW
 // on #993). No scenario's setting or value is named. Its fix round
@@ -163,7 +165,7 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "2d2ec56e121490c900ae3f757f885b0aad585e61786db09c61252acc59e73a8a"
+const cdcPromptSHA256 = "6749f6c4e7759c1c0dcf42a70a1c1f7b6772c7224ddc2083de7b276f74fd685e"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -177,7 +179,7 @@ const cdcPromptSHA256 = "2d2ec56e121490c900ae3f757f885b0aad585e61786db09c61252ac
 // word-neutral: still 1353 words), and W4i (the negative claim's read in
 // rule 1, the restart bullet and the offsets note, word-neutral: still 1353
 // words).
-const cdcPromptWriteOffSHA256 = "ca10a2f1f41a971332a0be9e87ab74ee30304e581e59e300dcf1cf241e97911d"
+const cdcPromptWriteOffSHA256 = "db684be9e34f9ca3a73c1bf5b1fc046bae5126a72af4904d35e1c461102305b6"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

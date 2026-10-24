@@ -13,7 +13,7 @@ import (
 
 // w4gRootCause is the sentence W4g (KAN-506) adds to rule 4, between the two
 // sentences the W4f ruling froze and the hypothesis form.
-const w4gRootCause = "The root-cause component is where the cause sits, even if only downstream fails; a safeguard correctly refusing isn't it, a non-default setting disabling one is."
+const w4gRootCause = "The root-cause component holds the fault (malformed record: its topic), though only downstream fails; a safeguard correctly refusing isn't it, a non-default setting disabling one is."
 
 // w4gFrozenRule4 is rule 4's first two sentences as the W4f ruling (lead
 // ruling on PR #931) has them. W4g appends to rule 4 and changes neither.
@@ -27,11 +27,15 @@ const w4gFrozenRule4 = `4. The first failing component is the most upstream stag
 // rejected a source change (schema-change: "Root cause: schema-registry
 // subject ... rejects the new value schema, caused by ALTER COLUMN"), and
 // the source change behind a connector setting that skipped the failures
-// (tolerance-all-skips). The generic rule: the root-cause component is where
-// the cause sits, even if only downstream fails; a safeguard correctly
-// refusing is not it, and a non-default setting disabling one is. The rule
-// names no setting, mode or value (the ticket's examples are for reviewers
-// only). "Correctly" rather than the ticket's "as designed" (LEAD-REVIEW on
+// (tolerance-all-skips). The generic rule: the root-cause component holds
+// the fault, though only downstream fails; a safeguard correctly refusing
+// is not it, and a non-default setting disabling one is. The rule names no
+// setting, mode or value (the ticket's examples are for reviewers only).
+// Its one example, "(malformed record: its topic)", is LEAD-ARCH's on #993
+// (runs=3 40090999753: consumer-poison-pill 0/4 and
+// injection-kafka-record-key 1/3 filled the root-cause slot's <layer> with
+// the map's [consumer] tag for a record sitting on the topic); the leakage
+// tests show it completes no scenario's root-cause groups. "Correctly" rather than the ticket's "as designed" (LEAD-REVIEW on
 // #993): a safeguard whose design is the bug, dlq-backlog's validator that
 // rejects a valid status, stays a candidate cause. Both write modes share the
 // method, so both are checked.
@@ -65,7 +69,7 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 		}
 		// KAN-506 test case 5: the safeguard rule is generic.
 		for _, want := range []string{
-			"where the cause sits, even if only downstream fails",
+			"The root-cause component holds the fault (malformed record: its topic), though only downstream fails;",
 			"a safeguard correctly refusing isn't it",
 			"a non-default setting disabling one is",
 		} {
@@ -90,8 +94,15 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 		if all, action := strings.Count(p, "compatibility NONE"), strings.Count(p, "schema_set_compatibility NONE"); all != action {
 			t.Errorf("write mode %v: %d \"compatibility NONE\", only %d as schema_set_compatibility's argument", write, all, action)
 		}
-		// The new sentence names no target or regression scenario's answer.
-		added := strings.ToLower(w4gRootCause)
+		// The new sentence names no target or regression scenario's answer,
+		// but for the lead-ruled example (its words are checked by the
+		// leakage tests below, not here: it is the one place the rule may
+		// say "record" and "topic").
+		const ruledExample = "(malformed record: its topic)"
+		if n := strings.Count(p, ruledExample); n != 1 {
+			t.Errorf("write mode %v: the ruled example %q occurs %d times, want 1", write, ruledExample, n)
+		}
+		added := strings.ToLower(strings.Replace(w4gRootCause, ruledExample, "", 1))
 		for _, answer := range []string{
 			"tolerance", "skip", "dlq", "dead", "compatib", "none", "backward", "registry", "schema", "avro",
 			"decimal", "numeric", "amount", "alter", "column", "drop", "poison", "record", "partition",
@@ -133,7 +144,7 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 	// The batch prompt keeps its bytes (TestSystemPromptSnapshotBatch) and
 	// gains none of the CDC rule.
 	batch := systemPromptFor(events.PipelineKindBatch)
-	for _, cdcOnly := range []string{"correctly refusing", "disabling one", "where the cause sits"} {
+	for _, cdcOnly := range []string{"correctly refusing", "disabling one", "holds the fault"} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt carries the CDC rule %q", cdcOnly)
 		}

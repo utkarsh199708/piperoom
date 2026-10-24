@@ -264,8 +264,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // follows the restart bullet and the resume check's dropped "that", so the
 // MySQL prompt stays word-neutral too.
 const (
-	mysqlPromptSHA256         = "22fef92a1f561c88a3fb735664a9eddfaee38a66b6a6b340cff8281e7446b9f9"
-	mysqlPromptWriteOffSHA256 = "ab3b23dfab5bba51e5585d6c05aae8ccbf5b4e4c136a914fcbbc522493369fa1"
+	mysqlPromptSHA256         = "49bc3e14d6e162c106f14c4c5254df48b6ddf81d1fcde1f222e8af4dad408da3"
+	mysqlPromptWriteOffSHA256 = "c649cb79024e059cd06b16c53016260334f8e9541f8849380e4e4e4c19714cb9"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
