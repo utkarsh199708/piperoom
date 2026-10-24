@@ -339,9 +339,7 @@ func ValidateRules(rules []VersionRule) error {
 // ValidateEmbedded is the start-up check of the embedded knowledge: the rule
 // table is valid and every Debezium release in the plugin index renders a
 // reference project for each build tool and source. A non-nil error means
-// the shipped tables or templates are corrupt. It is meant to run at start-up
-// next to Check; Check does not call it yet (a one-line follow-up in
-// knowledge.go, left out of this change so it merges cleanly with U3a).
+// the shipped tables or templates are corrupt. Check calls it.
 func ValidateEmbedded() error {
 	if len(embeddedRules) == 0 {
 		return errors.New("knowledge: embedded rule table is empty")
