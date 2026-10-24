@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -30,6 +32,29 @@ const (
 	itDBEnv = "PIPEROOM_IT_MYSQL_DB"
 )
 
+// requireReachable skips, as testenv.Require does for the dev stack, when the
+// server the URL names does not answer on its port: the profile is down or was
+// never started. Only the host and port are dialled and named; the URL's
+// password reaches no message. A value that is not a URL is left to the client,
+// whose errors carry no URL either.
+func requireReachable(t *testing.T, rawURL string) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	port := u.Port()
+	if port == "" {
+		port = "3306"
+	}
+	addr := net.JoinHostPort(u.Hostname(), port)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Skipf("mysql setup integration: the mysql profile is not reachable at %s (`docker compose -f dev/docker-compose.yml --profile mysql up -d --wait mysql`): %v", addr, err)
+	}
+	_ = conn.Close()
+}
+
 func randomNonce() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
@@ -50,12 +75,15 @@ func itName() string {
 func TestPrerequisitesIntegration(t *testing.T) {
 	readURL, writeURL := os.Getenv(readURLEnv), os.Getenv(writeURLEnv)
 	if readURL == "" || writeURL == "" {
-		// Not t.Skip: the setup-matrix Compose job runs every ./internal/setup
-		// integration test without a MySQL, and a skip fails it. The full-stack
-		// job starts the profile and sets both URLs, so there the test runs.
-		t.Logf("%s and %s are not set (the dev compose profile \"mysql\", Q8a, is not in this run): nothing was checked", readURLEnv, writeURLEnv)
-		return
+		// A skip, never a silent pass (docs/collab.md §5: an integration test
+		// skips when the stack is unreachable). The setup matrix's Compose job
+		// runs ./internal/setup/... with -tags integration and no MySQL, where
+		// this skip is tolerated through .github/integration-skip-allow.txt,
+		// as the Postgres and Oracle drivers' are; the full-stack job starts
+		// the profile, sets both URLs and fails on a skip, so there it runs.
+		t.Skipf("mysql setup integration: %s and %s are not set (the dev compose profile \"mysql\", Q8a, is not in this run: `docker compose -f dev/docker-compose.yml --profile mysql up -d --wait mysql`, then set both as dev/mysql/README.md lists them)", readURLEnv, writeURLEnv)
 	}
+	requireReachable(t, readURL)
 	db := os.Getenv(itDBEnv)
 	if db == "" {
 		db = "shop"
