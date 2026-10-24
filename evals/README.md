@@ -196,7 +196,7 @@ with its correct, judge-checked label instead.
 | `-tolerance` | 5 | score drop per scenario that counts as a regression |
 | `-fail-on-regression` | off | exit 2 if any scenario regressed |
 | `-commit` | VCS stamp, else `git rev-parse HEAD` (+`-dirty`) | revision recorded in every result |
-| `-no-tap` | off | skip the model tap; results record `prompt_hash: untapped` |
+| `-no-tap` | off | skip the model tap (the Anthropic HTTP tap, or the in-process tap of the other adapters); results record `prompt_hash: untapped` |
 | `-judge` / `-judge-model` | scenario's `judge`, else `auto` / `PIPEROOM_MODEL` | `terms`, `llm` (alias `claude`) or `auto` (above) |
 | `-judge-cache DIR` | `evals/judgecache` | recorded verdicts `auto` reads first |
 | `-judge-cache-only` | off | `auto` reads only the cache; a miss fails the run |
@@ -383,7 +383,8 @@ without amount", "nothing reads the slot" all state the cause). A term that star
 comes before it up to the previous `,` or `and`: "Connect is healthy" does not name Connect, while
 "Connect is healthy and order-sync crashes" and "order-sync is stuck on partition 1, partitions 0 and
 2 are fine" still name the consumer (and Kafka). The Kafka layer is also named by the pipeline's topics
-(`<topic_prefix>.<source_table>`, e.g. `pg.public.orders/1`).
+(`<topic_prefix>.<source_table>`, e.g. `pg.public.orders/1`), and Postgres by its `source_tables`
+(`public.orders`), except inside a topic name: `pg.public.orders` names Kafka only.
 
 **Known limits, left to the judge** (or, for healthy, ask and abstain, to a later judge extension):
 - negation **after** the term: "the amount change did not cause the 409", "that is wrong", "both are
@@ -394,12 +395,20 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
   Because ...") or a quoted "?" counts as asking the driver;
 - healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass.
 
+**Healthy verdict and the judge** (W4d): a healthy verdict is cancelled only by an affirmed, present
+fault. When the verdict's text has both a healthy phrase and such a fault word ("The pipeline is healthy
+now ... Ruled out: a topic that stopped receiving writes"), the keyword grade is not healthy and the run
+is marked ambiguous (`healthy_verdict`). `-judge auto` then asks the judge whether the words state a
+fault present now, from `evals/judgecache` first (key prompt version `judge-healthy-...`), then live within
+the call cap; `-judge llm` asks live; `-judge terms` keeps the keyword grade. With no verdict the run fails
+"healthy verdict ambiguous (unjudged)".
+
 | field | type | meaning |
 |---|---|---|
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `source_tables` (outside a topic name), topics, `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
 | `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (the diagnosis names two: a consumer down for 87 h against a 48 h retention is a consumer story and a retention story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
@@ -440,7 +449,7 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind", "1m stale", "stale for 1m") |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault (a healthy phrase beside a fault word goes to the judge, see **Healthy verdict and the judge**). A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated anywhere before it in its part of the sentence ("no errors", "nothing is stuck", "no component is currently failing"; a `because`, `since`, `after` or `when` in between ends the negator's reach) or given as an example of what to check ("for example crash or OOM logs") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind", "1m stale", "stale for 1m") |
 | `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
 | `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
@@ -1014,7 +1023,8 @@ among them, are never read), and per room (found by the `Room:` line of the firs
 the models named and `sha256` of the request's `system` and `tools`, exactly as sent: any change to the
 prompt, a tool description or schema, or the actions in `propose_fix` changes it. More than one hash in a
 run is listed in `prompt_hashes`. `untapped`: no tap (`-no-tap`, Bedrock, Vertex, scripted runners);
-`none`: tapped, but no model request.
+`none`: tapped, but no model request. The other adapters (openai, gemini, bedrock-converse) have their own
+in-process tap and a `neutral-sha256:` hash (V11, below).
 
 ## Invalid tool calls (V9r)
 
@@ -1065,7 +1075,7 @@ role's model, so the start checks judge the model the run uses.
 
 **The report** records `provider`, `flavor` (openai only), `model`, `effort` and `prompt_hash_kind`:
 `sha256` (the Anthropic tap's hash of system and tools as sent), `neutral-sha256` (the other adapters'
-hash, recorded once V11 adds their tap), or `untapped`. Hashes of two kinds never compare.
+hash, V11 below), or `untapped`. Hashes of two kinds never compare.
 
 **Per-model baselines** live at `evals/baseline/<provider>-<model>.json`, the model id with `/` and `:`
 replaced by `_` (`openai-qwen3_32b.json`). `default.json` stays the Claude reference (`claude-opus-5-5`,
@@ -1123,6 +1133,38 @@ go run ./evals/cmd/evalrun -models-table evals/baseline                   # docs
 `anthropic-claude-opus-5-5.json`) first, then the others by file name, each with its gate verdict against the
 reference (`supported`, `experimental`, `refused`, or `not gated:` and why), and a note when a file is not named
 `<provider>-<model>.json`. Reports written before V10 have no provider and print `anthropic`.
+
+### The in-process tap and the key check (V11)
+
+**Tap.** The Anthropic HTTP tap (`modeltap.go`) stays as it is for `-provider anthropic`; a replay of a recorded
+request (`testdata/modeltap/anthropic_main_turn.json`) pins its hash. For `openai`, `gemini` and
+`bedrock-converse`, `NeutralTap` (`neutraltap.go`) wraps each role's `llm.Model` in process: every call passes
+through unchanged, and per room (the `Room:` line of the first user message, as the HTTP tap reads it) it records
+the models named and
+
+    neutral-sha256:<first 16 hex of sha256( json(System) 0x00 json(Tools) 0x00 )>
+
+where `json` is Go's `encoding/json` output (no whitespace, schema object keys sorted) and `Tools` is the
+request's tool list in its order, each as `{"name","description","schema","strict"}` (`[]` when none). It is the
+neutral request the agent hands the adapter, so one prompt has one neutral hash on every adapter; the model id,
+history and other fields are not in it. `bedrock` and `vertex` stay untapped, as before.
+
+**Not wired yet:** the agent has no hook to wrap its role models (it builds them inside `internal/agent`, A4's
+folder). Until the hook lands (V11's thread ask to A4), evalrun prints a note and a non-Anthropic run records
+`untapped`, never a tap that saw nothing (`none`).
+
+**Key check.** Before any scenario, evalrun checks that every model role has its credentials, by the agent's
+rules (`internal/agent/roles.go`; the main role may also use `PIPEROOM_MODEL_API_KEY` or
+`PIPEROOM_MODEL_API_KEY_FILE`; a role on another provider only its standard variable). Only presence is checked;
+the error names the variable, never a value:
+
+| provider | needs |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` (the message as before); a non-main role may use `ANTHROPIC_AUTH_TOKEN` |
+| `bedrock`, `vertex` | nothing here (their own credential chains, as before) |
+| `openai` | the flavor's variable (`OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `DASHSCOPE_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`); none for `ollama`, `vllm`, `generic` |
+| `gemini` | `GEMINI_API_KEY`; with `PIPEROOM_GEMINI_BACKEND=vertex`, `VERTEX_PROJECT_ID` and `VERTEX_REGION` (Google credentials are found when the client is built) |
+| `bedrock-converse` | `AWS_REGION`, and `AWS_BEARER_TOKEN_BEDROCK` or AWS credentials found without a network call (`AWS_ACCESS_KEY_ID`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_CONTAINER_CREDENTIALS_*`, or a shared credentials or config file). An EC2 instance role alone is not seen: set `AWS_PROFILE` or run from a shell that has credentials |
 
 ### A free local run on Ollama
 

@@ -70,6 +70,10 @@ type wireAgentInput struct {
 	fakeAgent  bool
 	pmMode     string
 	writeOn    bool
+	// live is the swappable endpoint of a standalone or quickstart server
+	// (models.go); nil elsewhere, where a model that does not build refuses
+	// the start.
+	live *liveModel
 }
 
 // wireAgent wires a non-demo server. When fakeAgent is on it replaces every
@@ -96,6 +100,10 @@ func wireAgent(
 		paths.write = demo.WriteHandoff
 		if in.pmMode == config.PostmortemModelAuto {
 			paths.writePM = demo.WritePostmortem
+		}
+	} else if in.live != nil {
+		if paths, err = wireLive(ctx, in.live, in, awsCfg, newAgentEndpoint); err != nil {
+			return agentWiring{}, err
 		}
 	} else {
 		ep, err := newAgentEndpoint(ctx, in.cfg, in.log, awsCfg)

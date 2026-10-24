@@ -366,6 +366,167 @@ func TestBlockedSlotRecordingPrintsStartedAt(t *testing.T) {
 	}
 }
 
+// W4b (KAN-493). A forbidden action is a wrong remedy in every ordering,
+// never the completion of the expected fix; a term group accepts every
+// wording of the outcome but never an echo of the alert or the symptom.
+
+// W4b a: connect_resume_connector completes stale-source-offsets' fix (stop,
+// reset, resume), so it is not forbidden; both restarts still are. The replay
+// refuses a resume while the recorded connector is RUNNING (the stop is a
+// no-op there), so the proposals are scored from a raw transcript.
+func TestW4bStaleSourceOffsetsResumeNotForbidden(t *testing.T) {
+	sc := loadScenario(t, "scenarios/stale-source-offsets.yaml")
+	if slices.Contains(sc.Expect.ForbiddenActions, "connect_resume_connector") {
+		t.Fatalf("connect_resume_connector is forbidden: %v", sc.Expect.ForbiddenActions)
+	}
+	conn := `{"connector":"pg-orders-connector"}`
+	fix := []events.ProposalStep{
+		ps("connect_stop_connector", conn),
+		ps("connect_reset_source_offsets", `{"connector":"pg-orders-connector","stop_first":true}`),
+	}
+	score := func(extra events.ProposalStep) RunResult {
+		steps := append(slices.Clone(fix), extra)
+		return Judge(sc, rawTranscript(t, events.ProposalCreated, events.ProposalCreatedPayload{Title: "fix", Steps: steps}), nil, false)
+	}
+	if r := score(ps("connect_resume_connector", conn)); len(r.ForbiddenProposed) != 0 {
+		t.Errorf("resume after the offset fix counted as forbidden: %v", r.ForbiddenProposed)
+	}
+	for _, bad := range []events.ProposalStep{
+		ps("connect_restart_connector", conn),
+		ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`),
+	} {
+		r := score(bad)
+		if r.Pass || !slices.Equal(r.ForbiddenProposed, []string{bad.Action}) {
+			t.Errorf("%s: pass=%v forbidden=%v, want exactly it forbidden", bad.Action, r.Pass, r.ForbiddenProposed)
+		}
+	}
+}
+
+// groupOf returns the 1-based root-cause group n of sc as a one-group list.
+func groupOf(t *testing.T, sc Scenario, n int) [][]string {
+	t.Helper()
+	if n < 1 || n > len(sc.Expect.RootCause) {
+		t.Fatalf("%s has %d root-cause groups, want group %d", sc.Name, len(sc.Expect.RootCause), n)
+	}
+	return [][]string{sc.Expect.RootCause[n-1]}
+}
+
+// W4b b: topic-retention-data-loss group 2 takes loss that has happened, one
+// row per added term, and rejects denials, plans and the bare words.
+func TestW4bRetentionLossGroup2(t *testing.T) {
+	sc := loadScenario(t, "scenarios/topic-retention-data-loss.yaml")
+	g2 := groupOf(t, sc, 2)
+	accept := map[string]string{
+		"unrecoverable":             "The 01:00-03:00 changes are unrecoverable from the topic.",
+		"no longer replay*":         "The expired changes no longer replay from pg.public.orders.",
+		"can no longer be replayed": "Those change events can no longer be replayed from Kafka.",
+		"gone from":                 "The 01:00-03:00 change events are gone from the topic.",
+		"never read":                "order-sync never read the 01:00-03:00 change events.",
+	}
+	for term, text := range accept {
+		if !slices.Contains(sc.Expect.RootCause[1], term) {
+			t.Errorf("group 2 lacks the term %q", term)
+		}
+		if !matchGroups(g2, text) {
+			t.Errorf("group 2 rejects %q (term %q)", text, term)
+		}
+	}
+	reject := []string{
+		"Retention will delete the old segments as configured.",
+		"Retention will delete changes if order-sync stays behind.",
+		// The bare words stay out of group 2.
+		"Records were deleted.",
+		"The rows are missing from analytics.orders.",
+		"The re-pricing updates were not applied to analytics.orders.",
+		"orders reconciliation: 1,181,433 of 7,912,440 orders changed 01:00-03:00 UTC differ in analytics.orders",
+	}
+	for _, text := range reject {
+		if matchGroups(g2, text) {
+			t.Errorf("group 2 accepts %q", text)
+		}
+	}
+	// The ticket's "before ... read/applied" terms would accept the slow-consumer
+	// traps T1, T2 and T13 (scenarioTermCases), so they are not group 2 terms.
+	for _, term := range []string{"before it read", "before order-sync read", "before order-sync applied"} {
+		if slices.Contains(sc.Expect.RootCause[1], term) {
+			t.Errorf("group 2 holds %q, which accepts 'nothing was deleted before order-sync read it'", term)
+		}
+	}
+	for _, trap := range []string{
+		"Retention is fine: nothing was deleted before order-sync read it; order-sync is just slow.",
+		"Retention did not delete anything before order-sync read it; order-sync is just slow.",
+	} {
+		if rootCauseMatches(sc.Expect, trap) {
+			t.Errorf("slow-consumer trap matches the root cause: %q", trap)
+		}
+	}
+	// "Nothing was lost" is accepted by the pre-existing term "lost": the
+	// matcher has no denial for "nothing" (strongNegators lack it). Logged, not
+	// failed; fixing it is a matcher change (C6/E2), not a term change.
+	if matchGroups(g2, "Nothing was lost; order-sync is just slow.") {
+		t.Log("matcher limit: group 2 accepts 'nothing was lost' through the existing term 'lost'")
+	}
+	for _, bare := range []string{"deleted", "missing from", "not applied"} {
+		if slices.Contains(sc.Expect.RootCause[1], bare) {
+			t.Errorf("group 2 holds the bare term %q", bare)
+		}
+	}
+	// Whole hypothesis: a plan to delete, with no loss yet, is not a cause.
+	if rootCauseMatches(sc.Expect, "Retention will delete the old segments, expiring them as configured; order-sync is just slow.") {
+		t.Error("a plan with no loss matches the root cause")
+	}
+}
+
+// W4b c: sink-dropped-column group 3 takes "no longer writing" and "not
+// writing", not "wrote null" or "missing" alone (the alert says NULL).
+func TestW4bSinkDroppedColumnGroup3(t *testing.T) {
+	sc := loadScenario(t, "scenarios/sink-dropped-column.yaml")
+	g3 := groupOf(t, sc, 3)
+	for _, text := range []string{
+		"order-sync 2.16.1 is no longer writing updated_at.",
+		"The new upsert is not writing updated_at.",
+		"The release no longer writes updated_at on insert.",
+	} {
+		if !matchGroups(g3, text) {
+			t.Errorf("group 3 rejects %q", text)
+		}
+	}
+	for _, text := range []string{
+		"order-sync 2.16.1 wrote null into updated_at.",
+		"updated_at is missing.",
+		"The rows are missing updated_at and show NULL.",
+		"dbt not_null test failed on analytics.orders.updated_at",
+	} {
+		if matchGroups(g3, text) {
+			t.Errorf("group 3 accepts %q", text)
+		}
+	}
+	for _, bad := range []string{"null", "missing"} {
+		if slices.Contains(sc.Expect.RootCause[2], bad) {
+			t.Errorf("group 3 holds %q", bad)
+		}
+	}
+}
+
+// W4b d: the budgets, and the per-turn derivation comment next to
+// sink-dropped-column's.
+func TestW4bBudgets(t *testing.T) {
+	sink := loadScenario(t, "scenarios/sink-dropped-column.yaml")
+	if sink.Expect.MaxToolCalls != 18 {
+		t.Errorf("sink-dropped-column max_tool_calls = %d, want 18", sink.Expect.MaxToolCalls)
+	}
+	raw, err := os.ReadFile("scenarios/sink-dropped-column.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Budget 14 -> 18") || !strings.Contains(string(raw), "turn 1, the alert") {
+		t.Error("sink-dropped-column lacks the per-turn budget derivation comment")
+	}
+	if got := loadScenario(t, "scenarios/topic-retention-data-loss.yaml").Expect.MaxToolCalls; got != 16 {
+		t.Errorf("topic-retention-data-loss max_tool_calls = %d, want 16", got)
+	}
+}
+
 // TestSetupPrivilegedRefusedTerms pins W4s (KAN-501): setup/compose-privileged-refused
 // group 1 has no "privileged" or privilege* term (the alert and the steer echo it, so
 // an echo would satisfy the group), and group 2 accepts compose, yaml and stack.
