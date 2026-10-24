@@ -28,7 +28,7 @@ Users (dev-only passwords, local stack only, AGENTS.md §3; grants of the design
 | `root` | `piperoom-dev` | devctl breaks (`docker exec`, password through an option file, never argv) |
 | `debezium` | `dbz-dev` | the connector: `SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT` |
 | `piperoom` | `piperoom-dev` | Piperoom read (`SOURCE_DB_URL`): `SELECT` on the tables, `REPLICATION CLIENT`, `PROCESS`, `performance_schema`, the listed `mysql.user` columns; no `REPLICATION SLAVE` |
-| `piperoom_write` | `piperoom-dev-write` | Piperoom write (`SOURCE_DB_WRITE_URL`): `SELECT ... WITH GRANT OPTION`, `CONNECTION_ADMIN`, `CREATE` on `piperoom_heartbeat` |
+| `piperoom_write` | `piperoom-dev-write` | Piperoom write (`SOURCE_DB_WRITE_URL`): `SELECT ... WITH GRANT OPTION` and `CREATE` on `shop` (the heartbeat table sits in a source database, design §6.8), `CONNECTION_ADMIN`; `DROP` on `shop` only so the writer's integration test can clean up |
 
 Not observed yet: written on 2026-10-23 without a Docker daemon. `docker compose -f dev/docker-compose.yml --profile
 mysql config -q` passes; the image, the init script and the connector have not run.

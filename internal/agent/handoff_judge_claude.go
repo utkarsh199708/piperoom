@@ -93,8 +93,8 @@ func (e *Endpoint) JudgeHandoff(ctx context.Context, evs []events.Event, s event
 	if len(evs) == 0 {
 		return HandoffVerdict{}, fmt.Errorf("agent: cannot judge a handoff against an empty room")
 	}
-	m := &budgetModel{inner: e.model, budget: e.budget(evs[0].RoomID)}
-	return judgeHandoff(ctx, evs, s, opts, m)
+	m := &budgetModel{inner: e.judgeClient(), budget: e.budget(evs[0].RoomID)}
+	return judgeHandoff(ctx, evs, s, e.judge.withModel(opts), m)
 }
 
 // judgeEffort is the effort for the judge: a verdict over a short log needs

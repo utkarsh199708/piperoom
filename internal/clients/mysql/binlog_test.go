@@ -45,7 +45,7 @@ func TestBinlogStatus(t *testing.T) {
 			File: "binlog.000007", Pos: 1234, GTIDMode: "ON",
 			GTIDExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100", GTIDPurged: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20",
 			ServerID: 223344, ServerUUID: "3e11fa47-71ca-11e1-9e33-c80aa9429562",
-			Binlogs:       []BinlogFile{{"binlog.000001", 1001}, {"binlog.000002", 1002}, {"binlog.000003", 1003}},
+			Binlogs:       []BinlogFile{{Name: "binlog.000001", Size: 1001}, {Name: "binlog.000002", Size: 1002}, {Name: "binlog.000003", Size: 1003}},
 			ExpireSeconds: 86400,
 		}
 		if !reflect.DeepEqual(st, want) {

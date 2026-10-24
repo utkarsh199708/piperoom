@@ -171,8 +171,11 @@ func TestLayersForScopedByKinds(t *testing.T) {
 			t.Fatalf("group member = %v", got)
 		}
 		solo := kindService(t, loadOwnersFile(t, "pipelines:\n"+kindCDCPipeline+kindBatchPipeline), "priya", nil)
-		if got := solo.LayersFor(User{ID: "priya"}); !slices.Equal(got, events.Layers) {
-			t.Fatalf("solo = %v, want every layer %v", got, events.Layers)
+		// Every layer of the kinds in use: no pipeline has source_kind mysql
+		// (Q8-0), so the mysql layer is not one of them.
+		all := slices.DeleteFunc(slices.Clone(events.Layers), func(l string) bool { return l == events.LayerMySQL })
+		if got := solo.LayersFor(User{ID: "priya"}); !slices.Equal(got, all) {
+			t.Fatalf("solo = %v, want every layer %v", got, all)
 		}
 	})
 	t.Run("batch only", func(t *testing.T) {

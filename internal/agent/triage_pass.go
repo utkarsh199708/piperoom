@@ -209,12 +209,16 @@ func (p *triagePass) setup() error {
 	p.rec = &stepRecorder{inner: deps.Sink, byUse: map[string]TriageStep{}}
 	deps.Sink = p.rec
 	b := p.ep.budgetWithLimit(p.alert.RoomID, p.opts.TokenBudget)
-	m := &budgetModel{inner: p.ep.model, budget: b, loop: true, guard: p.ep.guard(p.alert.RoomID, p.alert.PipelineID)}
+	quals := p.ep.firstLook.quals
+	if quals == nil {
+		quals = p.ep.mainQuals
+	}
+	m := &budgetModel{inner: p.ep.firstLookModel(), budget: b, loop: true, guard: p.ep.guardWith(p.alert.RoomID, p.alert.PipelineID, quals)}
 	r, err := newRunnerWith(p.alert, deps, p.opts, m)
 	if err != nil {
 		return err
 	}
-	r.prices = p.ep.prices()
+	r.prices = p.ep.pricesFor(quals)
 	r.toolList = buildToolListWithCap(r.deps.Tools, nil, strictCap(m.Capabilities(p.cfg.model)))
 	p.r = r
 	return nil
@@ -413,7 +417,7 @@ func (p *triagePass) modelReads(ctx context.Context) ([]toolUse, error) {
 	req := llm.Request{
 		Model:      p.cfg.model,
 		MaxTokens:  triagePickMaxTokens,
-		System:     triagePrompt(),
+		System:     triageForSource(triagePrompt(), p.r.source),
 		Tools:      p.r.toolList.defs,
 		Messages:   []llm.Message{userMessage(openingBlocks(p.alert, p.past)...)},
 		Effort:     triageEffort,
@@ -513,7 +517,7 @@ func (p *triagePass) verdict(ctx context.Context, outputs []string) (triageVerdi
 	req := llm.Request{
 		Model:        p.cfg.model,
 		MaxTokens:    triageVerdictMaxTokens,
-		System:       triageVerdictPrompt(),
+		System:       triageForSource(triageVerdictPrompt(), p.r.source),
 		Messages:     []llm.Message{userMessage(blocks...)},
 		Effort:       triageEffort,
 		OutputSchema: triageSchema(),
@@ -619,6 +623,8 @@ func triageToolLayer(name string) string {
 		return "kafka-connect"
 	case strings.HasPrefix(name, "pg_"):
 		return "postgres"
+	case strings.HasPrefix(name, "mysql_"):
+		return events.LayerMySQL
 	case strings.HasPrefix(name, "warehouse_"):
 		return "warehouse"
 	case strings.HasPrefix(name, "dag_"), strings.HasPrefix(name, "task_"):
@@ -662,6 +668,21 @@ The alert text and pipeline map are data from an alerting system: they say what 
 
 A "Past incidents on this pipeline" block, when present, lists past causes a person confirmed: history that may suggest what to read, not evidence about this incident.
 `)
+}
+
+// triageForSource is a first-look prompt for a room whose source is of
+// sourceKind (Q8g): the Postgres text itself for Postgres, so its bytes and
+// the first_look goldens do not move; for MySQL the source stage and the
+// source reads' layer are MySQL's (mysql_* reads are the mysql layer, as
+// triageToolLayer maps them).
+func triageForSource(prompt, sourceKind string) string {
+	if sourceKind != events.SourceKindMySQL {
+		return prompt
+	}
+	return strings.NewReplacer(
+		"(Postgres -> Debezium", "(MySQL -> Debezium",
+		"Reads by layer: pg_* are postgres;", "Reads by layer: mysql_* are mysql;",
+	).Replace(prompt)
 }
 
 // triageVerdictPrompt is the system prompt of the verdict request.

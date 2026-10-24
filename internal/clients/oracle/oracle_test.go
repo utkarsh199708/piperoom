@@ -88,10 +88,7 @@ func TestDatabaseCDB(t *testing.T) {
 	f := &fakeQuerier{responses: []sqlRows{
 		rows(dbRow("YES", "ORCLCDB", "CDB$ROOT", "ARCHIVELOG", "YES", "YES", "YES", "YES", "YES", "NO")),
 		rows([]string{"ORCLPDB1"}, []string{"ORCLPDB2"}),
-		rows(
-			[]string{"Oracle Database 23ai Free Edition Release 23.0.0.0.0 - Production"},
-			[]string{"NLSRTL Version 23.0.0.0.0 - Production"},
-		),
+		rows([]string{banner26ai}),
 	}}
 	c := testClient(f)
 
@@ -109,8 +106,8 @@ func TestDatabaseCDB(t *testing.T) {
 		Supplemental: SupplementalLogging{
 			Minimal: true, PrimaryKey: true, All: true, ForeignKey: true, UniqueIndex: false,
 		},
-		Version: "Oracle Database 23ai Free Edition Release 23.0.0.0.0 - Production",
-		Edition: "Free Edition",
+		Version: banner26ai,
+		Edition: "Free",
 	}
 	if !equalDB(got, want) {
 		t.Fatalf("Database = %+v, want %+v", got, want)
@@ -149,6 +146,57 @@ func TestDatabaseNonCDB(t *testing.T) {
 	// A non-CDB must not issue the V$CONTAINERS query.
 	if len(f.queries) != 2 {
 		t.Fatalf("expected 2 queries, got %d", len(f.queries))
+	}
+}
+
+// TestDatabaseVersionBanner reads V$VERSION as the real releases return it:
+// one row on 23ai and 26ai, a product row before the component rows on 12c to
+// 19c, and no product row at all.
+func TestDatabaseVersionBanner(t *testing.T) {
+	cases := []struct {
+		name        string
+		banners     [][]string
+		wantVersion string
+		wantEdition string
+		wantErr     bool
+	}{
+		{"23ai Free (23.9)", [][]string{{banner23ai}}, banner23ai, "Free", false},
+		{"26ai Free (23.26.3)", [][]string{{banner26ai}}, banner26ai, "Free", false},
+		{"19c with component rows", [][]string{
+			{"Oracle Database 19c Enterprise Edition Release 19.0.0.0.0 - Production"},
+			{"PL/SQL Release 19.0.0.0.0 - Production"},
+			{"CORE\t19.0.0.0.0\tProduction"},
+			{"TNS for Linux: Version 19.0.0.0.0 - Production"},
+			{"NLSRTL Version 19.0.0.0.0 - Production"},
+		}, "Oracle Database 19c Enterprise Edition Release 19.0.0.0.0 - Production", "Enterprise Edition", false},
+		{"component rows only", [][]string{
+			{"PL/SQL Release 19.0.0.0.0 - Production"},
+			{"NLSRTL Version 19.0.0.0.0 - Production"},
+		}, "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeQuerier{responses: []sqlRows{
+				rows(dbRow("NO", "FREE", "FREE", "ARCHIVELOG", "NO", "YES", "NO", "NO", "NO", "NO")),
+				rows(tc.banners...),
+			}}
+			got, err := testClient(f).Database(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Database = %+v, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Database: %v", err)
+			}
+			if got.Version != tc.wantVersion || got.Edition != tc.wantEdition {
+				t.Fatalf("Version, Edition = %q, %q; want %q, %q", got.Version, got.Edition, tc.wantVersion, tc.wantEdition)
+			}
+			if got.LogMode != "ARCHIVELOG" || !got.Supplemental.Minimal {
+				t.Fatalf("prerequisites lost: %+v", got)
+			}
+		})
 	}
 }
 

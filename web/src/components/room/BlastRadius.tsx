@@ -5,6 +5,8 @@ import { Badge } from '@/components/ui/badge'
 import { Clock } from './Clock'
 import { previewLine } from '../../lib/recovery'
 import { StatusDot } from './StatusDot'
+import { DiffPreview } from './DiffPreview'
+import { splitFooter } from '../../lib/fixpr'
 
 /** How long the "Previewing…" skeleton shows before it gives way to the muted "unavailable". */
 export const PREVIEW_WAIT_MS = 20_000
@@ -54,6 +56,8 @@ export function BlastRadius({ proposal, topology }: { proposal: ProposalState; t
         const pv = sp.preview
         // X2: read from the target by the action's Preview; a fix has none, so its preview is unchanged.
         const recovers = pv ? previewLine(pv.count, pv.unit) : undefined
+        // Q7: a PR step's expected text ends with the PR body's footer, which the diff block shows apart.
+        const { expected, footer } = pv?.diff ? splitFooter(pv.expected) : { expected: pv?.expected ?? '', footer: undefined }
         return (
           <div key={sp.step_index} className="flex flex-col gap-1" data-testid={`preview-step-${sp.step_index}`}>
             {sp.error && (
@@ -82,13 +86,14 @@ export function BlastRadius({ proposal, topology }: { proposal: ProposalState; t
                     →
                   </span>
                   <span className="text-xs font-medium text-subtle-foreground">Expected: </span>
-                  {pv.expected}
+                  {expected}
                 </p>
                 <p className="m-0 break-words text-[13px] leading-[18px]">
                   <span className="text-xs font-medium text-subtle-foreground">Downstream: </span>
                   {pv.downstream && pv.downstream.length > 0 ? pv.downstream.map(nameOf).join(' → ') : 'downstream unknown'}
                 </p>
                 {pv.dry_run && <DryRun dry={pv.dry_run} />}
+                {pv.diff && <DiffPreview diff={pv.diff} footer={footer} stepIndex={sp.step_index} />}
               </>
             )}
           </div>

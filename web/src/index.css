@@ -84,6 +84,7 @@
   --color-layer-warehouse: var(--layer-warehouse);
   --color-layer-orchestrator: var(--layer-orchestrator);
   --color-layer-transform: var(--layer-transform);
+  --color-layer-mysql: var(--layer-mysql);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
@@ -232,6 +233,7 @@
   --layer-warehouse: #9fb3ff;
   --layer-orchestrator: #4dd6e0;
   --layer-transform: #d98bd4;
+  --layer-mysql: #d8cb5c;
 
   --overlay: rgb(0 0 0 / 0.6);
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
@@ -298,6 +300,7 @@
   --layer-warehouse: #4356bd;
   --layer-orchestrator: #0e7490;
   --layer-transform: #86198f;
+  --layer-mysql: #665d00;
 
   --overlay: rgb(24 24 27 / 0.45);
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
@@ -356,6 +359,7 @@
     --layer-warehouse: #4356bd;
     --layer-orchestrator: #0e7490;
     --layer-transform: #86198f;
+    --layer-mysql: #665d00;
     --overlay: rgb(24 24 27 / 0.45);
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
     --shadow-md: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);

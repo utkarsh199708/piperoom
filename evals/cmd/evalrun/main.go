@@ -11,6 +11,9 @@
 //	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
 //	go run ./evals/cmd/evalrun -validate -set heldout   # the held-out set; never tune prompts on it
 //	go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run   # what a verdict-cache fill would cost; no model calls
+//	go run ./evals/cmd/evalrun -provider openai -flavor ollama -model M -runs 3 -gate evals/baseline/default.json -out cand.json
+//	go run ./evals/cmd/evalrun -gate evals/baseline/default.json cand.json   # gate a saved report; no model calls
+//	go run ./evals/cmd/evalrun -models-table evals/baseline   # the published per-model table, reference first
 package main
 
 import (
@@ -74,6 +77,7 @@ type flags struct {
 	learned     string
 	failOnRegr  bool
 	check       bool
+	list        bool
 	fromShadow  string
 	owners      string
 	name        string
@@ -81,6 +85,13 @@ type flags struct {
 	prices      string
 	commit      string
 	noTap       bool
+	// V10: the model under test and its gate.
+	provider      string
+	flavor        string
+	judgeProvider string
+	gate          string
+	gateConfig    string
+	modelsTable   string
 	// args are the positional arguments: the candidate of -compare a.json b.json.
 	args []string
 }
@@ -134,6 +145,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.agreement, "agreement", "", "FILE-OR-DIR of saved GET /shadow?include=data,room responses: score the agent's final hypothesis against the human label and print the agreement table; offline, never for graders before they grade (-out writes the JSON summary, -judge claude uses the LLM judge)")
 	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
+	fs.BoolVar(&f.list, "list", false, "print the names of the scenarios a run would replay, one per line, without those held out by pending_harness; no model calls (the evals-live workflow counts them with `evalrun -list | wc -l`)")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
 	fs.BoolVar(&f.check, "validate", false, "same as -check")
 	fs.StringVar(&f.fromShadow, "from-shadow", "", "build a scenario from a saved GET /api/rooms/{id}/shadow?include=room response and exit; YAML goes to stdout or -out/-o; no model calls")
@@ -142,7 +154,13 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.out, "o", "", "same as -out")
 	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
 	fs.StringVar(&f.commit, "commit", "", "source revision to record in every result (default: the build's VCS stamp, else git rev-parse HEAD)")
-	fs.BoolVar(&f.noTap, "no-tap", false, "do not put the model tap in front of the Anthropic API; results then record prompt_hash \"untapped\"")
+	fs.StringVar(&f.provider, "provider", "", "model provider of the agent: anthropic, bedrock, vertex, openai, gemini or bedrock-converse (default PIPEROOM_MODEL_PROVIDER); the role, key and start-check rules are the server's. The judge stays on its own provider (-judge-provider)")
+	fs.StringVar(&f.flavor, "flavor", "", "OpenAI-compatible flavor with -provider openai: openai, azure, deepseek, qwen, mistral, groq, together, openrouter, xai, ollama, vllm or generic (default PIPEROOM_MODEL_FLAVOR)")
+	fs.StringVar(&f.judgeProvider, "judge-provider", "", "provider of the LLM judge: anthropic, bedrock or vertex (default PIPEROOM_MODEL_PROVIDER from the environment; -provider never moves the judge, so verdicts compare across models)")
+	fs.StringVar(&f.gate, "gate", "", "REF.json: after the run, check the report against this 3-run reference with the hard gates and quality floors of -gate-config; exit 4 on a hard-gate failure, 5 on a floor miss. With one positional CANDIDATE.json, gate that saved report and exit; no model calls")
+	fs.StringVar(&f.gateConfig, "gate-config", evals.DefaultGateFile, "the gate's thresholds (repo policy; changed only by a reviewed PR)")
+	fs.StringVar(&f.modelsTable, "models-table", "", "DIR of baselines (evals/baseline): print the published per-model table, the reference first, each baseline with its gate verdict, and exit; no model calls")
+	fs.BoolVar(&f.noTap, "no-tap", false, "do not tap the model (the HTTP tap in front of the Anthropic API, or the in-process tap of openai, gemini and bedrock-converse); results then record prompt_hash \"untapped\"")
 	// Go's flag package stops at the first positional argument; parse on after
 	// each one so "-compare a.json b.json -fail-on-regression" keeps its flag.
 	for {
@@ -188,6 +206,12 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		}
 		return compare(base, cand, f, stdout)
 	}
+	if f.modelsTable != "" {
+		return runModelsTable(f, stdout)
+	}
+	if f.gate != "" && len(f.args) > 0 {
+		return runSavedGate(f, stdout)
+	}
 	if len(f.args) > 0 {
 		return 1, fmt.Errorf("unexpected arguments: %s", strings.Join(f.args, " "))
 	}
@@ -215,8 +239,28 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	// A pending_harness marker whose row has landed is refused by -check and by a
+	// run alike: the scenario must then be scored.
+	if err := evals.CheckPendingHarness(scenarios, evals.FindRepoRoot(".")); err != nil {
+		return 1, err
+	}
+	if f.list {
+		runnable, _ := evals.SplitPending(scenarios)
+		for _, sc := range runnable {
+			fmt.Fprintln(stdout, sc.Name)
+		}
+		return 0, nil
+	}
 	if scenarios, err = filter(scenarios, f.only); err != nil {
 		return 1, err
+	}
+	// Without -only the held-out scenarios are skipped; an explicit -only runs
+	// them, labelled in the report and kept out of the baseline comparison.
+	var heldOut, ranPending []string
+	if f.only == "" && !f.check {
+		scenarios, heldOut = evals.SplitPending(scenarios)
+	} else {
+		ranPending = evals.PendingNames(scenarios)
 	}
 	if f.check {
 		// -check also validates learned/pending/ so a fresh export is at least
@@ -250,12 +294,25 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		return 0, nil
 	}
 
-	cfg := config.Load()
-	// Fail before any work rather than after the first model call; the key
-	// itself is read by the SDK and never touched or logged here. Bedrock
-	// and Vertex use their own credentials.
-	if p := strings.ToLower(strings.TrimSpace(cfg.ModelProvider)); (p == "" || p == agent.ProviderAnthropic) && os.Getenv("ANTHROPIC_API_KEY") == "" {
-		return 1, errors.New("ANTHROPIC_API_KEY is not set (use -check to validate scenarios without it)")
+	// The gate's file and reference are checked before any model call, so a
+	// 1-run reference or a bad gate.yaml costs nothing.
+	var gate *gateInputs
+	if f.gate != "" {
+		g, err := loadGate(f)
+		if err != nil {
+			return 1, err
+		}
+		gate = &g
+	}
+	cfg, err := withModelFlags(config.Load(), f)
+	if err != nil {
+		return 1, err
+	}
+	// Fail before any work rather than after the first model call: every
+	// role's key, by its provider (keys.go). Only presence is checked; a key
+	// is read by its client and never touched or logged here.
+	if err := checkModelKeys(cfg, os.Getenv, fileExists); err != nil {
+		return 1, err
 	}
 	var baseline *evals.Report
 	if f.baseline != "" {
@@ -302,20 +359,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	defer stop()
 
 	// The agent runs as in cmd/server: the room service starts the Endpoint
-	// that wiring.NewAgentEndpoint builds. The tap goes in first, because the
-	// SDK reads its base URL when the Endpoint's client is built.
-	var tap *evals.ModelTap
-	if !f.noTap {
-		if tap, err = evals.InstallModelTap(cfg.ModelProvider); err != nil {
-			return 1, err
-		}
-		if tap != nil {
-			defer tap.Close()
-		}
-	}
-	runner, err := evals.NewEndpointRunner(ctx, cfg, logger)
+	// that wiring.NewAgentEndpoint builds.
+	runner, tap, err := tappedRunner(ctx, cfg, f.noTap, logger, stderr)
 	if err != nil {
 		return 1, err
+	}
+	if c, ok := tap.(io.Closer); ok {
+		defer c.Close()
 	}
 	commit := f.commit
 	if commit == "" {
@@ -365,6 +415,8 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		},
 	})
 	usage.Apply(&rep)
+	recordModel(&rep, cfg)
+	rep.PendingHarness, rep.PendingHarnessRan = heldOut, ranPending
 	// A stopped or partly failed evaluation still writes what finished.
 	if err := writeReport(rep, f, stdout); err != nil {
 		return 1, errors.Join(runErr, err)
@@ -377,14 +429,31 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if runErr != nil {
 		return 1, runErr
 	}
+	code := 0
 	if baseline != nil {
 		fmt.Fprintln(stdout)
-		return compare(*baseline, rep, f, stdout)
+		if code, err = compare(*baseline, rep, f, stdout); err != nil {
+			return code, err
+		}
 	}
-	return 0, nil
+	if gate != nil {
+		fmt.Fprintln(stdout)
+		gc, err := runGate(gate.ref, rep, gate.cfg, stdout)
+		if err != nil || gc != 0 {
+			return gc, err
+		}
+	}
+	return code, nil
 }
 
 func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
+	// Scenarios held out by pending_harness (skipped, or run by an explicit
+	// -only) are in neither side of the comparison: a skipped one would read as
+	// missing from the candidate, and a pending one cannot regress a baseline
+	// recorded before its harness existed.
+	if skip := append(append([]string(nil), cand.PendingHarness...), cand.PendingHarnessRan...); len(skip) > 0 {
+		base, cand = withoutScenarios(base, skip), withoutScenarios(cand, skip)
+	}
 	subset := f.only != ""
 	total := 0
 	if subset {
@@ -417,6 +486,22 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 	return 0, nil
 }
 
+// withoutScenarios is the report with the named scenarios dropped from its rows,
+// results and rates.
+func withoutScenarios(r evals.Report, drop []string) evals.Report {
+	gone := map[string]bool{}
+	for _, n := range drop {
+		gone[n] = true
+	}
+	var keep []string
+	for _, s := range r.Scenarios {
+		if !gone[s.Name] {
+			keep = append(keep, s.Name)
+		}
+	}
+	return r.Restrict(keep)
+}
+
 // liveJudge builds the live LLM judge a run needs. -judge llm (or a
 // scenario's judge: llm; claude is the alias) must have it, and so must -judge auto (the
 // default) unless it may make no live call (-judge-cache-only, or
@@ -429,7 +514,7 @@ func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, erro
 	if !needed && (!auto || f.cacheOnly || f.maxCalls <= 0) {
 		return nil, nil
 	}
-	j, err := newJudge(f.judgeModel)
+	j, err := newJudge(f.judgeModel, f.judgeProvider)
 	switch {
 	case err != nil && (needed || !errors.Is(err, errNoLiveJudge)):
 		// A -tags livejudge build whose provider setup failed (no Vertex

@@ -55,7 +55,7 @@ const (
 type Deps struct {
 	// Forge reads the repositories. Required: the tools are registered only
 	// when a forge is configured (design §12).
-	Forge forge.ForgeReader
+	Forge clients.ForgeReader
 	// Owners resolves the room's pipeline (tools.ScopeFor). Required.
 	Owners *owners.Owners
 	// Repos gives each pipeline's repos: block. Required.
@@ -89,6 +89,8 @@ type returnedSHAs struct {
 	m  map[string][]string
 }
 
+// refKey keys a repository by host, owner and name (Host from owners.yaml's
+// repos[].url; "" when the source left it out).
 func refKey(r forge.RepoRef) string { return strings.ToLower(r.Host + "/" + r.Owner + "/" + r.Name) }
 
 func (s *returnedSHAs) add(r forge.RepoRef, sha string) {
