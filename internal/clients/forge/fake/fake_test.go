@@ -26,7 +26,7 @@ func TestFakeForge(t *testing.T) {
 		t.Fatalf("head %s %v", head, err)
 	}
 	file, err := f.File(ctx, ref, base, "docker/Dockerfile")
-	if err != nil || string(file.Content) != "FROM a\n" || file.BlobSHA != forge.BlobSHA([]byte("FROM a\n")) {
+	if err != nil || string(file.Content) != "FROM a\n" || file.BlobSHA != blobID([]byte("FROM a\n")) {
 		t.Fatalf("file %+v %v", file, err)
 	}
 	if _, err := f.File(ctx, ref, base, "docker"); !errors.Is(err, forge.ErrNotRegularFile) {
@@ -91,5 +91,26 @@ func TestFakeForge(t *testing.T) {
 	f.SetErr(errors.New("down"))
 	if _, err := f.RepoInfo(ctx, ref); err == nil {
 		t.Fatal("SetErr ignored")
+	}
+}
+
+// TestFakeIDsAreNotGitObjectIDs pins the fake's id scheme: SHA-256 cut to
+// Git's 40 hex digits, never Git's SHA-1 object ids. File content (eval
+// fixtures, proposed fixes) can hold secrets, and those bytes must never be
+// fed to a weak hash; the fake's ids are in-memory only, so nothing requires
+// Git's scheme, while the 40-hex shape is what the fixpr and repo_read_file
+// tools require of a base_sha.
+func TestFakeIDsAreNotGitObjectIDs(t *testing.T) {
+	f := New()
+	base := f.AddRepo(ref, forge.RepoInfo{Visibility: "private"}, map[string]string{"a.txt": "s3cr3t"})
+	if len(base) != 40 {
+		t.Fatalf("commit id %q is not 40 hex digits", base)
+	}
+	if blobID([]byte("s3cr3t")) == forge.BlobSHA([]byte("s3cr3t")) {
+		t.Fatal("fake blob id must not be the git SHA-1 blob id")
+	}
+	file, err := f.File(context.Background(), ref, base, "a.txt")
+	if err != nil || file.BlobSHA != blobID([]byte("s3cr3t")) || len(file.BlobSHA) != 40 {
+		t.Fatalf("file %+v %v", file, err)
 	}
 }
