@@ -609,7 +609,7 @@ func (l *setupLadder) issueRead(ctx context.Context, tool string, input map[stri
 		return r
 	}
 	r.Input = raw
-	t, ok := l.s.toolsFor(l.prov.ID).Get(tool)
+	t, ok := l.s.setupToolsFor(l.prov.ID).Get(tool)
 	if !ok {
 		r.Note = "the read " + cleanPlanName(tool) + " is not available in this room"
 		return r
