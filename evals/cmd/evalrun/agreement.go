@@ -20,7 +20,7 @@ func runAgreement(f flags, stdout io.Writer) (int, error) {
 	switch f.judge {
 	case "", evals.JudgeTerms:
 	case evals.JudgeLLM, evals.JudgeClaude:
-		j, err := newJudge(f.judgeModel)
+		j, err := newJudge(f.judgeModel, "")
 		if err != nil {
 			return 1, err
 		}

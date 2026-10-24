@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -43,6 +44,13 @@ type SupportedModel struct {
 	// Sunset is the provider's announced retirement date; after it the row
 	// counts as not listed.
 	Sunset string `json:"sunset,omitempty"`
+	// PassRate, RootCauseRate and CostPerRunUSD are the gate run's results
+	// for GET /api/models: the share of scenarios passed and of root causes
+	// found (0 to 1), and the mean cost of one run in US dollars. Nil = not
+	// recorded.
+	PassRate      *float64 `json:"pass_rate,omitempty"`
+	RootCauseRate *float64 `json:"root_cause_rate,omitempty"`
+	CostPerRunUSD *float64 `json:"cost_per_run_usd,omitempty"`
 }
 
 // SupportedModels parses the embedded supported.json.
@@ -100,6 +108,15 @@ func ParseSupported(b []byte) ([]SupportedModel, error) {
 		if m.Sunset != "" {
 			if _, err := time.Parse(time.DateOnly, m.Sunset); err != nil {
 				return nil, errors.New(where + ": sunset must be YYYY-MM-DD")
+			}
+		}
+		for _, r := range []struct {
+			name string
+			v    *float64
+			max  float64
+		}{{"pass_rate", m.PassRate, 1}, {"root_cause_rate", m.RootCauseRate, 1}, {"cost_per_run_usd", m.CostPerRunUSD, math.MaxFloat64}} {
+			if r.v != nil && !(*r.v >= 0 && *r.v <= r.max) {
+				return nil, fmt.Errorf("%s: %s must be between 0 and %g", where, r.name, r.max)
 			}
 		}
 		k := m.Provider + "\x00" + m.Flavor + "\x00" + m.Model

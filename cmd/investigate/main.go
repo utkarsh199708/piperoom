@@ -143,7 +143,8 @@ func run(o runOptions) (err error) {
 
 	// The model endpoint (provider, triage model, token budget) comes from the
 	// same settings as the server; a bad value stops the run before any tool opens.
-	// One AWS config for the process, shared by Bedrock and MSK IAM.
+	// One AWS config for the process, shared by Bedrock, Bedrock Converse and
+	// MSK IAM.
 	awsCfg, err := wiring.LoadAWS(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("investigate: %w", err)

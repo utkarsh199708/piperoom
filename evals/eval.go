@@ -44,8 +44,10 @@ type Config struct {
 	// it, see Provenance); it is copied into every result.
 	Commit string
 	// Tap, when set, is the model tap the runner's requests go through; it
-	// gives every result the models used and the prompt hash (modeltap.go).
-	Tap *ModelTap
+	// gives every result the models used and the prompt hash: the Anthropic
+	// HTTP tap (modeltap.go) or the in-process tap of the other adapters
+	// (neutraltap.go). Never a typed nil: leave it unset for an untapped run.
+	Tap PromptTap
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
 	// Judge forces the judge mode for every scenario ("terms", "claude" or

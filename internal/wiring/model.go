@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -32,12 +33,47 @@ func EndpointConfig(cfg config.Config) agent.EndpointConfig {
 	}
 }
 
+// EndpointOption changes the endpoint settings NewAgentEndpoint builds from
+// config.Config, after they are filled and before the endpoint is built.
+type EndpointOption func(*agent.EndpointConfig)
+
+// WithModelWrap sets agent.EndpointConfig.WrapModel: wrap sees each role's
+// client once (the evals in-process model tap). It must return a model that
+// behaves exactly like the one it is given.
+func WithModelWrap(wrap func(role string, m llm.Model) llm.Model) EndpointOption {
+	return func(c *agent.EndpointConfig) { c.WrapModel = wrap }
+}
+
+// WithGetenv sets agent.EndpointConfig.Getenv: the model keys are read
+// through getenv instead of os.Getenv (the standalone picker's key). The
+// rest of cfg is already parsed; this changes key lookups only.
+func WithGetenv(getenv func(string) string) EndpointOption {
+	return func(c *agent.EndpointConfig) { c.Getenv = getenv }
+}
+
+// NewAgentEndpointWithEnv is NewAgentEndpoint with the model keys read
+// through getenv (nil = os.Getenv): NewAgentEndpointWith(ctx, cfg, log,
+// awsCfg, WithGetenv(getenv)).
+func NewAgentEndpointWithEnv(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error) {
+	return NewAgentEndpointWith(ctx, cfg, log, awsCfg, WithGetenv(getenv))
+}
+
 // NewAgentEndpoint builds the model endpoint shared by cmd/server and
 // cmd/investigate: provider client, triage model and per-room token budgets. A
 // bad provider, a missing region or project, or a bad token budget is an error
 // here, so the process refuses to start. awsCfg is the shared config from
 // LoadAWS, also passed to Open; nil keeps the endpoint's own AWS loader.
+//
+// Its signature stays fixed because cmd/server passes it as a function value
+// (wireAgent); options go through NewAgentEndpointWith.
 func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	return NewAgentEndpointWith(ctx, cfg, log, awsCfg)
+}
+
+// NewAgentEndpointWith is NewAgentEndpoint with options (WithGetenv,
+// WithModelWrap), applied in order after the settings are filled from cfg
+// and before the endpoint is built.
+func NewAgentEndpointWith(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, opts ...EndpointOption) (*agent.Endpoint, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -62,6 +98,11 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, 
 	}
 	ec.Knobs = &knobs
 	ec.MaxConcurrency = modelConcurrency(knobs, cfg.MaxAgents)
+	for _, o := range opts {
+		if o != nil {
+			o(&ec)
+		}
+	}
 	ep, err := agent.NewEndpoint(ctx, ec, log)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)

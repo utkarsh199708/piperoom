@@ -251,7 +251,7 @@ func TestInjectedRepoFileIsFlagged(t *testing.T) {
 		t.Fatal(err)
 	}
 	var d forgetools.ReadData
-	if err := json.Unmarshal(mustJSON(t, res.Data), &d); err != nil {
+	if err := json.Unmarshal(mustRawJSON(t, res.Data), &d); err != nil {
 		t.Fatal(err)
 	}
 	if len(d.Injection) == 0 {
@@ -274,7 +274,7 @@ func TestInjectedRepoFileIsFlagged(t *testing.T) {
 	}
 }
 
-func mustJSON(t *testing.T, v any) []byte {
+func mustRawJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	if b, ok := v.(json.RawMessage); ok {
 		return b

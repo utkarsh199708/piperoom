@@ -368,7 +368,7 @@ var syntheticLabels = map[string]Label{
 	"toast-placeholder":   {"kafka-connect", []string{"replica identity", "toast*"}},
 	// The Q3f worker-visibility and Q5f stale-source-offsets scenarios.
 	"tolerance-all-skips":          {"kafka-connect", []string{"errors.tolerance", "skipp*"}},
-	"internal-topic-not-compacted": {"kafka-connect", []string{"compact*", "cleanup.policy", "offsets topic"}},
+	"internal-topic-not-compacted": {"kafka", []string{"compact*", "cleanup.policy", "offsets topic"}}, // R3 (W4n)
 	"rebalance-loop":               {"kafka-connect", []string{"rebalance loop", "group.id", "staging"}},
 	"stale-source-offsets":         {"kafka-connect", []string{"source offsets", "old orders database", "repointed"}},
 	// The Q6c network-probe scenarios (KAN-250).
@@ -383,7 +383,7 @@ var syntheticLabels = map[string]Label{
 	// the failed task, the missing slot or the retained WAL, never the cause.
 	"no-replica-identity": {"postgres", []string{"omits the old tuple"}},
 	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
-	"blocked-slot":        {"postgres", []string{"48213", "blocks_slot"}},
+	"blocked-slot":        {"kafka-connect", []string{"48213", "blocks_slot"}}, // R1 (W4n)
 	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},

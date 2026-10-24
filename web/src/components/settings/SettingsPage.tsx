@@ -1,6 +1,7 @@
 import { Download, Lock } from 'lucide-react'
 import { ADMIN_CONFIG_EXPORT_URL } from '@/api/client'
 import type { AdminConfig } from '@/api/types'
+import { ModelSection } from '@/components/models/ModelSection'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -20,7 +21,17 @@ export function SettingsPage() {
   // A non-admin never asks: the server would answer 403, and the state below is the same.
   const { view, reload } = useAdminConfig(admin)
 
-  if (!admin || view.phase === 'forbidden') return <AdminsOnly />
+  // The Model panel is open to every logged-in user (GET /api/models), so it shows here for a non-admin too.
+  if (!admin || view.phase === 'forbidden') {
+    return (
+      <>
+        <AdminsOnly />
+        <div className="mx-auto w-full max-w-5xl px-4 pb-8 sm:px-6">
+          <ModelBlock canEdit={user.role !== 'viewer'} />
+        </div>
+      </>
+    )
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 text-sm sm:px-6">
@@ -41,7 +52,19 @@ export function SettingsPage() {
         </div>
       )}
       {view.phase === 'ready' && <Loaded config={view.config} />}
+      {view.phase === 'ready' && <ModelBlock canEdit={user.role !== 'viewer'} />}
     </div>
+  )
+}
+
+function ModelBlock({ canEdit }: { canEdit: boolean }) {
+  return (
+    <section aria-labelledby="settings-model" className="flex flex-col gap-3 border-t border-border pt-5">
+      <h2 id="settings-model" className="m-0 text-base font-semibold">
+        Model
+      </h2>
+      <ModelSection canEdit={canEdit} />
+    </section>
   )
 }
 

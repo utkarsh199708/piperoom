@@ -1572,3 +1572,72 @@ export interface ProbeResult {
   took_ms: number
   checks: ProbeCheck[]
 }
+
+// ---- Models (V8; docs/api.md "Models", docs/design/model-providers.md section 11) ----
+
+/** Server mode of GET /api/models. Only standalone and quickstart can change the model. */
+export type ModelMode = 'team' | 'standalone' | 'quickstart'
+
+/** `reference` is a Claude provider (never checked against the list). */
+export type ModelStatus = 'reference' | 'supported' | 'experimental' | 'unverified'
+
+/** USD per million tokens. */
+export interface ModelPrice {
+  input: number
+  output: number
+  cache_write?: number
+  cache_read?: number
+}
+
+export interface ModelRole {
+  /** main | triage | first_look | summary | judge. */
+  role: string
+  provider: string
+  /** Only for provider `openai`. */
+  flavor?: string
+  model: string
+  /** The host only; the server never sends a whole base URL or a key. */
+  base_url_host?: string
+  region?: string
+  status: ModelStatus
+  prompt_cache: boolean
+  /** null when unpriced. */
+  price: ModelPrice | null
+  /** Present only when supported.json sets one. */
+  sunset?: string
+  /** Whether a key is configured for the role's provider. Never the key. */
+  key_set: boolean
+}
+
+export interface SupportedModel {
+  provider: string
+  flavor?: string
+  model: string
+  status: 'supported' | 'experimental'
+  alias: boolean
+  /** null while the row carries no baseline numbers: shown as "not measured yet". */
+  pass_rate: number | null
+  root_cause_rate: number | null
+  cost_per_run_usd: number | null
+  gated_at: string
+  sunset: string
+}
+
+/** GET /api/models, and the answer of PUT /api/models. */
+export interface ModelPanel {
+  mode: ModelMode
+  /** `no_model` only on a standalone or quickstart server with no usable model. */
+  state: 'ready' | 'no_model'
+  roles: ModelRole[] | null
+  supported: SupportedModel[] | null
+}
+
+/** PUT /api/models body. `key` is sent on this request only and never read back. */
+export interface ModelChoice {
+  provider: string
+  flavor?: string
+  base_url?: string
+  model: string
+  /** Absent keeps the stored key; "" means this target takes no key. */
+  key?: string
+}
