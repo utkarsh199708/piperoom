@@ -563,4 +563,12 @@ expect:
   fix_targets:
     source_end_session: {connector: pg-orders-connector, pid: 48213}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
-  max_tool_calls: 12
+  # Tool budget (ruling R18, tasks/W4-evals-to-100.md, which applies R8; W4n-3, KAN-497; 12 -> 21).
+  # Live run 40066306931 made 19 calls on this scenario and failed on the budget alone, so it is a
+  # passing path: 19 + 2 = 21. Its turn split was not read from the transcript; the split of the
+  # standard path, NOT MEASURED, is turn 1 (the alert) about 12 reads (pipeline map, Connect status
+  # and config, slots, streaming liveness, long transactions, blocking sessions, recent DDL,
+  # publication tables, source settings, warehouse freshness, similar incidents) and turn 2
+  # (priya's steer) about 7 (blocking sessions and slots again before proposing source_end_session,
+  # Connect status, the worker log, the role grants, the table's replication settings, a trace).
+  max_tool_calls: 21

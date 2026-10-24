@@ -5,14 +5,16 @@
 # generated from fake clients, so regenerate them if a tool's output format changes.
 # kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
-# First failing layer: kafka. Root-cause layer: kafka (retention shorter than the consumer outage).
-#   Alternative root-cause layer: consumer (root_cause_layer_alt). The cause is two-sided: retention
-#   deleted the records (kafka), but only because order-sync was scaled to 0 for 87.6 h, longer than
-#   the 48 h retention (consumer). A hypothesis that places the cause in either layer passes the
-#   root-cause-layer grade; the root_cause groups below still require a retention term and a loss
-#   term, so "the consumer was down" alone does not pass. Ruled a legitimate label fix on #684
-#   (reviews/evals-2026-10-19/diagnosis.md, P3-W3d; shipped as P3-W3d-2). Ruling R2
-#   (tasks/W4-evals-to-100.md, 2026-10-23) keeps this label: first failing kafka, consumer alt.
+# First failing layer: consumer. Root-cause layer: kafka (retention shorter than the consumer
+#   outage). No alternative root-cause layer. Ruling R14 (tasks/W4-evals-to-100.md, 2026-10-24,
+#   amends R2; applied in W4n-3, KAN-497): under prompt rule 4 as W4f kept it, the first failing
+#   stage is the most upstream one whose own read shows it failed, and a component that still
+#   answers requests is at most the root cause. order-sync's own read shows it failed (every pod
+#   crash-loops on OffsetOutOfRangeException, the group is Empty); Kafka answers every read (topic
+#   offsets, config, key lookups), so Kafka is the root cause, not the first failure. The
+#   consumer alternative of P3-W3d-2 (#684) is gone: it would now equal first_failing_layer, which
+#   validation refuses. The root_cause groups below still require a retention term and a loss
+#   term, so "the consumer was down" alone does not pass.
 #   Alert fired at: consumer (crash loop) / warehouse.
 #   Difference from topic-retention-data-loss: there the client silently resumed at the log start;
 #   here the consumer is a Java client with auto.offset.reset=none, it fails loudly, and the group is
@@ -63,8 +65,9 @@ description: |
   offsets, which are now below the log start offsets; the consumer is configured with
   auto.offset.reset=none and dies with OffsetOutOfRangeException. The group is Empty, lag looks like
   37864551 (end minus a committed offset that no longer exists), and the warehouse is 87.6 hours stale.
-  Postgres, Debezium, the registry and the topic are healthy. A recent additive ADD COLUMN is
-  unrelated.
+  Postgres, Debezium and the registry are healthy, and the topic answers every read. A recent
+  additive ADD COLUMN is unrelated. The first component that fails is order-sync, which
+  crash-loops; Kafka, which deleted the records by retention, holds the root cause.
 
   Root cause: topic retention (48 h) was shorter than the consumer's outage, so the log start moved
   past order-sync's committed offsets and the changes in between were deleted before they were read.
@@ -268,9 +271,10 @@ expect:
     - [loyalty_tier, break*]
     - ['schema change', broke]
     - ['schema change', break*]
-  first_failing_layer: kafka
+  # R14: order-sync is the first failing stage (crash loop); Kafka answers reads and holds the
+  # root cause. No alt: [consumer] would equal first_failing_layer.
+  first_failing_layer: consumer
   root_cause_layer: kafka
-  root_cause_layer_alt: [consumer]
   # The log start of every partition is above order-sync's committed offset,
   # and retention is 48 h.
   expected_facts:
