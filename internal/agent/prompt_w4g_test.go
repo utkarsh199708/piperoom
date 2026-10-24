@@ -48,8 +48,15 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 		// fix round (evals-live 40077638804: schema-change named the registry,
 		// injection-kafka-record-key a record key, tolerance-all-skips no
 		// Connect component) asks for each component's layer too, as the
-		// pipeline map's brackets name it.
-		const form = `update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <component>." even if identical; set its scope.`
+		// pipeline map's brackets name it. Its second run (40085823038:
+		// consumer-poison-pill, source-column-dropped and
+		// injection-kafka-record-key wrote "Root cause: consumer order-sync",
+		// the failing component again) makes the root-cause slot the cause,
+		// not a component: "Root cause: <layer> <cause>".
+		const form = `update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <cause>." even if identical; set its scope.`
+		if strings.Contains(r4, "Root cause: <layer> <component>") {
+			t.Errorf("write mode %v: the root-cause slot asks for a component again", write)
+		}
 		if want := w4gFrozenRule4 + w4gRootCause + " " + form; r4 != want {
 			t.Errorf("write mode %v: rule 4 =\n%s\nwant\n%s", write, r4, want)
 		}

@@ -137,8 +137,10 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // on #993). No scenario's setting or value is named. Its fix round
 // (evals-live 40077638804: the root-cause layer went unnamed in
 // schema-change, injection-kafka-record-key and tolerance-all-skips) makes
-// the hypothesis form name each component's layer, "First failing: <layer>
-// <component>. Root cause: <layer> <component>.". Word-neutral (1335 before
+// the hypothesis form name each layer, "First failing: <layer> <component>.
+// Root cause: <layer> <cause>." (the second run, 40085823038, filled a
+// "<layer> <component>" root-cause slot with the failing consumer, so the
+// slot asks for the cause). Word-neutral (1335 before
 // KAN-515's hold rule, 1353 after it) by contractions in the intro and
 // rules 1, 3, 4, 6 and 7 and the resume
 // bullet, "You only read and propose fixes", one clause for rule 5's steer
@@ -161,7 +163,7 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "e427bf08314f253b6cc9d1ed21de40f595625d3b2c8724276c34a6fc50807fa3"
+const cdcPromptSHA256 = "2d2ec56e121490c900ae3f757f885b0aad585e61786db09c61252acc59e73a8a"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -175,7 +177,7 @@ const cdcPromptSHA256 = "e427bf08314f253b6cc9d1ed21de40f595625d3b2c8724276c34a6f
 // word-neutral: still 1353 words), and W4i (the negative claim's read in
 // rule 1, the restart bullet and the offsets note, word-neutral: still 1353
 // words).
-const cdcPromptWriteOffSHA256 = "ec598cfc0517dabf901597cbb086c853f94425d11aa81c6bf13aa8aae88e081b"
+const cdcPromptWriteOffSHA256 = "ca10a2f1f41a971332a0be9e87ab74ee30304e581e59e300dcf1cf241e97911d"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

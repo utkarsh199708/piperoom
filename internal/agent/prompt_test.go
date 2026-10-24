@@ -472,8 +472,9 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		// has update_hypothesis name it and the root cause in a fixed form.
 		"The first failing component is the most upstream stage whose own status read shows it failed",
 		"else the most upstream one that no longer does its job",
-		// W4g (KAN-506) names each component's layer in the form.
-		`update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <component>." even if identical`,
+		// W4g (KAN-506) names each layer in the form; the root-cause slot
+		// is the cause, not a component.
+		`update_hypothesis names a cause: "First failing: <layer> <component>. Root cause: <layer> <cause>." even if identical`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
