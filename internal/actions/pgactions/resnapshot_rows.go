@@ -136,6 +136,7 @@ func (a *resnapshotRows) Describe() string {
 		"The column must be the table's whole primary key or a date/timestamp column; integer, text, uuid and time values are bound as quoted literals. " +
 		"The signal goes where the connector config takes it: a row in its signal table (source in signal.enabled.channels) or a record on its signal.kafka.topic. " +
 		"The preview counts the matching rows (\"will re-emit N rows\") and the step is refused above max_rows (owners.yaml recovery.max_rows, default 100000). " +
+		"Use it only for rows whose change events never reached Kafka or were deleted from it; records still on the topic are replayed with kafka_replay_range. " +
 		"After it ran, the source and sink counts over the same range are compared until the sink has them all. Sinks that do not upsert by key see duplicates."
 }
 
@@ -296,6 +297,9 @@ func (a *resnapshotRows) CheckScope(pl owners.Pipeline, raw json.RawMessage) err
 }
 
 func resnapInScope(pl owners.Pipeline, p resnapParams) error {
+	if err := refuseMySQL(ResnapshotRowsName, pl); err != nil {
+		return err
+	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {
 		return fmt.Errorf("pgactions: %s: %w: pipeline %q is not a CDC pipeline", ResnapshotRowsName, tools.ErrOutOfScope, pl.ID)
 	}

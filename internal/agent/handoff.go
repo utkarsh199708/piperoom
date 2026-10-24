@@ -98,7 +98,7 @@ func summaryParams(roomEvents []events.Event, opts Options, prompt, what string)
 // requestSummary sends one request and parses the summary. It also returns the
 // model's raw text, which a retry replays as the assistant turn.
 func requestSummary(ctx context.Context, params llm.Request, m model, what string) (events.HandoffSummary, string, error) {
-	msg, err := m.Turn(ctx, params)
+	msg, text, err := structuredTurn(ctx, m.Turn, m.Capabilities(params.Model), params, what)
 	if err != nil {
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s request: %w", what, err)
 	}
@@ -106,7 +106,6 @@ func requestSummary(ctx context.Context, params llm.Request, m model, what strin
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: model refused the request", what)
 	}
 
-	text := extractText(msg.Message.Parts)
 	if strings.TrimSpace(text) == "" {
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: model returned no text", what)
 	}

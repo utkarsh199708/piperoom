@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"piperoom/internal/events"
@@ -174,7 +175,13 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 		verdict := fmt.Sprintf("NOT recovered: step %d of the driver's fix did not succeed; recovery was not checked.", failed+1)
 		r.emitVerification(ctx, events.AgentVerificationPayload{ProposalID: id, Checks: []events.VerificationCheck{}, Verdict: verdict})
 		r.setDriverVerdict(id, false)
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)}}
+		// A fix PR an earlier step opened may still merge: the verdict above
+		// is final for the proposal, so that merge checks nothing again.
+		if p := r.followDeferred(id, r.driverSteps(ctx, id), events.ProposalOriginDriver); p != nil {
+			p.final = true
+		}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)},
+			failures: []failedStep{{proposalID: id, index: failed, steps: r.driverSteps(ctx, id), text: in.Text}}}
 	case none || unknown >= 0:
 		// An unknown outcome claims neither way: no verdict is stored, so a
 		// later report of the same proposal is judged on its own.
@@ -183,10 +190,37 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 			verdict = fmt.Sprintf("not verified: the outcome of step %d of the driver's fix is unknown; recovery is not claimed.", unknown+1)
 		}
 		r.emitVerification(ctx, events.AgentVerificationPayload{ProposalID: id, Checks: []events.VerificationCheck{}, Verdict: verdict})
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)}}
+		if !none {
+			// The fix PRs of the steps before the unknown one are open: they
+			// are followed, and the proposal's verdict does not wait for the
+			// unknown step or the ones after it (they never ran).
+			steps := r.driverSteps(ctx, id)
+			for i := 0; i < unknown && i < len(steps); i++ {
+				if r.isDeferredAction(steps[i].Action) {
+					r.deferredOpened(ctx, id, steps, i, events.ProposalOriginDriver)
+				}
+			}
+			if _, ok := r.deferred[id]; ok {
+				out = mergeOutcome(out, r.deferredStepsStopped(ctx, id, unknown))
+			}
+		}
+		return out
 	}
 
 	rec := proposalRecord{id: id, steps: r.driverSteps(ctx, id)}
+	if slices.ContainsFunc(rec.steps, func(s events.ProposalStep) bool { return r.isDeferredAction(s.Action) }) {
+		// The driver's fix PRs are open: verified after they merge (Q7f).
+		out := actionOutcome{needsModel: true}
+		for i, st := range rec.steps {
+			if !r.isDeferredAction(st.Action) {
+				continue
+			}
+			one := r.deferredOpened(ctx, id, rec.steps, i, events.ProposalOriginDriver)
+			out.notes = append(out.notes, one.notes...)
+		}
+		return out
+	}
 	executedAt := r.nowTime()
 	if !in.At.IsZero() {
 		executedAt = minTime(in.At, executedAt)

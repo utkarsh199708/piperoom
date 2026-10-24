@@ -337,6 +337,28 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |-
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+    data: {"connector": "pg-orders-connector", "connector_user": "piperoom", "connector_user_source": "connector pg-orders-connector config database.user", "publication": "dbz_publication", "publication_source": "default", "publication_tables": [{"in_publication": true, "schema": "public", "selectable": true, "table": "orders"}], "source_tables": [{"in_publication": true, "schema": "public", "selectable": true, "table": "orders"}]}
+  - tool: connect_source_offsets
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=263235684640, lsn_proc=263235684640, ts_usec=1792918692480000, txId=918223
+    data: {"connectors": [{"connector": "pg-orders-connector", "offsets": [{"partition": {"server": "pg"}, "offset": {"lsn": 263235684640, "lsn_proc": 263235684640, "ts_usec": 1792918692480000, "txId": 918223}}]}]}
+  - tool: source_role_grants
+    input: {pipeline_id: "orders"}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data: {"connector": "pg-orders-connector", "connector_user": "piperoom", "connector_user_source": "connector pg-orders-connector config database.user", "role_info": {"role": "piperoom", "exists": true, "can_login": true, "replication": true, "selectable": {"public.orders": true}}}
 
 inputs:
   - kind: steer

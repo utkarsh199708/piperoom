@@ -93,8 +93,8 @@ func (e *Endpoint) JudgeHandoff(ctx context.Context, evs []events.Event, s event
 	if len(evs) == 0 {
 		return HandoffVerdict{}, fmt.Errorf("agent: cannot judge a handoff against an empty room")
 	}
-	m := &budgetModel{inner: e.model, budget: e.budget(evs[0].RoomID)}
-	return judgeHandoff(ctx, evs, s, opts, m)
+	m := &budgetModel{inner: e.judgeClient(), budget: e.budget(evs[0].RoomID)}
+	return judgeHandoff(ctx, evs, s, e.judge.withModel(opts), m)
 }
 
 // judgeEffort is the effort for the judge: a verdict over a short log needs
@@ -120,14 +120,14 @@ func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 		Effort:       judgeEffort(opts),
 		OutputSchema: judgeSchema(),
 	}
-	msg, err := m.Turn(ctx, params)
+	msg, text, err := structuredTurn(ctx, m.Turn, m.Capabilities(params.Model), params, "judge_verdict")
 	if err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: request: %w", err)
 	}
 	if msg.Stop == llm.StopRefusal {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: model refused the request")
 	}
-	dec := json.NewDecoder(strings.NewReader(extractText(msg.Message.Parts)))
+	dec := json.NewDecoder(strings.NewReader(text))
 	dec.DisallowUnknownFields()
 	var v HandoffVerdict
 	if err := dec.Decode(&v); err != nil {

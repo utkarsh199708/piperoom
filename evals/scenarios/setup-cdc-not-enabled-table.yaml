@@ -1,0 +1,350 @@
+# C7 setup scenario (U4d): CDC is still on for the SQL Server database, but the captured table
+# dbo.orders lost its capture instance after the setup run, so its changes reach no change table
+# and Debezium streams nothing for it, while the canary table (its own capture instance) still
+# flows. The label names the failing check and the fixing op with its tier (tasks/U-board.md rows
+# U4a, U4b and U4d, step 4). Format: evals/README.md (C6). Built on `devctl setup-break
+# cdc-not-enabled-table` (dev/mssql/README.md, cmd/devctl/setupbreaks_mssql.go, U4c).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_worker_logs, debezium_metrics, kafkatools and dbtools
+# code from main, composed by hand (the U1-19 approach; this session has no Docker, and the SQL
+# Server source driver, U4b, is not on main). The check name and its message are devctl's
+# verifyMSSQLTableCDC, which reads what the U4a client's DatabaseCDC and TableCDC read. Clock:
+# 2026-10-26T09:40:00Z. Runner session: evals/setup/recordings/setup-cdc-not-enabled-table.json.
+# To re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios: SQL Server
+# (U4d)".
+#
+# Timeline: 09:20 the setup run enabled CDC on database orders and on dbo.orders (capture instance
+#   orders_mssql, named after the publication) and on dbo.piperoom_canary (dbo_piperoom_canary),
+#   and registered mssql-orders-connector; 09:22 the first verification was green. 09:28 a DBA's
+#   migration script ran sys.sp_cdc_disable_table on dbo.orders (capture_instance all) to rebuild
+#   an index and did not enable it again. 09:31 the person inserted order 101: it never reached
+#   Kafka. 09:39 a re-verification was green again on rungs 1 to 7: canary 2 arrived, because the
+#   canary table keeps its own capture instance. 09:40 the re-run of the prerequisite checks:
+#   sqlserver-agent-running passed, sqlserver-table-cdc failed.
+#
+# First failing layer: postgres (the source layer: dbo.orders has no capture instance; owners.yaml
+#   has no sqlserver source_kind yet, so the source layer is named postgres). Root-cause layer:
+#   postgres.
+#
+# Expected label: failing check sqlserver-table-cdc ("CDC is on for database orders but dbo.orders
+#   is not tracked (sys.tables.is_tracked_by_cdc = 0)"); fixing op source_create_publication
+#   {name: orders_mssql, tables: [dbo.orders]} at T2 (the U4a writer's CreatePublication:
+#   sp_cdc_enable_db is a no-op on an enabled database, then sp_cdc_enable_table for dbo.orders
+#   under the capture instance orders_mssql), then connect_restart_task {connector:
+#   mssql-orders-connector, task: 0} so the task reads the change tables again. Changes made while
+#   dbo.orders was untracked (order 101 among them) are in no change table: CDC captures from the
+#   moment a table is enabled, so they need a re-snapshot of the table or a re-insert, which the
+#   label notes and does not grade. source_create_publication is a setup runner op, not a room
+#   action in evals.LiveActions, so there is no expect.fix.
+#   Forbidden: pg_add_publication_table - a Postgres publication is not what SQL Server lacks; the
+#     table needs a capture instance.
+#   Forbidden: connect_update_connector_config - table.include.list already names dbo.orders.
+#   Forbidden: connect_restart_connector, connect_resume_connector, connect_delete_connector,
+#     connect_reset_source_offsets - no connector state or offset is wrong.
+#   Forbidden: schema_register, schema_set_compatibility - the registry is fine.
+#
+# Traps:
+#   - The re-verification is green: the canary proves Connect, Kafka, the registry and the capture
+#     job (SQL Server Agent runs). Only dbo.orders is silent; an Agent-stopped story fails.
+#   - table.include.list names dbo.orders, so an include-list story fails: the connector asks for
+#     the table; the database records nothing for it.
+#   - No WARN line: Debezium has no change table to read for dbo.orders and says nothing.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_mssql.go: breakMSSQLTableCDC (sp_cdc_enable_db if needed, then
+#     sp_cdc_disable_table @capture_instance = N'all' on dbo.orders), verifyMSSQLTableCDC's detail
+#     "CDC is on for database orders but dbo.orders is not tracked (sys.tables.is_tracked_by_cdc =
+#     0)", check name sqlserver-table-cdc; fixMSSQLTableCDC (sp_cdc_enable_table under the recorded
+#     capture instance names).
+#   - internal/clients/sqlserver/writer.go: CreatePublication enables CDC on the database and one
+#     capture instance per table, named after the publication; CreateCanaryTable gives the canary
+#     table its own instance (schema_table).
+#   - https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sys-sp-cdc-disable-table-transact-sql:
+#     disabling a table drops its change table and capture instance; changes after that are not
+#     captured.
+
+name: setup/cdc-not-enabled-table
+description: |
+  The SQL Server pipeline orders-mssql was set up at 09:20 and verified at 09:22. At 09:28 a DBA's
+  migration script disabled CDC on dbo.orders (sys.sp_cdc_disable_table, every capture instance) to
+  rebuild an index and did not enable it again. The order the person inserted at 09:31 (id 101)
+  never reached Kafka. A re-verification at 09:39 was green on rungs 1 to 7 (canary 2 arrived on
+  mssql.orders.dbo.piperoom_canary). The re-run of the prerequisite checks passes
+  sqlserver-agent-running and fails sqlserver-table-cdc: "CDC is on for database orders but
+  dbo.orders is not tracked (sys.tables.is_tracked_by_cdc = 0)". mssql-orders-connector and task 0
+  are RUNNING and table.include.list names dbo.orders.
+
+  Root cause: dbo.orders has no CDC capture instance on the source database any more, so its
+  changes reach no change table and the connector has nothing to stream for it; the canary table
+  keeps its own instance and still flows.
+
+  Expected label: failing check sqlserver-table-cdc; fixing op source_create_publication for
+  dbo.orders (T2: sp_cdc_enable_table under the orders_mssql capture instance), then
+  connect_restart_task for task 0; the rows written while the table was untracked need a
+  re-snapshot or a re-insert.
+
+setup:
+  source_kind: sqlserver
+  target: compose
+
+pipeline:
+  id: orders-mssql
+  title: Orders CDC (SQL Server)
+  topic_prefix: mssql.orders
+  source_tables: [dbo.orders]
+  connectors: [mssql-orders-connector]
+
+resources:
+  connectors: [mssql-orders-connector]
+  subjects: [mssql.orders.dbo.orders-key, mssql.orders.dbo.orders-value, mssql.orders.dbo.piperoom_canary-key, mssql.orders.dbo.piperoom_canary-value]
+
+alert:
+  # The title names the rung and the check, not the check's message: the message states the cause
+  # (it is in the description), and a title that hands the cause back must not pass.
+  title: 'orders-mssql setup: rung 8 timed out (the change to dbo.orders is absent from Kafka); prerequisite check sqlserver-table-cdc failed'
+  pipeline_map: |
+    pipeline orders-mssql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:dbo.orders [postgres, owner priya] UNKNOWN
+    2 connect:mssql-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+      from: pg:dbo.orders
+    3 topic:mssql.orders.dbo.orders [kafka, owner arjun] OK newest_record=19m ago
+      from: connect:mssql-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mssql}
+    summary: |
+      pipeline orders-mssql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:dbo.orders [postgres, owner priya] UNKNOWN
+      2 connect:mssql-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+        from: pg:dbo.orders
+      3 topic:mssql.orders.dbo.orders [kafka, owner arjun] OK newest_record=19m ago
+        from: connect:mssql-orders-connector
+    data:
+      edges:
+        - from: pg:dbo.orders
+          to: connect:mssql-orders-connector
+        - from: connect:mssql-orders-connector
+          to: topic:mssql.orders.dbo.orders
+      nodes:
+        - health: unknown
+          id: pg:dbo.orders
+          kind: source_table
+          layer: postgres
+          name: dbo.orders
+          owner: priya
+        - facts:
+            tasks_running: "1"
+          health: ok
+          id: connect:mssql-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: mssql-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 19m ago
+          health: ok
+          id: topic:mssql.orders.dbo.orders
+          kind: topic
+          layer: kafka
+          name: mssql.orders.dbo.orders
+          owner: arjun
+      pipeline_id: orders-mssql
+  - tool: connect_status
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      mssql-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: mssql-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      type: source
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.sqlserver.SqlServerConnector
+      database.encrypt: false
+      database.hostname: mssql
+      database.names: orders
+      database.password: ***
+      database.port: 1433
+      database.user: piperoom_cdc
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-mssql
+      table.include.list: dbo.orders,dbo.piperoom_canary
+      topic.prefix: mssql
+    data:
+      connector.class: io.debezium.connector.sqlserver.SqlServerConnector
+      database.encrypt: "false"
+      database.hostname: mssql
+      database.names: orders
+      database.password: '***'
+      database.port: "1433"
+      database.user: piperoom_cdc
+      schema.history.internal.kafka.bootstrap.servers: kafka:9092
+      schema.history.internal.kafka.topic: schema-changes.orders-mssql
+      table.include.list: dbo.orders,dbo.piperoom_canary
+      topic.prefix: mssql
+  - tool: debezium_metrics
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      mssql-orders-connector: streaming connected=true, 0.0 s behind source, last event 52 s ago, queue 0/8192, 2 events seen; snapshot running=false, completed=true, rows scanned of table orders.dbo.orders 100, orders.dbo.piperoom_canary 0, 100 events seen
+    data:
+      connector: mssql-orders-connector
+      metrics_found: 12
+      rows_scanned_by_table:
+        orders.dbo.orders: 100
+        orders.dbo.piperoom_canary: 0
+      snapshot:
+        SnapshotCompleted: 1
+        SnapshotRunning: 0
+        TotalNumberOfEventsSeen: 100
+      streaming:
+        Connected: 1
+        MilliSecondsBehindSource: 0
+        MilliSecondsSinceLastEvent: 52000
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+        TotalNumberOfEventsSeen: 2
+      topic_prefix: mssql
+  - tool: connect_worker_logs
+    input: {connector: mssql-orders-connector}
+    summary: |-
+      Worker log lines naming mssql-orders-connector at WARN or above, 2026-10-26T08:40:00Z to 2026-10-26T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+    data:
+      bytes: 0
+      connector: mssql-orders-connector
+      lines: []
+      min_level: WARN
+      since: "2026-10-26T08:40:00Z"
+      summary_lines: 0
+      until: "2026-10-26T09:40:00Z"
+  - tool: kafka_topic_offsets
+    input: {topic: mssql.orders.dbo.orders}
+    summary: |-
+      partition 0: 0–100 (100 records), newest 19 min ago
+    data:
+      partitions:
+        - end: 100
+          last_timestamp: "2026-10-26T09:21:04Z"
+          partition: 0
+          start: 0
+      topic: mssql.orders.dbo.orders
+      total_records: 100
+  - tool: kafka_topic_offsets
+    input: {topic: mssql.orders.dbo.piperoom_canary}
+    summary: |-
+      partition 0: 0–2 (2 records), newest 52 s ago
+    data:
+      partitions:
+        - end: 2
+          last_timestamp: "2026-10-26T09:39:08Z"
+          partition: 0
+          start: 0
+      topic: mssql.orders.dbo.piperoom_canary
+      total_records: 2
+  - tool: kafka_find_by_key
+    input: {topic: mssql.orders.dbo.orders}
+    summary: |-
+      not found: no record with key "101" since 2026-10-26T09:28:00Z
+    data:
+      found: false
+      key: "101"
+      records: null
+      topic: mssql.orders.dbo.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {topic: mssql.orders.dbo.piperoom_canary}
+    summary: |-
+      found 1 record(s) with key "a93e05b7c2d14f68e0b1c7d2f5a83e96"
+        partition 0, offset 1, 2026-10-26T09:39:08Z
+    data:
+      found: true
+      key: a93e05b7c2d14f68e0b1c7d2f5a83e96
+      records:
+        - key: a93e05b7c2d14f68e0b1c7d2f5a83e96
+          offset: 1
+          partition: 0
+          timestamp: "2026-10-26T09:39:08.402Z"
+      topic: mssql.orders.dbo.piperoom_canary
+  - tool: schema_registry_subjects
+    summary: |-
+      mssql.orders.dbo.orders-key
+      mssql.orders.dbo.orders-value
+      mssql.orders.dbo.piperoom_canary-key
+      mssql.orders.dbo.piperoom_canary-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mssql (0 past rooms searched).
+  # The room's source tools have no SQL Server reader on main: the real tools' answer.
+  - tool: source_settings
+    error: 'dbtools: source_settings: the source client cannot read database settings'
+  - tool: source_role_grants
+    error: 'dbtools: source_role_grants: the source client cannot read database settings'
+  - tool: source_table_replication
+    error: 'dbtools: source_table_replication: the source client cannot read database settings'
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-mssql"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The canary came through again at 09:39 but my test order 101 in dbo.orders never shows up. The connector is RUNNING and the table is in its include list. What is missing on the table, and what brings it back?"
+
+expect:
+  root_cause:
+    - [cdc, change data capture, capture instance, is_tracked_by_cdc]
+    - [dbo.orders, orders table, the table]
+    - [disabled, not enabled, not tracked, untracked, dropped, removed, off]
+  # The wrong stories of one silent table next to a working canary.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [permission denied]
+    - [agent, stopped]
+    - [agent, not running]
+    - [include list, missing]
+    - [connector, paused]
+    - [offset*, reset]
+    - [network, unreachable]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_order_missing
+      tool: kafka_find_by_key
+      match: [not found, '101']
+      required: true
+    - id: f_canary_found
+      tool: kafka_find_by_key
+      match: [found 1 record, a93e05b7c2d14f68e0b1c7d2f5a83e96]
+    - id: f_include_list
+      tool: connect_config
+      match: [table.include.list, dbo.orders]
+    - id: f_no_warning
+      tool: connect_worker_logs
+      match: [0 line s]
+  claims:
+    - about: root_cause
+      facts: [f_order_missing, f_canary_found, f_include_list]
+  evidence_tools: [connect_status, kafka_find_by_key]
+  forbidden_actions: [pg_add_publication_table, connect_update_connector_config, connect_restart_connector, connect_resume_connector, connect_delete_connector, connect_reset_source_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

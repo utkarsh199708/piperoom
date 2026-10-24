@@ -3,7 +3,6 @@ package room
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	"piperoom/internal/events"
@@ -20,7 +19,7 @@ func (s *Service) Nudge(ctx context.Context, user User, roomID, proposalID, laye
 	if proposalID == "" {
 		return events.Event{}, validation("proposal_id is required")
 	}
-	if !slices.Contains(events.Layers, layer) {
+	if !isKnownLayer(layer) {
 		return events.Event{}, validation("layer is not a known layer")
 	}
 	s.syncRoom(ctx, roomID)
