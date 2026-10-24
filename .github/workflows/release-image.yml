@@ -18,6 +18,9 @@ on:
       - "go.mod"
       - "go.sum"
       - "cmd/server/**"
+      # The image also ships piperoom-setup (cmd/setup, U1-22): a change there
+      # must build the image too.
+      - "cmd/setup/**"
       - "web/package*.json"
       - ".github/workflows/release-image.yml"
   workflow_dispatch:
@@ -84,6 +87,37 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Both binaries, unchanged entrypoint (U1-22)
+        # A pull-request build is loaded into the daemon (load: true above), so
+        # the binaries can be run here; a tag build pushes and keeps no local
+        # copy. This is what makes "the image ships piperoom-setup and the old
+        # entrypoint still works" a check, not a claim.
+        if: steps.name.outputs.push != 'true'
+        run: |
+          set -euo pipefail
+          entrypoint="$(docker image inspect --format '{{json .Config.Entrypoint}}' piperoom:ci)"
+          echo "entrypoint: $entrypoint"
+          # deploy/*.yml, the chart and the HEALTHCHECK run the image with no
+          # command: the server must stay the entrypoint.
+          if [ "$entrypoint" != '["/piperoom"]' ]; then
+            echo "::error::the image entrypoint is no longer /piperoom: $entrypoint"
+            exit 1
+          fi
+          # The entrypoint binary runs: --version needs no config and exits 0.
+          version="$(docker run --rm piperoom:ci --version)"
+          echo "server version: $version"
+          [ -n "$version" ] || { echo "::error::/piperoom --version printed nothing"; exit 1; }
+          # /piperoom-setup (cmd/setup, the setup runner) is the second binary.
+          # --help exits 1 by design; the usage text is what proves it runs.
+          # 125/126/127 are Docker's own "did not start" codes.
+          rc=0
+          docker run --rm --entrypoint /piperoom-setup piperoom:ci --help > setup-help.txt 2>&1 || rc=$?
+          cat setup-help.txt
+          case "$rc" in
+            125|126|127) echo "::error::/piperoom-setup did not start (docker exit $rc)"; exit 1 ;;
+          esac
+          grep -q -- " -standalone" setup-help.txt || {
+            echo "::error::/piperoom-setup --help did not print its flags"; exit 1; }
       - name: Record the digest
         if: steps.name.outputs.push == 'true'
         env:

@@ -372,3 +372,54 @@ func TestRunCompareInvalidCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestSetupRecordingsDir: the sibling setup/recordings directory is used only
+// when it holds a *.json recording; an absent or empty one reads none.
+func TestSetupRecordingsDir(t *testing.T) {
+	root := t.TempDir()
+	scen := filepath.Join(root, "scenarios")
+	recs := filepath.Join(root, "setup", "recordings")
+	if got := setupRecordingsDir(scen); got != "" {
+		t.Errorf("absent dir: got %q, want empty", got)
+	}
+	if err := os.MkdirAll(recs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupRecordingsDir(scen); got != "" {
+		t.Errorf("empty dir: got %q, want empty", got)
+	}
+	if err := os.WriteFile(filepath.Join(recs, "a.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupRecordingsDir(scen); got != recs {
+		t.Errorf("dir with a recording: got %q, want %q", got, recs)
+	}
+}
+
+// TestRunCheckRejectsBrokenSetupRecording: a run only warns about a broken
+// setup recording, so -check is where it fails.
+func TestRunCheckRejectsBrokenSetupRecording(t *testing.T) {
+	root := t.TempDir()
+	scen := filepath.Join(root, "scenarios")
+	recs := filepath.Join(root, "setup", "recordings")
+	for _, d := range []string{scen, recs} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed, err := os.ReadFile("../../scenarios/schema-change.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scen, "schema-change.yaml"), seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recs, "bad.json"), []byte(`{"scenario":"x","ops":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{scenarios: scen, check: true}, &out, &out)
+	if err == nil || code == 0 || !strings.Contains(err.Error(), "ops is empty") {
+		t.Fatalf("code %d err %v, want the broken recording's error", code, err)
+	}
+}

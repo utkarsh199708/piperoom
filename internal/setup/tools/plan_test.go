@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
@@ -57,7 +56,6 @@ func roomDeps(t *testing.T, cat plan.Catalogue, sink Emitter, class string) Room
 		Catalogue: cat,
 		Sink:      sink,
 		ClassOf:   FixedClass(class),
-		Now:       func() time.Time { return time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC) },
 	}
 }
 
@@ -142,7 +140,6 @@ func TestSetupPlanEmitsTheResolvedPlan(t *testing.T) {
 	tool := planTool(t, roomDeps(t, cat, sink, plan.ClassLocal))
 
 	input := json.RawMessage(`{
-		"plan_id": "pl_orders",
 		"phases": [
 			{"name":"stack","steps":[{"op":"file_write","params_hint":"compose.yaml","verify":"compose config renders"}]},
 			{"name":"services","steps":[{"op":"compose_up"}]}
@@ -160,8 +157,8 @@ func TestSetupPlanEmitsTheResolvedPlan(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload = %T, want events.SetupPlanPayload", recorded[0].payload)
 	}
-	if payload.PlanID != "pl_orders" {
-		t.Fatalf("plan id = %q, want pl_orders", payload.PlanID)
+	if !planIDRe.MatchString(payload.PlanID) || !strings.HasPrefix(payload.PlanID, "pl_") {
+		t.Fatalf("plan id = %q, want a server-minted pl_<hex>", payload.PlanID)
 	}
 	if len(payload.Phases) != 2 || len(payload.Phases[1].Steps) != 1 {
 		t.Fatalf("phases = %+v", payload.Phases)
@@ -177,7 +174,7 @@ func TestSetupPlanEmitsTheResolvedPlan(t *testing.T) {
 	if !ok || stored.PlanID != payload.PlanID {
 		t.Fatalf("result data = %T %+v, want the stored plan", res.Data, res.Data)
 	}
-	if !strings.Contains(res.Summary, "pl_orders") || !strings.Contains(res.Summary, "file_write(T1)") {
+	if !strings.Contains(res.Summary, payload.PlanID) || !strings.Contains(res.Summary, "file_write(T1)") {
 		t.Fatalf("summary = %q", res.Summary)
 	}
 }
@@ -193,6 +190,98 @@ func TestSetupPlanAssignsAPlanID(t *testing.T) {
 	payload := res.Data.(events.SetupPlanPayload)
 	if !strings.HasPrefix(payload.PlanID, "pl_") || len(payload.PlanID) > plan.MaxPlanIDBytes {
 		t.Fatalf("plan id = %q, want pl_+hex within the cap", payload.PlanID)
+	}
+}
+
+func TestSetupPlanRefusesAModelPlanID(t *testing.T) {
+	cat := fakeCatalogue{"file_write": plan.TierT1}
+	sink := &recordingSink{}
+	tool := planTool(t, roomDeps(t, cat, sink, plan.ClassLocal))
+	// A model re-planning with the id of the plan whose ladder just ran would
+	// make that verdict count for steps that never executed.
+	for _, id := range []string{"pl_orders", "pl_0123456789abcdef0123", "x\\u0007"} {
+		_, err := tool.Run(context.Background(), json.RawMessage(
+			`{"plan_id":"`+id+`","phases":[{"name":"p","steps":[{"op":"file_write"}]}]}`))
+		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "plan_id") {
+			t.Fatalf("Run with plan_id %q = %v, want ErrBadInput naming plan_id", id, err)
+		}
+	}
+	if got := len(sink.recorded()); got != 0 {
+		t.Fatalf("a plan with a model plan_id emitted %d events, want 0", got)
+	}
+	props := tool.InputSchema()["properties"].(map[string]any)
+	if _, ok := props["plan_id"]; ok {
+		t.Fatal("plan_id is in the input schema; the server mints it")
+	}
+}
+
+func TestSetupPlanMintsAFreshIDEveryTime(t *testing.T) {
+	cat := fakeCatalogue{"file_write": plan.TierT1}
+	tool := planTool(t, roomDeps(t, cat, &recordingSink{}, plan.ClassLocal))
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		res, err := tool.Run(context.Background(), json.RawMessage(`{"phases":[{"name":"p","steps":[{"op":"file_write"}]}]}`))
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		id := res.Data.(events.SetupPlanPayload).PlanID
+		if seen[id] {
+			t.Fatalf("plan id %q was minted twice", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestSetupPlanRefusesABadSupersedes(t *testing.T) {
+	cat := fakeCatalogue{"file_write": plan.TierT1}
+	sink := &recordingSink{}
+	tool := planTool(t, roomDeps(t, cat, sink, plan.ClassLocal))
+	for _, sup := range []string{"pl old", "pl_\\u001b[31m", "<b>pl</b>"} {
+		_, err := tool.Run(context.Background(), json.RawMessage(
+			`{"supersedes":"`+sup+`","phases":[{"name":"p","steps":[{"op":"file_write"}]}]}`))
+		if !errors.Is(err, tools.ErrBadInput) {
+			t.Fatalf("Run with supersedes %q = %v, want ErrBadInput", sup, err)
+		}
+	}
+	if got := len(sink.recorded()); got != 0 {
+		t.Fatalf("emitted %d events, want 0", got)
+	}
+}
+
+// layerCatalogue is a fakeCatalogue that also answers layers.
+type layerCatalogue struct {
+	fakeCatalogue
+	layers map[string]string
+}
+
+func (c layerCatalogue) LayerOf(op string) (string, bool) {
+	l, ok := c.layers[op]
+	return l, ok
+}
+
+func TestSetupPlanFillsLayerFromTheCatalogue(t *testing.T) {
+	cat := layerCatalogue{
+		fakeCatalogue: fakeCatalogue{"file_write": plan.TierT1, "compose_up": plan.TierT1},
+		layers:        map[string]string{"file_write": "environment", "compose_up": "stack"},
+	}
+	tool := planTool(t, roomDeps(t, cat, &recordingSink{}, plan.ClassLocal))
+	res, err := tool.Run(context.Background(), json.RawMessage(
+		`{"phases":[{"name":"p","steps":[{"op":"file_write"},{"op":"compose_up"}]}]}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	steps := res.Data.(events.SetupPlanPayload).Phases[0].Steps
+	if steps[0].Layer != "environment" || steps[1].Layer != "stack" {
+		t.Fatalf("layers = %q, %q; want environment, stack", steps[0].Layer, steps[1].Layer)
+	}
+	if steps[0].Target != "" {
+		t.Fatalf("target = %q; Target is left to the room (U1-10)", steps[0].Target)
+	}
+	// A model-written layer is still refused by plan.Decode.
+	_, err = tool.Run(context.Background(), json.RawMessage(
+		`{"phases":[{"name":"p","steps":[{"op":"file_write","layer":"x"}]}]}`))
+	if !errors.Is(err, tools.ErrBadInput) || !errors.Is(err, plan.ErrPlan) {
+		t.Fatalf("Run with a model layer = %v, want a plan.Decode refusal", err)
 	}
 }
 

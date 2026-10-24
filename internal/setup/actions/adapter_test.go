@@ -15,6 +15,7 @@ import (
 	"piperoom/internal/room"
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
+	"piperoom/internal/setup/remoteclients"
 	"piperoom/internal/tools"
 )
 
@@ -150,6 +151,8 @@ func TestNewRefusesABadSpec(t *testing.T) {
 		"preview is a write": func(s *Spec) {
 			s.PreviewOp = s.Name
 		},
+		"negative timeout":   func(s *Spec) { s.Timeout = -time.Second },
+		"timeout over a cap": func(s *Spec) { s.Timeout = maxSpecTimeout + time.Second },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -381,5 +384,151 @@ func TestParamsSchemaIsACopy(t *testing.T) {
 	req[0] = "changed"
 	if again := a.ParamsSchema()["required"].([]string); again[0] != "role" {
 		t.Fatalf("the returned schema edits the adapter's: %v", again)
+	}
+}
+
+func TestExecuteRaisesAnUntieredStepToItsClass(t *testing.T) {
+	spec := testSpec()
+	spec.Tier = plan.TierT1
+	f := &fakeRunner{}
+	a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for class, want := range map[string]string{
+		protocol.ClassLocal:      plan.TierT1,
+		protocol.ClassShared:     plan.TierT2,
+		protocol.ClassProduction: plan.TierT3,
+	} {
+		ctx := room.WithSetupStep(testContext(t, grantParams), room.SetupStep{
+			ProposalID: "p_1", StepIndex: 0, ParamsHash: "h",
+			Class: class, Action: "source_grant_select", Params: grantParams,
+		})
+		if _, _, err := a.ExecuteReceipt(ctx, grantParams); err != nil {
+			t.Fatalf("ExecuteReceipt(%s): %v", class, err)
+		}
+		calls := f.recorded()
+		if got := calls[len(calls)-1].req.Tier; got != want {
+			t.Errorf("class %s with no step tier: tier = %q, want %q (plan.TierOf)", class, got, want)
+		}
+	}
+}
+
+func TestValidateChecksOnlyTheObjectShape(t *testing.T) {
+	a := newTestAdapter(t, &fakeRunner{})
+	// Not an object: refused here.
+	for _, bad := range []string{`[1]`, `"x"`, `null`, `{"role":"a","Role":"b"}`} {
+		if err := a.Validate(context.Background(), json.RawMessage(bad)); !errors.Is(err, ErrBadInput) {
+			t.Errorf("Validate(%s) = %v, want ErrBadInput", bad, err)
+		}
+	}
+	// An object that breaks the schema (missing required, unknown key, wrong
+	// type) passes the shape check: there is no JSON Schema validator here, and
+	// the runner refuses it against the op's schema before it executes.
+	for _, schemaBreaking := range []string{
+		`{}`,
+		`{"role":"r","tables":["public.orders"],"extra":true}`,
+		`{"role":7,"tables":"public.orders"}`,
+	} {
+		if err := a.Validate(context.Background(), json.RawMessage(schemaBreaking)); err != nil {
+			t.Errorf("Validate(%s) = %v, want nil (the runner validates the schema)", schemaBreaking, err)
+		}
+	}
+}
+
+func TestExecuteCarriesTheFrozenProposalByteForByte(t *testing.T) {
+	// Deliberately not canonical JSON (spacing, key order): the runner
+	// recomputes params_hash over exactly these bytes, so they must not be
+	// re-encoded on the way.
+	raw := json.RawMessage(`{"proposal_id":"p_1",  "steps":[{"action":"source_grant_select","params":{"tables":["public.orders"],"role":"piperoom_reader"}}],"origin":"setup"}`)
+	f := &fakeRunner{}
+	a := newTestAdapter(t, f)
+	ctx := remoteclients.WithProposal(testContext(t, grantParams), raw)
+	if _, err := a.Execute(ctx, grantParams); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	req := f.recorded()[0].req
+	if string(req.Proposal) != string(raw) {
+		t.Fatalf("proposal = %s, want the ctx bytes %s", req.Proposal, raw)
+	}
+}
+
+func TestExecuteWithoutAProposalSendsNoProposalField(t *testing.T) {
+	f := &fakeRunner{}
+	a := newTestAdapter(t, f)
+	if _, _, err := a.ExecuteReceipt(testContext(t, grantParams), grantParams); err != nil {
+		t.Fatalf("ExecuteReceipt: %v", err)
+	}
+	req := f.recorded()[0].req
+	if req.Proposal != nil {
+		t.Fatalf("proposal = %s, want none", req.Proposal)
+	}
+	wire, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["proposal"]; ok {
+		t.Fatalf("wire request = %s, want no proposal field", wire)
+	}
+}
+
+func TestWriteDeadlineHonoursTheSpecTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout time.Duration
+		tier    string
+		want    time.Duration
+	}{
+		{"default T2", 0, plan.TierT2, writeTimeout},
+		{"long op T2", longOpTimeout, plan.TierT2, longOpTimeout},
+		{"default T3", 0, plan.TierT3, t3Timeout},
+		{"long op T3", longOpTimeout, plan.TierT3, longOpTimeout},
+		{"short spec timeout never lowers T3", time.Second, plan.TierT3, t3Timeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec()
+			spec.Timeout = tc.timeout
+			f := &fakeRunner{}
+			a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx := tools.WithPipeline(context.Background(), testPipeline())
+			ctx = room.WithRoomID(ctx, "r_setup")
+			ctx = room.WithSetupStep(ctx, room.SetupStep{
+				ProposalID: "p_1", StepIndex: 0, ParamsHash: "h", Tier: tc.tier,
+				Class: protocol.ClassShared, Action: spec.Name, Params: grantParams,
+			})
+			before := time.Now()
+			if _, err := a.Execute(ctx, grantParams); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			got := f.recorded()[0].req.Deadline.Sub(before)
+			if got < tc.want-time.Second || got > tc.want+time.Second {
+				t.Fatalf("deadline in %s, want about %s", got, tc.want)
+			}
+		})
+	}
+	// A preview stays on the preview bound whatever the spec's Timeout.
+	spec := testSpec()
+	spec.Timeout = longOpTimeout
+	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+		return protocol.OpResult{ID: req.ID, OK: true, Data: json.RawMessage(`{"target":"t","expected":"e"}`)}, nil
+	}}
+	a, err := New(spec, Deps{Runner: f, RoomID: "r_setup"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	before := time.Now()
+	if _, err := a.Preview(testContext(t, grantParams), grantParams); err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if got := f.recorded()[0].req.Deadline.Sub(before); got > previewTimeout+time.Second {
+		t.Fatalf("preview deadline in %s, want within %s", got, previewTimeout)
 	}
 }

@@ -166,7 +166,7 @@ func LoadUsers(path string) (*Users, error) {
 
 // ValidateUsers checks the users directory against the loaded owners config
 // (LEAD-ARCH round 4, item 7). Every layer a user claims must be one of
-// events.Layers, and the two files must agree in BOTH directions: every layer
+// owners.KnownLayers, and the two files must agree in BOTH directions: every layer
 // in the owners config must name a user who exists in the users file and
 // actually lists that layer (owners → users), and every layer a user lists
 // must be assigned to that same user in the owners config (users → owners).
@@ -181,7 +181,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 	for _, user := range users.order {
 		for _, layer := range user.Layers {
 			if !isKnownLayer(layer) {
-				return fmt.Errorf("users file: user %q claims unknown layer %q (known: %v)", user.ID, layer, events.Layers)
+				return fmt.Errorf("users file: user %q claims unknown layer %q (known: %v)", user.ID, layer, owners.KnownLayers())
 			}
 		}
 	}

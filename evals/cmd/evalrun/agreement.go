@@ -19,14 +19,14 @@ func runAgreement(f flags, stdout io.Writer) (int, error) {
 	score := evals.AgreementFunc(evals.TermsAgreement)
 	switch f.judge {
 	case "", evals.JudgeTerms:
-	case evals.JudgeClaude:
+	case evals.JudgeLLM, evals.JudgeClaude:
 		j, err := newJudge(f.judgeModel)
 		if err != nil {
 			return 1, err
 		}
 		score = evals.JudgeAgreement(j)
 	default:
-		return 1, fmt.Errorf("unknown -judge %q (want terms or claude)", f.judge)
+		return 1, fmt.Errorf("unknown -judge %q (want terms or llm; claude is its alias)", f.judge)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

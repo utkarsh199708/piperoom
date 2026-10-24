@@ -9,10 +9,12 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.80.0
 	github.com/aws/aws-sdk-go-v2 v1.43.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.31
+	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.56.0
 	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/databricks/databricks-sql-go v1.16.0
 	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gowebpki/jcs v1.0.2
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -37,6 +39,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.11.0 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/99designs/keyring v1.2.2 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3 // indirect

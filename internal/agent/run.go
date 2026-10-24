@@ -136,6 +136,10 @@ type runner struct {
 	// run verified after its proposal_executed (driverproposal.go), so a
 	// repeated input reports it instead of checking again. Lost on restart.
 	driverVerdicts map[string]bool
+
+	// compact is the client-side compaction state (compaction.go); off on a
+	// model that compacts on the server.
+	compact compactor
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -232,6 +236,7 @@ func (r *runner) run(ctx context.Context) error {
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
 	r.system = systemPromptForMode(r.kind, r.mode)
+	r.initCompaction()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
@@ -292,7 +297,9 @@ func (r *runner) run(ctx context.Context) error {
 			continue
 		}
 
-		resp, err := r.modelTurn(ctx, messages)
+		var resp llm.Response
+		var err error
+		messages, resp, err = r.sendTurn(ctx, messages)
 		if err != nil {
 			// The room's token budget is spent: stop here, between turns. Tool
 			// calls of the previous turn have all finished by now.
@@ -404,7 +411,7 @@ func (r *runner) callModel(ctx context.Context, req llm.Request, role string) (l
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices) {
+		for _, p := range withProvider(usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices), r.model.Provider()) {
 			r.emit(ectx, events.AgentUsage, p)
 		}
 	}
@@ -444,10 +451,7 @@ func (r *runner) request(messages []llm.Message) llm.Request {
 }
 
 func (r *runner) initialMessage(inputs []HumanInput, notes []string) llm.Message {
-	blocks := openingBlocks(r.alert, r.past)
-	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
-		blocks = append(blocks, textPart(note))
-	}
+	blocks := r.openingParts()
 	// The opening turn has read nothing yet, so a driver's proposal in it gets
 	// the idle wording (a read or two first), not "answer from the evidence
 	// you already have" (driverproposal.go).
@@ -490,7 +494,9 @@ func appendUser(messages []llm.Message, blocks ...llm.Part) []llm.Message {
 func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
 	blocks := make([]llm.Part, 0, len(inputs))
 	for _, in := range inputs {
-		blocks = append(blocks, textPart(formatInput(in, idle)))
+		text := formatInput(in, idle)
+		blocks = append(blocks, textPart(text))
+		r.compact.noteInput(in, text)
 	}
 	return blocks
 }

@@ -391,6 +391,6 @@ expect:
   claims:
     - about: root_cause
       facts: [f_class_not_found]
-  evidence_tools: [connect_status, connect_list_connectors]
+  evidence_tools: [connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility, pg_drop_replication_slot]
   max_tool_calls: 12

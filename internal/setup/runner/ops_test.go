@@ -990,3 +990,170 @@ func TestT3OffByDefault(t *testing.T) {
 		t.Fatalf("a disabled T3 op prompted: %q", stdout.String())
 	}
 }
+
+// pingBarrier sends a FramePing and waits for its FramePong. The runner's read
+// loop handles frames in order and applies a FrameCancel (or drops a resend)
+// before reading the next frame, so once the Pong arrives every frame sent
+// before the Ping has been handled. It also asserts no other frame came first.
+func pingBarrier(t *testing.T, conn *websocket.Conn, ctx context.Context) {
+	t.Helper()
+	writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FramePing})
+	if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FramePong {
+		t.Fatalf("want pong, got %+v", f)
+	}
+}
+
+// slowCheckCatalogue holds every op in its target check until release is
+// closed, so a test can land a FrameCancel while the op is still in runOp's
+// checks (not started, not prompting).
+type slowCheckCatalogue struct {
+	*fakeCatalogue
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *slowCheckCatalogue) CheckTarget(protocol.OpRequest) string {
+	c.entered <- struct{}{}
+	<-c.release
+	return ""
+}
+
+// TestCancelDuringChecksStopsTheOp: a FrameCancel read while the op is still
+// in its checks reaches it (the read loop registers the op's cancel before
+// its goroutine starts), so the op is refused and never runs, at T0 as at T1.
+// Sending the same op twice (a resend after a reconnect) is stopped by the one
+// cancel too.
+func TestCancelDuringChecksStopsTheOp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tier  string
+		sends int
+	}{
+		{"t0", protocol.TierT0, 1},
+		{"t1", protocol.TierT1, 1},
+		{"t1 resent", protocol.TierT1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &slowCheckCatalogue{
+				fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": tc.tier}},
+				entered:       make(chan struct{}, tc.sends),
+				release:       make(chan struct{}),
+			}
+			srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+				doHandshake(t, conn, ctx, "tok", time.Now, nil)
+				p1 := testProposalWithAction("p1", "source_restart")
+				a := opReqPtr("a", "source_restart", tc.tier, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+				a.Deadline = time.Now().Add(time.Hour)
+				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+				<-cat.entered
+				for i := 1; i < tc.sends; i++ {
+					// A resend while the first request is still held is
+					// dropped; the first request answers for the id.
+					writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+				}
+				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
+				pingBarrier(t, conn, ctx)
+				close(cat.release)
+				assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+				// Nothing else answers for the id.
+				pingBarrier(t, conn, ctx)
+			})
+			defer srv.Close()
+			r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("Run = %v", err)
+			}
+			<-done
+			if n := cat.callCount(); n != 0 {
+				t.Fatalf("op ran %d time(s) after it was cancelled during its checks", n)
+			}
+		})
+	}
+}
+
+// TestCancelBeforeThePromptDropsAStaleYes: a T3 op cancelled while still in
+// its checks never shows its prompt, but a "y" typed meanwhile (for it) must
+// not confirm the next T3 op either.
+func TestCancelBeforeThePromptDropsAStaleYes(t *testing.T) {
+	cat := &slowCheckCatalogue{
+		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}},
+		entered:       make(chan struct{}, 2),
+		release:       make(chan struct{}),
+	}
+	start := time.Now()
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		a.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		<-cat.entered
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
+		pingBarrier(t, conn, ctx)
+		close(cat.release)
+		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+		// The "y" is typed at ~600 ms; B arrives at ~1.2 s and nobody
+		// answers it.
+		time.Sleep(time.Until(start.Add(1200 * time.Millisecond)))
+		p2 := testProposalWithAction("p2", "source_restart")
+		b := opReqPtr("b", "source_restart", protocol.TierT3, "p2", 0, proposalHash(t, p2), proposalRaw(t, p2))
+		b.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: b})
+		time.Sleep(300 * time.Millisecond)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "b"}})
+		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+	})
+	defer srv.Close()
+	r, err := runner.New(runner.Options{AllowT3: true, ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: &delayedYes{at: start.Add(600 * time.Millisecond)}, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 0 {
+		t.Fatalf("an op ran %d time(s) on a \"y\" typed before its prompt", n)
+	}
+}
+
+// TestResentT0OpRunsOnce: a T0 op has no start ledger, so a resend of an op
+// still in its checks (after a reconnect) must be dropped, not run a second
+// time.
+func TestResentT0OpRunsOnce(t *testing.T) {
+	cat := &slowCheckCatalogue{
+		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT0}},
+		entered:       make(chan struct{}, 2),
+		release:       make(chan struct{}),
+	}
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT0, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		a.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		<-cat.entered
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		pingBarrier(t, conn, ctx)
+		close(cat.release)
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Fatalf("want one result, got %+v", f)
+		}
+		pingBarrier(t, conn, ctx)
+	})
+	defer srv.Close()
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("op ran %d time(s), want 1", n)
+	}
+}
