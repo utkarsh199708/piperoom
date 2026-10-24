@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "consumer-offsets-out-of-range-retention",
   "hypothesis": "order-sync was scaled to zero for about 87 hours, longer than the 48 h retention on pg.public.orders, so the log start moved past its committed offsets: those change records were deleted before they were read, which is data loss for analytics.orders. The OffsetOutOfRangeException is a symptom. Do not reset the group to latest: that would skip the remaining 48 h too.",
-  "truth_sha256": "51a2b8961fad3b01807b520d64e7d846e4da9f8a96ed56f7f5dd2f9cea9048ca",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "cfe906e17e110a593e9990ccfe86b5eb4b495fa83c779631dc3029d2b4d1d712",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": true,
     "root_cause_correct": true,
     "root_cause_layer_correct": true,
-    "reason": "The hypothesis identifies that the 48 h retention was shorter than the outage, so the log start moved past the committed offsets and the records were deleted, causing data loss; this places the cause in kafka. Its mention of reset to latest is a warning against doing it, not a story that blames it."
+    "reason": "The hypothesis correctly attributes the incident to the 48 h retention deleting records past the committed offsets during the consumer outage. It calls this data loss, treats the exception as a symptom, and only mentions reset-to-latest as a warning."
   }
 }

@@ -26,6 +26,12 @@ import (
 // index/; LoadIndex parses and validates it, so a bad range, digest, key
 // or citation fails start-up (Check calls it). Renamed classes come from
 // the Q1b known-issues index (internal/tools/runbooks), not a copy.
+//
+// The same index holds the tuning entries (U10a, kind tuning, tuning.go):
+// the Connect worker heap, the Debezium queue and batch keys, snapshot
+// fetch sizes, tasks.max per source and the producer and consumer
+// overrides, each with its default read from source and the symptoms
+// that call for changing it.
 
 // Sentinel errors of the SMT and sink index. Compare with errors.Is.
 var (
@@ -50,11 +56,14 @@ type Kind string
 
 // Entry kinds. A predicate is set under predicates.<name>.type, an SMT
 // under transforms.<name>.type, a sink as connector.class (Kafka Connect)
-// or debezium.sink.type (Debezium Server).
+// or debezium.sink.type (Debezium Server). A tuning entry names no class:
+// it is a group of keys set where its Scope says, with the symptoms that
+// call for changing them.
 const (
 	KindSMT       Kind = "smt"
 	KindPredicate Kind = "predicate"
 	KindSink      Kind = "sink"
+	KindTuning    Kind = "tuning"
 )
 
 // Runtime is where an entry runs.
@@ -162,6 +171,17 @@ type Entry struct {
 	Successor string `yaml:"successor,omitempty" json:"successor,omitempty"`
 	Doc       string `yaml:"doc" json:"doc"`
 	Source    string `yaml:"source" json:"source"`
+
+	// Scope says where a tuning entry's keys are set: ScopeConnector,
+	// ScopeWorker or ScopeEnv. Tuning entries only.
+	Scope string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	// Connector is the source connector (a plugins.go short name) a tuning
+	// entry applies to; empty means every source. Tuning entries only.
+	Connector string `yaml:"connector,omitempty" json:"connector,omitempty"`
+	// Symptoms are what the logs, metrics or the user show when a tuning
+	// entry's keys are worth changing: the plan proposes the entry only
+	// after one of them is seen. Tuning entries only, and required there.
+	Symptoms []string `yaml:"symptoms,omitempty" json:"symptoms,omitempty"`
 
 	rng releaseRange
 }
@@ -298,7 +318,7 @@ var (
 )
 
 var (
-	kinds      = []Kind{KindSMT, KindPredicate, KindSink}
+	kinds      = []Kind{KindSMT, KindPredicate, KindSink, KindTuning}
 	components = []string{"debezium", "kafka", "confluent", "snowflake", "aiven"}
 	runtimes   = []string{RuntimeConnect, RuntimeServer}
 	installs   = []string{InstallBundled, InstallPinned, InstallUnpinned}
@@ -317,7 +337,7 @@ func (e *Entry) check() error {
 	case !entryNameRe.MatchString(e.Name):
 		return fmt.Errorf("name must match %s", entryNameRe)
 	case !slices.Contains(kinds, e.Kind):
-		return fmt.Errorf("kind %q is not one of smt, predicate, sink", e.Kind)
+		return fmt.Errorf("kind %q is not one of smt, predicate, sink, tuning", e.Kind)
 	case !slices.Contains(components, e.Component):
 		return fmt.Errorf("component %q is not one of %s", e.Component, strings.Join(components, ", "))
 	case !slices.Contains(runtimes, e.Runtime):
@@ -327,7 +347,13 @@ func (e *Entry) check() error {
 	case len(e.Checks) == 0:
 		return errors.New("at least one check is required")
 	}
-	if e.Runtime == RuntimeConnect {
+	if e.Kind == KindTuning {
+		if err := e.checkTuning(); err != nil {
+			return err
+		}
+	} else if e.Scope != "" || e.Connector != "" || len(e.Symptoms) > 0 {
+		return errors.New("scope, connector and symptoms belong to tuning entries only")
+	} else if e.Runtime == RuntimeConnect {
 		if !classRe.MatchString(e.Class) || e.SinkType != "" {
 			return fmt.Errorf("a connect entry needs a Java class (got %q) and no sink_type", e.Class)
 		}
@@ -354,8 +380,10 @@ func (e *Entry) check() error {
 	if err := e.checkKeys(); err != nil {
 		return err
 	}
-	if err := e.checkInstall(); err != nil {
-		return err
+	if e.Kind != KindTuning {
+		if err := e.checkInstall(); err != nil {
+			return err
+		}
 	}
 	if err := checkCitation(e.Doc, docHosts); err != nil {
 		return fmt.Errorf("doc: %w", err)
@@ -631,20 +659,26 @@ func (ix *Index) Entries() []Entry { return slices.Clone(ix.entries) }
 
 // Lookup finds an entry of kind by its index name, its class (with or
 // without a $Key/$Value variant), the class's simple name when that is
-// unique within kind, or a Debezium Server sink type. An empty kind
+// unique within kind, a Debezium Server sink type, or, for a tuning
+// entry, one of its keys (see tuningKeyMatches for the prefixes it
+// accepts) when that key is in one tuning entry only. An empty kind
 // matches every kind. It returns ErrUnknownEntry when nothing matches,
 // when the variant is not one the entry has (ValueToKey$Value), and when
-// a simple name is ambiguous (Filter is both Kafka's and Debezium's).
+// a simple name or a key is ambiguous (Filter is both Kafka's and
+// Debezium's; snapshot.fetch.size has an entry per source).
 func (ix *Index) Lookup(kind Kind, name string) (Entry, error) {
 	name = strings.TrimSpace(name)
 	class, variant, hasVariant := strings.Cut(name, "$")
-	var simple []Entry
+	var simple, byKey []Entry
 	for _, e := range ix.entries {
 		if kind != "" && e.Kind != kind {
 			continue
 		}
 		if !hasVariant && (e.Name == name || (e.SinkType != "" && e.SinkType == name)) {
 			return e, nil
+		}
+		if e.Kind == KindTuning && !hasVariant && tuningKeyMatches(e, name) {
+			byKey = append(byKey, e)
 		}
 		if e.Class == "" {
 			continue
@@ -673,6 +707,16 @@ func (ix *Index) Lookup(kind Kind, name string) (Entry, error) {
 			cs = append(cs, e.Class)
 		}
 		return Entry{}, fmt.Errorf("%w: %q is ambiguous, use one of %s", ErrUnknownEntry, name, strings.Join(cs, ", "))
+	}
+	if len(byKey) == 1 {
+		return byKey[0], nil
+	}
+	if len(byKey) > 1 {
+		var ns []string
+		for _, e := range byKey {
+			ns = append(ns, e.Name)
+		}
+		return Entry{}, fmt.Errorf("%w: key %q is in several tuning entries, use one of %s", ErrUnknownEntry, name, strings.Join(ns, ", "))
 	}
 	return Entry{}, fmt.Errorf("%w: %s %q", ErrUnknownEntry, kind, name)
 }

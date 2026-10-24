@@ -35,7 +35,7 @@ connector, slot, group names; offsets; timestamps), not generated from fake clie
 | `replication-slot-lost-failover` | no change events for 22 min, task 0 FAILED | failover to a standby with no logical slot: `replication slot "debezium_orders" does not exist` | postgres | none: a restart would recreate the slot at the current LSN and silently skip the gap; needs a slot plan and incremental snapshot |
 | `consumer-rebalance-storm` | `order-sync` lag 1.9 M, warehouse 40 min stale | members evicted by poll-interval and session timeouts (generation 4318, `PreparingRebalance`), not the bulk import on the source | consumer | none: consumer config and CPU limits |
 | `sink-connector-paused-warehouse-stale` | `analytics.orders` stale 2.4 h | `wh-orders-sink` is `PAUSED` on purpose by the warehouse owner (nothing FAILED; group still `Stable`) | kafka-connect | none: ask the pauser; `connect_resume_connector` is forbidden here |
-| `consumer-offsets-out-of-range-retention` | `order-sync` crash-loop, `OffsetOutOfRangeException`, warehouse 87.6 h stale | `retention.ms` 48 h was shorter than a 3.6-day consumer outage; committed offsets are below the log start (about 17 M records deleted, no silent skip, unlike `topic-retention-data-loss`) | kafka | none: raise retention first, then plan a restart point and re-snapshot; never reset to latest |
+| `consumer-offsets-out-of-range-retention` | `order-sync` crash-loop, `OffsetOutOfRangeException`, warehouse 87.6 h stale | `retention.ms` 48 h was shorter than a 3.6-day consumer outage; committed offsets are below the log start (about 17 M records deleted, no silent skip, unlike `topic-retention-data-loss`) | consumer (root cause kafka; ruling R14) | none: raise retention first, then plan a restart point and re-snapshot; never reset to latest |
 
 Some dangers have no registered action (reset offsets to latest, drop or recreate the slot), so
 `forbidden_actions` cannot list them; they are in each file's header, and the forbidden list
@@ -142,7 +142,7 @@ of a green pipeline next to the trap stories.
 | Scenario | Opened by | Root cause | First failing / root-cause layer | Fix |
 |---|---|---|---|---|
 | `sink-filtered-rows` | watcher `count_drift` (sev2): source 2689, sink 2649 in 08:00-09:00 | order-sync 2.16.0 filters out the 40 `backfill` orders and commits past them | consumer / consumer | none automated: roll back, then replay from before 08:31Z |
-| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | kafka / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
+| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | none (healthy now; ruling R15) / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
 | `sink-dropped-column` | dbt `not_null` test on `analytics.orders.updated_at` (hand-written title) | order-sync 2.16.1 dropped `updated_at` from its upsert | consumer / consumer | none automated: fixed build, then replay |
 | `toast-placeholder` | dbt `accepted_values` test on `analytics.orders.status` (hand-written title) | `REPLICA IDENTITY DEFAULT` on `public.orders`: an update leaving the TOASTed status unchanged makes Debezium emit `__debezium_unavailable_value` | kafka-connect / postgres | none automated: identity FULL, rewrite the rows |
 
@@ -235,9 +235,22 @@ range or shows the reprocess topic, so the files declare what the actions read:
   and time windows are not replayed); the model gets the refusal and can give ranges.
 
 There is **no recovered phase**: X2c's verdict ("pipeline recovered" status, the counts message) is not a tool read,
-so `../verify_score.go` would count it as a recovery claim without a re-check and fail the run. Reads after the
-step answer the broken state; the Verify counts (`agent.recovery_check`, `agent.verification` with before/after)
-are the post-fix evidence. Counting X2c's checks as the re-check is a C6 follow-up.
+so `../verify_score.go` would count it as a recovery claim without a re-check and fail the run. Counting X2c's
+checks as the re-check is a C6 follow-up.
+
+**The reads after the fix answer the fixed state** (ruling R17, `tasks/W4-evals-to-100.md`; W4n-3). A static world
+answered every read after the step with the broken state (reconcile -40, `warehouse_row` "not found",
+`trace_record` "stopped at: warehouse"), and a live run concluded the fix had not worked and proposed the forbidden
+reset. Each file now has two phases (`skipped`/`lost`, then `replayed`) and one transition on its recovery action
+**without** `ok: true`, so `replayed` is not a recovered phase and the rule above still holds. The `replayed`
+recordings (reconcile in both windows, `warehouse_row` and `trace_record` for ids 1301-1340, `kafka_consumer_lag`,
+`warehouse_load_errors`; in `rows-lost-after-retention` also `kafka_find_by_key` and `kafka_topic_offsets`, since
+the re-snapshot writes to the CDC topic) are the real tools' output at `2f19542a` over the post-fix state, from a
+throwaway generator that first rebuilt the start state and reproduced the existing recordings byte for byte; each
+header says what changed and on which clock. In `consumer-skipped-range` `kafka_consumer_lag` still lists the CDC
+topic only: the reprocess topic is not one of the room's topics, so the scoped tool reports its partitions as not
+shown. Since the fix restores the data, a post-recovery "the pipeline is healthy" is not a wrong story there:
+both files dropped the `pipeline is healthy` and `nothing is wrong` forbidden rows (R17).
 
 **Re-recording (TC2, TC3).** Needs Docker and `ANTHROPIC_API_KEY`:
 
@@ -276,7 +289,7 @@ with one Q2 admin action, which the label names. `idle-wal-growth` is scoped lik
 |---|---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
 | `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
-| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes started_at=2026-10-23T09:14:12Z` (identity hidden: it locks no pipeline table) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes started_at=2026-10-23T09:14:12Z` (identity hidden: it locks no pipeline table) | kafka-connect / postgres (ruling R1) | `source_end_session` (pid and started_at from the tool) |
 | `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
 
 **Graded since Q2h (C6).** `evals.LiveActions` registers the source actions on replay clients
@@ -620,6 +633,39 @@ injected text.
 **Synthesised, not recorded** (`RECORDED: NO`): no repository was read and no Docker ran. `runbook_lookup` is
 not recorded in `debezium-upgrade`; the harness runs it live over the Q1 known-issues index.
 
+### Setup scenarios: MongoDB (U7d)
+
+Three setup scenarios on a MongoDB 7.0 source (the `mongo` dev profile, a one-member replica set `rs0`,
+`dev/mongo/README.md`) and the Compose target, each with a runner session in `evals/setup/recordings` (the eval
+replay). Two are built on the U7c `devctl setup-break` names; their labels name the failing check (the check names
+and messages of `cmd/devctl/setupbreaks_mongo.go`, which read the U7a client `internal/clients/mongodb`) and the fix
+with its tier from `tasks/U-board.md` (U7a, U7b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-mongodb-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every MongoDB check passed | - | outcome `healthy`; no proposal |
+| `setup/standalone-mongod` | task 0 FAILED (`MongoTimeoutException`); check `mongo-change-streams` failed | mongod recreated without `--replSet rs0`: a standalone has no change streams, and the driver (`replicaSet=rs0`) drops it from its cluster view | kafka-connect / postgres | `mongo-change-streams`; restart mongod with `--replSet rs0` (a documented ask: the person's own mongod; T1 only when the room created it, by receipt), then `connect_restart_task` |
+| `setup/no-oplog-role` | the run stopped at the source checks; check `mongo-oplog-read` failed | the capture user `piperoom_cdc` holds `readAnyDatabase`, which leaves out `local`, so it cannot read `local.oplog.rs` | postgres / postgres | `mongo-oplog-read`; grant read on `local` (a documented ask to the person's user administrator), or the setup's own capture user with `source_create_read_role` (T2) |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U7a client's DTOs, and the MongoDB driver (U7b) and the client's `SetupSourceWriter` half are not on main, so the
+check reads are recorded under the remote clients' source op names (`source_settings`, `source_role_info`).
+Digests are synthetic placeholders. `standalone-mongod`'s task trace is composed from the MongoDB Java driver's
+server-selection timeout and Debezium's change-event-producer wrapper. `no-oplog-role` stops before a connector
+exists, so, like `setup/compose-postgres-clean`, it replays only `similar_incidents` and has no `expected_facts`;
+its runner session goes on past the person's grant to a green verification. Conventions shared with the other
+setup sources: the source database is graded as the source layer `postgres` (owners.yaml has no `mongodb`
+source kind), the room's `source_*` tools record their real "cannot read database settings" error, and a title names
+the step and the check, not the check's message. A MongoDB topic is `<topic.prefix>.<db>.<collection>`, which is
+owners.yaml's `<topic_prefix>.<table>` for a `db.collection` table.
+
+To re-record on the dev stack once U7b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mongo up -d --wait mongo`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break standalone-mongod` after the first verification (or
+`no-oplog-role` before the run), re-verify and re-run the checks. Take the room's tool results from `GET
+/api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Setup scenarios (U1-19)
 
 Six files about `piperoom-setup`, where the failure is a setup check, a compose validator rule or the
@@ -684,6 +730,50 @@ as misses; nothing recorded makes a fix look right and every fix stays forbidden
 reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
 one-line edit in `../agreement_test.go` (C6's) and a judge refill.
 
+### Setup scenarios: SQL Server (U4d)
+
+Three setup scenarios on a SQL Server 2022 source (the `mssql` dev profile, `dev/mssql/README.md`) and the Compose
+target, each with a runner session in `evals/setup/recordings` (the eval replay). Two are built on the U4c
+`devctl setup-break` names; their labels name the failing check (the check names and messages of
+`cmd/devctl/setupbreaks_mssql.go`, which read what the U4a client `internal/clients/sqlserver` reads) and the fix with
+its tier from `tasks/U-board.md` (U4a, U4b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-sqlserver-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every SQL Server check passed | - | outcome `healthy`; no proposal |
+| `setup/agent-stopped` | re-verification failed at `canary_event`; check `sqlserver-agent-running` failed | SQL Server Agent stopped, so the CDC capture job does not run; the connector stays RUNNING | postgres / postgres | `sqlserver-agent-running`; start the Agent: T2 `service_restart` on a host target, a documented ask on this Compose project (the person's container) and on managed SQL; no connector action |
+| `setup/cdc-not-enabled-table` | rung 8 timed out; check `sqlserver-table-cdc` failed | CDC on for the database, `dbo.orders` untracked (its capture instance dropped); the canary table still flows | postgres / postgres | `sqlserver-table-cdc`; `source_create_publication` for `dbo.orders` (T2, `sp_cdc_enable_table`), then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U4a client's DTOs, and the SQL Server driver (U4b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. Conventions the three share, which a re-recording keeps:
+
+- **Layers.** `owners.yaml` has no `sqlserver` source kind yet, so the source database is graded as the source
+  layer, `postgres` (`events.Layers[0]`); `textmatch.go` counts "SQL Server" (and the other setup sources' names,
+  MongoDB and Oracle) as words of that layer.
+- **Topics.** Debezium's SQL Server connector names a topic `<topic.prefix>.<database>.<schema>.<table>`; owners.yaml
+  names it `<topic_prefix>.<schema>.<table>`, so the pipeline's `topic_prefix` is `mssql.orders` while the
+  connector's `topic.prefix` is `mssql`.
+- **Source tools.** The room's `source_settings`, `source_role_grants` and `source_table_replication` have no SQL
+  Server reader on main; the scenarios record their real error ("the source client cannot read database settings"),
+  so a run that tries them sees the gap, and the Agent and table state come from the setup check in the alert.
+- **Titles.** An alert title names the failed rung and the check, not the check's message: the message states the
+  cause, and a title that hands the cause back must not pass (`TestScoringOldVsNew`).
+
+The two breaks set no `expect.fix`: starting the Agent is no room action, and `source_create_publication` is a setup
+runner op, not in `evals.LiveActions`. `setup/agent-stopped` forbids every connector write (the task is RUNNING; a
+restart starts no Agent job); `setup/cdc-not-enabled-table` forbids `pg_add_publication_table` (a Postgres
+publication is not what SQL Server lacks) and the connector writes other than the task restart that follows the
+fix.
+
+To re-record on the dev stack once U4b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mssql up -d --wait mssql`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break agent-stopped` (or `cdc-not-enabled-table`) after the first
+verification, re-verify and re-run the checks. Take the room's tool results from `GET /api/rooms/{id}/export` and
+the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Provider-neutral scenarios (V15)
 
 Three scenarios for the multi-provider model interface (`docs/design/model-providers.md`). All are
@@ -740,6 +830,38 @@ regenerate them if a tool's format changes. Decisions a reader should know:
   path (15 + 2). Its turn split was not measured (see the scenario header). `consumer-rebalance-storm` stays 14 (its
   live run passed at 14; never 16), and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule
   would give 13 and 12; a row that only records misses does not lower a budget).
+
+### Setup scenarios: Oracle (U9d)
+
+Four setup scenarios on an Oracle Database Free 23ai source (the `oracle` dev profile: CDB `FREE`, PDB `FREEPDB1`,
+LogMiner user `C##DBZUSER`, `dev/oracle/README.md`) and the Compose target, each with a runner session in
+`evals/setup/recordings` (the eval replay). Three are built on the U9c `devctl setup-break` names; their labels name
+the failing check (the check names and messages of `cmd/devctl/setupbreaks_oracle.go`, which evaluate the U9a client
+`internal/clients/oracle`'s types) and the fix with its tier from `tasks/U-board.md` (U9a, U9b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-oracle-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every Oracle check passed | - | outcome `healthy`; no proposal |
+| `setup/no-archivelog` | task 0 FAILED; check `oracle-archive-log-mode` failed | the database restarted in NOARCHIVELOG, so LogMiner has no archived redo | kafka-connect / postgres | `oracle-archive-log-mode`; T3 in a maintenance window: a DBA's `SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN` (the allow-listed `source_alter_system archive_log` is refused by the U9a writer on an open instance; the runner session records it), then `connect_restart_task` |
+| `setup/no-supplemental-logging` | task 0 FAILED; check `oracle-supplemental-logging` failed | the minimal supplemental logging and the table's ALL COLUMNS group were dropped | kafka-connect / postgres | `oracle-supplemental-logging`; a DBA's `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA`, `source_create_publication` for `PIPEROOM.ORDERS` (T2, the ALL COLUMNS group), then `connect_restart_task` |
+| `setup/missing-logminer-grant` | task 0 FAILED (ORA-01031); check `oracle-logminer-grants` failed | `LOGMINING` revoked from `C##DBZUSER` | kafka-connect / postgres | `oracle-logminer-grants`; `GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL` (a documented ask: the person's user), or the setup's own LogMiner user from `source_create_read_role` (T2); then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U9a client's DTOs, and the Oracle driver (U9b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. The task traces are Debezium's own archive log and supplemental logging checks and Oracle's ORA-01031,
+each under Debezium's change-event-producer wrapper. Conventions shared with the other setup sources: the source
+database is graded as the source layer `postgres` (owners.yaml has no `oracle` source kind), the room's `source_*`
+tools record their real "cannot read database settings" error, and a title names the failed task and the check, not
+the check's message. The topic prefix is `ora`, so a topic (`ora.PIPEROOM.ORDERS`, Oracle's upper case kept) is not a
+word of the source layer.
+
+To re-record on the dev stack once U9b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile oracle up -d --wait oracle`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then one of `devctl setup-break no-archivelog`, `no-supplemental-logging` or
+`missing-logminer-grant` after the first verification, re-verify and re-run the checks. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl
+setup-fix` restores the profile.
 
 ## Outcome scenarios (E2)
 

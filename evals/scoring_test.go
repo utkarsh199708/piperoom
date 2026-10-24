@@ -452,6 +452,17 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The setup validator refused the compose file with rule secret: the postgres service sets POSTGRES_PASSWORD to a plain-text credential. Write the .env with properties_write (POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD: ${secret:postgres_password}), re-render the source-postgres template with compose_write so it interpolates the reference, and start the stack with compose_up.",
 		wrong: "The stack stays down because the postgres image lacks the pinned digest the setup allow-list requires; pull the pinned image and render the compose file again.",
 	},
+	// The U7d MongoDB setup scenarios. Each wrong text tells the other
+	// break's story (a standalone mongod, a network route), the trap between
+	// them.
+	"setup/standalone-mongod": {
+		good:  "The setup check mongo-change-streams fails: the source database runs mongod as a standalone since 09:30, when the recreated container's command lost --replSet rs0. Change streams need a replica set member, so the connector's MongoDB driver, which connects with replicaSet=rs0, finds a STANDALONE server, drops it from its cluster view and times out (MongoTimeoutException, servers=[]); task 0 of mongo-orders-connector FAILED. The fix is a documented ask to the person, who owns that mongod (this room created only Kafka, Connect and the registry): restart it with --replSet rs0 on the same volume, where the member's set config makes it primary again, then connect_restart_task for task 0. The resume token is still in the oplog on the volume, so the task picks up where it stopped.",
+		wrong: "The Connect worker lost its network route to mongo:27017, so the MongoDB driver times out; fix the Docker network between Connect and the source and restart the connector.",
+	},
+	"setup/no-oplog-role": {
+		good:  "The setup check mongo-oplog-read fails: the capture user piperoom_cdc on the source database holds readAnyDatabase, which leaves out the local database, so it lacks read on local.oplog.rs. The run stopped before it registered mongo-orders-connector. The fix: the person's user administrator grants it read on local (db.getSiblingDB('admin').grantRolesToUser('piperoom_cdc', [{role: 'read', db: 'local'}])), a documented ask because the user is the person's own; or the setup creates its own capture user with source_create_read_role (T2), which carries read on local. Then the run re-runs the checks.",
+		wrong: "The mongod runs as a standalone outside any replica set, so change streams are unavailable; restart it with --replSet rs0.",
+	},
 	"setup/compose-privileged-refused": {
 		good:  "The setup validator refused the compose file with rule privilege: the connect service declares privileged: true, which asks for host privileges. Re-render the stack from the driver's templates with compose_write (the connect template renders only the allow-listed service fields: image, command, environment, ports, volumes, depends_on and healthcheck) and bring it up with compose_up.",
 		wrong: "The connect service uses an image tag that is absent from the setup knowledge index, so the stack stays down; pin the image digest and run it again.",
@@ -459,6 +470,20 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	"setup/flat-plugin-dir": {
 		good:  "The setup check plugin-layout fails: the Debezium Postgres plugin jars sit directly in the Connect worker's plugin root (/kafka/connect) outside their own directory, so the worker's plugin scan misses io.debezium.connector.postgresql.PostgresConnector and pg-orders-connector FAILED with 'Failed to find any class'. Run plugin_install {release: 3.2.0.Final, connector: postgres} (it installs into connect-plugins/debezium-connector-postgres, one plugin per directory), then compose_restart {services: [connect]} so the worker rescans plugin.path.",
 		wrong: "pg-orders-connector failed because its config is invalid after the image upgrade; restart the connector and task 0.",
+	},
+	// The U9d Oracle setup scenarios. Each wrong text tells another of the
+	// three breaks' stories (a revoked grant, the log mode, dropped logging).
+	"setup/no-archivelog": {
+		good:  "Task 0 of ora-orders-connector FAILED at start because the source database runs in NOARCHIVELOG mode: a DBA restarted it at 09:30 with ALTER DATABASE NOARCHIVELOG to keep the recovery area from filling, and LogMiner reads archived redo, so the setup check oracle-archive-log-mode fails with LOG_MODE=NOARCHIVELOG. Switching back is a T3 step in a maintenance window, because it restarts a database the person owns: a DBA runs SHUTDOWN IMMEDIATE, STARTUP MOUNT, ALTER DATABASE ARCHIVELOG and ALTER DATABASE OPEN, with a recovery area sized for the archives (source_alter_system archive_log is the allow-listed op, and the setup writer refuses it on an OPEN instance). Then connect_restart_task for task 0.",
+		wrong: "The LogMiner user C##DBZUSER lost its LOGMINING privilege, so its mining session fails; a DBA grants it again.",
+	},
+	"setup/no-supplemental-logging": {
+		good:  "Task 0 of ora-orders-connector FAILED at start because supplemental logging on the source database was dropped at 09:30: a DBA's redo-volume cleanup removed the database-level minimal supplemental logging and the ALL COLUMNS log group of PIPEROOM.ORDERS, and Debezium checks both before it mines. The setup check oracle-supplemental-logging fails on the minimal logging flag and the missing ALL COLUMNS group. The fix: a DBA runs ALTER DATABASE ADD SUPPLEMENTAL LOG DATA in the CDB root (a DBA step, outside the setup ops), source_create_publication for PIPEROOM.ORDERS adds the ALL COLUMNS group back at T2, then connect_restart_task for task 0. Changes written while the logging was off carry incomplete redo, so a re-snapshot of those rows follows.",
+		wrong: "The database runs in NOARCHIVELOG mode, so LogMiner lacks archived redo; switch it back to ARCHIVELOG.",
+	},
+	"setup/missing-logminer-grant": {
+		good:  "Task 0 of ora-orders-connector FAILED with ORA-01031: insufficient privileges when it started its next LogMiner session at 09:31, because a privilege review revoked LOGMINING from the LogMiner user C##DBZUSER on the source database at 09:30. The setup check oracle-logminer-grants reports C##DBZUSER is missing LOGMINING; its other grants are intact. The fix: a DBA runs GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL, since the user is the person's own (the setup's alternative is its own LogMiner user from source_create_read_role at T2, with the Debezium grant set), then connect_restart_task for task 0.",
+		wrong: "Supplemental logging was dropped on the source, so the connector mines incomplete changes; add it back.",
 	},
 	"setup/wal-level-replica": {
 		good:  "The setup check postgres-wal-level fails: the source Postgres runs with wal_level=replica, so logical decoding and every logical replication slot are unavailable. pg-orders-connector task 0 FAILED with 'logical decoding requires wal_level >= logical'. Set wal_level=logical with source_alter_system and restart the server with source_restart (or re-render the source-postgres template with compose_write when the compose command line pins -c wal_level=replica), then take a new slot and snapshot.",
@@ -471,6 +496,17 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	"setup/db-unreachable-from-connect": {
 		good:  "The setup check connect-source-reachable fails: the Connect container resolves the source host postgres to 192.0.2.1, a TEST-NET-1 black-hole address from a stale /etc/hosts entry, so pg-orders-connector task 0 FAILED with java.net.SocketTimeoutException: connect timed out while the database answers the room's own reads. Restart the Connect service with compose_restart so Docker regenerates /etc/hosts and the worker starts with an empty DNS cache.",
 		wrong: "The source Postgres is down, so the connector stays idle; restart the database and the connector.",
+	},
+	// The U4d SQL Server setup scenarios. The labels name the setup check and
+	// the fix with its tier; the wrong text of cdc-not-enabled-table is the
+	// right story of agent-stopped, the trap between the two.
+	"setup/agent-stopped": {
+		good:  "The setup check sqlserver-agent-running fails: SQL Server Agent is stopped on the source database since a DBA stopped it at 09:30 to hold the nightly jobs. The CDC capture job is an Agent job, so it has stopped moving changes from the transaction log into the change tables, and Debezium reads empty change tables. mssql-orders-connector and task 0 are RUNNING and the worker log is quiet; order 101 and the new canary are absent from Kafka while the snapshot and the first canary are there. Start SQL Server Agent: here that is a documented ask to the DBA (xp_servicecontrol START, or a container restart with MSSQL_AGENT_ENABLED=true); on a host target it is service_restart of the SQL Server service at T2. The running task then streams the backlog by itself.",
+		wrong: "mssql-orders-connector task 0 lost its connection to the source and quietly stopped streaming; restart the connector and reset its offsets so it takes a new snapshot.",
+	},
+	"setup/cdc-not-enabled-table": {
+		good:  "The setup check sqlserver-table-cdc fails: CDC is still on for database orders, but dbo.orders lost its capture instance (is_tracked_by_cdc = 0) when a DBA's migration script disabled CDC on the table at 09:28. Changes to dbo.orders therefore stay out of every change table in the source database, and the connector has nothing to stream for the table. The canary table keeps its own capture instance, so canary 2 arrived at 09:39, and the connector is RUNNING with dbo.orders in table.include.list. Order 101 is absent from the topic. Enable CDC on dbo.orders again with source_create_publication (T2, sp_cdc_enable_table under the orders_mssql capture instance), restart task 0, and re-snapshot or re-insert the rows written while the table was untracked.",
+		wrong: "SQL Server Agent stopped on the source, so the capture job has halted; ask the DBA to start the Agent.",
 	},
 	// The Q8i MySQL scenarios (C7, KAN-302).
 	"mysql-binlog-purged": {

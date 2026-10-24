@@ -127,7 +127,7 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
+const cdcPromptSHA256 = "7ff37205ff61d97bfd83a164b8df85530af0b3d917c7513fb420a7870767dbe3"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -137,7 +137,7 @@ const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06c
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
 // word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
+const cdcPromptWriteOffSHA256 = "76993d03120fc945c0fea5ced142a2e2b105a012ac56bf0a5d0ff2965bc27778"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -159,9 +159,9 @@ func TestSystemPromptSnapshotCDCWriteOff(t *testing.T) {
 	if h := hex.EncodeToString(sum[:]); h != cdcPromptWriteOffSHA256 {
 		t.Fatalf("CDC write-off system prompt sha256 = %s, want %s", h, cdcPromptWriteOffSHA256)
 	}
-	// Both modes stay under the 1335-word cap (P2d).
-	if wc := len(strings.Fields(got)); wc > 1335 {
-		t.Fatalf("CDC write-off system prompt is %d words, over the 1335 limit", wc)
+	// Both modes stay under the CDC cap (P2d), 1355 since KAN-515.
+	if wc := len(strings.Fields(got)); wc > 1355 {
+		t.Fatalf("CDC write-off system prompt is %d words, over the 1355 limit", wc)
 	}
 	// The write-off note must be the only mode wording: no scheduling note.
 	if strings.Contains(got, "name the countdown") {
