@@ -40,6 +40,11 @@
 #   Not forbidden: connect_resume_connector. After connect_stop_connector and the offset reset the
 #     connector IS stopped, and the resume is the step that completes the fix (see the header); a
 #     forbidden action is a wrong remedy in every ordering, never the completion of the expected fix.
+#   Allowed after the fix: connect_resume_connector as a third step (stop, reset, resume). Stop and
+#     reset leave the connector STOPPED, so a resume is what ends the incident; it is not forbidden.
+#     Today the resume's Validate checks the connector's current state (RUNNING) and refuses it inside
+#     the same proposal (KAN-514 asks for step-ordered validation); a refused resume attempt is not a
+#     forbidden action here. A resume on its own, without the stop and reset, still fails the fix.
 #   Forbidden: connect_update_connector_config - its allow-list holds output settings only; and
 #     pointing back at the old database undoes the migration.
 #   Forbidden: pg_drop_replication_slot - it drops the connector's slot.name, the new slot
