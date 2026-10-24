@@ -50,6 +50,22 @@ func (r *Runner) floorOf(op string) (string, bool) {
 	return "", false
 }
 
+// floorForReq is floorOf for one request: a catalogue that implements
+// ParamFloorer raises the op's floor by the tier the request's params need,
+// so a T1 request for a step that needs T2 (a properties file outside the
+// project directory) is refused below its floor. err is non-nil when the
+// params' tier cannot be computed. A built-in op, and every op of a catalogue
+// without the capability, get floorOf unchanged.
+func (r *Runner) floorForReq(req *protocol.OpRequest) (string, bool, error) {
+	if pf, ok := r.catalogue.(ParamFloorer); ok && !isBuiltinOp(req.Op) {
+		if tier, ok, err := pf.FloorFor(req.Op, req.Params); ok {
+			return tier, true, err
+		}
+	}
+	tier, ok := r.floorOf(req.Op)
+	return tier, ok, nil
+}
+
 // executeBuiltin runs an op the runner owns. Only secret_set is built in.
 func (r *Runner) executeBuiltin(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
 	switch req.Op {
