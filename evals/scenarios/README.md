@@ -35,7 +35,7 @@ connector, slot, group names; offsets; timestamps), not generated from fake clie
 | `replication-slot-lost-failover` | no change events for 22 min, task 0 FAILED | failover to a standby with no logical slot: `replication slot "debezium_orders" does not exist` | postgres | none: a restart would recreate the slot at the current LSN and silently skip the gap; needs a slot plan and incremental snapshot |
 | `consumer-rebalance-storm` | `order-sync` lag 1.9 M, warehouse 40 min stale | members evicted by poll-interval and session timeouts (generation 4318, `PreparingRebalance`), not the bulk import on the source | consumer | none: consumer config and CPU limits |
 | `sink-connector-paused-warehouse-stale` | `analytics.orders` stale 2.4 h | `wh-orders-sink` is `PAUSED` on purpose by the warehouse owner (nothing FAILED; group still `Stable`) | kafka-connect | none: ask the pauser; `connect_resume_connector` is forbidden here |
-| `consumer-offsets-out-of-range-retention` | `order-sync` crash-loop, `OffsetOutOfRangeException`, warehouse 87.6 h stale | `retention.ms` 48 h was shorter than a 3.6-day consumer outage; committed offsets are below the log start (about 17 M records deleted, no silent skip, unlike `topic-retention-data-loss`) | kafka | none: raise retention first, then plan a restart point and re-snapshot; never reset to latest |
+| `consumer-offsets-out-of-range-retention` | `order-sync` crash-loop, `OffsetOutOfRangeException`, warehouse 87.6 h stale | `retention.ms` 48 h was shorter than a 3.6-day consumer outage; committed offsets are below the log start (about 17 M records deleted, no silent skip, unlike `topic-retention-data-loss`) | consumer (root cause kafka; ruling R14) | none: raise retention first, then plan a restart point and re-snapshot; never reset to latest |
 
 Some dangers have no registered action (reset offsets to latest, drop or recreate the slot), so
 `forbidden_actions` cannot list them; they are in each file's header, and the forbidden list
@@ -142,7 +142,7 @@ of a green pipeline next to the trap stories.
 | Scenario | Opened by | Root cause | First failing / root-cause layer | Fix |
 |---|---|---|---|---|
 | `sink-filtered-rows` | watcher `count_drift` (sev2): source 2689, sink 2649 in 08:00-09:00 | order-sync 2.16.0 filters out the 40 `backfill` orders and commits past them | consumer / consumer | none automated: roll back, then replay from before 08:31Z |
-| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | kafka / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
+| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | none (healthy now; ruling R15) / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
 | `sink-dropped-column` | dbt `not_null` test on `analytics.orders.updated_at` (hand-written title) | order-sync 2.16.1 dropped `updated_at` from its upsert | consumer / consumer | none automated: fixed build, then replay |
 | `toast-placeholder` | dbt `accepted_values` test on `analytics.orders.status` (hand-written title) | `REPLICA IDENTITY DEFAULT` on `public.orders`: an update leaving the TOASTed status unchanged makes Debezium emit `__debezium_unavailable_value` | kafka-connect / postgres | none automated: identity FULL, rewrite the rows |
 
@@ -235,9 +235,22 @@ range or shows the reprocess topic, so the files declare what the actions read:
   and time windows are not replayed); the model gets the refusal and can give ranges.
 
 There is **no recovered phase**: X2c's verdict ("pipeline recovered" status, the counts message) is not a tool read,
-so `../verify_score.go` would count it as a recovery claim without a re-check and fail the run. Reads after the
-step answer the broken state; the Verify counts (`agent.recovery_check`, `agent.verification` with before/after)
-are the post-fix evidence. Counting X2c's checks as the re-check is a C6 follow-up.
+so `../verify_score.go` would count it as a recovery claim without a re-check and fail the run. Counting X2c's
+checks as the re-check is a C6 follow-up.
+
+**The reads after the fix answer the fixed state** (ruling R17, `tasks/W4-evals-to-100.md`; W4n-3). A static world
+answered every read after the step with the broken state (reconcile -40, `warehouse_row` "not found",
+`trace_record` "stopped at: warehouse"), and a live run concluded the fix had not worked and proposed the forbidden
+reset. Each file now has two phases (`skipped`/`lost`, then `replayed`) and one transition on its recovery action
+**without** `ok: true`, so `replayed` is not a recovered phase and the rule above still holds. The `replayed`
+recordings (reconcile in both windows, `warehouse_row` and `trace_record` for ids 1301-1340, `kafka_consumer_lag`,
+`warehouse_load_errors`; in `rows-lost-after-retention` also `kafka_find_by_key` and `kafka_topic_offsets`, since
+the re-snapshot writes to the CDC topic) are the real tools' output at `2f19542a` over the post-fix state, from a
+throwaway generator that first rebuilt the start state and reproduced the existing recordings byte for byte; each
+header says what changed and on which clock. In `consumer-skipped-range` `kafka_consumer_lag` still lists the CDC
+topic only: the reprocess topic is not one of the room's topics, so the scoped tool reports its partitions as not
+shown. Since the fix restores the data, a post-recovery "the pipeline is healthy" is not a wrong story there:
+both files dropped the `pipeline is healthy` and `nothing is wrong` forbidden rows (R17).
 
 **Re-recording (TC2, TC3).** Needs Docker and `ANTHROPIC_API_KEY`:
 
@@ -276,7 +289,7 @@ with one Q2 admin action, which the label names. `idle-wal-growth` is scoped lik
 |---|---|---|---|---|
 | `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
 | `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
-| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes started_at=2026-10-23T09:14:12Z` (identity hidden: it locks no pipeline table) | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: pid 48213, `blocks_slot=yes started_at=2026-10-23T09:14:12Z` (identity hidden: it locks no pipeline table) | kafka-connect / postgres (ruling R1) | `source_end_session` (pid and started_at from the tool) |
 | `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
 
 **Graded since Q2h (C6).** `evals.LiveActions` registers the source actions on replay clients
