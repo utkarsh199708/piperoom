@@ -241,16 +241,14 @@ func (teamModels) Apply(context.Context, httpapi.ModelChoice) (httpapi.ModelPane
 }
 
 // modelsOption builds the model routes' option: the picker on a standalone
-// or quickstart server, the read-only panel elsewhere; none in --demo.
+// or quickstart server, the read-only panel elsewhere. --demo gets the
+// read-only panel too, so the web shell's GET /api/models never 404s there.
 func modelsOption(m serveMode, cfg config.Config, prices agent.Prices, live *liveModel, soloUser string, users *room.Users) (httpapi.Option, error) {
-	if m.demo {
-		return nil, nil
-	}
 	supported, err := llm.SupportedModels()
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
-	if live == nil {
+	if live == nil || m.demo {
 		return httpapi.WithModels(teamModels{cfg: cfg, prices: prices, supported: supported}), nil
 	}
 	if soloUser == "" {

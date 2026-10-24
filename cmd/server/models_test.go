@@ -78,8 +78,9 @@ func TestWireLiveNoModelThenPick(t *testing.T) {
 
 func TestModelsOption(t *testing.T) {
 	users := room.DefaultUsers()
-	if o, err := modelsOption(serveMode{demo: true}, config.Config{}, nil, nil, "", users); o != nil || err != nil {
-		t.Fatalf("--demo = %v, %v; want no model routes", o != nil, err)
+	// --demo serves the read-only panel, so the web shell's GET never 404s.
+	if o, err := modelsOption(serveMode{demo: true}, config.Config{}, nil, &liveModel{}, "", users); o == nil || err != nil {
+		t.Fatalf("--demo = %v, %v; want the read-only panel", o != nil, err)
 	}
 	o, err := modelsOption(serveMode{}, config.Config{}, nil, nil, "", users)
 	if err != nil || o == nil {
