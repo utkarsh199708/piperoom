@@ -3252,6 +3252,17 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 1301 rows inserted since stats reset, 0 dead tuples, last autovacuum never, 0 session(s) waiting on a lock
+  - tool: dlq_peek
+    input: {topic: "order-sync.dlq"}
+    error: "out of scope: DLQ topic \"order-sync.dlq\" is not part of this room's pipeline \"orders\" (none declared (use connector for a sink's DLQ))"
 
 inputs:
   - kind: comment

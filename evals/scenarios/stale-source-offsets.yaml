@@ -262,6 +262,14 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: "orders"}
+    summary: |-
+      quiet: no source writes in 5s (slot "devctl_orders_v2", confirmed_flush_lsn 3D/5B0E2A50 unchanged, active=false); not a stall; connector pg-orders-connector state RUNNING; the slot is INACTIVE, so no walsender is streaming it
 
 inputs:
   - kind: steer
