@@ -24,21 +24,27 @@ import (
 
 const testKey = "sk-picker-0123456789"
 
-// mapEnv is a quickstart.Env over a map.
+// mapEnv is a quickstart.Env over a map: the operator's environment, read
+// only.
 type mapEnv struct {
-	mu sync.Mutex
-	m  map[string]string
+	m map[string]string
 }
 
 func (e *mapEnv) Lookup(n string) (string, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	v, ok := e.m[n]
 	return v, ok
 }
-func (e *mapEnv) Set(n, v string) error { e.mu.Lock(); defer e.mu.Unlock(); e.m[n] = v; return nil }
-func (e *mapEnv) Unset(n string) error  { e.mu.Lock(); defer e.mu.Unlock(); delete(e.m, n); return nil }
-func (e *mapEnv) get(n string) string   { v, _ := e.Lookup(n); return v }
+func (e *mapEnv) get(n string) string { v, _ := e.Lookup(n); return v }
+
+// keyOf is what the adapters of the current endpoint read for n: the
+// picker's keys over the environment.
+func keyOf(m *Models, n string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.keys.Lookup(n)
+}
+
+func keyGet(m *Models, n string) string { v, _ := keyOf(m, n); return v }
 
 type pickerEnv struct {
 	m      *Models
@@ -59,15 +65,16 @@ func groqSupported() []llm.SupportedModel {
 // newPicker starts on an openai vllm endpoint at base with a stored key.
 func newPicker(t *testing.T, base string) *pickerEnv {
 	t.Helper()
-	p := &pickerEnv{env: &mapEnv{m: map[string]string{config.EnvModelAPIKey: testKey}}, dir: t.TempDir()}
+	// The stored key is in model.env only, not in the environment.
+	p := &pickerEnv{env: &mapEnv{m: map[string]string{}}, dir: t.TempDir()}
 	cfg := config.Config{ModelProvider: "openai", ModelFlavor: "vllm", ModelBaseURL: base, Model: "qwen3:32b"}
 	p.m = NewModels(ModelsOptions{
 		Mode: httpapi.ModelModeStandalone, ProjectDir: p.dir, Config: cfg, Ready: true, SoloUser: "solo",
 		Stored: ModelEnv{KeyVar: config.EnvModelAPIKey, Key: testKey},
 		Env:    p.env,
-		Panel:  httpapi.PanelInput{Supported: groqSupported(), Getenv: p.env.get},
+		Panel:  httpapi.PanelInput{Supported: groqSupported()},
 		Now:    func() time.Time { return time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC) },
-		Build: func(ctx context.Context, cfg config.Config) (func(), func(), error) {
+		Build: func(ctx context.Context, cfg config.Config, getenv func(string) string) (func(), func(), error) {
 			p.builds.Add(1)
 			if p.buildErr != nil {
 				return nil, nil, p.buildErr
@@ -76,7 +83,7 @@ func newPicker(t *testing.T, base string) *pickerEnv {
 			if err != nil {
 				return nil, nil, err
 			}
-			req.Header.Set("Authorization", "Bearer "+p.env.get(config.EnvModelAPIKey))
+			req.Header.Set("Authorization", "Bearer "+getenv(config.EnvModelAPIKey))
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				return nil, nil, err
@@ -134,7 +141,7 @@ func TestPutWithNewHostAndNoKeyIsKeyRequiredAndSendsNothing(t *testing.T) {
 	if _, err := os.Stat(ModelEnvPath(p.dir)); !os.IsNotExist(err) {
 		t.Fatalf("model.env written on a refusal: %v", err)
 	}
-	if p.env.get(config.EnvModelAPIKey) != testKey {
+	if keyGet(p.m, config.EnvModelAPIKey) != testKey {
 		t.Fatal("the stored key changed on a refusal")
 	}
 }
@@ -218,7 +225,7 @@ func TestPutBuildFailureRestoresKeyAndWritesNothing(t *testing.T) {
 	if code(err) != "validation" || strings.Contains(err.Error(), "sk-bad") || strings.Contains(err.Error(), a.URL) {
 		t.Fatalf("Apply = %v", err)
 	}
-	if p.env.get(config.EnvModelAPIKey) != testKey {
+	if keyGet(p.m, config.EnvModelAPIKey) != testKey {
 		t.Fatal("the old key was not restored")
 	}
 	if _, err := os.Stat(ModelEnvPath(p.dir)); !os.IsNotExist(err) {
@@ -233,10 +240,10 @@ func TestEmptyKeyClearsTheOldOne(t *testing.T) {
 	if _, err := p.m.Apply(context.Background(), httpapi.ModelChoice{Provider: "openai", Flavor: "vllm", BaseURL: a.URL + "/x/v1", Model: "qwen3:32b", Key: ptr("")}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := p.env.Lookup(config.EnvModelAPIKey); ok {
+	if _, ok := keyOf(p.m, config.EnvModelAPIKey); ok {
 		t.Fatal("the old key would follow the new base URL")
 	}
-	if _, ok := p.env.Lookup(config.EnvModelAPIKeyFile); ok {
+	if _, ok := keyOf(p.m, config.EnvModelAPIKeyFile); ok {
 		t.Fatal("the key file would follow the new base URL")
 	}
 	if e, _, _ := ReadModelEnv(p.dir); e.KeyVar != "" {
@@ -264,7 +271,7 @@ func TestPickerConcurrentApplyAndPanel(t *testing.T) {
 
 func TestNoModelPanel(t *testing.T) {
 	m := NewModels(ModelsOptions{Mode: httpapi.ModelModeQuickstart, Config: config.Config{}, Ready: true,
-		Panel: httpapi.PanelInput{Supported: groqSupported(), Getenv: func(string) string { return "" }}})
+		Env: &mapEnv{m: map[string]string{}}, Panel: httpapi.PanelInput{Supported: groqSupported()}})
 	p := m.Panel()
 	// The default Claude model without ANTHROPIC_API_KEY is no usable model.
 	if p.State != httpapi.ModelStateNoModel || len(p.Supported) != 1 || p.Mode != "quickstart" {

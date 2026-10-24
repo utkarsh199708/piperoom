@@ -16,6 +16,12 @@ import (
 
 const pendingA, pendingB = "setup/compose-postgres-clean", "setup/compose-privileged-refused"
 
+// pendingC is held out until W4c-resolver (W4c, KAN-494, lead ruling R10).
+const pendingC = "setup/db-unreachable-from-connect"
+
+// pendingCount is how many scenarios carry pending_harness.
+const pendingCount = 3
+
 // -list prints the scenarios a run replays, without the pending_harness pair.
 func TestRunListExcludesPendingHarness(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -28,11 +34,11 @@ func TestRunListExcludesPendingHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != len(all)-2 {
-		t.Errorf("%d names listed, want %d", len(names), len(all)-2)
+	if len(names) != len(all)-pendingCount {
+		t.Errorf("%d names listed, want %d", len(names), len(all)-pendingCount)
 	}
 	for _, n := range names {
-		if n == pendingA || n == pendingB {
+		if n == pendingA || n == pendingB || n == pendingC {
 			t.Errorf("%s is listed but pending", n)
 		}
 	}
@@ -81,11 +87,11 @@ func TestRunSkipsPendingHarnessUnlessNamed(t *testing.T) {
 		t.Fatalf("code %d err %v\n%s", code, err, stderr.String())
 	}
 	rep := readReport(t, out)
-	if strings.Join(rep.PendingHarness, ",") != pendingA+","+pendingB || len(rep.PendingHarnessRan) != 0 {
+	if strings.Join(rep.PendingHarness, ",") != pendingA+","+pendingB+","+pendingC || len(rep.PendingHarnessRan) != 0 {
 		t.Errorf("pending lists: skipped %v ran %v", rep.PendingHarness, rep.PendingHarnessRan)
 	}
 	for _, s := range rep.Scenarios {
-		if s.Name == pendingA || s.Name == pendingB {
+		if s.Name == pendingA || s.Name == pendingB || s.Name == pendingC {
 			t.Errorf("%s is in the report rows (so in the rates)", s.Name)
 		}
 	}

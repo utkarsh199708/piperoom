@@ -495,7 +495,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// names the failed task (kafka-connect). The wrong texts blame an idle source, a Kafka replay, a
 	// down broker and purged WAL.
 	"tolerance-all-skips":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
-	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}}, // R3 (W4n): labelled kafka; the wrong topic story names the right layer
 	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q6c: the lazy texts are the alert titles, which name the failed task
@@ -521,7 +521,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// watcher-start's), and those misses count against the accuracy.
 	"no-replica-identity": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}}, // R1 (W4n): labelled kafka-connect; the lost-slot text blames postgres
 	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the

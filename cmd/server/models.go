@@ -37,6 +37,10 @@ type liveModel struct {
 	// build makes a candidate endpoint for the picker (set by wireAgent,
 	// which holds the AWS config and the spend options).
 	build quickstart.BuildFunc
+	// startKeys are the picker's keys at start (model.env's stored key over
+	// the process environment): the start endpoint reads its key through
+	// them, so the stored key never enters the process environment.
+	startKeys quickstart.Keys
 }
 
 type liveEndpoint struct {
@@ -164,17 +168,19 @@ func (l *liveModel) Forget(roomID string) {
 // A model that does not build is not a refused start there: the server
 // starts in the no model state and the web opens the picker.
 func wireLive(ctx context.Context, l *liveModel, in wireAgentInput, awsCfg *aws.Config,
-	newAgentEndpoint func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error),
+	newAgentEndpoint func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error),
 ) (agentWiring, error) {
 	// The endpoint lives on the server's context, not the PUT's: Vertex
 	// (Claude and Gemini) keeps the build context for later token refreshes,
 	// and a request context ends with the response. The request only bounds
 	// the build and its probe.
 	srvCtx := ctx
-	l.build = func(reqCtx context.Context, cfg config.Config) (func(), func(), error) {
+	l.build = func(reqCtx context.Context, cfg config.Config, getenv func(string) string) (func(), func(), error) {
 		bctx, cancel := context.WithCancel(srvCtx)
 		stop := context.AfterFunc(reqCtx, cancel)
-		ep, err := newAgentEndpoint(bctx, cfg, in.log, awsCfg)
+		// The keys come from the picker's overlay (wiring.WithGetenv), never
+		// from os.Setenv (V18 MP1).
+		ep, err := newAgentEndpoint(bctx, cfg, in.log, awsCfg, getenv)
 		if !stop() && err == nil {
 			// The request ended during the build, which cancelled bctx.
 			err = reqCtx.Err()
@@ -188,7 +194,7 @@ func wireLive(ctx context.Context, l *liveModel, in wireAgentInput, awsCfg *aws.
 		}
 		return func() { l.install(ep, cfg.Model, cancel) }, cancel, nil
 	}
-	if commit, _, err := l.build(ctx, in.cfg); err != nil {
+	if commit, _, err := l.build(ctx, in.cfg, l.startKeys.Getenv); err != nil {
 		// The agent's start errors name the variable to set, never a key.
 		in.log.Warn("server: no usable model: the server starts without one; choose a model in the web", "reason", err.Error())
 	} else {
@@ -200,26 +206,6 @@ func wireLive(ctx context.Context, l *liveModel, in wireAgentInput, awsCfg *aws.
 	}
 	in.hook.setForget(l)
 	return agentWiring{run: l.Run, write: l.WriteHandoff, triage: l.Triage, triageTimeout: tp.Timeout}, nil
-}
-
-// osEnv is the process environment, which the model adapters read their key
-// from (quickstart.Env).
-type osEnv struct{}
-
-func (osEnv) Lookup(name string) (string, bool) { return os.LookupEnv(name) }
-func (osEnv) Set(name, value string) error      { return os.Setenv(name, value) }
-func (osEnv) Unset(name string) error           { return os.Unsetenv(name) }
-
-// setStoredKey hands the adapters the key model.env holds, before the
-// endpoint is built.
-func setStoredKey(e quickstart.ModelEnv, env quickstart.Env) error {
-	if e.KeyVar == "" || e.Key == "" {
-		return nil
-	}
-	if err := env.Set(e.KeyVar, e.Key.Reveal()); err != nil {
-		return errors.New("server: model.env: set the stored key in the environment")
-	}
-	return nil
 }
 
 // teamModels is GET /api/models on a team server: the configuration, read
@@ -264,7 +250,8 @@ func modelsOption(m serveMode, cfg config.Config, prices agent.Prices, live *liv
 		Ready:      live.ready(),
 		SoloUser:   soloUser,
 		Build:      live.build,
-		Env:        osEnv{},
-		Panel:      httpapi.PanelInput{Prices: prices, Supported: supported, Getenv: os.Getenv},
+		// Env nil: the operator's variables are read from the process
+		// environment; the picker's keys stay in the overlay.
+		Panel: httpapi.PanelInput{Prices: prices, Supported: supported},
 	})), nil
 }

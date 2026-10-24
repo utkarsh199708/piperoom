@@ -372,7 +372,14 @@ recordings:
 expect:
   root_cause:
     - [retention, log start, expired, aged out, deleted before]
-    - [lost, loss*, skipped, gap*, never reached]
+    # Group 2 accepts loss that has already happened. Not bare 'deleted', 'missing from' or 'not
+    # applied' (group 1 has 'deleted before'; the alert echoes 'differ'), and none that a plan
+    # ('retention will delete') could satisfy. The ticket's three 'before ... read/applied' terms
+    # (before it read, before order-sync read, before order-sync applied) are NOT here: each also
+    # matches the slow-consumer traps 'nothing was deleted before order-sync read it' (T1, T2, T13
+    # in scenario_terms_test.go), because the matcher's denials do not reach 'before ...'. The
+    # judge decides those wordings.
+    - [lost, loss*, skipped, gap*, never reached, unrecoverable, 'no longer replay*', 'can no longer be replayed', 'gone from', 'never read']
   # "Reset order-sync to latest" is the named trap: it skips even more.
   root_cause_forbidden:
     - [reset*, latest]

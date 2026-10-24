@@ -27,9 +27,9 @@ func adapterPicker(t *testing.T, cfg config.Config, env map[string]string, store
 	var builds atomic.Int32
 	m := NewModels(ModelsOptions{
 		Mode: httpapi.ModelModeStandalone, ProjectDir: t.TempDir(), Config: cfg, Stored: stored, Ready: true, SoloUser: "solo",
-		Env: e, Panel: httpapi.PanelInput{Getenv: e.get},
+		Env: e, Panel: httpapi.PanelInput{},
 		Now: func() time.Time { return time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC) },
-		Build: func(ctx context.Context, cfg config.Config) (func(), func(), error) {
+		Build: func(ctx context.Context, cfg config.Config, getenv func(string) string) (func(), func(), error) {
 			builds.Add(1)
 			k, err := config.ParseModelKnobs(cfg)
 			if err != nil {
@@ -45,14 +45,14 @@ func adapterPicker(t *testing.T, cfg config.Config, env map[string]string, store
 				var key string
 				switch r.Provider {
 				case config.ModelProviderOpenAI:
-					s, err := openai.LoadKey(r.Flavor, isMain, e.get, os.ReadFile)
+					s, err := openai.LoadKey(r.Flavor, isMain, getenv, os.ReadFile)
 					if err != nil {
 						return nil, nil, err
 					}
 					key = s.Reveal()
 				case config.ModelProviderGemini:
-					if key = e.get(config.EnvModelAPIKey); !isMain || key == "" {
-						key = e.get("GEMINI_API_KEY")
+					if key = getenv(config.EnvModelAPIKey); !isMain || key == "" {
+						key = getenv("GEMINI_API_KEY")
 					}
 				}
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.BaseURL.String()+"/models", nil)
@@ -102,7 +102,7 @@ func TestPutNewHostEmptyKeyWithEnvKeyIsKeyRequired(t *testing.T) {
 			if builds.Load() != 0 || hitsEvil.Load() != 0 {
 				t.Fatalf("builds %d, requests to the new host %d; want none", builds.Load(), hitsEvil.Load())
 			}
-			if env.get(tc.env) != envKey {
+			if env.get(tc.env) != envKey || keyGet(m, tc.env) != envKey {
 				t.Fatal("the operator's variable changed")
 			}
 		})
@@ -138,7 +138,7 @@ func TestPutRoleToNewHostWithEnvKeyIsRefused(t *testing.T) {
 			if builds.Load() != 0 || hitsEvil.Load() != 0 {
 				t.Fatalf("builds %d, requests to the new host %d; want none", builds.Load(), hitsEvil.Load())
 			}
-			if env.get("OPENAI_API_KEY") != envKey {
+			if env.get("OPENAI_API_KEY") != envKey || keyGet(m, "OPENAI_API_KEY") != envKey {
 				t.Fatal("the operator's variable changed")
 			}
 		})
@@ -223,7 +223,7 @@ func TestPutTwoStepEmptyKeyIsKeyRequired(t *testing.T) {
 			if hitsEvil.Load() != 0 {
 				t.Fatalf("the new host got %d requests after the empty key", hitsEvil.Load())
 			}
-			if env.get(tc.env) != envKey || env.get(config.EnvModelAPIKey) != "junk" {
+			if env.get(tc.env) != envKey || keyGet(m, tc.env) != envKey || keyGet(m, config.EnvModelAPIKey) != "junk" {
 				t.Fatal("the environment changed on a refusal")
 			}
 		})
@@ -261,7 +261,7 @@ func TestPutGeminiVertexBaseURLIsRefused(t *testing.T) {
 	}
 }
 
-// A key the picker set for Anthropic does not stay in the environment after a
+// A key the picker set for Anthropic does not stay in the keys after a
 // switch to a provider no role of which reads it; an operator's does.
 func TestPickerKeyLeftoverIsRemovedOperatorKeyKept(t *testing.T) {
 	a, _, _ := hostCounter(t)
@@ -270,37 +270,37 @@ func TestPickerKeyLeftoverIsRemovedOperatorKeyKept(t *testing.T) {
 		Roles: &httpapi.ModelRoleChoices{}}
 
 	// Picker-set (model.env's key at start): removed.
-	m, env, _ := adapterPicker(t, cfg, map[string]string{"ANTHROPIC_API_KEY": "sk-picked"}, ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-picked"})
+	m, _, _ := adapterPicker(t, cfg, map[string]string{}, ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-picked"})
 	m.cfg.ModelUnverified = "on"
 	if _, err := m.Apply(context.Background(), to); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := env.Lookup("ANTHROPIC_API_KEY"); ok {
+	if _, ok := keyOf(m, "ANTHROPIC_API_KEY"); ok {
 		t.Fatal("the picker's Anthropic key stayed after the switch")
 	}
-	if env.get(config.EnvModelAPIKey) != "sk-vllm" {
+	if keyGet(m, config.EnvModelAPIKey) != "sk-vllm" {
 		t.Fatal("the new key is not set")
 	}
 
 	// Operator-set: kept.
-	m, env, _ = adapterPicker(t, cfg, map[string]string{"ANTHROPIC_API_KEY": "sk-operator"}, ModelEnv{})
+	m, env, _ := adapterPicker(t, cfg, map[string]string{"ANTHROPIC_API_KEY": "sk-operator"}, ModelEnv{})
 	m.cfg.ModelUnverified = "on"
 	if _, err := m.Apply(context.Background(), to); err != nil {
 		t.Fatal(err)
 	}
-	if env.get("ANTHROPIC_API_KEY") != "sk-operator" {
+	if env.get("ANTHROPIC_API_KEY") != "sk-operator" || keyGet(m, "ANTHROPIC_API_KEY") != "sk-operator" {
 		t.Fatal("the operator's Anthropic key was removed")
 	}
 
 	// A picker key a role still reads stays: the summary role on Anthropic.
-	m, env, _ = adapterPicker(t, cfg, map[string]string{"ANTHROPIC_API_KEY": "sk-picked"}, ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-picked"})
+	m, _, _ = adapterPicker(t, cfg, map[string]string{}, ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-picked"})
 	m.cfg.ModelUnverified = "on"
 	keep := to
 	keep.Roles = &httpapi.ModelRoleChoices{Summary: &httpapi.ModelRoleChoice{Provider: "anthropic", Model: "claude-haiku-5-5"}}
 	if _, err := m.Apply(context.Background(), keep); err != nil {
 		t.Fatal(err)
 	}
-	if env.get("ANTHROPIC_API_KEY") != "sk-picked" {
+	if keyGet(m, "ANTHROPIC_API_KEY") != "sk-picked" {
 		t.Fatal("a key the summary role reads was removed")
 	}
 }
@@ -311,10 +311,10 @@ func TestPanelReturnsWhileApplyBuilds(t *testing.T) {
 	p := newPicker(t, a.URL+"/v1")
 	entered, release := make(chan struct{}), make(chan struct{})
 	build := p.m.o.Build
-	p.m.o.Build = func(ctx context.Context, cfg config.Config) (func(), func(), error) {
+	p.m.o.Build = func(ctx context.Context, cfg config.Config, getenv func(string) string) (func(), func(), error) {
 		close(entered)
 		<-release
-		return build(ctx, cfg)
+		return build(ctx, cfg, getenv)
 	}
 	done := make(chan error, 1)
 	go func() {

@@ -27,7 +27,6 @@ var knownJudgeMisses = map[string]string{
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. That does not mean we ruled out a reset to latest.": missHedgePolicy,
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. We cannot confirm or rule out a reset to latest.":   missHedgePolicy,
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. We cannot confirm, or rule out, a reset to latest.": missHedgePolicy,
-	"topic-retention-data-loss\x00Retention is 6 h and records were lost. I'm not sure I ruled out a reset to latest.":                                        missHedgePolicy,
 	"topic-retention-data-loss\x00Retention is 6 h and records were lost. We can't say we ruled out a reset to latest.":                                       missHedgePolicy,
 	"publication-permission-denied\x00Root cause: the orders table owner changed; the debezium role still owns its slot, not publications.":                   missGarbled,
 	"publication-permission-denied\x00Root cause: the table owner changed, so Debezium's role owns tables, not publications.":                                 missGarbled,
