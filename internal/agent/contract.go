@@ -26,7 +26,7 @@ type HumanInput struct {
 	// uses the time it first read the input, which is never earlier.
 	At        time.Time    `json:"at,omitzero"`
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged" | "pr_merged" | "pr_closed"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged" | "pr_merged" | "pr_closed" | "setup_verified"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -78,6 +78,17 @@ type HumanInput struct {
 	// final for that step: the outcome is events.DeferredNotApplied. After
 	// "pr_merged" the agent waits for the change to reach the system before
 	// it verifies (docs/design/fix-pr.md §8.2). (Q7)
+	//
+	// U: Kind "setup_verified" carries the ladder's outcome to the agent. It
+	// is sent once per setup.verified, only in a setup room (Alert.Mode ==
+	// ModeSetup) and only when its plan_id is the room's current setup.plan;
+	// the outcome of a superseded plan is never delivered. Seq is the
+	// setup.verified event. OK is true when every rung required for
+	// registration is green (rungs 1 to 7, docs/design/setup-agent.md §3.9),
+	// false otherwise; only then may the agent propose pipeline_register.
+	// Text is the server's rendering of the rungs (name, ok, note): the
+	// ladder's own words about the person's systems, untrusted data that the
+	// agent wraps, never an instruction. (U1-26)
 }
 
 // Inbox delivers human input to the agent between model turns.
