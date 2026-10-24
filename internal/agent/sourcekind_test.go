@@ -253,8 +253,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
 // silently.
 const (
-	mysqlPromptSHA256         = "d0ff4ca3074ba846506ec23ac478ff2455dc571e81c08b427b7aff3c32c5cc6d"
-	mysqlPromptWriteOffSHA256 = "ededa957e93fab693eedcd43c743b4406eb785efcc4e1c2c75ad1d45c8ccfa1d"
+	mysqlPromptSHA256         = "58413e4711792bcfa501618ac1febfd44fc528e8153839cfa5a29f2731f84062"
+	mysqlPromptWriteOffSHA256 = "18286b09569817dde84bfecb0357dff425ec75abb47331cc2b499dd9e584d7b5"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {

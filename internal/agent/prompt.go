@@ -96,7 +96,7 @@ func promptCDCFixesMySQL() string {
 	return strings.NewReplacer(
 		"- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is irreversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.",
 		"- A stored position the server no longer has (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position the server has or a new snapshot; say what the gap loses.",
-		"confirm with reads that a source connector's slot still exists and holds its position,",
+		"confirm with reads that a source connector's slot exists and holds its position,",
 		"confirm with reads that the binlog still holds a source connector's position (mysql_binlog_status),",
 		"- pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal (signal_table: signal.data.collection from connect_config).",
 		"- A database.server.id clashing with the server's or another connector's is the cause: set a unique one with connect_update_connector_config.\n"+
