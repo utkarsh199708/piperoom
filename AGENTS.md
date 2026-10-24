@@ -256,7 +256,7 @@ New folders of the wave (owned from the first PR that creates them):
 | A10 (Qoder, new) | `internal/clients/sqlserver/**`, `internal/clients/mongodb/**`, `internal/clients/oracle/**`, `internal/setup/sources/sqlserver/**`, `internal/setup/sources/mongodb/**`, `internal/setup/sources/oracle/**` |
 | A3 | `internal/setup/sources/postgres/**` |
 | A8 | `internal/setup/sources/mysql/**` |
-| C19 (cloud, new) | `internal/setup/targets/compose/**`, `internal/setup/targets/host/**` |
+| C19 (cloud, new) | `internal/setup/targets/compose/**`, `internal/setup/targets/host/**`; U8b grant (lead ruling on PR #928): `internal/setup/setupcmd/setupcmd.go` and `internal/setup/setupcmd/setupcmd_test.go` for the `run-service` dispatch (the folder stays A9's) |
 | C20 (cloud, new) | `internal/setup/targets/strimzi/**`, `internal/setup/targets/server/**` |
 | C21 (cloud, new) | `internal/setup/targets/managed/**`, `internal/clients/mskconnect/**`, `internal/clients/confluentcloud/**`, `internal/clients/aiven/**` |
 | C22 (cloud, new) | `internal/setup/knowledge/**` |

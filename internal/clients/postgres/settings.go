@@ -231,6 +231,31 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 	return info, nil
 }
 
+// RDSRoleReplication reports whether role is a member of rds_replication.
+// RDS/Aurora grants a connector role its replication rights that way instead
+// of the rolreplication attribute, and Debezium's own login check accepts
+// either. The contract's RoleInfo (clients.RoleInfo) does not carry the flag
+// yet, so this local adapter keeps the read available to the setup driver
+// until it does (contract change request). The CASE guards pg_has_role: on a
+// server without the rds_replication role (any stock Postgres) pg_has_role
+// would raise "role does not exist", and CASE is the one place Postgres
+// promises not to evaluate the branch it does not need.
+func (d *DB) RDSRoleReplication(ctx context.Context, role string) (bool, error) {
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
+	defer cancel()
+
+	var member bool
+	err := d.queryRow(ctx, `
+		SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles rr WHERE rr.rolname = 'rds_replication')
+		            THEN pg_has_role(r.oid, 'rds_replication', 'MEMBER')
+		            ELSE false END
+		FROM pg_roles r WHERE r.rolname = $1`, role).Scan(&member)
+	if err != nil {
+		return false, fmt.Errorf("postgres: read rds_replication membership for role %q: %w", role, err)
+	}
+	return member, nil
+}
+
 // blockersSQL lists the sessions that hold back a slot: an open transaction
 // older than $1 seconds, or a session holding the server's oldest xid horizon
 // (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits
