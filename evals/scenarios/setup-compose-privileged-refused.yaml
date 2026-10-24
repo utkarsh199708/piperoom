@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the person's own Compose file runs the Connect service with
 # privileged: true, and the setup validator refuses the document before anything starts. The label
-# names the validator rule and the fixing op (tasks/U-board.md row U1-19, step 1). Format:
+# names the validator rule and the fixing op (Jira KAN-5 row U1-19, step 1). Format:
 # evals/README.md (C6). The rule and its message are internal/setup/targets/compose's
 # (validator.go, knownRefusals, RulePrivilege).
 #

@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the setup run created its connector role without REPLICATION and
 # without SELECT on the captured table, so the connector cannot log in as a replication client or
-# read the snapshot. The label names the failing check and the fixing op (tasks/U-board.md row
+# read the snapshot. The label names the failing check and the fixing op (Jira KAN-5 row
 # U1-19, step 1). Format: evals/README.md (C6). Built on `devctl setup-break missing-grant`
 # (dev/scenarios.md, "Setup breaks", PR #880).
 #

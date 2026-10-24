@@ -1,7 +1,7 @@
 # C7 setup scenario (U7d): the person's MongoDB capture user holds readAnyDatabase, which never
 # covers the local database, so it cannot read local.oplog.rs and the setup run stops at the oplog
 # check before it registers a connector. The label names the failing check and the fixing op with
-# its tier (tasks/U-board.md rows U7a and U7d, step 7). Format: evals/README.md (C6). Built on
+# its tier (Jira KAN-5 rows U7a and U7d, step 7). Format: evals/README.md (C6). Built on
 # `devctl setup-break no-oplog-role` (dev/mongo/README.md, cmd/devctl/setupbreaks_mongo.go, U7c).
 #
 # RECORDED: NO, and only one pipeline read is replayed: the run stopped before it registered

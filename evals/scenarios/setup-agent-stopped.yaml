@@ -1,7 +1,7 @@
 # C7 setup scenario (U4d): SQL Server Agent on the source stopped after the setup run, so CDC's
 # capture job no longer moves changes from the transaction log into the change tables. The
 # connector and its task stay RUNNING and Debezium logs nothing; only the source's own state says
-# why nothing flows. The label names the failing check and the fix with its tier (tasks/U-board.md
+# why nothing flows. The label names the failing check and the fix with its tier (Jira KAN-5
 # rows U4b and U4d, step 4). Format: evals/README.md (C6). Built on `devctl setup-break
 # agent-stopped` (dev/mssql/README.md, cmd/devctl/setupbreaks_mssql.go, U4c).
 #
@@ -60,7 +60,7 @@
 #     START); dev/mssql/README.md: a container restart with MSSQL_AGENT_ENABLED=true starts it too.
 #   - internal/clients/sqlserver/readers.go: AgentState (sys.dm_server_services, the Agent sessions
 #     fallback on Linux).
-#   - tasks/U-board.md U4b: "Agent stopped is a check whose fix is T2 (service_restart on a host
+#   - Jira KAN-5 U4b: "Agent stopped is a check whose fix is T2 (service_restart on a host
 #     target) or a documented ask on managed SQL".
 #   - https://learn.microsoft.com/sql/relational-databases/track-changes/about-change-data-capture-sql-server:
 #     the capture and cleanup jobs are SQL Server Agent jobs; the log is not truncated until the
