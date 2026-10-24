@@ -213,7 +213,7 @@ const (
 // id per connector (config_drift.go), after these (pipeState.ids).
 var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart, owners.SignalLongTx}, forecastIDs()...)
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -225,6 +225,8 @@ type pipeState struct {
 	samples []sample
 	// slot is the slot name found for the pipeline (cached across ticks).
 	slot string
+	// ltx is the long_tx memory of the restart_lsn held now (long_tx.go).
+	ltx *longTxMem
 	// dlqFirst is, per DLQ topic, when the current growth episode was first
 	// seen (the first rising sample). It is cleared when the signal quiets.
 	dlqFirst map[string]time.Time

@@ -93,6 +93,8 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return cfg.GroupUnstable.WatchSignal
 	case owners.SignalOffsetBelowLogStart:
 		return cfg.OffsetBelowLogStart
+	case owners.SignalLongTx:
+		return cfg.LongTx.WatchSignal
 	}
 	return cfg.SlotWAL.WatchSignal
 }
