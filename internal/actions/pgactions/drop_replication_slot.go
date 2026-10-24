@@ -132,7 +132,7 @@ func (a *dropSlot) CheckScope(pl owners.Pipeline, raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	if err := refuseMySQL(DropSlotName, pl); err != nil {
+	if err := refuseNonPostgres(DropSlotName, pl); err != nil {
 		return err
 	}
 	if !slices.Contains(pl.Connectors, p.Connector) {

@@ -58,13 +58,27 @@ func stepKind(ctx context.Context, src any) string {
 	return owners.SourceKindPostgres
 }
 
-// refusePostgresOnly is the refusal of a Postgres-only action on a MySQL
-// pipeline: CheckScope's, so the step never reaches an approver.
+// refusePostgresOnly is the refusal of a Postgres-only action on a pipeline
+// whose source is not Postgres (MySQL, SQL Server, MongoDB, Oracle):
+// CheckScope's, so the step never reaches an approver.
 func refusePostgresOnly(name string, pl owners.Pipeline) error {
-	if pl.IsMySQL() {
-		return fmt.Errorf("sourceactions: %s: %w: pipeline %q has source_kind mysql and %s is a Postgres-only action (MySQL has no replica identity)", name, tools.ErrOutOfScope, pl.ID, name)
+	if k := pl.SourceKindOrDefault(); k != owners.SourceKindPostgres {
+		return fmt.Errorf("sourceactions: %s: %w: pipeline %q has source_kind %s and %s is a Postgres-only action (a %s source has no replica identity)", name, tools.ErrOutOfScope, pl.ID, k, name, k)
 	}
 	return nil
+}
+
+// refuseUnsupportedKind refuses a pipeline whose source kind these
+// source-neutral actions do not support. They run on Postgres and MySQL only
+// (KAN-541): a SQL Server, MongoDB or Oracle pipeline would otherwise be
+// handled as Postgres.
+func refuseUnsupportedKind(name string, pl owners.Pipeline) error {
+	switch k := pl.SourceKindOrDefault(); k {
+	case owners.SourceKindPostgres, owners.SourceKindMySQL:
+		return nil
+	default:
+		return fmt.Errorf("sourceactions: %s: %w: pipeline %q has source_kind %s, which %s does not support (postgres and mysql only)", name, tools.ErrOutOfScope, pl.ID, k, name)
+	}
 }
 
 // isMySQL reports whether kind is the MySQL source kind.

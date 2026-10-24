@@ -239,7 +239,7 @@ func (a *addPublicationTable) CheckScope(pl owners.Pipeline, raw json.RawMessage
 }
 
 func addPubInScope(pl owners.Pipeline, p addPublicationTableParams) error {
-	if err := refuseMySQL(AddPublicationTableName, pl); err != nil {
+	if err := refuseNonPostgres(AddPublicationTableName, pl); err != nil {
 		return err
 	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {
