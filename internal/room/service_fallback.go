@@ -107,6 +107,14 @@ func (s *Service) authorizeSetupLayer(st *roomState, p store.ProposalRow, user U
 		return s.authorizeProposalLayerGeneric(st, p, user, layer, confirm, needConfirm)
 	}
 	solo := s.setupSolo(&st.snap) && s.setupLocal
+	// pipeline_register on a team server needs an approver who is not the
+	// requester, unless solo mode applies (design §3.6): the room's creator
+	// approving their own registration is refused whatever other right they
+	// hold — a tenant admin or an overlap owner's self-approval is still a
+	// self-approval.
+	if stepsContainRegister(steps) && !s.setupSolo(&st.snap) && st.snap.Setup.creator.ID == user.ID {
+		return "", notAdmin()
+	}
 	if origin == events.ProposalOriginDriver && !solo && s.isDriver(st, user.ID) {
 		// §3.6: a destructive setup step needs a non-self approver on a team
 		// server. A driver-origin proposal is the driver's own write, so the
