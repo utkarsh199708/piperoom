@@ -207,6 +207,14 @@ func TestRunRefusesConfigBeforeAnyRead(t *testing.T) {
 		{"no login", func(d *Driver) { d.Login = "" }},
 		{"sa login", func(d *Driver) { d.Login = "SA" }},
 		{"fixed role login", func(d *Driver) { d.Login = "db_owner" }},
+		{"guest login", func(d *Driver) { d.Login = "guest" }},
+		{"cdc login", func(d *Driver) { d.Login = "cdc" }},
+		{"INFORMATION_SCHEMA login", func(d *Driver) { d.Login = "INFORMATION_SCHEMA" }},
+		{"database over sysname", func(d *Driver) { d.Database = strings.Repeat("d", maxIdentChars+1) }},
+		{"duplicate tables, suffix over the limit", func(d *Driver) {
+			d.CaptureInstance = strings.Repeat("c", 90)
+			d.Tables = []string{"dbo.orders", "dbo.orders", DefaultCanaryTable}
+		}},
 		{"long capture instance", func(d *Driver) { d.CaptureInstance = strings.Repeat("c", 90) }},
 		{"unknown platform", func(d *Driver) { d.Platform = "gcp" }},
 	}

@@ -87,6 +87,12 @@ func TestWriterRefusesBeforeAnyIO(t *testing.T) {
 		{"canary bad nonce", func(w *Writer) error { return w.InsertCanary(ctx, DefaultCanaryTable, "ABC") }},
 		{"canary bad table", func(w *Writer) error { return w.InsertCanary(ctx, "c", nonce) }},
 		{"sa login", func(w *Writer) error { _, err := w.CreateReadRole(ctx, "sa", []string{"dbo.orders"}); return err }},
+		{"guest login", func(w *Writer) error { _, err := w.CreateReadRole(ctx, "guest", []string{"dbo.orders"}); return err }},
+		{"cdc login", func(w *Writer) error { _, err := w.CreateReadRole(ctx, "cdc", []string{"dbo.orders"}); return err }},
+		{"fixed role login", func(w *Writer) error {
+			_, err := w.CreateReadRole(ctx, "db_datareader", []string{"dbo.orders"})
+			return err
+		}},
 		{"login no tables", func(w *Writer) error { _, err := w.CreateReadRole(ctx, "ro", nil); return err }},
 		{"alter system", func(w *Writer) error { _, err := w.AlterSystem(ctx, "wal_level", "logical"); return err }},
 	}

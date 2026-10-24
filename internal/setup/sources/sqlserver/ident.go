@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	sqlclient "piperoom/internal/clients/sqlserver"
 )
 
 // Errors of the driver and the writer. Compare with errors.Is.
@@ -21,12 +23,12 @@ var (
 	ErrParams = errors.New("setup/sources/sqlserver: bad parameter")
 )
 
-const (
-	// maxIdentChars is sysname's length: a longer name cannot exist.
-	maxIdentChars = 128
-	// maxCaptureInstance is sp_cdc_enable_table's limit on @capture_instance.
-	maxCaptureInstance = 100
-)
+// maxIdentChars is sysname's length: a longer name cannot exist. Every name
+// here is ASCII (identRe), so bytes are characters. The capture instance limit
+// (sp_cdc_enable_table's 100 characters) is sqlclient.MaxCaptureInstanceChars,
+// applied by the derivation this package shares with the executing writer
+// (checkCaptureInstance).
+const maxIdentChars = 128
 
 var (
 	identRe       = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -42,9 +44,13 @@ var systemDatabases = []string{"master", "model", "msdb", "tempdb"}
 
 // reservedLogins are principals a setup must never create, grant to or name
 // as the connector's login: the administrator, the database's built-in users
-// and the fixed server roles (a login of such a name would read as one).
+// (dbo, guest, sys, INFORMATION_SCHEMA), the cdc user and schema that
+// sp_cdc_enable_db creates (CreateReadRole's CREATE USER would land on it and
+// the grants would reach CDC's own principal), and the fixed server roles (a
+// login of such a name would read as one). Matched case-insensitively, as SQL
+// Server resolves principal names under its usual collations.
 var reservedLogins = []string{
-	"sa", "public", "dbo", "guest", "sys", "information_schema",
+	"sa", "public", "dbo", "guest", "sys", "information_schema", "cdc",
 	"sysadmin", "serveradmin", "securityadmin", "processadmin", "setupadmin",
 	"bulkadmin", "diskadmin", "dbcreator",
 }
@@ -118,22 +124,18 @@ func checkDatabase(db string) error {
 	return nil
 }
 
-// checkCaptureInstance checks the CreatePublication name against what the
-// executing writer derives from it: name itself for one table, and
-// name_schema_table for each of several, each within sp_cdc_enable_table's
-// 100-character limit.
+// checkCaptureInstance checks the CreatePublication name against the capture
+// instances the executing writer derives from it. sqlclient.CaptureInstances
+// is the writer's own derivation (name for one table, name_schema_table for
+// each of several, a duplicate counted once) and carries sp_cdc_enable_table's
+// limit, so the driver can never accept a name the writer then refuses, nor
+// check one the writer never creates.
 func checkCaptureInstance(name string, tables []string) error {
 	if err := checkIdent(name); err != nil {
 		return err
 	}
-	for _, t := range tables {
-		inst := name
-		if len(tables) > 1 {
-			inst = name + "_" + strings.Replace(t, ".", "_", 1)
-		}
-		if len(inst) > maxCaptureInstance {
-			return fmt.Errorf("%w: capture instance %q is over %d characters", ErrParams, clipName(inst), maxCaptureInstance)
-		}
+	if _, err := sqlclient.CaptureInstances(name, tables); err != nil {
+		return fmt.Errorf("%w: %w", ErrParams, err)
 	}
 	return nil
 }
