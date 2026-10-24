@@ -1,6 +1,6 @@
-//go:build !claude
+//go:build !livejudge && !claude
 
-// Without -tags claude, newJudge refuses, so nothing here can reach the API.
+// Without -tags livejudge (or its alias claude), newJudge refuses, so nothing here can reach the API.
 
 package main
 

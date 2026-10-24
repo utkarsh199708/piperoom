@@ -15,14 +15,15 @@ import (
 
 // fakeReader answers the driver's reads from fields; err fails every call.
 type fakeReader struct {
-	settings    []pgclient.DBSetting
-	slots       []clients.ReplicationSlot
-	tables      []pgclient.TableReplication
-	role        pgclient.RoleInfo
-	publication []pgclient.PublicationTable
-	pubErr      error
-	err         error
-	calls       []string
+	settings       []pgclient.DBSetting
+	slots          []clients.ReplicationSlot
+	tables         []pgclient.TableReplication
+	role           pgclient.RoleInfo
+	rdsReplication bool
+	publication    []pgclient.PublicationTable
+	pubErr         error
+	err            error
+	calls          []string
 }
 
 func (f *fakeReader) Settings(context.Context) ([]pgclient.DBSetting, error) {
@@ -43,6 +44,11 @@ func (f *fakeReader) TableReplication(_ context.Context, tables []string) ([]pgc
 func (f *fakeReader) RoleInfo(context.Context, string, []string) (pgclient.RoleInfo, error) {
 	f.calls = append(f.calls, "role")
 	return f.role, f.err
+}
+
+func (f *fakeReader) RDSRoleReplication(context.Context, string) (bool, error) {
+	f.calls = append(f.calls, "rds_replication")
+	return f.rdsReplication, f.err
 }
 
 func (f *fakeReader) PublicationTables(context.Context, string, string, []string) ([]pgclient.PublicationTable, error) {
@@ -339,7 +345,7 @@ func TestReplicaIdentity(t *testing.T) {
 func TestReadRoleAcceptsRDSReplication(t *testing.T) {
 	f := readyReader()
 	f.role.Replication = false
-	f.role.RDSReplication = true
+	f.rdsReplication = true
 	results, err := testDriver().Run(context.Background(), f)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

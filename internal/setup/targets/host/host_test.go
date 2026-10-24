@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,13 @@ func newFixture(t *testing.T, opts Options) *fixture {
 
 func newFixtureIn(t *testing.T, dir string, opts Options) *fixture {
 	t.Helper()
+	if (opts.GOOS == "" || opts.GOOS == "linux") && runtime.GOOS == "windows" {
+		// A simulated Linux runner on a Windows test machine gets real
+		// backslash temp paths, which no systemd unit can hold (the unit-path
+		// rule refuses them, as it should) and NTFS modes. These run on the
+		// ubuntu and macOS legs; the GOOS "windows" fixtures still run here.
+		t.Skip("simulates a Linux runner; needs a POSIX temp dir (runs on ubuntu and macOS)")
+	}
 	f := &fixture{t: t, dir: dir, exec: &fakeExec{}, java: fakeJava}
 	reg, err := ops.New(ops.Config{
 		ProjectDir: dir,
@@ -152,6 +160,7 @@ func TestCatalogue(t *testing.T) {
 		"service_status": protocol.TierT0, "properties_read": protocol.TierT0,
 		"properties_write": protocol.TierT1,
 		"service_install":  protocol.TierT2, "service_restart": protocol.TierT2,
+		"journal_tail": protocol.TierT0,
 	}
 	for name, tier := range want {
 		op, ok := f.reg.Get(name)

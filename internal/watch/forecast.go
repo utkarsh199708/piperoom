@@ -108,7 +108,8 @@ func (w *Watcher) planSamples(now time.Time, ts []target, bySet map[string]*obse
 			ps.lastSample[m] = now
 			return true
 		}
-		if row, ok := slotSample(ps, obs); ok && due(clients.WatchMetricSlotWALBytes) {
+		// A MySQL pipeline has no slot: no slot sample, so no slot forecast.
+		if row, ok := slotSample(ps, obs); ok && !t.p.IsMySQL() && due(clients.WatchMetricSlotWALBytes) {
 			jobs = append(jobs, sampleJob{t: t, metric: clients.WatchMetricSlotWALBytes, value: float64(row.RetainedWALBytes),
 				object: ps.slot, limit: slotLimit(row, t.cfg.WALHeadroomBytes)})
 		}

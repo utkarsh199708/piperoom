@@ -75,6 +75,15 @@ type Reader interface {
 
 var _ Reader = (*pgclient.DB)(nil)
 
+// rdsReplicationReader is the optional local adapter behind Evidence's
+// RDSReplication: *postgres.DB answers it; the runner's remote client does
+// not, so an RDS/Aurora role without the rolreplication attribute fails
+// read_role over the runner until the runner's source_role_info carries the
+// flag (contract change request).
+type rdsReplicationReader interface {
+	RDSRoleReplication(ctx context.Context, role string) (bool, error)
+}
+
 // Evidence is what one check's read returned.
 type Evidence struct {
 	Settings    []pgclient.DBSetting
@@ -86,6 +95,10 @@ type Evidence struct {
 	// PublicationExists is false when the read reported that the publication
 	// is absent (clients.ErrNotFound), which is a check failure, not an error.
 	PublicationExists bool
+	// RDSReplication is the role's membership in rds_replication (RDS/Aurora),
+	// read through the optional rdsReplicationReader; false when the reader
+	// does not carry the read.
+	RDSReplication bool
 }
 
 // ReadFunc is one check's read.
@@ -420,7 +433,17 @@ func readRole(ctx context.Context, r Reader, d Driver) (Evidence, error) {
 	if err != nil {
 		return Evidence{}, fmt.Errorf("postgres driver: read role %s: %w", clipName(d.Role), err)
 	}
-	return Evidence{Role: role}, nil
+	ev := Evidence{Role: role}
+	if role.Exists {
+		if rr, ok := r.(rdsReplicationReader); ok {
+			rds, err := rr.RDSRoleReplication(ctx, d.Role)
+			if err != nil {
+				return Evidence{}, fmt.Errorf("postgres driver: read rds_replication membership for %s: %w", clipName(d.Role), err)
+			}
+			ev.RDSReplication = rds
+		}
+	}
+	return ev, nil
 }
 
 func readPublication(ctx context.Context, r Reader, d Driver) (Evidence, error) {
@@ -532,7 +555,7 @@ func replicaIdentityReady(d Driver, ev Evidence) bool {
 // of the rolreplication attribute, and Debezium's own login check accepts
 // either.
 func readRoleReady(d Driver, ev Evidence) bool {
-	return ev.Role.Exists && ev.Role.CanLogin && (ev.Role.Replication || ev.Role.RDSReplication)
+	return ev.Role.Exists && ev.Role.CanLogin && (ev.Role.Replication || ev.RDSReplication)
 }
 
 // readRoleFix names what a failing read_role check needs. A role that does not

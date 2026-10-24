@@ -93,8 +93,12 @@ func TestTableReplicationAndRoleIntegration(t *testing.T) {
 	}
 	// The dev stack is stock Postgres: no rds_replication role exists, and the
 	// guarded membership read must not raise "role does not exist".
-	if info.RDSReplication {
-		t.Fatalf("stock Postgres reported rds_replication membership: %+v", info)
+	rds, err := db.RDSRoleReplication(context.Background(), "piperoom")
+	if err != nil {
+		t.Fatalf("RDSRoleReplication: %v", err)
+	}
+	if rds {
+		t.Fatalf("stock Postgres reported rds_replication membership: %v", rds)
 	}
 	for _, tbl := range tables {
 		if !info.Selectable[tbl] {

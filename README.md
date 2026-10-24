@@ -1,7 +1,8 @@
 # Piperoom
 
-Piperoom is a shared incident room for CDC/Kafka data pipelines (Postgres → Debezium →
-Kafka → consumers → warehouse). When an alert fires, it opens a room where an AI agent
+Piperoom is a shared incident room for CDC/Kafka data pipelines (Postgres or MySQL →
+Debezium → Kafka → consumers → warehouse; a MySQL source is `source_kind: mysql` in
+`owners.yaml`, `docs/pilot/mysql-users.md`). When an alert fires, it opens a room where an AI agent
 (Claude) investigates with read-only tools while engineers watch live, comment, and steer.
 Only one person — the **driver** — steers the agent at a time; everyone else suggests. The
 agent can only propose a fix, and a fix runs only once every layer owner it touches has
@@ -18,6 +19,7 @@ cmd/
   devconsumer/   sample order-sync consumer used by the dev stack and scenarios
   discover/      drafts an owners file from a live cluster (read-only)
   investigate/   CLI entry point for a one-shot agent investigation
+  setup/         piperoom-setup: the setup runner (pairs with a server, or --standalone)
 evals/           agent eval harness and scenarios (cmd/evalrun)
 dev/
   docker-compose.yml   Postgres, Kafka, Schema Registry, Connect, devconsumer
@@ -47,14 +49,51 @@ See `AGENTS.md` for the full architecture diagram, team roles, and file ownershi
 
 ## Quickstart (5 minutes)
 
-Read-only: Piperoom investigates and proposes fixes, but nothing executes. You need Go 1.27
-(plus Node 24 for the UI) or Docker, and your Kafka Connect, Kafka, Schema Registry, source
-Postgres and warehouse, with the read-only roles of `docs/pilot/permissions.md`. `discover`
-reads Connect, Kafka and the Registry. The server pings the source Postgres and the warehouse
-at start and will not start if either is down; it connects to Connect, Kafka and the Registry
-only when a tool first uses them. Point the standard variables at them (`CONNECT_URL`,
-`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`); unset, they
-default to the local dev stack below. Set `ANTHROPIC_API_KEY` for the agent.
+Start with the setup runner. `piperoom-setup` is the one binary that runs the setup agent on your
+machine: with `--standalone` it starts Piperoom in-process for one person (in-memory rooms, dev login
+on 127.0.0.1, write mode and setup on), prints the URL to open, and stays up as the pipeline's
+watcher once the pipeline is live.
+
+```sh
+mkdir -p orders                 # --project must name an existing directory
+piperoom-setup --standalone --project ./orders
+```
+
+`--project` is the directory the run writes to: `owners.yaml` (a bootstrap file on a first start, the
+live pipelines after setup), `setup-log.jsonl` (every room event, one JSON object per line) and
+`.piperoom/` (the secret store). Use an empty directory for a new pipeline. Later,
+`piperoom-setup --standalone --watch --project ./orders` restarts the server whenever the setup room
+writes `owners.yaml` (`--watch` needs `--standalone`: the standalone server is the one that restarts).
+Set `ANTHROPIC_API_KEY` for the agent and have Docker running (Docker Desktop in Linux-container
+mode) for a Compose target.
+
+The binary comes from this checkout (`go build -o bin/piperoom-setup ./cmd/setup`) or from the pilot
+image, which ships it as `/piperoom-setup` for runner mode:
+
+```sh
+read -rs PIPEROOM_SETUP_CODE && export PIPEROOM_SETUP_CODE   # paste the pairing code
+docker run --rm -it -e PIPEROOM_SETUP_CODE --mount type=volume,source=piperoom-orders,destination=/work \
+  --entrypoint /piperoom-setup piperoom:pilot \
+  --server <origin> --project /work
+```
+
+The pairing code is single-use; passing it through the environment keeps it out of shell history,
+`ps` and `docker inspect`. The named volume keeps `owners.yaml`, `setup-log.jsonl` and the secret
+store after the container exits; a tmpfs mount or no mount loses them.
+
+`--standalone` is for your own machine, because it insists on a loopback address, and the image sets
+`PIPEROOM_HTTP_ADDR=0.0.0.0`, so it refuses there by design. The setup room, the typed operations the
+runner executes and the approval model are described in `docs/design/setup-agent.md`; the setup-mode
+agent is landing in the U wave (`tasks/U-board.md`).
+
+Already have a pipeline? Use the read-only quickstart: Piperoom investigates and proposes fixes, but
+nothing executes. You need Go 1.27 (plus Node 24 for the UI) or Docker, and your Kafka Connect, Kafka,
+Schema Registry, source Postgres and warehouse, with the read-only roles of
+`docs/pilot/permissions.md`. `discover` reads Connect, Kafka and the Registry. The server pings the
+source Postgres and the warehouse at start and will not start if either is down; it connects to
+Connect, Kafka and the Registry only when a tool first uses them. Point the standard variables at
+them (`CONNECT_URL`, `KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`);
+unset, they default to the local dev stack below. Set `ANTHROPIC_API_KEY` for the agent.
 
 ```sh
 make quickstart                                          # Go: discover, build the UI, start
@@ -153,7 +192,24 @@ Postgres (`internal/store` and `internal/room` run for real; tests that need the
 dev stack skip), the race detector, govulncheck, the deploy manifests (Helm, Terraform, no
 dev auth in the image) and the web job. The OIDC end-to-end test runs only by hand
 (`workflow_dispatch`). Live eval runs call the model and need `ANTHROPIC_API_KEY`; see
-`evals/README.md`.
+`evals/README.md`. CI also checks the supported-model list of the other providers: every row of
+`internal/agent/llm/supported.json` needs a 3-run baseline that passes `evalrun -gate` against the Claude
+reference, and no `sunset` may have passed. A model of another provider (OpenAI and compatible hosts, Gemini,
+Bedrock) is gated by dispatching `evals-live` with its `provider`, `flavor` and `model`; the provider's key is a
+secret of the `evals` environment and a missing one skips the run. See "Gate run of a model provider" in
+`docs/runbook.md`; the published model table is `docs/pilot/models.md` (added by V14).
+
+The setup runner has its own workflows. `setup-matrix.yml` runs on every pull request and on
+push to `main`: the setup unit tests, the path table tests of `internal/setup/ops` and the
+Docker endpoint detection on ubuntu, macOS and Windows, plus the Compose integration on
+ubuntu (and on macOS when the runner has Colima; otherwise it is a documented skip).
+`setup-nightly.yml` runs the Compose integration on the owner's Windows machine (a
+self-hosted runner, label `piperoom-r1`, Docker Desktop in Linux-container mode), schedule
+and manual only: it never runs on a pull request, so it is not a required check and a
+checkout without that runner never shows it as pending. Its `go test -json` export is kept
+as an artifact for 30 days. The repository is public, so before registering that runner set
+"Require approval for all external contributors" in the Actions settings and run it under a
+dedicated unprivileged Windows account (see the workflow's header).
 
 ### Web tooling: npm install scripts
 
@@ -232,7 +288,11 @@ the env vars above. Operations (token rotation, turning it off, error codes) are
 
 ## Running a pilot (Docker, login)
 
-`deploy/README.md` is the guide: one image, one compose file, its own Postgres. The image and the
+`deploy/README.md` is the guide: one image, one compose file, its own Postgres. The image has two
+binaries: `/piperoom`, the server and its entrypoint, and `/piperoom-setup`, the setup runner, which
+you run explicitly by overriding the entrypoint. The in-cluster runner Job of
+`docs/design/setup-strimzi.md` is that consumer; it is a design, not in the Helm chart yet. The
+image and the
 compose file start in **oidc** mode (real single sign-on through your identity provider) and refuse
 to start, naming the missing variable, until `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_ISSUER`,
 `PIPEROOM_OIDC_CLIENT_ID` and `PIPEROOM_OIDC_CLIENT_SECRET` are set. Passwordless **dev** login

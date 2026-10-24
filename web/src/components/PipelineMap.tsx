@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronsLeftRight, ChevronsRightLeft, Route } from 'lucide-react'
+import { LAYER_MYSQL } from '../api/types'
 import type { ForecastSummary, Topology, TopologyNode } from '../api/types'
 import { updatedAgoLabel } from '../lib/time'
 import { factLabel, factPhrase, factValue } from '../lib/facts'
 import { driftLabel, driftPhrase, placeDrift, windowClock } from '../lib/drift'
 import type { DriftFact } from '../lib/drift'
 import { cn } from '@/lib/utils'
-import { Badge, layerVariant } from '@/components/ui/badge'
+import { Badge, layerLabel, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -42,12 +43,36 @@ const RUN_STATE: Partial<Record<TopologyNode['kind'], { key: string; label: stri
   model: { key: 'last_run_status', label: 'last run' },
 }
 
+// Q8d (internal/topology/mysql.go): a MySQL source node carries the server's binlog state instead of a slot. The
+// oldest binlog the server still has is what a purged-position incident turns on, so it leads; the rest follow in
+// this order. The JSON object arrives sorted by key, which would lead with the retention.
+const MYSQL_FACT_ORDER = ['binlog_oldest', 'binlog_files', 'binlog_expire', 'gtid_mode']
+
+/** A source table of a source_kind: mysql pipeline: id "mysql:<db>.<table>", layer mysql. */
+function isMySQLSource(node: TopologyNode): boolean {
+  return node.kind === 'source_table' && node.layer === LAYER_MYSQL
+}
+
+/** The kind word a node shows; a MySQL source says so, a Postgres one stays "Source". */
+function kindLabel(node: TopologyNode): string {
+  if (isMySQLSource(node)) return 'MySQL source'
+  return KIND_LABEL[node.kind] ?? node.kind
+}
+
 /**
- * The facts a node shows, lead fact first. CDC nodes keep the server's order untouched; a batch node leads with its
- * run state, and a DAG's tasks_skipped is drawn as its own note instead of a fact.
+ * The facts a node shows, lead fact first. CDC nodes keep the server's order untouched, except a MySQL source's
+ * binlog facts (MYSQL_FACT_ORDER); a batch node leads with its run state, and a DAG's tasks_skipped is drawn as its
+ * own note instead of a fact.
  */
 function displayFacts(node: TopologyNode): [string, string][] {
   const entries = node.facts ? Object.entries(node.facts) : []
+  if (isMySQLSource(node)) {
+    const rank = (k: string) => {
+      const i = MYSQL_FACT_ORDER.indexOf(k)
+      return i < 0 ? MYSQL_FACT_ORDER.length : i
+    }
+    return [...entries].sort(([a], [b]) => rank(a) - rank(b))
+  }
   const run = RUN_STATE[node.kind]
   if (!run) return entries
   const rest = entries.filter(([k]) => k !== run.key && !(node.kind === 'dag' && k === 'tasks_skipped'))
@@ -83,6 +108,7 @@ const LAYER_EDGE: Record<string, string> = {
   kafka: 'border-l-layer-kafka',
   consumer: 'border-l-layer-consumer',
   warehouse: 'border-l-layer-warehouse',
+  mysql: 'border-l-layer-mysql',
 }
 
 // A drift fact is a word plus a colour, like health: "drift" in the warning tone for a known kind, muted for an
@@ -212,14 +238,14 @@ function Node({
         data-worst={worst ? 'true' : undefined}
         aria-pressed={selected}
         onClick={onSelect}
-        title={`${node.layer}\n${tip}`}
+        title={`${layerLabel(node.layer)}\n${tip}`}
         className={cn(shared, 'flex h-14 min-w-[168px] flex-1 basis-0 flex-col justify-center gap-0.5 border-l-[3px] px-3 py-1.5', LAYER_EDGE[node.layer] ?? 'border-l-input')}
       >
         {/* Line one: what it is and how it is, in words. Line two: the name, with the whole width
             (it used to share a line with the health word and truncated to "public.o…"). The layer
             is a coloured left edge here and a badge in the expanded lane; its name is in the tooltip. */}
         <span className="flex items-center gap-1.5 text-xs">
-          <span className="whitespace-nowrap text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
+          <span className="whitespace-nowrap text-subtle-foreground">{kindLabel(node)}</span>
           {/* A batch node's run state is what tells a failed run from a failed scheduler, so it stays on the
               strip; every other fact is in the tooltip. */}
           {runState && (
@@ -229,7 +255,7 @@ function Node({
           )}
           <SkippedNote count={skipped} />
           {drift && drift.length > 0 && <DriftInline facts={drift} />}
-          <span className="sr-only">, {node.layer},</span>
+          <span className="sr-only">, {layerLabel(node.layer)},</span>
           {badge}
           <StatusDot tone={health.tone} className="ml-auto" />
           <span className={cn('whitespace-nowrap', node.health === 'fail' ? 'text-destructive-fg' : 'text-muted-foreground')}>
@@ -263,10 +289,10 @@ function Node({
       className={cn(shared, 'flex min-h-[92px] min-w-[200px] flex-1 basis-0 flex-col gap-1.5 px-3 py-2.5')}
     >
       <div className="flex items-center gap-2">
-        <span className="whitespace-nowrap text-xs text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
+        <span className="whitespace-nowrap text-xs text-subtle-foreground">{kindLabel(node)}</span>
         <SkippedNote count={skipped} />
         <Badge variant={layerVariant(node.layer)} mono className="ml-auto">
-          {node.layer}
+          {layerLabel(node.layer)}
         </Badge>
       </div>
       <div className="truncate font-mono text-sm font-medium" title={node.name}>

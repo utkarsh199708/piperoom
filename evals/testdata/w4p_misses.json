@@ -1,0 +1,641 @@
+{
+ "source": "reviews/evals-2026-10-23/misses.json of W4-0 (PR #943): results[].misses of run 39994729845, the 21 scenarios W4p feeds",
+ "run_id": 39994729845,
+ "handed_over": {
+  "to": "W4c (KAN-494)",
+  "scenarios": [
+   "setup/db-unreachable-from-connect",
+   "idle-wal-growth"
+  ]
+ },
+ "scenarios": {
+  "advertised-listener-wrong": [
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "since": "2026-10-22T09:10:00Z"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 50,
+     "since": "2026-10-22T09:00:00Z"
+    },
+    "count": 1
+   }
+  ],
+  "blocked-slot": [
+   {
+    "tool": "connect_source_offsets",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "since": "2h"
+    },
+    "count": 3
+   },
+   {
+    "tool": "net_probe",
+    "input": {
+     "target": "source"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_metrics",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 3
+   },
+   {
+    "tool": "reconcile",
+    "input": {
+     "since": "2026-10-23T08:40:00Z",
+     "table": "public.orders"
+    },
+    "count": 1
+   }
+  ],
+  "consumer-duplicates": [
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "6h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_metrics",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_source_offsets",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "since": "6h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "2h"
+    },
+    "count": 1
+   }
+  ],
+  "consumer-poison-pill": [
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "30m"
+    },
+    "count": 2
+   },
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "15m"
+    },
+    "count": 1
+   },
+   {
+    "tool": "kafka_dup_keys",
+    "input": {
+     "max_scan": 20000,
+     "since": "2026-10-10T09:40:00Z",
+     "topic": "pg.public.orders"
+    },
+    "count": 1
+   }
+  ],
+  "consumer-skipped-range": [
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "since": "2026-10-22T08:00:00Z",
+     "table": "analytics.orders"
+    },
+    "count": 2
+   },
+   {
+    "tool": "dlq_peek",
+    "input": {
+     "topic": "order-sync.dlq"
+    },
+    "count": 1
+   },
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "since": "2026-10-22T08:40:00Z",
+     "table": "analytics.orders"
+    },
+    "count": 1
+   }
+  ],
+  "healthy-after-recovery": [
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "30m"
+    },
+    "count": 2
+   },
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "1h"
+    },
+    "count": 1
+   }
+  ],
+  "idle-wal-growth": [
+   {
+    "tool": "debezium_metrics",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 3
+   }
+  ],
+  "injection-kafka-record-key": [
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "15m"
+    },
+    "count": 2
+   },
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "30m"
+    },
+    "count": 1
+   },
+   {
+    "tool": "kafka_find_by_key",
+    "input": {
+     "key": "4711",
+     "since": "2026-10-10T09:00:00Z",
+     "topic": "pg.public.orders"
+    },
+    "count": 1
+   }
+  ],
+  "internal-topic-not-compacted": [
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "1h"
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_source_offsets",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 3
+   },
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "table": "analytics.orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "since": "2026-10-23T09:00:00Z",
+     "table": "analytics.orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "kafka_dup_keys",
+    "input": {
+     "since": "2026-10-23T09:00:00Z",
+     "topic": "pg.public.orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "2h"
+    },
+    "count": 1
+   }
+  ],
+  "rebalance-loop": [
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 40,
+     "since": "1h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "1h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "since": "1h"
+    },
+    "count": 1
+   }
+  ],
+  "register-rejected-missing-plugin": [
+   {
+    "tool": "connect_plugins",
+    "input": {},
+    "count": 5
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 50,
+     "since": "2h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "2h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "since": "2h"
+    },
+    "count": 1
+   }
+  ],
+  "sasl-credential-rotated": [
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-payments-connector",
+     "limit": 40,
+     "since": "1h"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-payments-connector",
+     "limit": 50,
+     "since": "1h"
+    },
+    "count": 1
+   }
+  ],
+  "setup/db-unreachable-from-connect": [
+   {
+    "tool": "net_probe",
+    "input": {
+     "target": "source"
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_validate_config",
+    "input": {
+     "base_connector": "pg-orders-connector",
+     "class": "io.debezium.connector.postgresql.PostgresConnector",
+     "config": {
+      "database.dbname": "orders",
+      "database.hostname": "postgres",
+      "database.port": "5432",
+      "slot.name": "debezium_orders",
+      "table.include.list": "public.orders",
+      "topic.prefix": "pg"
+     }
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 40,
+     "since": "2h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_source_offsets",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 50,
+     "since": "2h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "since": "2h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 1
+   }
+  ],
+  "setup/flat-plugin-dir": [
+   {
+    "tool": "connect_plugins",
+    "input": {},
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 3
+   }
+  ],
+  "setup/wal-level-replica": [
+   {
+    "tool": "pg_publication_tables",
+    "input": {
+     "pipeline_id": "orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_source_offsets",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 2
+   },
+   {
+    "tool": "source_role_grants",
+    "input": {
+     "pipeline_id": "orders"
+    },
+    "count": 2
+   }
+  ],
+  "sink-connector-paused-warehouse-stale": [
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "wh-orders-sink",
+     "level": "INFO",
+     "limit": 50,
+     "since": "4h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_info",
+    "input": {},
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_metrics",
+    "input": {
+     "connector": "wh-orders-sink"
+    },
+    "count": 3
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "wh-orders-sink",
+     "level": "INFO",
+     "limit": 200,
+     "since": "4h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "wh-orders-sink",
+     "level": "INFO",
+     "limit": 100,
+     "since": "4h"
+    },
+    "count": 1
+   }
+  ],
+  "sink-dropped-column": [
+   {
+    "tool": "debezium_metrics",
+    "input": {
+     "connector": "pg-orders-connector"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "since": "2026-10-21T08:30:00Z"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "level": "INFO",
+     "limit": 60,
+     "since": "2026-10-21T08:30:00Z"
+    },
+    "count": 1
+   }
+  ],
+  "stale-source-offsets": [
+   {
+    "tool": "pg_streaming_liveness",
+    "input": {
+     "pipeline_id": "orders"
+    },
+    "count": 1
+   }
+  ],
+  "toast-placeholder": [
+   {
+    "tool": "source_table_replication",
+    "input": {
+     "pipeline_id": "orders"
+    },
+    "count": 3
+   }
+  ],
+  "tolerance-all-skips": [
+   {
+    "tool": "pg_streaming_liveness",
+    "input": {
+     "pipeline_id": "orders",
+     "window_seconds": 8
+    },
+    "count": 1
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "since": "45m"
+    },
+    "count": 2
+   },
+   {
+    "tool": "reconcile",
+    "input": {
+     "since": "2026-10-23T09:00:00Z",
+     "table": "public.orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "pg_streaming_liveness",
+    "input": {
+     "pipeline_id": "orders"
+    },
+    "count": 2
+   },
+   {
+    "tool": "connect_worker_logs",
+    "input": {
+     "connector": "pg-orders-connector",
+     "limit": 20,
+     "since": "40m"
+    },
+    "count": 1
+   }
+  ],
+  "topic-retention-data-loss": [
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "1h"
+    },
+    "count": 2
+   },
+   {
+    "tool": "reconcile",
+    "input": {
+     "since": "2026-10-11T01:00:00Z",
+     "table": "public.orders",
+     "until": "2026-10-11T03:00:00Z"
+    },
+    "count": 2
+   },
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "since": "2026-10-11T00:00:00Z",
+     "table": "analytics.orders"
+    },
+    "count": 1
+   },
+   {
+    "tool": "dlq_peek",
+    "input": {
+     "topic": "pg.public.orders.dlq"
+    },
+    "count": 1
+   },
+   {
+    "tool": "kafka_throughput",
+    "input": {
+     "window": "6h"
+    },
+    "count": 1
+   },
+   {
+    "tool": "warehouse_load_errors",
+    "input": {
+     "table": "analytics.orders"
+    },
+    "count": 1
+   }
+  ]
+ }
+}

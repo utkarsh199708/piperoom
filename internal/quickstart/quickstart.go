@@ -28,7 +28,7 @@ import (
 
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
-	"piperoom/internal/events"
+	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 )
@@ -98,6 +98,9 @@ type Options struct {
 	TempDir string
 	// Stdout receives the URL once the listener is bound; nil discards it.
 	Stdout io.Writer
+	// ProjectDir holds .piperoom/model.env, the model picker's choice (V7);
+	// "" is the working directory.
+	ProjectDir string
 	// Log is the logger; nil is slog.Default.
 	Log *slog.Logger
 	// Serve serves the server with the resolved Settings until ctx ends. It is
@@ -116,6 +119,20 @@ type Settings struct {
 	WriteMode    bool
 	SetupEnabled bool
 	Stdout       io.Writer
+	// ProjectDir is Options.ProjectDir; ModelEnv is the model.env read from
+	// it (already applied to Config; the zero value when there is none). Its
+	// key is for the caller to hand the model adapters.
+	ProjectDir string
+	ModelEnv   ModelEnv
+}
+
+// ModelMode is the server mode the model panel reports: standalone when
+// write mode is on (docs/design/setup-agent.md section 2.7), else quickstart.
+func (s Settings) ModelMode() string {
+	if s.WriteMode {
+		return httpapi.ModelModeStandalone
+	}
+	return httpapi.ModelModeQuickstart
 }
 
 // ServeFunc serves the quickstart server with the resolved settings until ctx
@@ -187,6 +204,16 @@ func Prepare(opts Options) (Settings, func(), error) {
 	// The address check above already refused anything off loopback; clearing
 	// the switch makes authSetup refuse it too.
 	cfg.DevAllowNonLoopback = ""
+	// The model the picker chose last time wins over the environment: it is
+	// the solo user's latest explicit choice (PUT /api/models).
+	menv, found, err := ReadModelEnv(opts.ProjectDir)
+	if err != nil {
+		return Settings{}, noop, fmt.Errorf("server: %w", err)
+	}
+	if found {
+		cfg = menv.Apply(cfg)
+		log.Info("server: quickstart: the model comes from the picker's file", "path", ModelEnvPath(opts.ProjectDir))
+	}
 	ownersPath := opts.OwnersPath
 	if ownersPath == "" {
 		ownersPath = DefaultOwnersFile
@@ -233,6 +260,8 @@ func Prepare(opts Options) (Settings, func(), error) {
 		WriteMode:    opts.WriteMode,
 		SetupEnabled: opts.SetupEnabled,
 		Stdout:       stdout,
+		ProjectDir:   opts.ProjectDir,
+		ModelEnv:     menv,
 	}, cleanup, nil
 }
 
@@ -288,12 +317,12 @@ func SoleUser(own *owners.Owners) (string, bool) {
 }
 
 // ownedLayers lists the layers of the owners file's layers: block, in
-// events.Layers order and then any other name sorted, so the users file lists
+// owners.KnownLayers order (so the mysql source layer is a known one) and then any other name sorted, so the users file lists
 // exactly what the owners file assigns.
 func ownedLayers(own *owners.Owners) []string {
 	out := []string{}
 	seen := map[string]bool{}
-	for _, l := range events.Layers {
+	for _, l := range owners.KnownLayers() {
 		if _, ok := own.Layers[l]; ok {
 			out = append(out, l)
 			seen[l] = true

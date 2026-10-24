@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
 )
 
@@ -533,11 +534,11 @@ func errShadowNotAllowed() *Error {
 }
 
 // canGradeShadow decides whether user may label or grade a room of pipelineID:
-// the first layer of events.Layers that authorizeLayer grants, which is exactly
+// the first layer of owners.KnownLayers that authorizeLayer grants, which is exactly
 // CheckExportAccess without the auditor shortcut (design 3.5). grant is the
 // string recorded in identity.grant.
 func (s *Service) canGradeShadow(pipelineID string, user User) (string, bool) {
-	for _, layer := range events.Layers {
+	for _, layer := range owners.KnownLayers() {
 		if g, err := s.authorizeLayer(pipelineID, user, layer, "", false); err == nil {
 			return g, true
 		}

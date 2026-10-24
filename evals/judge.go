@@ -10,13 +10,18 @@ import (
 	"strings"
 )
 
-// Judge modes. "terms" is the deterministic keyword grade; "claude" asks a
-// model to grade every final hypothesis (judge_claude.go, build tag claude);
-// "auto" keeps the keyword grade of a clear hypothesis and asks the judge only
-// about one the tri-state keyword pass marks ambiguous (tristate.go,
-// judge_auto.go), from the recorded verdict cache first.
+// Judge modes. "terms" is the deterministic keyword grade; "llm" asks a model
+// to grade every final hypothesis (NewLLMJudge; evalrun links the live judge
+// only with the build tag livejudge); "claude" is the alias "llm" had before
+// the judge became provider-neutral; "auto" keeps the keyword grade of a
+// clear hypothesis and asks the judge only about one the tri-state keyword
+// pass marks ambiguous (tristate.go, judge_auto.go), from the recorded verdict
+// cache first.
 const (
-	JudgeTerms  = "terms"
+	JudgeTerms = "terms"
+	JudgeLLM   = "llm"
+	// JudgeClaude is an alias of JudgeLLM: the same judge on whatever model
+	// the judge client runs.
 	JudgeClaude = "claude"
 	JudgeAuto   = "auto"
 )
@@ -55,17 +60,24 @@ type JudgeResult struct {
 // validJudge reports whether m is a judge mode ("" means unset).
 func validJudge(m string) bool {
 	switch m {
-	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+	case "", JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto:
 		return true
 	}
 	return false
 }
 
+// IsLLMJudge reports whether m is the LLM judge mode, under its name or its
+// alias.
+func IsLLMJudge(m string) bool { return m == JudgeLLM || m == JudgeClaude }
+
 // effectiveJudge returns the judge mode for sc: the evalrun flag wins over the
 // scenario's own field, which wins over the run's default (Config.DefaultJudge);
-// the last resort is terms.
+// the last resort is terms. The alias "claude" comes back as "llm".
 func effectiveJudge(flag string, sc Scenario, def string) string {
 	for _, m := range []string{flag, sc.Judge, def} {
+		if IsLLMJudge(m) {
+			return JudgeLLM
+		}
 		if m != "" {
 			return m
 		}
@@ -246,8 +258,8 @@ type MeteredJudge interface {
 
 // textJudge is a HypothesisJudge on top of any function that sends a system
 // prompt and a user message and returns the reply text (and, when it knows
-// them, the tokens). Claude's transport (judge_claude.go) and test fakes both
-// plug in here.
+// them, the tokens). The LLM judge (judge_llm.go) and test fakes both plug in
+// here.
 type textJudge struct {
 	send func(ctx context.Context, system, user string) (string, JudgeUsage, error)
 }

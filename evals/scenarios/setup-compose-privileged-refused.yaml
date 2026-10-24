@@ -52,6 +52,10 @@
 #     the preview and nothing runs.
 
 name: setup/compose-privileged-refused
+# Held out until U1-10 (the agent's setup mode, wiring.SetupStack) lands: without it the agent cannot read the
+# compose file or the validator output (live run 40030412424: 0/2, every read errored). -validate refuses
+# this marker once internal/wiring declares SetupStack.
+pending_harness: U1-10
 description: |
   The person brought their own compose.yaml for the project (copied from a blog post), with the
   connect service declared as privileged: true. The setup run stopped at the compose step: the
@@ -93,8 +97,8 @@ inputs:
 
 expect:
   root_cause:
-    - [privileged, host privileges, cap add, security opt]
-    - [compose file, yaml, stack]
+    - [host privileges, cap add, security opt, privileged true]
+    - [compose*, yaml, stack]
   # The wrong stories of a stack that never started.
   root_cause_forbidden:
     - ['schema change']

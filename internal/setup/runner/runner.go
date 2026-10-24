@@ -156,10 +156,11 @@ type Runner struct {
 	proposals map[string]events.ProposalCreatedPayload
 	floors    map[string]string
 	inflight  map[string]*inflightOp
-	// confirming holds the cancel of each T3 op still waiting for its "y":
-	// such an op is not started (not in inflight), but a FrameCancel must
-	// still drop its prompt.
-	confirming map[string]*context.CancelFunc
+	// confirming holds the cancel of each op from the moment its frame is
+	// read until runOp returns: an op still in its checks or waiting for its
+	// T3 "y" is not started (not in inflight), but a FrameCancel must still
+	// stop it. A resent request with the same id adds its own entry.
+	confirming map[string][]*context.CancelFunc
 	opLog      *opLog
 	opLogDone  bool // op log closed; late appends are no-ops
 }
@@ -186,7 +187,7 @@ func New(o Options) (*Runner, error) {
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
 		inflight:   make(map[string]*inflightOp),
-		confirming: make(map[string]*context.CancelFunc),
+		confirming: make(map[string][]*context.CancelFunc),
 	}
 	if r.stdin == nil {
 		r.stdin = os.Stdin
@@ -636,7 +637,24 @@ func (r *Runner) serve(ctx context.Context) error {
 			}
 		case protocol.FramePong:
 		case protocol.FrameOp:
-			go r.runOp(ctx, f.Op)
+			// A resend of an op this runner still holds (in its checks, its
+			// T3 prompt, or running) is dropped: the first request answers
+			// for the id. Without this a T0 op, which has no start ledger,
+			// would run twice after a reconnect.
+			if r.opHeld(f.Op.ID) {
+				r.log.Debug("dropping a resend of an op still held", "op", f.Op.Op)
+				continue
+			}
+			// The op's cancel is registered before its goroutine starts, so
+			// a FrameCancel read next always reaches it, even while its
+			// checks or its T3 prompt are still running.
+			opCtx, opCancel := context.WithCancel(ctx)
+			unwatch := r.watchConfirm(f.Op.ID, opCancel)
+			go func(req *protocol.OpRequest) {
+				defer opCancel()
+				defer unwatch()
+				r.runOp(ctx, opCtx, opCancel, req)
+			}(f.Op)
 		case protocol.FrameCancel:
 			r.cancelOp(f.Cancel.ID)
 		case protocol.FrameSecret:

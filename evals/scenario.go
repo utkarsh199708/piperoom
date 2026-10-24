@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -70,10 +71,67 @@ type Scenario struct {
 	// judge_auto.go). Unset uses the run's default (evalrun: auto). The
 	// evalrun -judge flag overrides it.
 	Judge string `yaml:"judge"`
+	// Setup is the scenario's setup metadata (U1-20): the source kind and
+	// target kind a setup run starts from, which the report groups its
+	// per-source and per-target pass rates by. An incident scenario names
+	// none; its source kind defaults to postgres (the pipeline every incident
+	// scenario runs on) and it is in no target group.
+	Setup *ScenarioSetup `yaml:"setup"`
+	// PendingHarness is the board row whose harness the scenario waits for
+	// (for example U1-10). evalrun skips such a scenario, reports it apart from
+	// the pass rate and keeps it out of baseline comparison; -only still runs it.
+	// -validate refuses the marker once the row has landed (pending.go).
+	PendingHarness string `yaml:"pending_harness"`
 
 	// pipelineYAML is the pipeline as written, for the room path's owners
 	// file; nil for a scenario built in code.
 	pipelineYAML *yaml.Node
+}
+
+// ScenarioSetup is the setup shape a scenario reports under (U1-20). The
+// kinds are the ones events.SetupRequest names; an empty SourceKind is
+// DefaultSourceKind.
+type ScenarioSetup struct {
+	SourceKind string `yaml:"source_kind"`
+	Target     string `yaml:"target"`
+}
+
+// DefaultSourceKind is the source kind of a scenario that names none: every
+// incident scenario and the U1-19 setup scenarios run on Postgres.
+const DefaultSourceKind = "postgres"
+
+// setupKinds returns the source kind and target kind the report groups this
+// scenario's runs by. A scenario with no setup block (an incident scenario)
+// has its room's source kind (Q8j, sourceKind). A target is "" (in no target
+// group) when the scenario names none.
+func (s Scenario) setupKinds() (source, target string) {
+	if s.Setup == nil {
+		return s.sourceKind(), ""
+	}
+	source = DefaultSourceKind
+	if s.Setup.SourceKind != "" {
+		source = s.Setup.SourceKind
+	}
+	return source, s.Setup.Target
+}
+
+// attachSetup fills the scenario's setup kinds from its runner recording when
+// it names none (U1-20). A recording is the setup request's own session, so
+// its source and target are what the run started from; a scenario that states
+// a kind keeps it.
+func attachSetup(s *Scenario, rec *evalsetup.Recording) {
+	if rec == nil {
+		return
+	}
+	if s.Setup == nil {
+		s.Setup = &ScenarioSetup{}
+	}
+	if s.Setup.SourceKind == "" {
+		s.Setup.SourceKind = rec.SourceKind()
+	}
+	if s.Setup.Target == "" {
+		s.Setup.Target = rec.Target
+	}
 }
 
 // Alert is what opens the room.
@@ -111,6 +169,19 @@ type Resources struct {
 	// kafka_topic_offsets refuses (it reads CDC topics only) and
 	// kafka_replay_range writes to (X2e). Each is empty: start = end = 0.
 	Topics map[string]TopicState `yaml:"topics"`
+	// SourceKind is the room's source kind, pipeline.source_kind as
+	// owners.yaml spells it ("" is postgres). It is not a field of the file:
+	// ParseScenario copies it from the pipeline, so LiveActions builds the
+	// actions a room of that source gets (Q8j: a MySQL room's binlog reader
+	// and no pg_* action).
+	SourceKind string `yaml:"-"`
+	// Repos are the fixture repositories of the pipeline's repos: block, by
+	// repo id: what the replay forge holds (replay_forge.go, Q7j).
+	Repos map[string]RepoFixture `yaml:"repos"`
+	// PipelineRepos is pipeline.repos, copied by ParseScenario like
+	// SourceKind: the repos the forge tools and repo_open_pull_request may
+	// touch. Empty, the room gets neither, as without a forge.
+	PipelineRepos []owners.Repo `yaml:"-"`
 }
 
 // TopicState is one topic of resources.topics.
@@ -286,6 +357,10 @@ type Expect struct {
 	// (matched like a recording's input). Set, it makes the fix check
 	// strict: see fixscore.go.
 	FixTargets map[string]map[string]any `yaml:"fix_targets"`
+	// FixFiles are the pull-request steps a good fix proposes, each the repo
+	// and, per file, the lines it removes and adds: the "right files
+	// changed" check (rightfiles.go, Q7j).
+	FixFiles []FixFiles `yaml:"fix_files"`
 	// ForbiddenActions must never be proposed in this scenario.
 	ForbiddenActions []string `yaml:"forbidden_actions"`
 	// MaxVerifyCalls is the read-tool budget after the first executed fix
@@ -386,7 +461,24 @@ func ParseScenario(b []byte) (Scenario, error) {
 	if raw.Pipeline.Kind != 0 {
 		s.pipelineYAML = &raw.Pipeline
 	}
+	s.Resources.SourceKind = s.Pipeline.SourceKind
+	s.Resources.PipelineRepos = s.Pipeline.Repos
 	return s, nil
+}
+
+// sourceKind is the scenario room's source kind: pipeline.source_kind,
+// postgres when unset (owners.Pipeline.SourceKindOrDefault).
+func (s Scenario) sourceKind() string {
+	return s.Pipeline.SourceKindOrDefault()
+}
+
+// resources returns s.Resources with SourceKind set to the room's source
+// kind, for a scenario built in code rather than parsed.
+func (s Scenario) resources() Resources {
+	r := s.Resources
+	r.SourceKind = s.sourceKind()
+	r.PipelineRepos = s.Pipeline.Repos
+	return r
 }
 
 // LoadScenario reads one scenario file. The name defaults to the file name.
@@ -401,6 +493,9 @@ func LoadScenario(path string) (Scenario, error) {
 	}
 	if s.Name == "" {
 		s.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if err := s.Resources.loadRepoDirs(filepath.Dir(path)); err != nil {
+		return Scenario{}, fmt.Errorf("%s: %w", path, err)
 	}
 	// The pipeline as the server loads it: its watch block resolved, which
 	// dlq_replay's and pg_drop_replication_slot's CheckScope read
@@ -520,9 +615,17 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
 	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
 	switch s.Judge {
-	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+	case "", JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto:
 	default:
-		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q (alias %q) or %q)", s.Judge, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto))
+	}
+	if s.Setup != nil {
+		if s.Setup.SourceKind != "" && !evalsetup.ValidSourceKind(s.Setup.SourceKind) {
+			errs = append(errs, fmt.Errorf("setup.source_kind: %q is not a setup source kind", s.Setup.SourceKind))
+		}
+		if s.Setup.Target != "" && !evalsetup.ValidTargetKind(s.Setup.Target) {
+			errs = append(errs, fmt.Errorf("setup.target: %q is not a setup target kind", s.Setup.Target))
+		}
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && !contains(incidentLayers(), l) {
@@ -556,7 +659,11 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 			}
 		}
 		fields, isTool := toolInputs[r.Tool]
-		if !isTool {
+		if isForgeTool(r.Tool) {
+			// The repository tools run live over resources.repos; a
+			// recording of one would never answer.
+			errs = append(errs, fmt.Errorf("recordings[%d]: %s runs over resources.repos and is never replayed; put the file in the fixture repo", i, r.Tool))
+		} else if !isTool {
 			errs = append(errs, fmt.Errorf("recordings[%d]: unknown tool %q", i, r.Tool))
 		} else {
 			// A key the schema does not have can never appear in a real call
@@ -586,6 +693,8 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	}
 	errs = append(errs, s.validatePhases(toolInputs, actionNames)...)
 	errs = append(errs, s.Resources.validate()...)
+	errs = append(errs, s.resources().validateRepos()...)
+	errs = append(errs, s.checkFixFiles()...)
 	for _, t := range s.Expect.EvidenceTools {
 		if _, ok := toolInputs[t]; !ok {
 			errs = append(errs, fmt.Errorf("expect.evidence_tools: unknown tool %q", t))
@@ -656,13 +765,14 @@ func (s Scenario) checkOutcome() []error {
 		"root_cause_layer_alt": len(e.RootCauseLayerAlt) > 0,
 		"fix":                  len(e.Fix) > 0,
 		"fix_targets":          len(e.FixTargets) > 0,
+		"fix_files":            len(e.FixFiles) > 0,
 		"claims":               len(e.Claims) > 0,
 	} {
 		if set {
 			errs = append(errs, fmt.Errorf("expect.%s: only graded when outcome is %s, not %s", field, OutcomeDiagnose, e.Outcome))
 		}
 	}
-	if s.Judge == JudgeClaude || s.Judge == JudgeAuto {
+	if IsLLMJudge(s.Judge) || s.Judge == JudgeAuto {
 		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", s.Judge, e.Outcome))
 	}
 	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {

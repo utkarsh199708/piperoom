@@ -673,6 +673,17 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools}; the values are composed to agree with the recordings above.
+  # kafka_throughput: no watcher runs in a replay, so there are no group_lag samples and no consumed rate.
+  - tool: kafka_throughput
+    input: {table: public.orders, window: "2h"}
+    summary: |-
+      orders last 2h: no skew found
+      pg.public.orders: 46 records (0.0/s) over 3 partitions; median 0.0/s, max p0 0.0/s → even
+      order-sync (Stable, 1 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
 
 inputs:
   - kind: comment

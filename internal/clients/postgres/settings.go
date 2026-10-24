@@ -15,94 +15,29 @@ import (
 )
 
 // The Q2a source-settings reads (Q board row Q2a). The interface and its DTOs
-// are the local adapter for the Q board's clients.SourceSettingsReader: the
-// contract file internal/clients/clients.go does not carry them yet, so they
-// live here until Q0 adopts them (see the contract change request in the PR).
-// The shapes and JSON tags are exactly the board's, so adopting them later is
-// a move, not a rewrite.
+// are Q0 item 2 of the contract file internal/clients/clients.go (moved there
+// by Q8-0); the aliases below keep every caller of the postgres names
+// compiling unchanged.
 
-// SourceSettingsReader is the read-only source-settings surface of a CDC
-// source. Postgres implements it here; MySQL (Q8b) implements the same
-// methods. Every method is read-only and bounded by a 10 s deadline. Table
-// identifiers are validated (^[a-zA-Z_][a-zA-Z0-9_]*$) before any I/O.
-type SourceSettingsReader interface {
-	// Settings returns the fixed list of CDC-relevant settings that the
-	// server reports, in the order of settingNames. A setting the server does
-	// not have (max_slot_wal_keep_size before PG 13, rds.logical_replication
-	// outside RDS/Aurora) is simply absent from the result.
-	Settings(ctx context.Context) ([]DBSetting, error)
-	// TableReplication returns one entry per table, in that order, with its
-	// primary key presence and replica identity (default, full, index or
-	// nothing). A table that does not exist is clients.ErrNotFound.
-	TableReplication(ctx context.Context, tables []string) ([]TableReplication, error)
-	// RoleInfo reports whether role exists, can log in and may replicate,
-	// and its SELECT privilege on each table. A missing role is not an error:
-	// Exists is false and every table is false in Selectable.
-	RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error)
-	// Blockers lists the sessions that can hold back logical replication:
-	// an open transaction older than olderThan, or the session holding the
-	// oldest xmin. Query is redacted (N5) and at most MaxSessionQueryBytes.
-	Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error)
-}
+// SourceSettingsReader is clients.SourceSettingsReader.
+type SourceSettingsReader = clients.SourceSettingsReader
 
-// DBSetting is one server setting with its changed-but-not-yet-applied flag.
-type DBSetting struct {
-	Name           string `json:"name"`
-	Value          string `json:"value"`
-	Unit           string `json:"unit,omitempty"`
-	PendingRestart bool   `json:"pending_restart,omitempty"`
-}
+// DBSetting is clients.DBSetting.
+type DBSetting = clients.DBSetting
 
-// TableReplication is a table's primary key presence and replica identity.
-type TableReplication struct {
-	Table           string `json:"table"`
-	HasPrimaryKey   bool   `json:"has_primary_key"`
-	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none
-}
+// TableReplication is clients.TableReplication.
+type TableReplication = clients.TableReplication
 
-// RoleInfo is a source role's login/replication rights and SELECT privilege
-// per table.
-type RoleInfo struct {
-	Role        string `json:"role"`
-	Exists      bool   `json:"exists"`
-	CanLogin    bool   `json:"can_login"`
-	Replication bool   `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and CLIENT
-	// RDSReplication is membership in rds_replication. RDS/Aurora grants a
-	// connector role its replication rights that way instead of the
-	// rolreplication attribute, and Debezium's own login check accepts either.
-	RDSReplication bool            `json:"rds_replication,omitempty"`
-	Selectable     map[string]bool `json:"selectable"` // table -> SELECT
-}
+// RoleInfo is clients.RoleInfo.
+type RoleInfo = clients.RoleInfo
 
-// DBSession is one session that can hold back logical replication. Query is
-// untrusted text: redacted and cut before it leaves the client. InScope is
-// false for a session a scoped read anonymised (see BlockersOnTables): its
-// User, App and Query are blank because they belong to another pipeline, user
-// or database. (InScope is additive to the Q-board shape; see the PR's
-// contract change request.)
-type DBSession struct {
-	PID        int64     `json:"pid"`
-	StartedAt  time.Time `json:"started_at"` // backend start; with PID, the identity EndSession re-checks
-	XactStart  time.Time `json:"xact_start"`
-	User       string    `json:"user"`
-	App        string    `json:"application"`
-	State      string    `json:"state"`
-	Query      string    `json:"query"` // untrusted, redacted, at most 200 bytes
-	BlocksSlot bool      `json:"blocks_slot"`
-	InScope    bool      `json:"in_scope"`
-	// OldXact, SameDB and ClientBackend are never shown: the session's
-	// transaction is older than the read's threshold (by the server's
-	// clock), it is connected to the database this client reads (not
-	// another tenant's database on the server), and it is an ordinary client
-	// backend (not autovacuum, a logical replication worker or another
-	// background process). source_end_session needs all three before it ends
-	// a session whose identity the scoped read withheld.
-	OldXact       bool `json:"-"`
-	SameDB        bool `json:"-"`
-	ClientBackend bool `json:"-"`
-}
+// DBSession is clients.DBSession.
+type DBSession = clients.DBSession
 
-var _ SourceSettingsReader = (*DB)(nil)
+var (
+	_ SourceSettingsReader        = (*DB)(nil)
+	_ clients.ScopedBlockerReader = (*DB)(nil)
+)
 
 // MaxSessionQueryBytes caps DBSession.Query. The query often holds literal row
 // values, so only a short redacted fragment leaves the client.
@@ -254,17 +189,8 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 	defer cancel()
 
 	info := RoleInfo{Role: role, Selectable: make(map[string]bool, len(tables))}
-	// The CASE guards pg_has_role: on a server without the rds_replication
-	// role (any stock Postgres) pg_has_role would raise "role does not exist",
-	// and CASE is the one place Postgres promises not to evaluate the branch
-	// it does not need.
-	err = d.queryRow(ctx, `
-		SELECT r.rolcanlogin, r.rolreplication,
-		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles rr WHERE rr.rolname = 'rds_replication')
-		            THEN pg_has_role(r.oid, 'rds_replication', 'MEMBER')
-		            ELSE false END
-		FROM pg_roles r WHERE r.rolname = $1`, role).
-		Scan(&info.CanLogin, &info.Replication, &info.RDSReplication)
+	err = d.queryRow(ctx, `SELECT rolcanlogin, rolreplication FROM pg_roles WHERE rolname = $1`, role).
+		Scan(&info.CanLogin, &info.Replication)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// A role that does not exist: not an error, and no table can be read.
@@ -303,6 +229,31 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 		return RoleInfo{}, fmt.Errorf("postgres: read role %q grants: %w", role, err)
 	}
 	return info, nil
+}
+
+// RDSRoleReplication reports whether role is a member of rds_replication.
+// RDS/Aurora grants a connector role its replication rights that way instead
+// of the rolreplication attribute, and Debezium's own login check accepts
+// either. The contract's RoleInfo (clients.RoleInfo) does not carry the flag
+// yet, so this local adapter keeps the read available to the setup driver
+// until it does (contract change request). The CASE guards pg_has_role: on a
+// server without the rds_replication role (any stock Postgres) pg_has_role
+// would raise "role does not exist", and CASE is the one place Postgres
+// promises not to evaluate the branch it does not need.
+func (d *DB) RDSRoleReplication(ctx context.Context, role string) (bool, error) {
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
+	defer cancel()
+
+	var member bool
+	err := d.queryRow(ctx, `
+		SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles rr WHERE rr.rolname = 'rds_replication')
+		            THEN pg_has_role(r.oid, 'rds_replication', 'MEMBER')
+		            ELSE false END
+		FROM pg_roles r WHERE r.rolname = $1`, role).Scan(&member)
+	if err != nil {
+		return false, fmt.Errorf("postgres: read rds_replication membership for role %q: %w", role, err)
+	}
+	return member, nil
 }
 
 // blockersSQL lists the sessions that hold back a slot: an open transaction
