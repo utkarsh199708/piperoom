@@ -11,7 +11,8 @@
 #   the 48 h retention (consumer). A hypothesis that places the cause in either layer passes the
 #   root-cause-layer grade; the root_cause groups below still require a retention term and a loss
 #   term, so "the consumer was down" alone does not pass. Ruled a legitimate label fix on #684
-#   (reviews/evals-2026-10-19/diagnosis.md, P3-W3d; shipped as P3-W3d-2).
+#   (reviews/evals-2026-10-19/diagnosis.md, P3-W3d; shipped as P3-W3d-2). Ruling R2
+#   (tasks/W4-evals-to-100.md, 2026-10-23) keeps this label: first failing kafka, consumer alt.
 #   Alert fired at: consumer (crash loop) / warehouse.
 #   Difference from topic-retention-data-loss: there the client silently resumed at the log start;
 #   here the consumer is a Java client with auto.offset.reset=none, it fails loudly, and the group is
@@ -293,4 +294,10 @@ expect:
       facts: [f_log_start, f_committed_below_log_start, f_retention_48h]
   evidence_tools: [kafka_topic_offsets, kafka_consumer_lag, kafka_topic_config]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
-  max_tool_calls: 14
+  # Tool budget (W4n, KAN-497; ruling R8; 14 -> 18). Live run 40044762858 #1 used 16 calls and
+  # failed on the budget alone (score 98.1), so it is a passing path: 16 + 2 = 18. Its turn split
+  # was not read from the transcript; the split of the standard path, NOT MEASURED, is turn 1
+  # (the alert) about 12 reads (lag, topic offsets and config, Connect status, freshness, slot,
+  # DDL, registry, trace, sink row, similar incidents, load errors) and turn 2 (Kabir's comment)
+  # about 4 (lag and offsets again before answering the reset-to-latest question, a key lookup).
+  max_tool_calls: 18
