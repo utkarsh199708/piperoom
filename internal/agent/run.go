@@ -411,7 +411,7 @@ func (r *runner) callModel(ctx context.Context, req llm.Request, role string) (l
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices) {
+		for _, p := range withProvider(usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices), r.model.Provider()) {
 			r.emit(ectx, events.AgentUsage, p)
 		}
 	}

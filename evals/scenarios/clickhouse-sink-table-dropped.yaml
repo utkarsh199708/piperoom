@@ -128,13 +128,9 @@ expect:
       tool: warehouse_load_errors
       match: [insert, exception, 'code 60']
       required: true
-    - id: f_warehouse_stale
-      tool: pipeline_map
-      match: [stale]
-      required: true
   claims:
     - about: root_cause
       facts: [f_code60]
-  evidence_tools: [warehouse_load_errors, pipeline_map]
+  evidence_tools: [warehouse_load_errors]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

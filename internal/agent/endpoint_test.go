@@ -116,8 +116,8 @@ func TestNewEndpointStartupErrors(t *testing.T) {
 	}{
 		{"unknown provider names the allowed values", EndpointConfig{Provider: "azure"},
 			[]string{`"azure"`, "anthropic", "bedrock", "vertex"}},
-		{"provider names are trimmed and lower-cased before the check", EndpointConfig{Provider: "Gemini"},
-			[]string{`"gemini"`, "allowed values"}},
+		{"provider names are trimmed and lower-cased before the check", EndpointConfig{Provider: " Cohere "},
+			[]string{`"cohere"`, "allowed values", "openai", "gemini", "bedrock-converse"}},
 		{"bedrock without a region", EndpointConfig{Provider: "bedrock"}, []string{"AWS_REGION"}},
 		{"bedrock with a blank region", EndpointConfig{Provider: "bedrock", AWSRegion: "  "}, []string{"AWS_REGION"}},
 		{"vertex without a project", EndpointConfig{Provider: "vertex", VertexRegion: "global"}, []string{"VERTEX_PROJECT_ID"}},
@@ -405,5 +405,16 @@ func TestLoopRequestPassesThroughTheCloudAdapters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestModelConcurrencyIsClamped(t *testing.T) {
+	for _, tt := range []struct {
+		in   int64
+		want int
+	}{{-1, 0}, {0, 0}, {3, 3}, {maxModelConcurrency, maxModelConcurrency}, {1 << 40, maxModelConcurrency}} {
+		if got := modelConcurrency(tt.in); got != tt.want {
+			t.Errorf("modelConcurrency(%d) = %d, want %d", tt.in, got, tt.want)
+		}
 	}
 }

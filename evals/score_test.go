@@ -942,6 +942,18 @@ func canPassScript(t *testing.T, sc Scenario, fix []events.ProposalStep) []step 
 			call(tool, func(Observation) bool { return true })
 		}
 	}
+	// A scenario that names no fact or evidence tool still needs one read, so the hypothesis has a step to cite.
+	if len(script) == 0 {
+		for _, r := range sc.Recordings {
+			if r.Phase != "" && r.Phase != sc.startPhase() {
+				continue
+			}
+			if res := recordingResults(r); len(res) > 0 && res[0].Error == "" {
+				script = append(script, step{tool: r.Tool, input: r.Input})
+				break
+			}
+		}
+	}
 	switch sc.Expect.outcome() {
 	case OutcomeHealthy:
 		script = append(script, step{message: "The pipeline is healthy; nothing to fix."})
