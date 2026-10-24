@@ -1,6 +1,6 @@
 //go:build integration
 
-package setuptools
+package main
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"piperoom/internal/clients/connect"
+	"piperoom/internal/setup/knowledge"
+	setuptools "piperoom/internal/setup/tools"
 	"piperoom/internal/testenv"
 )
 
@@ -21,19 +23,31 @@ import (
 // PUT /connector-plugins/{class}/config/validate through the Q4a
 // ConfigValidator client, with the ${secret:} reference materialised the way
 // the runner does. Validate creates nothing, so there is nothing to clean up.
+//
+// It lives in cmd/setup, not internal/setup/tools, because the setup matrix's
+// Compose job runs ./internal/setup/... with -tags integration and no dev
+// stack (every testenv.Require test there skips, and a skip fails that job);
+// the full-stack job runs ./cmd/... against the dev stack.
 func TestSinkConfigPassesConnectValidate(t *testing.T) {
 	cfg := testenv.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	b := builder(t)
+	ix, err := knowledge.LoadIndex()
+	if err != nil {
+		t.Fatalf("LoadIndex: %v", err)
+	}
+	b, err := setuptools.NewConfigBuilder(ix, setuptools.Versions{"debezium": "3.2.0.Final"})
+	if err != nil {
+		t.Fatalf("NewConfigBuilder: %v", err)
+	}
 	host := strings.TrimSpace(os.Getenv("PIPEROOM_TEST_CONNECT_DB_HOST"))
 	if host == "" {
 		// Inside the Connect container the dev Postgres is the compose
 		// service, not localhost.
 		host = "postgres"
 	}
-	sink, err := b.SinkConfig(SinkOptions{
+	sink, err := b.SinkConfig(setuptools.SinkOptions{
 		Sink:   "debezium-jdbc-sink",
 		Topics: []string{testenv.Name("sink")},
 		Config: map[string]string{
@@ -46,7 +60,7 @@ func TestSinkConfigPassesConnectValidate(t *testing.T) {
 			"schema.evolution":    "basic",
 			"tasks.max":           "1",
 		},
-		Transforms: []Transform{{Alias: "route", Class: "jdbc-collection-name-transformation"}},
+		Transforms: []setuptools.Transform{{Alias: "route", Class: "jdbc-collection-name-transformation"}},
 	})
 	if err != nil {
 		t.Fatalf("SinkConfig: %v", err)
