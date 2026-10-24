@@ -656,6 +656,23 @@ func TestPropertiesSourceAllowList(t *testing.T) {
 		{"empty list element", map[string]string{"table.include.list": "public.orders,"}, ErrProperties},
 		{"secret reference on a non-credential key", map[string]string{"database.hostname": "${secret:x}"}, ErrProperties},
 		{"backslash in a list", map[string]string{"table.include.list": `public\.orders`}, ErrProperties},
+		// The driver interpolates database.dbname and database.user into a JDBC
+		// URL, so URL punctuation would set driver properties.
+		{"dbname with JDBC parameters", map[string]string{"database.dbname": "orders?sslmode=disable"}, ErrProperties},
+		{"dbname with a semicolon", map[string]string{"database.dbname": "orders;trustServerCertificate=true"}, ErrProperties},
+		{"user with URL punctuation", map[string]string{"database.user": "debezium?x=1"}, ErrProperties},
+		// The index lists Debezium's scripting SMTs for Connect; a setup
+		// proposal must never supply their code.
+		{"scripting SMT condition", map[string]string{
+			"transforms": "f", "transforms.f.type": "io.debezium.transforms.Filter",
+			"transforms.f.language": "jsr223.groovy", "transforms.f.condition": "true",
+		}, ErrProperties},
+		{"scripting SMT topic expression", map[string]string{
+			"transforms": "r", "transforms.r.type": "io.debezium.transforms.ContentBasedRouter",
+			"transforms.r.topic.expression": "'x'",
+		}, ErrProperties},
+		{"decimal IPv4 host", map[string]string{"database.hostname": "2852039166"}, ErrProperties},
+		{"three-part decimal IPv4 host", map[string]string{"database.hostname": "169.254.43518"}, ErrProperties},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -663,6 +680,18 @@ func TestPropertiesSourceAllowList(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
+	}
+
+	// A simple class name resolves through the index and is written canonical,
+	// so the engine never gets a name it cannot load.
+	got, err := build(map[string]string{
+		"transforms": "unwrap", "transforms.unwrap.type": "ExtractNewRecordState",
+	})
+	if err != nil {
+		t.Fatalf("simple transform class name: %v", err)
+	}
+	if cls := got.Entries["debezium.source.transforms.unwrap.type"]; cls != "io.debezium.transforms.ExtractNewRecordState" {
+		t.Fatalf("transform type written as %q, want the canonical class", cls)
 	}
 }
 

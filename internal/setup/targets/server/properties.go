@@ -128,7 +128,7 @@ var (
 	secretRefRE     = regexp.MustCompile(`\$\{secret:[A-Za-z_][A-Za-z0-9_]*\}`)
 	offsetsFileRE   = regexp.MustCompile(`^data/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	transformRE     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
-	sourceNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,127}$`)
+	sourceNameRE    = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_.$-]{0,127}$`)
 	hostnameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
 	intRE           = regexp.MustCompile(`^-?[0-9]{1,9}$`)
 	classValueRE    = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)+$`)
@@ -177,9 +177,12 @@ var commonSourceKeys = map[string]sourceKeySpec{
 var relationalSourceKeys = mergeSourceKeys(commonSourceKeys, map[string]sourceKeySpec{
 	"database.hostname": {rule: sourceHost},
 	"database.port":     {rule: sourcePort},
-	"database.user":     {rule: sourceText},
+	// A connector identifier: the driver interpolates these into a JDBC URL or
+	// a DSN, so ? & ; = / would inject driver properties (sslmode, socketFactory,
+	// options) and undo the allow-listed database.* keys.
+	"database.user":     {rule: sourceName},
 	"database.password": {rule: sourceText}, // a credential by name: secret ref only
-	"database.dbname":   {rule: sourceText},
+	"database.dbname":   {rule: sourceName},
 
 	"table.include.list":  {rule: sourceList},
 	"table.exclude.list":  {rule: sourceList},
@@ -230,10 +233,10 @@ var sourceKeyTables = map[string]map[string]sourceKeySpec{
 	}),
 	"sqlserver": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
 		"database.names":                  {rule: sourceList},
-		"database.instance":               {rule: sourceText},
+		"database.instance":               {rule: sourceName},
 		"database.encrypt":                {rule: sourceBool},
 		"database.trustServerCertificate": {rule: sourceBool},
-		"database.applicationName":        {rule: sourceText},
+		"database.applicationName":        {rule: sourceName},
 		// SQL Server adds the recovery mode to the shared snapshot modes.
 		"snapshot.mode": {rule: sourceText, values: []string{"initial", "initial_only", "schema_only", "schema_only_recovery", "recovery", "never"}},
 	}),
@@ -563,7 +566,7 @@ func checkSourceRule(name, value string, rule sourceRule) error {
 	case sourceText:
 	case sourceName, sourceTopicPrefix:
 		if !sourceNameRE.MatchString(value) {
-			return bad("the value must be an identifier of letters, digits, '_', '.' and '-'")
+			return bad("the value must be an identifier of letters, digits, '_', '.', '$' and '-'")
 		}
 	case sourceBool:
 		if value != "true" && value != "false" {
@@ -625,7 +628,34 @@ func checkHost(value string) error {
 	if !hostnameRE.MatchString(host) || strings.HasSuffix(host, "-") {
 		return fmt.Errorf("%w: %s is not a host name or IP literal", ErrProperties, q(value))
 	}
+	// Java's InetAddress reads an all-numeric (or 0x) last label as an IPv4
+	// address, so 2852039166 and 169.254.43518 reach 169.254.169.254 even
+	// though netip refuses them; a numeric top-level label is not a host name.
+	if decimalAddress(host) {
+		return fmt.Errorf("%w: %s is a decimal or hex IPv4 spelling; write the dotted quad", ErrProperties, q(value))
+	}
 	return nil
+}
+
+// decimalAddress reports whether the host's last label is all digits or a
+// 0x-prefixed hex number (see checkHost).
+func decimalAddress(host string) bool {
+	last := host
+	if i := strings.LastIndexByte(host, '.'); i >= 0 {
+		last = host[i+1:]
+	}
+	if last == "" {
+		return false
+	}
+	if strings.HasPrefix(last, "0x") || strings.HasPrefix(last, "0X") {
+		return true
+	}
+	for _, r := range last {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // checkMongoURI validates a mongodb:// or mongodb+srv:// connection string: no
@@ -677,6 +707,23 @@ func addSourceFamilies(props *Properties, ix *knowledge.Index, tag string, given
 	return nil
 }
 
+// refuseScriptingSMT refuses an SMT whose values are code the engine runs with
+// the server's privileges: Debezium's Filter carries a script in `condition`
+// (with a `language` selecting the engine) and ContentBasedRouter in
+// `topic.expression`. The index lists both because they are valid Connect
+// configs, but a setup proposal must never supply that code: design §2.5 says
+// an executed artifact comes from a template with typed params.
+func refuseScriptingSMT(entry knowledge.Entry) error {
+	for _, k := range entry.Keys {
+		switch {
+		case k.Name == "language", k.Name == "condition", k.Name == "expression",
+			strings.HasSuffix(k.Name, ".condition"), strings.HasSuffix(k.Name, ".expression"):
+			return fmt.Errorf("%s runs script code through %s; the setup never supplies scripts", q(entry.Name), q(k.Name))
+		}
+	}
+	return nil
+}
+
 // addSourceFamily validates one family (transforms or predicates) and writes
 // its entries. It returns the declared aliases and the index entry each names.
 func addSourceFamily(props *Properties, ix *knowledge.Index, tag string, given map[string]string, listKey string, kind knowledge.Kind) (map[string]knowledge.Entry, error) {
@@ -712,6 +759,11 @@ func addSourceFamily(props *Properties, ix *knowledge.Index, tag string, given m
 		if err != nil {
 			return nil, fmt.Errorf("%w: source key %s: %w", ErrProperties, q(typeKey), err)
 		}
+		if kind == knowledge.KindSMT {
+			if err := refuseScriptingSMT(entry); err != nil {
+				return nil, fmt.Errorf("%w: source key %s: %v", ErrProperties, q(typeKey), err)
+			}
+		}
 		entries[alias] = entry
 	}
 	names := make([]string, 0, len(given))
@@ -739,7 +791,15 @@ func addSourceFamily(props *Properties, ix *knowledge.Index, tag string, given m
 			if err := checkNoExpression(value); err != nil {
 				return nil, fmt.Errorf("%w: source key %s", err, q(name))
 			}
-			props.Entries["debezium.source."+name] = value
+			written := entry.Class
+			if written == "" {
+				written = value
+			} else if strings.HasSuffix(value, "$Key") {
+				written += "$Key"
+			} else if strings.HasSuffix(value, "$Value") {
+				written += "$Value"
+			}
+			props.Entries["debezium.source."+name] = written
 			continue
 		}
 		key, ok := entry.Key(sub)
@@ -845,10 +905,11 @@ func checkURLValue(value string) error {
 	if u.User != nil {
 		return fmt.Errorf("%w: the URL carries a username or password; use the connector's user and password keys", ErrSecretValue)
 	}
-	if ip, err := netip.ParseAddr(u.Hostname()); err == nil {
-		if gerr := urlGuard.CheckAddr(ip); gerr != nil {
-			return fmt.Errorf("%w: %v", ErrProperties, gerr)
-		}
+	// A sink URL's host is checked like a source host: the same metadata names
+	// and decimal-IPv4 spellings, so http://metadata.google.internal/ is
+	// refused here as well.
+	if err := checkHost(u.Hostname()); err != nil {
+		return err
 	}
 	return nil
 }
