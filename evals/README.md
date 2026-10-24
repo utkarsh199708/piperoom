@@ -376,18 +376,29 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
   `is not the cause`/`problem`/`issue`, `isn't the cause`/`problem`, `not to blame`, `not at fault`,
   `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
 
-A forward denial stops at `because`, `since`, `after`, `when`, `before` or `until`: the clause they
-open has its own polarity ("no consumer read them before they were deleted" states the deletion).
+A denial stops at a **barrier**, which opens a clause of its own polarity: `because` and `when`
+always; `since`, `after`, `before` and `until` only after a verb in the same part (an auxiliary such
+as `is`/`was`/`had`, a modal, a common irregular past such as `read`, or a word ending in `-ed`). So
+"no consumer read them before they were deleted" states the deletion, while in "no changes before the
+outage were lost" `before` is a preposition and the denial reaches `lost`. The barriers are in the
+shared denial pass, so they apply to **layer naming too**, not only to root-cause terms: "the slot is
+not the cause because the connector failed" and "it's not the registry since the connector crashed"
+now name Connect (before W4b-2 the forward denial ran through the conjunction), while "no errors since
+the connector restart" still does not.
 
 `no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
 without amount", "nothing reads the slot" all state the cause), except before a **loss word**
 (`lost`, `loss*`, `lose*`, `losing`, `delet*`, `purg*`, `expir*`, `gone`, `skipped`, `discard*`,
-`remov*`, `dropped`, `aged`; W4b-2): a term holding one does not count when `nothing`, `none`,
-`nobody`, `without` or `zero` stands anywhere before it in its part of the fragment, or `not`, `n't`
-or `never` up to two words before it, with no `because`/`since`/`after`/`when`/`before`/`until` in
-between. So "nothing was lost", "none of the changes were lost", "records were not lost", "without any
-data loss" name no loss, while "records were lost before the consumer read them", "the changes that
-order-sync never read were deleted" and "not all changes were lost" still do. A term that starts with
+`remov*`, `dropped`, `aged`; W4b-2). A root-cause term holding one does not count when, with no
+barrier in between, `nothing`, `none` or `nobody` stands anywhere before it in its part of the
+fragment; `without` or `zero` up to three words before it ("zero data loss", "without any data loss",
+"zero records lost"); or `not`, `n't` or `never` up to three words before it with only `be`, `been`,
+`being`, `yet`, `actually`, `really`, `ever` or `even` in between ("were not lost", "has not yet been
+deleted"). Layer naming does not use this rule. So "nothing was lost", "none of the changes were
+lost", "records were not lost" and "no events since the restart were lost" name no loss, while
+"records were lost before the consumer read them", "the changes that order-sync never read were
+deleted", "messages that weren't consumed expired", "consumer lag is zero yet records were lost" and
+"not all changes were lost" still do. A term that starts with
 a negator (`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
 `healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not `not healthy`) clears what
 comes before it up to the previous `,` or `and`: "Connect is healthy" does not name Connect, while
@@ -403,7 +414,16 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
   denial set off by commas ("it was not, as some thought, the amount") is not seen;
 - a self-answered rhetorical question ("Restarting now? No: it would fail again.", "Why did it fail?
   Because ...") or a quoted "?" counts as asking the driver;
-- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass.
+- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass;
+- loss words (W4b-2): a negator after the loss word ("retention deleted nothing that ...", "retention
+  removed no records", "data loss: none"), a digit zero ("0 records were lost"), a negator out of
+  reach ("I don't see any data loss", "not one record was lost", "it is not true that records
+  were lost") or a hedge after it ("data loss is unlikely") still name the loss; `nobody`, a strong
+  negator, still denies a loss it does not govern ("the records nobody read were deleted"); a
+  barrier after a present-tense verb is not seen ("no events reach the warehouse since the slot was
+  dropped" denies the drop), and an `-ed` noun or adjective counts as a verb ("no committed offsets
+  before the reset were lost" names the loss); a colon inside a time ("01:00") cuts the fragment, so
+  "none of the 01:00-03:00 changes were lost" names the loss.
 
 **Healthy verdict and the judge** (W4d): a healthy verdict is cancelled only by an affirmed, present
 fault. When the verdict's text has both a healthy phrase and such a fault word ("The pipeline is healthy
