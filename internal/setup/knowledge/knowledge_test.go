@@ -232,3 +232,32 @@ func TestCheckFailsOnCorruptTable(t *testing.T) {
 		t.Fatal("Check() on a corrupt plugin table = nil, want an error")
 	}
 }
+
+// Check runs ValidateEmbedded, so a broken embedded-engine rule fails
+// start-up like a corrupt image or plugin. The package-level rule table is
+// swapped and restored, so this must not run in parallel with other tests.
+func TestCheckFailsOnBrokenEmbeddedRule(t *testing.T) {
+	orig := embeddedRules
+	defer func() { embeddedRules = orig }()
+
+	broken := make([]VersionRule, len(orig))
+	copy(broken, orig)
+	broken[1].ID = broken[0].ID
+	embeddedRules = broken
+	if err := Check(); err == nil || !strings.Contains(err.Error(), "duplicate rule") {
+		t.Fatalf("Check() with a duplicate rule id = %v, want a duplicate rule error", err)
+	}
+
+	broken = make([]VersionRule, len(orig))
+	copy(broken, orig)
+	broken[0].Quote = ""
+	embeddedRules = broken
+	if err := Check(); err == nil || !strings.Contains(err.Error(), "quote are required") {
+		t.Fatalf("Check() with an unquoted rule = %v, want a quote error", err)
+	}
+
+	embeddedRules = nil
+	if err := Check(); err == nil {
+		t.Fatal("Check() with an empty rule table = nil, want an error")
+	}
+}
