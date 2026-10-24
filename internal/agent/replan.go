@@ -35,8 +35,9 @@ import (
 // byte-for-byte for the CDC evals and the prompt cache, and a room whose
 // fixes all succeed reads nothing new. A failed step is an action_result with
 // OK false, a driver's fix with a failed step, and, in a setup room only, a
-// verification that says not recovered (design §3.3: "a failed verification
-// is a failed step"); an incident room keeps today's verify-after-fix there.
+// verification of the agent's or the driver's fix that says not recovered
+// (design §3.3: "a failed verification is a failed step"); an incident room
+// keeps today's verify-after-fix there.
 
 const (
 	// containerLogsTool is the setup room's container log read (U1-7's
@@ -240,6 +241,20 @@ func replanQuery(f failedStep, exceptions []string) string {
 		}
 	}
 	return strings.Join(append(parts, exceptions...), " ")
+}
+
+// setupVerifyFailure adds the failed step of a verification that says not
+// recovered to out, in a setup room only: there a failed verification is a
+// failed step (design §3.3), so the model re-plans from the logs of the step
+// that ran last. The agent's own proposals and a driver's both come here; the
+// targets of the reads come from steps, the proposal's stored params, never
+// from the verification's text. An incident room keeps today's
+// verify-after-fix, so its out is returned unchanged.
+func (r *runner) setupVerifyFailure(out actionOutcome, id string, index int, steps []events.ProposalStep) actionOutcome {
+	if out.broken && r.alert.Mode == ModeSetup {
+		out.failures = append(out.failures, failedStep{proposalID: id, index: index, steps: steps})
+	}
+	return out
 }
 
 // replanWhy is the title of the runner's own reads in the room log.
