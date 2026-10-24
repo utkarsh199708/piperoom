@@ -151,7 +151,8 @@ func (c *Client) pdbs(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// versionBanner returns the first "Oracle Database …" banner from V$VERSION.
+// versionBanner returns the first database product banner from V$VERSION:
+// "Oracle Database …", or "Oracle AI Database …" from 23.26 (isDatabaseBanner).
 func (c *Client) versionBanner(ctx context.Context) (string, error) {
 	var banner string
 	err := c.each(ctx, `SELECT BANNER FROM V$VERSION ORDER BY ROWNUM`, nil, func(rows sqlRows) error {
@@ -159,7 +160,7 @@ func (c *Client) versionBanner(ctx context.Context) (string, error) {
 		if err := rows.Scan(&b); err != nil {
 			return fmt.Errorf("oracle: scan version: %w", err)
 		}
-		if strings.HasPrefix(nullStr(b), "Oracle Database ") {
+		if isDatabaseBanner(nullStr(b)) {
 			banner = nullStr(b)
 			return errStop
 		}
@@ -169,7 +170,7 @@ func (c *Client) versionBanner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oracle: read version: %w", err)
 	}
 	if banner == "" {
-		return "", fmt.Errorf("oracle: no Oracle Database banner in V$VERSION")
+		return "", fmt.Errorf("oracle: no Oracle database product banner in V$VERSION")
 	}
 	return banner, nil
 }
