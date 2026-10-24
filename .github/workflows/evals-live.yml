@@ -1,41 +1,80 @@
 name: evals-live
 
-# Live agent evals against the hosted model (evals/README.md, "CI (evals-live)").
+# Live agent evals against a hosted model (evals/README.md, "CI (evals-live)").
 # This repository is public, so:
 #  - never pull_request_target: a PR must not run with the secret on code the
 #    base branch has not reviewed;
 #  - PR runs only for branches of this repository (a fork gets no secret and
 #    must not spend ours);
-#  - the secret lives in the GitHub Environment "evals" with required reviewers,
+#  - the secrets live in the GitHub Environment "evals" with required reviewers,
 #    so no PR run spends money without approval;
 #  - only the report of the committed synthetic scenarios is uploaded. The
 #    learned set stays in a private store and is never passed with -learned.
+#
+# Model providers (docs/design/model-providers.md 12, V12). A dispatch picks
+# the provider, flavor and model to run (a "gate run", evals/README.md "The
+# gate"). The job holds only the secret of that provider (and the judge's
+# Anthropic key): every key below is
+# set from `secrets` only when the leg's key_env names it, and the resolve job
+# that reads the inputs has no environment and no secret at all.
 
 on:
   workflow_dispatch:
     inputs:
       make_baseline:
-        description: "Write the report as the baseline-default artifact (commit it as evals/baseline/default.json in a later PR); no comparison"
+        description: "Write the report as the baseline-default artifact (commit it as evals/baseline/default.json in a later PR); no comparison. Claude default model only: other models always upload baseline-<provider>-<model>"
         type: boolean
         default: false
       only:
-        description: "Comma-separated scenario names, or all (GitHub replaces an empty value with the default)"
+        description: "Comma-separated scenario names, or all (GitHub replaces an empty value with the default). A gate run (any model but the default Claude) needs all"
         type: string
         default: "schema-change"
       runs:
-        description: "Runs per scenario (3 for a comparable baseline; 1 to save money)"
+        description: "Runs per scenario (3 for a comparable baseline; 1 to save money). A gate run needs 3"
         type: string
         default: "1"
       max_turns:
         description: "Agent turns per episode (caps the cost of a runaway episode)"
         type: string
         default: "25"
+      provider:
+        description: "Model provider to run. anthropic (default) uses the Claude default model; supported-list re-gates every row of internal/agent/llm/supported.json one after the other, in gate_order"
+        type: choice
+        options:
+          - anthropic
+          - openai
+          - gemini
+          - bedrock-converse
+          - supported-list
+        default: anthropic
+      flavor:
+        description: "With provider openai only: openai, azure, deepseek, qwen, mistral, groq, together, openrouter, xai, ollama, vllm or generic"
+        type: string
+        default: ""
+      model:
+        description: "Pinned model id to run (required for every provider but anthropic; empty on anthropic = the default Claude model)"
+        type: string
+        default: ""
+      gate_order:
+        description: "Order of the gate runs of provider supported-list: provider or openai flavor names, first run first. Unlisted rows run last"
+        type: string
+        default: "ollama,openai,gemini,deepseek,qwen"
+      set:
+        description: "Scenario set: default (evals/scenarios) or heldout (evals/scenarios/heldout: report only, no baseline comparison, never tune prompts on it)"
+        type: choice
+        options:
+          - default
+          - heldout
+        default: default
       judge_fill:
         description: "Refill evals/judgecache verdicts for the dispatched branch (PAID, ~$0.01 per call) and push the cache back to that branch; runs no episodes"
         type: boolean
         default: false
   # Nightly full run (75 episodes) is off while the API budget is small; turn it
   # back on, or make it a cheap canary, once the cost per episode is measured.
+  # Turned on, it runs the Claude default model; the supported-list matrix below
+  # is dispatched by hand (provider: supported-list) until the owner adds it
+  # here too.
   # schedule:
   #   - cron: "17 3 * * *"
   pull_request:
@@ -48,38 +87,203 @@ on:
 permissions:
   contents: read
 
-# A second push to the same ref cancels the running eval.
+# A second push to the same ref cancels the running eval. Two dispatches for
+# different models are different runs: a gate run costs real money and must not
+# cancel its neighbour (the inputs are empty on a pull_request).
 concurrency:
-  group: evals-live-${{ github.ref }}
+  group: evals-live-${{ github.ref }}-${{ inputs.provider }}-${{ inputs.flavor }}-${{ inputs.model }}
   cancel-in-progress: true
 
 jobs:
+  # Reads the dispatch inputs and lists the runs (the matrix). No environment
+  # and no secret: a bad input fails here, before any approval or spend.
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.judge_fill) }}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      # The list is read from this checkout of the dispatched ref; it is data
+      # for the matrix, never executed.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: internal/agent/llm/supported.json
+          sparse-checkout-cone-mode: false
+      - name: Plan the runs
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && inputs.provider || 'anthropic' }}
+          IN_FLAVOR: ${{ github.event_name == 'workflow_dispatch' && inputs.flavor || '' }}
+          IN_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || '' }}
+          IN_ORDER: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_order || 'ollama,openai,gemini,deepseek,qwen' }}
+          IN_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
+          IN_RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          flavors=" openai azure deepseek qwen mistral groq together openrouter xai ollama vllm generic "
+          # Same variables as openai.KeyEnv, the gemini adapter and the bedrock
+          # key check of evals/README.md ("The in-process tap and the key check").
+          # evals/live_workflow_test.go fails when this list and the code drift.
+          keys='{"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","azure":"AZURE_OPENAI_API_KEY","deepseek":"DEEPSEEK_API_KEY","qwen":"DASHSCOPE_API_KEY","mistral":"MISTRAL_API_KEY","groq":"GROQ_API_KEY","together":"TOGETHER_API_KEY","openrouter":"OPENROUTER_API_KEY","xai":"XAI_API_KEY","gemini":"GEMINI_API_KEY","bedrock-converse":"AWS_BEARER_TOKEN_BEDROCK"}'
+
+          case "$IN_ORDER" in *[!a-z0-9,-]*) fail "gate_order takes provider or flavor names separated by commas";; esac
+          for tok in $(printf '%s' "$IN_ORDER" | tr ',' ' '); do
+            case "$tok" in
+              anthropic|gemini|bedrock-converse) ;;
+              *) case "$flavors" in *" $tok "*) ;; *) fail "gate_order: unknown provider or flavor '$tok'";; esac;;
+            esac
+          done
+
+          if [ "$IN_PROVIDER" = "supported-list" ]; then
+            [ -z "$IN_FLAVOR$IN_MODEL" ] || fail "provider supported-list takes no flavor or model: it runs every row of supported.json"
+            today="$(date -u +%F)"
+            # Rows past their sunset count as not listed (design 5.4), so no
+            # gate run is spent on them; the ci.yml check fails on them anyway.
+            cands="$(jq -c --arg today "$today" '[.models[] | select((.sunset // "9999-12-31") >= $today)
+              | {provider, flavor: (.flavor // ""), model, status}]' internal/agent/llm/supported.json)"
+            gate=true
+          else
+            case "$IN_PROVIDER" in
+              anthropic)
+                [ -z "$IN_FLAVOR" ] || fail "flavor is for provider openai only"
+                gate=false; [ -z "$IN_MODEL" ] || gate=true;;
+              openai)
+                [ -n "$IN_FLAVOR" ] || fail "provider openai needs a flavor"
+                case "$flavors" in *" $IN_FLAVOR "*) ;; *) fail "unknown flavor '$IN_FLAVOR'";; esac
+                gate=true;;
+              gemini|bedrock-converse)
+                [ -z "$IN_FLAVOR" ] || fail "flavor is for provider openai only"
+                gate=true;;
+              *) fail "unknown provider '$IN_PROVIDER'";;
+            esac
+            if [ "$gate" = "true" ] && [ -z "$IN_MODEL" ]; then fail "provider $IN_PROVIDER needs a model id"; fi
+            case "$IN_MODEL" in *[!A-Za-z0-9._:/@+-]*) fail "model takes letters, digits and . _ : / @ + - only";; esac
+            cands="$(jq -c -n --arg p "$IN_PROVIDER" --arg f "$IN_FLAVOR" --arg m "$IN_MODEL" '[{provider: $p, flavor: $f, model: $m, status: ""}]')"
+          fi
+
+          # A gate run compares with the 3-run reference over every scenario
+          # (evalrun -gate refuses less, after the money is spent), so refuse it here.
+          # The supported-list matrix always runs every scenario, so it ignores only.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$gate" = "true" ]; then
+            if [ "$IN_PROVIDER" != "supported-list" ] && [ "$IN_ONLY" != "all" ]; then
+              fail "a gate run needs only=all (got '$IN_ONLY'); a run of fewer scenarios cannot be gated"
+            fi
+            if [ "$IN_RUNS" != "3" ]; then
+              fail "a gate run needs runs=3 (got '$IN_RUNS'); a cheaper run cannot be gated"
+            fi
+          fi
+
+          matrix="$(jq -c --argjson keys "$keys" --arg order "$IN_ORDER" '
+            ($order | split(",")) as $o
+            | def tag: if .provider == "openai" then .flavor else .provider end;
+            def rank: . as $t | ($o | index($t)) // 999;
+            def slug: if .model == "" then "default" else .provider + "-" + (.model | gsub("[/:]"; "_")) end;
+            {include: ( . | sort_by([(tag | rank), .model]) | map(
+              . + {key_env: ($keys[tag] // ""),
+                   slug: slug,
+                   gate: (.model != ""),
+                   label: (if .model == "" then "evals-live"
+                           else "evals-live " + .provider + (if .flavor != "" then "/" + .flavor else "" end) + " " + .model end)}))}' <<<"$cands")"
+          count="$(jq '.include | length' <<<"$matrix")"
+          if [ "$count" = "0" ]; then
+            echo "::notice::supported.json lists no model (or every row is past its sunset): nothing to gate."
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | jq .
+
   evals-live:
-    name: evals-live
+    name: ${{ matrix.label }}
+    needs: resolve
     runs-on: ubuntu-latest
     # 75 episodes (25 scenarios x 3 runs) at 6 in parallel take about 40 minutes.
     timeout-minutes: 60
     environment: evals
+    strategy:
+      # One gate run at a time, in gate_order, so the run order is the matrix
+      # order and one leg's spend is approved before the next starts. A failed
+      # leg does not stop the others.
+      max-parallel: 1
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     # The pull_request path stays off until evals/baseline/default.json is on
     # main (tasks/L1-learn-from-rooms.md, L1c): without a baseline a PR run has
     # nothing to compare with and would only spend money. A later C1 PR removes
     # the `false &&`. A judge_fill dispatch runs the judge-fill jobs below
     # instead of episodes.
     if: >-
-      (github.event_name != 'pull_request' && !inputs.judge_fill) ||
-      (false && github.event.pull_request.head.repo.full_name == github.repository)
+      needs.resolve.result == 'success' && needs.resolve.outputs.count != '0' &&
+      ((github.event_name != 'pull_request' && !inputs.judge_fill) ||
+      (false && github.event.pull_request.head.repo.full_name == github.repository))
     steps:
+      # A missing secret (or, for a model host you run yourself, a missing
+      # endpoint) skips the job's work with a notice and a green job: the
+      # steps below run only when run == 'true'. Only presence is checked;
+      # a value is never printed.
       - name: Check for the API key
         id: key
         env:
+          KEY_ENV: ${{ matrix.key_env }}
+          PROVIDER: ${{ matrix.provider }}
+          FLAVOR: ${{ matrix.flavor }}
+          # Only the self-hosted flavors take a base URL, so no other leg's key
+          # can be sent to that endpoint; azure has its own variable.
+          MODEL_BASE_URL: ${{ matrix.provider == 'openai' && (matrix.flavor == 'azure' && vars.EVALS_AZURE_BASE_URL || ((matrix.flavor == 'ollama' || matrix.flavor == 'vllm' || matrix.flavor == 'generic') && vars.EVALS_MODEL_BASE_URL)) || '' }}
+          AWS_REGION_VAR: ${{ vars.EVALS_AWS_REGION }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ matrix.key_env == 'OPENAI_API_KEY' && secrets.OPENAI_API_KEY || '' }}
+          AZURE_OPENAI_API_KEY: ${{ matrix.key_env == 'AZURE_OPENAI_API_KEY' && secrets.AZURE_OPENAI_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ matrix.key_env == 'DEEPSEEK_API_KEY' && secrets.DEEPSEEK_API_KEY || '' }}
+          DASHSCOPE_API_KEY: ${{ matrix.key_env == 'DASHSCOPE_API_KEY' && secrets.DASHSCOPE_API_KEY || '' }}
+          MISTRAL_API_KEY: ${{ matrix.key_env == 'MISTRAL_API_KEY' && secrets.MISTRAL_API_KEY || '' }}
+          GROQ_API_KEY: ${{ matrix.key_env == 'GROQ_API_KEY' && secrets.GROQ_API_KEY || '' }}
+          TOGETHER_API_KEY: ${{ matrix.key_env == 'TOGETHER_API_KEY' && secrets.TOGETHER_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ matrix.key_env == 'OPENROUTER_API_KEY' && secrets.OPENROUTER_API_KEY || '' }}
+          XAI_API_KEY: ${{ matrix.key_env == 'XAI_API_KEY' && secrets.XAI_API_KEY || '' }}
+          GEMINI_API_KEY: ${{ matrix.key_env == 'GEMINI_API_KEY' && secrets.GEMINI_API_KEY || '' }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ matrix.key_env == 'AWS_BEARER_TOKEN_BEDROCK' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::notice::ANTHROPIC_API_KEY is not set in the evals environment; skipping the live evals."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
+          run=true
+          if [ -n "$KEY_ENV" ] && [ -z "${!KEY_ENV}" ]; then
+            echo "::notice::${KEY_ENV} is not set in the evals environment; skipping the live evals for ${PROVIDER} ${FLAVOR}."
+            run=false
           fi
+          # Hosts with no hosted default URL are reached through a variable of
+          # the evals environment (a hosted runner cannot start Ollama's models).
+          if [ "$PROVIDER" = "openai" ]; then
+            case "$FLAVOR" in ollama|vllm|generic|azure)
+              if [ -z "$MODEL_BASE_URL" ]; then
+                var=EVALS_MODEL_BASE_URL; [ "$FLAVOR" = "azure" ] && var=EVALS_AZURE_BASE_URL
+                echo "::notice::flavor ${FLAVOR} needs the variable ${var} (an https endpoint a hosted runner can reach) in the evals environment; skipping. A local model is run on a developer machine (evals/README.md)."
+                run=false
+              fi;;
+            esac
+          fi
+          if [ "$PROVIDER" = "bedrock-converse" ] && [ -z "$AWS_REGION_VAR" ]; then
+            echo "::notice::bedrock-converse needs the variable EVALS_AWS_REGION in the evals environment; skipping."
+            run=false
+          fi
+          # The judge stays on the Anthropic API for every model, so a candidate
+          # is judged like the reference. Without its key the judge is off (ambiguous
+          # hypotheses count as not passed: a candidate can only look worse).
+          judge=true
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            judge=false
+            if [ "$PROVIDER" = "anthropic" ]; then
+              echo "::notice::ANTHROPIC_API_KEY is not set in the evals environment; skipping the live evals."
+              run=false
+            else
+              echo "::notice::ANTHROPIC_API_KEY is not set: the judge is off for this run (-judge-max-calls 0); the gate of record needs it."
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "judge=$judge" >> "$GITHUB_OUTPUT"
       - name: Checkout
         if: steps.key.outputs.run == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -100,12 +304,43 @@ jobs:
         if: steps.key.outputs.run == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ matrix.key_env == 'OPENAI_API_KEY' && secrets.OPENAI_API_KEY || '' }}
+          AZURE_OPENAI_API_KEY: ${{ matrix.key_env == 'AZURE_OPENAI_API_KEY' && secrets.AZURE_OPENAI_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ matrix.key_env == 'DEEPSEEK_API_KEY' && secrets.DEEPSEEK_API_KEY || '' }}
+          DASHSCOPE_API_KEY: ${{ matrix.key_env == 'DASHSCOPE_API_KEY' && secrets.DASHSCOPE_API_KEY || '' }}
+          MISTRAL_API_KEY: ${{ matrix.key_env == 'MISTRAL_API_KEY' && secrets.MISTRAL_API_KEY || '' }}
+          GROQ_API_KEY: ${{ matrix.key_env == 'GROQ_API_KEY' && secrets.GROQ_API_KEY || '' }}
+          TOGETHER_API_KEY: ${{ matrix.key_env == 'TOGETHER_API_KEY' && secrets.TOGETHER_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ matrix.key_env == 'OPENROUTER_API_KEY' && secrets.OPENROUTER_API_KEY || '' }}
+          XAI_API_KEY: ${{ matrix.key_env == 'XAI_API_KEY' && secrets.XAI_API_KEY || '' }}
+          GEMINI_API_KEY: ${{ matrix.key_env == 'GEMINI_API_KEY' && secrets.GEMINI_API_KEY || '' }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ matrix.key_env == 'AWS_BEARER_TOKEN_BEDROCK' && secrets.AWS_BEARER_TOKEN_BEDROCK || '' }}
+          # Only the self-hosted flavors take a base URL, so no other leg's key
+          # can be sent to that endpoint; azure has its own variable.
+          MODEL_BASE_URL: ${{ matrix.provider == 'openai' && (matrix.flavor == 'azure' && vars.EVALS_AZURE_BASE_URL || ((matrix.flavor == 'ollama' || matrix.flavor == 'vllm' || matrix.flavor == 'generic') && vars.EVALS_MODEL_BASE_URL)) || '' }}
+          AWS_REGION_VAR: ${{ vars.EVALS_AWS_REGION }}
+          PROVIDER: ${{ matrix.provider }}
+          FLAVOR: ${{ matrix.flavor }}
+          MODEL: ${{ matrix.model }}
+          SLUG: ${{ matrix.slug }}
+          GATE: ${{ matrix.gate }}
+          JUDGE: ${{ steps.key.outputs.judge }}
+          # A dispatch of one model admits it, so it is not on the list yet
+          # (the start check would refuse it); a supported-list leg is on the list.
+          LISTED: ${{ matrix.status != '' }}
           MAKE_BASELINE: ${{ inputs.make_baseline }}
+          SET: ${{ github.event_name == 'workflow_dispatch' && inputs.set || 'default' }}
           # Manual runs choose scope; the nightly run uses the full set, 3 runs.
           ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
           RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
           MAX_TURNS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_turns || '25' }}
+          LIST_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.provider == 'supported-list' }}
         run: |
+          case "$SET" in default|heldout) ;; *) echo "::error::set must be default or heldout"; exit 1;; esac
+          if [ "$SET" = "heldout" ] && [ "$MAKE_BASELINE" = "true" ]; then
+            echo "::error::make_baseline is refused with set=heldout: the held-out set has no baseline file and must never get one."
+            exit 1
+          fi
           case "$RUNS" in ''|*[!0-9]*) echo "::error::runs must be a whole number"; exit 1;; esac
           case "$MAX_TURNS" in ''|*[!0-9]*) echo "::error::max_turns must be a whole number"; exit 1;; esac
           # A name may be a path under evals/scenarios (setup/<x>), so "/" is allowed.
@@ -113,6 +348,9 @@ jobs:
           # segment, an empty segment and a leading "/" are refused by the second case.
           case "$ONLY" in *[!a-z0-9,/-]*) echo "::error::only takes scenario names separated by commas"; exit 1;; esac
           case ",$ONLY," in *..*|*//*|*,/*|*/,*) echo "::error::only names must not contain .., empty or leading / segments"; exit 1;; esac
+          # The supported-list matrix re-gates whole sets and ignores `only`
+          # (the resolve job accepts any value there).
+          if [ "$LIST_RUN" = "true" ]; then ONLY=all; fi
           # USD per million tokens (docs/design/cost.md), so the report carries
           # cost_per_run_usd. cache_write is the 5-minute write price (1.25x input).
           cat > "$RUNNER_TEMP/prices.json" <<'JSON'
@@ -125,26 +363,80 @@ jobs:
           # Episodes run 6 at a time with a 10-minute cap each; one at a time
           # (the evalrun default) cannot finish 75 episodes inside the job limit.
           args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
+          if [ "$SET" = "heldout" ]; then
+            args+=(-set heldout)
+          fi
           if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then
             args+=(-only "$ONLY")
             n_scenarios="$(printf '%s' "$ONLY" | tr ',' '\n' | grep -c .)"
+          elif [ "$SET" = "heldout" ]; then
+            # -set heldout reads evals/scenarios/heldout/*.yaml (fixtures/ is a subdirectory).
+            n_scenarios="$(find evals/scenarios/heldout -maxdepth 1 -name '*.yaml' | wc -l)"
           else
-            # evalrun's default set is the top-level *.yaml of evals/scenarios;
-            # heldout/ and learned/ are subdirectories and are not run.
-            n_scenarios="$(find evals/scenarios -maxdepth 1 -name '*.yaml' | wc -l)"
+            # Ask evalrun for the set it will run: -list prints one runnable name
+            # per line and leaves out pending_harness scenarios, so the cost and
+            # judge caps do not count episodes that never start.
+            n_scenarios="$(go run ./evals/cmd/evalrun -list | grep -c .)"
           fi
           # Live judge calls: at most 2 per episode (an episode judges root cause
           # and layer). The evalrun default of 50 ran out after ~77 of 90 episodes.
           judge_cap=$((2 * n_scenarios * RUNS))
+          if [ "$JUDGE" != "true" ]; then judge_cap=0; fi
           echo "::notice::${n_scenarios} scenario(s) x ${RUNS} run(s): -judge-max-calls ${judge_cap}"
           args+=(-judge-max-calls "$judge_cap" -transcripts transcripts)
-          if [ "$MAKE_BASELINE" = "true" ]; then
+
+          # The model under test. The Claude default model keeps today's flags.
+          if [ "$PROVIDER" != "anthropic" ]; then
+            args+=(-provider "$PROVIDER" -judge-provider anthropic)
+            [ -z "$FLAVOR" ] || args+=(-flavor "$FLAVOR")
+            # No price table covers a new model: cost is omitted, not guessed
+            # (the gate does not read cost). A host's own endpoint and region
+            # come from variables of the evals environment.
+            export PIPEROOM_MODEL_PRICING_STRICT=off
+            [ "$LISTED" = "true" ] || export PIPEROOM_MODEL_UNVERIFIED=on
+            if [ "$PROVIDER" = "openai" ] && [ -n "$MODEL_BASE_URL" ]; then
+              case "$FLAVOR" in azure|ollama|vllm|generic) export PIPEROOM_MODEL_BASE_URL="$MODEL_BASE_URL";; esac
+            fi
+            [ -z "$AWS_REGION_VAR" ] || export AWS_REGION="$AWS_REGION_VAR"
+          fi
+          [ -z "$MODEL" ] || args+=(-model "$MODEL")
+
+          # The reference is the 3-run Claude baseline. A model's own baseline,
+          # when committed, is the regression baseline of later runs of it.
+          ref=evals/baseline/default.json
+          own="evals/baseline/${SLUG}.json"
+          baseline=""
+          if [ "$SET" = "heldout" ] && [ "$GATE" = "true" ]; then
+            echo "::error::set=heldout cannot be a gate run: the gate compares the default set with its reference."
+            exit 1
+          fi
+          if [ "$SET" = "heldout" ]; then
+            echo "::notice::set=heldout: report only; no comparison with evals/baseline/default.json (that is the default set)."
+          elif [ "$GATE" = "true" ]; then
+            if [ -f "$ref" ]; then
+              args+=(-gate "$ref")
+            else
+              echo "::error::${ref} does not exist: a gate run has no reference to be gated against."
+              exit 1
+            fi
+            if [ -f "$own" ]; then
+              baseline="$own"
+            else
+              echo "::notice::${own} does not exist yet; this run is gated against the reference only. Commit the baseline-${SLUG} artifact there if the gate passes."
+            fi
+          elif [ "$MAKE_BASELINE" = "true" ]; then
             echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
-          elif [ -f evals/baseline/default.json ]; then
-            args+=(-baseline evals/baseline/default.json -fail-on-regression)
+          elif [ -f "$ref" ]; then
+            baseline="$ref"
           else
             echo "::notice::evals/baseline/default.json does not exist yet; running without a comparison."
           fi
+          if [ -n "$baseline" ] && [ "$MAKE_BASELINE" != "true" ]; then
+            args+=(-baseline "$baseline" -fail-on-regression)
+          else
+            baseline=""
+          fi
+          echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
           # Keep the exit code so the report is uploaded even when the run
           # regressed; the Gate step fails the job. Never -learned: that set is private.
           # Build first: `go run` reports any non-zero child exit as 1, which
@@ -155,47 +447,81 @@ jobs:
           set +e
           "$RUNNER_TEMP/evalrun" "${args[@]}"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
+      # The default set's report. A held-out run uploads its report only as
+      # heldout-<sha> below: the cand and transcripts artifacts are what rows
+      # read to tune scenarios, and nobody tunes on held-out answers (KAN-489).
       - name: Upload report
-        if: steps.key.outputs.run == 'true' && hashFiles('cand.json') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: cand
+          name: cand-${{ matrix.slug }}
+          path: cand.json
+          retention-days: 14
+      # The held-out reference for the W4j comparison (KAN-510); never committed
+      # as a baseline file. W4j reads results only, so no transcript of a
+      # held-out run is uploaded.
+      - name: Upload held-out report
+        if: steps.key.outputs.run == 'true' && inputs.set == 'heldout' && hashFiles('cand.json') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: heldout-${{ github.sha }}
           path: cand.json
           retention-days: 14
       # Each run's transcript and result (replayed synthetic tool output and the
-      # agent's text). The API key is only in the environment of the process and
-      # is never part of a transcript.
+      # agent's text). No API key is part of a transcript: a key is only in the
+      # environment of the process.
       - name: Upload transcripts
-        if: steps.key.outputs.run == 'true' && hashFiles('transcripts/**') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('transcripts/**') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: transcripts
+          name: transcripts-${{ matrix.slug }}
           path: transcripts
           retention-days: 14
+      # baseline-default for the Claude default model (make_baseline), and
+      # baseline-<provider>-<model> for every gate run: the report to commit as
+      # evals/baseline/<provider>-<model>.json (model id with / and : as _).
       - name: Upload baseline candidate
-        if: steps.key.outputs.run == 'true' && inputs.make_baseline == true && hashFiles('cand.json') != ''
+        if: steps.key.outputs.run == 'true' && (matrix.gate || inputs.make_baseline == true) && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: baseline-default
+          name: baseline-${{ matrix.slug }}
           path: cand.json
           retention-days: 14
       - name: Gate
         if: steps.key.outputs.run == 'true'
         env:
           RC: ${{ steps.run.outputs.rc }}
+          BASELINE: ${{ steps.run.outputs.baseline }}
           MAKE_BASELINE: ${{ inputs.make_baseline }}
+          STATUS: ${{ matrix.status }}
+          SLUG: ${{ matrix.slug }}
+          SET: ${{ github.event_name == 'workflow_dispatch' && inputs.set || 'default' }}
         run: |
           if [ "$RC" = "2" ]; then
-            echo "::error::A scenario regressed against evals/baseline/default.json (see the comparison above)."
+            echo "::error::A scenario regressed against ${BASELINE} (see the comparison above)."
             exit 1
           elif [ "$RC" = "3" ]; then
             echo "::error::evalrun stopped on an API error (billing/auth); not a regression."
             exit 1
+          elif [ "$RC" = "4" ]; then
+            echo "::error::${SLUG} is refused by the gate: a hard gate failed (see the gate lines above). It must not be added to supported.json."
+            exit 1
+          elif [ "$RC" = "5" ]; then
+            # A quality-floor miss is a result, not a failure, for a model being
+            # admitted (experimental); a row listed as supported that misses it
+            # must drop to experimental in the same PR (design 5.3).
+            if [ "$STATUS" = "supported" ]; then
+              echo "::error::${SLUG} is listed as supported but now misses a quality floor: set it to experimental in internal/agent/llm/supported.json."
+              exit 1
+            fi
+            echo "::warning::${SLUG} passed the hard gates and missed a quality floor: it can be admitted as experimental only."
           elif [ "$RC" != "0" ]; then
             echo "::error::evalrun failed (exit ${RC:-unknown}) before it could compare."
             exit 1
           fi
-          if [ "$MAKE_BASELINE" = "true" ] || [ ! -f evals/baseline/default.json ]; then
+          # The held-out set is gated on evalrun errors only (above), never on a
+          # comparison with the default set's baseline.
+          if [ "$SET" = "heldout" ] || [ "$MAKE_BASELINE" = "true" ] || [ -z "$BASELINE" ]; then
             exit 0
           fi
           # Misses (tool calls the scenario had no recording for) growing means
@@ -204,14 +530,14 @@ jobs:
           # run covers a subset of the baseline, and a report sums the misses of
           # all its runs, so the overall totals of two reports do not compare.
           read -r n_shared base_miss cand_miss < <(jq -n -r \
-            --slurpfile b evals/baseline/default.json --slurpfile c cand.json '
+            --slurpfile b "$BASELINE" --slurpfile c cand.json '
             def rate(s): (s | map(.misses) | add // 0) / ([(s | map(.runs) | add // 0), 1] | max);
             ($c[0].scenarios // [] | map(.name)) as $cand
             | ($b[0].scenarios // [] | map(select(.name | IN($cand[])))) as $bs
             | ($bs | map(.name)) as $shared
             | ($c[0].scenarios // [] | map(select(.name | IN($shared[])))) as $cs
             | "\($shared | length) \(rate($bs)) \(rate($cs))"')
-          base_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' evals/baseline/default.json)"
+          base_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' "$BASELINE")"
           cand_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' cand.json)"
           echo "misses per run over ${n_shared} shared scenario(s): baseline ${base_miss}, candidate ${cand_miss}"
           if [ -n "$base_cost" ] && [ -n "$cand_cost" ]; then

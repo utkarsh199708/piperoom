@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"piperoom/internal/config"
 	"piperoom/internal/owners"
 )
 
@@ -160,5 +161,15 @@ func TestRoomKind(t *testing.T) {
 		if (err != nil) != tt.wantErr || got != tt.want {
 			t.Errorf("roomKind(%q, %s, %v) = %q, %v", tt.flag, tt.pipe.ID, tt.havePipe, got, err)
 		}
+	}
+}
+
+func TestWithModelFlags(t *testing.T) {
+	base := config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5"}
+	if got := withModelFlags(base, "", ""); got.ModelProvider != "anthropic" || got.Model != "claude-opus-5-5" {
+		t.Fatalf("empty flags changed the config: %+v", got)
+	}
+	if got := withModelFlags(base, "openai", "gpt-x"); got.ModelProvider != "openai" || got.Model != "gpt-x" {
+		t.Fatalf("flags not applied: %q %q", got.ModelProvider, got.Model)
 	}
 }

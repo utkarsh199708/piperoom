@@ -120,6 +120,9 @@ type RunResult struct {
 	// Judged is set when an LLM judge graded the run (ApplyVerdict): RootCause
 	// and LayerNamed then hold the judge's verdicts, Judged the terms ones.
 	Judged *JudgeResult `json:"judged,omitempty"`
+	// HealthyJudged is the judge's verdict on an ambiguous healthy verdict
+	// (gradeHealthy); SaysHealthy then holds it.
+	HealthyJudged *HealthyVerdict `json:"healthy_judged,omitempty"`
 	// Ambiguity is set when the tri-state keyword pass could not decide an
 	// item of the final hypothesis (tristate.go); it says what settled it.
 	Ambiguity *Ambiguity `json:"ambiguity,omitempty"`
@@ -300,9 +303,11 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
 	res.RootCauseLayerNamed = rootCauseLayerGraded(sc, last)
 	// The healthy verdict may come from the final hypothesis or the last
-	// message; a current fault in the last message cancels it.
+	// message; a current fault in the last message cancels it. A healthy
+	// phrase beside a fault word is ambiguous and not healthy here; the
+	// judge mode may settle it (gradeHealthy).
 	res.LastMessage = lastMessage
-	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)
+	res.SaysHealthy, _ = healthyGrade(lastMessage, res.FinalHypothesis)
 	res.ClaimsCause = last != nil && (last.Confidence == "medium" || last.Confidence == "high") &&
 		!(res.Outcome == OutcomeHealthy && healthyVerdict(last.Text))
 
@@ -366,7 +371,7 @@ func layerGraded(sc Scenario, layer string, last *events.AgentHypothesisPayload)
 	if layer == "" {
 		return true
 	}
-	return last != nil && namesLayer(layerTermsFor(sc.Pipeline, layer), last.Text)
+	return last != nil && namesPipelineLayer(sc.Pipeline, layer, last.Text)
 }
 
 // finish derives the outcome verdict, Correct, Abstained, the score and the
@@ -497,7 +502,11 @@ func failures(sc Scenario, res RunResult) []string {
 		if res.ClaimsCause {
 			f = append(f, fmt.Sprintf("claimed a cause at %s confidence on a healthy pipeline", res.Confidence))
 		}
-		if !res.SaysHealthy {
+		switch {
+		case res.SaysHealthy:
+		case res.Ambiguity.Unjudged() && res.Ambiguity.Healthy:
+			f = append(f, unjudgedFailure("healthy verdict", res.Ambiguity))
+		default:
 			f = append(f, "final message does not say the pipeline is healthy or that there is nothing to fix")
 		}
 	case OutcomeAbstain:

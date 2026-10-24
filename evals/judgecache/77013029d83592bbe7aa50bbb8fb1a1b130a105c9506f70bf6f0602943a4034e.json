@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "consumer-offsets-out-of-range-retention",
   "hypothesis": "Order-sync's committed offsets were deleted by retention. I don't think it rules out a reset to latest.",
-  "truth_sha256": "51a2b8961fad3b01807b520d64e7d846e4da9f8a96ed56f7f5dd2f9cea9048ca",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "cfe906e17e110a593e9990ccfe86b5eb4b495fa83c779631dc3029d2b4d1d712",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
-    "layer_correct": true,
+    "layer_correct": false,
     "root_cause_correct": false,
     "root_cause_layer_correct": true,
-    "reason": ""
+    "reason": "The hypothesis does blame retention, which points to the Kafka root-cause layer. But it also entertains a 'reset to latest' story, one of the listed wrong stories, never states the lost change records explicitly, and never names order-sync crash-looping as the first failure."
   }
 }

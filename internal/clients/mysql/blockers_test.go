@@ -3,12 +3,15 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	gomysql "github.com/go-sql-driver/mysql"
+
+	"piperoom/internal/clients"
 )
 
 var blockerCols = []string{"pid", "started", "user", "app", "state", "query", "blocks", "in_scope", "old", "same_db", "client"}
@@ -40,7 +43,7 @@ func TestBlockers(t *testing.T) {
 		t.Errorf("session 1 = %+v", s)
 	}
 	q := srv.queries()[len(srv.queries())-1]
-	if !reflect.DeepEqual(q.args, []any{int64(300), false}) || !strings.Contains(q.query, "AND FALSE)") {
+	if !reflect.DeepEqual(q.args, []any{"", "", int64(300), false, ""}) || !strings.Contains(q.query, "AND FALSE)") {
 		t.Fatalf("unscoped read: args %v", q.args)
 	}
 	for _, must := range []string{"t.TYPE = 'FOREGROUND'", "CONNECTION_ID()", "'Binlog Dump', 'Binlog Dump GTID'",
@@ -67,7 +70,7 @@ func TestBlockersOnTablesBindsTheScope(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 	q := srv.queries()[len(srv.queries())-1]
-	if !reflect.DeepEqual(q.args, []any{int64(60), true, "shop", "orders", "shop", "order_items"}) {
+	if !reflect.DeepEqual(q.args, []any{"", "", int64(60), true, "shop", "orders", "shop", "order_items", ""}) {
 		t.Fatalf("args %v", q.args)
 	}
 	if !strings.Contains(q.query, "(m.OBJECT_SCHEMA, m.OBJECT_NAME) IN ((?, ?), (?, ?))") || strings.Contains(q.query, "order_items") {
@@ -78,8 +81,51 @@ func TestBlockersOnTablesBindsTheScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	q = srv.queries()[len(srv.queries())-1]
-	if !reflect.DeepEqual(q.args, []any{int64(60), true}) || !strings.Contains(q.query, "AND FALSE)") {
+	if !reflect.DeepEqual(q.args, []any{"", "", int64(60), true, ""}) || !strings.Contains(q.query, "AND FALSE)") {
 		t.Fatalf("empty scope: %v", q.args)
+	}
+}
+
+// A hidden lock holder is flagged only on the connector's own wait (design
+// §6.5): the user is bound in the waiter filter, and without a user the flag
+// is limited to in-scope sessions in SQL.
+func TestBlockersForConnectorBindsTheUser(t *testing.T) {
+	srv := (&fakeServer{}).on("WITH waited AS", blockerCols,
+		row(int64(31), int64(0), b(""), b(""), b("Sleep"), b(""), int64(1), int64(0), int64(0), int64(1), int64(1)))
+	d := newFake(t, srv)
+	got, err := d.BlockersForConnector(context.Background(), time.Minute, []string{"shop.orders"}, "debezium")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !got[0].BlocksSlot || got[0].InScope {
+		t.Fatalf("got %+v", got)
+	}
+	q := srv.queries()[len(srv.queries())-1]
+	if !reflect.DeepEqual(q.args, []any{"debezium", "debezium", int64(60), true, "shop", "orders", "debezium"}) {
+		t.Fatalf("args %v", q.args)
+	}
+	for _, must := range []string{"wt.PROCESSLIST_USER = ?", "(waited_on AND (in_scope OR ? <> '')) AS blocks"} {
+		if !strings.Contains(q.query, must) {
+			t.Errorf("blockers SQL lacks %q", must)
+		}
+	}
+	if strings.Contains(q.query, "debezium") {
+		t.Errorf("user spliced into SQL: %s", q.query)
+	}
+	if _, err := d.BlockersForConnector(context.Background(), time.Minute, nil, ""); err == nil {
+		t.Error("empty connector user accepted")
+	}
+}
+
+// The MySQL sentinels are the contract's, so a caller comparing with the
+// clients ones sees a MySQL writer refusal.
+func TestSentinelsAreTheContracts(t *testing.T) {
+	err := fmt.Errorf("mysql: end session: %w", ErrSessionChanged)
+	if !errors.Is(err, clients.ErrSessionChanged) {
+		t.Error("ErrSessionChanged is not clients.ErrSessionChanged")
+	}
+	if !errors.Is(fmt.Errorf("x: %w", ErrSessionProtected), clients.ErrSessionProtected) {
+		t.Error("ErrSessionProtected is not clients.ErrSessionProtected")
 	}
 }
 

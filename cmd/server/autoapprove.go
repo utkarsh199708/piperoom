@@ -28,19 +28,26 @@ func autoApproveDelay(cfg config.Config) (time.Duration, error) {
 // off its actions only have read-only clients; nothing is removed), and no
 // entry may be a schema_* action, which the policy does not cover in this
 // wave. A typo such as connect_restart_taks fails here instead of becoming a
-// policy that never matches. With the policy off (delay 0) the lists are
+// policy that never matches. An entry naming an actions.Deferred action is
+// refused too (Q7a). With the policy off (delay 0) the lists are
 // still checked, so turning it on later cannot surface an old typo.
 func checkAutoApprove(own *owners.Owners, regs []*actions.Registry, delay time.Duration, log *slog.Logger) error {
-	var names []string
+	var names, deferred []string
 	for _, r := range regs {
 		if r == nil {
 			continue
 		}
 		for _, a := range r.All() {
 			names = append(names, a.Name())
+			if _, ok := a.(actions.Deferred); ok {
+				deferred = append(deferred, a.Name())
+			}
 		}
 	}
-	if err := own.ValidateAutoApprove(names); err != nil {
+	// A Deferred action (a fix pull request) is never approved by a policy:
+	// this load-time wall and the room's schedule check are the two walls of
+	// docs/design/fix-pr.md §7, so one bug is not enough.
+	if err := own.ValidateAutoApproveDeferred(names, deferred); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
 	var on []string

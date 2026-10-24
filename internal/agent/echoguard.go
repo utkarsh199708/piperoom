@@ -80,7 +80,12 @@ func (l *stepLedger) scanNameList() []string {
 // scanRead scans a read's text and, when injectscan flags it, remembers the
 // flagged spans under the read's step. It returns the findings so the caller
 // can log their kinds. A nil ledger scans without remembering.
+//
+// The log tools' own fence lines are blanked first (maskToolLogFences), so a
+// clean log read is not flagged for the fence and the fence never becomes a
+// flagged span; the log lines inside it are scanned as they are.
 func (l *stepLedger) scanRead(stepID, tool, text string) []injectscan.Finding {
+	text = maskToolLogFences(text)
 	if l == nil {
 		return injectscan.Scan(text)
 	}

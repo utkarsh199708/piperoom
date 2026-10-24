@@ -10,9 +10,13 @@
 # scoped by dev/owners.yaml. To replace it with a real recording, see
 # evals/scenarios/README.md, "Source-database settings (Q2g)".
 #
-# First failing layer: postgres (no slot can be created). Root-cause layer: postgres. Nothing
+# First failing layer: kafka-connect (the connector task never gets past start). Root-cause
+#   layer: postgres (the open transaction that CREATE_REPLICATION_SLOT waits on). Nothing
 #   FAILED: the connector and its task are RUNNING/UNASSIGNED and Connect reports no error,
 #   because start() has not returned. The warehouse is stale and the topic is idle.
+#   Ruling R1 (tasks/W4-evals-to-100.md, applied in W4n, KAN-497): a component that answers
+#   every read is not the first failing one. Postgres answers every read here; the task that
+#   never starts is the first failing layer, and Postgres is the root cause.
 #
 # Expected fix (the label): source_end_session {connector: pg-orders-connector, pid: 48213,
 #   started_at: 2026-10-23T09:14:12Z, older_than_minutes: 20} (the postgres owner approves; the
@@ -181,7 +185,7 @@ recordings:
       pipeline_id: orders
   - tool: source_blocking_sessions
     summary: |-
-      pid=48213 state=active age=25m blocks_slot=yes (outside the pipeline's tables; identity hidden)
+      pid=48213 state=active age=25m blocks_slot=yes started_at=2026-10-23T09:14:12Z (outside the pipeline's tables; identity hidden)
     data:
       - pid: 48213
         started_at: "2026-10-23T09:14:12Z"
@@ -444,6 +448,65 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: connect_source_offsets
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: no stored offsets
+    data: {"connectors": [{"connector": "pg-orders-connector", "offsets": null}]}
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: net_probe
+    input: {target: "source"}
+    summary: |-
+      net_probe source (postgres:5432): all checks ok: dns ok, tcp ok, connect_view ok
+      - connect_view ok: Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)
+      - dns postgres:5432 ok: 172.19.0.4
+      - tcp postgres:5432 ok: TCP connected
+      - tls postgres:5432 skip: not configured with TLS
+    data: {"checks": [{"addr": "postgres:5432", "detail": "172.19.0.4", "id": "dns", "ms": 0, "status": "ok"}, {"addr": "postgres:5432", "detail": "TCP connected", "id": "tcp", "ms": 1, "status": "ok"}, {"addr": "postgres:5432", "detail": "not configured with TLS", "id": "tls", "ms": 0, "status": "skip"}, {"detail": "Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)", "id": "connect_view", "ms": 212, "status": "ok"}], "endpoints": ["postgres:5432"], "kind": "source_db", "target": "source"}
+  - tool: connect_worker_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: FLAGS: 1 unassigned tasks. tasks total 1 (running 0, failed 0, paused 0, unassigned 1, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 0 task startup failures of 3 attempts, 0 connector startup failures of 3 attempts, 1 connectors, 1 tasks. rebalance: rebalancing=false, 2 completed, epoch 2, last 11.2 h ago, avg 0.6 s, max 0.9 s
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group connect-cluster (Stable): 1 worker; runs the pipeline's connectors
+        - worker 172.19.0.6 http://connect:8083/ leader; runs pg-orders-connector
+      Internal topics (name match):
+      - config connect-configs: 1 partitions, RF 1, cleanup compact
+      - offset connect-offsets: 25 partitions, RF 1, cleanup compact
+      - status connect-status: 5 partitions, RF 1, cleanup compact
+      Plugins: Kafka 3.7.1; 3 plugins (1 source, 2 converter) (connect_plugins lists them)
+      Log levels: root INFO
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-23T08:40:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 5m0s from 2026-10-23T08:40:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      08:40 | 5 | 5 | 5 | +0
+      08:45 | 4 | 4 | 4 | +0
+      08:50 | 5 | 5 | 5 | +0
+      08:55 | 4 | 4 | 4 | +0
+      09:00 | 3 | 3 | 3 | +0
+      09:05 | 5 | 5 | 5 | +0
+      09:10 | 4 | 4 | 4 | +0
+      09:15 | 4 | 0 | 0 | -4
+      09:20 | 5 | 0 | 0 | -5
+      09:25 | 4 | 0 | 0 | -4
+      09:30 | 5 | 0 | 0 | -5
+      09:35 | 2 | 0 | 0 | -2
+      verdict: sink is missing 20 rows in 09:15–09:40; the topic carried only 0 change events for 20 source rows (connector side)
+      keys by id: source 50, sink 30; missing 20 (e.g. 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1419, 1420, 1421); extra 0
+      keys: 20 source rows are not in the sink's window (missing, or not yet updated there); confirm one with warehouse_row (source row present, sink row absent) before naming a writer
+
+      note: rows newer than 2026-10-23T09:38:00.041877213Z (the last 2m0s) are in flight and not judged
 
 inputs:
   - kind: steer
@@ -474,7 +537,8 @@ expect:
     - ['lost the slot']
     - ['consumer lag']
     - ['network']
-  first_failing_layer: postgres
+  # R1 (W4n): the task that never starts fails first; Postgres holds the cause.
+  first_failing_layer: kafka-connect
   root_cause_layer: postgres
   expected_facts:
     - id: f_blocker
@@ -499,4 +563,12 @@ expect:
   fix_targets:
     source_end_session: {connector: pg-orders-connector, pid: 48213}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
-  max_tool_calls: 12
+  # Tool budget (ruling R18, tasks/W4-evals-to-100.md, which applies R8; W4n-3, KAN-497; 12 -> 21).
+  # Live run 40066306931 made 19 calls on this scenario and failed on the budget alone, so it is a
+  # passing path: 19 + 2 = 21. Its turn split was not read from the transcript; the split of the
+  # standard path, NOT MEASURED, is turn 1 (the alert) about 12 reads (pipeline map, Connect status
+  # and config, slots, streaming liveness, long transactions, blocking sessions, recent DDL,
+  # publication tables, source settings, warehouse freshness, similar incidents) and turn 2
+  # (priya's steer) about 7 (blocking sessions and slots again before proposing source_end_session,
+  # Connect status, the worker log, the role grants, the table's replication settings, a trace).
+  max_tool_calls: 21

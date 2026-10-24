@@ -10,12 +10,16 @@ import (
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/runner"
+	setuptools "piperoom/internal/setup/tools"
 	"piperoom/internal/tools"
 )
 
 // The registry is the runner's Catalogue, structurally: no import of the
 // runner in the package, only this assertion in a test.
 var _ runner.Catalogue = (*Registry)(nil)
+
+// setup_plan fills each stored step's Layer from the registry.
+var _ setuptools.LayerCatalogue = (*Registry)(nil)
 
 func TestFloorsAndTargets(t *testing.T) {
 	cases := []struct {
@@ -46,6 +50,9 @@ func TestFloorsAndTargets(t *testing.T) {
 		if !ok || op.Target() != c.target {
 			t.Errorf("Target(%q) = %q, want %q", c.op, op.Target(), c.target)
 		}
+		if layer, ok := r.LayerOf(c.op); !ok || layer != op.Layer() || layer == "" {
+			t.Errorf("LayerOf(%q) = %q, %v; want the op's layer %q", c.op, layer, ok, op.Layer())
+		}
 		if action, ok := r.StepAction(c.op); !ok || action != c.op {
 			t.Errorf("StepAction(%q) = %q, %v", c.op, action, ok)
 		}
@@ -55,6 +62,9 @@ func TestFloorsAndTargets(t *testing.T) {
 	}
 	if _, ok := r.Floor("no_such_op"); ok {
 		t.Error("Floor of an unknown op = true")
+	}
+	if _, ok := r.LayerOf("no_such_op"); ok {
+		t.Error("LayerOf of an unknown op = true")
 	}
 	if _, ok := r.StepAction("no_such_op"); ok {
 		t.Error("StepAction of an unknown op = true")

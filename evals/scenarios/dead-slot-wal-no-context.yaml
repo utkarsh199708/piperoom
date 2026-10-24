@@ -30,6 +30,14 @@
 #   with lag 0, the warehouse is stale only because nothing is produced.
 #
 # Sources: as dead-slot-wal; dev/scenarios.md §5 (slot-inactive) and §9.
+#
+# W4k (KAN-495): run 39994729845 missed connect_source_offsets (all three runs), pg_streaming_liveness
+#   and connect_worker_logs, and run 2 did not propose the resume because the stored offsets "could not
+#   be read". They are recorded after the other reads (the real tools' output over this state; the
+#   offsets sit at the slot's confirmed_flush_lsn, so the connector still holds its position, and
+#   devctl load keeps writing, so pg_streaming_liveness says stuck with the connector STOPPED and the
+#   slot INACTIVE). max_tool_calls stays 14: the passing runs made 10 and 11 calls, which the rule
+#   (highest passing + 2) would put at 13; a budget is not lowered by a row that only records misses.
 
 name: dead-slot-wal-no-context
 description: |
@@ -449,6 +457,59 @@ recordings:
       sampled: 0
       topic: devctl.order-sync.dlq
       writer: order-sync
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. Each is the
+  # output of the real tool over the stack above (evals/w4k_recordings_test.go rebuilds it): the
+  # connector is STOPPED, the slot is inactive and keeps its position, devctl load keeps writing.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=253176813278, lsn_commit=253176813278, lsn_proc=253176813278, messageType=UPDATE, ts_usec=1792304874000000, txId=7413
+    data:
+      connectors:
+        - connector: pg-orders-connector
+          offsets:
+            - offset:
+                lsn: 253176813278
+                lsn_commit: 253176813278
+                lsn_proc: 253176813278
+                messageType: UPDATE
+                ts_usec: 1792304874000000
+                txId: 7413
+              partition:
+                server: pg
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 652000 bytes in 5s (slot "debezium_orders", active=false, wal_status=extended, retains 1.4 GiB); connector pg-orders-connector state STOPPED; the slot is INACTIVE, so no walsender is streaming it
+      the head-confirmed_flush lag grew from 1.4 GiB to 1.4 GiB in 5s and is above the stuck threshold of 29.8 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+    data:
+      connector: pg-orders-connector
+      connector_state: STOPPED
+      elapsed_ms: 5000
+      note: the head-confirmed_flush lag grew from 1.4 GiB to 1.4 GiB in 5s and is above the stuck threshold of 29.8 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      pipeline: orders
+      slot:
+        active: false
+        confirmed_flush_advance_bytes: 0
+        confirmed_flush_lsn: 3A/F28396DE
+        confirmed_flush_lsn_after: 3A/F28396DE
+        flush_lag_bytes: 1503238050
+        flush_lag_bytes_after: 1503890050
+        name: debezium_orders
+        retained_wal_bytes: 1503890554
+        source_wal_advance_bytes: 652000
+        stuck_lag_threshold_bytes: 31296000
+        verdict: stuck
+        wal_status: extended
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      transaction_note: no open writer transaction was found; the slot is held back by something else
+      verdict: stuck
+      window_seconds: 5
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
   - tool: pipeline_map
     error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
   - tool: connect_status
