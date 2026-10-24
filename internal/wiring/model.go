@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
+	"piperoom/internal/tools"
 )
 
 // EndpointConfig maps the model settings of cfg onto the agent package's
@@ -33,6 +38,9 @@ func EndpointConfig(cfg config.Config) agent.EndpointConfig {
 // here, so the process refuses to start. awsCfg is the shared config from
 // LoadAWS, also passed to Open; nil keeps the endpoint's own AWS loader.
 func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	ec := EndpointConfig(cfg)
 	ec.AWSConfig = awsCfg
 	tp, err := config.ParseTriagePass(cfg)
@@ -40,12 +48,29 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, 
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
 	}
 	ec.TriagePass, ec.TriagePassModel, ec.TriagePassTimeout = tp.On, tp.Model, tp.Timeout
+	// The roles and knobs of design section 9. A Claude deployment that sets
+	// none of them parses to today's values, and nothing below changes for it.
+	knobs, err := config.ParseModelKnobs(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+	}
+	for _, w := range knobs.Warnings {
+		log.Warn(w)
+	}
+	ec.Knobs = &knobs
+	ec.MaxConcurrency = modelConcurrency(knobs, cfg.MaxAgents)
 	ep, err := agent.NewEndpoint(ctx, ec, log)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
 	}
-	if log == nil {
-		log = slog.Default()
+	if ep.NeedsStartChecks() {
+		sets, err := startToolSets()
+		if err != nil {
+			return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+		}
+		if err := ep.CheckStart(ctx, sets); err != nil {
+			return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+		}
 	}
 	if ep.Provider() == agent.ProviderBedrock {
 		warnIfNotBedrockModelID(log, "PIPEROOM_MODEL", cfg.Model)
@@ -73,6 +98,44 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, 
 	log.Info("model endpoint ready", "provider", ep.Provider(), "model", cfg.Model, "triage_model", cfg.TriageModel,
 		"first_look", tp.On, "first_look_model", tp.Model, "first_look_timeout", tp.Timeout.String(), "room_token_budget", limit)
 	return ep, nil
+}
+
+// defaultMaxAgents mirrors room.DefaultMaxAgents (room imports wiring, so
+// wiring cannot import it): the default of PIPEROOM_MAX_AGENTS.
+const defaultMaxAgents = 3
+
+// modelConcurrency is PIPEROOM_MODEL_MAX_CONCURRENCY, else
+// PIPEROOM_MAX_AGENTS (design 9). cmd/server validates PIPEROOM_MAX_AGENTS
+// itself; a value it refuses never reaches a running endpoint, so here an
+// unreadable one falls back to the default.
+func modelConcurrency(k config.ModelKnobs, maxAgents string) int64 {
+	if k.MaxConcurrency > 0 {
+		return k.MaxConcurrency
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(maxAgents), 10, 64); err == nil && n > 0 {
+		return n
+	}
+	return defaultMaxAgents
+}
+
+// startToolSets are the tools and actions a room of each pipeline kind is
+// offered, registered without clients (no client is opened, nothing is
+// dialled): what the start checks measure the context fit and the
+// adapters' tool limits on. Write actions are those of write mode on, the
+// larger list.
+func startToolSets() ([]agent.StartToolSet, error) {
+	var out []agent.StartToolSet
+	for _, p := range []owners.Pipeline{
+		{ID: "start-check-cdc", Kind: events.PipelineKindCDC, TopicPrefix: "pg", SourceTables: []string{"public.t"}, Connectors: []string{"c"}},
+		{ID: "start-check-batch", Kind: events.PipelineKindBatch, DAGs: []string{"d"}, Models: []string{"m"}},
+	} {
+		reg, areg := tools.NewReadOnlyRegistry(), actions.NewRegistry()
+		if err := RegisterTools(reg, areg, &Wired{Owners: &owners.Owners{Pipelines: []owners.Pipeline{p}}}); err != nil {
+			return nil, fmt.Errorf("start checks: register the %s tools: %w", p.Kind, err)
+		}
+		out = append(out, agent.StartToolSet{Kind: p.Kind, Tools: reg, Actions: areg})
+	}
+	return out, nil
 }
 
 // warnIfNotBedrockModelID logs when a model name cannot be a Bedrock id. The

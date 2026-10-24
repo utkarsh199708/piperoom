@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 )
 
@@ -123,6 +124,11 @@ func (e *Endpoint) SetSpend(o SpendOptions) error {
 	if o.EstimateFloor < 0 {
 		return errors.New("agent: the estimate floor must not be negative")
 	}
+	if c > 0 {
+		if err := e.checkPricing(o.Prices); err != nil {
+			return err
+		}
+	}
 	floor := o.EstimateFloor
 	if floor == 0 {
 		floor = DefaultEstimateFloor
@@ -146,6 +152,43 @@ func (e *Endpoint) SetSpend(o SpendOptions) error {
 	return nil
 }
 
+// checkPricing is the fail-safe pricing rule of design 8.2 (decision 4),
+// checked when a daily cost cap is set: every configured model of every role
+// (main, triage, first look, summary, judge) must have a price, or the cap
+// would count its requests as free. PIPEROOM_MODEL_PRICING_STRICT chooses
+// which roles: non-claude (the default) the roles on a new provider only, so
+// a Claude model keeps today's per-request warning (warnUnpriced); all every
+// role; off is refused with a cap (config.ParseModelKnobs refuses it first).
+// Without EndpointConfig.Knobs there is no role list and nothing changes.
+func (e *Endpoint) checkPricing(p Prices) error {
+	for _, sp := range e.specs {
+		if p.qualified(priceQualifiers(sp.role)).Has(sp.role.Model) {
+			continue
+		}
+		switch e.pricingStrict {
+		case config.PricingStrictNonClaude:
+			if !newProvider(sp.role.Provider) {
+				continue
+			}
+		case config.PricingStrictAll:
+		default:
+			return fmt.Errorf("agent: PIPEROOM_MODEL_PRICING_STRICT=%s with PIPEROOM_PIPELINE_DAILY_COST_USD set: a cost cap would count the unpriced %s=%q as free", e.pricingStrict, sp.env, sp.role.Model)
+		}
+		q := priceQualifiers(sp.role)
+		return fmt.Errorf("agent: PIPEROOM_PIPELINE_DAILY_COST_USD is set but PIPEROOM_MODEL_PRICES has no price for %s=%q on %s (PIPEROOM_MODEL_PRICING_STRICT=%s): add %q or %q to the table (a local model is priced at 0 explicitly)",
+			sp.env, sp.role.Model, providerLabel(sp.role), e.pricingStrict, q[len(q)-1]+":"+sp.role.Model, sp.role.Model)
+	}
+	return nil
+}
+
+// providerLabel is "openai (flavor groq)" or the provider alone.
+func providerLabel(r config.ModelRole) string {
+	if r.Flavor != "" {
+		return r.Provider + " (flavor " + r.Flavor + ")"
+	}
+	return r.Provider
+}
+
 // spendSettings returns what SetSpend stored, or nil.
 func (e *Endpoint) spendSettings() *spendSettings {
 	e.mu.Lock()
@@ -156,17 +199,26 @@ func (e *Endpoint) spendSettings() *spendSettings {
 // guard returns the durable spend guard for one room, or nil when there is no
 // ledger (the in-memory tokenBudget then decides alone).
 func (e *Endpoint) guard(roomID, pipelineID string) *spendGuard {
+	return e.guardWith(roomID, pipelineID, e.mainQuals)
+}
+
+// guardWith is guard for a role whose price keys may carry quals
+// (priceQualifiers).
+func (e *Endpoint) guardWith(roomID, pipelineID string, quals []string) *spendGuard {
 	s := e.spendSettings()
 	if s == nil || s.ledger == nil {
 		return nil
 	}
-	return &spendGuard{s: s, roomID: roomID, pipelineID: pipelineID, log: e.log}
+	return &spendGuard{s: s, roomID: roomID, pipelineID: pipelineID, log: e.log, prices: s.prices.qualified(quals)}
 }
 
-// prices returns the price table for usage events, or nil.
-func (e *Endpoint) prices() Prices {
+// prices returns the main role's price table for usage events, or nil.
+func (e *Endpoint) prices() Prices { return e.pricesFor(e.mainQuals) }
+
+// pricesFor returns the price table as a role with quals sees it, or nil.
+func (e *Endpoint) pricesFor(quals []string) Prices {
 	if s := e.spendSettings(); s != nil {
-		return s.prices
+		return s.prices.qualified(quals)
 	}
 	return nil
 }
@@ -181,12 +233,16 @@ func (e *Endpoint) handoffModel(roomEvents []events.Event) model {
 // closing post-mortem draft is reported as its own role.
 func (e *Endpoint) summaryModel(roomEvents []events.Event, role string) model {
 	roomID := roomEvents[0].RoomID
-	var m model = &budgetModel{inner: e.model, budget: e.budget(roomID), guard: e.guard(roomID, pipelineOf(roomEvents))}
+	quals := e.summary.quals
+	if quals == nil {
+		quals = e.mainQuals
+	}
+	var m model = &budgetModel{inner: e.summaryClient(), budget: e.budget(roomID), guard: e.guardWith(roomID, pipelineOf(roomEvents), quals)}
 	s := e.spendSettings()
 	if s == nil || s.onUsage == nil {
 		return m
 	}
-	return &reportingModel{inner: m, role: role, prices: s.prices, report: func(ctx context.Context, p events.AgentUsagePayload) {
+	return &reportingModel{inner: m, role: role, prices: s.prices.qualified(quals), report: func(ctx context.Context, p events.AgentUsagePayload) {
 		s.onUsage(ctx, roomID, p)
 	}}
 }
@@ -224,6 +280,8 @@ type spendGuard struct {
 	roomID     string
 	pipelineID string
 	log        *slog.Logger
+	// prices is s.prices as the role's provider sees it (Prices.qualified).
+	prices Prices
 }
 
 // spendCharge is what admit charged for one request, settled after it.
@@ -247,7 +305,7 @@ func (g *spendGuard) admit(ctx context.Context, b *tokenBudget, model string, es
 		// No previous request in this process to size it by.
 		est = g.s.estimateFloor
 	}
-	ch := spendCharge{day: g.s.day(), tokens: est, costMicros: g.s.prices.estimateMicros(model, est)}
+	ch := spendCharge{day: g.s.day(), tokens: est, costMicros: g.prices.estimateMicros(model, est)}
 
 	sctx, cancel := context.WithTimeout(ctx, spendStoreTimeout)
 	t, err := g.s.ledger.AddSpend(sctx, g.change(ch.day, ch.tokens, ch.costMicros, nil))
@@ -307,7 +365,7 @@ func (g *spendGuard) refund(ctx context.Context, ch spendCharge) {
 func (g *spendGuard) settle(ctx context.Context, ch spendCharge, model string, u llm.Usage) {
 	own, comp, _ := splitUsage(u)
 	used := own.plus(comp)
-	cost, priced := g.s.prices.costMicros(model, used)
+	cost, priced := g.prices.costMicros(model, used)
 	if !priced && g.s.dailyCostMicros > 0 {
 		g.s.warnUnpriced(g.log, model)
 	}

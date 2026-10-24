@@ -69,6 +69,21 @@ func TestHeartbeatValidate(t *testing.T) {
 	}
 }
 
+// KAN-502: the model reads Describe when it picks the next step, and in the
+// idle-wal-growth runs it proposed pg_add_publication_table right after the
+// heartbeat table (W4-0 transcripts). The preview
+// still lists the publication step for the approvers; Describe must not.
+func TestHeartbeatDescribeNamesNoPublicationFollowUp(t *testing.T) {
+	_, _, _, a := hbFixture()
+	d := a.Describe()
+	if strings.Contains(d, "pg_add_publication_table") {
+		t.Errorf("Describe names pg_add_publication_table:\n%s", d)
+	}
+	if !strings.Contains(d, "heartbeat.action.query") {
+		t.Errorf("Describe lost the heartbeat.action.query follow-up:\n%s", d)
+	}
+}
+
 func TestHeartbeatPreviewFilteredPublication(t *testing.T) {
 	conn, _, w, a := hbFixture()
 	conn.cfg["pg-orders"]["publication.autocreate.mode"] = "filtered"

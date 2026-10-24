@@ -691,6 +691,23 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: connect_worker_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: tasks total 1 (running 1, failed 0, paused 0, unassigned 0, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 0 task startup failures of 1 attempts, 0 connector startup failures of 1 attempts, 1 connectors, 1 tasks. rebalance: rebalancing=false, 2 completed, epoch 2, last 8.4 h ago, avg 0.4 s, max 0.5 s
+  - tool: connect_source_offsets
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=254677678952, lsn_proc=254677678952, ts_usec=1792575101112000, txId=7421
+    data: {"connectors": [{"connector": "pg-orders-connector", "offsets": [{"partition": {"server": "pg"}, "offset": {"lsn": 254677678952, "lsn_proc": 254677678952, "ts_usec": 1792575101112000, "txId": 7421}}]}]}
 
 inputs:
   - kind: steer

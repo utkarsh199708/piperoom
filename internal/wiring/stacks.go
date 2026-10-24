@@ -239,7 +239,8 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	if needAWS && awsCfg == nil {
 		c := cfg
 		c.KafkaSASLMechanism = netsec.MechAWSMSKIAM
-		c.ModelProvider = ""
+		// MSK IAM alone: no model role is named as a user of this load.
+		c.ModelProvider, c.TriagePassProvider, c.SummaryProvider, c.JudgeProvider = "", "", "", ""
 		ac, err := d.loadAWS(ctx, c)
 		if err != nil {
 			return nil, fmt.Errorf("wiring: MSK IAM in a pipeline's connections: %w", err)
