@@ -56,6 +56,11 @@ type LifecycleDeps struct {
 	// Preview uses it, through the tableRowEstimator assertion (the Postgres
 	// client's planner estimate), to say how large a following snapshot is.
 	Source clients.SourceReader
+	// Binlog is optional and read-only: the MySQL source's binlog state, which
+	// connect_reset_source_offsets checks a MySQL position against (Q8e). Nil
+	// falls back to Source when that is a clients.BinlogReader (the MySQL
+	// client); with neither, a MySQL position is refused (clients.ErrNotSupported).
+	Binlog clients.BinlogReader
 	// AllowedHosts are operator-configured endpoints (host[:port] or a
 	// comma-separated broker list) a created connector may point at besides
 	// the pipeline's connections and registered connectors: the Kafka

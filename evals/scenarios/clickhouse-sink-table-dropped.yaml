@@ -104,6 +104,57 @@ recordings:
       analytics.orders: 2 failed or partial load(s) since 2026-10-19T09:00:00Z; latest 2026-10-20T08:40:00Z LOAD_FAILED 0 of 1 rows: ClickHouse INSERT exception (code 60)
       - 2026-10-20T08:40:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 60)
       - 2026-10-20T08:30:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 60)
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. The real
+  # tools' output over this stack (the pipeline upstream is healthy and the sink table is gone).
+  # The warehouse_row error does not name the key, so one recording answers every key.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=22.1 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3C/2A3048FF
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3C/2A304707
+        retained_wal_bytes: 23173529
+        wal_status: reserved
+  - tool: net_probe
+    input: {target: warehouse}
+    summary: |-
+      net_probe warehouse (clickhouse.prod.internal:9000): all checks ok: dns ok, tcp ok
+      - dns clickhouse.prod.internal:9000 ok: 10.20.6.21
+      - tcp clickhouse.prod.internal:9000 ok: TCP connected
+      - tls clickhouse.prod.internal:9000 skip: not configured with TLS
+    data:
+      checks:
+        - addr: clickhouse.prod.internal:9000
+          detail: 10.20.6.21
+          id: dns
+          ms: 0
+          status: ok
+        - addr: clickhouse.prod.internal:9000
+          detail: TCP connected
+          id: tcp
+          ms: 0
+          status: ok
+        - addr: clickhouse.prod.internal:9000
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+      endpoints:
+        - clickhouse.prod.internal:9000
+      kind: warehouse
+      target: warehouse
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-19T09:00:00Z)
+  - tool: warehouse_row
+    input: {pipeline_id: orders, pk_column: id, table: analytics.orders}
+    error: 'dbtools: warehouse_row: clickhouse: query row from analytics.orders: not found'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
 
 inputs:
   - kind: steer

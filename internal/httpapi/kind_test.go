@@ -89,8 +89,11 @@ func TestMeLayersScopedByKind(t *testing.T) {
 	})
 	t.Run("batch present: they appear", func(t *testing.T) {
 		srv := kindServer(t, "pipelines:\n"+kindOrders+kindRevenue, "meera")
-		if got := me(t, srv, "meera"); !slices.Equal(got, events.Layers) {
-			t.Fatalf("solo = %v, want %v", got, events.Layers)
+		// Every layer of the kinds in use: no pipeline has source_kind mysql
+		// (Q8-0), so the mysql layer is not one of them.
+		want := slices.DeleteFunc(slices.Clone(events.Layers), func(l string) bool { return l == events.LayerMySQL })
+		if got := me(t, srv, "meera"); !slices.Equal(got, want) {
+			t.Fatalf("solo = %v, want %v", got, want)
 		}
 		// A non-solo user keeps their own layers.
 		if got := me(t, srv, "arjun"); !slices.Equal(got, []string{"kafka-connect", "kafka"}) {

@@ -164,7 +164,7 @@ func TestFakeAgentScriptedRunsThroughHTTP(t *testing.T) {
 		opts.Only = []string{}
 		return wiring.OpenStacks(ctx, cfg, awsCfg, own, opts)
 	}
-	newEndpoint := func(context.Context, config.Config, *slog.Logger, *aws.Config) (*agent.Endpoint, error) {
+	newEndpoint := func(context.Context, config.Config, *slog.Logger, *aws.Config, func(string) string) (*agent.Endpoint, error) {
 		endpointBuilt = true
 		return nil, errors.New("must not build a model endpoint for the scripted agent")
 	}

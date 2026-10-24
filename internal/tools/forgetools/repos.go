@@ -9,7 +9,9 @@ import (
 // need it: the resolved reference and the path globs with their layers. It
 // mirrors owners.Repo and owners.RepoPath of docs/design/fix-pr.md §5.8
 // (Q7a, built in parallel); the wiring row adapts owners.Repo to it with
-// Repo.Ref() and Paths until Q7a lands, then this type may become an alias.
+// forge.RefOf(Repo.Ref()) (which keeps the url's Host, so the forge client's
+// host check and refKey see it) and Paths until Q7a lands, then this type may
+// become an alias.
 type Repo struct {
 	Ref   forge.RepoRef
 	Paths []RepoPath

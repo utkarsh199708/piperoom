@@ -59,7 +59,7 @@ func (e Expect) checkRootCauseLayerAlt() []error {
 // root-cause-layer grade when a scenario sets root_cause_layer_alt.
 func namesAnyLayer(p owners.Pipeline, layers []string, text string) bool {
 	for _, l := range layers {
-		if namesLayer(layerTermsFor(p, l), text) {
+		if namesPipelineLayer(p, l, text) {
 			return true
 		}
 	}

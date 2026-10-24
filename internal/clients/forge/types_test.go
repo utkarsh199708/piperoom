@@ -98,6 +98,19 @@ func TestCheckRepoPath(t *testing.T) {
 	}
 }
 
+func TestRefOfCarriesHost(t *testing.T) {
+	or := owners.Repo{ID: "c", URL: "https://GHE.acme.test/acme/c", Base: "main"}.Ref()
+	if got := RefOf(or); got != (RepoRef{ID: "c", Owner: "acme", Name: "c", Base: "main", Host: "ghe.acme.test"}) {
+		t.Fatalf("RefOf = %+v", got)
+	}
+}
+
+func TestFileChangeString(t *testing.T) {
+	if s := (FileChange{Path: "a", Content: []byte("secret=1")}).String(); strings.Contains(s, "secret") {
+		t.Fatalf("content printed: %s", s)
+	}
+}
+
 func TestBlobSHA(t *testing.T) {
 	// git hash-object of "hello\n" and of the empty blob.
 	if got := BlobSHA([]byte("hello\n")); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
@@ -105,12 +118,6 @@ func TestBlobSHA(t *testing.T) {
 	}
 	if got := BlobSHA(nil); got != "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {
 		t.Fatalf("empty = %s", got)
-	}
-}
-
-func TestFileChangeString(t *testing.T) {
-	if s := (FileChange{Path: "a", Content: []byte("secret=1")}).String(); strings.Contains(s, "secret") {
-		t.Fatalf("content printed: %s", s)
 	}
 }
 
