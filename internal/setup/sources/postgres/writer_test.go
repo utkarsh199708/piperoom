@@ -63,7 +63,7 @@ func (f *fakeWriter) AlterSystem(_ context.Context, name, value string) (bool, e
 	return f.pending, f.err
 }
 
-// allTablesFake is gone: U1-9 supports only the filtered publication. This
+// Only the filtered publication exists (no FOR ALL TABLES form). This
 // assertion pins that *Writer is a clients.SetupSourceWriter.
 var _ clients.SetupSourceWriter = (*Writer)(nil)
 
