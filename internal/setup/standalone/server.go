@@ -76,9 +76,13 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		return fmt.Errorf("setup: %w", err)
 	}
 	st := memstore.New()
+	// The hand-off's agent.usage events go to the room service once it exists
+	// (usage.set below), so the room log and the ledger agree on the tokens.
+	usage := &usageRelay{log: log}
 	host := &modelHost{
 		startKeys: quickstart.NewKeys(nil, qs.ModelEnv),
 		ledger:    standaloneSpendLedger{st: st},
+		usage:     usage,
 	}
 	host.wire(ctx, log, qs.Config, prices)
 	run := s.Agent
@@ -115,6 +119,8 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		deps.OnRoomOpened = s.Events.Hook(st, log)
 	}
 	svc := room.New(deps)
+	// Set before the listener opens: no hand-off can run before it.
+	usage.set(svc)
 	loadCtx, cancelLoad := context.WithTimeout(ctx, loadTimeout)
 	loadErr := svc.Load(loadCtx)
 	cancelLoad()

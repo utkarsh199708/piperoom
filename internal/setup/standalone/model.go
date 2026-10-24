@@ -10,6 +10,7 @@ package standalone
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/quickstart"
+	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/wiring"
 )
@@ -34,6 +36,9 @@ type modelHost struct {
 	// ledger is shared by every picker endpoint, so replacing a model does
 	// not reset a room's token budget.
 	ledger agent.SpendLedger
+	// usage hands the hand-off's agent.usage events to the room service,
+	// which is built after the start endpoint; nil drops them.
+	usage *usageRelay
 	// build makes a candidate endpoint for the picker (quickstart.BuildFunc).
 	build quickstart.BuildFunc
 	// startKeys are the picker's keys at start (model.env's stored key over
@@ -156,6 +161,12 @@ func (h *modelHost) wire(ctx context.Context, log *slog.Logger, cfg config.Confi
 	if log == nil {
 		log = slog.Default()
 	}
+	// The hand-off's requests run outside an agent run, so their agent.usage
+	// events reach the room log only through this hook (cmd/server's relay).
+	var onUsage func(context.Context, string, events.AgentUsagePayload)
+	if h.usage != nil {
+		onUsage = h.usage.emit
+	}
 	h.build = func(reqCtx context.Context, cfg config.Config, getenv func(string) string) (func(), func(), error) {
 		bctx, cancel := context.WithCancel(ctx)
 		stop := context.AfterFunc(reqCtx, cancel)
@@ -171,7 +182,7 @@ func (h *modelHost) wire(ctx context.Context, log *slog.Logger, cfg config.Confi
 			// The standalone room store is in memory; sharing it as the spend
 			// ledger keeps room totals across picker endpoint replacements. No
 			// pipeline daily caps are enabled here.
-			err = ep.SetSpend(agent.SpendOptions{Prices: prices, Ledger: h.ledger})
+			err = ep.SetSpend(agent.SpendOptions{Prices: prices, Ledger: h.ledger, OnUsage: onUsage})
 		}
 		if err != nil {
 			cancel()
@@ -216,7 +227,7 @@ func (l standaloneSpendLedger) AddSpend(ctx context.Context, c agent.SpendChange
 	}
 	t, err := l.st.AddSpend(ctx, sc)
 	if err != nil {
-		return agent.SpendTotals{}, err
+		return agent.SpendTotals{}, fmt.Errorf("setup: record model spend: %w", err)
 	}
 	return agent.SpendTotals{
 		RoomTokens:         t.RoomTokens,
@@ -224,4 +235,38 @@ func (l standaloneSpendLedger) AddSpend(ctx context.Context, c agent.SpendChange
 		PipelineTokens:     t.PipelineTokens,
 		PipelineCostMicros: t.PipelineCostMicros,
 	}, nil
+}
+
+// usageRelay hands the hand-off's agent.usage events to the room service,
+// which is built after the start endpoint (cmd/server's pattern). Without it
+// the summary's tokens reach the spend ledger but never the room log, so the
+// room's insight, GET /api/usage and the agent stats would miss them.
+type usageRelay struct {
+	mu  sync.Mutex
+	svc *room.Service
+	log *slog.Logger
+}
+
+// set points the relay at the service; events before it are dropped.
+func (u *usageRelay) set(svc *room.Service) {
+	u.mu.Lock()
+	u.svc = svc
+	u.mu.Unlock()
+}
+
+// emit appends the event; a failure is logged and the hand-off goes on.
+func (u *usageRelay) emit(ctx context.Context, roomID string, p events.AgentUsagePayload) {
+	u.mu.Lock()
+	svc := u.svc
+	u.mu.Unlock()
+	if svc == nil {
+		return
+	}
+	if err := svc.EmitAgentUsage(ctx, roomID, p); err != nil {
+		log := u.log
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("setup: could not record the hand-off's model usage", "room", roomID, "err", err)
+	}
 }
