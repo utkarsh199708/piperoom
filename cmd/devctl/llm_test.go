@@ -144,6 +144,13 @@ func TestComposeLLMProfile(t *testing.T) {
 	if o.Environment["OLLAMA_CONTEXT_LENGTH"] != "131072" {
 		t.Errorf("OLLAMA_CONTEXT_LENGTH = %q", o.Environment["OLLAMA_CONTEXT_LENGTH"])
 	}
+	// The KV-cache knobs pass through from the shell and default to unset,
+	// so Ollama's own defaults hold unless a memory-capped machine sets them.
+	for _, k := range []string{"OLLAMA_FLASH_ATTENTION", "OLLAMA_KV_CACHE_TYPE"} {
+		if want := "${" + k + ":-}"; o.Environment[k] != want {
+			t.Errorf("%s = %q, want %q", k, o.Environment[k], want)
+		}
+	}
 	if len(o.Healthcheck.Test) == 0 {
 		t.Error("no healthcheck")
 	}

@@ -494,6 +494,11 @@ services:
       # far under one investigation turn. 131072 is the window of llama3.1:8b,
       # the model `devctl llm-up` pulls.
       OLLAMA_CONTEXT_LENGTH: "131072"
+      # Unset by default (Ollama's own defaults). On a memory-capped Docker,
+      # OLLAMA_FLASH_ATTENTION=1 with OLLAMA_KV_CACHE_TYPE=q8_0 roughly halves
+      # the KV cache of the 131072 window (dev/README.md "Local models").
+      OLLAMA_FLASH_ATTENTION: "${OLLAMA_FLASH_ATTENTION:-}"
+      OLLAMA_KV_CACHE_TYPE: "${OLLAMA_KV_CACHE_TYPE:-}"
     # Host loopback only: Ollama has no auth.
     ports: ["127.0.0.1:11434:11434"]
     volumes:

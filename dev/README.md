@@ -188,9 +188,27 @@ server (or `cmd/investigate`) at it:
 
 Planned eval run, available once V10 lands: `go run ./evals/cmd/evalrun -provider openai -flavor ollama -model
 llama3.1:8b -only schema-change`. A local run is valid for development, not as a gate result.
-**Not run yet:** written without Docker (2026-10-23). The compose structure and the pull call are unit-tested
-(`go test ./cmd/devctl -run 'LLM|Ollama'`); nobody has seen the profile come up healthy, `llm-up` finish a pull, or
-the start probe and `evalrun` pass against it.
+**First real run (2026-10-24, Windows, Docker Desktop):** `devctl llm-up` exited 0 with `model ready`; the container
+was healthy, `/api/tags` listed `llama3.1:8b` and `/v1/models` served it. The pull took about 13 minutes. The start
+probe and `evalrun` have not been run against it yet.
+
+**Memory.** The 131072 window is not optional: the agent refuses a model whose window is under 128000 tokens
+(`internal/agent/startcheck.go`), and a smaller Ollama window truncates silently. At that window `llama3.1:8b` does not
+fit an 8 GiB Docker: with Docker Desktop capped at 7.46 GiB, the first generation killed the model process
+(`llama-server process has terminated: signal: killed`); the same model at a 4096 window answered, so the model and
+the profile are fine. Give Docker Desktop more memory (Settings, Resources), or halve the KV cache before `llm-up`:
+
+```
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 go run ./cmd/devctl llm-up
+```
+
+Neither fix was measured on the 8 GiB machine; do not lower `OLLAMA_CONTEXT_LENGTH` instead.
+
+**Two machine problems seen on that run:**
+- A native Ollama install already on `127.0.0.1:11434` makes compose fail with "ports are not available". On Windows,
+  quit the tray app (`ollama app.exe`) first: it restarts `ollama.exe` if only that is killed.
+- A container left in the Created state by an aborted first attempt blocks the next one:
+  `docker rm -f piperoom-dev-ollama-1`, then `llm-up` again.
 
 ## The dev-only break/fix API (`devctl serve`)
 
