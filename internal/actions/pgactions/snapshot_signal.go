@@ -357,7 +357,7 @@ func (a *snapshotSignal) CheckScope(pl owners.Pipeline, raw json.RawMessage) err
 }
 
 func snapSigInScope(pl owners.Pipeline, p snapshotSignalParams) error {
-	if err := refuseMySQL(SnapshotSignalName, pl); err != nil {
+	if err := refuseNonPostgres(SnapshotSignalName, pl); err != nil {
 		return err
 	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {

@@ -134,10 +134,13 @@ func checkConnectorName(name, connector string) error {
 	return nil
 }
 
-// pipelineScope is the CheckScope base of every action: a CDC pipeline whose
-// connectors include connector.
+// pipelineScope is the CheckScope base of every action: a CDC pipeline of a
+// supported source kind whose connectors include connector.
 func pipelineScope(name string, pl owners.Pipeline, connector string) error {
 	if err := pipelineKindCDC(name, pl); err != nil {
+		return err
+	}
+	if err := refuseUnsupportedKind(name, pl); err != nil {
 		return err
 	}
 	if !slices.Contains(pl.Connectors, connector) {

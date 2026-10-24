@@ -84,7 +84,7 @@ store after the container exits; a tmpfs mount or no mount loses them.
 `--standalone` is for your own machine, because it insists on a loopback address, and the image sets
 `PIPEROOM_HTTP_ADDR=0.0.0.0`, so it refuses there by design. The setup room, the typed operations the
 runner executes and the approval model are described in `docs/design/setup-agent.md`; the setup-mode
-agent is landing in the U wave (`tasks/U-board.md`).
+agent is landing in the U wave (Jira epic KAN-5).
 
 Already have a pipeline? Use the read-only quickstart: Piperoom investigates and proposes fixes, but
 nothing executes. You need Go 1.27 (plus Node 24 for the UI) or Docker, and your Kafka Connect, Kafka,

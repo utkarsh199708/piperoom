@@ -7,16 +7,15 @@ import (
 	"testing"
 )
 
-// pendingPair are the scenarios held out until U1-10 (W4s, KAN-501).
+// pendingPair were held out until U1-10 (W4s, KAN-501). U1-10 declared
+// wiring.SetupStack (#1012), so their markers are gone and they run.
 var pendingPair = []string{"setup/compose-postgres-clean", "setup/compose-privileged-refused"}
 
-// pendingRows are every held-out scenario and the row it waits for: the pair
-// above, and setup/db-unreachable-from-connect until container-resolve-op (W4c,
-// KAN-494, lead ruling R10; re-keyed by the KAN-526 ruling: its cause is
-// observable only once the runner op container_resolve exists).
+// pendingRows are every held-out scenario and the row it waits for:
+// setup/db-unreachable-from-connect until container-resolve-op (W4c, KAN-494,
+// lead ruling R10; re-keyed by the KAN-526 ruling: its cause is observable
+// only once the runner op container_resolve exists).
 var pendingRows = map[string]string{
-	"setup/compose-postgres-clean":      "U1-10",
-	"setup/compose-privileged-refused":  "U1-10",
 	"setup/db-unreachable-from-connect": "container-resolve-op",
 }
 
@@ -32,8 +31,8 @@ func TestPendingHarnessMarkerOnThePair(t *testing.T) {
 		}
 	}
 	for _, name := range pendingPair {
-		if got[name] != "U1-10" {
-			t.Errorf("%s: pending_harness = %q, want U1-10", name, got[name])
+		if got[name] != "" {
+			t.Errorf("%s: pending_harness = %q, want none: U1-10 has landed", name, got[name])
 		}
 	}
 	if len(got) != len(pendingRows) {

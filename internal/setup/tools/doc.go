@@ -6,6 +6,13 @@
 //     container_inspect, container_logs), each one fixed runner op at T0 and
 //     nothing else. Register puts them in a tools.ReadOnlyRegistry, so a tool
 //     that ever claimed KindRoom would fail registration;
+//   - setup_config_help (row U3b), a KindRead tool over the shipped SMT,
+//     predicate, sink and tuning index (internal/setup/knowledge) that holds
+//     no runner and reads no customer system; RegisterConfigHelp adds it;
+//   - the connector config builder (ConfigBuilder): SMTs, predicates and
+//     sink connector configs are added only through the same index, and
+//     SinkRegistrationParams frames a sink as Q5c's connect_create_connector
+//     step, which runs over the room's (remote) Connect client;
 //   - the two KindRoom tools, setup_plan and setup_request_verification,
 //     built by RoomTools for the agent to add beside its own room tools.
 //

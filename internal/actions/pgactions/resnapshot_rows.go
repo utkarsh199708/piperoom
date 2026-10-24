@@ -297,7 +297,7 @@ func (a *resnapshotRows) CheckScope(pl owners.Pipeline, raw json.RawMessage) err
 }
 
 func resnapInScope(pl owners.Pipeline, p resnapParams) error {
-	if err := refuseMySQL(ResnapshotRowsName, pl); err != nil {
+	if err := refuseNonPostgres(ResnapshotRowsName, pl); err != nil {
 		return err
 	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {

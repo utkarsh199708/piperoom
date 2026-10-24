@@ -73,6 +73,11 @@ type setupScenario struct {
 	breakIt func(ctx context.Context, s *stack) error
 	fix     func(ctx context.Context, s *stack) error
 	verify  func(ctx context.Context, s *stack) (ok bool, detail string, err error)
+	// prepare brings up what the check reads when that is not part of the dev
+	// stack (the host profile's fake host). setup-break and setup-fix run it
+	// before the first verify, so a check never reports "fails" for a
+	// component that was simply never started. nil means nothing to do.
+	prepare func(ctx context.Context, s *stack) error
 	// profile is the compose profile the scenario's service runs in ("" for
 	// the base dev stack). A profile scenario has its own fake and its own
 	// integration test (setupbreaks_<profile>*.go), so the base-stack tests
@@ -96,6 +101,10 @@ var setupScenarios = map[string]setupScenario{
 	// SQL Server source, profile mssql (U4c, setupbreaks_mssql.go).
 	"agent-stopped":         mssqlAgentStopped,
 	"cdc-not-enabled-table": mssqlCDCNotEnabledTable,
+	// Host target, profile host (U8c, setupbreaks_host.go).
+	"wrong-standalone-args": {name: "wrong-standalone-args", check: checkHostStandaloneArgs, profile: hostProfile, prepare: prepareHost, breakIt: breakHostStandaloneArgs, fix: fixHostStandaloneArgs, verify: verifyHostStandaloneArgs},
+	"plugin-path-unset":     {name: "plugin-path-unset", check: checkHostPluginPath, profile: hostProfile, prepare: prepareHost, breakIt: breakHostPluginPathUnset, fix: fixHostPluginPathUnset, verify: verifyHostPluginPath},
+	"java-too-old":          {name: "java-too-old", check: checkHostJavaVersion, profile: hostProfile, prepare: prepareHost, breakIt: breakHostJavaTooOld, fix: fixHostJavaTooOld, verify: verifyHostJavaVersion},
 }
 
 // setupScenarioNames returns the names sorted, for usage text and errors.
@@ -160,6 +169,11 @@ func setupBreakCmd(ctx context.Context, s *stack, name string) error {
 	if !ok {
 		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(allSetupScenarioNames(), ", "))
 	}
+	if sc.prepare != nil {
+		if err := sc.prepare(ctx, s); err != nil {
+			return fmt.Errorf("devctl: prepare %s: %w", name, err)
+		}
+	}
 	okNow, detail, err := sc.verify(ctx, s)
 	if err != nil {
 		return fmt.Errorf("devctl: check %s: %w", sc.check, err)
@@ -188,6 +202,11 @@ func setupFixCmd(ctx context.Context, s *stack, name string) error {
 	sc, ok := findSetupScenario(name)
 	if !ok {
 		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(allSetupScenarioNames(), ", "))
+	}
+	if sc.prepare != nil {
+		if err := sc.prepare(ctx, s); err != nil {
+			return fmt.Errorf("devctl: prepare %s: %w", name, err)
+		}
 	}
 	// A check that cannot run (the component it reads is down, often because
 	// of the break) does not block the fix: the fix restarts that component,

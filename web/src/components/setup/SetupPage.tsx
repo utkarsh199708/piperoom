@@ -18,6 +18,7 @@ import {
   SETUP_TARGETS,
   SOURCE_KINDS,
   SetupFormError,
+  TARGET_KIND_LABELS,
   TARGET_KINDS,
   setupRequestFrom,
 } from '@/lib/setupForm'
@@ -50,17 +51,7 @@ const TARGET_LABEL: Record<string, string> = {
   embedded: 'Embedded',
 }
 
-const KIND_LABEL: Record<string, string> = {
-  postgres: 'postgres',
-  kafka: 'kafka',
-  connect: 'connect',
-  registry: 'schema registry',
-  kubernetes: 'kubernetes',
-  aws: 'aws',
-  confluent: 'confluent',
-  aiven: 'aiven',
-  host: 'host',
-}
+const KIND_LABEL = TARGET_KIND_LABELS
 
 /** The Set up page: a viewer gets the same message the server would answer with. */
 export function SetupPage() {
