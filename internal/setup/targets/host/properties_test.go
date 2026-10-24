@@ -199,7 +199,9 @@ func TestPropertiesWriteRefusals(t *testing.T) {
 		{"plugin.path empty entry", "", with(d, "plugin.path", "a,,b"), ErrProperties},
 		{"plugin.path outside, trailing slash", "", with(d, "plugin.path", "extra-plugins/"), ErrProperties},
 		{"offset file outside", "connect-standalone.properties", map[string]string{"bootstrap.servers": "a:1", "key.converter": "a.B", "value.converter": "a.B", "offset.storage.file.filename": "/var/lib/x.offsets"}, ErrProperties},
-		{"file outside project", "/etc/kafka/connect-distributed.properties", d, ErrProperties},
+		// Outside the project is T2 (lead ruling on U8a); until the
+		// catalogue routes the op by its params' tier it is refused.
+		{"file outside project, tier not routed", "/etc/kafka/connect-distributed.properties", d, ErrTierRouting},
 		{"file traversal", "../connect-distributed.properties", d, ErrProperties},
 		{"distribution sample", "kafka/config/connect-distributed.properties", d, ErrProperties},
 		{"other name", "worker.properties", d, ErrProperties},

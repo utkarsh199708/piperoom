@@ -19,6 +19,7 @@ the read access and the original Connect and Registry writes.
 | System | Used by | Read access needed | Write access needed |
 |---|---|---|---|
 | Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `pg_publication_tables`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views, catalog views | **none** |
+| Source MongoDB (setup only) | `source_create_read_role` and the canary (setup writer) | the capture user Piperoom creates: `find`/`changeStream` on captured collections and `find` on `local.oplog.rs` (deployment-wide, see the section) | the setup credential: user/role admin in `admin`, create and insert for the canary |
 | Warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md); see each warehouse's section) | **none** |
 | Airflow (batch orchestrator) | `dag_runs`, `task_instances`, `task_log_tail`, `dag_schedule_gap` | `Viewer` role; REST `GET` only | **none** |
 | dbt (batch transform) | `dbt_run_results`, `dbt_model_lineage`, `dbt_model_sql` | read `run_results.json` / `manifest.json` (a directory, or dbt Cloud with a read-only service token) | **none** |
@@ -90,6 +91,44 @@ requires a superuser (or equivalent) **once**, run by your DBA, not by Piperoom.
 function is `SECURITY DEFINER`, so Piperoom's role only needs `SELECT` on the log table.
 The log stores the full DDL statement text (`query`), so review that it does not contain
 secrets (for example `CREATE ROLE ... PASSWORD`) before enabling it in production.
+
+## Source MongoDB
+
+Setup only (U wave): Piperoom's incident tools do not read MongoDB yet. Two credentials are involved, and neither
+is the application's user.
+
+**The capture user Piperoom creates** (`source_create_read_role`, `internal/clients/mongodb/writer.go`). The setup
+writer creates, in `admin`:
+
+- a custom role `<user>_cdc` with `find` and `changeStream` on each captured collection (`db.collection` from the
+  pipeline's `source_tables`), `find` on `local.oplog.rs`, and no inherited role;
+- a user `<user>` holding only that role, with a generated password that goes straight to the runner's secret
+  store (`source_read_password`) and is never shown, logged or returned.
+
+An existing user or role of that name is an error; Piperoom never re-passwords or widens an existing user.
+
+> **Read the oplog grant before you approve it.** `find` on `local.oplog.rs` lets the user read every replicated
+> write in the deployment during the oplog window: every database and collection, not only the captured ones. That
+> includes writes to `admin.system.users`, which carry the SCRAM credentials of any user created or re-passworded in
+> that window (this capture user included). In practice this user can read far more than its per-collection
+> privileges suggest, so treat it as a deployment-wide read credential: keep it to the connector, and keep the oplog
+> window no longer than the connector needs.
+>
+> Why the grant is still there: Piperoom's own setup check `mongo-oplog-read` (`RoleInfo.Replication`, the
+> `no-oplog-role` setup break) requires it. Debezium 2.x captures through change streams and does not read
+> `local.oplog.rs` itself, so the grant is expected to go once the real-run row U7-R confirms the connector works
+> without it; the check then moves to change-stream access. Until then it stays, and this note is the record.
+
+The role may also be **too narrow** for some connector settings: Debezium's default `capture.scope=deployment`
+opens a cluster-wide change stream, which needs `changeStream` and `find` on `{db: "", collection: ""}`, and its
+snapshot may need `listDatabases` / `listCollections`. U7b sets `capture.scope` in the connector config, and U7-R
+confirms the final list; this section will be updated with it.
+
+**The setup write credential** (`PIPEROOM_IT_MONGODB_WRITE_URI` in tests; wiring is not done yet). It needs
+`viewUser`, `viewRole` (the existence checks), `createUser`, `createRole`, `dropUser` and `dropRole` in `admin`
+(the drops only undo a create that failed), and
+`createCollection` and `insert` in the canary's database. Use a dedicated setup user with exactly those actions, not
+`root`, and remove it after setup. The dev stack's `piperoom_admin` root user is for the local stack only.
 
 ## Warehouse
 

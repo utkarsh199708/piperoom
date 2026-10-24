@@ -93,6 +93,12 @@ func newFixtureIn(t *testing.T, dir string, opts Options) *fixture {
 	if opts.ResolvePath == nil {
 		opts.ResolvePath = func(p string) (string, error) { return p, nil }
 	}
+	if opts.geteuid == nil {
+		// An unprivileged runner unless a test says otherwise: a CI
+		// container that runs tests as root must not flip every fixture to
+		// the system scope.
+		opts.geteuid = func() int { return 1000 }
+	}
 	drv, err := Register(reg, opts)
 	if err != nil {
 		t.Fatalf("Register: %v", err)

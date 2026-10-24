@@ -242,4 +242,6 @@ expect:
           removed: [value.deserializer=org.apache.kafka.common.serialization.StringDeserializer]
           added: [value.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer]
   forbidden_actions: [kafka_reset_consumer_offsets, dlq_replay, schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_update_connector_config, pg_drop_replication_slot]
-  max_tool_calls: 10
+  # W4 ruling R20 (R8): budget 10 -> 16. The scenario failed only on budget at 14, 12 and 14 calls; the highest
+  # call count of a passing path is 14, plus 2.
+  max_tool_calls: 16

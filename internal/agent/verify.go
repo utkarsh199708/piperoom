@@ -272,12 +272,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 
 	out := r.verifyExecuted(ctx, rec, r.executedAt(in, id, step))
-	if out.broken && r.alert.Mode == ModeSetup {
-		// In a setup room a failed verification is a failed step (design
-		// §3.3): the model re-plans from the logs of the step that ran last.
-		out.failures = append(out.failures, failedStep{proposalID: id, index: step, steps: rec.steps})
-	}
-	return out
+	return r.setupVerifyFailure(out, id, step, rec.steps)
 }
 
 // failedOwnStep describes a failed step of the agent's own proposal. A result

@@ -429,6 +429,9 @@ var corpusMatcherRows = []corpusRow{
 	gap(fb("r4.11", []string{"slot", "lost"}, "Nothing of the slot was lost.", false), "#334 nothing, waits on #454"),
 }
 
+// saslPostgresGap marks the r6.1 Postgres-login rows (W4 ruling R19, a lead grant to C7's PR).
+const saslPostgresGap = "W4 ruling R19: the root-cause layer is now kafka-connect, which these texts name, so the term matcher cannot tell a Postgres login from the Kafka one; the judge decides"
+
 // saslCause are sasl-credential-rotated's cause words for agreement rows.
 var saslCause = []string{"sasl", "credential", "rotated", "password"}
 
@@ -538,13 +541,15 @@ var corpusReviewScenarioRows = []corpusRow{
 	sc("r4", "publication-permission-denied", "Root cause: Debezium's role has REPLICATION, not table ownership, so it cannot alter the publication.", true),
 	sc("r4", "publication-permission-denied", "Root cause: the orders table owner changed; the debezium role still owns its slot, not publications.", true),
 	// Round 6: a Postgres SCRAM/SASL login is sasl-credential-rotated's trap
-	// ("looks like a Postgres problem"): its cause words match, but it does
-	// not name the Kafka layer, so the answer is not correct.
-	co("r6.1", "sasl-credential-rotated", "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.", false),
-	co("r6.1", "sasl-credential-rotated", "Root cause: Postgres rejects Debezium's SCRAM-SHA-256 login: the password of the database user debezium was rotated.", false),
-	co("r6.1", "sasl-credential-rotated", "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.", false),
-	co("r6.1", "sasl-credential-rotated", "Root cause: SASL authentication to Postgres fails because the debezium database password was rotated.", false),
-	co("r6.1", "sasl-credential-rotated", "Root cause: the replication slot is inactive because Postgres refuses the debezium login: its SCRAM secret was rotated by the DBA.", false),
+	// ("looks like a Postgres problem"): its cause words match, and it did
+	// not name the Kafka layer, so the answer was not correct. Since R19 the
+	// root-cause layer is kafka-connect (kafka accepted), so these are
+	// known gaps of the term matcher and the judge decides them.
+	gap(co("r6.1", "sasl-credential-rotated", "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.", false), saslPostgresGap),
+	gap(co("r6.1", "sasl-credential-rotated", "Root cause: Postgres rejects Debezium's SCRAM-SHA-256 login: the password of the database user debezium was rotated.", false), saslPostgresGap),
+	gap(co("r6.1", "sasl-credential-rotated", "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.", false), saslPostgresGap),
+	gap(co("r6.1", "sasl-credential-rotated", "Root cause: SASL authentication to Postgres fails because the debezium database password was rotated.", false), saslPostgresGap),
+	gap(co("r6.1", "sasl-credential-rotated", "Root cause: the replication slot is inactive because Postgres refuses the debezium login: its SCRAM secret was rotated by the DBA.", false), saslPostgresGap),
 	co("r6.1 control", "sasl-credential-rotated", "Root cause: the SCRAM password of the Kafka user debezium was rotated, so the broker rejects the connector's SASL login.", true),
 	// Round 4, nit 10: round 3 item 3 on topic-retention-data-loss.
 	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We can't yet, however, rule out a reset to latest.", false),
