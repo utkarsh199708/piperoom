@@ -1149,9 +1149,9 @@ request's tool list in its order, each as `{"name","description","schema","stric
 neutral request the agent hands the adapter, so one prompt has one neutral hash on every adapter; the model id,
 history and other fields are not in it. `bedrock` and `vertex` stay untapped, as before.
 
-**Not wired yet:** the agent has no hook to wrap its role models (it builds them inside `internal/agent`, A4's
-folder). Until the hook lands (V11's thread ask to A4), evalrun prints a note and a non-Anthropic run records
-`untapped`, never a tap that saw nothing (`none`).
+**Wiring:** evalrun wraps each role's model through the agent's `wiring.WithModelWrap` hook (A4, #974), so a
+non-Anthropic run records the models called and a `neutral-sha256` hash. The wrap sits outside the control-token
+neutraliser and sees each role's client once; roles that share the main client are not counted twice.
 
 **Key check.** Before any scenario, evalrun checks that every model role has its credentials, by the agent's
 rules (`internal/agent/roles.go`; the main role may also use `PIPEROOM_MODEL_API_KEY` or

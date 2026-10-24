@@ -29,7 +29,7 @@ func tappedRunner(ctx context.Context, cfg config.Config, noTap bool, log *slog.
 			return nil, nil, err
 		}
 		if !tapped {
-			fmt.Fprintln(stderr, "evalrun: note: the agent has no model-wrap hook yet, so this run is untapped (prompt_hash \"untapped\")")
+			fmt.Fprintln(stderr, "evalrun: note: the model wrap did not reach the role models, so this run is untapped (prompt_hash \"untapped\")")
 			return run, nil, nil
 		}
 		return run, nt, nil
