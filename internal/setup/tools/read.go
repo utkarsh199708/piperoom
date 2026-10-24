@@ -14,6 +14,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/setup/errcode"
+	"piperoom/internal/setup/knowledge"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/tools"
 )
@@ -80,13 +81,17 @@ func Register(reg *tools.Registry, deps Deps) error {
 	if deps.CallRoom == nil {
 		return errors.New("setuptools: the read tools need the call's room reader (Deps.CallRoom, room.RoomID in wiring)")
 	}
+	index, err := knowledge.LoadIndex()
+	if err != nil {
+		return fmt.Errorf("setuptools: loading setup configuration knowledge: %w", err)
+	}
 	c := &caller{runner: deps.Runner, roomID: deps.RoomID, callRoom: deps.CallRoom, class: deps.Class, now: deps.Now}
 	for _, spec := range readSpecs() {
 		if err := reg.Register(&readTool{spec: spec, c: c}); err != nil {
 			return err
 		}
 	}
-	return nil
+	return reg.Register(&configHelpTool{index: index})
 }
 
 // ReadToolNames returns the names Register adds, in registration order. The
@@ -97,7 +102,7 @@ func ReadToolNames() []string {
 	for i, s := range specs {
 		out[i] = s.name
 	}
-	return out
+	return append(out, configHelpName)
 }
 
 // readSpec is one forwarding tool: one fixed op, its bounded input and the
