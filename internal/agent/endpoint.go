@@ -91,9 +91,6 @@ type EndpointConfig struct {
 	// (PIPEROOM_MODEL_MAX_CONCURRENCY, default PIPEROOM_MAX_AGENTS); 0 = no
 	// bound. The Claude providers keep their SDK's own behaviour.
 	MaxConcurrency int64
-	// Converse builds bedrock-converse clients (V5). Nil refuses that provider
-	// at start with "not built yet".
-	Converse ModelFactory
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -104,6 +101,11 @@ type providerLoaders struct {
 	googleCreds func(ctx context.Context) (*google.Credentials, error)
 	// readFile reads PIPEROOM_MODEL_API_KEY_FILE; nil = os.ReadFile.
 	readFile func(path string) ([]byte, error)
+	// converseEndpoint replaces the regional Bedrock endpoint of
+	// bedrock-converse roles: a test hook for an httptest server, never set
+	// from a PIPEROOM_* variable (it decides where the AWS credentials or
+	// the Bedrock API key are sent; converse.Config.BaseEndpoint).
+	converseEndpoint string
 }
 
 // ProviderLoaders replace the cloud-credential lookups ProviderOptions makes.
