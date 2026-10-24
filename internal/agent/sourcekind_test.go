@@ -261,8 +261,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // the MySQL prompt is the CDC prompt's size: 1353 words with write mode off,
 // 1352 with it on.
 const (
-	mysqlPromptSHA256         = "4081f018ef8ed26d5c6cc51ae5780ae61dc8df5fac9d32e3006c62debe385f85"
-	mysqlPromptWriteOffSHA256 = "3b6b1acee8a17b79e3f25e0f691041c109fc940e920bbb1df9298c09bde02af7"
+	mysqlPromptSHA256         = "163cd226d3b84f5ab0a0bb48f4792b0947f6b25ec06536b92b8c58ca0ce5a59e"
+	mysqlPromptWriteOffSHA256 = "9c3e53aad9ff945839ffa23139423e689389f885579d17172a6ef8d4d0c199b0"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
