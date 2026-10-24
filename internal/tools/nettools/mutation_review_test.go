@@ -302,13 +302,13 @@ func TestConnectViewPicksConnectorNamingHost(t *testing.T) {
 	}
 	tool := &netProbe{d: Deps{Connect: fc, StepTimeout: time.Second}}
 	tgt := Target{Label: LabelSource, Kind: KindSource, Endpoints: []Endpoint{{Addr: "db.test:5432"}}, Connectors: []string{"a", "b"}}
-	c := tool.connectView(context.Background(), tgt)
+	c := tool.connectView(context.Background(), tgt, &sourceConfig{})
 	if c.Status != StatusOK || !strings.Contains(c.Detail, "validated b ") || len(validated) != 1 || validated[0] != "DB.test" {
 		t.Fatalf("connect_view = %+v, validated %v", c, validated)
 	}
 	hosts["b"] = "elsewhere.test"
 	validated = nil
-	c = tool.connectView(context.Background(), tgt)
+	c = tool.connectView(context.Background(), tgt, &sourceConfig{})
 	if c.Status != StatusSkip || c.Detail != "no source connector of the pipeline names this host" || len(validated) != 0 {
 		t.Fatalf("connect_view = %+v, validated %v", c, validated)
 	}

@@ -16,11 +16,13 @@ import (
 
 const pendingA, pendingB = "setup/compose-postgres-clean", "setup/compose-privileged-refused"
 
-// pendingC is held out until W4c-resolver (W4c, KAN-494, lead ruling R10).
+// pendingC was held out until W4c-resolver (W4c, KAN-494, lead ruling R10);
+// KAN-526 landed nettools.ConnectResolveCheck and removed its marker, so it
+// runs and is scored like any other scenario.
 const pendingC = "setup/db-unreachable-from-connect"
 
 // pendingCount is how many scenarios carry pending_harness.
-const pendingCount = 3
+const pendingCount = 2
 
 // -list prints the scenarios a run replays, without the pending_harness pair.
 func TestRunListExcludesPendingHarness(t *testing.T) {
@@ -37,10 +39,15 @@ func TestRunListExcludesPendingHarness(t *testing.T) {
 	if len(names) != len(all)-pendingCount {
 		t.Errorf("%d names listed, want %d", len(names), len(all)-pendingCount)
 	}
+	listedC := false
 	for _, n := range names {
-		if n == pendingA || n == pendingB || n == pendingC {
+		if n == pendingA || n == pendingB {
 			t.Errorf("%s is listed but pending", n)
 		}
+		listedC = listedC || n == pendingC
+	}
+	if !listedC {
+		t.Errorf("%s is not listed, but its marker is gone (KAN-526)", pendingC)
 	}
 	// -check still validates every scenario, the held-out ones included.
 	stdout.Reset()
@@ -87,11 +94,11 @@ func TestRunSkipsPendingHarnessUnlessNamed(t *testing.T) {
 		t.Fatalf("code %d err %v\n%s", code, err, stderr.String())
 	}
 	rep := readReport(t, out)
-	if strings.Join(rep.PendingHarness, ",") != pendingA+","+pendingB+","+pendingC || len(rep.PendingHarnessRan) != 0 {
+	if strings.Join(rep.PendingHarness, ",") != pendingA+","+pendingB || len(rep.PendingHarnessRan) != 0 {
 		t.Errorf("pending lists: skipped %v ran %v", rep.PendingHarness, rep.PendingHarnessRan)
 	}
 	for _, s := range rep.Scenarios {
-		if s.Name == pendingA || s.Name == pendingB || s.Name == pendingC {
+		if s.Name == pendingA || s.Name == pendingB {
 			t.Errorf("%s is in the report rows (so in the rates)", s.Name)
 		}
 	}

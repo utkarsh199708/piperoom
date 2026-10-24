@@ -11,12 +11,12 @@ import (
 var pendingPair = []string{"setup/compose-postgres-clean", "setup/compose-privileged-refused"}
 
 // pendingRows are every held-out scenario and the row it waits for: the pair
-// above, and setup/db-unreachable-from-connect until W4c-resolver (W4c,
-// KAN-494, lead ruling R10: its cause is in no read tool's output).
+// above. setup/db-unreachable-from-connect waited for W4c-resolver (W4c,
+// KAN-494, lead ruling R10) until KAN-526 landed nettools.ConnectResolveCheck
+// and removed its marker.
 var pendingRows = map[string]string{
-	"setup/compose-postgres-clean":      "U1-10",
-	"setup/compose-privileged-refused":  "U1-10",
-	"setup/db-unreachable-from-connect": "W4c-resolver",
+	"setup/compose-postgres-clean":     "U1-10",
+	"setup/compose-privileged-refused": "U1-10",
 }
 
 func TestPendingHarnessMarkerOnThePair(t *testing.T) {
