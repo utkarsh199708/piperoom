@@ -1204,8 +1204,9 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 
 // TestW4cSetupDBUnreachableNetProbe pins the net_probe {target: source}
 // recording: Connect's view of the database times out while Piperoom's own
-// dns and tcp checks pass, and no read the room offers shows the bad address
-// (which is why the address group was dropped).
+// dns and tcp checks pass. Since KAN-526 its connect_resolve check shows the
+// worker resolving postgres to 192.0.2.1; no other read shows the bad address
+// (which is why the address group was dropped under R10).
 func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
 	rp, err := newScenarioReplayer(sc)
@@ -1219,7 +1220,9 @@ func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 	if rec.Error != "" {
 		t.Fatalf("net_probe recording is an error: %q", rec.Error)
 	}
-	if !strings.HasPrefix(rec.Summary, "net_probe source (postgres:5432): 1 of 4 checks failed\n- connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time") {
+	// KAN-526: connect_resolve runs first and fails on the worker's answer.
+	if !strings.HasPrefix(rec.Summary, "net_probe source (postgres:5432): 2 of 5 checks failed\n- connect_resolve postgres:5432 fail: the Connect worker connect resolves postgres to 192.0.2.1") ||
+		!strings.Contains(rec.Summary, "\n- connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time") {
 		t.Errorf("summary = %q", rec.Summary)
 	}
 	b, err := json.Marshal(rec.Data)
@@ -1253,11 +1256,15 @@ func TestW4cSetupDBUnreachableNetProbe(t *testing.T) {
 			}
 		}
 	}
-	if want := map[string]string{"connect_view": "fail", "dns": "ok", "tcp": "ok", "tls": "skip"}; !reflect.DeepEqual(got, want) {
+	if want := map[string]string{"connect_resolve": "fail", "connect_view": "fail", "dns": "ok", "tcp": "ok", "tls": "skip"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("checks = %v, want %v", got, want)
 	}
-	// Negative: no recording answers with the bad address or the hosts file.
+	// Negative: no other recording answers with the bad address or the hosts
+	// file; since KAN-526 only net_probe's connect_resolve check shows it.
 	for _, r := range sc.Recordings {
+		if r.Tool == "net_probe" && r.Input["target"] == "source" {
+			continue
+		}
 		blob, _ := json.Marshal(r.Data)
 		for _, s := range []string{r.Summary, r.Error, string(blob)} {
 			if strings.Contains(s, "192.0.2.1") || strings.Contains(s, "/etc/hosts") {
@@ -1495,10 +1502,11 @@ func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
 
 // TestW4cRerunLabels pins the W4c re-run round (live run 40043829982): ruling R8
 // (#939) sets idle-wal-growth's budget to its 16 measured calls + 2, and
-// setup/db-unreachable-from-connect is held out until W4c-resolver (ruling
-// R10: its cause, the Connect container's name resolution, is in no read
-// tool's output). Negatives: idle-wal-growth is not held out, and the setup
-// scenario keeps its labels, so it scores as before once the marker goes.
+// setup/db-unreachable-from-connect is held out until container-resolve-op
+// (ruling R10; re-keyed by the KAN-526 ruling: nettools.ConnectResolveCheck
+// observes the cause, but live rooms get it only through the runner op
+// container_resolve). Negatives: idle-wal-growth is not held out, and the
+// setup scenario keeps its labels, so it scores as before once the marker goes.
 func TestW4cRerunLabels(t *testing.T) {
 	idle := w4cScenario(t, "idle-wal-growth")
 	if idle.Expect.MaxToolCalls != 18 {
@@ -1508,8 +1516,8 @@ func TestW4cRerunLabels(t *testing.T) {
 		t.Errorf("idle-wal-growth is held out: %q", idle.PendingHarness)
 	}
 	setup := w4cScenario(t, "setup/db-unreachable-from-connect")
-	if setup.PendingHarness != "W4c-resolver" {
-		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want W4c-resolver", setup.PendingHarness)
+	if setup.PendingHarness != "container-resolve-op" {
+		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want container-resolve-op", setup.PendingHarness)
 	}
 	if !reflect.DeepEqual(setup.Expect.RootCause, [][]string{{"resolv*", "dns", "hosts", "name resolution"}}) {
 		t.Errorf("setup/db-unreachable-from-connect root_cause = %v", setup.Expect.RootCause)
