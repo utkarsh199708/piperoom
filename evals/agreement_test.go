@@ -413,16 +413,17 @@ var syntheticTruth = map[string]map[string]truth{
 	"source-column-dropped":         {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"topic-retention-data-loss":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	// consumer-offsets (first_failing_layer consumer since R14, W4n-3:
-	// order-sync crash-loops while Kafka answers every read): good blames
-	// retention on the topic (the cause), so its layer misses, as avro's
-	// does; lazy is order-sync's crash-loop title; wrong blames an
+	// order-sync crash-loops while Kafka answers every read): good names
+	// order-sync's outage as what fails (lead ruling on #992; the recorded
+	// judge verdict agrees), and the matcher reads "log start" first, a
+	// counted miss; lazy is order-sync's crash-loop title; wrong blames an
 	// order-sync deploy, the right layer for the wrong reason.
 	// avro (first_failing_layer kafka-connect since P3-W3d-2; the registry
 	// still answers, the sink task is what breaks): good and wrong both blame
 	// the registry, so their layer misses; lazy is the sink task's failure
 	// title. rebalance lazy: the title names the consumer group's lag.
 	"avro-schema-id-deleted-sink-failed":      {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"consumer-offsets-out-of-range-retention": {"good": {false, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"sink-connector-paused-warehouse-stale":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
