@@ -223,8 +223,10 @@ func (r *runner) handleInputs(ctx context.Context, inputs []HumanInput) ([]Human
 	inputs, pending := r.awaitStepResults(ctx, inputs)
 	if r.setup != nil {
 		// The setup bounds count every executed step of the batch, once,
-		// before the run acts on it (setup.go).
+		// before the run acts on it (setup.go), and a green ladder in a room
+		// that cannot register is posted to the room.
 		r.setup.observe(inputs)
+		r.noteSetupVerified(ctx, inputs)
 	}
 	out := r.handleActionResults(ctx, inputs)
 	if pending != "" {

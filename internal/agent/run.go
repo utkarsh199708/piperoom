@@ -295,6 +295,7 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
 	setRoomSource(room, r.source)
+	setRoomSetup(room, r.setup)
 	room = append(room, r.setupRoom...)
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
@@ -434,6 +435,13 @@ func (r *runner) run(ctx context.Context) error {
 		// The agent's own words follow the tool steps, matching the loop order.
 		for _, t := range texts {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: t})
+		}
+
+		// propose_fix refused a step past the setup's steps bound
+		// (admitProposal): the run stops on it now, before another turn,
+		// exactly as a bound stop at the top of a turn.
+		if r.setup != nil && r.setup.stop != "" {
+			return fmt.Errorf("agent: stopped: %w", r.stopForSetupBound(ctx, r.setup.stop))
 		}
 
 		switch resp.Stop {
@@ -586,6 +594,9 @@ func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
 			continue
 		}
 		text := formatInput(in, idle)
+		if in.Kind == kindSetupVerified && r.setup != nil {
+			text = r.formatSetupVerified(in)
+		}
 		blocks = append(blocks, textPart(text))
 		r.compact.noteInput(in, text)
 	}
@@ -687,6 +698,12 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]llm.Message
 			r.emitWaiting(ctx)
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if r.setupSettled(inputs) {
+		// A green ladder in a room that cannot register leaves the run
+		// nothing to do: the verdict is posted (noteSetupVerified), and the
+		// run stays idle until a batch needs the model.
+		return r.holdSetupSettled(ctx, messages, turns)
 	}
 	if !outcome.statusSet {
 		// The model runs again: leave the idle (or done) status, so the room

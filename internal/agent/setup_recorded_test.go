@@ -319,9 +319,9 @@ func firstPlanID(t *testing.T, m *recordedModel) string {
 // ladder's canary step then executes, and the model waits for the server's
 // outcome without claiming one. The test, standing in for the ladder runner,
 // records the green setup.verified after the run: the sink holds exactly
-// that one, after the request, so the run itself wrote none. (No HumanInput
-// kind carries setup.verified to the agent yet, so the model never reads the
-// verdict here; see the PR review.)
+// that one, after the request, so the run itself wrote none. (The model
+// never reads the verdict here: the setup_verified input that carries it is
+// tested in setup_verified_test.go.)
 func TestSetupRecordedLadderRun(t *testing.T) {
 	fr := &fakeSetupRunner{t: t}
 	m := &recordedModel{t: t}
