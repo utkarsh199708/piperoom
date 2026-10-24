@@ -3,6 +3,8 @@ package room_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -23,7 +25,9 @@ import (
 // §3.9; docs/api.md "Registration"): the happy path through the proposal and
 // approval routes with the real executor, the not-verified refusal, the
 // requester's own approval refused on a team server, the overlap refusal at
-// Create, and the double register refused once the room is closed.
+// Create, the refusals of a registration this server cannot write or watch,
+// the registration time after a restart, and the double register refused once
+// the room is closed.
 
 // registerOwnersYAML is the setup test owners config with a second tenant
 // admin: ann may approve on tenant a, which the non-self approver rule of
@@ -61,9 +65,13 @@ type registerEnv struct {
 	mainFile  string
 	ownersDir string
 	reloads   *int
+	deps      func() room.Deps
 }
 
-func newRegisterEnv(t *testing.T) *registerEnv {
+// newRegisterEnv builds the environment; mutate (nil for none) edits the deps
+// before the service is built, for the tests of a server that cannot
+// register.
+func newRegisterEnv(t *testing.T, mutate func(*room.Deps)) *registerEnv {
 	t.Helper()
 	users, err := room.ParseUsers([]byte(setupUsers))
 	if err != nil {
@@ -82,21 +90,28 @@ func newRegisterEnv(t *testing.T) *registerEnv {
 	reloads := 0
 	st := memstore.New()
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	svc := room.New(room.Deps{
-		Store:            st,
-		Users:            users,
-		Owners:           live.Load(),
-		OwnersNow:        func() *owners.Owners { return live.Load() },
-		ReloadOwners:     live.Reload,
-		OnOwnersReloaded: func() { reloads++ },
-		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
-			<-ctx.Done()
-			return nil
-		},
-		Now:           func() time.Time { return now },
-		Setup:         config.Setup{Enabled: true, SecretsDir: secretsDir, OwnersDir: ownersDir},
-		SetupResolver: fakeResolver{"db.acme": {netip.MustParseAddr("10.1.2.3")}},
-	})
+	deps := func() room.Deps {
+		d := room.Deps{
+			Store:            st,
+			Users:            users,
+			Owners:           live.Load(),
+			OwnersNow:        func() *owners.Owners { return live.Load() },
+			ReloadOwners:     live.Reload,
+			OnOwnersReloaded: func() { reloads++ },
+			Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+				<-ctx.Done()
+				return nil
+			},
+			Now:           func() time.Time { return now },
+			Setup:         config.Setup{Enabled: true, SecretsDir: secretsDir, OwnersDir: ownersDir},
+			SetupResolver: fakeResolver{"db.acme": {netip.MustParseAddr("10.1.2.3")}},
+		}
+		if mutate != nil {
+			mutate(&d)
+		}
+		return d
+	}
+	svc := room.New(deps())
 	t.Cleanup(svc.Close)
 	return &registerEnv{
 		setupEnv:  setupEnv{svc: svc, store: st, own: live.Load(), now: now, secretsDir: secretsDir},
@@ -104,7 +119,18 @@ func newRegisterEnv(t *testing.T) *registerEnv {
 		mainFile:  mainFile,
 		ownersDir: ownersDir,
 		reloads:   &reloads,
+		deps:      deps,
 	}
+}
+
+// restart builds a second service over the same store and owners set: what
+// another replica, or the server after a restart, sees before anyone reads
+// the room.
+func (env *registerEnv) restart(t *testing.T) *room.Service {
+	t.Helper()
+	svc := room.New(env.deps())
+	t.Cleanup(svc.Close)
+	return svc
 }
 
 // greenLadder is a setup.verified with rungs 1 to 7 green, the ladder
@@ -119,12 +145,36 @@ func greenLadder() []events.SetupRung {
 	return rungs
 }
 
+// emitVerified writes the ladder's verdict the way the ladder runner does.
+// EmitSetup refuses setup.verified (only the runner writes it, U1-8b), so the
+// test-only emitter appends it under the room's lock for the current plan.
 func emitVerified(t *testing.T, svc *room.Service, roomID string, rungs []events.SetupRung) {
 	t.Helper()
-	if err := svc.EmitSetup(context.Background(), roomID, events.SetupVerified, events.SetupVerifiedPayload{
-		Rungs: rungs,
-	}); err != nil {
+	if err := room.EmitSetupVerifiedForTest(context.Background(), svc, roomID, rungs); err != nil {
 		t.Fatalf("setup.verified: %v", err)
+	}
+}
+
+// registerConnKeys are the cdc connection keys owners.yaml requires of a
+// connections: block. The credentials click registers the read credentials
+// under these names (U1-5d), so the entry's connections: is complete.
+func registerConnKeys() []string {
+	return []string{"source_db_url", "warehouse_db_url", "kafka_brokers", "connect_url", "schema_registry_url"}
+}
+
+// registerCredentials records the credentials click's outcome for the room:
+// the runner's Credentials frame wrote the files under the server's secrets
+// dir, and setup.credentials_registered names them (the fold the registration
+// reads). names defaults to the cdc connection keys.
+func registerCredentials(t *testing.T, svc *room.Service, roomID, pipelineID string, names ...string) {
+	t.Helper()
+	if len(names) == 0 {
+		names = registerConnKeys()
+	}
+	if err := svc.EmitSetup(context.Background(), roomID, events.SetupCredentialsRegistered, events.SetupCredentialsRegisteredPayload{
+		PipelineID: pipelineID, Names: names, RunnerLabel: "laptop",
+	}); err != nil {
+		t.Fatalf("setup.credentials_registered: %v", err)
 	}
 }
 
@@ -137,12 +187,16 @@ func registerProposal(title string) events.ProposalCreatedPayload {
 	}
 }
 
-func TestRegisterHappyPathTeamServer(t *testing.T) {
-	env := newRegisterEnv(t)
+// registerHappy runs the registration of "orders-setup" to the closed room:
+// a green ladder, the credentials click, the driver's proposal, the other
+// tenant admin's approval. It returns the room and the register proposal.
+func registerHappy(t *testing.T, env *registerEnv) (roomID, pid string) {
+	t.Helper()
 	ctx := context.Background()
 	res := createSetup(t, &env.setupEnv, setupRequest("orders-setup"))
-	roomID := res.Room.ID
+	roomID = res.Room.ID
 	emitVerified(t, env.svc, roomID, greenLadder())
+	registerCredentials(t, env.svc, roomID, "orders-setup")
 
 	// The driver proposes the registration; a driver-origin step needs no
 	// plan step, and the action is in the service's own registry.
@@ -154,7 +208,7 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pid := dec.ProposalID
+	pid = dec.ProposalID
 
 	// On a team server the requester's own approval is refused, admin or not.
 	_, err = env.svc.ApproveProposal(ctx, alice(), pid, "environment", proposalHash(t, env.svc, pid))
@@ -168,6 +222,29 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 		snap, err := env.svc.GetRoom(ctx, roomID)
 		return err == nil && snap.ClosedAt != nil
 	})
+	return roomID, pid
+}
+
+// registeredEventTime is the pipeline.registered event's time, RFC 3339.
+func registeredEventTime(t *testing.T, svc *room.Service, roomID string) string {
+	t.Helper()
+	evs, _, err := svc.Events(context.Background(), roomID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Type == events.PipelineRegistered {
+			return e.At.UTC().Format(time.RFC3339)
+		}
+	}
+	t.Fatal("no pipeline.registered event")
+	return ""
+}
+
+func TestRegisterHappyPathTeamServer(t *testing.T) {
+	env := newRegisterEnv(t, nil)
+	ctx := context.Background()
+	roomID, pid := registerHappy(t, env)
 	snap, err := env.svc.GetRoom(ctx, roomID)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +270,7 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 	}
 	for _, want := range []string{
 		"tenant: a", "auto_approve: []", "target: compose", "watched_by: server",
-		"room_id: " + roomID, "approvers: 'user:alice'",
+		"room_id: " + roomID, "approvers: 'user:alice'", "connections:",
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("the entry misses %q:\n%s", want, raw)
@@ -210,6 +287,17 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 	spec, ok := p.Setup()
 	if !ok || spec.RoomID != roomID || spec.Target != "compose" || spec.WatchedBy != events.WatchedByServer {
 		t.Fatalf("setup spec = %+v, ok %v", spec, ok)
+	}
+	// connections: is the registered read credentials as file: references
+	// under the server's secrets dir — never the process-wide settings.
+	if !p.HasConnections() {
+		t.Fatal("the registered pipeline has no connections: block; the server would read it with its own settings")
+	}
+	for _, key := range registerConnKeys() {
+		want := filepath.Join(env.secretsDir, "orders-setup", key)
+		if got := p.Connections[key].File; got != want {
+			t.Fatalf("connections.%s = %+v, want file %s", key, p.Connections[key], want)
+		}
 	}
 
 	// pipeline.registered: the file path, the watcher, the requester and the
@@ -229,10 +317,10 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 		t.Fatalf("pipeline.registered.approved_by = %+v, want [ann]", reg.ApprovedBy)
 	}
 
-	// room.labelled gets cause "setup".
+	// room.labelled gets cause "setup" and names the register proposal.
 	labels := eventsOf[events.RoomLabelledPayload](t, env.svc, roomID, events.RoomLabelled)
-	if len(labels) != 1 || labels[0].Cause != "setup" {
-		t.Fatalf("room.labelled = %+v, want one with cause setup", labels)
+	if len(labels) != 1 || labels[0].Cause != "setup" || labels[0].FixProposalID != pid {
+		t.Fatalf("room.labelled = %+v, want one with cause setup and fix_proposal_id %s", labels, pid)
 	}
 
 	// GET /api/pipelines shows the setup row.
@@ -254,17 +342,7 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 		t.Fatalf("registered_at %q does not parse: %v", info.Setup.RegisteredAt, err)
 	}
 	// It is the pipeline.registered event's own time.
-	evs, _, err := env.svc.Events(ctx, roomID, 0, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var regAt string
-	for _, e := range evs {
-		if e.Type == events.PipelineRegistered {
-			regAt = e.At.UTC().Format(time.RFC3339)
-		}
-	}
-	if info.Setup.RegisteredAt != regAt {
+	if regAt := registeredEventTime(t, env.svc, roomID); info.Setup.RegisteredAt != regAt {
 		t.Fatalf("registered_at = %q, want the event time %q", info.Setup.RegisteredAt, regAt)
 	}
 
@@ -273,10 +351,35 @@ func TestRegisterHappyPathTeamServer(t *testing.T) {
 	wantSetupError(t, err, 409, "room_closed")
 }
 
+// TestRegisterRegisteredAtSurvivesRestart: the registration time comes from
+// the room's log, not from this process. A second service over the same store
+// (a restart, another replica) answers it on its first GET /api/pipelines,
+// before anyone has read the setup room.
+func TestRegisterRegisteredAtSurvivesRestart(t *testing.T) {
+	env := newRegisterEnv(t, nil)
+	roomID, _ := registerHappy(t, env)
+	want := registeredEventTime(t, env.svc, roomID)
+
+	second := env.restart(t)
+	var info *room.PipelineSetupInfo
+	for _, pi := range second.PipelinesFor(alice()) {
+		if pi.ID == "orders-setup" {
+			info = pi.Setup
+		}
+	}
+	if info == nil {
+		t.Fatal("the restarted service does not list the registered pipeline's setup row")
+	}
+	if info.RegisteredAt != want {
+		t.Fatalf("registered_at after a restart = %q, want the event time %q", info.RegisteredAt, want)
+	}
+}
+
 func TestRegisterRefusedWithoutGreenLadder(t *testing.T) {
-	env := newRegisterEnv(t)
+	env := newRegisterEnv(t, nil)
 	ctx := context.Background()
 	roomID := createSetup(t, &env.setupEnv, setupRequest("orders-setup")).Room.ID
+	registerCredentials(t, env.svc, roomID, "orders-setup")
 
 	// The ladder never ran.
 	_, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
@@ -303,10 +406,80 @@ func TestRegisterRefusedWithoutGreenLadder(t *testing.T) {
 	}
 }
 
+// TestRegisterRefusedWithoutRegisteredCredentials: a pipeline this server
+// will watch needs the read credentials registered with it first (design
+// §3.7). A secret the driver set but never registered does not count: the
+// server holds no file for it.
+func TestRegisterRefusedWithoutRegisteredCredentials(t *testing.T) {
+	env := newRegisterEnv(t, nil)
+	ctx := context.Background()
+	roomID := createSetup(t, &env.setupEnv, setupRequest("orders-setup")).Room.ID
+	emitVerified(t, env.svc, roomID, greenLadder())
+
+	_, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
+	wantSetupError(t, err, 400, "validation")
+	if !strings.Contains(err.Error(), "read credentials") {
+		t.Fatalf("the refusal does not name the credentials click: %v", err)
+	}
+
+	if err := env.svc.EmitSetup(ctx, roomID, events.SetupSecretSet, events.SetupSecretSetPayload{
+		Name: "source_db_url", Actor: events.Actor{Kind: events.ActorHuman, ID: "alice", Name: "Alice"},
+	}); err != nil {
+		t.Fatalf("setup.secret_set: %v", err)
+	}
+	_, err = env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
+	wantSetupError(t, err, 400, "validation")
+
+	// A registration for another pipeline id is not this room's.
+	registerCredentials(t, env.svc, roomID, "someone-else")
+	_, err = env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
+	wantSetupError(t, err, 400, "validation")
+
+	registerCredentials(t, env.svc, roomID, "orders-setup")
+	if _, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register")); err != nil {
+		t.Fatalf("registered credentials should allow the proposal: %v", err)
+	}
+	// Nothing was written by the refusals.
+	if _, err := os.Stat(filepath.Join(env.ownersDir, "orders-setup.yaml")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("an owners entry exists before any registration ran: %v", err)
+	}
+}
+
+// TestRegisterRefusedWhenServerCannotRegister: a server with no OWNERS_DIR or
+// no owners reload refuses the proposal at Create with the reason, and writes
+// nothing.
+func TestRegisterRefusedWhenServerCannotRegister(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*room.Deps)
+		want   string
+	}{
+		{"no OWNERS_DIR", func(d *room.Deps) { d.Setup.OwnersDir = "" }, "OWNERS_DIR"},
+		{"no owners reload", func(d *room.Deps) { d.ReloadOwners = nil }, "reload"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := newRegisterEnv(t, c.mutate)
+			ctx := context.Background()
+			roomID := createSetup(t, &env.setupEnv, setupRequest("orders-setup")).Room.ID
+			emitVerified(t, env.svc, roomID, greenLadder())
+			registerCredentials(t, env.svc, roomID, "orders-setup")
+			_, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
+			wantSetupError(t, err, 400, "validation")
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("the refusal does not name %q: %v", c.want, err)
+			}
+			if _, err := os.Stat(filepath.Join(env.ownersDir, "orders-setup.yaml")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("an owners entry was written by a refused registration: %v", err)
+			}
+		})
+	}
+}
+
 // TestRegisterRefusedInIncidentRoom pins that pipeline_register is a
 // setup-room step: an incident room has no setup state to register.
 func TestRegisterRefusedInIncidentRoom(t *testing.T) {
-	env := newRegisterEnv(t)
+	env := newRegisterEnv(t, nil)
 	ctx := context.Background()
 	incident, err := env.svc.CreateRoom(ctx, alice(), "incident", "sev2", "existing")
 	if err != nil {
@@ -317,7 +490,7 @@ func TestRegisterRefusedInIncidentRoom(t *testing.T) {
 }
 
 func TestRegisterOverlapRefusedAtCreate(t *testing.T) {
-	env := newRegisterEnv(t)
+	env := newRegisterEnv(t, nil)
 	ctx := context.Background()
 
 	// The provisional pipeline shares tenant b's "other" topic prefix: its
@@ -329,8 +502,8 @@ func TestRegisterOverlapRefusedAtCreate(t *testing.T) {
 	emitVerified(t, env.svc, roomID, greenLadder())
 	_, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
 	wantSetupError(t, err, 409, "overlap")
-	if err == nil || !strings.Contains(err.Error(), "another tenant") {
-		t.Fatalf("the foreign overlap refusal names no other tenant's pipeline: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "another tenant") || strings.Contains(err.Error(), "pipelines are:") {
+		t.Fatalf("the foreign overlap refusal must say another tenant and name no pipeline: %v", err)
 	}
 
 	// An own-tenant pipeline that owns no layer has no approver either.
@@ -350,6 +523,7 @@ func TestRegisterOverlapRefusedAtCreate(t *testing.T) {
 	owned.TopicPrefix = "ex"
 	roomID = createSetup(t, &env.setupEnv, owned).Room.ID
 	emitVerified(t, env.svc, roomID, greenLadder())
+	registerCredentials(t, env.svc, roomID, "orders-owned")
 	ev, err := env.svc.CreateDriverProposal(ctx, alice(), roomID, registerProposal("register"))
 	if err != nil {
 		t.Fatalf("an owned overlap is approvable: %v", err)
@@ -364,7 +538,8 @@ func TestRegisterOverlapRefusedAtCreate(t *testing.T) {
 	// the approval guard on every required layer (the overlap's layers,
 	// setupLayers), but the Execute re-check refuses: the overlap rule needs
 	// the overlapping pipeline's OWNERS among the approvers (design §3.6),
-	// and ann is none. The proposal fails and the room stays open.
+	// and ann is none. The proposal fails, the room stays open and no entry
+	// is written.
 	if len(dec.RequiredLayers) == 0 {
 		t.Fatal("the overlap proposal has no required layers")
 	}
@@ -383,5 +558,8 @@ func TestRegisterOverlapRefusedAtCreate(t *testing.T) {
 	}
 	if snap.ClosedAt != nil {
 		t.Fatalf("the room closed despite the refused overlap: %+v", snap.ClosedAt)
+	}
+	if _, err := os.Stat(filepath.Join(env.ownersDir, "orders-owned.yaml")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the refused overlap wrote an owners entry: %v", err)
 	}
 }

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,12 +19,21 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/setup/plan"
+	"piperoom/internal/store/memstore"
 )
 
 // The pipeline_register internals (U1-14): the gate, the fold fields the gate
 // and the approval guard read, the owners entry rendering (byte-equal to
 // discover -write-owners for the same pipeline), the connections: file
-// references, watched_by, and the write's idempotency.
+// references, watched_by, the server-side preconditions, the write's
+// exclusivity and its removal when the reload fails, the repos: path's wait
+// for its own PR, and the whole last mile with the real ladder runner.
+
+// registerCDCKeys are the connection keys owners.yaml requires of a cdc
+// connections: block, the names the credentials click registers (U1-5d).
+func registerCDCKeys() []string {
+	return []string{"source_db_url", "warehouse_db_url", "kafka_brokers", "connect_url", "schema_registry_url"}
+}
 
 func greenRungs() []events.SetupRung {
 	names := []string{plan.RungConnector, plan.RungTasks, plan.RungCanaryTopic, plan.RungSnapshot,
@@ -116,7 +127,7 @@ func TestRegisterSnapshotFoldFields(t *testing.T) {
 	ann := events.Actor{Kind: events.ActorHuman, ID: "ann", Name: "Ann"}
 
 	snap := Apply(RoomSnapshot{}, ev(1, events.RoomCreated, alice, events.RoomCreatedPayload{
-		Mode: events.RoomModeSetup, Alert: mustJSON(t, req),
+		PipelineID: "orders-x", Mode: events.RoomModeSetup, Alert: mustJSON(t, req),
 	}))
 	if snap.Setup == nil || snap.Setup.creator.ID != "alice" {
 		t.Fatalf("creator = %+v", snap.Setup)
@@ -165,11 +176,38 @@ func TestRegisterSnapshotFoldFields(t *testing.T) {
 	if !ok || actor.ID != "ann" {
 		t.Fatalf("approval actors = %+v", prop.approvalActors)
 	}
+
+	// The principal each approval was granted under (identity.grant), which
+	// the overlap re-check reads for an IdP group; an approval without an
+	// identity records its grant field.
+	snap = Apply(snap, ev(8, events.ApprovalGiven, ann, events.ApprovalGivenPayload{
+		ProposalID: "p9", Layer: "kafka", Identity: &events.Identity{Grant: "group:platform"}, Grant: events.GrantOwner,
+	}))
+	prop, _ = openProposal(snap, "p9")
+	if prop.approvalGrants["kafka"] != "group:platform" || prop.approvalGrants[events.LayerEnvironment] != "" {
+		t.Fatalf("approval grants = %+v, want kafka granted as group:platform", prop.approvalGrants)
+	}
+
+	// The credentials click's names: this room's pipeline only, valid names
+	// only, each once.
+	snap = Apply(snap, ev(9, events.SetupCredentialsRegistered, systemActor, events.SetupCredentialsRegisteredPayload{
+		PipelineID: "someone-else", Names: []string{"source_db_url"},
+	}))
+	if len(snap.Setup.credentialNames) != 0 {
+		t.Fatalf("another pipeline's credentials were folded: %v", snap.Setup.credentialNames)
+	}
+	snap = Apply(snap, ev(10, events.SetupCredentialsRegistered, systemActor, events.SetupCredentialsRegisteredPayload{
+		PipelineID: "orders-x", Names: []string{"source_db_url", "bad name", "source_db_url"},
+	}))
+	if got := snap.Setup.credentialNames; len(got) != 1 || got[0] != "source_db_url" {
+		t.Fatalf("credential names = %v, want [source_db_url]", got)
+	}
 }
 
 // entrySnapshot builds the snapshot registerEntry reads: the request, the
-// room id and the fold-only fields.
-func entrySnapshot(id, tenant, title string, targets []SetupTargetState, secretNames, consumerGroups, sinkTables []string) RoomSnapshot {
+// room id and the fold-only fields (credentialNames are the registered read
+// credentials the entry references as connections:).
+func entrySnapshot(id, tenant, title string, targets []SetupTargetState, credentialNames, consumerGroups, sinkTables []string) RoomSnapshot {
 	req := events.SetupRequest{
 		PipelineID: id, Tenant: tenant, Title: title, SourceKind: "postgres", Target: "compose",
 		TopicPrefix: "orders", Tables: []string{"public.orders"}, Connectors: []string{"orders-src"},
@@ -188,7 +226,7 @@ func entrySnapshot(id, tenant, title string, targets []SetupTargetState, secretN
 				TopicPrefix: "orders", Tables: []string{"public.orders"}, Connectors: []string{"orders-src"},
 				ConsumerGroups: consumerGroups, SinkTables: sinkTables,
 			},
-			secretNames: secretNames,
+			credentialNames: credentialNames,
 		},
 	}
 }
@@ -370,13 +408,18 @@ func TestRegisterEntryLocalTargetWatchedLocally(t *testing.T) {
 	}
 }
 
-// TestRegisterConnectionsFileRefs: only the connection keys whose read
-// credential the room recorded become file: references; every other key is
-// left out, so the pipeline fails closed rather than read a process-wide
-// setting of the server.
+// TestRegisterConnectionsFileRefs: every registered read credential whose name
+// is a connection key becomes a file: reference, whether or not the room's
+// targets name that key (warehouse_db_url never comes from a target, and the
+// owners validation requires it); a registered name that is no connection
+// key (the runner's own store name) and a secret that was set but never
+// registered are left out.
 func TestRegisterConnectionsFileRefs(t *testing.T) {
 	svc := registerTestService(t)
-	setup := &SetupSnapshot{secretNames: []string{"source_db_url"}}
+	setup := &SetupSnapshot{
+		credentialNames: []string{"source_db_url", "warehouse_db_url", "source_read_password"},
+		secretNames:     []string{"source_db_url", "warehouse_db_url", "kafka_brokers"},
+	}
 	prov, err := owners.Provisional(events.SetupRequest{
 		PipelineID: "orders-x", TopicPrefix: "orders", Tables: []string{"public.orders"},
 		Connectors: []string{"orders-src"},
@@ -392,9 +435,14 @@ func TestRegisterConnectionsFileRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := owners.FileRef(filepath.Join(svc.setupCfg.SecretsDir, "orders-x", "source_db_url"))
-	if len(conns) != 1 || conns["source_db_url"] != want {
-		t.Fatalf("connections = %v, want {source_db_url: %s}", conns, want)
+	// The value is the plain absolute path (what the loader's file: accepts),
+	// not the canonical owners.FileRef comparison form.
+	path := func(key string) string { return filepath.Join(svc.setupCfg.SecretsDir, "orders-x", key) }
+	if len(conns) != 2 || conns["source_db_url"] != path("source_db_url") || conns["warehouse_db_url"] != path("warehouse_db_url") {
+		t.Fatalf("connections = %v, want source_db_url and warehouse_db_url as absolute file paths", conns)
+	}
+	if !filepath.IsAbs(conns["source_db_url"]) || strings.HasPrefix(conns["source_db_url"], "file:") {
+		t.Fatalf("connections.source_db_url = %q, want a plain absolute path", conns["source_db_url"])
 	}
 }
 
@@ -413,9 +461,14 @@ func TestRegisterWriteFileIdempotent(t *testing.T) {
 	if path != filepath.Join(svc.setupCfg.OwnersDir, "orders-x.yaml") {
 		t.Fatalf("path = %q", path)
 	}
-	// The second write is refused: a registration never overwrites a file.
-	if _, err := svc.writeRegisterFile(ctx, &snap, entry); err == nil || !strings.Contains(err.Error(), "already exists") {
+	// The second write is refused: a registration never overwrites a file,
+	// and the first entry's bytes stay as they were.
+	changed := append([]byte("# changed\n"), entry...)
+	if _, err := svc.writeRegisterFile(ctx, &snap, changed); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second write = %v, want already exists", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || !bytes.Equal(b, entry) {
+		t.Fatalf("the existing entry changed: %v", err)
 	}
 
 	// A symlink in the way is refused, never followed.
@@ -453,7 +506,12 @@ func loadOwnersString(t *testing.T, y string) *owners.Owners {
 
 // TestRegisterApprovalsHold pins the overlap re-check (design §3.6): the
 // recorded approvers must include, per overlapping pipeline, one of its own
-// owners. A tenant admin or a system approval does not count.
+// owners. A tenant admin or a system approval does not count. An approver the
+// server knows only from the IdP (not in users.yaml) counts through the
+// principal the approval was granted under (identity.grant "group:<name>" or
+// "backup:group:<name>", as the fold records it), never through a user grant
+// or a group the pipeline does not name; with no recorded grant it fails
+// closed.
 func TestRegisterApprovalsHold(t *testing.T) {
 	own := loadOwnersString(t, registerOwnersOnlyYAML())
 	users, err := ParseUsers([]byte(setupUsersForRegister()))
@@ -462,52 +520,73 @@ func TestRegisterApprovalsHold(t *testing.T) {
 	}
 	svc := New(Deps{Owners: own, Users: users, Setup: config.Setup{Enabled: true}})
 	t.Cleanup(svc.Close)
-	existing, ok := own.Pipeline("existing")
-	if !ok {
-		t.Fatal("no existing pipeline")
+	pipe := func(id string) []owners.Pipeline {
+		p, ok := own.Pipeline(id)
+		if !ok {
+			t.Fatalf("no pipeline %s", id)
+		}
+		return []owners.Pipeline{p}
 	}
-	pipes := []owners.Pipeline{existing}
+	human := func(id string) events.Actor { return events.Actor{Kind: events.ActorHuman, ID: id, Name: id} }
+	env := events.LayerEnvironment
 
-	snapFor := func(actors map[string]events.Actor) *RoomSnapshot {
+	snapFor := func(actors map[string]events.Actor, grants map[string]string) *RoomSnapshot {
 		return &RoomSnapshot{
 			Setup: &SetupSnapshot{Mode: true, req: events.SetupRequest{PipelineID: "orders-x", Tenant: "a"}},
 			OpenProposals: []Proposal{{
 				ProposalID:     "p1",
 				approvalActors: actors,
+				approvalGrants: grants,
 			}},
 		}
 	}
 	cases := []struct {
 		name   string
+		pipes  []owners.Pipeline
 		actors map[string]events.Actor
+		grants map[string]string
 		want   bool
 	}{
-		{"no approvals", nil, false},
-		{"a tenant admin who is not an owner", map[string]events.Actor{
-			"environment": {Kind: events.ActorHuman, ID: "ann", Name: "Ann"},
-		}, false},
-		{"the system actor", map[string]events.Actor{
-			"environment": systemActor,
-		}, false},
-		{"the overlapping pipeline's owner", map[string]events.Actor{
-			"environment": {Kind: events.ActorHuman, ID: "alice", Name: "Alice"},
-		}, true},
+		{"no approvals", pipe("existing"), nil, nil, false},
+		{"a tenant admin who is not an owner", pipe("existing"),
+			map[string]events.Actor{env: human("ann")}, map[string]string{env: events.GrantAdmin}, false},
+		{"the system actor", pipe("existing"),
+			map[string]events.Actor{env: systemActor}, map[string]string{env: events.GrantPolicy}, false},
+		{"the overlapping pipeline's owner", pipe("existing"),
+			map[string]events.Actor{env: human("alice")}, map[string]string{env: "user:alice"}, true},
+		{"an IdP group member, granted as the owning group", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe")}, map[string]string{env: "group:platform"}, true},
+		{"an IdP group member, granted as a backup of the owning group", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe")}, map[string]string{env: "backup:group:platform"}, true},
+		{"an IdP user granted as a user principal the pipeline does not name", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe")}, map[string]string{env: "user:zoe"}, false},
+		{"a group the pipeline does not name", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe")}, map[string]string{env: "group:data"}, false},
+		{"an IdP group member with no recorded grant", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe")}, nil, false},
+		{"the group grant covers only the layer it was given on", pipe("grouped"),
+			map[string]events.Actor{env: human("zoe"), "kafka": human("zoe")},
+			map[string]string{"kafka": "group:platform"}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := svc.registerApprovalsHold(snapFor(c.actors), "p1", pipes); got != c.want {
+			if got := svc.registerApprovalsHold(snapFor(c.actors, c.grants), "p1", c.pipes); got != c.want {
 				t.Fatalf("approvals hold = %v, want %v", got, c.want)
 			}
 		})
 	}
 }
 
+// registerOwnersOnlyYAML has "existing", owned by alice on every layer, and
+// "grouped", owned by the group platform (an IdP group no users.yaml lists)
+// on the environment layer.
 func registerOwnersOnlyYAML() string {
 	var b strings.Builder
 	b.WriteString("pipelines:\n  - id: existing\n    topic_prefix: ex\n    source_tables: [public.e]\n    connectors: [ex-c]\n    connections: {source_db_url: {env: EX_SRC}, warehouse_db_url: {env: EX_WH}, kafka_brokers: {env: EX_K}, connect_url: {env: EX_C}, schema_registry_url: {env: EX_SR}}\n    owners:")
 	for _, l := range events.LayersOf(events.PipelineKindCDC) {
 		b.WriteString("\n      " + l + ": {approvers: [user:alice]}")
 	}
+	b.WriteString("\n  - id: grouped\n    topic_prefix: gr\n    source_tables: [public.g]\n    connectors: [gr-c]\n    connections: {source_db_url: {env: GR_SRC}, warehouse_db_url: {env: GR_WH}, kafka_brokers: {env: GR_K}, connect_url: {env: GR_C}, schema_registry_url: {env: GR_SR}}\n    owners:\n      environment: {approvers: [group:platform]}\n")
 	return b.String()
 }
 
@@ -547,4 +626,314 @@ func TestRegisterCreateRefusal(t *testing.T) {
 	if !errors.As(err, &re) || re.Status != 409 || re.Code != "overlap" {
 		t.Fatalf("an unowned overlap = %v, want 409 overlap", err)
 	}
+}
+
+// TestRegisterPreconditions pins what the server itself needs before a
+// registration writes anything (registerPreconditions; checked at Create and
+// before Execute): an owners dir and a reload for the file path, a forge for
+// repos:, read credentials registered for a pipeline this server will watch
+// (a secret only set does not count), and an id the owners set does not hold
+// yet. A local target is watched locally and needs no credentials here.
+func TestRegisterPreconditions(t *testing.T) {
+	local := []SetupTargetState{{Kind: "postgres", Address: "127.0.0.1:5432", Class: "local"}}
+	cases := []struct {
+		name     string
+		tweak    func(svc *Service, snap *RoomSnapshot)
+		wantCode string
+		contains string
+	}{
+		{"server-watched, credentials registered", func(_ *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = registerCDCKeys()
+		}, "", ""},
+		{"local target needs no credentials here", func(_ *Service, snap *RoomSnapshot) {
+			snap.Setup.Targets = local
+		}, "", ""},
+		{"server-watched without credentials", func(*Service, *RoomSnapshot) {}, "validation", "read credentials"},
+		{"a secret set but not registered", func(_ *Service, snap *RoomSnapshot) {
+			snap.Setup.secretNames = registerCDCKeys()
+		}, "validation", "read credentials"},
+		{"a registered name that is no connection key", func(_ *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = []string{"source_read_password"}
+		}, "validation", "read credentials"},
+		{"no OWNERS_DIR", func(svc *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = registerCDCKeys()
+			svc.setupCfg.OwnersDir = ""
+		}, "validation", "OWNERS_DIR"},
+		{"no owners reload", func(svc *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = registerCDCKeys()
+			svc.reloadOwners = nil
+		}, "validation", "reload"},
+		{"repos: without a forge", func(svc *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = registerCDCKeys()
+			snap.Setup.req.Repos = []string{"infra"}
+			svc.setupForge = nil
+		}, "validation", "forge"},
+		{"the id is in the owners set already", func(svc *Service, snap *RoomSnapshot) {
+			snap.Setup.credentialNames = registerCDCKeys()
+			svc.owners = loadOwnersString(t, strings.Replace(registerOwnersOnlyYAML(), "id: existing", "id: orders-x", 1))
+		}, "pipeline_exists", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			svc := registerTestService(t)
+			svc.reloadOwners = func() error { return nil }
+			snap := entrySnapshot("orders-x", "", "Orders", nil, nil, nil, nil)
+			c.tweak(svc, &snap)
+			err := svc.registerPreconditions(&snap)
+			if c.wantCode == "" {
+				if err != nil {
+					t.Fatalf("preconditions refused: %v", err)
+				}
+				return
+			}
+			var re *Error
+			if !errors.As(err, &re) || re.Code != c.wantCode {
+				t.Fatalf("preconditions = %v, want %s", err, c.wantCode)
+			}
+			if c.contains != "" && !strings.Contains(re.Msg, c.contains) {
+				t.Fatalf("message %q misses %q", re.Msg, c.contains)
+			}
+		})
+	}
+}
+
+// TestRegisterFileIsRemovedWhenTheReloadFails: the write and the reload are
+// one step. A reload that errors, or that skips the entry, leaves no file
+// behind (and no pipeline in the published set), and the next attempt is not
+// refused as "already exists".
+func TestRegisterFileIsRemovedWhenTheReloadFails(t *testing.T) {
+	ctx := context.Background()
+	svc := registerTestService(t)
+	mainFile := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(mainFile, []byte(registerOwnersOnlyYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live, err := owners.NewLive(mainFile, svc.setupCfg.OwnersDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.ownersNowFn = live.Load
+	svc.reloadOwners = func() error { return errors.New("owners: the main file is unreadable") }
+	path := filepath.Join(svc.setupCfg.OwnersDir, "orders-x.yaml")
+
+	snap := entrySnapshot("orders-x", "", "Orders", nil, registerCDCKeys(), nil, nil)
+	entry, _, err := svc.registerEntry(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.registerFile(ctx, &snap, entry)
+	if err == nil || !strings.Contains(err.Error(), "unreadable") || !strings.Contains(err.Error(), "removed") {
+		t.Fatalf("registerFile with a failing reload = %v, want the reload error and the removal", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the entry of a failed registration is still there: %v", err)
+	}
+
+	// An entry the reload skips (a tenant the main file does not declare) is
+	// removed too, with the loader's reason, and never published.
+	svc.reloadOwners = live.Reload
+	tenanted := entrySnapshot("orders-x", "a", "Orders", nil, registerCDCKeys(), nil, nil)
+	entry, _, err = svc.registerEntry(&tenanted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.registerFile(ctx, &tenanted, entry)
+	if err == nil || !strings.Contains(err.Error(), "not loaded") || !strings.Contains(err.Error(), "tenant") {
+		t.Fatalf("registerFile with a skipped entry = %v, want not loaded with the loader's reason", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the skipped entry is still there: %v", err)
+	}
+	if _, ok := live.Load().Pipeline("orders-x"); ok {
+		t.Fatal("the skipped entry is in the published owners set")
+	}
+
+	// The next attempt, with a loadable entry, succeeds: nothing refuses it
+	// as already existing, and the published set carries the pipeline.
+	entry, _, err = svc.registerEntry(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.registerFile(ctx, &snap, entry)
+	if err != nil {
+		t.Fatalf("registerFile after the failures: %v", err)
+	}
+	if got != path {
+		t.Fatalf("path = %q, want %q", got, path)
+	}
+	p, ok := live.Load().Pipeline("orders-x")
+	if !ok || !p.HasConnections() {
+		t.Fatalf("the registered pipeline = %+v, ok %v; want it published with connections", p, ok)
+	}
+}
+
+// TestRegisterPRMergedClosesOnlyItsOwnPR: with repos: the room waits for the
+// merge of the registration PR it recorded, not for any merge the follower
+// sees. A merge without a URL, or of another PR, leaves the room open; the
+// registration PR's merge closes it "pipeline live" and labels it.
+func TestRegisterPRMergedClosesOnlyItsOwnPR(t *testing.T) {
+	ctx := context.Background()
+	users, err := ParseUsers([]byte(tierUsersYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(Deps{
+		Store: memstore.New(), Users: users, Owners: loadOwnersString(t, tierOwnersYAML()), Run: idleRun,
+		Setup: config.Setup{Enabled: true, SecretsDir: t.TempDir(), OwnersDir: t.TempDir()},
+	})
+	t.Cleanup(svc.Close)
+	alice, ok := svc.LookupUser("alice")
+	if !ok {
+		t.Fatal("no user alice")
+	}
+	res, err := svc.CreateSetupRoom(ctx, alice, events.SetupRequest{
+		PipelineID: "shipments-setup", Tenant: "a", Title: "Setup shipments", SourceKind: "postgres", Target: "compose",
+		TopicPrefix: "shipments", Tables: []string{"public.shipments"}, Connectors: []string{"shipments-src"},
+		Targets: []events.SetupTarget{{Kind: "postgres", Address: "db.acme:5432"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomID := res.Room.ID
+	const url = "https://forge.acme/acme/infra/pull/7"
+	if err := svc.EmitSetup(ctx, roomID, events.PipelineRegistered, events.PipelineRegisteredPayload{
+		PipelineID: "shipments-setup", Tenant: "a", PullRequestURL: url, WatchedBy: events.WatchedByServer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	open := func() bool { return mustRoom(t, svc, roomID).ClosedAt == nil }
+
+	svc.registerPRMerged(ctx, roomID, "p_reg", "")
+	if !open() {
+		t.Fatal("a merge without a URL closed the room")
+	}
+	svc.registerPRMerged(ctx, roomID, "p_reg", "https://forge.acme/acme/infra/pull/8")
+	if !open() {
+		t.Fatal("another PR's merge closed the room")
+	}
+	svc.registerPRMerged(ctx, roomID, "p_reg", url)
+	snap := mustRoom(t, svc, roomID)
+	if snap.ClosedAt == nil || snap.Resolution != pipelineLiveResolution {
+		t.Fatalf("after the registration PR merged: closed %v, resolution %q", snap.ClosedAt, snap.Resolution)
+	}
+	var labels []events.RoomLabelledPayload
+	for _, e := range roomEvents(t, svc, roomID) {
+		if e.Type == events.RoomLabelled {
+			var p events.RoomLabelledPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			labels = append(labels, p)
+		}
+	}
+	if len(labels) != 1 || labels[0].Cause != registerLabelCause || labels[0].FixProposalID != "p_reg" {
+		t.Fatalf("room.labelled = %+v, want one with cause setup for p_reg", labels)
+	}
+}
+
+// TestRegisterAfterRealLadder runs the last mile with the real producers: the
+// ladder runner (U1-8b) writes setup.verified for the current plan, the
+// credentials click's record names the read credentials, the driver proposes
+// pipeline_register, the tenant admin approves (the creator's own approval is
+// refused), and the executor writes the entry, reloads the owners set and
+// closes the room "pipeline live". Nothing here fakes a setup.verified.
+func TestRegisterAfterRealLadder(t *testing.T) {
+	ctx := context.Background()
+	r := newLadderRig(t, tierOpts{})
+	// The registration deps a team server wires: a Live owners set over the
+	// rig's owners config and an OWNERS_DIR, the reload and the watcher hook.
+	mainFile := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(mainFile, []byte(tierOwnersYAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownersDir := filepath.Join(t.TempDir(), "owners.d")
+	live, err := owners.NewLive(mainFile, ownersDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloads := 0
+	r.svc.ownersNowFn = live.Load
+	r.svc.reloadOwners = live.Reload
+	r.svc.onOwnersReloaded = func() { reloads++ }
+	r.svc.setupCfg.OwnersDir = ownersDir
+	r.svc.setupCfg.SecretsDir = t.TempDir()
+
+	roomID := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomID, "db.acme:5432", "compose_up", "connect_create_connector")
+	r.reads.found = func(key string) bool { return key == r.canary.lastNonce() }
+	if err := r.svc.startSetupLadder(roomID); err != nil {
+		t.Fatalf("start ladder: %v", err)
+	}
+	canary, _ := waitLadderCanaryProposal(t, r.svc, roomID, 0)
+	if err := r.approve(roomID, canary, "postgres", "bob"); err != nil {
+		t.Fatalf("approve the canary insert: %v", err)
+	}
+	// Rungs 1 to 7 green: the gate's event, written by the runner itself.
+	waitSetupVerified(t, r.svc, roomID, 1)
+	if err := r.svc.EmitSetup(ctx, roomID, events.SetupCredentialsRegistered, events.SetupCredentialsRegisteredPayload{
+		PipelineID: "shipments-setup", Names: registerCDCKeys(), RunnerLabel: "laptop",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := r.driverPropose(roomID, "alice", registerActionName, events.LayerEnvironment, "{}")
+	approveNow := func(who string) error {
+		p, ok := openProposal(mustRoom(t, r.svc, roomID), pid)
+		if !ok {
+			t.Fatalf("proposal %s is not open", pid)
+		}
+		_, err := r.svc.ApproveProposal(ctx, r.user(who), pid, events.LayerEnvironment, p.ParamsHash)
+		return err
+	}
+	// The creator cannot approve her own registration on a team server.
+	err = approveNow("alice")
+	var re *Error
+	if !errors.As(err, &re) || re.Code != "not_admin" {
+		t.Fatalf("alice's self-approval = %v, want 403 not_admin", err)
+	}
+	if err := approveNow("bob"); err != nil {
+		t.Fatalf("bob approves: %v", err)
+	}
+	waitForCond(t, 10*time.Second, func() bool { return mustRoom(t, r.svc, roomID).ClosedAt != nil }, "the room never closed after the registration")
+	snap := mustRoom(t, r.svc, roomID)
+	if snap.Resolution != pipelineLiveResolution {
+		t.Fatalf("resolution = %q, want %q", snap.Resolution, pipelineLiveResolution)
+	}
+	if reloads != 1 {
+		t.Fatalf("owners reloads = %d, want 1", reloads)
+	}
+	p, ok := live.Load().Pipeline("shipments-setup")
+	if !ok {
+		t.Fatal("the reloaded owners set does not know the pipeline")
+	}
+	if !p.HasConnections() {
+		t.Fatal("the registered pipeline has no connections: block")
+	}
+	spec, ok := p.Setup()
+	if !ok || spec.RoomID != roomID || spec.WatchedBy != events.WatchedByServer {
+		t.Fatalf("setup spec = %+v, ok %v", spec, ok)
+	}
+	var regs []events.PipelineRegisteredPayload
+	for _, e := range roomEvents(t, r.svc, roomID) {
+		if e.Type == events.PipelineRegistered {
+			var pl events.PipelineRegisteredPayload
+			if err := json.Unmarshal(e.Payload, &pl); err != nil {
+				t.Fatal(err)
+			}
+			regs = append(regs, pl)
+		}
+	}
+	if len(regs) != 1 || regs[0].By.ID != "alice" || len(regs[0].ApprovedBy) != 1 || regs[0].ApprovedBy[0].ID != "bob" {
+		t.Fatalf("pipeline.registered = %+v, want by alice, approved by bob", regs)
+	}
+	// GET /api/pipelines shows the setup row with the registration time.
+	for _, info := range r.svc.PipelinesFor(r.user("alice")) {
+		if info.ID == "shipments-setup" {
+			if info.Setup == nil || info.Setup.RegisteredAt == "" || info.Setup.RoomID != roomID {
+				t.Fatalf("pipelines row = %+v", info.Setup)
+			}
+			return
+		}
+	}
+	t.Fatal("PipelinesFor does not list the registered pipeline")
 }
