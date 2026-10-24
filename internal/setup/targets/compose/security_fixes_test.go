@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -81,6 +82,9 @@ func TestWriteTextRefusesMaterialised(t *testing.T) {
 // An unchanged properties_write still fixes the file's mode: a pre-existing
 // world-readable .env must not stay 0644 because its bytes already matched.
 func TestPropertiesWriteFixesMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("NTFS reports 0666 for every writable file and os.Chmod only toggles the read-only bit")
+	}
 	h := newHarness(t, protocol.ClassLocal)
 	entries := map[string]string{"POSTGRES_DB": "orders"}
 	if _, err := h.run(t, "properties_write", PropertiesParams{File: EnvFileName, Entries: entries}); err != nil {

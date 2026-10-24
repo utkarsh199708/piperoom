@@ -16,8 +16,7 @@ name: Setup matrix
 # Unit scope: ./internal/setup/... and ./cmd/setup/... — the capability this
 # matrix is about. The repo-wide unit suite is ci.yml's Go job; on Windows it
 # is not green yet for reasons outside this row (POSIX absolute paths in
-# internal/config, a mode assertion in targets/compose), see the U1-16 PR's
-# "Not done / known gaps".
+# internal/config), see the U1-16 PR's "Not done / known gaps".
 
 on:
   pull_request:
@@ -62,26 +61,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          skip=""
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            # Three upstream tests cannot pass on Windows for environment
-            # reasons, not logic, and none of them has a skip of its own:
-            #  - TestPropertiesWriteFixesMode (security_fixes_test.go) and
-            #    TestStackOpsRunValidatedSnapshot (allowlist_test.go, #887)
-            #    assert 0600 on a file they wrote. NTFS reports 0666 for every
-            #    writable file and os.Chmod only toggles the read-only bit.
-            #  - TestStackRefusesSymlinkBind (allowlist_test.go, #887) creates
-            #    a symlink. A runner user without SeCreateSymbolicLinkPrivilege
-            #    cannot.
-            # They run on the ubuntu and macOS legs. Each needs a
-            # `//go:build !windows` or a Windows branch: C19's, named as a
-            # follow-up in the U1-16 PR. Only these three are skipped by the
-            # flag; the two path-table rows that create real symlinks still
-            # skip themselves where the OS user may not, which the next step
-            # accounts for.
-            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind)$'
-          fi
-          go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
+          # No -skip on Windows: the tests that assert POSIX modes, create
+          # symlinks or need a Linux unit path skip or narrow themselves there.
+          go test -count=1 -timeout 10m ./internal/setup/... ./cmd/setup/...
       - name: "Section 2.3 path table tests (run, never skipped)"
         shell: bash
         run: |
@@ -159,12 +141,16 @@ jobs:
         if: runner.os == 'macOS' && steps.colima.outputs.found == 'true'
         timeout-minutes: 45
         shell: bash
+        env:
+          # Needs the dev stack (testenv.Require), which this job does not
+          # start; ci.yml's full-stack job runs it.
+          NEEDS_DEV_STACK: '^TestReferenceProjectsBuildAndRun$'
         run: |
           if ! colima status >/dev/null 2>&1; then
             colima start --cpu 2 --memory 4 --disk 20 || { echo "::error::colima start failed"; exit 1; }
           fi
           set +e
-          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          go test -count=1 -timeout 40m -json -tags integration -skip "$NEEDS_DEV_STACK" ./internal/setup/... > test.json
           rc=$?
           set -e
           jq -rs '
@@ -206,9 +192,14 @@ jobs:
             go.mod
             go.sum
       - name: go test -tags integration ./internal/setup/... (TestComposeStackToHealthyConnect)
+        env:
+          # internal/setup/knowledge's reference-project build needs the dev
+          # stack (testenv.Require skips without it), which this job does not
+          # start; ci.yml's full-stack job runs it with the stack up.
+          NEEDS_DEV_STACK: '^TestReferenceProjectsBuildAndRun$'
         run: |
           set +e
-          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          go test -count=1 -timeout 40m -json -tags integration -skip "$NEEDS_DEV_STACK" ./internal/setup/... > test.json
           rc=$?
           set -e
           # Readable failures in the log: the whole output of every failed test.

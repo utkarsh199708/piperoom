@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -241,7 +242,9 @@ func TestStackOpsRunValidatedSnapshot(t *testing.T) {
 					t.Errorf("the snapshot is missing while docker runs: %v", err)
 					return nil, 1, nil
 				}
-				if fi.Mode().Perm() != 0o600 {
+				// NTFS reports 0666 for every writable file and os.Chmod only
+				// toggles the read-only bit, so the mode is checked on POSIX.
+				if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 					t.Errorf("snapshot mode = %o, want 600", fi.Mode().Perm())
 				}
 				seen, _ = os.ReadFile(snap)
@@ -294,7 +297,9 @@ func TestStackRefusesSymlinkBind(t *testing.T) {
 			}
 			_ = os.RemoveAll(filepath.Join(dir, tc.link))
 			if err := os.Symlink("/etc", filepath.Join(dir, tc.link)); err != nil {
-				t.Fatal(err)
+				// A Windows user without SeCreateSymbolicLinkPrivilege
+				// (no Developer Mode) cannot create one.
+				t.Skipf("symlinks unavailable: %v", err)
 			}
 			if _, err := runOp(t, reg, "compose_up", map[string]any{}); !errors.Is(err, ErrStack) || RuleOf(err) != RuleMount {
 				t.Fatalf("compose_up with a symlinked bind = %v, want ErrStack and the mount rule", err)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -147,6 +148,7 @@ WantedBy=default.target
 }
 
 func TestServiceInstall(t *testing.T) {
+	requireLinuxPaths(t)
 	for _, mode := range []string{ModeDistributed, ModeStandalone} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture(t, Options{})
@@ -177,6 +179,7 @@ func TestServiceInstall(t *testing.T) {
 }
 
 func TestServiceInstallJavaHomeIsResolved(t *testing.T) {
+	requireLinuxPaths(t)
 	f := newFixture(t, Options{ResolvePath: func(p string) (string, error) {
 		if p != "/usr/bin/java" {
 			t.Errorf("resolved %q", p)
@@ -242,6 +245,7 @@ func TestServiceInstallRefusals(t *testing.T) {
 }
 
 func TestServiceInstallRefusesSymlinks(t *testing.T) {
+	requireLinuxPaths(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	elsewhere := t.TempDir()
@@ -350,6 +354,7 @@ func TestServiceRestart(t *testing.T) {
 // unit file is written; and a valid install's ExecStart, WorkingDirectory and
 // Environment lines are exactly the detected paths, with no User= at all.
 func TestNoParamReachesTheUnit(t *testing.T) {
+	requireLinuxPaths(t)
 	payloads := []string{
 		"connect\nExecStartPre=/bin/sh -c id", "connect\n[Service]\nUser=root", "a=b", "User=root",
 		"$HOME", "${HOME}", "%h", "%%", `"q"`, "'q'", `a\b`, "a b", "a;b", "a|b", "../x", "/etc/passwd",
@@ -507,6 +512,7 @@ func TestServiceRestartRefusesAnotherProjectsUnit(t *testing.T) {
 // from another file is refused before the unit file is written or enable
 // runs.
 func TestServiceInstallRefusesATakenName(t *testing.T) {
+	requireLinuxPaths(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	f.exec.respond = func([]string) ([]byte, int, error) {
@@ -541,6 +547,7 @@ func TestServiceInstallRefusesATakenName(t *testing.T) {
 // daemon-reload and removes the unit file it created; a failed daemon-reload
 // is reported the same way.
 func TestServiceInstallCommandFailures(t *testing.T) {
+	requireLinuxPaths(t)
 	show, _ := SystemctlArgv("show", "piperoom-connect.service")
 	for _, c := range []struct {
 		verb     string
@@ -598,6 +605,7 @@ func TestServiceInstallCommandFailures(t *testing.T) {
 // the unit runs, so it must be under a mount directory file_write cannot
 // change.
 func TestJavaHomeInsideTheProject(t *testing.T) {
+	requireLinuxPaths(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	for _, java := range []string{f.dir + "/jdk/bin/java", f.dir + "/bin/java", f.dir + "/logs/jdk/bin/java"} {
@@ -618,7 +626,13 @@ func TestJavaHomeInsideTheProject(t *testing.T) {
 	}
 	// The project reached through a symlink: the resolved JDK path is
 	// still recognised as inside it.
-	real := t.TempDir()
+	// The fake ResolvePath returns java as given, but the real one
+	// returns a fully resolved path; on macOS t.TempDir() is under /var, a
+	// symlink to /private/var, so resolve it as production would.
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	link := t.TempDir() + "/p"
 	mustSymlink(t, real, link)
 	g := newFixtureIn(t, link, Options{})

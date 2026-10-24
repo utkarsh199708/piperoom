@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +45,18 @@ func (f *fakeExec) argvs() [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][]string(nil), f.calls...)
+}
+
+// requireLinuxPaths skips a test that needs the project directory to be a
+// path a systemd unit can carry and its files to keep POSIX modes. The host
+// target is Linux only: on Windows t.TempDir() is a drive path with
+// backslashes, which CheckUnitPath refuses by design (TestProjectDirMustBeUnitSafe
+// covers the refusal), and NTFS reports 0666 for every writable file.
+func requireLinuxPaths(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the host target writes Linux systemd units: a Windows project directory is not a unit path and NTFS has no POSIX modes")
+	}
 }
 
 // fixture is a project directory with a registry and the host driver.
