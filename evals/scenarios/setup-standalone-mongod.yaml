@@ -2,7 +2,7 @@
 # without --replSet), so it serves no change streams and the connector's driver, which asks for
 # replica set rs0, finds no member and times out: task 0 FAILED. The trace reads like a network
 # problem; the setup check says what the server is. The label names the failing check and the fix
-# with its tier (tasks/U-board.md rows U7b and U7d, step 7). Format: evals/README.md (C6). Built on
+# with its tier (Jira KAN-5 rows U7b and U7d, step 7). Format: evals/README.md (C6). Built on
 # `devctl setup-break standalone-mongod` (dev/mongo/README.md, cmd/devctl/setupbreaks_mongo.go,
 # U7c).
 #
@@ -57,7 +57,7 @@
 #     status.go: ChangeStreamSupport's reason "standalone mongod has no change streams".
 #   - dev/mongo/README.md: the URI on the compose network carries replicaSet=rs0; the fix recreates the
 #     service from the base file and the member elects itself primary again.
-#   - tasks/U-board.md U7b: "a standalone mongod is a check whose fix is T1 only when this room
+#   - Jira KAN-5 U7b: "a standalone mongod is a check whose fix is T1 only when this room
 #     created it (by receipt)".
 #   - https://www.mongodb.com/docs/manual/changeStreams/: change streams need a replica set or a
 #     sharded cluster.

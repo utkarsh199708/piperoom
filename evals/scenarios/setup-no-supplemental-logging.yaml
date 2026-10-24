@@ -1,7 +1,7 @@
 # C7 setup scenario (U9d): supplemental logging was dropped on the source Oracle database after the
 # setup run (the database-level minimal logging and the ALL COLUMNS log group of PIPEROOM.ORDERS),
 # so the connector's task fails its start check. The label names the failing check and the fix with
-# its tier (tasks/U-board.md rows U9a and U9d, step 9). Format: evals/README.md (C6). Built on
+# its tier (Jira KAN-5 rows U9a and U9d, step 9). Format: evals/README.md (C6). Built on
 # `devctl setup-break no-supplemental-logging` (dev/oracle/README.md,
 # cmd/devctl/setupbreaks_oracle.go, U9c).
 #
