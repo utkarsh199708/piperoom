@@ -88,3 +88,21 @@ func TestKeysRedacted(t *testing.T) {
 		}
 	}
 }
+
+// An empty key on anthropic drops the Anthropic key the picker set, so the
+// running endpoint reads the operator's ANTHROPIC_API_KEY, as model.env does
+// after a restart (V18 MP1 review note a).
+func TestEmptyKeyDropsPickerAnthropicKey(t *testing.T) {
+	env := &mapEnv{m: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-operator"}}
+	cur := NewKeys(env, ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-ant-picker"})
+	if got := cur.Getenv("ANTHROPIC_API_KEY"); got != "sk-ant-picker" {
+		t.Fatalf("before: %q", got)
+	}
+	next := nextKeys(cur, ptr(""), "ANTHROPIC_API_KEY", map[string]bool{"ANTHROPIC_API_KEY": true})
+	if got := next.Getenv("ANTHROPIC_API_KEY"); got != "sk-ant-operator" {
+		t.Fatalf("after an empty key: %q, want the operator's key", got)
+	}
+	if got := cur.Getenv("ANTHROPIC_API_KEY"); got != "sk-ant-picker" {
+		t.Fatalf("the old overlay changed: %q", got)
+	}
+}

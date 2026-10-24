@@ -413,6 +413,12 @@ func nextKeys(cur Keys, key *string, keyVar string, used map[string]bool) Keys {
 			case k == "" || keyVar == "":
 				unset(config.EnvModelAPIKey)
 				unset(config.EnvModelAPIKeyFile)
+				// An empty key drops a key the picker set for the target's own
+				// variable (ANTHROPIC_API_KEY), so the running endpoint reads what
+				// model.env now says: the operator's variable, if any.
+				if keyVar != "" && keyVar != config.EnvModelAPIKey {
+					delete(vars, keyVar)
+				}
 			case keyVar == config.EnvModelAPIKey:
 				unset(config.EnvModelAPIKeyFile)
 				vars[keyVar] = keyEntry{value: netsec.Secret(k)}
