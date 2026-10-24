@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,10 @@ var (
 	// the source cannot have: another partition, another key, another type or
 	// a negative value.
 	ErrSourcePosition = errors.New("actions: the position does not match the connector's stored source offsets")
+	// ErrResumeAfterReset marks a reset whose offsets were written but whose
+	// resume_after resume failed: the connector stays STOPPED and a person
+	// resumes it. The reset must not be retried as if it had not run.
+	ErrResumeAfterReset = errors.New("actions: the source offsets were reset but the connector was not resumed")
 	// ErrMultipleSourceOffsets refuses a full reset of a connector that stores
 	// more than one offset: this action can write only one position back, so it
 	// could not offer the full reset's rollback.
@@ -198,7 +203,7 @@ var (
 func (a *resetSourceOffsets) Name() string  { return ResetSourceOffsetsName }
 func (a *resetSourceOffsets) Layer() string { return "kafka-connect" }
 func (a *resetSourceOffsets) Describe() string {
-	return "Clears or moves the stored source offsets of one of the pipeline's Kafka Connect source connectors (KIP-875, Kafka Connect 3.6+). With no position the connector forgets where it was: on the next start it decides from its config (snapshot.mode) whether to re-read the tables in a snapshot, so use it to re-read data the connector skipped. With a position (partition and offset as connect_source_offsets shows them) it resumes from that position instead; the position must match a partition and the offset keys the connector stores. The connector must be STOPPED: put a connect_stop_connector step before this one in the same proposal and set stop_first: true. The reset itself loses nothing in Kafka; a snapshot re-emits existing rows, so sinks that do not upsert by key see duplicates."
+	return "Clears or moves the stored source offsets of one of the pipeline's Kafka Connect source connectors (KIP-875, Kafka Connect 3.6+). With no position the connector forgets where it was: on the next start it decides from its config (snapshot.mode) whether to re-read the tables in a snapshot, so use it to re-read data the connector skipped. With a position (partition and offset as connect_source_offsets shows them) it resumes from that position instead; the position must match a partition and the offset keys the connector stores. The connector must be STOPPED: put a connect_stop_connector step before this one in the same proposal and set stop_first: true. To bring the connector back in the same proposal, set resume_after: true on this step (after the reset it resumes the connector, PUT /connectors/{name}/resume, and waits for RUNNING); do not add a connect_resume_connector step after it, which is refused because the connector is not yet stopped when the proposal is checked. The reset itself loses nothing in Kafka; a snapshot re-emits existing rows, so sinks that do not upsert by key see duplicates."
 }
 
 func (a *resetSourceOffsets) ParamsSchema() map[string]any {
@@ -207,6 +212,10 @@ func (a *resetSourceOffsets) ParamsSchema() map[string]any {
 		"stop_first": map[string]any{
 			"type":        "boolean",
 			"description": "set only when a connect_stop_connector step for the same connector precedes this step in the same proposal (the reset refuses a running connector without it)",
+		},
+		"resume_after": map[string]any{
+			"type":        "boolean",
+			"description": "resume the connector (to RUNNING) right after the reset, in this step; use it instead of a separate connect_resume_connector step",
 		},
 		"position": map[string]any{
 			"type":        "object",
@@ -229,9 +238,15 @@ type sourcePosition struct {
 }
 
 type resetSourceOffsetsParams struct {
-	Connector string          `json:"connector"`
-	StopFirst bool            `json:"stop_first"`
-	Position  *sourcePosition `json:"position"`
+	Connector string `json:"connector"`
+	StopFirst bool   `json:"stop_first"`
+	// ResumeAfter resumes the connector once the reset is done (KAN-514). A
+	// separate connect_resume_connector step cannot follow the reset in the
+	// same proposal: its Validate reads the live state when the proposal is
+	// created, sees the connector still RUNNING and refuses it, and Validate
+	// has no view of the earlier steps (actions.Action).
+	ResumeAfter bool            `json:"resume_after"`
+	Position    *sourcePosition `json:"position"`
 }
 
 // parseResetParams decodes params strictly (unknown fields are refused so a
@@ -413,6 +428,14 @@ func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) 
 	if err := ctxConnectorScope(ctx, p.Connector); err != nil {
 		return err
 	}
+	// Refused here, not only in Execute: by Execute an earlier stop step of
+	// the same proposal has run, so the connector would be left STOPPED with
+	// nothing reset.
+	if p.ResumeAfter {
+		if _, ok := a.d.Connect.(connectorResumer); !ok {
+			return fmt.Errorf("actions: %s: resume_after: this Connect client cannot resume a connector: %w", ResetSourceOffsetsName, ErrNoLifecycleWriter)
+		}
+	}
 	ctx, cancel := a.d.ctx(ctx)
 	defer cancel()
 	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
@@ -502,11 +525,29 @@ func storedPositions(offs []connect.SourceOffset) []connect.SourceOffset {
 	return out
 }
 
+// Preview says what the reset does and, with resume_after, that the same step
+// then resumes the connector.
 func (a *resetSourceOffsets) Preview(ctx context.Context, raw json.RawMessage) (PreviewResult, error) {
 	p, err := parseResetParams(raw)
 	if err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
+	res, err := a.previewReset(ctx, p)
+	if err != nil || !p.ResumeAfter {
+		return res, err
+	}
+	res.Expected += fmt.Sprintf("; then resume: PUT /connectors/%s/resume moves the connector from STOPPED to RUNNING in this same step, and the step waits for RUNNING", p.Connector)
+	if res.Reversible {
+		// Rollback stays "<action> {params}" for machines; the order it needs
+		// is said here, since the connector runs again after this step.
+		res.Expected += fmt.Sprintf("; to undo, %s %s first (it runs again after this step), then the rollback with stop_first: true", StopConnectorName, p.Connector)
+	}
+	res.Downstream = append(res.Downstream, "the connector starts again right after the reset in this step, so whatever its restart does (a snapshot under snapshot.mode, or streaming from the new position) begins without a further approval")
+	return res, nil
+}
+
+// previewReset is the reset's own preview, without resume_after.
+func (a *resetSourceOffsets) previewReset(ctx context.Context, p resetSourceOffsetsParams) (PreviewResult, error) {
 	if err := ctxConnectorScope(ctx, p.Connector); err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
@@ -613,12 +654,57 @@ func (a *resetSourceOffsets) Execute(ctx context.Context, raw json.RawMessage) (
 	if err := ctxConnectorScope(ctx, p.Connector); err != nil {
 		return "", err
 	}
-	ctx, cancel := a.d.ctx(ctx)
-	defer cancel()
 	lw, ok := a.d.Connect.(connect.ConnectLifecycleWriter)
 	if !ok {
 		return "", fmt.Errorf("actions: %s: %w", ResetSourceOffsetsName, ErrNoLifecycleWriter)
 	}
+	// Checked before any write: a client that cannot resume must not get a
+	// reset that then leaves the connector STOPPED against the approval.
+	var rc connectorResumer
+	if p.ResumeAfter {
+		if rc, ok = a.d.Connect.(connectorResumer); !ok {
+			return "", fmt.Errorf("actions: %s: resume_after: this Connect client cannot resume a connector; nothing was reset: %w", ResetSourceOffsetsName, ErrNoLifecycleWriter)
+		}
+	}
+	done, err := a.executeReset(ctx, p, lw)
+	if err != nil || !p.ResumeAfter {
+		return done, err
+	}
+	return a.resumeAfterReset(ctx, rc, p.Connector, done)
+}
+
+// resumeAfterReset resumes the connector once its offsets are reset
+// (resume_after). It gets a deadline of its own, so a slow reset cannot
+// starve it. The reset already happened: a failed resume is an error that
+// says so (ErrResumeAfterReset), and every problem after an accepted resume is
+// a non-error result, as in connect_resume_connector.
+func (a *resetSourceOffsets) resumeAfterReset(ctx context.Context, rc connectorResumer, name, done string) (string, error) {
+	ctx, cancel := a.d.ctx(ctx)
+	defer cancel()
+	if err := rc.Resume(ctx, name); err != nil {
+		return "", fmt.Errorf("actions: %s: %s; the reset succeeded but the resume failed, so %s may still be STOPPED (check connect_status): resume it by hand (connect_resume_connector, or PUT /connectors/%s/resume): %w: %w",
+			ResetSourceOffsetsName, done, name, url.PathEscape(name), ErrResumeAfterReset, err)
+	}
+	state, running, err := awaitState(ctx, a.d.poll(), "RUNNING", func(ctx context.Context) (string, error) {
+		st, err := a.d.Connect.Status(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		return st.State, nil
+	})
+	switch {
+	case err != nil:
+		return fmt.Sprintf("%s; resume accepted for %s; status read failed: %v", done, name, err), nil
+	case running:
+		return fmt.Sprintf("%s; resumed %s (RUNNING)", done, name), nil
+	}
+	return fmt.Sprintf("%s; resume accepted for %s; state now %s (Connect applies a resume asynchronously)", done, name, orUnknown(state)), nil
+}
+
+// executeReset is the reset itself: the live-state re-check, then the write.
+func (a *resetSourceOffsets) executeReset(ctx context.Context, p resetSourceOffsetsParams, lw connect.ConnectLifecycleWriter) (string, error) {
+	ctx, cancel := a.d.ctx(ctx)
+	defer cancel()
 	st, err := a.d.Connect.Status(ctx, p.Connector)
 	if err != nil {
 		return "", fmt.Errorf("actions: %s: read status of %s: %w", ResetSourceOffsetsName, p.Connector, err)
