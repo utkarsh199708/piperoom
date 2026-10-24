@@ -138,8 +138,11 @@ func (p *execProposals) Create(_ context.Context, pc events.ProposalCreatedPaylo
 // planGatedProposals is the room's plan rule (design §3.3, ErrNotInPlan): a
 // proposal whose step is not in the current setup plan is refused, where
 // "current" is the latest setup.plan the room accepted (the agent's sink).
+// An accepted proposal's steps execute on the fake runner, like the room's
+// executor would, so a refused repeat is visible as an op that never ran.
 type planGatedProposals struct {
 	sink *fakeSink
+	fr   *fakeSetupRunner
 	mu   sync.Mutex
 	n    int
 	last int // setup.plan count the last accepted proposal saw
@@ -154,6 +157,9 @@ func (g *planGatedProposals) Create(_ context.Context, pc events.ProposalCreated
 	}
 	g.last = plans
 	g.n++
+	for _, s := range pc.Steps {
+		g.fr.execStep(s.Action, s.Params)
+	}
 	return fmt.Sprintf("p_%d", g.n), nil
 }
 
@@ -277,6 +283,35 @@ func planToolUse(id string, phases ...map[string]any) map[string]any {
 	return map[string]any{"type": "tool_use", "id": id, "name": "setup_plan", "input": map[string]any{"phases": phases}}
 }
 
+// planToolUseSuperseding is a setup_plan call that names the plan it replaces
+// (supersedes is the model's own field in the design's tool schema).
+func planToolUseSuperseding(id, supersedes string, phases ...map[string]any) map[string]any {
+	in := map[string]any{"phases": phases}
+	if supersedes != "" {
+		in["supersedes"] = supersedes
+	}
+	return map[string]any{"type": "tool_use", "id": id, "name": "setup_plan", "input": in}
+}
+
+// firstPlanID reads the id the first setup_plan result assigned, which the
+// model's re-plan names in supersedes: the summary the tool returned carries
+// it, so it is part of the model's history, never invented by the script.
+func firstPlanID(t *testing.T, m *recordedModel) string {
+	t.Helper()
+	text := m.callsText()
+	const marker = "plan pl_"
+	i := strings.Index(text, marker)
+	if i < 0 {
+		t.Fatalf("the first plan's summary never reached the model: %q", text)
+	}
+	rest := text[i+len("plan "):]
+	if j := strings.IndexAny(rest, ": \n"); j > 0 {
+		return rest[:j]
+	}
+	t.Fatalf("no plan id after %q in %q", marker, text)
+	return ""
+}
+
 // TestSetupRecordedLadderRun is the row's recorded-model test (U1-10): the
 // model takes the paired runner from an empty project directory to a ladder
 // request — reads the empty dir, records the plan, proposes and executes the
@@ -300,10 +335,12 @@ func TestSetupRecordedLadderRun(t *testing.T) {
 			})
 			return string(b)
 		},
-		// Turn 2: the plan before any proposal.
+		// Turn 2: the plan before any proposal. The dir read of turn 1 is a
+		// tool_result block, which requestText does not carry; callsText has
+		// every text and tool-result block the model received.
 		func(text string) string {
-			if !strings.Contains(text, "project dir: empty") {
-				t.Errorf("the first reads did not see the empty dir: %q", text)
+			if !strings.Contains(m.callsText(), "project dir: empty") {
+				t.Errorf("the first reads did not see the empty dir: %q", m.callsText())
 			}
 			b, _ := json.Marshal(map[string]any{
 				"stop_reason": "tool_use",
@@ -443,8 +480,18 @@ func TestSetupRecordedLadderRun(t *testing.T) {
 			t.Fatalf("the model claimed the verification: %q", m)
 		}
 	}
-	if !strings.Contains(texts[len(texts)-1], "server") {
-		t.Fatalf("the last message does not credit the server: %q", texts[len(texts)-1])
+	// messageTexts appends the agent.verification verdicts after the agent
+	// messages, so the last agent message is not its last entry: the run's
+	// own texts must credit the server, whatever verdicts came before them.
+	var last string
+	for _, e := range sink.ofType(events.AgentMessage) {
+		var p events.AgentMessagePayload
+		if json.Unmarshal(e.payload, &p) == nil {
+			last = p.Text
+		}
+	}
+	if !strings.Contains(last, "server") {
+		t.Fatalf("the last agent message does not credit the server: %q", last)
 	}
 	// The whole story ran against the fake runner: the dir went from empty
 	// to the rendered files, the stack went up, and the connector exists.
@@ -502,7 +549,7 @@ func TestSetupReplanRefusedUntilNewPlan(t *testing.T) {
 			b, _ := json.Marshal(map[string]any{
 				"stop_reason": "tool_use",
 				"content": []map[string]any{
-					planToolUse("tu_4",
+					planToolUseSuperseding("tu_4", firstPlanID(t, m),
 						map[string]any{
 							"name": "stack",
 							"steps": []map[string]any{
@@ -530,7 +577,9 @@ func TestSetupReplanRefusedUntilNewPlan(t *testing.T) {
 			return string(b)
 		},
 	}
-	step0 := 0
+	// The duplicate-delivery dedupe of the steps bound is unit-tested in
+	// TestSetupObserve; a duplicate result delivered as its own batch after
+	// end_turn would wake the model for an extra turn here.
 	inbox := &fakeInbox{
 		drains: [][]HumanInput{
 			nil, // the opening drain
@@ -539,11 +588,10 @@ func TestSetupReplanRefusedUntilNewPlan(t *testing.T) {
 			nil, // the refused proposal executed nothing
 			nil,
 			{actionInput("proposal p_2 step 0: compose_write executed: wrote compose.yaml", okPtr(true))},
-			{HumanInput{Kind: "action_result", ProposalID: "p_2", StepIndex: &step0, OK: okPtr(true), Text: "duplicate delivery of p_2, counted once"}},
 		},
 		waitErr: context.Canceled,
 	}
-	props := &planGatedProposals{sink: sink}
+	props := &planGatedProposals{sink: sink, fr: fr}
 	r := newSetupRunner(t, fr, m, inbox, sink, props, setupActions(t))
 
 	if err := r.run(context.Background()); err != nil {
@@ -567,17 +615,17 @@ func TestSetupReplanRefusedUntilNewPlan(t *testing.T) {
 	if second.Supersedes != first.PlanID {
 		t.Fatalf("the new plan supersedes %q, want the first plan %q", second.Supersedes, first.PlanID)
 	}
-	// Both proposals went to the room; the refusal blocked the repeat, so the
-	// fake runner executed the failed step, the recovered step and nothing in
-	// between.
+	// Both accepted proposals' steps ran on the fake runner — the failed
+	// attempt and the recovered step — and the refused repeat is not among
+	// them: the room's plan gate blocked it before the executor.
 	var executed int
 	for _, op := range fr.ops {
 		if op == "compose_write" {
 			executed++
 		}
 	}
-	if executed != 1 {
-		t.Fatalf("compose_write executed %d times, want 1 (the recovered step)", executed)
+	if executed != 2 {
+		t.Fatalf("compose_write executed %d times, want 2 (the failed step and the recovered step, never the refused repeat)", executed)
 	}
 }
 
