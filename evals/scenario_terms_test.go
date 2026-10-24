@@ -1496,9 +1496,11 @@ func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
 
 // TestW4cRerunLabels pins the W4c re-run round (live run 40043829982): ruling R8
 // (#939) sets idle-wal-growth's budget to its 16 measured calls + 2, and
-// setup/db-unreachable-from-connect was held out until W4c-resolver (ruling
-// R10); KAN-526 landed the resolver check and removed the marker. Negatives:
-// neither scenario is held out, and the setup scenario keeps its R10 labels.
+// setup/db-unreachable-from-connect is held out until container-resolve-op
+// (ruling R10; re-keyed by the KAN-526 ruling: nettools.ConnectResolveCheck
+// observes the cause, but live rooms get it only through the runner op
+// container_resolve). Negatives: idle-wal-growth is not held out, and the
+// setup scenario keeps its labels, so it scores as before once the marker goes.
 func TestW4cRerunLabels(t *testing.T) {
 	idle := w4cScenario(t, "idle-wal-growth")
 	if idle.Expect.MaxToolCalls != 18 {
@@ -1508,10 +1510,8 @@ func TestW4cRerunLabels(t *testing.T) {
 		t.Errorf("idle-wal-growth is held out: %q", idle.PendingHarness)
 	}
 	setup := w4cScenario(t, "setup/db-unreachable-from-connect")
-	// KAN-526 landed the resolver check, so the marker is gone and the
-	// scenario runs with these labels.
-	if setup.Pending() {
-		t.Errorf("setup/db-unreachable-from-connect is still held out: %q", setup.PendingHarness)
+	if setup.PendingHarness != "container-resolve-op" {
+		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want container-resolve-op", setup.PendingHarness)
 	}
 	if !reflect.DeepEqual(setup.Expect.RootCause, [][]string{{"resolv*", "dns", "hosts", "name resolution"}}) {
 		t.Errorf("setup/db-unreachable-from-connect root_cause = %v", setup.Expect.RootCause)

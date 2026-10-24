@@ -84,19 +84,23 @@
 #   f_server_answers now comes from net_probe's tcp check (Piperoom opens a TCP connection to
 #   postgres:5432), the read the agent used instead of source_settings, so source_settings is no
 #   longer required evidence (W4a: no duplicate evidence); its recording stays.
-# KAN-526 (W4c-resolver, C18): the scenario was held out (pending_harness: W4c-resolver) because
-#   no read showed what the Connect worker resolved postgres to. net_probe now has a
-#   connect_resolve check (nettools.ConnectResolveCheck): through a WorkerResolver it asks the
-#   Connect worker what it resolves the running connector's database.hostname to and whether the
-#   first address answers TCP from the worker. The net_probe {target: source} recording below is
-#   that tool's real output over fakes of this world (nettools scenarioWorld, pinned by
-#   TestToolConnectResolveScenarioWorld): the worker resolves postgres to 192.0.2.1 and the SYN
-#   gets no answer within the 3 s step, while Piperoom resolves 172.18.0.2 and connects. The
-#   marker is removed, and f_worker_resolves_black_hole makes that line required evidence.
-#   Production rooms do not have the worker view yet: the runner op it needs is a contract change
-#   request in KAN-526's PR, so until it lands a live room's net_probe has no connect_resolve line.
+# KAN-526 (C18): net_probe now has a connect_resolve check (nettools.ConnectResolveCheck): through
+#   a WorkerResolver it asks the Connect worker what it resolves the running connector's
+#   database.hostname to and whether the first address answers TCP from the worker. The net_probe
+#   {target: source} recording below is that tool's real output over fakes of this world
+#   (nettools scenarioWorld, pinned by TestToolConnectResolveScenarioWorld): the worker resolves
+#   postgres to 192.0.2.1 and the SYN gets no answer within the 3 s step, while Piperoom resolves
+#   172.18.0.2 and connects. f_worker_resolves_black_hole makes that line required evidence.
 
 name: setup/db-unreachable-from-connect
+# Held out until container-resolve-op (lead ruling on #996, KAN-526; was W4c-resolver under R10).
+# The check that observes the cause exists, but only over fakes: a WorkerResolver needs the
+# setup runner's container_resolve op (KAN-526's contract change request), and no op runs inside
+# the Connect container today, so a live room's net_probe has no connect_resolve line. Scoring
+# the scenario now would credit a capability live rooms lack. The recording and the required
+# fact are ready: -validate refuses this marker once a package under internal/setup declares the
+# runner op container_resolve (evals/pending.go, opDeclared), and the scenario then runs as is.
+pending_harness: container-resolve-op
 description: |
   The person re-ran piperoom-setup after moving the project between hosts. The run stopped at its
   reachability step: check connect-source-reachable fails, because the Connect container resolves
