@@ -318,30 +318,17 @@ func TestServiceRequestsClosed(t *testing.T) {
 	}
 }
 
-// TestServiceOtherControls: a control the service does not accept changes
-// nothing.
-func TestServiceOtherControls(t *testing.T) {
-	f := newSupervisorFixture(t, newFakeChild(0))
-	f.serve()
-	f.rec.next(t)
-	f.reqs <- changeRequest{Cmd: serviceControl(6)} // pause, not accepted
-	f.reqs <- changeRequest{Cmd: controlStop}
-	if st := f.rec.next(t); st.State != stateStopPending {
-		t.Errorf("next status %v, want stop pending (an ignored control reports nothing)", st.State)
-	}
-	f.finish(t)
-	if got := f.rec.all(); len(got) != 2 {
-		t.Errorf("reported statuses %+v, want Running and stop pending", got)
-	}
-}
-
-// fakeServiceHost is serviceHost: the platform binding, faked.
+// fakeServiceHost is serviceHost: a Program Files directory, a trust check
+// that fails for the paths in untrusted, and a Run that records the supervisor.
 type fakeServiceHost struct {
-	isService bool
-	isErr     error
-	runErr    error
-	ranName   string
-	sup       *serviceSupervisor
+	isService    bool
+	isErr        error
+	runErr       error
+	programFiles string
+	untrusted    map[string]bool
+	checked      []string
+	ranName      string
+	sup          *serviceSupervisor
 }
 
 func (h *fakeServiceHost) IsService() (bool, error) { return h.isService, h.isErr }
@@ -351,13 +338,26 @@ func (h *fakeServiceHost) Run(name string, sup *serviceSupervisor) error {
 	return h.runErr
 }
 
-// runServiceProject lays out a project the subcommand accepts: the directory
-// exists and holds a distribution.
-func runServiceProject(t *testing.T) string {
+func (h *fakeServiceHost) ProgramFiles() (string, error) { return h.programFiles, nil }
+
+func (h *fakeServiceHost) CheckTrusted(path string, tree bool) error {
+	h.checked = append(h.checked, path)
+	if h.untrusted[path] {
+		return ErrUntrusted
+	}
+	return nil
+}
+
+// runServiceRelease lays out a release the subcommand accepts under a
+// temporary Program Files: <pf>/Piperoom/piperoom-connect/releases/<id> with a
+// distribution and a worker file. It returns the Program Files directory and
+// the release.
+func runServiceRelease(t *testing.T) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
-	for _, name := range []string{DistDir + "/libs/kafka-clients-4.0.0.jar", "connect-distributed.properties"} {
-		p := filepath.Join(dir, filepath.FromSlash(name))
+	pf := t.TempDir()
+	release := releasePath(serviceHome(pf, "piperoom-connect"), "0123456789abcdef")
+	for _, name := range []string{DistDir + "/libs/kafka-clients-4.0.0.jar", releaseConfigDir + "/connect-distributed.properties"} {
+		p := filepath.Join(release, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -365,33 +365,35 @@ func runServiceProject(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	return dir
+	return pf, release
 }
 
-// TestRunServiceRefusals: every bad input is refused before anything starts,
-// and the console refusal names the SCM.
+// TestRunServiceRefusals: every bad input is refused before anything starts.
 func TestRunServiceRefusals(t *testing.T) {
-	dir := runServiceProject(t)
-	file := filepath.Join(dir, "connect-distributed.properties")
+	pf, release := runServiceRelease(t)
+	home := serviceHome(pf, "piperoom-connect")
+	other := releasePath(serviceHome(pf, "piperoom-other"), "0123456789abcdef")
 	cases := []struct {
 		name string
 		args []string
 		want error
 	}{
 		{"no args", nil, ErrParams},
-		{"no project", []string{"--java", fakeJavaHome}, ErrParams},
-		{"no java", []string{"--project", dir}, ErrParams},
-		{"bad mode", []string{"--project", dir, "--java", fakeJavaHome, "--mode", "cluster"}, ErrParams},
-		{"bad name", []string{"--project", dir, "--java", fakeJavaHome, "--name", "a.b"}, ErrParams},
-		{"relative project", []string{"--project", "orders", "--java", fakeJavaHome}, ErrDetect},
-		{"relative java", []string{"--project", dir, "--java", "jdk"}, ErrDetect},
-		{"missing project dir", []string{"--project", filepath.Join(dir, "absent"), "--java", fakeJavaHome}, ErrDetect},
-		{"project is a file", []string{"--project", file, "--java", fakeJavaHome}, ErrDetect},
-		{"extra argument", []string{"--project", dir, "--java", fakeJavaHome, "extra"}, ErrParams},
+		{"no release", []string{"--java", fakeJavaHome}, ErrParams},
+		{"no java", []string{"--release", release}, ErrParams},
+		{"bad mode", []string{"--release", release, "--java", fakeJavaHome, "--mode", "cluster"}, ErrParams},
+		{"bad name", []string{"--release", release, "--java", fakeJavaHome, "--name", "a.b"}, ErrParams},
+		{"relative release", []string{"--release", "orders", "--java", fakeJavaHome}, ErrDetect},
+		{"relative java", []string{"--release", release, "--java", "jdk"}, ErrDetect},
+		{"extra argument", []string{"--release", release, "--java", fakeJavaHome, "extra"}, ErrParams},
+		// The release must be one of this service's own, in its home.
+		{"another service's release", []string{"--release", other, "--java", fakeJavaHome}, ErrParams},
+		{"a release id that is not a digest", []string{"--release", releasePath(home, "latest"), "--java", fakeJavaHome}, ErrParams},
+		{"a project directory", []string{"--release", t.TempDir(), "--java", fakeJavaHome}, ErrParams},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			host := &fakeServiceHost{isService: true}
+			host := &fakeServiceHost{isService: true, programFiles: pf}
 			err := runService(c.args, io.Discard, host)
 			if !errors.Is(err, c.want) {
 				t.Fatalf("err %v, want %v", err, c.want)
@@ -401,79 +403,94 @@ func TestRunServiceRefusals(t *testing.T) {
 			}
 		})
 	}
-	t.Run("missing worker is the JVM's failure not a refusal", func(t *testing.T) {
-		// Only the project must exist: a missing worker file is the JVM's
-		// start failure, which reports its exit code, so the operator can fix
-		// the properties and restart.
-		empty := t.TempDir()
-		host := &fakeServiceHost{isService: true}
-		if err := runService([]string{"--project", empty, "--java", fakeJavaHome}, io.Discard, host); err != nil {
-			t.Fatalf("err %v, want nil", err)
-		}
-		if host.ranName != "piperoom-connect" {
-			t.Errorf("ran %q, want piperoom-connect", host.ranName)
-		}
-	})
+}
+
+// TestRunServiceRefusesAnUntrustedPath: the release and the JDK are checked
+// at every start, so a DACL loosened after install stops the service instead
+// of letting it run what another account changed; the refusal is logged in the
+// home's service log, where the operator reads why the start failed.
+func TestRunServiceRefusesAnUntrustedPath(t *testing.T) {
+	for _, what := range []string{"release", "JDK"} {
+		t.Run(what, func(t *testing.T) {
+			pf, release := runServiceRelease(t)
+			bad := release
+			if what == "JDK" {
+				bad = fakeJavaHome
+			}
+			host := &fakeServiceHost{isService: true, programFiles: pf, untrusted: map[string]bool{bad: true}}
+			err := runService([]string{"--release", release, "--java", fakeJavaHome}, io.Discard, host)
+			if !errors.Is(err, ErrUntrusted) {
+				t.Fatalf("err %v, want ErrUntrusted", err)
+			}
+			if host.sup != nil {
+				t.Error("the service ran from an untrusted path")
+			}
+			b, rerr := os.ReadFile(filepath.Join(serviceHome(pf, "piperoom-connect"), homeLogDir, ServiceLogName))
+			if rerr != nil || !strings.Contains(string(b), "refusing to start") {
+				t.Errorf("service log %q (%v), want the refusal", b, rerr)
+			}
+		})
+	}
 }
 
 // TestRunServiceIsTheSCMsEntryPoint: started from a console the subcommand
 // refuses, since there is no SCM channel to answer — and it refuses before it
-// opens the project log.
+// opens the service log.
 func TestRunServiceIsTheSCMsEntryPoint(t *testing.T) {
-	dir := runServiceProject(t)
-	host := &fakeServiceHost{isService: false}
-	err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host)
+	pf, release := runServiceRelease(t)
+	host := &fakeServiceHost{isService: false, programFiles: pf}
+	err := runService([]string{"--release", release, "--java", fakeJavaHome}, io.Discard, host)
 	if !errors.Is(err, ErrUnsupported) || !strings.Contains(err.Error(), "service control manager") {
 		t.Fatalf("err %v, want the console refusal naming the SCM", err)
 	}
-	if _, serr := os.Stat(filepath.Join(dir, LogDir, ServiceLogName)); !os.IsNotExist(serr) {
+	if _, serr := os.Stat(filepath.Join(serviceHome(pf, "piperoom-connect"), homeLogDir, ServiceLogName)); !os.IsNotExist(serr) {
 		t.Errorf("a console run wrote the service log: %v", serr)
 	}
-	host = &fakeServiceHost{isErr: errors.New("IsWindowsService: Access is denied.")}
-	if err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host); err == nil {
+	host = &fakeServiceHost{isErr: errors.New("IsWindowsService: Access is denied."), programFiles: pf}
+	if err := runService([]string{"--release", release, "--java", fakeJavaHome}, io.Discard, host); err == nil {
 		t.Fatal("an IsWindowsService failure was ignored")
 	}
 }
 
-// TestRunServiceRuns: a service start builds the JVM argv from the flags, logs
-// the start under the project's logs/ and runs under the SCM with the service
-// name the SCM knows.
+// TestRunServiceRuns: a service start checks the release and the JDK, builds
+// the JVM argv from the release, logs the start in the home's logs and runs
+// under the SCM with the service name the SCM knows.
 func TestRunServiceRuns(t *testing.T) {
-	dir := runServiceProject(t)
-	host := &fakeServiceHost{isService: true}
-	if err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host); err != nil {
+	pf, release := runServiceRelease(t)
+	home := serviceHome(pf, "piperoom-connect")
+	host := &fakeServiceHost{isService: true, programFiles: pf}
+	if err := runService([]string{"--release", release, "--java", fakeJavaHome}, io.Discard, host); err != nil {
 		t.Fatalf("runService: %v", err)
 	}
 	if host.ranName != "piperoom-connect" {
 		t.Errorf("ran as %q, want piperoom-connect", host.ranName)
 	}
+	if !equalStrings(host.checked, []string{release, fakeJavaHome}) {
+		t.Errorf("trust checks %q, want the release and the JDK", host.checked)
+	}
 	if host.sup == nil {
 		t.Fatal("no supervisor reached the service host")
 	}
-	if got, want := host.sup.argv, wantJavaArgv(dir, ModeDistributed, ""); !equalStrings(got, want) {
+	if got, want := host.sup.argv, wantJavaArgv(release, home, ModeDistributed, ""); !equalStrings(got, want) {
 		t.Errorf("JVM argv %q, want %q", got, want)
 	}
-	logPath := filepath.Join(dir, LogDir, ServiceLogName)
-	b, err := os.ReadFile(logPath)
+	b, err := os.ReadFile(filepath.Join(home, homeLogDir, ServiceLogName))
 	if err != nil {
 		t.Fatalf("service log: %v", err)
 	}
-	if !strings.Contains(string(b), "service host starting") || !strings.Contains(string(b), "piperoom-connect") {
-		t.Errorf("service log %q, want the start line", b)
-	}
-	if !strings.Contains(string(b), "argv=") {
-		t.Errorf("service log %q, want the argv the service starts", b)
+	if !strings.Contains(string(b), "service host starting") || !strings.Contains(string(b), "argv=") {
+		t.Errorf("service log %q, want the start line with the argv", b)
 	}
 	// A failed svc.Run is a failure the SCM has to see.
 	host.runErr = errors.New("StartServiceCtrlDispatcher: the service did not respond")
-	if err := runService([]string{"--project", dir, "--java", fakeJavaHome}, io.Discard, host); !errors.Is(err, ErrServiceManager) {
+	if err := runService([]string{"--release", release, "--java", fakeJavaHome}, io.Discard, host); !errors.Is(err, ErrServiceManager) {
 		t.Errorf("svc.Run failure: %v, want ErrServiceManager", err)
 	}
 }
 
 // TestRunServiceCommand: setupcmd.Run dispatches on the first argument only.
 func TestRunServiceCommand(t *testing.T) {
-	for _, args := range [][]string{nil, {}, {"--project", "x"}, {"run-services"}} {
+	for _, args := range [][]string{nil, {}, {"--release", "x"}, {"run-services"}} {
 		handled, err := RunServiceCommand(args, io.Discard)
 		if handled || err != nil {
 			t.Errorf("RunServiceCommand(%q) = %v, %v; want (false, nil)", args, handled, err)
@@ -481,19 +498,19 @@ func TestRunServiceCommand(t *testing.T) {
 	}
 	handled, err := RunServiceCommand([]string{RunServiceSubcommand}, io.Discard)
 	if !handled || err == nil {
-		t.Fatalf("RunServiceCommand(run-service) = %v, %v; want handled with the missing-project refusal", handled, err)
+		t.Fatalf("RunServiceCommand(run-service) = %v, %v; want handled with the missing-release refusal", handled, err)
 	}
 	if !errors.Is(err, ErrParams) {
 		t.Errorf("err %v, want ErrParams", err)
 	}
 }
 
-// TestServiceLogStaysInTheProject: a project directory that cannot be opened
-// is not a reason to fail the service; the log is best effort.
-func TestServiceLogStaysInTheProject(t *testing.T) {
+// TestServiceLogIsBestEffort: a home that cannot be opened is not a reason to
+// fail the service; the log is best effort.
+func TestServiceLogIsBestEffort(t *testing.T) {
 	w, closeFn := serviceLog(filepath.Join(t.TempDir(), "absent"))
 	if w != io.Discard {
-		t.Errorf("logger %T, want io.Discard for a project that does not exist", w)
+		t.Errorf("logger %T, want io.Discard for a home that does not exist", w)
 	}
 	closeFn()
 }

@@ -32,26 +32,23 @@
 // that hole. A system-scope install needs a design ruling (a root-owned unit
 // directory outside the project) and is not in this row. A Windows service
 // always installs into the machine's service database and therefore needs an
-// elevated prompt. It runs as its own virtual account (NT SERVICE\<service>,
-// never LocalSystem) with a token that keeps one privilege, and install gives
-// the directories the service executes or loads from (bin\, kafka\,
-// connect-plugins\, services\) a protected DACL owned by Administrators, so a
-// file the person's account writes can no longer become code the service runs
-// (winsvc.go, serviceAccountPrefix; acl.go). One file is still theirs: the
-// worker properties file at the project root, which properties_write (T1)
-// writes unelevated and which decides what the service loads, and the project
-// directory itself, which that account can rename aside while the service is
-// stopped. Both are the remaining risk (docs/design/setup-agent.md), and the
-// reason a Windows install wants its own host. Row U8e documents
-// the account, the ACLs and where to install.
+// elevated prompt; for the same reason it never runs from the project. Install
+// stages a release into an admin-only home under Program Files (servicehome.go:
+// the runner, the distribution's libs and config, the plugins and a re-validated
+// worker file), checks that only administrators can change the release, the
+// home, the JDK and every directory above them, and points the service at that
+// release; the service runs as its own virtual account (NT SERVICE\<service>,
+// never LocalSystem) with a token that keeps one privilege (winsvc.go,
+// serviceAccountPrefix). A change under the project takes effect at the next
+// service_install. Row U8e documents the account and where to install.
 //
 // The unit file is written to systemd/<unit> under the project directory and
 // linked into the user's unit search path by `systemctl --user enable
-// <absolute path>`. On Windows the project holds bin/piperoom-setup.exe (the
-// copy the SCM runs) and services/<name>.txt (the definition install
-// recorded). The distribution, the plugin directory and the unit, bin and
-// services directories are registered as mount directories, so file_write and
-// file_delete can never change what the service executes or loads.
+// <absolute path>`. On Windows the project holds services/<name>.txt, a marker
+// of the definition install recorded (the record install trusts is the one in
+// the home). The distribution, the plugin directory and the unit and services
+// directories are registered as mount directories, so file_write and
+// file_delete can never change what a service executes or loads.
 //
 // Wiring (one line outside this package, after ops.New(cfg), in place of
 // compose.Register for a room whose SetupRequest.Target is "host"):
@@ -97,11 +94,11 @@ const (
 	// DefaultService is the service name when the params name none.
 	DefaultService = "connect"
 
-	// BinDir holds the copy of piperoom-setup.exe the Windows service
-	// control manager runs (row U8b).
+	// BinDir holds, in a Windows service's release, the copy of
+	// piperoom-setup.exe the service control manager runs (row U8b).
 	BinDir = "bin"
-	// ServiceDir holds the Windows service definitions service_install
-	// records (the unit file's counterpart).
+	// ServiceDir holds the markers of the Windows service definitions
+	// service_install records (the unit file's counterpart).
 	ServiceDir = "services"
 	// RunnerExe is that copy's fixed name.
 	RunnerExe = "piperoom-setup.exe"
@@ -193,7 +190,7 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	case "linux":
 		d.mgr = systemdUser{resolve: d.resolve}
 	case "windows":
-		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable, defaultServiceACL())
+		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable, defaultProgramFiles, defaultServiceACL(), defaultTrust())
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},
@@ -205,9 +202,10 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	}
 	dirs := []string{DistDir, PluginDir, UnitDir}
 	if d.goos == "windows" {
-		// The SCM runs bin/piperoom-setup.exe and install records
-		// services/<name>.txt: neither may become file_write's target.
-		dirs = []string{DistDir, PluginDir, BinDir, ServiceDir}
+		// install stages the distribution and the plugins into the service's
+		// release and marks services/<name>.txt: none may become file_write's
+		// target (the release itself is outside the project).
+		dirs = []string{DistDir, PluginDir, ServiceDir}
 	}
 	for _, dir := range dirs {
 		if err := r.RegisterMountDir(dir); err != nil {

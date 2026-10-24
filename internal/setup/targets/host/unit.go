@@ -208,16 +208,27 @@ type serviceSpec struct {
 	Worker   string // project-relative
 	Rendered Unit   // Linux: the rendered unit
 	// Windows (row U8b): the service control manager runs this exe with Args,
-	// and the exe runs the JVM in Java. None of them comes from an op param.
+	// and the exe runs the JVM in Java. None of them comes from an op param,
+	// and none of them is under the project: the manager's complete stages a
+	// release into the service's admin-only home and points these at it
+	// (servicehome.go).
 	ProjectDir string
-	ExePath    string   // <project>\bin\piperoom-setup.exe
-	Args       []string // run-service --project ... --name ... --mode ... --java ...
+	JavaHome   string
+	Class      string
+	Home       string   // %ProgramFiles%\Piperoom\<unit>
+	Release    string   // <home>\releases\<id>
+	Digest     string   // the release's content digest (hex SHA-256)
+	ExePath    string   // <release>\bin\piperoom-setup.exe
+	Args       []string // run-service --release ... --name ... --mode ... --java ...
 	Java       []string // the JVM argv the service host starts
-	LogFile    string   // <project>\logs\piperoom-service.log
-	// Offsets is a standalone worker's offset file (<project>\connect.offsets),
+	LogFile    string   // <home>\logs\piperoom-service.log
+	// Offsets is a standalone worker's offset file (<home>\data\<name>.offsets),
 	// the second place the service writes; empty for a distributed worker, whose
 	// offsets live in a Kafka topic.
 	Offsets string
+	// plan is what complete read from the project for the release; install
+	// stages exactly it.
+	plan *releasePlan
 }
 
 // spec resolves params into a service definition. Paths come from the project
@@ -276,12 +287,13 @@ func (d *Driver) specUnix(p ServiceParams, unit string, env ops.Env) (serviceSpe
 	return s, nil
 }
 
-// specWindows is the service definition of row U8b. The service control manager
+// specWindows is the project half of the service definition of row U8b: the
+// mode, the worker file and the detected JDK. The service control manager
 // cannot run java.exe (it never answers the SCM's status handshake), so the
-// installed service is piperoom-setup itself: the copy at bin/ under the
-// project, started with the run-service subcommand and the project directory.
-// The exe then starts the Connect JVM with the argv javaArgv builds, so the
-// worker runs as a child of a process that does speak to the SCM.
+// installed service is piperoom-setup itself, started with the run-service
+// subcommand; it starts the Connect JVM with the argv javaArgv builds. Where
+// all of that runs from — an admin-only release under Program Files, never the
+// project — is the manager's half (windowsManager.complete).
 //
 // The paths take the service shape (CheckServicePath): a project directory, a
 // distribution or a JDK under `C:\Program Files` or a profile with a space in
@@ -304,31 +316,12 @@ func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (service
 	if err != nil {
 		return serviceSpec{}, err
 	}
-	java, err := javaArgv(dir, javaHome, p.Mode)
-	if err != nil {
-		return serviceSpec{}, err
-	}
-	exe := nativeJoin(dir, BinDir, RunnerExe)
-	args := []string{
-		RunServiceSubcommand, "--project", dir,
-		"--name", p.Name, "--mode", p.Mode, "--java", javaHome,
-	}
-	for _, v := range append([]string{exe}, args...) {
-		if err := CheckServiceToken(v); err != nil {
-			return serviceSpec{}, err
-		}
-	}
-	spec := serviceSpec{
+	return serviceSpec{
 		Unit: unit, Mode: p.Mode, Worker: files[1],
 		UnitFile:   ServiceDir + "/" + unit + ".txt",
 		UnitPath:   nativeJoin(dir, ServiceDir, unit+".txt"),
-		ProjectDir: dir, ExePath: exe, Args: args, Java: java,
-		LogFile: nativeJoin(dir, LogDir, ServiceLogName),
-	}
-	if p.Mode == ModeStandalone {
-		spec.Offsets = nativeJoin(dir, OffsetsFile)
-	}
-	return spec, nil
+		ProjectDir: dir, JavaHome: javaHome, Class: d.classOrDefault(),
+	}, nil
 }
 
 // checkPath is the path rule of the artifact this driver renders: a systemd

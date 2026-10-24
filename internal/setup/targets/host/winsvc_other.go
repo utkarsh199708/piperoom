@@ -31,3 +31,9 @@ func (platformServiceHost) IsService() (bool, error) {
 func (platformServiceHost) Run(string, *serviceSupervisor) error {
 	return fmt.Errorf("%w: a %s build cannot run as a Windows service", ErrUnsupported, runtime.GOOS)
 }
+
+func (platformServiceHost) ProgramFiles() (string, error) { return defaultProgramFiles() }
+
+func (platformServiceHost) CheckTrusted(path string, tree bool) error {
+	return defaultTrust().CheckTrusted(path, tree)
+}

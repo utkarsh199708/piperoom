@@ -33,7 +33,7 @@ import (
 //
 // The one argument form parsed here first is the host target's run-service
 // subcommand (row U8b): the Windows service control manager starts
-// `piperoom-setup run-service --project ...`, and that process is the service
+// `piperoom-setup run-service --release ...`, and that process is the service
 // host, not a runner. It is dispatched in this package rather than in cmd/setup
 // so that every build of the runner — piperoom-setup and the umbrella
 // `piperoom setup` — answers it the same way; the service's own binary must be

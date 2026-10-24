@@ -229,3 +229,31 @@ func restoreForCleanup(t *testing.T, root string, self *windows.SID) {
 		return nil
 	})
 }
+
+// TestWindowsTrustReadsTheRealDACLs: the trust check against what Windows
+// itself ships and what a non-administrator owns. System32 and Program Files
+// are owned by TrustedInstaller and grant no other account a write, so they
+// pass; a temporary directory belongs to the account running the test, so it
+// is refused, by owner, before any ACE is read.
+func TestWindowsTrustReadsTheRealDACLs(t *testing.T) {
+	system32, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatalf("GetSystemDirectory: %v", err)
+	}
+	pf, err := defaultProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{system32, pf} {
+		if err := (windowsTrust{}).CheckTrusted(p, false); err != nil {
+			t.Errorf("CheckTrusted(%s): %v, want it trusted", p, err)
+		}
+	}
+	dir := t.TempDir()
+	if err := (windowsTrust{}).CheckTrusted(dir, false); !errors.Is(err, ErrUntrusted) {
+		t.Errorf("CheckTrusted(%s) = %v, want ErrUntrusted for a directory the test's account owns", dir, err)
+	}
+	if err := (windowsTrust{}).CheckTrusted("relative", false); !errors.Is(err, ErrUntrusted) {
+		t.Errorf("a relative path: %v", err)
+	}
+}

@@ -129,16 +129,16 @@ func TestUnexpectedArguments(t *testing.T) {
 }
 
 // TestRunDispatchesRunService: the Windows service control manager starts
-// `piperoom-setup run-service --project ...` (row U8b), so every build of the
+// `piperoom-setup run-service --release ...` (row U8b), so every build of the
 // runner answers that subcommand before it parses the runner's own flags — a
 // console run of it is refused with a reason instead of a flag error.
 func TestRunDispatchesRunService(t *testing.T) {
 	err := Run([]string{"run-service"}, io.Discard, io.Discard)
-	if err == nil || !errors.Is(err, host.ErrParams) || !strings.Contains(err.Error(), "--project") {
-		t.Fatalf("Run(run-service) = %v, want the run-service --project refusal, not a flag error", err)
+	if err == nil || !errors.Is(err, host.ErrParams) || !strings.Contains(err.Error(), "--release") {
+		t.Fatalf("Run(run-service) = %v, want the run-service --release refusal, not a flag error", err)
 	}
-	err = Run([]string{"run-service", "--project", t.TempDir()}, io.Discard, io.Discard)
+	err = Run([]string{"run-service", "--release", t.TempDir()}, io.Discard, io.Discard)
 	if err == nil || !errors.Is(err, host.ErrParams) || !strings.Contains(err.Error(), "--java") {
-		t.Fatalf("Run(run-service --project) = %v, want the run-service --java refusal", err)
+		t.Fatalf("Run(run-service --release) = %v, want the run-service --java refusal", err)
 	}
 }

@@ -194,6 +194,10 @@ func (o serviceInstallOp) prepare(params json.RawMessage, env ops.Env) (serviceS
 		return serviceSpec{}, nil, err
 	}
 	s, err := o.d.spec(p, env)
+	if err != nil {
+		return serviceSpec{}, nil, err
+	}
+	s, err = mgr.complete(env, s)
 	return s, mgr, err
 }
 

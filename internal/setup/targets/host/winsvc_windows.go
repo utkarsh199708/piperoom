@@ -212,3 +212,9 @@ func (h svcHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, statu
 	close(done)
 	return specific, code
 }
+
+func (platformServiceHost) ProgramFiles() (string, error) { return defaultProgramFiles() }
+
+func (platformServiceHost) CheckTrusted(path string, tree bool) error {
+	return windowsTrust{}.CheckTrusted(path, tree)
+}

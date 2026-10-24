@@ -42,8 +42,7 @@ func writeConfined(env ops.Env, name string, data []byte, mode fs.FileMode) (str
 
 // writeDriverFile is writeConfined for the one file kind the driver itself
 // renders into a directory it registered as a mount: the systemd unit (UnitDir)
-// and, on Windows, the copy of piperoom-setup.exe the service control manager
-// runs (BinDir) and its recorded definition (ServiceDir). dir is the one
+// and, on Windows, the marker of the definition install recorded (ServiceDir). dir is the one
 // directory that kind may go in, so a driver write never lands anywhere else
 // under a mount.
 func writeDriverFile(env ops.Env, name string, data []byte, mode fs.FileMode, dir string) (string, bool, error) {

@@ -13,8 +13,8 @@ import (
 // The service-host role of row U8b. The service control manager cannot run
 // java.exe: a process it starts must call into the SCM inside the start
 // timeout, and java.exe never does. So the installed service is a copy of
-// piperoom-setup (bin/piperoom-setup.exe under the project) started with
-// run-service; that process starts the Connect JVM as its child (file:
+// piperoom-setup (bin\piperoom-setup.exe in the release install staged under
+// Program Files; servicehome.go) started with run-service; that process starts the Connect JVM as its child (file:
 // child.go), reports Running, relays Stop and Shutdown to the child, and turns
 // the child's exit into the service's service-specific exit code (svc.Run
 // reports the final Stopped itself, with that code).
@@ -27,7 +27,7 @@ import (
 // ServiceLogName is the file the service host writes its own lines and the
 // JVM's console output to. A Windows service has no terminal, so a JVM that
 // dies during startup would otherwise leave nothing to read (Kafka's log4j
-// appenders still write their own files under logs/).
+// appenders still write their own files there, in the home's logs\).
 const ServiceLogName = "piperoom-service.log"
 
 // Timing of the service host. The wait hint is what the SCM is told a pending
@@ -49,35 +49,37 @@ var connectMain = map[string]string{
 }
 
 // javaArgv builds the JVM command line of the service: the detected JDK,
-// the distribution's libs/ as a wildcard classpath (the JVM expands it, so no
-// jar list is globbed or joined here), the logs directory and the worker
-// properties file the mode names. It mirrors what the distribution's
-// connect-<mode>.sh runs: the heap of KAFKA_HEAP_OPTS (-Xms256M -Xmx2G, not the
-// -Xmx256M an older version of this function copied from the unit), and the
-// log4j configuration without which connect.log is never written (file:
-// connectLog4jArg). Every path is checked by CheckServicePath; the arguments
-// are passed to exec.Command as a slice, never as a string.
-func javaArgv(project, javaHome, mode string) ([]string, error) {
+// the release's kafka\libs as a wildcard classpath (the JVM expands it, so no
+// jar list is globbed or joined here), the home's log directory and the
+// release's worker file for the mode. It mirrors what the distribution's
+// connect-<mode>.sh runs: the heap of KAFKA_HEAP_OPTS (-Xms256M -Xmx2G), and
+// the log4j configuration without which connect.log is never written (file:
+// connectLog4jArg). probe is the directory whose config files decide the log4j
+// argument: the project's kafka\config while the release is being planned
+// (it is staged from there), the release's own at the service's start. Every
+// path is checked by CheckServicePath; the arguments are passed to exec.Command
+// as a slice, never as a string.
+func javaArgv(release, home, javaHome, mode, probe string) ([]string, error) {
 	files, ok := modeFiles[mode]
 	if !ok {
 		return nil, fmt.Errorf("%w: mode %s is not distributed or standalone", ErrParams, q(mode))
 	}
-	libs := nativeJoin(project, DistDir, "libs")
-	logs := nativeJoin(project, LogDir)
-	worker := nativeJoin(project, files[1])
+	libs := nativeJoin(release, DistDir, "libs")
+	logs := nativeJoin(home, homeLogDir)
+	worker := nativeJoin(release, releaseConfigDir, files[1])
 	java := nativeJoin(javaHome, "bin", "java.exe")
-	for _, p := range []string{project, javaHome, libs, logs, worker, java} {
+	for _, p := range []string{release, home, javaHome, libs, logs, worker, java} {
 		if err := CheckServicePath(p); err != nil {
 			return nil, err
 		}
 	}
-	log4j, err := connectLog4jArg(project)
+	log4j, err := connectLog4jArg(probe, nativeJoin(release, DistDir, "config"))
 	if err != nil {
 		return nil, err
 	}
 	// The classpath is one wildcard entry the JVM expands, in the shape of the
-	// project path; a jar list is never globbed or joined here.
-	sep := pathSeparator(project)
+	// release path; a jar list is never globbed or joined here.
+	sep := pathSeparator(release)
 	argv := []string{
 		java,
 		"-Xms256M", "-Xmx2G",
@@ -94,25 +96,23 @@ func javaArgv(project, javaHome, mode string) ([]string, error) {
 }
 
 // connectLog4jArg is the JVM argument that points the worker at the
-// distribution's logging configuration, or "" when the distribution carries
-// none (log4j's default configuration then logs to the console, which the
-// service host sends to logs/piperoom-service.log). Kafka 4 names the file
-// config/connect-log4j2.yaml and selects it with -Dlog4j2.configurationFile;
-// earlier distributions use config/connect-log4j.properties with
-// -Dlog4j.configuration=file:. Without it no file appender is configured and
-// connect.log is never written.
-func connectLog4jArg(project string) (string, error) {
-	config := nativeJoin(project, DistDir, "config")
+// distribution's logging configuration in config, or "" when probe holds none
+// (log4j's default configuration then logs to the console, which the service
+// host sends to logs\piperoom-service.log). Kafka 4 names the file
+// connect-log4j2.yaml and selects it with -Dlog4j2.configurationFile; earlier
+// distributions use connect-log4j.properties with -Dlog4j.configuration=file:.
+// Without it no file appender is configured and connect.log is never written.
+func connectLog4jArg(probe, config string) (string, error) {
 	candidates := []struct{ file, property string }{
 		{"connect-log4j2.yaml", "-Dlog4j2.configurationFile="},
 		{"connect-log4j.properties", "-Dlog4j.configuration=file:"},
 	}
 	for _, c := range candidates {
-		p := nativeJoin(config, c.file)
-		fi, err := os.Stat(p)
+		fi, err := os.Stat(nativeJoin(probe, c.file))
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
+		p := nativeJoin(config, c.file)
 		if err := CheckServicePath(p); err != nil {
 			return "", err
 		}
@@ -129,12 +129,19 @@ type serviceHost interface {
 	IsService() (bool, error)
 	// Run runs the process as service name.
 	Run(name string, sup *serviceSupervisor) error
+	// ProgramFiles is %ProgramFiles% from the known-folder API: the release
+	// the SCM names must be under this service's home in it.
+	ProgramFiles() (string, error)
+	// CheckTrusted is trustAPI.CheckTrusted: the release and the JDK are
+	// checked again at every start, so a DACL loosened after install stops
+	// the service rather than letting it run what another account changed.
+	CheckTrusted(path string, tree bool) error
 }
 
 // RunServiceCommand reports whether args name the run-service subcommand and,
 // if so, runs it. setupcmd.Run dispatches here before it parses its own flags:
 // the installed Windows service's command line is `<exe> run-service
-// --project ...`, and the SCM starts it with no argument of its own.
+// --release ...`, and the SCM starts it with no argument of its own.
 func RunServiceCommand(args []string, stderr io.Writer) (bool, error) {
 	if len(args) == 0 || args[0] != RunServiceSubcommand {
 		return false, nil
@@ -152,7 +159,7 @@ func RunService(args []string, stderr io.Writer) error {
 func runService(args []string, stderr io.Writer, host serviceHost) error {
 	fs := flag.NewFlagSet("piperoom-setup "+RunServiceSubcommand, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	project := fs.String("project", "", "project directory (service_install writes it from the project)")
+	release := fs.String("release", "", "release directory under the service's home (service_install writes it)")
 	name := fs.String("name", DefaultService, "service name segment (the service is "+UnitPrefix+"<name>)")
 	mode := fs.String("mode", ModeDistributed, "worker mode the service runs")
 	javaHome := fs.String("java", "", "JDK home the JVM runs from (service_install writes it from the detected java)")
@@ -166,11 +173,11 @@ func runService(args []string, stderr io.Writer, host serviceHost) error {
 	if err != nil {
 		return err
 	}
-	if *project == "" {
-		return fmt.Errorf("%w: %s needs --project <directory>; service_install writes it", ErrParams, RunServiceSubcommand)
+	if *release == "" {
+		return fmt.Errorf("%w: %s needs --release <directory>; service_install writes it", ErrParams, RunServiceSubcommand)
 	}
-	if err := CheckServicePath(*project); err != nil {
-		return fmt.Errorf("--project: %w", err)
+	if err := CheckServicePath(*release); err != nil {
+		return fmt.Errorf("--release: %w", err)
 	}
 	if *javaHome == "" {
 		return fmt.Errorf("%w: %s needs --java <JDK home>; service_install writes it from the detected java", ErrParams, RunServiceSubcommand)
@@ -178,21 +185,9 @@ func runService(args []string, stderr io.Writer, host serviceHost) error {
 	if err := CheckServicePath(*javaHome); err != nil {
 		return fmt.Errorf("--java: %w", err)
 	}
-	// The project must exist: a service that cannot find its worker file should
-	// fail at start with that reason, not run a JVM that dies a second later.
-	fi, err := os.Stat(*project)
-	if err != nil {
-		return fmt.Errorf("%w: the project directory %s: %w", ErrDetect, q(*project), err)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%w: %s is not a directory", ErrDetect, q(*project))
-	}
-	argv, err := javaArgv(*project, *javaHome, p.Mode)
-	if err != nil {
-		return err
-	}
-	// IsService comes before the project log is opened: a console run must not
-	// write a service log next to the project's worker files.
+	unit := UnitPrefix + p.Name
+	// IsService comes before anything is read or logged: a console run has
+	// nothing to supervise.
 	isService, err := host.IsService()
 	if err != nil {
 		return fmt.Errorf("host: asking the service control manager: %w", err)
@@ -200,32 +195,57 @@ func runService(args []string, stderr io.Writer, host serviceHost) error {
 	if !isService {
 		return fmt.Errorf("%w: %s is the installed service's own entry point; the service control manager starts it (service_install installs the service, service_restart starts it), so a console run has nothing to supervise", ErrUnsupported, RunServiceSubcommand)
 	}
-	out, closeLog := serviceLog(*project)
-	defer closeLog()
-	sup := &serviceSupervisor{
-		name: UnitPrefix + p.Name, argv: argv, start: startChild, out: out,
-		log: slog.New(slog.NewTextHandler(out, nil)), stopTimeout: defaultStopTimeout,
+	// The release must be one of this service's own, under its home in
+	// Program Files: the SCM's command line is admin-only, but the check is
+	// cheap and keeps the service from running a release of another name.
+	pf, err := host.ProgramFiles()
+	if err != nil {
+		return err
 	}
-	sup.log.Info("host: service host starting", "service", sup.name, "project", *project, "mode", p.Mode, "argv", argv)
+	home := serviceHome(pf, unit)
+	if !samePath(nativeDir(nativeDir(*release)), home) || nativeBase(nativeDir(*release)) != releasesDir ||
+		!releaseIDRE.MatchString(nativeBase(*release)) {
+		return fmt.Errorf("%w: --release %s is not a release under %s", ErrParams, q(*release), q(home))
+	}
+	out, closeLog := serviceLog(home)
+	defer closeLog()
+	log := slog.New(slog.NewTextHandler(out, nil))
+	for _, c := range []struct {
+		path, what string
+	}{{*release, "release"}, {*javaHome, "JDK"}} {
+		if err := host.CheckTrusted(c.path, true); err != nil {
+			log.Error("host: refusing to start: the "+c.what+" can be changed by a non-administrator", "service", unit, "err", err)
+			return fmt.Errorf("the %s at %s: %w", c.what, q(c.path), err)
+		}
+	}
+	argv, err := javaArgv(*release, home, *javaHome, p.Mode, nativeJoin(*release, DistDir, "config"))
+	if err != nil {
+		return err
+	}
+	sup := &serviceSupervisor{
+		name: unit, argv: argv, start: startChild, out: out,
+		log: log, stopTimeout: defaultStopTimeout,
+	}
+	sup.log.Info("host: service host starting", "service", sup.name, "release", *release, "mode", p.Mode, "argv", argv)
 	if err := host.Run(sup.name, sup); err != nil {
 		return fmt.Errorf("%w: running %s under the service control manager: %w", ErrServiceManager, q(sup.name), err)
 	}
 	return nil
 }
 
-// serviceLog opens the service log under the project, best effort: a service
-// that cannot log still runs, and Kafka's own appenders write under logs/ too.
-// os.Root keeps the write inside the project even if a component is a link.
-func serviceLog(project string) (io.Writer, func()) {
-	root, err := os.OpenRoot(project)
+// serviceLog opens the service log in the home's logs directory, best effort:
+// a service that cannot log still runs, and Kafka's own appenders write there
+// too. os.Root keeps the write inside the home even if a component is a link.
+func serviceLog(home string) (io.Writer, func()) {
+	root, err := os.OpenRoot(home)
 	if err != nil {
 		return io.Discard, func() {}
 	}
 	defer root.Close()
-	if err := root.MkdirAll(LogDir, 0o755); err != nil {
+	if err := root.MkdirAll(homeLogDir, 0o755); err != nil {
 		return io.Discard, func() {}
 	}
-	f, err := root.OpenFile(LogDir+"/"+ServiceLogName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := root.OpenFile(homeLogDir+"/"+ServiceLogName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return io.Discard, func() {}
 	}
