@@ -33,6 +33,15 @@ const (
 	// without a comparable LSN, a slot that appeared or disappeared between the
 	// reads). It is never reported as healthy.
 	verdictUnknown = "unknown"
+	// verdictHorizonHeld means restart_lsn did not move while the source WAL
+	// head advanced and the slot's retained WAL grew, and an open writer (or
+	// prepared transaction) at least horizonHolderMinAge old was found: it
+	// holds the WAL horizon, so retained WAL grows until it ends, even though
+	// confirmed_flush_lsn may still advance (the connector keeps streaming
+	// other transactions). A flat restart_lsn with no such holder is not this
+	// verdict: restart_lsn moves only in steps (at running-xacts records), so
+	// a healthy slot can show it flat for a few seconds.
+	verdictHorizonHeld = "horizon_held"
 )
 
 const (
@@ -74,10 +83,12 @@ const (
 func pgStreamingLivenessTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_streaming_liveness",
-		desc: "Check whether the source Postgres is actually streaming to Debezium: sample the pipeline's replication slot confirmed_flush_lsn twice, window_seconds apart, and compare it with the source WAL head. " +
-			"Returns verdict streaming (the slot advanced), stuck (confirmed_flush_lsn stayed flat while the source wrote AND the head-confirmed_flush lag is growing and larger than one Kafka Connect worker offset flush could explain: above max(16 MiB, 4 x the observed write rate x the 60 s worker offset.flush.interval.ms default)), not_confirmed (flat flush with a lag below that threshold: Debezium may simply not have been due to commit offsets yet, not a fault) or quiet (no source writes; not a fault). " +
+		desc: "Check whether the source Postgres is actually streaming to Debezium: sample the pipeline's replication slot confirmed_flush_lsn and restart_lsn twice, window_seconds apart, and compare them with the source WAL head. " +
+			"Data reports the derived comparisons next to the raw LSNs (restart_lsn_moved, restart_advance_bytes, confirmed_flush_advance_bytes, source_wal_advance_bytes, retained_growth_bytes), so never compare hex LSNs yourself. " +
+			"Returns verdict horizon_held (restart_lsn did not move while the WAL head advanced and retained WAL grew, and an open writer or prepared transaction at least 30 s old holds it: retained WAL keeps growing until that transaction ends, even though confirmed_flush_lsn advances and the connector looks healthy; horizon_holder names it; call pg_long_transactions), streaming (the slot advanced), stuck (confirmed_flush_lsn stayed flat while the source wrote AND the head-confirmed_flush lag is growing and larger than one Kafka Connect worker offset flush could explain: above max(16 MiB, 4 x the observed write rate x the 60 s worker offset.flush.interval.ms default)), not_confirmed (flat flush with a lag below that threshold: Debezium may simply not have been due to commit offsets yet, not a fault) or quiet (no source writes; not a fault). " +
 			"A quiet reading with an inactive slot, or a stuck reading, is not healthy. Use it when a connector or its tasks are RUNNING but the sink is stale or no events arrive; debezium_metrics, when DEBEZIUM_METRICS_URL is set, is the connector-side view, and this check needs no JMX. " +
-			"stuck also names the oldest open writer transaction: a long transaction, or a write outside the publication, holds the slot back without the connector being broken.",
+			"stuck also names the oldest open writer transaction: a long transaction, or a write outside the publication, holds the slot back without the connector being broken. " +
+			"streaming does not prove the slot is healthy when restart_lsn_moved is false: restart_lsn moves in steps (at running-xacts records, about every 15 s), so a flat restart_lsn with no holder found is reported in horizon_note; if it stays flat across calls, call pg_long_transactions.",
 		schema: objSchema(map[string]any{
 			"pipeline_id":    strProp("Pipeline id from owners.yaml."),
 			"window_seconds": intProp("Seconds between the two slot reads, 1-8. Default 5."),
@@ -178,9 +189,15 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 				ElapsedMS:     elapsed.Milliseconds(),
 				Slot:          sl,
 			}
+			// A flat restart_lsn while the head moves: find what holds it
+			// before the connector read, so the holder is measured right after
+			// the second slot read. stuck already names the oldest writer.
+			if (verdict == verdictStreaming || verdict == verdictNotConfirmed) && horizonCandidate(sl) {
+				d.checkHorizon(ctx, sc, p, &rep)
+			}
 			rep.Connector = connector
 			rep.ConnectorState, rep.ConnectorTasks, rep.ConnectorStatusError = d.connectorStatus(ctx, connector)
-			if verdict == verdictStuck {
+			if rep.Verdict == verdictStuck {
 				d.explainStuck(ctx, sc, p, &rep)
 			}
 
@@ -324,9 +341,63 @@ func (d Deps) waitFor(ctx context.Context, dur time.Duration) error {
 func slotLivenessOf(s clients.ReplicationSlot) slotLiveness {
 	return slotLiveness{
 		Name: s.Name, Active: s.Active, WALStatus: s.WALStatus,
-		RetainedWALBytes:  s.RetainedWALBytes,
-		ConfirmedFlushLSN: s.ConfirmedFlushLSN,
-		Verdict:           verdictUnknown,
+		RetainedWALBytes:       s.RetainedWALBytes,
+		RetainedWALBytesBefore: s.RetainedWALBytes,
+		ConfirmedFlushLSN:      s.ConfirmedFlushLSN,
+		RestartLSN:             s.RestartLSN,
+		Verdict:                verdictUnknown,
+	}
+}
+
+// measureRestart fills the restart_lsn and WAL head comparisons, whatever the
+// verdict turns out to be, so the model reads movement as numbers and never
+// compares hex LSNs itself. A position that does not parse (or goes
+// backwards) leaves the comparison out; the verdict logic reports it.
+func measureRestart(sl *slotLiveness, before, after clients.ReplicationSlot) {
+	sl.RestartLSNAfter = after.RestartLSN
+	sl.RetainedWALBytesBefore = before.RetainedWALBytes
+	sl.RetainedGrowthBytes = after.RetainedWALBytes - before.RetainedWALBytes
+	r0, err0 := parseLSN(before.RestartLSN)
+	r1, err1 := parseLSN(after.RestartLSN)
+	if err0 == nil && err1 == nil && r1 >= r0 {
+		moved := r1 > r0
+		sl.RestartLSNMoved = &moved
+		sl.RestartAdvanceBytes = int64(r1 - r0)
+	}
+	h0, err0 := slotWALHead(before)
+	h1, err1 := slotWALHead(after)
+	if err0 == nil && err1 == nil && h1 >= h0 {
+		sl.SourceWALAdvanceBytes = int64(h1 - h0)
+	}
+}
+
+// horizonCandidate is the LSN half of horizon_held: restart_lsn did not move
+// while the source WAL head advanced and the slot's retained WAL grew.
+func horizonCandidate(sl slotLiveness) bool {
+	return sl.RestartLSNMoved != nil && !*sl.RestartLSNMoved && sl.SourceWALAdvanceBytes > 0 && sl.RetainedGrowthBytes > 0
+}
+
+// checkHorizon is the other half: it looks for the open writer or prepared
+// transaction that holds the flat restart_lsn. Found, the verdict becomes
+// horizon_held; not found, the verdict stays and HorizonNote says what was
+// seen, so a flat restart_lsn is never silent.
+func (d Deps) checkHorizon(ctx context.Context, sc tools.Scope, p owners.Pipeline, rep *livenessReport) {
+	sl := &rep.Slot
+	window := topology.HumanAge(time.Duration(rep.WindowSeconds) * time.Second)
+	holder, prepared, preparedAge, checked, why := d.horizonHolder(ctx, p.SourceTables, sc.Unscoped())
+	switch {
+	case holder != nil || prepared > 0:
+		rep.Verdict, sl.Verdict = verdictHorizonHeld, verdictHorizonHeld
+		rep.HorizonHolder = holder
+		rep.HorizonPreparedTransactions, rep.HorizonPreparedAgeSeconds = prepared, preparedAge
+		rep.Note = fmt.Sprintf("restart_lsn %s did not move in %s while the source WAL head advanced %d bytes and retained WAL grew %d bytes; confirmed_flush_lsn advanced %d bytes",
+			orDash(sl.RestartLSN), window, sl.SourceWALAdvanceBytes, sl.RetainedGrowthBytes, sl.ConfirmedFlushAdvanceBytes)
+	case checked:
+		rep.HorizonNote = fmt.Sprintf("restart_lsn did not move in %s while WAL advanced %d bytes, but no open writer or prepared transaction at least %s old was found: likely the normal step between running-xacts records; if restart_lsn stays flat across calls, a stuck slot holds the WAL horizon (call pg_long_transactions)",
+			window, sl.SourceWALAdvanceBytes, topology.HumanAge(horizonHolderMinAge))
+	default:
+		rep.HorizonNote = fmt.Sprintf("restart_lsn did not move in %s while WAL advanced %d bytes and retained WAL grew %d bytes: an open transaction (or a stuck slot) may hold the WAL horizon; %s; call pg_long_transactions",
+			window, sl.SourceWALAdvanceBytes, sl.RetainedGrowthBytes, why)
 	}
 }
 
@@ -346,12 +417,17 @@ func slotLivenessOf(s clients.ReplicationSlot) slotLiveness {
 //   - quiet when neither moved (the source had nothing to send);
 //   - unknown, with a note, when the reads do not carry a comparable position.
 //     A slot that cannot be judged is never reported as healthy.
+//
+// The restart_lsn comparison (measureRestart) is filled for every verdict;
+// streaming and not_confirmed become horizon_held in checkHorizon when
+// restart_lsn stayed flat and a holder is found, which needs a source read.
 func evaluateSlot(before, after clients.ReplicationSlot, window time.Duration) (slotLiveness, string, string) {
 	sl := slotLivenessOf(before)
 	sl.Active = after.Active
 	sl.WALStatus = after.WALStatus
 	sl.RetainedWALBytes = after.RetainedWALBytes
 	sl.ConfirmedFlushLSNAfter = after.ConfirmedFlushLSN
+	measureRestart(&sl, before, after)
 
 	flush0, err := parseLSN(before.ConfirmedFlushLSN)
 	if err != nil {
@@ -629,6 +705,16 @@ type livenessReport struct {
 	OldestTransaction *longTxn     `json:"oldest_transaction,omitempty"`
 	OldestOtherWriter *otherWriter `json:"oldest_other_writer,omitempty"`
 	TransactionNote   string       `json:"transaction_note,omitempty"`
+	// HorizonHolder is the open writer that holds a flat restart_lsn
+	// (horizon_held), and HorizonPreparedTransactions /
+	// HorizonPreparedAgeSeconds the prepared transactions that do. Outside
+	// the pipeline's tables in a room it carries no application name.
+	HorizonHolder               *openTxn `json:"horizon_holder,omitempty"`
+	HorizonPreparedTransactions int      `json:"horizon_prepared_transactions,omitempty"`
+	HorizonPreparedAgeSeconds   int64    `json:"horizon_prepared_age_seconds,omitempty"`
+	// HorizonNote explains a flat restart_lsn that is not horizon_held (no
+	// holder found, or the check could not run).
+	HorizonNote string `json:"horizon_note,omitempty"`
 }
 
 // slotLiveness is one slot's measurement.
@@ -641,6 +727,19 @@ type slotLiveness struct {
 	ConfirmedFlushLSN          string `json:"confirmed_flush_lsn"`
 	ConfirmedFlushLSNAfter     string `json:"confirmed_flush_lsn_after"`
 	ConfirmedFlushAdvanceBytes int64  `json:"confirmed_flush_advance_bytes"`
+	// RestartLSN is the first read, RestartLSNAfter the second.
+	// RestartLSNMoved is the comparison (absent when either does not parse):
+	// false while the WAL head advances means something holds the WAL
+	// horizon, or the slot is between two restart steps.
+	RestartLSN          string `json:"restart_lsn"`
+	RestartLSNAfter     string `json:"restart_lsn_after"`
+	RestartLSNMoved     *bool  `json:"restart_lsn_moved,omitempty"`
+	RestartAdvanceBytes int64  `json:"restart_advance_bytes"`
+	// RetainedWALBytesBefore is the first read's retained WAL
+	// (RetainedWALBytes is the second); RetainedGrowthBytes the difference,
+	// negative when the slot released WAL.
+	RetainedWALBytesBefore int64 `json:"retained_wal_bytes_before"`
+	RetainedGrowthBytes    int64 `json:"retained_growth_bytes"`
 	// SourceWALAdvanceBytes is how far the server's WAL head moved between the
 	// reads (0 when nothing was written).
 	SourceWALAdvanceBytes int64 `json:"source_wal_advance_bytes"`
@@ -664,6 +763,9 @@ func livenessSummary(rep livenessReport) string {
 	window := topology.HumanAge(time.Duration(rep.WindowSeconds) * time.Second)
 	var sb strings.Builder
 	switch rep.Verdict {
+	case verdictHorizonHeld:
+		fmt.Fprintf(&sb, "horizon_held: restart_lsn did not move while WAL advanced: an open transaction (or a stuck slot) holds the WAL horizon, so retained WAL grows until it ends — call pg_long_transactions (slot %q: %s; the connector still streams, so it is not broken; active=%t, retains %s)",
+			sl.Name, rep.Note, sl.Active, topology.HumanBytes(sl.RetainedWALBytes))
 	case verdictStreaming:
 		fmt.Fprintf(&sb, "streaming: slot %q confirmed_flush_lsn advanced %d bytes in %s (%s -> %s)",
 			sl.Name, sl.ConfirmedFlushAdvanceBytes, window, sl.ConfirmedFlushLSN, sl.ConfirmedFlushLSNAfter)
@@ -693,6 +795,20 @@ func livenessSummary(rep livenessReport) string {
 	sb.WriteString("\n")
 	if rep.ConnectorStatusError != "" {
 		fmt.Fprintf(&sb, "%s\n", rep.ConnectorStatusError)
+	}
+	if rep.Verdict == verdictHorizonHeld {
+		if h := rep.HorizonHolder; h != nil {
+			sb.WriteString("held by the oldest open writer: ")
+			writeOpenTxn(&sb, *h)
+			sb.WriteString(" (it holds an xid; the WAL horizon moves when it commits or rolls back)\n")
+		}
+		if n := rep.HorizonPreparedTransactions; n > 0 {
+			fmt.Fprintf(&sb, "held by %d prepared (two-phase) %s, the oldest %s old (pg_prepared_xacts; no session to end)\n",
+				n, tools.Plural(n, "transaction", "transactions"), topology.HumanAge(time.Duration(rep.HorizonPreparedAgeSeconds)*time.Second))
+		}
+	}
+	if rep.HorizonNote != "" {
+		fmt.Fprintf(&sb, "%s\n", rep.HorizonNote)
 	}
 	if rep.Verdict == verdictStuck {
 		// The note states the lag and the threshold that made this stuck.
