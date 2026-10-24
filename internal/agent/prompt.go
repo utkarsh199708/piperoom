@@ -98,8 +98,9 @@ func promptCDCFixesMySQL() string {
 		"- A stored position the server no longer has (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position the server has or a new snapshot; say what the gap loses.",
 		"confirm with reads that a source connector's slot exists and holds its position,",
 		"confirm with reads that the binlog still holds a source connector's position (mysql_binlog_status),",
-		"- pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal (signal_table: signal.data.collection from connect_config).",
-		"- A database.server.id clashing with the server's or another connector's is the cause: set a unique one with connect_update_connector_config.\n"+
+		"- A FAILED task's restart is the next step of the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
+		"- A FAILED task's restart is the next step of the proposal removing its cause.\n"+
+			"- A database.server.id clashing with the server's or another connector's is the cause: set a unique one with connect_update_connector_config.\n"+
 			"- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.",
 	).Replace(promptCDCFixes)
 }
