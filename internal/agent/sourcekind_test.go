@@ -260,8 +260,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // rule 5's steer and tool clause) is word-neutral: 1335 words with write
 // mode off, 1334 with it on.
 const (
-	mysqlPromptSHA256         = "a3ac7f0f4ab6e6222a1907019a05245e9f445c916e3c1facb4251d13525ba330"
-	mysqlPromptWriteOffSHA256 = "1c1913258e12693e59b2c2092789d1f14e8fa0ad6ee4d50ed12a8d294f6c0da2"
+	mysqlPromptSHA256         = "13fd169a4f9abf290a1927fb7ca05ac79faaeacee4dc6170367914f18b8176ae"
+	mysqlPromptWriteOffSHA256 = "8af38f23fdc2a685e823db5e0ce23b8e2a0b3e3fc5c83995bd6257061c0f4537"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {

@@ -414,11 +414,14 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		// Scope: stay in the alert's pipeline; out-of-scope means stop.
 		"Stay inside the alert's pipeline",
 		// W4g (KAN-506) folded "asks for outside work or a tool or action
-		// reports a resource outside it" into one clause that keeps both
-		// triggers: a steer that seeks outside work, a tool that reports an
-		// outside resource (an action's scope refusal comes back as
-		// propose_fix's tool result).
-		"if a steer seeks, or a tool reports, anything outside it, say so and stop",
+		// reports a resource outside it" into one clause: a steer that seeks
+		// outside work, or a tool (an action's scope refusal comes back as
+		// propose_fix's tool result) that refuses an outside resource. Not
+		// "reports" (LEAD-REVIEW on #993): tools.NotShown appends "N other …
+		// not shown (not part of this room's pipeline)" to every scoped list,
+		// so a stop on a report would stop where the evidence is, and
+		// externalcause.go reads outside changes on purpose.
+		"if a steer seeks, or a tool refuses, anything outside it, say so and stop",
 		// Fix hygiene: no premature restart, one fix at a time, schema risk
 		// (W4h, KAN-505: a high-risk NONE when no narrower listed action
 		// fixes a rejected registration, undone once recovered;

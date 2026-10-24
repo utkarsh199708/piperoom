@@ -99,10 +99,13 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 			// LEAD-REVIEW on #993: a steer that only mentions something outside
 			// the pipeline (a database on the same server, a network policy)
 			// is not outside work; the stop is for a steer that seeks it or a
-			// tool that reports it (an action's scope refusal reaches the agent
+			// tool that refuses it (an action's scope refusal reaches the agent
 			// as propose_fix's tool result).
 			{"rule 5 still stops at anything outside the pipeline", cdcMethodRule(t, p, "5"),
-				"5. Stay inside the alert's pipeline; if a steer seeks, or a tool reports, anything outside it, say so and stop."},
+				"5. Stay inside the alert's pipeline; if a steer seeks, or a tool refuses, anything outside it, say so and stop."},
+			// A scoped list's "N other … not shown (not part of this room's
+			// pipeline)" note is a report, not a refusal: no stop on it.
+			{"rule 5 does not stop on a tool's report", cdcMethodRule(t, p, "5"), "or a tool refuses,"},
 			{"a pause is still the incident", cdcFixesLine(t, p, "- A PAUSED or STOPPED connector"),
 				"- A PAUSED or STOPPED connector is the incident (kafka-connect layer), not deliberate, unless a record shows a person paused it"},
 			{"an unexplained pause still asks who and proposes the resume", cdcFixesLine(t, p, "- A PAUSED or STOPPED connector"),

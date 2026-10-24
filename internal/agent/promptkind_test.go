@@ -141,13 +141,14 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // <component>. Root cause: <layer> <component>.". Word-neutral against 1335
 // by contractions in the intro and rules 1, 3, 4, 6 and 7 and the resume
 // bullet, "You only read and propose fixes", one clause for rule 5's steer
-// and tool cases ("if a steer seeks, or a tool reports, anything outside
-// it"), and the pause bullet's "cite it", "name the pause as the incident"
-// and "above" (the PR lists each word).
+// and tool cases ("if a steer seeks, or a tool refuses, anything outside
+// it": not "reports", since every scoped list reports what it hides as not
+// part of the pipeline), and the pause bullet's "cite it", "name the pause
+// as the incident" and "above" (the PR lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "7976b312cfc3b73346cb055453f903ef23c047ed9b008fc9d81760abfefa0a8e"
+const cdcPromptSHA256 = "e719235820f763144c8d469dcaab41faaf5f07b82e62ab4c8613deae79d7e0da"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -158,7 +159,7 @@ const cdcPromptSHA256 = "7976b312cfc3b73346cb055453f903ef23c047ed9b008fc9d81760a
 // listed fix, the restart and compatibility bullets and the offsets note,
 // word-neutral: still 1335 words), and W4g (rule 4's root-cause component,
 // word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "bc4c3d06dfaefc76daf62926f3a465a67f6bf7b92c45947b7a77c9131f4b17ec"
+const cdcPromptWriteOffSHA256 = "9c6b96e1428c3cf9d75387a8682296af5525230053efbfe363d8ac7e222dc551"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
