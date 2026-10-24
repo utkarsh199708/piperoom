@@ -33,9 +33,13 @@ type setupRun struct {
 	// turn and wait.
 	start time.Time
 	// attempts counts consecutive failed executions since the last
-	// setup_plan or the last successful execution. It is at least as strict
-	// as a per-step count: two failures of different steps stop the run at
-	// the same bound as two of one step, never later.
+	// successful execution. A new setup_plan does not reset it: after a
+	// failure the model must re-plan before it proposes again (the room's
+	// ErrNotInPlan), so a count that restarted with every plan could never
+	// reach the bound and a fail, re-plan, fail loop would run until the wall
+	// clock. It is at least as strict as a per-step count: two failures of
+	// different steps stop the run at the same bound as two of one step,
+	// never later.
 	attempts int
 	// executed counts the executed steps (every action_result) since the
 	// last setup_plan: the steps the current plan spent.
@@ -96,16 +100,21 @@ func setupTokenBudget(b *SetupBounds) (int64, error) {
 // harness omits it).
 func (s *setupRun) decodeRequest(alert Alert) {
 	s.reqOK = false
-	if len(alert.Raw) > 0 && json.Unmarshal(alert.Raw, &s.req) == nil {
-		s.reqOK = true
+	var req events.SetupRequest
+	if len(alert.Raw) > 0 && json.Unmarshal(alert.Raw, &req) == nil {
+		s.req, s.reqOK = req, true
+		return
 	}
+	// A partial decode (a type error after some fields) must not leave
+	// targets behind for the plan's class resolver.
+	s.req = events.SetupRequest{}
 }
 
-// notePlan resets the counters when the model records a new plan
-// (setup_plan): the bounds count the current plan's steps and the failures
-// since it. A plan that supersedes another starts a fresh count.
+// notePlan restarts the steps count when the model records a new plan
+// (setup_plan): the steps bound counts the current plan's executed steps. The
+// failed-attempts count is not reset (see attempts): a re-plan is how the
+// model must answer a failure, so it cannot also be what clears it.
 func (s *setupRun) notePlan(events.SetupPlanPayload) {
-	s.attempts = 0
 	s.executed = 0
 	s.seen = map[string]bool{}
 }
@@ -167,6 +176,22 @@ func (r *runner) stopForSetupBound(ctx context.Context, reason string) *BudgetEr
 	return &BudgetError{Used: used, Limit: limit, scope: budgetSetupRun, setupReason: reason}
 }
 
+// setupBudgetBlocked records in a setup room that a spend limit stopped the
+// run: setup.blocked with reason budget. The agent message and the idle
+// status are stopForBudget's, which the caller emits next, so the room reads
+// one of each. The question names the limit that was reached: the setup's own
+// token budget (the room's cap in a setup room, Endpoint.Run), or the text of
+// a pipeline daily budget or an unavailable spend store, which a person
+// raising PIPEROOM_SETUP_TOKEN_BUDGET would not cure.
+func (r *runner) setupBudgetBlocked(ctx context.Context, be *BudgetError) {
+	question := setupBlockedQuestion(events.SetupBlockedBudget, r.setup)
+	if be.scope != budgetRoom {
+		question = be.Error()
+	}
+	r.log.Warn("agent: setup bound reached", "room", r.alert.RoomID, "reason", events.SetupBlockedBudget)
+	r.emit(ctx, events.SetupBlocked, events.SetupBlockedPayload{Reason: events.SetupBlockedBudget, Question: question})
+}
+
 // usedLimit fills the BudgetError's counts for the reason; the wall clock
 // carries no meaningful pair, so it reads as reached.
 func (s *setupRun) usedLimit(reason string) (used, limit int64) {
@@ -192,7 +217,9 @@ func setupBlockedQuestion(reason string, s *setupRun) string {
 	case events.SetupBlockedWallClock:
 		return "The setup's time budget is spent. A person can steer me to continue or close the room."
 	case events.SetupBlockedBudget:
-		return "The setup's token budget is spent. A person can raise PIPEROOM_SETUP_TOKEN_BUDGET or steer me to continue."
+		// The room's token count outlives the run, so a steer would only
+		// start a run that stops on the same budget: offer no steer.
+		return "The setup's token budget is spent, so a steer cannot restart me. A person can raise PIPEROOM_SETUP_TOKEN_BUDGET or close the room."
 	}
 	return "The setup run reached a bound. A person can steer me to continue."
 }
@@ -211,11 +238,34 @@ func setupBlockedQuestion(reason string, s *setupRun) string {
 // proposal time from the step's real params, a tier or class that is too
 // high would need approvals no step earned.
 func (r *runner) setupRoomTools() ([]tools.Tool, error) {
+	var sink setuptools.Emitter
+	if r.deps.Sink != nil {
+		sink = setupToolSink{inner: r.deps.Sink}
+	}
 	return setuptools.RoomTools(setuptools.RoomDeps{
 		Catalogue: setupCatalogue{acts: r.deps.Actions},
-		Sink:      r.deps.Sink,
+		Sink:      sink,
 		ClassOf:   setupPlanClassOf(r.setup.req.Targets),
 	})
+}
+
+// setupToolSink is the Sink the two setup room tools emit through. It passes
+// exactly the two setup types the agent may write, setup.plan and the
+// verification request, and refuses every other type, setup.verified first
+// among them (design §3.4: only the server's ladder runner writes the
+// verdict). The room's sink refuses setup.verified too; this makes the rule
+// hold in the agent whatever sink the run was given.
+type setupToolSink struct {
+	inner Sink
+}
+
+// Emit implements setuptools.Emitter.
+func (s setupToolSink) Emit(ctx context.Context, typ events.Type, payload any) error {
+	switch typ {
+	case events.SetupPlan, setuptools.TypeVerificationRequested:
+		return s.inner.Emit(ctx, typ, payload)
+	}
+	return fmt.Errorf("agent: a setup room tool may not emit %q", typ)
 }
 
 // setupCatalogue answers the tier floor of an op from the room's action

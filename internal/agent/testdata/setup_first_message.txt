@@ -3,7 +3,7 @@ Set up this pipeline.
 Setup request (typed by the person who opened the room):
 title: <untrusted>orders pipeline</untrusted>
 source: postgres
-target: db.acme:5432
+target: compose
 topic prefix: <untrusted>pg</untrusted>
 tables: <untrusted>public.orders, public.items</untrusted>
 connectors: <untrusted>pg-orders</untrusted>

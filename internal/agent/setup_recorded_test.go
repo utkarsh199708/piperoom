@@ -315,10 +315,13 @@ func firstPlanID(t *testing.T, m *recordedModel) string {
 // TestSetupRecordedLadderRun is the row's recorded-model test (U1-10): the
 // model takes the paired runner from an empty project directory to a ladder
 // request — reads the empty dir, records the plan, proposes and executes the
-// environment steps and the connector, and requests verification. The fake
-// ladder runner then records its green setup.verified, and the model's next
-// turn treats it as the server's verdict, never as its own: the agent's sink
-// holds exactly the one setup.verified the ladder wrote, after the request.
+// environment steps and the connector, and requests verification. The
+// ladder's canary step then executes, and the model waits for the server's
+// outcome without claiming one. The test, standing in for the ladder runner,
+// records the green setup.verified after the run: the sink holds exactly
+// that one, after the request, so the run itself wrote none. (No HumanInput
+// kind carries setup.verified to the agent yet, so the model never reads the
+// verdict here; see the PR review.)
 func TestSetupRecordedLadderRun(t *testing.T) {
 	fr := &fakeSetupRunner{t: t}
 	m := &recordedModel{t: t}
@@ -411,12 +414,13 @@ func TestSetupRecordedLadderRun(t *testing.T) {
 		func(string) string {
 			return toolUseMsg("tu_10", "setup_request_verification", map[string]any{})
 		},
-		// Turn 8 (after the canary inputs): the verdict is the server's.
+		// Turn 8 (after the canary input): the verdict is the server's to
+		// record, so the model waits for it.
 		func(text string) string {
 			b, _ := json.Marshal(map[string]any{
 				"stop_reason": "end_turn",
 				"content": []map[string]any{
-					{"type": "text", "text": "The server's ladder ran and its setup.verified records rungs 1 to 7 green; the canary step executed. The setup is verified by the server, and I am waiting for rung 8's change."},
+					{"type": "text", "text": "Verification requested and the ladder's canary step executed. The server's ladder runner records the outcome itself; I am waiting for it and for rung 8's change."},
 				},
 			})
 			return string(b)
@@ -626,6 +630,81 @@ func TestSetupReplanRefusedUntilNewPlan(t *testing.T) {
 	}
 	if executed != 2 {
 		t.Fatalf("compose_write executed %d times, want 2 (the failed step and the recovered step, never the refused repeat)", executed)
+	}
+}
+
+// TestSetupAttemptsBoundStopsAReplanLoop: the room makes the model re-plan
+// after every failed step, so a model that fails, re-plans and fails again is
+// stopped by the attempts bound: after the third consecutive failure the run
+// emits setup.blocked (attempts) and returns a *BudgetError before another
+// model turn, instead of looping until the wall clock.
+func TestSetupAttemptsBoundStopsAReplanLoop(t *testing.T) {
+	fr := &fakeSetupRunner{t: t}
+	m := &recordedModel{t: t}
+	sink := &fakeSink{}
+	planTurn := func(id string) func(string) string {
+		return func(string) string {
+			b, _ := json.Marshal(map[string]any{
+				"stop_reason": "tool_use",
+				"content": []map[string]any{
+					planToolUse(id, map[string]any{
+						"name":  "stack",
+						"steps": []map[string]any{{"op": "compose_write", "params_hint": "render the stack", "verify": "dir_list shows compose.yaml"}},
+					}),
+				},
+			})
+			return string(b)
+		}
+	}
+	proposeTurn := func(id string) func(string) string {
+		return func(string) string {
+			return toolUseMsg(id, "propose_fix", proposeInput("compose_write",
+				`{"templates":["kafka-kraft"],"project":"piperoom-orders"}`, "render the stack"))
+		}
+	}
+	// Three rounds of plan and failed step; a seventh turn would mean the
+	// bound did not stop the run (recordedModel fails the test then).
+	m.turns = []func(string) string{
+		planTurn("tu_1"), proposeTurn("tu_2"),
+		planTurn("tu_3"), proposeTurn("tu_4"),
+		planTurn("tu_5"), proposeTurn("tu_6"),
+	}
+	failed := func(n int) []HumanInput {
+		return []HumanInput{actionInput(fmt.Sprintf("proposal p_%d step 0: compose_write failed: template refused", n), okPtr(false))}
+	}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil, // the opening drain
+			nil, failed(1),
+			nil, failed(2),
+			nil, failed(3),
+		},
+		waitErr: context.Canceled,
+	}
+	props := &planGatedProposals{sink: sink, fr: fr}
+	r := newSetupRunner(t, fr, m, inbox, sink, props, setupActions(t))
+
+	err := r.run(context.Background())
+	be, ok := asBudgetError(err)
+	if !ok || be.setupReason != events.SetupBlockedAttempts {
+		t.Fatalf("run = %v, want a setup *BudgetError for attempts", err)
+	}
+	if n := len(m.calls); n != 6 {
+		t.Fatalf("model turns = %d, want 6: the bound stops the run before a seventh", n)
+	}
+	blocked := sink.ofType(events.SetupBlocked)
+	if len(blocked) != 1 {
+		t.Fatalf("setup.blocked emitted %d times, want once", len(blocked))
+	}
+	var p events.SetupBlockedPayload
+	if err := json.Unmarshal(blocked[0].payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Reason != events.SetupBlockedAttempts {
+		t.Fatalf("setup.blocked reason = %q, want %q", p.Reason, events.SetupBlockedAttempts)
+	}
+	if n := len(sink.ofType(events.SetupPlan)); n != 3 {
+		t.Fatalf("setup.plan emitted %d times, want 3 (one per round)", n)
 	}
 }
 

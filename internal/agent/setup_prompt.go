@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -96,17 +97,22 @@ func setupFirstMessage(alert Alert, s *setupRun) string {
 	return b.String()
 }
 
-// cleanSetupField keeps a request field that is not free text (a kind, a
-// class) out of the untrusted wrapper: it is one of a fixed set the server
-// validated, not a person's words. Control characters are stripped the same
-// way, as a backstop.
+// setupKindRe is the shape of every value of a request field that is not
+// free text: a source, target or target kind, or a class ("postgres",
+// "compose", "image_registry", "local").
+var setupKindRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// cleanSetupField renders a request field that is not free text (a kind, a
+// class). The room validates these against fixed sets before it stores the
+// request, but the agent does not rely on a check made in another package:
+// a value of a kind's shape is printed as it is, anything else is the
+// person's words and gets the untrusted-data wrapper like the title.
 func cleanSetupField(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, strings.TrimSpace(s))
+	s = strings.TrimSpace(s)
+	if setupKindRe.MatchString(s) {
+		return s
+	}
+	return wrapUntrusted(maskAlertText(s))
 }
 
 // setupOpeningParts is the opening turn of a setup run: the setup request

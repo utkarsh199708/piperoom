@@ -389,9 +389,9 @@ func (r *runner) run(ctx context.Context) error {
 				if r.setup != nil {
 					// In a setup room the room's cap is the setup's token
 					// budget (Endpoint.Run), so the room log says which
-					// bound stopped it (design §3.1), beside the budget
-					// message and idle status.
-					r.stopForSetupBound(ctx, events.SetupBlockedBudget)
+					// bound stopped it (design §3.1); the budget message
+					// and idle status below are the stop's only ones.
+					r.setupBudgetBlocked(ctx, be)
 				}
 				r.stopForBudget(ctx, be)
 				return fmt.Errorf("agent: stopped: %w", be)
@@ -1150,9 +1150,9 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	if pr, ok := res.Data.(proposeFixResult); ok {
 		r.snapshotBaseline(ctx, pr.ProposalID)
 	}
-	// A new setup plan (setup_plan) restarts the setup bounds' counters: the
-	// attempts and executed steps of the previous plan no longer count
-	// (design §3.1).
+	// A new setup plan (setup_plan) restarts the steps bound's count: the
+	// executed steps of the previous plan no longer count (design §3.1). The
+	// failed-attempts count carries over (setup.go, attempts).
 	if r.setup != nil {
 		if pl, ok := res.Data.(events.SetupPlanPayload); ok {
 			r.setup.notePlan(pl)
