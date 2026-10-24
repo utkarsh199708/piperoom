@@ -21,6 +21,11 @@
 #   R3 moves only the first failing layer; the two readings swap places because an alternative may
 #   not equal the first failing layer (evals/layers.go), so a hypothesis placing the cause in either
 #   layer still passes, as before.
+#   The description said "Postgres, the slot and Kafka are healthy", which contradicted the R3 label
+#   for the judge: live run 40044762858 named connect-offsets' cleanup.policy=delete, the keyword
+#   pass read kafka as named but marked it ambiguous ("instead of" shares the clause), and the judge
+#   said the first failing layer was not named. The description now says the Kafka topic
+#   connect-offsets is the first component that fails (W4n round 2).
 #
 # Expected label: the tool that shows the cause is connect_worker_info (Q3a): it lists the worker
 #   group's internal topics and flags "an internal topic that is not compacted" - here connect-offsets
@@ -81,11 +86,13 @@ description: |
   connector, and Debezium (snapshot.mode initial, the default) took a new initial snapshot of
   public.orders: 412,880 rows in 4 minutes, all already in the topic and the warehouse. order-sync
   now has 388,214 records of lag and re-applies orders loaded weeks ago; the warehouse is 23 min
-  behind. Postgres, the slot and Kafka are healthy.
+  behind. Postgres, the slot, the brokers and the CDC topic pg.public.orders are healthy, and the
+  connector is RUNNING. The first component that fails is the Kafka topic connect-offsets: it does
+  not keep the connector's stored offset, because it deletes instead of compacting.
 
-  Root cause: the Connect offsets topic is not compacted (cleanup.policy=delete, one-day retention),
-  so the connector's stored offset was deleted during the four-day pause and the resumed connector
-  re-snapshotted public.orders.
+  Root cause: the Connect offsets topic (a Kafka topic) is not compacted (cleanup.policy=delete,
+  one-day retention), so the connector's stored offset was deleted during the four-day pause and
+  the resumed connector re-snapshotted public.orders.
 
   Expected label: the tool that shows the cause is connect_worker_info (internal topic connect-offsets
   not compacted). Fix by a person: compact the internal topics, let order-sync drain.

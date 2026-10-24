@@ -722,7 +722,11 @@ inputs:
 
 expect:
   root_cause:
-    - [duplicat*, twice, redeliver*, republish*, replay*, copies]
+    # 'same lsn' and dedup* (W4n round 2, run 40044762858): the healthy-now answer R4 rules right
+    # ("re-sent a burst of 10 same-LSN events ... the sink deduplicated them") names the copies
+    # that way; "deduplicated" is not a word starting with duplicat*, so the group missed it. The
+    # alert title and the steer still fail the lsn group below.
+    - [duplicat*, twice, redeliver*, republish*, replay*, copies, same lsn, same-lsn, dedup*]
     - [lsn*, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
   root_cause_forbidden:
     - ['false positive']

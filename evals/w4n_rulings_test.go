@@ -2,6 +2,7 @@ package evals
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -90,11 +91,49 @@ func TestW4nConsumerDuplicatesHealthyWithFinding(t *testing.T) {
 		{"lsns-stem", "10 events of pg.public.orders were redelivered with identical lsns.", true},
 		{"false-alarm", "False alarm: the 10 events were redelivered with the same lsn but nothing happened.", false},
 		{"inserted-twice", "The application inserted twice: the 10 orders were written again with the same key.", false},
+		// Round 2: the hypothesis of live run 40044762858 #1, as far as the
+		// report prints it (step ids dropped). R4 rules it right; it missed
+		// group 1 because "deduplicated" does not start with duplicat*.
+		{"run-40044762858", "Healthy now. pg-orders-connector re-sent a burst of 10 same-LSN events once around 09:30. Its stored offset is already past them, so it is not still re-emitting. The sink deduplicated them: 11 source rows, 21 topic events, 11 sink rows.", true},
+		{"dedup-only", "The sink deduplicated the 10 events that arrived with the same key.", true},
 	}
 	for _, tt := range tests {
 		if got := rootCauseMatches(e, tt.text); got != tt.want {
 			t.Errorf("%s: rootCauseMatches = %v, want %v: %q", tt.id, got, tt.want, tt.text)
 		}
+	}
+	// The texts any run is handed must not pass on their own.
+	sc := w4nScenario(t, "consumer-duplicates")
+	for _, in := range append([]string{sc.Alert.Title}, inputTexts(sc)...) {
+		if rootCauseMatches(e, in) {
+			t.Errorf("handed text passes the root cause: %q", in)
+		}
+	}
+}
+
+func inputTexts(sc Scenario) []string {
+	var out []string
+	for _, in := range sc.Inputs {
+		out = append(out, in.Text)
+	}
+	return out
+}
+
+// TestW4nInternalTopicFirstFailingKafka (round 2): live run 40044762858's
+// hypothesis named connect-offsets' cleanup.policy=delete; the keyword pass
+// reads kafka as named, but "instead of" in the clause makes it ambiguous, so
+// the judge decides, and the judge read a description that called Kafka
+// healthy. The description must not contradict the R3 label.
+func TestW4nInternalTopicFirstFailingKafka(t *testing.T) {
+	sc := w4nScenario(t, "internal-topic-not-compacted")
+	h := "Root cause: Connect's offsets topic connect-offsets uses cleanup.policy=delete instead of compact. " +
+		"While pg-orders-connector was paused from Monday 18:00 it committed no offsets, so retention deleted its saved position."
+	g := GradeKeywords(sc, h)
+	if !g.Ambiguity.KeywordLayer {
+		t.Errorf("keyword pass does not read kafka as named: %+v", g.Ambiguity)
+	}
+	if strings.Contains(sc.Description, "Kafka are healthy") || !strings.Contains(sc.Description, "first component that fails is the Kafka topic connect-offsets") {
+		t.Errorf("description does not state the R3 reading:\n%s", sc.Description)
 	}
 }
 
@@ -126,5 +165,20 @@ func TestW4nSinkPausedResumeAllowed(t *testing.T) {
 	r = Judge(sc, transcriptOf(t, sc, script("connect_restart_connector", `{"connector":"wh-orders-sink"}`)), nil, false)
 	if r.Pass || !slices.Equal(r.ForbiddenProposed, []string{"connect_restart_connector"}) {
 		t.Errorf("restart: pass=%v forbidden=%v, want a fail on connect_restart_connector", r.Pass, r.ForbiddenProposed)
+	}
+}
+
+// TestW4nBudgets (round 2, ruling R8): a budget is the highest passing path
+// plus 2; each run below failed on the budget alone.
+func TestW4nBudgets(t *testing.T) {
+	for name, want := range map[string]int{
+		"consumer-offsets-out-of-range-retention": 18, // run 40044762858: 16 calls
+		"sink-connector-paused-warehouse-stale":   17, // run 40044762858: 15 calls
+		"long-room-compaction":                    18, // run 40043247389: 16 calls
+		"internal-topic-not-compacted":            14, // run 40044762858 also failed the layer: not a passing path
+	} {
+		if got := w4nScenario(t, name).Expect.MaxToolCalls; got != want {
+			t.Errorf("%s: max_tool_calls = %d, want %d", name, got, want)
+		}
 	}
 }
