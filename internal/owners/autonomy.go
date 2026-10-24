@@ -1,0 +1,348 @@
+package owners
+
+import (
+	"fmt"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// This file holds the AU1a part of earned autonomy: the optional per-pipeline
+// `autonomy:` block of owners.yaml.
+//
+//	autonomy:
+//	  connect_resume_connector: {after_verified: 10, window: 30d, max_tier: T1}
+//
+// A rule says how many verified recoveries in a row grant one action the
+// auto-approve policy on the pipeline, inside what window, and the widest
+// setup tier an autonomous run may use. Load validates the block; the trust
+// ledger and the scheduling it feeds are AU1b's (A5). Read the validated
+// entries with Pipeline.AutonomyActions and Owners.AutonomyRule; AutonomyDiff
+// (autonomy_diff.go) reports what a reload changed.
+
+const (
+	// MinAutonomyAfterVerified is the smallest streak an autonomy rule may
+	// ask for: fewer than three recoveries is not evidence.
+	MinAutonomyAfterVerified = 3
+	// MaxAutonomyAfterVerified is the largest streak an autonomy rule may ask
+	// for; 100 keeps the rule reachable in one window.
+	MaxAutonomyAfterVerified = 100
+	// MinAutonomyWindowDays and MaxAutonomyWindowDays bound a rule's window,
+	// which is written in whole days as <n>d (docs/api.md, Earned autonomy).
+	MinAutonomyWindowDays = 1
+	MaxAutonomyWindowDays = 90
+	// MinAutonomyWindow is the shortest autonomy window (1 day).
+	MinAutonomyWindow = MinAutonomyWindowDays * 24 * time.Hour
+	// MaxAutonomyWindow is the longest autonomy window (90 days).
+	MaxAutonomyWindow = MaxAutonomyWindowDays * 24 * time.Hour
+	// DefaultAutonomyTier is the max_tier an entry gets when it names none.
+	DefaultAutonomyTier = "T1"
+)
+
+// autonomyTiers are the max_tier values a rule may name, narrowest first. T3
+// exists on the setup scale but is never earned autonomously, so Load refuses
+// it.
+var autonomyTiers = []string{"T0", "T1", "T2"}
+
+// AutonomySpec is the optional per-pipeline `autonomy:` block: action name ->
+// rule as written. A nil or empty map means the pipeline declares no earned
+// autonomy. Read the parsed rules with Pipeline.AutonomyActions and
+// Owners.AutonomyRule; the raw values are validated by Load.
+type AutonomySpec map[string]AutonomyEntry
+
+// AutonomyEntry is one action's rule as written. Load parses and range-checks
+// it into an AutonomyRule.
+type AutonomyEntry struct {
+	// AfterVerified is how many verified recoveries in a row grant the action.
+	AfterVerified AutonomyCount `yaml:"after_verified"`
+	// WindowText is the window as written: whole days as <n>d, e.g. "30d".
+	// Hours ("720h"), fractions ("1.5d") and mixed units ("2d12h") are
+	// refused (the AU1-0 contract, docs/api.md).
+	WindowText string `yaml:"window"`
+	// MaxTier is the widest setup tier the action may run at: T0, T1 or T2.
+	// Empty means DefaultAutonomyTier (T1).
+	MaxTier string `yaml:"max_tier"`
+}
+
+// AutonomyCount is a number of verified recoveries written as a plain decimal
+// YAML integer. yaml.v3 would otherwise turn 3.5 into 3 without a word, and it
+// reads 010 as octal 8; a streak must never be rounded or re-based.
+type AutonomyCount int
+
+// UnmarshalYAML accepts only a plain decimal integer scalar: 10, not 10.0,
+// "10", 1e1, 0x0a, 0o12, 0b1010, +10, 010 or 1_0. yaml.v3 resolves every one
+// of those but the quoted and the float forms to !!int, so the tag check alone
+// would let a streak be written in a form its author did not mean.
+func (n *AutonomyCount) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" || !plainDecimal(node.Value) {
+		return fmt.Errorf("line %d: after_verified: want a whole number of verified recoveries in plain decimal digits, got %q", node.Line, node.Value)
+	}
+	v, err := strconv.Atoi(node.Value)
+	if err != nil {
+		return fmt.Errorf("line %d: after_verified: want a whole number: %w", node.Line, err)
+	}
+	*n = AutonomyCount(v)
+	return nil
+}
+
+// AutonomyRule is one validated `autonomy:` entry, the form later rows read.
+// The zero value is not a rule.
+type AutonomyRule struct {
+	// Action is the action name (the key of the block).
+	Action string
+	// AfterVerified is the streak of verified recoveries required, 3 to 100.
+	AfterVerified int
+	// Window is the parsed window, 1d to 90d.
+	Window time.Duration
+	// WindowText is the window as written, whole days as <n>d (e.g. "30d");
+	// the API and autonomy.granted show it unchanged.
+	WindowText string
+	// MaxTier is the widest setup tier the action may run at: T0, T1 or T2.
+	MaxTier string
+}
+
+// UnmarshalYAML rejects unknown keys in every rule, a key that is not an action
+// name, a duplicate action and a rule that is not a mapping. The node decoder
+// ignores unknown keys, so checkKeys cannot be left to the pipeline decode.
+func (s *AutonomySpec) UnmarshalYAML(node *yaml.Node) error {
+	if isNull(node) {
+		// Like auto_approve: null means "no rules", the safe reading.
+		*s = nil
+		return nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: autonomy: want a mapping of action name to rule, got %s", node.Line, node.ShortTag())
+	}
+	out := make(AutonomySpec, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		action := key.Value
+		where := "autonomy." + action
+		if key.Kind != yaml.ScalarNode || isNull(key) || action == "" {
+			return fmt.Errorf("line %d: autonomy: want an action name as the key", key.Line)
+		}
+		if key.ShortTag() == "!!merge" {
+			return fmt.Errorf("line %d: autonomy: merge key << is not supported; write the action out", key.Line)
+		}
+		if _, dup := out[action]; dup {
+			return fmt.Errorf("line %d: %s: listed twice", key.Line, where)
+		}
+		if value.Kind == yaml.AliasNode && value.Alias != nil {
+			// `*rule`, one anchored rule shared by several actions, is plain
+			// YAML; the decoder resolves aliases everywhere else in the file.
+			value = value.Alias
+		}
+		if isNull(value) {
+			return fmt.Errorf("line %d: %s: rule is empty (null); set after_verified and window", value.Line, where)
+		}
+		if value.Kind != yaml.MappingNode {
+			return fmt.Errorf("line %d: %s: want a mapping with after_verified, window and max_tier", value.Line, where)
+		}
+		if err := checkKeys(value, where, "after_verified", "window", "max_tier"); err != nil {
+			return err
+		}
+		type plain AutonomyEntry // no methods, so Decode does not recurse into this one
+		var e plain
+		if err := value.Decode(&e); err != nil {
+			return fmt.Errorf("line %d: %s: %w", value.Line, where, err)
+		}
+		out[action] = AutonomyEntry(e)
+	}
+	*s = out
+	return nil
+}
+
+// AutonomyActions returns the actions of the pipeline's autonomy: block sorted
+// by name. The result is never nil and the caller may modify it.
+func (p *Pipeline) AutonomyActions() []string {
+	if p == nil {
+		return []string{}
+	}
+	names := make([]string, 0, len(p.autonomy))
+	for a := range p.autonomy {
+		names = append(names, a)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// AutonomyRule returns the validated autonomy rule for action on the pipeline
+// and whether the block declares one. It is false for an unknown pipeline, a
+// pipeline with no autonomy: block and an action outside it.
+func (o *Owners) AutonomyRule(pipelineID, action string) (AutonomyRule, bool) {
+	if o == nil {
+		return AutonomyRule{}, false
+	}
+	p, ok := o.Pipeline(pipelineID)
+	if !ok {
+		return AutonomyRule{}, false
+	}
+	return p.AutonomyRule(action)
+}
+
+// AutonomyRule returns the validated autonomy rule for action, if the
+// pipeline declares one. Nil-safe.
+func (p *Pipeline) AutonomyRule(action string) (AutonomyRule, bool) {
+	if p == nil {
+		return AutonomyRule{}, false
+	}
+	r, ok := p.autonomy[action]
+	return r, ok
+}
+
+// ValidateAutonomyActions refuses an `autonomy:` action that is not in
+// actionNames, the action registry's names. Load checks the block's syntax and
+// values before a registry exists; a server calls this (or LoadWithActions),
+// like ValidateAutoApprove. A nil or empty set is an empty registry, not "skip
+// the check": every action is then refused. Pass the FULL proposal registry,
+// as for auto_approve.
+func (o *Owners) ValidateAutonomyActions(actionNames []string) error {
+	return o.ValidateAutonomyActionsDeferred(actionNames, nil)
+}
+
+// ValidateAutonomyActionsDeferred is ValidateAutonomyActions that also refuses
+// an autonomy: action in deferredNames, the actions.Deferred names: a
+// pull-request fix is never approved by a policy, earned autonomy included
+// (docs/design/fix-pr.md §5.8). It is the autonomy twin of
+// ValidateAutoApproveDeferred.
+func (o *Owners) ValidateAutonomyActionsDeferred(actionNames, deferredNames []string) error {
+	if o == nil {
+		return nil
+	}
+	if err := o.checkAutonomyNames(actionNames, deferredNames); err != nil {
+		return fmt.Errorf("owners: %w", err)
+	}
+	return nil
+}
+
+// checkAutonomyNames returns the first block action (pipelines in file order,
+// actions sorted) that is not in actionNames or that is in deferredNames. It
+// reads the block as written, not the validated rules, so a hand-built Owners
+// (a test's) is checked too instead of silently passing.
+func (o *Owners) checkAutonomyNames(actionNames, deferredNames []string) error {
+	known := make(map[string]bool, len(actionNames))
+	for _, n := range actionNames {
+		known[n] = true
+	}
+	for i := range o.Pipelines {
+		p := &o.Pipelines[i]
+		for _, a := range autonomyKeys(p.Autonomy) {
+			if slices.Contains(deferredNames, a) {
+				return fmt.Errorf("pipeline %q: autonomy: %q is never approved by a policy (it opens a pull request that a reviewer merges)", p.ID, a)
+			}
+			if !known[a] {
+				return fmt.Errorf("pipeline %q: autonomy: unknown action %q (known: %s)", p.ID, a, knownList(known))
+			}
+		}
+	}
+	return nil
+}
+
+// autonomyKeys returns the actions of spec sorted by name, so the first
+// reported error is the same whatever order the YAML map decoded in.
+func autonomyKeys(spec AutonomySpec) []string {
+	names := make([]string, 0, len(spec))
+	for a := range spec {
+		names = append(names, a)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validateAutonomy checks one pipeline's block and stores the parsed rules.
+// The errors do not name the pipeline; the caller adds it. An absent or empty
+// block is fine and leaves no rules.
+func (p *Pipeline) validateAutonomy() error {
+	if len(p.Autonomy) == 0 {
+		p.autonomy = nil
+		return nil
+	}
+	approved := make(map[string]bool, len(p.AutoApprove))
+	for _, a := range p.AutoApprove {
+		approved[a] = true
+	}
+	rules := make(map[string]AutonomyRule, len(p.Autonomy))
+	for _, action := range autonomyKeys(p.Autonomy) {
+		e := p.Autonomy[action]
+		if !validActionName(action) {
+			return fmt.Errorf("autonomy: %q is not an action name (want lowercase letters, digits and underscores, starting with a letter)", action)
+		}
+		if approved[action] {
+			return fmt.Errorf("autonomy: action %q is also in auto_approve: an action is approved by one policy or the other, not both", action)
+		}
+		after := int(e.AfterVerified)
+		if after < MinAutonomyAfterVerified || after > MaxAutonomyAfterVerified {
+			return fmt.Errorf("autonomy.%s: after_verified %d: want %d to %d", action, after, MinAutonomyAfterVerified, MaxAutonomyAfterVerified)
+		}
+		window, err := parseAutonomyWindow(e.WindowText)
+		if err != nil {
+			return fmt.Errorf("autonomy.%s: window %q: %w", action, e.WindowText, err)
+		}
+		tier := e.MaxTier
+		if tier == "" {
+			tier = DefaultAutonomyTier
+		}
+		if !slices.Contains(autonomyTiers, tier) {
+			return fmt.Errorf("autonomy.%s: max_tier %q: want T0, T1 or T2 (T3 is never earned)", action, e.MaxTier)
+		}
+		rules[action] = AutonomyRule{
+			Action:        action,
+			AfterVerified: after,
+			Window:        window,
+			WindowText:    e.WindowText,
+			MaxTier:       tier,
+		}
+	}
+	p.autonomy = rules
+	return nil
+}
+
+// parseAutonomyWindow parses a rule's window: whole days written <n>d, 1d to
+// 90d, as the AU1-0 contract spells it (docs/api.md, Earned autonomy). n is
+// plain decimal digits with no sign, space or leading zero, so a window has
+// one spelling and the API and autonomy.granted can show the text as written.
+// Hours ("720h"), fractions ("1.5d") and mixed units ("2d12h") are refused:
+// the window is a count of days, not a duration, and accepting a spelling
+// later is additive while refusing one later would break files. The caller
+// adds the action and the value as written to the error.
+func parseAutonomyWindow(text string) (time.Duration, error) {
+	want := fmt.Errorf("want %dd to %dd in whole days written <n>d (e.g. 30d)", MinAutonomyWindowDays, MaxAutonomyWindowDays)
+	digits, ok := strings.CutSuffix(text, "d")
+	if !ok || !plainDigits(digits) {
+		return 0, want
+	}
+	days, err := strconv.Atoi(digits)
+	if err != nil || days < MinAutonomyWindowDays || days > MaxAutonomyWindowDays {
+		// err means more digits than an int holds: out of range as well.
+		return 0, want
+	}
+	return time.Duration(days) * 24 * time.Hour, nil
+}
+
+// plainDigits reports whether s is a non-negative integer in plain decimal
+// digits with no sign and no leading zero: ^(0|[1-9][0-9]*)$. A byte loop,
+// like validActionName, instead of a package-level regexp.
+func plainDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	if s[0] == '0' {
+		return len(s) == 1
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// plainDecimal is plainDigits with an optional leading minus, so a negative
+// after_verified reaches the range check and its clearer message.
+func plainDecimal(s string) bool {
+	return plainDigits(strings.TrimPrefix(s, "-"))
+}
