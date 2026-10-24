@@ -86,20 +86,30 @@ func promptCDCFixesMySQLFor(m RoomMode) string {
 
 // The MySQL source wording (Q8g, docs/design/mysql-source.md §3, §7, §8).
 // promptCDCFixesMySQL is the CDC fixes section with the Postgres-only bullets
-// replaced: the slot drop by the purged-binlog rule, the publication bullet by
-// the server id and schema history rules, and the resume check's slot by the
-// binlog position. Built from promptCDCFixes so the shared bullets keep their
-// exact words.
-const promptCDCIntroMySQL = `You are on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect (DDL in its schema history topic) -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You use read-only tools; you only propose fixes.`
+// replaced: the slot drop by the purged-binlog rule, the restart bullet's
+// publication clause (W4h folded the publication bullet into it) by the
+// schema history rule, and the resume check's slot by the binlog position;
+// the server id rule is the MySQL case of the config-setting bullet. Built
+// from promptCDCFixes so the shared bullets keep their exact words; a
+// pattern that no longer matches leaves Postgres wording in the MySQL prompt,
+// which TestMySQLPromptNamesNoPostgresTool refuses. The intro carries the
+// CDC intro's W4g wording; the schema history topic is named by rule 2 and
+// its own bullet, not again in the intro, so the prompt stays inside the
+// 1335-word ceiling with W4h's restart bullet (W4h was word-neutral on the
+// Postgres prompt only: the MySQL bullets now replace a clause, not a
+// bullet).
+const promptCDCIntroMySQL = `You're on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You only read and propose fixes.`
 
 func promptCDCFixesMySQL() string {
 	return strings.NewReplacer(
 		"- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is irreversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.",
-		"- A stored position the server no longer has (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position the server has or a new snapshot; say what the gap loses.",
-		"confirm with reads that a source connector's slot exists and holds its position,",
-		"confirm with reads that the binlog still holds a source connector's position (mysql_binlog_status),",
-		"- pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal (signal_table: signal.data.collection from connect_config).",
-		"- A database.server.id clashing with the server's or another connector's is the cause: set a unique one with connect_update_connector_config.\n"+
+		"- A stored position the server lacks (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position it has or a new snapshot; say what's lost.",
+		"confirm that a source connector's slot exists and holds its position,",
+		"confirm that the binlog holds a source connector's position (mysql_binlog_status),",
+		"- Use connect_update_connector_config only when that setting is the cause.",
+		"- Use connect_update_connector_config only when that setting is the cause, e.g. a database.server.id clashing with the server's or another connector's (set a unique one).",
+		"- A FAILED task's restart is the next step of the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
+		"- A FAILED task's restart is the next step of the proposal removing its cause.\n"+
 			"- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.",
 	).Replace(promptCDCFixes)
 }
