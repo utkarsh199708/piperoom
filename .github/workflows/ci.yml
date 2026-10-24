@@ -74,6 +74,13 @@ jobs:
         run: go test ./...
       - name: eval scenarios (validate only; no model calls, no API key, no network)
         run: go run ./evals/cmd/evalrun -validate
+      - name: "evals: supported-model list (baselines pass the gate, no sunset passed)"
+        # V12, design 5.3 and 5.4. Every row of internal/agent/llm/supported.json
+        # needs its committed 3-run baseline, passing evalrun -gate against the
+        # current reference, and a sunset date not yet passed. -count=1: the
+        # result depends on today's date, which the test cache cannot see.
+        # It is also part of go test ./... above; this step names the failure.
+        run: go test -count=1 -run 'TestSupportedListGate|TestCheckSupportedFixtures|TestEvalsLiveHasEveryProviderKey' ./evals/
       - name: "evals: generated files are current"
         # LEAD-ARCH rule: a PR that changes tool output regenerates the eval
         # files in the same PR. -check lists the stale files and exits 1.

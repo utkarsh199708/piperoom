@@ -191,7 +191,12 @@ Postgres (`internal/store` and `internal/room` run for real; tests that need the
 dev stack skip), the race detector, govulncheck, the deploy manifests (Helm, Terraform, no
 dev auth in the image) and the web job. The OIDC end-to-end test runs only by hand
 (`workflow_dispatch`). Live eval runs call the model and need `ANTHROPIC_API_KEY`; see
-`evals/README.md`.
+`evals/README.md`. CI also checks the supported-model list of the other providers: every row of
+`internal/agent/llm/supported.json` needs a 3-run baseline that passes `evalrun -gate` against the Claude
+reference, and no `sunset` may have passed. A model of another provider (OpenAI and compatible hosts, Gemini,
+Bedrock) is gated by dispatching `evals-live` with its `provider`, `flavor` and `model`; the provider's key is a
+secret of the `evals` environment and a missing one skips the run. See "Gate run of a model provider" in
+`docs/runbook.md`; the published model table is `docs/pilot/models.md` (added by V14).
 
 The setup runner has its own workflows. `setup-matrix.yml` runs on every pull request and on
 push to `main`: the setup unit tests, the path table tests of `internal/setup/ops` and the
