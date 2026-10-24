@@ -349,7 +349,7 @@ expect:
       required: true
   claims:
     - about: root_cause
-      facts: [f_tolerance_all, f_events_seen, f_topic_stale]
+      facts: [f_tolerance_all, f_events_seen, f_records_skipped, f_topic_stale]
   evidence_tools: [connect_config, connect_worker_metrics]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register]
   # W4 ruling R20 (R8): budget 14 -> 21. The scenario failed only on budget at 19 calls; 19 plus 2.
