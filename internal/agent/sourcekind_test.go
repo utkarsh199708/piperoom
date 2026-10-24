@@ -251,10 +251,13 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 
 // mysqlPromptSHA256 and mysqlPromptWriteOffSHA256 pin the MySQL CDC prompt
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
-// silently.
+// silently. They moved when the replacer followed W4h's restart bullet (the
+// old publication pattern no longer matched, so pg_* names reached MySQL
+// rooms): the shared method and fixes carry W4h's wording, and MySQL-only
+// trims keep the prompt at 1335 words.
 const (
-	mysqlPromptSHA256         = "58413e4711792bcfa501618ac1febfd44fc528e8153839cfa5a29f2731f84062"
-	mysqlPromptWriteOffSHA256 = "18286b09569817dde84bfecb0357dff425ec75abb47331cc2b499dd9e584d7b5"
+	mysqlPromptSHA256         = "f4930ab047410226447896982b10f860ca31d5ceba2d18a9f17b2cff37a4221c"
+	mysqlPromptWriteOffSHA256 = "ffd7f76e8f12fa4353d1ecfac49dd8c8d75adb62c4385fd315626822626dc10a"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
