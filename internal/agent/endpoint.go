@@ -91,6 +91,24 @@ type EndpointConfig struct {
 	// (PIPEROOM_MODEL_MAX_CONCURRENCY, default PIPEROOM_MAX_AGENTS); 0 = no
 	// bound. The Claude providers keep their SDK's own behaviour.
 	MaxConcurrency int64
+
+	// Getenv replaces os.Getenv for key variables (the standalone picker's
+	// key); nil = os.Getenv. Every key the endpoint reads goes through it:
+	// ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN (the anthropic client then
+	// skips the SDK's own environment autoload, so a process key never mixes
+	// in, and a main anthropic role without either refuses to start),
+	// ANTHROPIC_WORKSPACE_ID, PIPEROOM_MODEL_API_KEY(_FILE), each openai
+	// flavor's and gemini's key variable, and AWS_BEARER_TOKEN_BEDROCK for
+	// the start checks. The AWS SDK (bedrock, bedrock-converse) still reads
+	// its own credentials and AWS_BEARER_TOKEN_BEDROCK from the process
+	// environment, and Vertex uses Google application default credentials.
+	Getenv func(string) string
+	// WrapModel wraps each role's client after it is built (the main client
+	// once, every other role's own client once); the evals model tap uses
+	// it; production leaves it nil; it must return a model that behaves
+	// exactly like m. A role that shares the main client is not wrapped
+	// again. role is "main", "first_look", "summary" or "judge".
+	WrapModel func(role string, m llm.Model) llm.Model
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -133,14 +151,14 @@ func (l ProviderLoaders) loaders() providerLoaders {
 // (anthropicllm.RequestOption is the SDK's option.RequestOption), for a
 // caller that needs its own client on the agent's provider (the eval judge).
 // It runs the same credential checks as NewEndpoint but sends no request.
-// getenv nil means os.Getenv.
+// getenv nil means cfg.Getenv, else os.Getenv.
 //
 // For vertex, ctx must outlive the returned options: vertex.WithCredentials
 // and the oauth2 token source it wraps keep ctx and use it for every later
 // token refresh, so a cancelled ctx breaks the client's calls.
 func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []anthropicllm.RequestOption, error) {
 	if getenv == nil {
-		getenv = os.Getenv
+		getenv = cfg.getenv()
 	}
 	cfg, _, err := cfg.normalized()
 	if err != nil {
@@ -273,8 +291,34 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 		}
 		return []anthropicllm.RequestOption{opt}, nil
 	default:
-		return clientOptions(getenv), nil
+		opts := clientOptions(getenv)
+		if c.Getenv != nil {
+			// The override replaces the process environment for the key:
+			// the SDK's autoload would otherwise send a process key.
+			env, ok := anthropicllm.EnvOptions(getenv)
+			if !ok {
+				return nil, errors.New("agent: PIPEROOM_MODEL_PROVIDER=anthropic needs ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN from the key lookup override")
+			}
+			opts = append(env, opts...)
+		}
+		return opts, nil
 	}
+}
+
+// getenv is c.Getenv, else os.Getenv.
+func (c EndpointConfig) getenv() func(string) string {
+	if c.Getenv != nil {
+		return c.Getenv
+	}
+	return os.Getenv
+}
+
+// wrap applies c.WrapModel to a role's client, when set.
+func (c EndpointConfig) wrap(role string, m llm.Model) llm.Model {
+	if c.WrapModel == nil {
+		return m
+	}
+	return c.WrapModel(role, m)
 }
 
 // Endpoint is the model client plus the per-room state that must outlive one
@@ -287,6 +331,10 @@ type Endpoint struct {
 	limit       int64
 	model       model
 	log         *slog.Logger
+	// mainRole and mainRegion describe the main role for Roles when no
+	// Knobs are set (specs is nil then).
+	mainRole   config.ModelRole
+	mainRegion string
 
 	// mainQuals are the price-key qualifiers of the main role (design 8.1).
 	mainQuals []string
@@ -343,7 +391,7 @@ func modelConcurrency(n int64) int {
 // the server refuses to start instead of failing on the first alert. It reads
 // cloud credentials but calls no model.
 func NewEndpoint(ctx context.Context, cfg EndpointConfig, log *slog.Logger) (*Endpoint, error) {
-	return newEndpoint(ctx, cfg, os.Getenv, defaultLoaders(), log)
+	return newEndpoint(ctx, cfg, cfg.getenv(), defaultLoaders(), log)
 }
 
 func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld providerLoaders, log *slog.Logger, extra ...anthropicllm.RequestOption) (*Endpoint, error) {
@@ -368,8 +416,10 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		triageTurns:   cfg.TriageTurns,
 		triagePass:    triagePassSettings(cfg),
 		limit:         limit,
-		model:         withNeutraliser(m, cfg.NeutraliseControlTokens),
+		model:         cfg.wrap(roleMain, withNeutraliser(m, cfg.NeutraliseControlTokens)),
 		log:           log,
+		mainRole:      mainRole,
+		mainRegion:    regionOf(cfg, mainRole),
 		budgets:       map[string]*tokenBudget{},
 		mainQuals:     priceQualifiers(mainRole),
 		pricingStrict: config.PricingStrictNonClaude,
@@ -427,7 +477,7 @@ func (e *Endpoint) buildRoles(ctx context.Context, cfg EndpointConfig, b clientB
 			if err != nil {
 				return err
 			}
-			m = withNeutraliser(built, cfg.NeutraliseControlTokens)
+			m = cfg.wrap(r.name, withNeutraliser(built, cfg.NeutraliseControlTokens))
 			rc.m = m
 		}
 		*r.dst = rc
@@ -459,6 +509,35 @@ func (rc roleClient) withModel(opts Options) Options {
 		opts.Model = rc.modelID
 	}
 	return opts
+}
+
+// RoleInfo is one configured role, for GET /api/models.
+type RoleInfo struct {
+	Name, Provider, Flavor, Model, Region string
+	PromptCache                           bool
+}
+
+// Roles returns the configured roles in a stable order.
+//
+// The order is main, triage, first_look, summary, judge, each present when
+// configured (a first look that is off is not listed). Without
+// EndpointConfig.Knobs only the main role is known: its provider, flavor and
+// region, with an empty Model (each request's Options.Model names it).
+func (e *Endpoint) Roles() []RoleInfo {
+	if len(e.specs) == 0 {
+		return []RoleInfo{{
+			Name: roleMain, Provider: e.provider, Flavor: e.mainRole.Flavor, Region: e.mainRegion,
+			PromptCache: e.model.Capabilities(e.mainRole.Model).PromptCache,
+		}}
+	}
+	out := make([]RoleInfo, 0, len(e.specs))
+	for _, sp := range e.specs {
+		out = append(out, RoleInfo{
+			Name: sp.name, Provider: sp.role.Provider, Flavor: sp.role.Flavor, Model: sp.role.Model,
+			Region: sp.region, PromptCache: sp.m.Capabilities(sp.role.Model).PromptCache,
+		})
+	}
+	return out
 }
 
 // Provider reports the normalized provider name.
