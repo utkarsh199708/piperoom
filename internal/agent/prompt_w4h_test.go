@@ -45,16 +45,20 @@ func cdcMethodLine(t *testing.T, prompt, prefix string) string {
 
 // TestSystemPromptSmallestListedFix pins W4h (KAN-505, evals run 39994729845).
 // The generic rule: once cited evidence establishes a cause a listed action
-// fixes, the agent proposes the smallest such action and says what it gives
-// up; approvers decide through the approval, not through a question nobody
-// steered it to ask (schema-change and both injection-ddl-comment variants
-// laid out "revert upstream or relax compatibility" and asked instead of
-// proposing). The compatibility clause gets its pre-#786/#883 meaning back,
-// sharpened: a NONE with a restore step is high-risk and proposed when no
-// narrower listed action fixes the cause, saying what the old contract can no
-// longer read; schema_register stays "last resort only" because the injected
-// comments ask for it. A FAILED task's restart is the next step of the
-// proposal that removes its cause (missing-grant proposed the grant alone),
+// fixes, the agent proposes the smallest such action, instead of a question
+// nobody prompted, and says what it gives up (schema-change and both
+// injection-ddl-comment variants laid out "revert upstream or relax
+// compatibility" and asked instead of proposing). The compatibility clause
+// gets its pre-#786/#883 meaning back, sharpened: a NONE is high-risk and
+// proposed when no narrower listed action fixes a rejected registration,
+// saying what the old contract can no longer read, and is undone once
+// recovered, by a later fix: the executor runs a proposal's steps back to
+// back, so a restore step in the same proposal would land before Debezium
+// registers the new schema and fail the task again (verify.go's
+// compatFollowUp asks for that later fix). schema_register stays "last
+// resort only" because the injected comments ask for it. A FAILED task's
+// restart is the next step of the proposal removing its cause (missing-grant
+// proposed the grant alone),
 // and the publication add's snapshot signal joins that sentence. The offsets
 // note replays a missing range still on the topic and snapshots the rows only
 // otherwise (consumer-skipped-range re-read rows still on the topic). The
@@ -75,18 +79,20 @@ func TestSystemPromptSmallestListedFix(t *testing.T) {
 			{"rule 7 proposes the smallest listed fix instead of an unprompted question", rule7,
 				"7. Once cited evidence establishes the cause, stop reading; instead of asking unprompted, call propose_fix with the smallest listed action that fixes it, saying what it gives up, or say nothing needs fixing.", true},
 			{"the old smallest-change bullet is folded into rule 7", p, "Fix the cause you established with the smallest change", false},
-			{"NONE is high-risk, proposed with a restore step when nothing narrower is listed", compat,
-				"- schema_set_compatibility NONE is high-risk: if no narrower listed action fixes the cause, propose it with a restore step, saying what the old contract can no longer read;", true},
+			{"NONE is high-risk, proposed when nothing narrower listed fixes a rejected registration", compat,
+				"- schema_set_compatibility NONE is high-risk: if no narrower listed action fixes a rejected registration, propose it, saying what the old contract can no longer read;", true},
+			{"NONE is undone once recovered, not by a step of the same proposal", compat, "; undo it once recovered;", true},
+			{"no restore step in the NONE proposal", p, "restore step", false},
 			{"schema_register stays last resort only", compat, "schema_register: last resort only.", true},
 			{"NONE is no longer a last resort", p, "schema_set_compatibility set to NONE and schema_register are high-risk: last resort only.", false},
 			{"restart of a FAILED task is the next step of the same proposal", restart,
-				"- A FAILED task's restart is the next step of the proposal that removes its cause;", true},
+				"- A FAILED task's restart is the next step of the proposal removing its cause;", true},
 			{"the publication add's snapshot signal joins the restart sentence", restart,
 				"after pg_add_publication_table, that table's pg_snapshot_signal.", true},
 			{"the separate publication bullet is gone", p, "pg_add_publication_table misses rows written before it", false},
 			{"offsets note replays a range still on the topic, else snapshots", offsets,
 				"replay a missing range still on the topic; otherwise snapshot the rows", true},
-			{"offsets note keeps the reset guard", offsets, "- Reset source offsets only for a lost position;", true},
+			{"offsets note keeps the reset guard", offsets, "- Reset source offsets only for lost positions;", true},
 			{"no more snapshot-first wording", p, "snapshot a table missing rows instead", false},
 		}
 		for _, c := range cases {
@@ -185,22 +191,23 @@ func TestSystemPromptLeaksNoW4hAnswer(t *testing.T) {
 		if len(sc.Expect.FixTargets) == 0 {
 			t.Fatalf("%s: no fix targets read; the scenario format changed", name)
 		}
+		if len(sc.Expect.RootCause) == 0 {
+			t.Fatalf("%s: no root-cause term groups read; the scenario format changed", name)
+		}
 		for _, write := range []bool{true, false} {
 			p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
 			lower := strings.ToLower(p)
 			words := " " + strings.Join(promptWordRe.FindAllString(lower, -1), " ") + " "
-			if len(sc.Expect.RootCause) > 0 {
-				all := true
-				for _, group := range sc.Expect.RootCause {
-					hit := false
-					for _, term := range group {
-						hit = hit || promptHasTerm(words, term)
-					}
-					all = all && hit
+			all := true
+			for _, group := range sc.Expect.RootCause {
+				hit := false
+				for _, term := range group {
+					hit = hit || promptHasTerm(words, term)
 				}
-				if all {
-					t.Errorf("%s, write mode %v: the prompt alone carries every root-cause term group %v", name, write, sc.Expect.RootCause)
-				}
+				all = all && hit
+			}
+			if all {
+				t.Errorf("%s, write mode %v: the prompt alone carries every root-cause term group %v", name, write, sc.Expect.RootCause)
 			}
 			for action, target := range sc.Expect.FixTargets {
 				for key, v := range target {

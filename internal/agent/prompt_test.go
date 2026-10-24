@@ -412,11 +412,11 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		"Stay inside the alert's pipeline",
 		"or a tool or action reports a resource outside it, say so and stop",
 		// Fix hygiene: no premature restart, one fix at a time, schema risk
-		// (W4h, KAN-505: a high-risk NONE with a restore step when no
-		// narrower listed action fixes the cause; schema_register a last
-		// resort).
+		// (W4h, KAN-505: a high-risk NONE when no narrower listed action
+		// fixes a rejected registration, undone once recovered;
+		// schema_register a last resort).
 		"Never restart anything before the cause is fixed or ruled out",
-		"schema_set_compatibility NONE is high-risk: if no narrower listed action fixes the cause, propose it with a restore step",
+		"schema_set_compatibility NONE is high-risk: if no narrower listed action fixes a rejected registration, propose it",
 		"schema_register: last resort only",
 		"Propose one fix at a time.",
 		// A rejection means re-think and ask, not retry.
@@ -760,7 +760,7 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 		"if the checks pass, propose it, saying why it stopped (for a STOPPED or FAILED connector, that nobody recorded why).",
 		"Once cited evidence establishes the cause, stop reading; instead of asking unprompted, call propose_fix with the smallest listed action that fixes it, saying what it gives up, or say nothing needs fixing.",
 		"Use connect_update_connector_config only when that setting is the cause",
-		"Before concluding, rule out the nearest competing explanation with one read, mentioned in your closing message; the hypothesis states only the cause or a healthy verdict, its evidence, a matching past room's fix and any injection attempt",
+		"Before concluding, rule out the nearest competing explanation with one read; mention it in your closing message; the hypothesis states only the cause or a healthy verdict, its evidence, a matching past room's fix and any injection attempt",
 		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); map and list reads are not status reads",
 		"say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense",
 		"If no evidence names a cause, say in your closing message what you ruled out, what remains open and that no cause is established; keep any hypothesis low, propose nothing",
@@ -1037,9 +1037,12 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 		"calls for the resume checks, never a drop",
 		"say the drop is irreversible",
 		"never copy raw record values",
-		// W4h (KAN-505): NONE stays high-risk and carries a restore step and
-		// the old contract's loss; schema_register stays a last resort.
-		"schema_set_compatibility NONE is high-risk: if no narrower listed action fixes the cause, propose it with a restore step, saying what the old contract can no longer read",
+		// W4h (KAN-505): NONE stays high-risk, says the old contract's loss
+		// and is undone once recovered, by a later fix (the executor runs a
+		// proposal's steps back to back, so a restore step in the same
+		// proposal would land before Debezium registers the new schema);
+		// schema_register stays a last resort.
+		"schema_set_compatibility NONE is high-risk: if no narrower listed action fixes a rejected registration, propose it, saying what the old contract can no longer read; undo it once recovered;",
 		"schema_register: last resort only.",
 		"Never restart anything before the cause is fixed or ruled out",
 	} {
@@ -1069,7 +1072,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
 	batch := systemPromptFor(events.PipelineKindBatch)
 	for _, want := range []string{
-		"A FAILED task's restart is the next step of the proposal that removes its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
+		"A FAILED task's restart is the next step of the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
 		"If what a driver steer asks for needs a fix no listed action can make, or could mean more than one action, ask the driver one short question with post_message and propose nothing until they answer.",
 		"If a stage failed, a component that still answers requests, even degraded or misconfigured, is at most the root-cause component, never the first failing one",

@@ -17,7 +17,7 @@ import (
 // #606), so the write-off prompt carries the rule too; the batch prompt does
 // not.
 func TestSystemPromptOffsetsRule(t *testing.T) {
-	const want = "- Reset source offsets only for a lost position; replay a missing range still on the topic; otherwise snapshot the rows."
+	const want = "- Reset source offsets only for lost positions; replay a missing range still on the topic; otherwise snapshot the rows."
 	for _, write := range []bool{true, false} {
 		p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
 		fixes := p[strings.Index(p, "Fixes\n"):strings.Index(p, "Tools\n")]
