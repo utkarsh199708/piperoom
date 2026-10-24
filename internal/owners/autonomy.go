@@ -21,7 +21,8 @@ import (
 // auto-approve policy on the pipeline, inside what window, and the widest
 // setup tier an autonomous run may use. Load validates the block; the trust
 // ledger and the scheduling it feeds are AU1b's (A5). Read the validated
-// entries with Pipeline.AutonomyActions and Owners.AutonomyRule.
+// entries with Pipeline.AutonomyActions and Owners.AutonomyRule; AutonomyDiff
+// (autonomy_diff.go) reports what a reload changed.
 
 const (
 	// MinAutonomyAfterVerified is the smallest streak an autonomy rule may
@@ -30,16 +31,21 @@ const (
 	// MaxAutonomyAfterVerified is the largest streak an autonomy rule may ask
 	// for; 100 keeps the rule reachable in one window.
 	MaxAutonomyAfterVerified = 100
+	// MinAutonomyWindowDays and MaxAutonomyWindowDays bound a rule's window,
+	// which is written in whole days as <n>d (docs/api.md, Earned autonomy).
+	MinAutonomyWindowDays = 1
+	MaxAutonomyWindowDays = 90
 	// MinAutonomyWindow is the shortest autonomy window (1 day).
-	MinAutonomyWindow = 24 * time.Hour
+	MinAutonomyWindow = MinAutonomyWindowDays * 24 * time.Hour
 	// MaxAutonomyWindow is the longest autonomy window (90 days).
-	MaxAutonomyWindow = 90 * 24 * time.Hour
+	MaxAutonomyWindow = MaxAutonomyWindowDays * 24 * time.Hour
 	// DefaultAutonomyTier is the max_tier an entry gets when it names none.
 	DefaultAutonomyTier = "T1"
 )
 
-// autonomyTiers are the max_tier values a rule may name. T3 exists on the
-// setup scale but is never earned autonomously, so Load refuses it.
+// autonomyTiers are the max_tier values a rule may name, narrowest first. T3
+// exists on the setup scale but is never earned autonomously, so Load refuses
+// it.
 var autonomyTiers = []string{"T0", "T1", "T2"}
 
 // AutonomySpec is the optional per-pipeline `autonomy:` block: action name ->
@@ -53,26 +59,30 @@ type AutonomySpec map[string]AutonomyEntry
 type AutonomyEntry struct {
 	// AfterVerified is how many verified recoveries in a row grant the action.
 	AfterVerified AutonomyCount `yaml:"after_verified"`
-	// WindowText is the window as written: a Go-style duration whose d unit
-	// means 24h, e.g. "30d" or "720h".
+	// WindowText is the window as written: whole days as <n>d, e.g. "30d".
+	// Hours ("720h"), fractions ("1.5d") and mixed units ("2d12h") are
+	// refused (the AU1-0 contract, docs/api.md).
 	WindowText string `yaml:"window"`
 	// MaxTier is the widest setup tier the action may run at: T0, T1 or T2.
 	// Empty means DefaultAutonomyTier (T1).
 	MaxTier string `yaml:"max_tier"`
 }
 
-// AutonomyCount is a number of verified recoveries written as a YAML integer.
-// yaml.v3 would otherwise turn 3.5 into 3 without a word; a streak must never
-// be rounded.
+// AutonomyCount is a number of verified recoveries written as a plain decimal
+// YAML integer. yaml.v3 would otherwise turn 3.5 into 3 without a word, and it
+// reads 010 as octal 8; a streak must never be rounded or re-based.
 type AutonomyCount int
 
-// UnmarshalYAML accepts only a plain integer scalar.
+// UnmarshalYAML accepts only a plain decimal integer scalar: 10, not 10.0,
+// "10", 1e1, 0x0a, 0o12, 0b1010, +10, 010 or 1_0. yaml.v3 resolves every one
+// of those but the quoted and the float forms to !!int, so the tag check alone
+// would let a streak be written in a form its author did not mean.
 func (n *AutonomyCount) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
-		return fmt.Errorf("line %d: after_verified: want a whole number of verified recoveries, got %q", node.Line, node.Value)
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" || !plainDecimal(node.Value) {
+		return fmt.Errorf("line %d: after_verified: want a whole number of verified recoveries in plain decimal digits, got %q", node.Line, node.Value)
 	}
-	var v int
-	if err := node.Decode(&v); err != nil {
+	v, err := strconv.Atoi(node.Value)
+	if err != nil {
 		return fmt.Errorf("line %d: after_verified: want a whole number: %w", node.Line, err)
 	}
 	*n = AutonomyCount(v)
@@ -88,7 +98,8 @@ type AutonomyRule struct {
 	AfterVerified int
 	// Window is the parsed window, 1d to 90d.
 	Window time.Duration
-	// WindowText is the window as written, e.g. "30d" or "720h".
+	// WindowText is the window as written, whole days as <n>d (e.g. "30d");
+	// the API and autonomy.granted show it unchanged.
 	WindowText string
 	// MaxTier is the widest setup tier the action may run at: T0, T1 or T2.
 	MaxTier string
@@ -119,6 +130,11 @@ func (s *AutonomySpec) UnmarshalYAML(node *yaml.Node) error {
 		}
 		if _, dup := out[action]; dup {
 			return fmt.Errorf("line %d: %s: listed twice", key.Line, where)
+		}
+		if value.Kind == yaml.AliasNode && value.Alias != nil {
+			// `*rule`, one anchored rule shared by several actions, is plain
+			// YAML; the decoder resolves aliases everywhere else in the file.
+			value = value.Alias
 		}
 		if isNull(value) {
 			return fmt.Errorf("line %d: %s: rule is empty (null); set after_verified and window", value.Line, where)
@@ -204,7 +220,9 @@ func (o *Owners) ValidateAutonomyActionsDeferred(actionNames, deferredNames []st
 }
 
 // checkAutonomyNames returns the first block action (pipelines in file order,
-// actions sorted) that is not in actionNames or that is in deferredNames.
+// actions sorted) that is not in actionNames or that is in deferredNames. It
+// reads the block as written, not the validated rules, so a hand-built Owners
+// (a test's) is checked too instead of silently passing.
 func (o *Owners) checkAutonomyNames(actionNames, deferredNames []string) error {
 	known := make(map[string]bool, len(actionNames))
 	for _, n := range actionNames {
@@ -212,7 +230,7 @@ func (o *Owners) checkAutonomyNames(actionNames, deferredNames []string) error {
 	}
 	for i := range o.Pipelines {
 		p := &o.Pipelines[i]
-		for _, a := range p.AutonomyActions() {
+		for _, a := range autonomyKeys(p.Autonomy) {
 			if slices.Contains(deferredNames, a) {
 				return fmt.Errorf("pipeline %q: autonomy: %q is never approved by a policy (it opens a pull request that a reviewer merges)", p.ID, a)
 			}
@@ -224,6 +242,17 @@ func (o *Owners) checkAutonomyNames(actionNames, deferredNames []string) error {
 	return nil
 }
 
+// autonomyKeys returns the actions of spec sorted by name, so the first
+// reported error is the same whatever order the YAML map decoded in.
+func autonomyKeys(spec AutonomySpec) []string {
+	names := make([]string, 0, len(spec))
+	for a := range spec {
+		names = append(names, a)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // validateAutonomy checks one pipeline's block and stores the parsed rules.
 // The errors do not name the pipeline; the caller adds it. An absent or empty
 // block is fine and leaves no rules.
@@ -232,19 +261,12 @@ func (p *Pipeline) validateAutonomy() error {
 		p.autonomy = nil
 		return nil
 	}
-	// Sorted actions make the first reported error deterministic, whatever
-	// order the YAML map happened to decode in.
-	names := make([]string, 0, len(p.Autonomy))
-	for a := range p.Autonomy {
-		names = append(names, a)
-	}
-	sort.Strings(names)
 	approved := make(map[string]bool, len(p.AutoApprove))
 	for _, a := range p.AutoApprove {
 		approved[a] = true
 	}
 	rules := make(map[string]AutonomyRule, len(p.Autonomy))
-	for _, action := range names {
+	for _, action := range autonomyKeys(p.Autonomy) {
 		e := p.Autonomy[action]
 		if !validActionName(action) {
 			return fmt.Errorf("autonomy: %q is not an action name (want lowercase letters, digits and underscores, starting with a letter)", action)
@@ -259,9 +281,6 @@ func (p *Pipeline) validateAutonomy() error {
 		window, err := parseAutonomyWindow(e.WindowText)
 		if err != nil {
 			return fmt.Errorf("autonomy.%s: window %q: %w", action, e.WindowText, err)
-		}
-		if window < MinAutonomyWindow || window > MaxAutonomyWindow {
-			return fmt.Errorf("autonomy.%s: window %q: want 1d to 90d (24h to 2160h)", action, e.WindowText)
 		}
 		tier := e.MaxTier
 		if tier == "" {
@@ -282,55 +301,48 @@ func (p *Pipeline) validateAutonomy() error {
 	return nil
 }
 
-// parseAutonomyWindow parses a rule's window: a Go-style duration that also
-// accepts a d unit meaning 24h, so "30d" and "720h" name the same window. The
-// range (1d to 90d) is checked by validateAutonomy so its error can name the
-// action and the value as written.
+// parseAutonomyWindow parses a rule's window: whole days written <n>d, 1d to
+// 90d, as the AU1-0 contract spells it (docs/api.md, Earned autonomy). n is
+// plain decimal digits with no sign, space or leading zero, so a window has
+// one spelling and the API and autonomy.granted can show the text as written.
+// Hours ("720h"), fractions ("1.5d") and mixed units ("2d12h") are refused:
+// the window is a count of days, not a duration, and accepting a spelling
+// later is additive while refusing one later would break files. The caller
+// adds the action and the value as written to the error.
 func parseAutonomyWindow(text string) (time.Duration, error) {
-	if strings.TrimSpace(text) == "" {
-		return 0, fmt.Errorf("want a duration between 1d and 90d, e.g. 30d or 720h")
+	want := fmt.Errorf("want %dd to %dd in whole days written <n>d (e.g. 30d)", MinAutonomyWindowDays, MaxAutonomyWindowDays)
+	digits, ok := strings.CutSuffix(text, "d")
+	if !ok || !plainDigits(digits) {
+		return 0, want
 	}
-	d, err := time.ParseDuration(daysAsHours(text))
-	if err != nil {
-		return 0, fmt.Errorf("want a Go-style duration between 1d and 90d, e.g. 30d or 720h: %w", err)
+	days, err := strconv.Atoi(digits)
+	if err != nil || days < MinAutonomyWindowDays || days > MaxAutonomyWindowDays {
+		// err means more digits than an int holds: out of range as well.
+		return 0, want
 	}
-	return d, nil
+	return time.Duration(days) * 24 * time.Hour, nil
 }
 
-// daysAsHours rewrites every "<number>d" component of s to hours and leaves
-// the rest for time.ParseDuration, which has no day unit. The unit is textual:
-// d is not a unit Go parses, so there is nothing else it could mean.
-func daysAsHours(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 4)
-	for i := 0; i < len(s); {
-		start := i
-		if s[i] == '+' || s[i] == '-' {
-			i++
-		}
-		digits := i
-		for i < len(s) && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.') {
-			i++
-		}
-		if i == digits || i >= len(s) || s[i] != 'd' {
-			b.WriteString(s[start:i])
-			if i < len(s) {
-				b.WriteByte(s[i])
-				i++
-			}
-			continue
-		}
-		days, err := strconv.ParseFloat(s[digits:i], 64)
-		if err != nil {
-			// Leave the text alone; time.ParseDuration reports the bad number.
-			b.WriteString(s[start : i+1])
-			i++
-			continue
-		}
-		b.WriteString(s[start:digits]) // the sign, if any
-		b.WriteString(strconv.FormatFloat(days*24, 'f', -1, 64))
-		b.WriteByte('h')
-		i++
+// plainDigits reports whether s is a non-negative integer in plain decimal
+// digits with no sign and no leading zero: ^(0|[1-9][0-9]*)$. A byte loop,
+// like validActionName, instead of a package-level regexp.
+func plainDigits(s string) bool {
+	if s == "" {
+		return false
 	}
-	return b.String()
+	if s[0] == '0' {
+		return len(s) == 1
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// plainDecimal is plainDigits with an optional leading minus, so a negative
+// after_verified reaches the range check and its clearer message.
+func plainDecimal(s string) bool {
+	return plainDigits(strings.TrimPrefix(s, "-"))
 }
