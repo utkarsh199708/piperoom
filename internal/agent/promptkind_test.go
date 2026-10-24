@@ -162,10 +162,16 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // snapshots them (rows-lost-after-retention). Word-neutral (1353 with write
 // mode off): rule 3's "a tool" became "tools" and the resume check lost
 // "that" after "confirm" (the PR lists each word).
+// W4m (KAN-508) moved it a sixteenth time, on purpose, for
+// consumer-skipped-range: after a verified recovery the final hypothesis
+// said "Recovered: ... nothing more to fix" and dropped the cause and its
+// citations. Rule 7's healthy verdict now says "keep any earlier fault,
+// cited, in past tense" for "put any earlier fault in the past tense",
+// word for word (8 for 8: still 1352 words, 1353 with write mode off).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "6749f6c4e7759c1c0dcf42a70a1c1f7b6772c7224ddc2083de7b276f74fd685e"
+const cdcPromptSHA256 = "26fda51a64616d85ef75d2884c62096169e9e7541dbf128d5fa3d148ef543106"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -178,8 +184,9 @@ const cdcPromptSHA256 = "6749f6c4e7759c1c0dcf42a70a1c1f7b6772c7224ddc2083de7b276
 // W4g (rule 4's root-cause component and layer form, rule 5's clause,
 // word-neutral: still 1353 words), and W4i (the negative claim's read in
 // rule 1, the restart bullet and the offsets note, word-neutral: still 1353
-// words).
-const cdcPromptWriteOffSHA256 = "db684be9e34f9ca3a73c1bf5b1fc046bae5126a72af4904d35e1c461102305b6"
+// words), and W4m (rule 7's earlier fault kept cited, word-neutral: still
+// 1353 words).
+const cdcPromptWriteOffSHA256 = "42b45850b815305e13a872232ac8ffcfa4ca4f30e4b5e6ae65287e7efb9f0a01"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
