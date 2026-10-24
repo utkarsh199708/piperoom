@@ -56,7 +56,7 @@ users:
 	if err := ValidateUsers(users, nil); err != nil {
 		t.Fatalf("ValidateUsers (users only) refused the mysql layer: %v", err)
 	}
-	if !isKnownLayer("mysql") || isKnownLayer("oracle") {
+	if !isKnownLayer("mysql") || isKnownLayer("db2") {
 		t.Fatal("isKnownLayer must agree with owners.KnownLayers")
 	}
 
