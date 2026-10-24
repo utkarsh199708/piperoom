@@ -79,7 +79,13 @@ jobs:
             # flag; the two path-table rows that create real symlinks still
             # skip themselves where the OS user may not, which the next step
             # accounts for.
-            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind)$'
+            # Four host-target tests (internal/setup/targets/host,
+            # systemd_test.go) install a systemd unit from a real t.TempDir()
+            # while simulating a Linux runner: on Windows that dir is a
+            # backslash path, which the unit-path rule refuses as it should
+            # (a unit file can never hold it). They run on ubuntu and macOS;
+            # the tests that simulate a Windows runner still run here.
+            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind|TestNoParamReachesTheUnit|TestServiceInstallRefusesATakenName|TestServiceInstallCommandFailures|TestJavaHomeInsideTheProject)$'
           fi
           go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
       - name: "Section 2.3 path table tests (run, never skipped)"
@@ -164,7 +170,7 @@ jobs:
             colima start --cpu 2 --memory 4 --disk 20 || { echo "::error::colima start failed"; exit 1; }
           fi
           set +e
-          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          go test -count=1 -timeout 40m -json -tags integration -skip '^TestReferenceProjectsBuildAndRun$' ./internal/setup/... > test.json
           rc=$?
           set -e
           jq -rs '
@@ -188,6 +194,9 @@ jobs:
   # Compose project on free ports and removes it, so it needs no dev stack and
   # no stack lock; ci.yml's fullstack job runs it too (./internal/... with the
   # integration tag), this job makes it the setup matrix's own signal.
+  # TestReferenceProjectsBuildAndRun (internal/setup/knowledge) needs the dev
+  # stack this job does not start, so it is left out here (-skip) instead of
+  # skipping on testenv.Require; ci.yml's fullstack job runs it.
   compose-integration:
     name: Compose integration (ubuntu)
     runs-on: ubuntu-latest
@@ -208,7 +217,7 @@ jobs:
       - name: go test -tags integration ./internal/setup/... (TestComposeStackToHealthyConnect)
         run: |
           set +e
-          go test -count=1 -timeout 40m -json -tags integration ./internal/setup/... > test.json
+          go test -count=1 -timeout 40m -json -tags integration -skip '^TestReferenceProjectsBuildAndRun$' ./internal/setup/... > test.json
           rc=$?
           set -e
           # Readable failures in the log: the whole output of every failed test.
