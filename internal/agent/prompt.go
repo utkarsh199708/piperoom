@@ -64,12 +64,20 @@ func systemPromptForSource(kind, sourceKind string, m RoomMode) string {
 // two cannot drift; a replaced phrase that is missing leaves a pg_* name in
 // the MySQL prompt, which TestMySQLPromptNamesNoPostgresTool refuses.
 func promptCDCMethodMySQL() string {
-	return strings.NewReplacer(
+	return strings.NewReplacer(mysqlMethodReplacements()...).Replace(promptCDCMethod)
+}
+
+// mysqlMethodReplacements are promptCDCMethodMySQL's old, new pairs. Each old
+// string occurs exactly once in promptCDCMethod
+// (TestMySQLReplacerPatternsMatchOnce), so a base edit that breaks one fails
+// there, at the named pattern, not through a pg_* name downstream.
+func mysqlMethodReplacements() []string {
+	return []string{
 		"Make what_changed your second read; without it, read pg_recent_ddl.",
 		"Make what_changed your second read; for DDL, read kafka_schema_history.",
 		"(pg_replication_slots, connect_status,",
 		"(mysql_binlog_status, connect_status,",
-	).Replace(promptCDCMethod)
+	}
 }
 
 // promptCDCFixesMySQLFor is promptCDCFixesFor for a MySQL source: the
@@ -96,21 +104,28 @@ func promptCDCFixesMySQLFor(m RoomMode) string {
 // the Postgres prompt only (the MySQL bullets now replace a clause, not a
 // bullet), so the MySQL-only text is tighter to stay inside the 1335-word
 // ceiling: the intro leaves the schema history topic to rule 2 and its own
-// bullet.
-const promptCDCIntroMySQL = `You are on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You use read-only tools; you only propose fixes.`
+// bullet and is said in fewer words.
+const promptCDCIntroMySQL = `You're on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You only read and propose fixes.`
 
 func promptCDCFixesMySQL() string {
-	return strings.NewReplacer(
+	return strings.NewReplacer(mysqlFixesReplacements()...).Replace(promptCDCFixes)
+}
+
+// mysqlFixesReplacements are promptCDCFixesMySQL's old, new pairs. Each old
+// string occurs exactly once in promptCDCFixes
+// (TestMySQLReplacerPatternsMatchOnce).
+func mysqlFixesReplacements() []string {
+	return []string{
 		"- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is irreversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.",
-		"- A stored position the server lacks (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position it has or a new snapshot; say what the gap loses.",
+		"- A stored position the server lacks (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position it has or a new snapshot; say what's lost.",
 		"confirm with reads that a source connector's slot exists and holds its position,",
 		"confirm that the binlog holds a source connector's position (mysql_binlog_status),",
 		"- Use connect_update_connector_config only when that setting is the cause.",
 		"- Use connect_update_connector_config only when that setting is the cause, e.g. a database.server.id clashing with the server's or another connector's (set a unique one).",
 		"- A FAILED task's restart is the next step of the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
-		"- A FAILED task's restart is the next step of the proposal removing its cause.\n"+
+		"- A FAILED task's restart is the next step of the proposal removing its cause.\n" +
 			"- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.",
-	).Replace(promptCDCFixes)
+	}
 }
 
 // promptCDCFixesFor is the CDC fixes section for a room's mode: the

@@ -254,10 +254,11 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // silently. They moved when the replacer followed W4h's restart bullet (the
 // old publication pattern no longer matched, so pg_* names reached MySQL
 // rooms): the shared method and fixes carry W4h's wording, and MySQL-only
-// trims keep the prompt at 1335 words.
+// trims keep the prompt inside the 1335-word ceiling (1330 words with write
+// mode off).
 const (
-	mysqlPromptSHA256         = "f4930ab047410226447896982b10f860ca31d5ceba2d18a9f17b2cff37a4221c"
-	mysqlPromptWriteOffSHA256 = "ffd7f76e8f12fa4353d1ecfac49dd8c8d75adb62c4385fd315626822626dc10a"
+	mysqlPromptSHA256         = "b4cf79d8a9df960887794bdd7e4296a4d1cae6d01a4255bfb3b9c1bf1f4403db"
+	mysqlPromptWriteOffSHA256 = "b7d14ccc14990478d49c16c2092440e32dcb790d65b378d7dc886a5e453fcb6e"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
@@ -308,6 +309,41 @@ func TestPostgresPromptUnchangedBySource(t *testing.T) {
 	names, err := PromptToolNamesForSource("", "")
 	if err != nil || !slices.Equal(names, PromptToolNames()) {
 		t.Fatalf(`PromptToolNamesForSource("", "") = %v, %v`, names, err)
+	}
+}
+
+// TestMySQLReplacerPatternsMatchOnce: each old string of the MySQL replacers
+// occurs exactly once in the CDC text it rewrites, and each replacement
+// leaves the MySQL prompt. #934's publication pattern was written against
+// the pre-W4h fixes section, matched nothing once W4h landed, and showed up
+// only as pg_* names in MySQL rooms; this names the pattern instead.
+func TestMySQLReplacerPatternsMatchOnce(t *testing.T) {
+	for _, set := range []struct {
+		name  string
+		base  string
+		pairs []string
+	}{
+		{"promptCDCMethod", promptCDCMethod, mysqlMethodReplacements()},
+		{"promptCDCFixes", promptCDCFixes, mysqlFixesReplacements()},
+	} {
+		if len(set.pairs)%2 != 0 {
+			t.Fatalf("%s: odd number of replacer strings", set.name)
+		}
+		for i := 0; i < len(set.pairs); i += 2 {
+			old, repl := set.pairs[i], set.pairs[i+1]
+			if n := strings.Count(set.base, old); n != 1 {
+				t.Errorf("%s: pattern %d occurs %d times, want 1: %q", set.name, i/2, n, old)
+			}
+			for _, m := range []RoomMode{{Write: true}, {Write: false}} {
+				p := systemPromptForSource(events.PipelineKindCDC, events.SourceKindMySQL, m)
+				if !strings.Contains(p, repl) {
+					t.Errorf("%s: replacement %d missing from the MySQL prompt (mode %+v): %q", set.name, i/2, m, repl)
+				}
+				if strings.Contains(p, old) {
+					t.Errorf("%s: pattern %d still in the MySQL prompt (mode %+v): %q", set.name, i/2, m, old)
+				}
+			}
+		}
 	}
 }
 
