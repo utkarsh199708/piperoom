@@ -45,9 +45,21 @@ type harnessCondition struct {
 // Connect container) would credit a capability the product lacks (lead ruling
 // on #996). The row lands when an op named container_resolve is declared
 // under internal/setup.
+//
+// setup-room-eval is the C6 hookup that U1-10 left to do (lead ruling R6, item D
+// of the review of #1012). wiring.SetupStack gives a setup room its tools, but
+// the harness still builds every Alert without a Mode and opens a CDC incident
+// room, so setup/compose-postgres-clean and setup/compose-privileged-refused
+// fail live for a harness reason (run 40030412424), not an agent one. The row
+// lands when package evals declares SetupRoomAlert, the func that builds the
+// setup-mode Alert (Mode set to setup, the request taken from the scenario's
+// setup block) the harness opens a setup room with. The hookup row must declare
+// exactly that name; renaming it means changing this condition in the same PR,
+// or -validate would not tell the author to drop the marker.
 var harnessConditions = map[string]harnessCondition{
 	"U1-10":                {Dir: "internal/wiring", Symbol: "SetupStack"},
 	"container-resolve-op": {Dir: "internal/setup", Op: "container_resolve"},
+	"setup-room-eval":      {Dir: "evals", Symbol: "SetupRoomAlert"},
 }
 
 // Pending reports whether the scenario waits for a harness row (pending_harness).
