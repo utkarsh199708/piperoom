@@ -253,8 +253,8 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
 // silently.
 const (
-	mysqlPromptSHA256         = "2b19fea8da1249365611dd31ed8a6a60a9b5c09215c705c776d0fec9a460c833"
-	mysqlPromptWriteOffSHA256 = "5e7cce2a8ce4b9472f9f6438a9d724c264a46cbdbcabbe6b50db6891d8840bae"
+	mysqlPromptSHA256         = "20de3b3f64e66d6db460bc8bc279d73e54dbfe71c49f0994d6ec65ec28c2ec93"
+	mysqlPromptWriteOffSHA256 = "9d4a3d448696d450700a371a5e2c0bcc62df4aeda86a5dc1f7333b8155a4315b"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
@@ -274,9 +274,9 @@ func TestSystemPromptSnapshotMySQL(t *testing.T) {
 		// The CDC word ceiling plus 20: W4h (#988) rewrote the shared CDC
 		// fixes, and the MySQL binlog, server id and schema history bullets
 		// are longer than the Postgres ones they replace (1351 words after
-		// the merge of #934 and #988).
-		if wc := len(strings.Fields(got)); wc > 1355 {
-			t.Fatalf("%s: %d words, over the 1355 limit", tt.file, wc)
+		// the merge of #934 and #988), plus 20 for KAN-515's hold rule.
+		if wc := len(strings.Fields(got)); wc > 1375 {
+			t.Fatalf("%s: %d words, over the 1375 limit", tt.file, wc)
 		}
 	}
 }
