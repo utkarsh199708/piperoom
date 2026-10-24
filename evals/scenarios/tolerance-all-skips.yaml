@@ -179,7 +179,7 @@ recordings:
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     summary: |-
-      no field changes
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: pg_recent_ddl
     summary: |
       2026-10-23T09:12:04.551870Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | app_migrator
@@ -263,6 +263,42 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: "orders"}
+    summary: |-
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 9264 bytes in 5s (3D/6A1F20C8 -> 3D/6A1F44F8); connector pg-orders-connector state RUNNING
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: "orders", window_seconds: 8}
+    summary: |-
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 11472 bytes in 8s (3D/6A1F20C8 -> 3D/6A1F4D98); connector pg-orders-connector state RUNNING
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-23T09:00:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 4m0s from 2026-10-23T09:00:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      09:00 | 4 | 4 | 4 | +0
+      09:04 | 3 | 3 | 3 | +0
+      09:08 | 4 | 4 | 4 | +0
+      09:12 | 4 | 0 | 0 | -4
+      09:16 | 5 | 0 | 0 | -5
+      09:20 | 3 | 0 | 0 | -3
+      09:24 | 4 | 0 | 0 | -4
+      09:28 | 4 | 0 | 0 | -4
+      09:32 | 5 | 0 | 0 | -5
+      09:36 | 2 | 0 | 0 | -2
+      verdict: sink is missing 27 rows in 09:12–09:40; the topic carried only 0 change events for 27 source rows (connector side)
+      keys by id: source 38, sink 11; missing 27 (e.g. 5904395, 5904396, 5904397, 5904398, 5904399, 5904400, 5904401, 5904402, 5904403, 5904404); extra 0
+      keys: 27 source rows are not in the sink's window (missing, or not yet updated there); confirm one with warehouse_row (source row present, sink row absent) before naming a writer
+
+      note: rows newer than 2026-10-23T09:38:00.027411806Z (the last 2m0s) are in flight and not judged
 
 inputs:
   - kind: steer

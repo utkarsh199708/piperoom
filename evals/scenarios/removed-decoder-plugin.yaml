@@ -67,6 +67,28 @@
 #     instance of <Task>; check the logs for details" after logging each problem as "The '<key>'
 #     value '<value>' is invalid: <problem>".
 #   - internal/tools/dbtools/pg.go: pg_replication_slots data carries each slot's plugin.
+#
+# Tool budget (W4l, KAN-496; max_tool_calls 14 -> 15, measured). Step 1 (live run 40034874651) passed
+#   this scenario at 13 calls (run 39994729845 had failed on budget alone at 18, 20 and 18); highest
+#   passing 13 + 2 = 15. The standard path below (11 + 3 = 14 reads, the ceiling of a focused run) is
+#   the per-turn breakdown of those 13; this row did not read the run's turn split. One entry per input
+#   turn (inputs arrive one per idle):
+#   turn 0, the alert (11 reads):
+#     1 pg_recent_ddl (rule 2; what_changed is not offered in the harness)
+#     2 connect_status (task 0 FAILED; required fact, evidence tool)
+#     3 pg_replication_slots (slot inactive, plugin wal2json; required fact, evidence tool)
+#     4 connect_config (the stored config, read before proposing a change)
+#     5 source_settings (rule 2: database settings before a config change)
+#     6 source_role_grants (the role still replicates: rules the permission story out)
+#     7 connect_plugins (the running Debezium version; the agent reads it before its first runbook_lookup)
+#     8 runbook_lookup (known issue dbz-wal2json-removed) and 9 similar_incidents
+#     10 kafka_consumer_lag and 11 warehouse_freshness (rule 7: each stage by its own status read)
+#   turn 1, arjun's steer (3 reads): runbook_lookup again with the log line's words,
+#     connect_validate_config of the pgoutput config with a new slot name (the prompt's pre-fix check),
+#     pg_publication_tables (the new slot needs a publication).
+#   Standard path 11 + 3 = 14 reads; measured 13 (run 40034874651); 13 + 2 = 15. The other calls of the
+#   failing runs of 39994729845 went to net_probe on three targets, worker logs, metrics, info and
+#   offsets: answered above now, and not on this path.
 
 name: removed-decoder-plugin
 description: |
@@ -308,6 +330,80 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4l (KAN-496): answers to the reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{nettools,kafkatools,debeziumtools,dbtools,logtools}) over this scenario's
+  # state on the clock above; hosts and addresses are composed. net_probe source and a
+  # connect_validate_config of the stored config report plugin.name because Connect validates the
+  # stored plugin.name=wal2json exactly as the task did at start; a config that sets
+  # plugin.name=pgoutput validates clean. connect_worker_logs answers as a server without
+  # WORKER_LOGS_LOKI_URL does, so the log line stays in the owner's steer only.
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (postgres:5432): ok with 1 warning(s)
+      - connect_view warn: Connect reports errors on plugin.name, none about the database host
+      - dns postgres:5432 ok: 10.0.4.31
+      - tcp postgres:5432 ok: TCP connected
+      - tls postgres:5432 skip: not configured with TLS
+  - tool: net_probe
+    input: {target: connect}
+    summary: |-
+      net_probe connect (connect-1:8083): all checks ok: dns ok, tcp ok
+      - dns connect-1:8083 ok: 10.0.4.11
+      - tcp connect-1:8083 ok: TCP connected
+      - tls connect-1:8083 skip: not configured with TLS
+  - tool: net_probe
+    input: {target: schema-registry}
+    summary: |-
+      net_probe schema-registry (schema-registry:8081): all checks ok: dns ok, tcp ok
+      - dns schema-registry:8081 ok: 10.0.4.21
+      - tcp schema-registry:8081 ok: TCP connected
+      - tls schema-registry:8081 skip: not configured with TLS
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: connect_worker_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: FLAGS: 1 failed tasks; 1 task startup failures on this worker. tasks total 1 (running 0, failed 1, paused 0, unassigned 0, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 1 task startup failures of 7 attempts, 0 connector startup failures of 5 attempts, 5 connectors, 6 tasks. rebalance: rebalancing=false, 2 completed, epoch 4, last 35 min ago, avg 0.4 s, max 0.6 s
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group connect-cluster (Stable): 1 worker; runs the pipeline's connectors
+        - worker 10.0.4.11 http://connect-1:8083/ leader; runs pg-orders-connector
+      Internal topics (name match):
+      - config connect-configs: 1 partitions, RF 3, cleanup compact
+      - offset connect-offsets: 25 partitions, RF 3, cleanup compact
+      - status connect-status: 5 partitions, RF 3, cleanup compact
+      Plugins: Kafka 3.7.1; 3 plugins (1 source, 2 converter) (connect_plugins lists them)
+      Log levels: root INFO
+  # No wal2json slot needs a publication, so none exists on the source: the pgoutput fix has to add one.
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=no, selectable=yes
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=271073720232, lsn_proc=271073720232, ts_usec=1792746291330918, txId=7418302
+  # connect_validate_config: any config that sets a decoder or a fix validates clean; the two
+  # recorded below leave plugin.name out and so inherit the stored wal2json from base_connector.
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    summary: |-
+      0 errors in io.debezium.connector.postgresql.PostgresConnector.
+  - tool: connect_validate_config
+    input: {"base_connector": "pg-orders-connector", "class": "io.debezium.connector.postgresql.PostgresConnector", "config": {"connector.class": "io.debezium.connector.postgresql.PostgresConnector", "database.dbname": "orders", "database.hostname": "postgres", "database.port": "5432", "database.user": "piperoom", "key.converter": "io.confluent.connect.avro.AvroConverter", "slot.name": "debezium_orders", "table.include.list": "public.orders", "topic.prefix": "pg", "value.converter": "io.confluent.connect.avro.AvroConverter"}}
+    summary: |-
+      1 error in io.debezium.connector.postgresql.PostgresConnector:
+        plugin.name: The 'plugin.name' value 'wal2json' is invalid: Value must be one of decoderbufs, pgoutput
+  - tool: connect_validate_config
+    input: {"base_connector": "pg-orders-connector", "class": "io.debezium.connector.postgresql.PostgresConnector", "config": {"name": "pg-orders-connector"}}
+    summary: |-
+      1 error in io.debezium.connector.postgresql.PostgresConnector:
+        plugin.name: The 'plugin.name' value 'wal2json' is invalid: Value must be one of decoderbufs, pgoutput
 
 inputs:
   - kind: steer
@@ -356,4 +452,4 @@ expect:
       facts: [f_task_config_error, f_slot_inactive]
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 14
+  max_tool_calls: 15

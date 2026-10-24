@@ -600,6 +600,13 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{dbtools}; the values are composed to agree with the recordings above.
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 4211 rows inserted since stats reset, 0 dead tuples, last autovacuum never, 0 session(s) waiting on a lock
 
 inputs:
   - kind: comment

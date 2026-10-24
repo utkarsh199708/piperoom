@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "topic-retention-data-loss",
   "hypothesis": "The 01:00-03:00 changes were not deleted by retention before order-sync read them; they are still in the topic and order-sync is just slow.",
-  "truth_sha256": "0e5446ae78df3d5ef4c5c5093ec58df1a1c6e1d8dd571dc0398cef302c7c5a11",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "ea2b9a27259d8f3e5493b0c5289e0bf80bf764d17e783a3f28b80273a51a0332",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": false,
     "root_cause_correct": false,
     "root_cause_layer_correct": false,
-    "reason": "The hypothesis explicitly denies that retention deleted the records and blames a slow consumer. That puts the cause in the consumer layer and misses the data loss."
+    "reason": "The hypothesis explicitly denies retention-based deletion and blames a slow consumer. That is a symptom and the wrong layer, and it does not identify the Kafka retention data loss."
   }
 }

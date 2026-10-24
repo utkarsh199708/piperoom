@@ -453,7 +453,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "The stack stays down because the postgres image lacks the pinned digest the setup allow-list requires; pull the pinned image and render the compose file again.",
 	},
 	"setup/compose-privileged-refused": {
-		good:  "The setup validator refused the compose file with rule privilege: the connect service declares privileged: true. Re-render the stack from the driver's templates with compose_write (the connect template renders only the allow-listed service fields: image, command, environment, ports, volumes, depends_on and healthcheck) and bring it up with compose_up.",
+		good:  "The setup validator refused the compose file with rule privilege: the connect service declares privileged: true, which asks for host privileges. Re-render the stack from the driver's templates with compose_write (the connect template renders only the allow-listed service fields: image, command, environment, ports, volumes, depends_on and healthcheck) and bring it up with compose_up.",
 		wrong: "The connect service uses an image tag that is absent from the setup knowledge index, so the stack stays down; pin the image digest and run it again.",
 	},
 	"setup/flat-plugin-dir": {
