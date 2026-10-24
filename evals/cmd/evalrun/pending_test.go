@@ -16,7 +16,8 @@ import (
 
 const pendingA, pendingB = "setup/compose-postgres-clean", "setup/compose-privileged-refused"
 
-// pendingC is held out until W4c-resolver (W4c, KAN-494, lead ruling R10).
+// pendingC is held out until container-resolve-op (W4c, KAN-494, lead ruling R10;
+// re-keyed by the KAN-526 ruling).
 const pendingC = "setup/db-unreachable-from-connect"
 
 // pendingCount is how many scenarios carry pending_harness.
