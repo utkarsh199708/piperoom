@@ -47,6 +47,14 @@
 #   - internal/actions/kafka_actions.go: The only write actions: connect_restart_task,
 #     connect_restart_connector, schema_set_compatibility, schema_register.
 #
+# W4k (KAN-495): run 39994729845 missed connect_source_offsets and pg_streaming_liveness in all three runs
+#   (source_blocking_sessions in one), and run 1 did not propose the resume because the stored offsets
+#   "could not be read". They are recorded after the other reads, for both phases (the real tools' output
+#   over this state: the offsets sit at the slot's confirmed_flush_lsn, the source keeps writing, so
+#   pg_streaming_liveness says stuck with the connector STOPPED; after the resume it says streaming).
+#   max_tool_calls stays 14: the passing runs made 10 and 9 investigation calls (the rule would give 12);
+#   a budget is not lowered by a row that only records misses.
+#
 # Verify budget (E6b review, max_verify_calls 6 -> 8): reads after the executed resume.
 #   agent.Run's own verification pass (internal/agent/verify.go) makes 4 of them here:
 #   connect_status twice (the kafka-connect check settles and reads again), pipeline_map (to
@@ -217,6 +225,103 @@ recordings:
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
       stopped at: kafka-connect pg-orders-connector
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. Each is the
+  # output of the real tool over the stack above (evals/w4k_recordings_test.go rebuilds it): the
+  # connector is STOPPED, the slot is inactive and keeps its position, the source keeps writing.
+  # The recovered phase answers the same two reads after the resume.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=288931458362, lsn_commit=288931458362, lsn_proc=288931458362, messageType=UPDATE, ts_usec=1791641096000000, txId=5634108
+    data:
+      connectors:
+        - connector: pg-orders-connector
+          offsets:
+            - offset:
+                lsn: 288931458362
+                lsn_commit: 288931458362
+                lsn_proc: 288931458362
+                messageType: UPDATE
+                ts_usec: 1791641096000000
+                txId: 5634108
+              partition:
+                server: pg
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 3698000 bytes in 5s (slot "debezium_orders", active=false, wal_status=extended, retains 48.6 GiB); connector pg-orders-connector state STOPPED; the slot is INACTIVE, so no walsender is streaming it
+      the head-confirmed_flush lag grew from 48.6 GiB to 48.6 GiB in 5s and is above the stuck threshold of 169.3 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+    data:
+      connector: pg-orders-connector
+      connector_state: STOPPED
+      elapsed_ms: 5000
+      note: the head-confirmed_flush lag grew from 48.6 GiB to 48.6 GiB in 5s and is above the stuck threshold of 169.3 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      pipeline: orders
+      slot:
+        active: false
+        confirmed_flush_advance_bytes: 0
+        confirmed_flush_lsn: 43/45A82D3A
+        confirmed_flush_lsn_after: 43/45A82D3A
+        flush_lag_bytes: 52183852142
+        flush_lag_bytes_after: 52187550142
+        name: debezium_orders
+        retained_wal_bytes: 52187550646
+        source_wal_advance_bytes: 3698000
+        stuck_lag_threshold_bytes: 177504000
+        verdict: stuck
+        wal_status: extended
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      transaction_note: no open writer transaction was found; the slot is held back by something else
+      verdict: stuck
+      window_seconds: 5
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+    data: []
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    phase: recovered
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=294306458938, lsn_commit=294306458938, lsn_proc=294306458938, messageType=UPDATE, ts_usec=1791711598000000, txId=5634999
+    data:
+      connectors:
+        - connector: pg-orders-connector
+          offsets:
+            - offset:
+                lsn: 294306458938
+                lsn_commit: 294306458938
+                lsn_proc: 294306458938
+                messageType: UPDATE
+                ts_usec: 1791711598000000
+                txId: 5634999
+              partition:
+                server: pg
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    phase: recovered
+    summary: |
+      streaming: slot "debezium_orders" confirmed_flush_lsn advanced 6291456 bytes in 5s (44/85A82D3A -> 44/86082D3A); connector pg-orders-connector state RUNNING
+    data:
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks:
+        - 0:RUNNING
+      elapsed_ms: 5003
+      pipeline: orders
+      slot:
+        active: true
+        confirmed_flush_advance_bytes: 6291456
+        confirmed_flush_lsn: 44/85A82D3A
+        confirmed_flush_lsn_after: 44/86082D3A
+        name: debezium_orders
+        retained_wal_bytes: 47349420982
+        source_wal_advance_bytes: 0
+        verdict: streaming
+        wal_status: extended
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      verdict: streaming
+      window_seconds: 5
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
   - tool: connect_status
