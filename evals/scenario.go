@@ -110,11 +110,11 @@ const DefaultSourceKind = "postgres"
 
 // setupKinds returns the source kind and target kind the report groups this
 // scenario's runs by. A scenario with no setup block (an incident scenario)
-// has its room's source kind (Q8j, sourceKind). A target is "" (in no target
-// group) when the scenario names none.
+// has no setup source or target group. A target is "" (in no target group)
+// when the setup scenario names none.
 func (s Scenario) setupKinds() (source, target string) {
 	if s.Setup == nil {
-		return s.sourceKind(), ""
+		return "", ""
 	}
 	source = DefaultSourceKind
 	if s.Setup.SourceKind != "" {
