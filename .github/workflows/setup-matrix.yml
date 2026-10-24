@@ -79,13 +79,7 @@ jobs:
             # flag; the two path-table rows that create real symlinks still
             # skip themselves where the OS user may not, which the next step
             # accounts for.
-            # Four host-target tests (internal/setup/targets/host,
-            # systemd_test.go) install a systemd unit from a real t.TempDir()
-            # while simulating a Linux runner: on Windows that dir is a
-            # backslash path, which the unit-path rule refuses as it should
-            # (a unit file can never hold it). They run on ubuntu and macOS;
-            # the tests that simulate a Windows runner still run here.
-            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind|TestNoParamReachesTheUnit|TestServiceInstallRefusesATakenName|TestServiceInstallCommandFailures|TestJavaHomeInsideTheProject)$'
+            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind)$'
           fi
           go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
       - name: "Section 2.3 path table tests (run, never skipped)"
