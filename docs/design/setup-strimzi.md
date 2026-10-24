@@ -2,7 +2,7 @@
 
 Owner: LEAD-ARCH. Parent design: `docs/design/setup-agent.md` (the runner, tiers T0–T3, `os.Root`, the
 `Credentials` frame); plan: `docs/product/setup-2026-10.md` (§4 row U12, §7 item 1: Strimzi is last by the measured
-order and this design starts early so pulling it forward costs no rework); board: `tasks/U-board.md` rows U12-0 to
+order and this design starts early so pulling it forward costs no rework); Jira KAN-5 tickets U12-0 to
 U12-R. The contracts this page codes against are the merged U0 ones: `internal/setup/protocol/protocol.go`
 (`Welcome`, `Hello`, `OpRequest`, `OpResult`, the `Refuse*` codes), `events.SetupTarget`, `events.SetupReceipt`
 (`Kind: "http"`) and the routes of `docs/api.md` "Setup rooms". Where this page and merged code differ, the code

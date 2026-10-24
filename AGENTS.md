@@ -228,7 +228,7 @@ actions, Connect worker visibility, config validation before registration, conne
 network and TLS probes, pull-request fix, MySQL). The board's After column is the only hard dependency; Q0 waits on
 the P wave's open contract follow-ups, and every row that adds a write action waits on P3-0.
 
-### U wave (planned 2026-10-18; plan `docs/product/setup-2026-10.md`, design `docs/design/setup-agent.md`, board `tasks/U-board.md`)
+### U wave (planned 2026-10-18; plan `docs/product/setup-2026-10.md`, design `docs/design/setup-agent.md`, tracked in Jira epic KAN-5)
 
 PR titles start with the board row's ID: `[U<N><letter>]` or `[U1-<n>]` for the core rows, `[U<N>-0]` for a design
 row (e.g. `[U1-3] setup/compose: driver and T1 ops`). Same rules as the P and Q waves: each row stays inside its

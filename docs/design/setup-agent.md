@@ -1,6 +1,6 @@
 # Setup agent: design (main @ 6cf24f60, 2026-10-18; rev 2 after the #641 reviews)
 
-Owner of the design: LEAD-ARCH. Plan: `docs/product/setup-2026-10.md`. Board: `tasks/U-board.md`. Contract
+Owner of the design: LEAD-ARCH. Plan: `docs/product/setup-2026-10.md`. Tracking: Jira epic KAN-5. Contract
 changes land in U0 and the design rows (`U1-0`, `U12-0`, `U13-0`); the shapes in §4 are proposals in the style of
 `tasks/P0-contracts.md` and the Q0 items: new interfaces, new events and one new contract file, so every existing
 fake and the eval replay compile unchanged. Where this text and merged code differ, the code and its doc comments
