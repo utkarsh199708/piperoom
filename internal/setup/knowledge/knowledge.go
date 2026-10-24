@@ -5,7 +5,9 @@
 // connector plugin archives, per release. It also holds the SMT and sink
 // index (index.go, data in index/*.yaml): the transforms, predicates and
 // sinks a setup config may name, with keys, defaults, verified release
-// ranges, the checks each implies and how each is installed.
+// ranges, the checks each implies and how each is installed, and the
+// tuning entries (tuning.go): worker, connector and client settings with
+// their defaults and the symptoms that call for changing them.
 //
 // Every entry is pinned, not guessed. Each Image.Digest was fetched from the
 // image's registry (Docker Hub, Quay, or the Microsoft Container Registry)
@@ -206,10 +208,11 @@ func Validate(images []Image, plugins []Plugin) error {
 	return nil
 }
 
-// Check validates the shipped index — the image and plugin tables and the
-// SMT and sink index — and fails when it is empty. Call it once at runner
-// start-up; a non-nil error means the shipped data is corrupt and the
-// runner must refuse to start.
+// Check validates the shipped index — the image and plugin tables, the
+// SMT, sink and tuning index, and the embedded-engine rule table with its
+// reference projects (ValidateEmbedded) — and fails when it is empty. Call
+// it once at runner start-up; a non-nil error means the shipped data is
+// corrupt and the runner must refuse to start.
 func Check() error {
 	if len(images) == 0 || len(plugins) == 0 {
 		return errors.New("knowledge: index is empty")
@@ -217,8 +220,10 @@ func Check() error {
 	if err := Validate(images, plugins); err != nil {
 		return err
 	}
-	_, err := LoadIndex()
-	return err
+	if _, err := LoadIndex(); err != nil {
+		return err
+	}
+	return ValidateEmbedded()
 }
 
 // LookupImage returns the allow-listed image for a repository and tag. repo

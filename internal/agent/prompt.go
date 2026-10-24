@@ -64,12 +64,20 @@ func systemPromptForSource(kind, sourceKind string, m RoomMode) string {
 // two cannot drift; a replaced phrase that is missing leaves a pg_* name in
 // the MySQL prompt, which TestMySQLPromptNamesNoPostgresTool refuses.
 func promptCDCMethodMySQL() string {
-	return strings.NewReplacer(
+	return strings.NewReplacer(mysqlMethodReplacements()...).Replace(promptCDCMethod)
+}
+
+// mysqlMethodReplacements are promptCDCMethodMySQL's old, new pairs. Each old
+// string occurs exactly once in promptCDCMethod
+// (TestMySQLReplacerPatternsMatchOnce), so a base edit that breaks one fails
+// there, at the named pattern, not through a pg_* name downstream.
+func mysqlMethodReplacements() []string {
+	return []string{
 		"Make what_changed your second read; without it, read pg_recent_ddl.",
 		"Make what_changed your second read; for DDL, read kafka_schema_history.",
 		"(pg_replication_slots, connect_status,",
 		"(mysql_binlog_status, connect_status,",
-	).Replace(promptCDCMethod)
+	}
 }
 
 // promptCDCFixesMySQLFor is promptCDCFixesFor for a MySQL source: the
@@ -87,21 +95,27 @@ func promptCDCFixesMySQLFor(m RoomMode) string {
 // The MySQL source wording (Q8g, docs/design/mysql-source.md §3, §7, §8).
 // promptCDCFixesMySQL is the CDC fixes section with the Postgres-only bullets
 // replaced: the slot drop by the purged-binlog rule, the restart bullet's
-// publication clause (W4h folded the publication bullet into it) by the
-// schema history rule, and the resume check's slot by the binlog position;
-// the server id rule is the MySQL case of the config-setting bullet. Built
-// from promptCDCFixes so the shared bullets keep their exact words; a
-// pattern that no longer matches leaves Postgres wording in the MySQL prompt,
-// which TestMySQLPromptNamesNoPostgresTool refuses. The intro carries the
-// CDC intro's W4g wording; the schema history topic is named by rule 2 and
-// its own bullet, not again in the intro, so the prompt stays inside the
-// 1335-word ceiling with W4h's restart bullet (W4h was word-neutral on the
-// Postgres prompt only: the MySQL bullets now replace a clause, not a
-// bullet).
+// publication clause (W4h folded the publication bullet into it; #994 keys on
+// it) by the schema history rule, and the resume check's slot by the binlog
+// position; the server id rule is the MySQL case of the config-setting
+// bullet. Built from promptCDCFixes so the shared bullets keep their exact
+// words; TestMySQLReplacerPatternsMatchOnce names a pattern that stops
+// matching. The intro carries the CDC intro's W4g wording, and the schema
+// history topic is named by rule 2 and its own bullet, not again in the
+// intro: with W4h's restart bullet the MySQL bullets replace a clause, not a
+// bullet (W4h was word-neutral on the Postgres prompt only), and these
+// MySQL-only trims keep the prompt inside the CDC prompt's 1335-word ceiling.
 const promptCDCIntroMySQL = `You're on-call for a pipeline: MySQL (binlog, GTID) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse; Schema Registry is a dependency of connectors and consumers, not a stage. You only read and propose fixes.`
 
 func promptCDCFixesMySQL() string {
-	return strings.NewReplacer(
+	return strings.NewReplacer(mysqlFixesReplacements()...).Replace(promptCDCFixes)
+}
+
+// mysqlFixesReplacements are promptCDCFixesMySQL's old, new pairs. Each old
+// string occurs exactly once in promptCDCFixes
+// (TestMySQLReplacerPatternsMatchOnce).
+func mysqlFixesReplacements() []string {
+	return []string{
 		"- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is irreversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.",
 		"- A stored position the server lacks (mysql_binlog_status: binlog purged, or another server's after a failover without GTIDs) cannot resume; the root cause is retention or the failover (mysql layer). Propose connect_reset_source_offsets to a position it has or a new snapshot; say what's lost.",
 		"confirm that a source connector's slot exists and holds its position,",
@@ -109,9 +123,9 @@ func promptCDCFixesMySQL() string {
 		"- Use connect_update_connector_config only when that setting is the cause.",
 		"- Use connect_update_connector_config only when that setting is the cause, e.g. a database.server.id clashing with the server's or another connector's (set a unique one).",
 		"- A FAILED task's restart is the next step of the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
-		"- A FAILED task's restart is the next step of the proposal removing its cause.\n"+
+		"- A FAILED task's restart is the next step of the proposal removing its cause.\n" +
 			"- The schema history topic needs one partition and unlimited retention (kafka_schema_history); if lost, propose snapshot.mode recovery via connect_update_connector_config only if no captured table's schema changed since the stored position.",
-	).Replace(promptCDCFixes)
+	}
 }
 
 // promptCDCFixesFor is the CDC fixes section for a room's mode: the

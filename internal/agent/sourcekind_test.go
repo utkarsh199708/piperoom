@@ -251,10 +251,11 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 
 // mysqlPromptSHA256 and mysqlPromptWriteOffSHA256 pin the MySQL CDC prompt
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
-// silently. W4g moved them: the shared method and fixes carry W4h's and
-// W4g's wording, the replacer follows W4h's restart bullet and W4g's resume
-// check (the old patterns no longer matched, so pg_* names reached MySQL
-// rooms), and MySQL-only trims keep the prompt at 1335 words.
+// silently. #994 moved them when the replacer followed W4h's restart bullet.
+// W4g moved them again: the shared method and fixes carry W4g's wording, the
+// resume pattern follows W4g's resume check, and MySQL-only trims (the server
+// id rule folded into the config-setting bullet, a shorter intro, purged
+// binlog and resume lines) bring the prompt back under the CDC ceiling.
 const (
 	mysqlPromptSHA256         = "444f9e19ae0b48e1cd7f9ad1b3429dcd07e9171d2b787d54dda84c107116c266"
 	mysqlPromptWriteOffSHA256 = "3542f5cac4dbb67a3697d0e502e46605b296f1b9beece8975d5c16526209396d"
@@ -274,7 +275,10 @@ func TestSystemPromptSnapshotMySQL(t *testing.T) {
 		if h := hex.EncodeToString(sum[:]); h != tt.sum {
 			t.Fatalf("%s: sha256 = %s, want %s", tt.file, h, tt.sum)
 		}
-		// The CDC word ceiling holds for the MySQL prompt too.
+		// The CDC word ceiling holds for the MySQL prompt too. #994 raised
+		// it to 1355 for the merge of #934 and #988 (1351 words); W4g's
+		// MySQL-only trims bring the prompt back to 1335, so the ceiling is
+		// the CDC one again.
 		if wc := len(strings.Fields(got)); wc > 1335 {
 			t.Fatalf("%s: %d words, over the 1335 limit", tt.file, wc)
 		}
@@ -308,6 +312,42 @@ func TestPostgresPromptUnchangedBySource(t *testing.T) {
 	names, err := PromptToolNamesForSource("", "")
 	if err != nil || !slices.Equal(names, PromptToolNames()) {
 		t.Fatalf(`PromptToolNamesForSource("", "") = %v, %v`, names, err)
+	}
+}
+
+// TestMySQLReplacerPatternsMatchOnce: each old string of the MySQL replacers
+// occurs exactly once in the CDC text it rewrites, its replacement reaches
+// the MySQL prompt, and the old string does not. #934's publication pattern
+// was written against the pre-W4h fixes section, matched nothing once W4h
+// landed, and showed up only as pg_* names in MySQL rooms; this names the
+// pattern instead (LEAD-REVIEW on #993).
+func TestMySQLReplacerPatternsMatchOnce(t *testing.T) {
+	for _, set := range []struct {
+		name  string
+		base  string
+		pairs []string
+	}{
+		{"promptCDCMethod", promptCDCMethod, mysqlMethodReplacements()},
+		{"promptCDCFixes", promptCDCFixes, mysqlFixesReplacements()},
+	} {
+		if len(set.pairs)%2 != 0 {
+			t.Fatalf("%s: odd number of replacer strings", set.name)
+		}
+		for i := 0; i < len(set.pairs); i += 2 {
+			old, repl := set.pairs[i], set.pairs[i+1]
+			if n := strings.Count(set.base, old); n != 1 {
+				t.Errorf("%s: pattern %d occurs %d times, want 1: %q", set.name, i/2, n, old)
+			}
+			for _, m := range []RoomMode{{Write: true}, {Write: false}} {
+				p := systemPromptForSource(events.PipelineKindCDC, events.SourceKindMySQL, m)
+				if !strings.Contains(p, repl) {
+					t.Errorf("%s: replacement %d missing from the MySQL prompt (mode %+v): %q", set.name, i/2, m, repl)
+				}
+				if strings.Contains(p, old) {
+					t.Errorf("%s: pattern %d still in the MySQL prompt (mode %+v): %q", set.name, i/2, m, old)
+				}
+			}
+		}
 	}
 }
 
