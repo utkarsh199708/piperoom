@@ -155,28 +155,65 @@ var (
 	barrierVerbs = []string{"is", "was", "were", "are", "am", "s", "has", "had", "have", "did", "does", "do",
 		"be", "been", "being", "t", "will", "would", "can", "could", "should", "may", "might", "must",
 		"read", "built", "made", "sent", "kept", "found", "run", "ran", "set", "put", "seen", "saw", "done",
-		"got", "went", "came", "took", "fell", "left", "began", "broke", "caught"}
+		"got", "went", "came", "took", "fell", "left", "began", "broke", "caught", "reset"}
 )
 
-// isBarrier reports whether toks[b] of c ends a denial's reach: a
-// conjunctionBarrier always, a prepositionBarrier only when a verb (see
-// barrierVerbs) stands before it in its sub, so it opens a clause rather than
-// a noun phrase ("no changes before the outage were lost").
-func isBarrier(c clauseToks, b int) bool {
+// isBarrier reports whether toks[b] of c ends the reach of a denial whose
+// negator ends before from: a conjunctionBarrier always; a
+// prepositionBarrier when a verb (see barrierVerb) stands between the
+// negator and it, so it opens a clause rather than a noun phrase ("no
+// changes before the outage were lost"). Unless strict, a verb before the
+// negator also counts when another follows the barrier ("it's not the
+// registry since the connector crashed"), but not when a noun phrase ends
+// the sub ("there are no errors since the connector restart").
+func isBarrier(c clauseToks, from, b int, strict bool) bool {
 	if phraseAt(c.toks, b, conjunctionBarriers) > 0 {
 		return true
 	}
 	if phraseAt(c.toks, b, prepositionBarriers) == 0 {
 		return false
 	}
+	before := false
 	for i := b - 1; i >= 0 && c.sub[i] == c.sub[b]; i-- {
-		t := c.toks[i]
-		if phraseAt(c.toks, i, barrierVerbs) > 0 || (len(t) > 3 && strings.HasSuffix(t, "ed")) {
+		if barrierVerb(c.toks, i) {
+			if i >= from {
+				return true
+			}
+			before = true
+		}
+	}
+	if strict || !before {
+		return false
+	}
+	for i := b + 1; i < len(c.toks) && c.sub[i] == c.sub[b]; i++ {
+		if barrierVerb(c.toks, i) {
 			return true
 		}
 	}
 	return false
 }
+
+// barrierVerb reports whether toks[i] is a verb isBarrier sees: one of
+// barrierVerbs ("s" only after a pronoun: "it's", not "Tuesday's"), or a
+// word ending in -ed that no determiner precedes ("no unprocessed records"
+// is a noun phrase, "nobody consumed the topic" a clause).
+func barrierVerb(toks []string, i int) bool {
+	t := toks[i]
+	if t == "s" {
+		return i > 0 && phraseAt(toks, i-1, pronounsBeforeS) > 0
+	}
+	if phraseAt(toks, i, barrierVerbs) > 0 {
+		return true
+	}
+	return len(t) > 3 && strings.HasSuffix(t, "ed") && i > 0 && phraseAt(toks, i-1, determiners) == 0
+}
+
+// pronounsBeforeS are the words whose "'s" is "is" or "has"; determiners
+// start a noun phrase, so an -ed word after one is an adjective.
+var (
+	pronounsBeforeS = []string{"it", "there", "that", "what", "here", "who", "he", "she"}
+	determiners     = []string{"no", "the", "a", "an", "any", "all", "these", "those", "its", "their", "every", "some", "of"}
+)
 
 // Loss words state that data went away. Unlike other root-cause words, a
 // negator a few words back denies them even before a verb: "records were not
@@ -230,22 +267,26 @@ func lossNegated(c clauseToks, i int, term string) bool {
 		if phraseAt(c.toks, k, lossWords) == 0 {
 			continue
 		}
+		prep := -1 // nearest prepositionBarrier between a negator and the loss word
 		for j := k - 1; j >= 0 && c.sub[j] == c.sub[k]; j-- {
-			if isBarrier(c, j) {
+			if phraseAt(c.toks, j, conjunctionBarriers) > 0 {
 				break
+			}
+			if phraseAt(c.toks, j, prepositionBarriers) > 0 {
+				if prep < 0 {
+					prep = j
+				}
+				continue
 			}
 			if j >= i && j < i+len(want) {
 				continue // the term's own words ("can no longer be replayed")
 			}
-			if phraseAt(c.toks, j, lossQuantifiers) > 0 {
-				return true
-			}
-			if k-j <= lossCounterWindow && phraseAt(c.toks, j, lossCounters) > 0 {
-				return true
-			}
-			if k-j <= lossVerbWindow && phraseAt(c.toks, j, lossVerbNegators) > 0 && !notAllOrOnly(c.toks, j) &&
-				onlyFillers(c.toks, j+1, k) {
-				return true
+			neg := phraseAt(c.toks, j, lossQuantifiers) > 0 || prep >= 0 && c.toks[j] == "no" && !affirmsDoubt(c.toks, j) ||
+				k-j <= lossCounterWindow && phraseAt(c.toks, j, lossCounters) > 0 ||
+				k-j <= lossVerbWindow && phraseAt(c.toks, j, lossVerbNegators) > 0 && !notAllOrOnly(c.toks, j) &&
+					onlyFillers(c.toks, j+1, k)
+			if neg {
+				return prep < 0 || !isBarrier(c, j+1, prep, true)
 			}
 		}
 	}
@@ -287,7 +328,7 @@ func denied(c clauseToks, layers bool) []bool {
 			}
 		}
 		if l := forwardDenial(c.toks, j); l > 0 {
-			for i := j + l; i < n && c.sub[i] == c.sub[j] && !isBarrier(c, i); i++ {
+			for i := j + l; i < n && c.sub[i] == c.sub[j] && !isBarrier(c, j+l, i, false); i++ {
 				neg[i] = true
 			}
 		}

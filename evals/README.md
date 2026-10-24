@@ -377,14 +377,17 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
   `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
 
 A denial stops at a **barrier**, which opens a clause of its own polarity: `because` and `when`
-always; `since`, `after`, `before` and `until` only after a verb in the same part (an auxiliary such
-as `is`/`was`/`had`, a modal, a common irregular past such as `read`, or a word ending in `-ed`). So
-"no consumer read them before they were deleted" states the deletion, while in "no changes before the
-outage were lost" `before` is a preposition and the denial reaches `lost`. The barriers are in the
+always; `since`, `after`, `before` and `until` only after a verb between the denial and the barrier
+(for layers, also a verb before the denial with a verb after the barrier). A verb is an auxiliary
+such as `is`/`was`/`had` (`'s` only after a pronoun: "it's", not "Tuesday's"), a modal, a common
+irregular past such as `read` or `reset`, or a word ending in `-ed` that no determiner precedes ("no
+unprocessed records" is a noun phrase). So "no consumer read them before they were deleted" states
+the deletion, while in "no changes before the outage were lost" and "it is clear that no records since
+the restart were lost" `before`/`since` is a preposition and the denial reaches `lost`. The barriers are in the
 shared denial pass, so they apply to **layer naming too**, not only to root-cause terms: "the slot is
 not the cause because the connector failed" and "it's not the registry since the connector crashed"
 now name Connect (before W4b-2 the forward denial ran through the conjunction), while "no errors since
-the connector restart" still does not.
+the connector restart" and "there are no errors since the connector restart" still do not.
 
 `no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
 without amount", "nothing reads the slot" all state the cause), except before a **loss word**
@@ -421,8 +424,8 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
   were lost") or a hedge after it ("data loss is unlikely") still name the loss; `nobody`, a strong
   negator, still denies a loss it does not govern ("the records nobody read were deleted"); a
   barrier after a present-tense verb is not seen ("no events reach the warehouse since the slot was
-  dropped" denies the drop), and an `-ed` noun or adjective counts as a verb ("no committed offsets
-  before the reset were lost" names the loss); a colon inside a time ("01:00") cuts the fragment, so
+  dropped" denies the drop), and a participle after a pronoun counts as a verb ("nothing produced
+  after the restart was deleted" names the loss); a colon inside a time ("01:00") cuts the fragment, so
   "none of the 01:00-03:00 changes were lost" names the loss.
 
 **Healthy verdict and the judge** (W4d): a healthy verdict is cancelled only by an affirmed, present

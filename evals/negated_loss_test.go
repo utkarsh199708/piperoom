@@ -52,6 +52,15 @@ func TestNegatedLossTerm(t *testing.T) {
 		{text: "No records after the restart were deleted.", only: delGroups},
 		{text: "Nothing after the restart was deleted.", only: delGroups},
 		{text: "None of the changes before the outage were lost.", only: lostGroups},
+		// Review round 2 (#991): a verb before the negator, or an -ed
+		// adjective after a determiner, does not make the preposition a barrier.
+		{text: "It is clear that no records since the restart were lost.", only: lostGroups},
+		{text: "There were no events since the restart lost.", only: lostGroups},
+		{text: "Order-sync has confirmed no events after the restart were deleted.", only: delGroups},
+		{text: "No unprocessed records since the restart were lost.", only: lostGroups},
+		{text: "No committed offsets before the reset were lost.", only: lostGroups},
+		{text: "No records since Tuesday's restart were lost.", only: lostGroups},
+		{text: "Nothing until the backfill was deleted.", only: delGroups},
 		// A scenario outside retention: source-column-dropped takes drop*.
 		{text: "The amount column was not dropped; it was renamed to total_amount.", only: dropGroups},
 		{text: "Nothing was dropped from public.orders.", only: dropGroups},
@@ -68,6 +77,10 @@ func TestNegatedLossTerm(t *testing.T) {
 		{want: true, text: "The changes that order-sync never read were deleted by retention.", only: delGroups},
 		{want: true, text: "order-sync was not running when retention deleted the changes.", only: delGroups},
 		{want: true, text: "No one noticed until the changes had expired.", only: delGroups},
+		// "reset" is a barrierVerb (review round 2): the past tense before
+		// "before" opens a clause; the noun after a barrier does not count.
+		{want: true, text: "Nobody reset order-sync before retention deleted the records.", only: delGroups},
+		{want: true, text: "No one reset the group until the changes had expired.", only: delGroups},
 		// Review round 1 (#991): wordings an earlier draft denied. A counter
 		// reaches three words; a verb negator before another verb negates
 		// that verb, not the loss word after it.
@@ -156,6 +169,8 @@ func TestDenialBarrierLayers(t *testing.T) {
 		{"It's not the registry since the connector crashed.", true},
 		{"No consumer read the topic before the connector failed.", true},
 		{"No errors since the connector restart.", false},
+		{"There are no errors since the connector restart.", false},
+		{"We saw no lag since the connector restart.", false},
 		{"Not a connector problem.", false},
 	}
 	for _, c := range cases {
@@ -183,10 +198,10 @@ func TestNegatedLossKnownLimits(t *testing.T) {
 		{lost, "Not one record was lost.", true},
 		{lost, "It is not true that records were lost.", true},
 		{lost, "Data loss is unlikely.", true},
-		{lost, "No committed offsets before the reset were lost.", true},
 		{lost, "None of the 01:00-03:00 changes were lost.", true},
 		{del, "The records nobody read were deleted by retention.", false},
 		{del, "No events reach the warehouse since the slot was dropped.", false},
+		{del, "Nothing produced after the restart was deleted.", true},
 	}
 	for _, c := range cases {
 		if got := matchGroups(c.groups, c.text); got != c.today {
