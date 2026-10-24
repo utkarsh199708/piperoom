@@ -16,6 +16,7 @@ import type {
   ProposalPreviewedPayload,
   ProposalStagedPayload,
   ProposalStep,
+  PRChecks,
   RoomLabelledPayload,
   RoomMode,
   RoomSnapshot,
@@ -244,6 +245,30 @@ export interface ProposalState {
   author?: Actor;
   /** X2: recovery proposals only; see RecoveryProgress. */
   recovery?: RecoveryProgress;
+  /**
+   * Q7: step index -> the pull request that step opened (action.executed.pull_request), updated by
+   * each pull_request.updated. Left off until a step opens one.
+   */
+  pull_requests?: Record<number, PullRequestState>;
+}
+
+/** Q7: what the log says about one fix PR. Every string came from the forge: render it as text. */
+export interface PullRequestState {
+  repo: string;
+  number: number;
+  url: string;
+  branch: string;
+  /** The commit Piperoom wrote (action.executed). */
+  head_sha: string;
+  state: string;
+  /** A reviewer pushed to the PR after approval: the merged change is not exactly the approved diff. */
+  head_changed: boolean;
+  /** Absent until the first pull_request.updated: the checks have not been read yet. */
+  checks?: PRChecks;
+  merge_sha?: string;
+  merged_at?: string;
+  /** The time of the last event that changed it. */
+  updated_at: string;
 }
 
 /** X2: what the log says about a recovery proposal after its step ran. */

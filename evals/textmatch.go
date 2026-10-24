@@ -286,12 +286,19 @@ func occursUndeniedOutside(cls []clauseToks, terms, shadows []string, layers boo
 var layerTerms = map[string][]string{
 	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
 		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal",
-		"postgre sql"}, // tokenize splits "PostgreSQL" into "postgre sql"
+		"postgre sql", // tokenize splits "PostgreSQL" into "postgre sql"
+		// The other setup sources (U4d, U7d, U9d): owners.yaml has no source kind
+		// for them yet, so their source database is graded as this layer.
+		// Whole words only: a topic prefix or pipeline id such as "mongo" or
+		// "orders-mssql" must not name the source layer.
+		"sql server", "sqlserver", "mongodb", "mongo db", "mongod", "oracle"},
 	"kafka-connect":   {"connect", "connector*", "debezium"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
 	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
 	"consumer":        {"consumer*"},
 	"warehouse":       {"warehouse*", "sink table"},
+	// The MySQL source (Q0 item 7, Q8j). tokenize splits "MySQL" into "my sql".
+	"mysql": {"mysql*", "my sql", "binlog*", "binary log*", "gtid*"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its

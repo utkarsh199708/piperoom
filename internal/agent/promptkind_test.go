@@ -105,18 +105,39 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // timeouts are evidence for what is unknown or blocked, not proof.", rule 1
 // "do not repeat its reads", the resume bullet "slot exists ... and no
 // maintenance", and the write-off note "won't" (the PR lists each word).
+// W4h (KAN-505) moved it a thirteenth time, on purpose, for evals run
+// 39994729845 (the agent asked which fix to take instead of proposing the
+// one listed action that fixed the cause, re-read rows from the source that
+// were still on the topic, and left a FAILED task's restart for later):
+// rule 7 carries the generic rule (instead of asking unprompted, propose the
+// smallest listed action that fixes the cause and say what it gives up; it
+// replaces the Fixes bullet "Fix the cause you established with the
+// smallest change"); a FAILED task's restart is the next step of the
+// proposal removing its cause, and pg_add_publication_table's snapshot
+// signal joins that sentence; a high-risk compatibility NONE is proposed
+// when no narrower listed action fixes a rejected registration, saying what
+// the old contract can no longer read, and undone once recovered (a later
+// fix: a restore step in the same proposal would run before Debezium
+// registers the new schema, LEAD-REVIEW on #988), while schema_register
+// stays a last resort; the offsets note replays a missing range still on the
+// topic and snapshots the rows otherwise. Word-neutral against 1335 by
+// meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
+// restart and offsets bullets and "Propose one fix at a time" (the PR lists
+// each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "fea65ec5122e7629c49f5cfa0188ee5e070efd5c06142eea44ab1b1c33c87be3"
+const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
-// 4 and 6, word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "fe41e44f52cbf312067a5ecf6c9086c1c58e3cc5949ca3ae1af8efd8808f95ef"
+// 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
+// listed fix, the restart and compatibility bullets and the offsets note,
+// word-neutral: still 1335 words).
+const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

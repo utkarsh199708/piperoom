@@ -350,6 +350,11 @@ type Watcher struct {
 	// versionJobs are planned under mu by evaluate and written by the tick.
 	versions    clients.ConfigVersionWriter
 	versionJobs []versionJob
+
+	// slotOff keeps the "slot signals off" INFO line of a MySQL pipeline to
+	// one per pipeline (source_kind.go). Its own lock: targets runs outside mu.
+	slotOffMu sync.Mutex
+	slotOff   map[string]bool
 }
 
 const maxClosedRemembered = 256
@@ -397,6 +402,7 @@ func New(d Deps) (*Watcher, error) {
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
 		samples: d.Samples, horizon: d.Forecast.Horizon, status: d.Status,
 		versions: d.ConfigVersions,
+		slotOff:  map[string]bool{},
 	}
 	if w.horizon <= 0 {
 		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon

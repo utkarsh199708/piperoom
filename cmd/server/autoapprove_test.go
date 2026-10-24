@@ -23,6 +23,11 @@ func (namedAction) ParamsSchema() map[string]any                             { r
 func (namedAction) Validate(context.Context, json.RawMessage) error          { return nil }
 func (namedAction) Execute(context.Context, json.RawMessage) (string, error) { return "", nil }
 
+// deferredAction stands for repo_open_pull_request: an actions.Deferred action.
+type deferredAction struct{ namedAction }
+
+func (deferredAction) Deferred() {}
+
 func registryOf(t *testing.T, names ...string) *actions.Registry {
 	t.Helper()
 	r := actions.NewRegistry()
@@ -63,6 +68,21 @@ func TestCheckAutoApprove(t *testing.T) {
 				}
 			}
 		})
+	}
+	// A Deferred action (a fix PR) is registered, so it is a known name, but
+	// the load-time wall refuses it on any list (docs/design/fix-pr.md §7).
+	withPR := registryOf(t, "connect_restart_task")
+	if err := withPR.Register(deferredAction{namedAction{name: "repo_open_pull_request"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, delay := range []time.Duration{0, time.Minute} {
+		err := checkAutoApprove(own("connect_restart_task", "repo_open_pull_request"), []*actions.Registry{withPR}, delay, log)
+		if err == nil || !strings.Contains(err.Error(), "never approved by a policy") {
+			t.Fatalf("delay %v: auto_approve: [repo_open_pull_request] = %v, want a refusal", delay, err)
+		}
+	}
+	if err := checkAutoApprove(own("connect_restart_task"), []*actions.Registry{withPR}, time.Minute, log); err != nil {
+		t.Fatalf("a list without the fix-PR action: %v", err)
 	}
 	// An empty registry refuses every entry (never "skip the check").
 	if err := checkAutoApprove(own("connect_restart_task"), nil, time.Minute, log); err == nil {

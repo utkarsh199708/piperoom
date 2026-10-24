@@ -1,0 +1,245 @@
+# C7 incident scenario (Q7i, pull-request fix): a consumer deploy moved order-sync's Kafka settings
+# into a properties file in its repository with the wrong value.deserializer, so the consumer reads
+# Confluent Avro bytes as text and crash-loops on the first record. The setting lives only in the
+# application's config: no Piperoom live action can change it. The fix is a pull request to the
+# consumer's config file. Format: evals/README.md (C6). Row Q7i (tasks/Q-board.md, step 7;
+# docs/design/fix-pr.md §10 "Scenarios (Q7i)", Jira KAN-320).
+#
+# RECORDED: NO. Synthesised from the code paths (the real kafkatools, dbtools, topology and
+# warehouse format strings on this branch), composed by hand. The consumer's crash text is the
+# Jackson error for a leading NUL byte (Confluent's wire format starts with magic byte 0x0), as the
+# consumer owner pastes it from the pod log; no Piperoom tool reads application logs. Clock:
+# 2026-10-23T09:40:00Z, scoped like dev/owners.yaml plus the repos: block below. See
+# evals/scenarios/README.md, "Pull-request fix scenarios (Q7i)".
+#
+# First failing layer: consumer. Root-cause layer: consumer (order-sync's config).
+#
+# Label (the row's done-when: repo, paths and applied_when):
+#   action: repo_open_pull_request (Q7c), one step, layer consumer
+#   repo: order-sync (https://github.com/acme/order-sync, base main)
+#   paths: [config/consumer.properties] (glob config/*.properties, layer consumer), nothing else
+#   edit: `value.deserializer=org.apache.kafka.common.serialization.StringDeserializer` ->
+#         `value.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer`
+#   applied_when: {kind: change, kinds: [deploy], service: order-sync} (the deploy webhook of the
+#     fixed build, X4a); then Q7f's verification sees the lag fall.
+#
+# Fixture repo (resources.repos below, Q7j's forge replay; base_sha
+#   2c7d9e41b0a3f5c86e1d2b4a7f90c3e5d6b18a27):
+#   order-sync @ main
+#     config/consumer.properties:
+#       # Kafka consumer settings of order-sync (moved here from application.yml in 2.18.0).
+#       bootstrap.servers=${env:KAFKA_BOOTSTRAP}
+#       group.id=order-sync
+#       key.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer
+#       value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+#       schema.registry.url=${env:SCHEMA_REGISTRY_URL}
+#       specific.avro.reader=false
+#       enable.auto.commit=false
+#       auto.offset.reset=earliest
+#     config/logging.properties: unrelated (also under the glob; must not change):
+#       root.level=INFO, logger.kafka.level=WARN
+#   History: PR #318 "config: move Kafka settings to consumer.properties" (order-sync 2.18.0,
+#   deployed 09:00) copied value.deserializer from a template.
+#
+# What is graded (Q7j, as plugin-missing-in-image.yaml): the diagnosis, fix
+#   [[repo_open_pull_request]] on fix_targets {repo: order-sync}, and fix_files: path set ==
+#   [config/consumer.properties], the one edit, no other line changed (key.deserializer and
+#   schema.registry.url are right). The repository tools run live over the fixture repo.
+#
+#   Forbidden: kafka_reset_consumer_offsets - the committed offsets are right; skipping to latest
+#     loses 1843 changes and the next record crashes the same build anyway.
+#   Forbidden: dlq_replay, schema_register, schema_set_compatibility - the records and schemas are
+#     fine.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_update_connector_config,
+#     pg_drop_replication_slot - the source side is healthy.
+#
+# Traps:
+#   - "Illegal character ((CTRL-CHAR, code 0))" reads like a poison-pill record
+#     (consumer-poison-pill). Every record fails: the deserializer, not one record, is wrong.
+#   - The Schema Registry and the topic's schemas are unchanged since last week; the consumer
+#     never asks the registry (StringDeserializer does not).
+#
+# Sources:
+#   - docs/design/fix-pr.md §1 ("a consumer's value.deserializer sits in the application's
+#     config"), §6.1, §8.2 (applied_when change), §10.
+#   - Confluent wire format: magic byte 0, 4-byte schema id, Avro payload.
+
+name: consumer-deserializer
+description: |
+  At 09:00 UTC order-sync 2.18.0 was deployed. Its PR #318 moved the Kafka consumer settings into
+  config/consumer.properties in the order-sync repository and set
+  value.deserializer=org.apache.kafka.common.serialization.StringDeserializer (copied from a
+  template) instead of io.confluent.kafka.serializers.KafkaAvroDeserializer. The consumer now reads
+  the Confluent Avro bytes of pg.public.orders as text and fails on the first record with
+  "JsonParseException: Illegal character ((CTRL-CHAR, code 0))"; the pod crash-loops, the group is
+  Empty and lag is 1843 and growing. The connector, the topic, the registry and the schemas are
+  healthy; analytics.orders is 40 minutes stale.
+
+  Root cause: order-sync's config/consumer.properties sets value.deserializer to StringDeserializer
+  instead of the Avro deserializer, so it cannot read the Avro records.
+
+  Expected label: a pull request (repo_open_pull_request) to repo order-sync changing only
+  config/consumer.properties, value.deserializer to io.confluent.kafka.serializers.KafkaAvroDeserializer;
+  applied when a deploy of order-sync is seen (applied_when kind change, kinds [deploy]).
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+  repos:
+    - id: order-sync
+      url: https://github.com/acme/order-sync
+      base: main
+      paths:
+        - {glob: "config/*.properties", layer: consumer}
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+  repos:
+    order-sync:
+      base_sha: 2c7d9e41b0a3f5c86e1d2b4a7f90c3e5d6b18a27
+      files:
+        config/consumer.properties: |
+          # Kafka consumer settings of order-sync (moved here from application.yml in 2.18.0).
+          bootstrap.servers=${env:KAFKA_BOOTSTRAP}
+          group.id=order-sync
+          key.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer
+          value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+          schema.registry.url=${env:SCHEMA_REGISTRY_URL}
+          specific.avro.reader=false
+          enable.auto.commit=false
+          auto.offset.reset=earliest
+        config/logging.properties: |
+          root.level=INFO
+          logger.kafka.level=WARN
+
+alert:
+  title: 'orders: order-sync lag 1843 and growing, analytics.orders stale 40m'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=0.9 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] FAIL lag=1843 state=Empty
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=40m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=0.9 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] FAIL lag=1843 state=Empty
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=40m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Empty, 0 members, total lag 1843
+        pg.public.orders/0: committed 1428, end 2049, lag 621
+        pg.public.orders/1: committed 1417, end 2031, lag 614
+        pg.public.orders/2: committed 1403, end 2011, lag 608
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–2049 (2049 records), newest 1 min ago
+      partition 1: 0–2031 (2031 records), newest 1 min ago
+      partition 2: 0–2011 (2011 records), newest 1 min ago
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:00:12Z (stale for 40m)
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=0.9 MiB wal_status=reserved
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+
+inputs:
+  - kind: steer
+    from: kabir
+    text: "order-sync 2.18.0 went out at 09:00 (PR #318 moved the Kafka settings to config/consumer.properties in github.com/acme/order-sync). The pod crash-loops with: com.fasterxml.jackson.core.JsonParseException: Illegal character ((CTRL-CHAR, code 0)): only regular white space (\\r, \\n, \\t) is allowed between tokens, at the first record of pg.public.orders. What is wrong and what do we change?"
+
+expect:
+  root_cause:
+    - [deserializ*, string deserializer, avro deserializer]
+  root_cause_forbidden:
+    - [poison pill]
+    - [schema, deleted]
+    - [connector, failed]
+    - [schema change]
+  first_failing_layer: consumer
+  root_cause_layer: consumer
+  expected_facts:
+    - id: f_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, 0 members, total lag 1843]
+      required: true
+    - id: f_topic_fresh
+      tool: kafka_topic_offsets
+      match: [newest 1 min ago]
+    - id: f_connector_ok
+      tool: connect_status
+      match: [task 0 running]
+  claims:
+    - about: root_cause
+      facts: [f_group_empty]
+  evidence_tools: [kafka_consumer_lag]
+  fix:
+    - [repo_open_pull_request]
+  fix_targets:
+    repo_open_pull_request: {repo: order-sync}
+  fix_files:
+    - repo: order-sync
+      files:
+        - path: config/consumer.properties
+          removed: [value.deserializer=org.apache.kafka.common.serialization.StringDeserializer]
+          added: [value.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer]
+  forbidden_actions: [kafka_reset_consumer_offsets, dlq_replay, schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_update_connector_config, pg_drop_replication_slot]
+  max_tool_calls: 10

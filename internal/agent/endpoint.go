@@ -75,6 +75,11 @@ type EndpointConfig struct {
 	TriagePass        bool
 	TriagePassModel   string
 	TriagePassTimeout time.Duration
+	// FixPRApplyTimeout is PIPEROOM_FIXPR_APPLY_TIMEOUT
+	// (config.ParseFixPRApplyTimeout): how long after a fix PR merged the
+	// agent waits for its applied_when before the outcome is not_deployed
+	// (Q7f). Zero means the default, 2 h.
+	FixPRApplyTimeout time.Duration
 	// NeutraliseControlTokens is the raw
 	// PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS value: all (default when
 	// empty) neutralises chat-template control tokens in the text of every
@@ -361,6 +366,10 @@ type Endpoint struct {
 	triagePass      triagePassConfig
 	firstLookWarned atomic.Bool
 
+	// applyTimeout is EndpointConfig.FixPRApplyTimeout; zero keeps the
+	// runner's default (Q7f).
+	applyTimeout time.Duration
+
 	mu      sync.Mutex
 	budgets map[string]*tokenBudget
 	// spend is the durable spend setup (SetSpend, spend.go); nil = in-memory
@@ -415,6 +424,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		triageModel:   cfg.TriageModel,
 		triageTurns:   cfg.TriageTurns,
 		triagePass:    triagePassSettings(cfg),
+		applyTimeout:  cfg.FixPRApplyTimeout,
 		limit:         limit,
 		model:         cfg.wrap(roleMain, withNeutraliser(m, cfg.NeutraliseControlTokens)),
 		log:           log,
@@ -608,6 +618,9 @@ func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options
 		return err
 	}
 	r.prices = e.pricesFor(e.mainQuals)
+	if e.applyTimeout > 0 {
+		r.timing.applyTimeout = e.applyTimeout
+	}
 	if e.triageModel != "" && e.triageModel != opts.Model {
 		r.triageModel = e.triageModel
 		r.triageTurns = e.triageTurns

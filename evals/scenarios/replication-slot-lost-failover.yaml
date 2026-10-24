@@ -5,12 +5,11 @@
 # generated from fake clients, so regenerate them if a tool's output format changes.
 # kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
-# First failing layer: postgres (the replication slot is gone). Alert fired at: kafka-connect.
-#   Root-cause layer: postgres. The visible failure is the Debezium task; the cause is that
+# First failing layer: kafka-connect (the Debezium task is FAILED; the source still answers every read).
+#   Alert fired at: kafka-connect. Root-cause layer: postgres. The cause is that
 #   debezium_orders does not exist on the new primary (orders-db-2, promoted at 06:58:12Z).
-#   R1 (tasks/W4-evals-to-100.md, 2026-10-23) reads this as first_failing_layer: kafka-connect, root cause
-#   postgres; W4l (KAN-496) did not apply it: it needs the one-line syntheticLabels/syntheticTruth edit in
-#   evals/agreement_test.go (C6's) and a judge refill, so the label waits for that grant.
+#   Ruling R1 (tasks/W4-evals-to-100.md, applied in W4n-2, KAN-497): a component that answers every
+#   read is not the first failing one; the task that stopped is, and the lost slot is the root cause.
 #
 # Modelling note: Debezium normally CREATES a missing slot on task start, so silent loss is the common
 #   real path. This scenario models the FAILED-on-reconnect path (the walsender connection drops and
@@ -311,7 +310,8 @@ expect:
        'did not carry the logical slot debezium_orders', 'didn''t carry logical slot debezium_orders',
        'didn''t carry the logical slot debezium_orders']
     - [failover, promot*, standby, 'new primary']
-  first_failing_layer: postgres
+  # R1 (W4n-2): the stopped task fails first; Postgres holds the cause.
+  first_failing_layer: kafka-connect
   root_cause_layer: postgres
   # The failover itself is only in Priya's comment.
   expected_facts:

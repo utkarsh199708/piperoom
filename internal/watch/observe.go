@@ -96,6 +96,9 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	var out []target
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
+		if p.IsMySQL() {
+			w.slotSignalsOff(p.ID, &cfg)
+		}
 		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
 			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
 			cfg.OffsetBelowLogStart.Enabled || driftOn(cfg)) {

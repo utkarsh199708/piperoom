@@ -123,7 +123,7 @@ func (r roomTargets) Labels(p owners.Pipeline) []string {
 			b.add(KindWarehouse, LabelWarehouse, addr, false, nil, "")
 		}
 	}
-	if addr := hostPortOf(cfg.SourceDBURL, "5432"); addr != "" {
+	if addr := hostPortOf(cfg.SourceDBURL, sourcePort(p, "")); addr != "" {
 		b.add(KindSource, LabelSource, addr, false, nil, "")
 	}
 	// A declared connector may name the source host; that is only known after
@@ -152,7 +152,7 @@ func (r roomTargets) Target(ctx context.Context, p owners.Pipeline, label string
 			}
 		}
 	case KindSource:
-		if addr := hostPortOf(cfg.SourceDBURL, "5432"); addr != "" {
+		if addr := hostPortOf(cfg.SourceDBURL, sourcePort(p, "")); addr != "" {
 			b.add(KindSource, LabelSource, addr, false, nil, "")
 		}
 	default:
@@ -199,7 +199,7 @@ func (b *targetSet) addConnectors(ctx context.Context, connect clients.ConnectCl
 		}
 		port := strings.TrimSpace(cfg["database.port"])
 		if port == "" {
-			port = "5432"
+			port = sourcePort(p, cfg["connector.class"])
 		}
 		addr := canonicalAddr(host, port)
 		if addr == "" {
@@ -240,7 +240,7 @@ func (s setupTargets) Target(_ context.Context, _ owners.Pipeline, label string)
 			continue
 		}
 		for _, raw := range strings.Split(t.Address, ",") {
-			if addr := hostPortOf(strings.TrimSpace(raw), defaultPort(kindOfLabel(kind))); addr != "" {
+			if addr := hostPortOf(strings.TrimSpace(raw), setupDefaultPort(kind)); addr != "" {
 				b.add(kindOfLabel(kind), kind, addr, false, nil, "")
 			}
 		}
@@ -354,6 +354,31 @@ func kindOfLabel(label string) string {
 	return label
 }
 
+// mysqlPort is MySQL's standard port: the default of a mysql:// URL, of a
+// MySQL pipeline's source host and of a Debezium MySQL connector's
+// database.port (docs/design/mysql-source.md §1, Q8q).
+const mysqlPort = "3306"
+
+// sourcePort is the default port of the pipeline's source database: 3306 on
+// a MySQL pipeline (source_kind: mysql) or for a Debezium MySQL connector
+// (connectorClass, "" when none), else Postgres's 5432. A mysql:// URL gets
+// 3306 from schemePort whatever the pipeline says.
+func sourcePort(p owners.Pipeline, connectorClass string) string {
+	if p.IsMySQL() || strings.Contains(strings.ToLower(connectorClass), ".mysql.") {
+		return mysqlPort
+	}
+	return "5432"
+}
+
+// setupDefaultPort is defaultPort for a setup target's kind: a "mysql" source
+// target defaults to 3306.
+func setupDefaultPort(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), "mysql") {
+		return mysqlPort
+	}
+	return defaultPort(kindOfLabel(strings.ToLower(strings.TrimSpace(kind))))
+}
+
 // defaultPort is the standard port of a kind, used when a target names a host
 // without a port.
 func defaultPort(kind string) string {
@@ -443,6 +468,8 @@ func schemePort(scheme, fallback string) string {
 		return "443"
 	case "postgres", "postgresql":
 		return "5432"
+	case "mysql":
+		return mysqlPort
 	case "clickhouse":
 		return "9000"
 	}

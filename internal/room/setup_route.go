@@ -247,6 +247,11 @@ func setupStepTier(acts *actions.Registry, step events.ProposalStep, class strin
 	if !plan.ValidTier(tier) {
 		return "", fmt.Errorf("tier of %q is %q, not T0..T3", cleanPlanName(step.Action), cleanPlanName(tier))
 	}
+	if isDeferred(a) {
+		// Q7k: a Deferred (pull-request) step is never a setup T1 step, so
+		// setup_local never schedules it, whatever its Tier says.
+		tier = raiseTier(tier, plan.TierT2)
+	}
 	return tier, nil
 }
 
