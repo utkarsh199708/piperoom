@@ -232,6 +232,21 @@ recordings:
       09:30 | 37800 | 37800 | 37174 | -626
       09:39 | 4200 | 4200 | 0 | -4200
       verdict: sink is missing 4200 rows in 09:39–09:48; topic has them (consumer side)
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, dbtools}; the values are composed to agree with the recordings above.
+  # kafka_throughput: no watcher runs in a replay, so there are no group_lag samples and no consumed rate.
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 104400 records (58/s) over 3 partitions; median 19/s, max p0 19/s → even
+      order-sync (Stable, 1 members): lag 4826; pg.public.orders p2 33% (1621)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 7381164 rows inserted since stats reset, 3120 dead tuples, last autovacuum 2026-10-11T07:58:31Z, 0 session(s) waiting on a lock
 
 expect:
   outcome: abstain
