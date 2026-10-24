@@ -22,6 +22,13 @@
 # kafka, or kafka-connect (an unclean connector restart that replays from its last flushed
 # offset is the usual producer of such copies; nothing here proves which writer it was).
 #
+# Outcome: healthy now, with a past finding (ruling R4, tasks/W4-evals-to-100.md, applied in W4n,
+# KAN-497; prompt rule 7). The sink fully absorbed the redelivery, so "the pipeline is healthy
+# now" is right as long as the hypothesis also states the duplicates; the forbidden rows that
+# contradicted it are gone: "pipeline is healthy", "pipeline healthy" and "nothing is wrong" (the
+# answer to "Is analytics.orders wrong?" is "nothing is wrong with it now"). The rows that deny
+# the finding itself (false positive, false alarm) stay: the duplicates are real.
+#
 # Expected fix: none. Kafka cannot delete single records, and the upsert sink is already right.
 #   The finding is that consumers must stay idempotent (a non-upsert consumer would double count).
 #   Forbidden: kafka_reset_consumer_offsets - replaying reprocesses everything to remove nothing.
@@ -715,14 +722,15 @@ inputs:
 
 expect:
   root_cause:
-    - [duplicat*, twice, redeliver*, republish*, replay*, copies]
-    - [lsn, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
+    # 'same lsn' and dedup* (W4n round 2, run 40044762858): the healthy-now answer R4 rules right
+    # ("re-sent a burst of 10 same-LSN events ... the sink deduplicated them") names the copies
+    # that way; "deduplicated" is not a word starting with duplicat*, so the group missed it. The
+    # alert title and the steer still fail the lsn group below.
+    - [duplicat*, twice, redeliver*, republish*, replay*, copies, same lsn, same-lsn, dedup*]
+    - [lsn*, 'same key', 'same keys', 'same event', 'same events', 'same change event*', 'same payload']
   root_cause_forbidden:
-    - ['pipeline is healthy']
-    - ['pipeline healthy']
     - ['false positive']
     - ['false alarm']
-    - ['nothing is wrong']
     - ['inserted twice']
     - ['double insert*']
     - ['duplicate inserts']
