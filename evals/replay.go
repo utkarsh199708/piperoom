@@ -412,11 +412,13 @@ type replayer struct {
 	isLookup func(context.Context) bool
 }
 
-// agentOwnRead reports a read the agent runner makes on its own: it is
+// agentOwnRead reports a read the agent runner makes on its own (including
+// the logs and known-issues reads after a failed step): it is
 // answered when recorded but is never a miss, never counts toward
 // after_calls and never moves a sequence.
 func agentOwnRead(ctx context.Context) bool {
-	return agent.IsPastIncidentsLookup(ctx) || agent.IsRunningVersionsRead(ctx)
+	return agent.IsPastIncidentsLookup(ctx) || agent.IsRunningVersionsRead(ctx) ||
+		agent.IsReplanRead(ctx)
 }
 
 // replayRecord is a Recording with its results already converted to JSON, so
