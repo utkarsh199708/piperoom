@@ -141,7 +141,6 @@ U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 | U4d | C7 + C6 | Opus 5.5 | 1 | scenarios: `setup/compose-sqlserver-clean` and the two U4c breaks; eval replay | the three score | U4c |
 | U4-0 | leads | Opus 5.5 | 0.25 | design ruling (`docs/design/setup-agent.md`): may `service_restart` reach a SQL Server unit (`mssql-server` on Linux, `SQLSERVERAGENT` / `SQLAgent$<instance>` on Windows) when the host target accepts only `piperoom-<name>` units (`host.UnitPrefix`, a security property); if yes, the allow-list shape and its tier | the section names the allowed units and who may add one, or records that the Agent fix on a host target stays an ask | U4b |
 | U4e | A9 | Opus 5.5 | 1 | setup/remoteclients + runner catalogue: the SQL Server read ops `source_server_info`, `source_agent_state`, `source_database_cdc`, `source_table_cdc`, `source_role_info` over `*sqlserver.Client`; a SQL Server target for the source write ops (`CreatePublication`, `CreateCanaryTable`, `InsertCanary`, `CreateReadRole` through `sqlserver.SetupWriter`); the source-kind dispatch line that constructs the U4b driver beside the Postgres one | every U4b check runs through a paired runner in a recorded test; the write ops keep their U1-2b floors; `remoteclients.Ops()` lists the new ops | U4b, U1-10 |
-| U4f | A3 | Opus 5.5 | 0.25 | owners: `sqlserver` as a `source_kind` (the U4d scenarios name the layer `postgres` today) | a scenario labels the SQL Server layer by its own kind | U4b |
 | U4g | A10 | Opus 5.5 | 0.75 | clients/sqlserver: `RoleInfo` reports `SELECT ON SCHEMA::cdc`, `VIEW DATABASE STATE` and whether the login has a database user in the captured database; U4b's grants check reads them | the grants check passes only on a login that can read the cdc schema; a missing grant names itself in the ask. A `GrantSelect` write, if wanted, is a Contract change request to `clients.SetupSourceWriter`, not this row | U4b |
 | U4-R | A10 | Opus 5.5 | 1 | real runs: SQL Server 2022 on Compose, Linux; Azure SQL as a manual check (the sandbox of plan §7 item 6) | exports in the write-up; the Azure run marked manual with its date | U4b, U4e, U1-R |
 
@@ -303,7 +302,7 @@ driver can be reviewed against the protocol fakes and merge first.
 | 2 | U1-2, U1-2b, U1-3a, U1-4, U1-5b, U1-5d, U1-8, U1-12a, U3a, U4c, U6a, U7a-1, U7a-2, U9a, U12a, U13b1 |
 | 3 | U1-3b, U1-6, U1-7, U1-8b, U1-9, U1-11, U1-14b, U1-17, U2a, U2b, U3b, U4b, U5a, U7b, U7c, U8a, U9b, U9c, U12b, U13b2, U13c, U13d |
 | 4 | U1-10, U1-12b, U1-14, U1-15, U1-16, U1-18, U1-19, U1-20, U1-22, U1-R, U2c, U3c, U3d, U3e, U4d, U5b, U5c, U6b, U6c, U7d, U8b, U8c, U9d, U10a, U11a, U12c, U13e, U13f |
-| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U8-C, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R, U4-0, U4e, U4f, U4g, U8f; U14 |
+| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U8-C, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R, U4-0, U4e, U4g, U8f; U14 |
 
 Review load for the leads peaks at about 25 PRs in weeks 3 and 4; the code review of C* PRs goes to `[LEAD-CLOUD]`
 as usual, and every target row's real run is checked by Lead 1 from the attached export before the merge.
