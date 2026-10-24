@@ -28,6 +28,7 @@
 // characters, 32 for a user) and backtick-quoted; an account host passes
 // ^[A-Za-z0-9_.:%-]{1,255}$ and is quoted as a literal; values are ? parameters
 // (AGENTS.md §4 rule 6). The only value spliced into a statement is the
-// generated read-user password, as lower-case hex, because CREATE USER has no
+// generated read-user password, from an alphabet of letters, digits, - and _
+// (no quote, backslash or white space), because CREATE USER has no
 // safe parameter position on every server this wave supports.
 package mysql

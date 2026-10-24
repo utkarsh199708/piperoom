@@ -138,10 +138,10 @@ func InsertCanarySQL(table string) (string, error) {
 // created for a source that later moves to RDS should not need a second grant.
 var connectorGlobalPrivileges = []string{"RELOAD", "SHOW DATABASES", "LOCK TABLES", "REPLICATION SLAVE", "REPLICATION CLIENT"}
 
-// CreateUserSQL creates the connector's user. password is the generated
-// lower-case hex the executing writer made; CREATE USER takes it as a literal,
-// quoted by quoteLiteral, and the statement is never logged or wrapped into an
-// error.
+// CreateUserSQL creates the connector's user. password is the generated value
+// the executing writer made (letters, digits, - and _: randomPassword); CREATE
+// USER takes it as a literal, quoted by quoteLiteral, and the statement is never
+// logged or wrapped into an error.
 func CreateUserSQL(user, password string) (string, error) {
 	acct, err := accountLiteral(user)
 	if err != nil {

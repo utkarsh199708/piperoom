@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -90,8 +91,8 @@ func TestSetupWriterCreateReadRole(t *testing.T) {
 		t.Fatalf("secret name = %q", name)
 	}
 	password := store.values[readPasswordSecretName]
-	if len(password) != 48 {
-		t.Fatalf("stored password has %d characters, want 48 hex", len(password))
+	if !passwordRe.MatchString(password) || !passwordHasEveryClass(password) {
+		t.Fatalf("stored password %q is not 48 characters of A-Z a-z 0-9 - _ with every class", password)
 	}
 	texts := srv.texts()
 	create := texts[len(texts)-4]
@@ -137,6 +138,67 @@ func TestSetupWriterReadRoleCreateFailureDoesNotEchoPassword(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "syntax error") {
 		t.Fatalf("the server text was wrapped into the error: %v", err)
+	}
+}
+
+// passwordRe is the shape randomPassword promises: 48 characters of the URL-safe
+// base64 alphabet, none of which can close a quoted literal.
+var passwordRe = regexp.MustCompile(`^[A-Za-z0-9_-]{48}$`)
+
+func TestRandomPasswordShape(t *testing.T) {
+	seen := map[string]bool{}
+	for range 200 {
+		p, err := randomPassword()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !passwordRe.MatchString(p) {
+			t.Fatalf("password %q is not 48 characters of A-Z a-z 0-9 - _", p)
+		}
+		if !passwordHasEveryClass(p) {
+			t.Fatalf("password %q lacks a character class validate_password MEDIUM needs", p)
+		}
+		if seen[p] {
+			t.Fatal("randomPassword repeated a value")
+		}
+		seen[p] = true
+		// The literal is the password unchanged: nothing in the alphabet needs
+		// escaping, so the statement cannot end early.
+		if quoteLiteral(p) != "'"+p+"'" {
+			t.Fatalf("quoteLiteral changed the password: %s", quoteLiteral(p))
+		}
+	}
+	for p, want := range map[string]bool{
+		"Aa1-": true, "Aa1_": true,
+		"aa1-": false, "AA1-": false, "Aaa-": false, "Aa11": false, "": false,
+	} {
+		if got := passwordHasEveryClass(p); got != want {
+			t.Errorf("passwordHasEveryClass(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// TestSetupWriterReadRolePasswordPolicyRefusal: a server whose validate_password
+// policy refuses the generated password (error 1819) gets a named error, no
+// grant and no stored password, and the server text is not wrapped.
+func TestSetupWriterReadRolePasswordPolicyRefusal(t *testing.T) {
+	srv := (&fakeServer{}).onErr("CREATE USER", mysqlErr(errNotValidPassword))
+	store := &memStore{}
+	w := newTestWriter(t, srv, store)
+	_, err := w.CreateReadRole(unscoped(), "debezium", []string{"shop.orders"})
+	if !errors.Is(err, errPasswordPolicy) {
+		t.Fatalf("CreateReadRole = %v, want errPasswordPolicy", err)
+	}
+	if strings.Contains(err.Error(), "server said no") {
+		t.Fatalf("the server text was wrapped into the error: %v", err)
+	}
+	if len(store.values) != 0 {
+		t.Fatal("a password was stored although the user was not created")
+	}
+	for _, s := range srv.texts() {
+		if strings.HasPrefix(s, "GRANT") || strings.HasPrefix(s, "DROP") {
+			t.Fatalf("a statement ran after the refused create: %s", s)
+		}
 	}
 }
 

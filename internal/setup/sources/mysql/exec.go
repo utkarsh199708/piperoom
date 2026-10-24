@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
@@ -83,6 +83,7 @@ const (
 	errSpecificDenied    = 1227 // ER_SPECIFIC_ACCESS_DENIED_ERROR
 	errNonexistingGrant  = 1141 // ER_NONEXISTING_GRANT
 	errNoMatchingUserRow = 1133 // ER_PASSWORD_NO_MATCH
+	errNotValidPassword  = 1819 // ER_NOT_VALID_PASSWORD: the validate_password component refused it
 )
 
 // SetupWriterOption changes a NewSetupWriter default.
@@ -199,6 +200,11 @@ var (
 	// is deliberately generic: the statement carries the generated password
 	// literal, so the server/driver error text is not wrapped.
 	errCreateUser = errors.New("mysql setup writer: CREATE USER failed")
+	// errPasswordPolicy: the server's validate_password component refused the
+	// generated password (error 1819). The generator satisfies the MEDIUM policy
+	// (randomPassword), so the server runs STRONG with a dictionary file or a
+	// length above 48; nothing was created.
+	errPasswordPolicy = errors.New("mysql setup writer: the server's password policy (validate_password) refused the generated password (48 characters: upper and lower case, digits, - and _): the policy is STRONG with a dictionary file or asks for more than 48 characters; create the user by hand (the read_role check names its grants) or relax validate_password.policy for the setup")
 )
 
 // CreatePublication answers clients.ErrNotSupported before any I/O: MySQL has no
@@ -305,6 +311,8 @@ func (w *SetupWriter) CreateReadRole(ctx context.Context, role string, tables []
 		switch errNumber(err) {
 		case errCannotUser:
 			return "", fmt.Errorf("mysql setup writer: create read role %s: %w", clipName(role), errUserExists)
+		case errNotValidPassword:
+			return "", fmt.Errorf("mysql setup writer: create read role %s: %w", clipName(role), errPasswordPolicy)
 		case errSpecificDenied, errDBAccessDenied:
 			return "", fmt.Errorf("mysql setup writer: create read role %s: the write user needs the CREATE USER privilege (error %d)", clipName(role), errNumber(err))
 		}
@@ -393,12 +401,50 @@ func checkSetupScope(ctx context.Context, tables []string) error {
 	return nil
 }
 
-// randomPassword returns a fresh hex password (24 random bytes) for the read
-// user. Lower-case hex cannot end the literal or the statement.
+// passwordBytes is the entropy of the read-user password: 36 random bytes, 48
+// characters once encoded.
+const passwordBytes = 36
+
+// randomPassword returns a fresh password for the read user: passwordBytes
+// random bytes in the URL-safe base64 alphabet (A-Z, a-z, 0-9, - and _), drawn
+// again until it has an upper-case letter, a lower-case letter, a digit and one
+// of - and _ (about four draws in five qualify), so a server whose
+// validate_password component runs the MEDIUM policy (RDS parameter groups,
+// hardened installs) accepts it; STRONG adds a dictionary check no generator
+// can promise, and CreateReadRole names that refusal (errPasswordPolicy). The
+// alphabet has no quote, backslash, semicolon or white space, so the literal
+// CREATE USER takes cannot end early under any sql_mode.
 func randomPassword() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("mysql setup writer: generate the read-user password: %w", err)
+	b := make([]byte, passwordBytes)
+	for range 64 {
+		if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("mysql setup writer: generate the read-user password: %w", err)
+		}
+		if p := base64.RawURLEncoding.EncodeToString(b); passwordHasEveryClass(p) {
+			return p, nil
+		}
 	}
-	return hex.EncodeToString(b), nil
+	// 64 draws without every class has probability below 1e-40: the random
+	// source is not random.
+	return "", errors.New("mysql setup writer: generate the read-user password: no draw had every character class")
+}
+
+// passwordHasEveryClass reports whether p has an upper-case letter, a lower-case
+// letter, a digit and one of - and _: what validate_password's MEDIUM policy
+// counts as its four classes (- and _ are its "special" characters).
+func passwordHasEveryClass(p string) bool {
+	var upper, lower, digit, special bool
+	for _, c := range p {
+		switch {
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= '0' && c <= '9':
+			digit = true
+		case c == '-' || c == '_':
+			special = true
+		}
+	}
+	return upper && lower && digit && special
 }
