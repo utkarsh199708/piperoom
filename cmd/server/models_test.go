@@ -17,10 +17,20 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
+	"piperoom/internal/quickstart"
 	"piperoom/internal/room"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/wiring"
 )
+
+// testKeys is a picker overlay holding an Anthropic key: with a key lookup
+// override the Anthropic client refuses to start without one.
+var testKeys = quickstart.NewKeys(mapEnv{}, quickstart.ModelEnv{KeyVar: "ANTHROPIC_API_KEY", Key: "sk-ant-test-0000"})
+
+// mapEnv is a read-only quickstart.Env over a map.
+type mapEnv map[string]string
+
+func (e mapEnv) Lookup(n string) (string, bool) { v, ok := e[n]; return v, ok }
 
 // A standalone or quickstart server whose model does not build starts in the
 // no model state: the agent paths answer errNoModel until the picker installs
@@ -32,11 +42,11 @@ func TestWireLiveNoModelThenPick(t *testing.T) {
 		return wiring.OpenStacks(ctx, cfg, awsCfg, own, opts)
 	}
 	fail := true
-	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error) {
 		if fail {
 			return nil, errors.New("agent: PIPEROOM_MODEL_PROVIDER=openai with flavor groq needs an API key: set GROQ_API_KEY")
 		}
-		return wiring.NewAgentEndpoint(ctx, cfg, log, nil)
+		return wiring.NewAgentEndpointWithEnv(ctx, cfg, log, nil, getenv)
 	}
 	live := &liveModel{}
 	hook := &roomClosedHook{}
@@ -63,7 +73,7 @@ func TestWireLiveNoModelThenPick(t *testing.T) {
 	}
 	hook.onClosed(context.Background(), "r1", "p", "") // no endpoint: nothing to forget, no panic
 	fail = false
-	commit, _, err := live.build(context.Background(), config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"})
+	commit, _, err := live.build(context.Background(), config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"}, testKeys.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,14 +160,14 @@ func TestLiveEndpointOutlivesTheRequest(t *testing.T) {
 	defer stopSrv()
 	var kept []context.Context
 	var cancelDuringBuild context.CancelFunc
-	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error) {
 		kept = append(kept, ctx)
 		if cancelDuringBuild != nil {
 			cancelDuringBuild()
 		}
-		return wiring.NewAgentEndpoint(ctx, cfg, log, nil)
+		return wiring.NewAgentEndpointWithEnv(ctx, cfg, log, nil, getenv)
 	}
-	live := &liveModel{}
+	live := &liveModel{startKeys: testKeys}
 	in := wireAgentInput{cfg: config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5"}, log: discardLog(),
 		spendStore: memstore.New(), usage: &usageRelay{log: discardLog()}, hook: &roomClosedHook{}, live: live}
 	if _, err := wireLive(srvCtx, live, in, nil, newEndpoint); err != nil {
@@ -168,7 +178,7 @@ func TestLiveEndpointOutlivesTheRequest(t *testing.T) {
 	build := func() context.Context {
 		t.Helper()
 		reqCtx, endReq := context.WithCancel(context.Background())
-		commit, _, err := live.build(reqCtx, config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"})
+		commit, _, err := live.build(reqCtx, config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"}, testKeys.Getenv)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +210,7 @@ func TestLiveEndpointOutlivesTheRequest(t *testing.T) {
 	// A request that ends during the build fails it, and its context ends.
 	reqCtx, endReq := context.WithCancel(context.Background())
 	cancelDuringBuild = endReq
-	if _, _, err := live.build(reqCtx, config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"}); !errors.Is(err, context.Canceled) {
+	if _, _, err := live.build(reqCtx, config.Config{ModelProvider: "anthropic", Model: "claude-sonnet-5"}, testKeys.Getenv); !errors.Is(err, context.Canceled) {
 		t.Fatalf("build = %v, want context.Canceled", err)
 	}
 	if kept[len(kept)-1].Err() == nil {
