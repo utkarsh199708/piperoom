@@ -5,9 +5,9 @@
 // (`systemctl --user`); the Windows service of row U8b slots in behind the
 // same ops as another serviceManager.
 //
-// Ops: service_status and properties_read (T0); properties_write (T1, the
-// project directory only); service_install and service_restart (T2).
-// journal_tail (T0, row U5a) is not in this package yet.
+// Ops: service_status, properties_read and journal_tail (T0, row U5a);
+// properties_write (T1, the project directory only); service_install and
+// service_restart (T2).
 //
 // The S1 rule of §2.5 for the unit: service_install takes a service name and
 // a worker mode, nothing else. ExecStart, WorkingDirectory and Environment
