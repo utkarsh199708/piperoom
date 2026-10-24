@@ -66,15 +66,34 @@ func stepApprover(class string) string {
 }
 
 // runStep proposes op as the agent, approves it as who and waits until the
-// action ran.
+// room has folded the step as executed.
 func runStep(t *testing.T, r *tierRig, roomID, op, layer, params, who string) string {
 	t.Helper()
+	before := executedSteps(t, r.svc, roomID)
 	pid := r.proposeOK(roomID, op, layer, params)
 	if err := r.approve(roomID, pid, layer, who); err != nil {
 		t.Fatalf("approve %s: %v", op, err)
 	}
 	waitForCond(t, 5*time.Second, func() bool { return r.acts[op].count() >= 1 }, op+" never ran")
+	// The executor appends action.executed under the room lock and folds it
+	// before the snapshot is published, and CreateSetupRollback derives its
+	// plan from that snapshot. Waiting only for the fake action to return let
+	// a fast caller see the earlier steps only (KAN-484).
+	waitForCond(t, 5*time.Second, func() bool {
+		return executedSteps(t, r.svc, roomID) > before
+	}, op+": action.executed never folded into the snapshot")
 	return pid
+}
+
+// executedSteps is the number of setup plan steps the room's published
+// snapshot has folded as executed.
+func executedSteps(t *testing.T, svc *Service, roomID string) int {
+	t.Helper()
+	snap := mustRoom(t, svc, roomID)
+	if snap.Setup == nil {
+		return 0
+	}
+	return len(snap.Setup.executed)
 }
 
 // waitPlanSteps waits until the room's snapshot says n plan steps executed, so
