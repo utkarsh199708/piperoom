@@ -64,9 +64,10 @@ func cdcMethodLine(t *testing.T, prompt, prefix string) string {
 // otherwise (consumer-skipped-range re-read rows still on the topic). The
 // steer-scoped ask rule is unchanged. Both write modes are checked. W4i
 // (KAN-507, LEAD-ARCH scope addition) rewords the restart sentence as a
-// restart only of a FAILED task, never an UNASSIGNED one, after the step
-// removing its cause, and keys the offsets note's replay on the log start
-// kafka_topic_offsets reads; both keep what W4h pins.
+// restart only of a FAILED task, never an UNASSIGNED one, in the proposal
+// removing its cause (still the same proposal, LEAD-REVIEW on #1004), and
+// keys the offsets note's replay on the log start kafka_topic_offsets reads;
+// both keep what W4h pins.
 func TestSystemPromptSmallestListedFix(t *testing.T) {
 	for _, write := range []bool{true, false} {
 		p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
@@ -89,13 +90,13 @@ func TestSystemPromptSmallestListedFix(t *testing.T) {
 			{"no restore step in the NONE proposal", p, "restore step", false},
 			{"schema_register stays last resort only", compat, "schema_register: last resort only.", true},
 			{"NONE is no longer a last resort", p, "schema_set_compatibility set to NONE and schema_register are high-risk: last resort only.", false},
-			{"restart of a FAILED task follows the step removing its cause", restart,
-				"- Restart only a FAILED task, never an UNASSIGNED one, after the step removing its cause;", true},
+			{"restart of a FAILED task is in the proposal removing its cause", restart,
+				"- Restart only a FAILED task, never an UNASSIGNED one, in the proposal removing its cause;", true},
 			{"the publication add's snapshot signal joins the restart sentence", restart,
 				"after pg_add_publication_table, that table's pg_snapshot_signal.", true},
 			{"the separate publication bullet is gone", p, "pg_add_publication_table misses rows written before it", false},
 			{"offsets note replays rows still on the topic, else snapshots", offsets,
-				"replay missing rows above the log start (kafka_topic_offsets), else snapshot them", true},
+				"replay missing records above the log start (kafka_topic_offsets), else snapshot them", true},
 			{"offsets note keeps the reset guard", offsets, "- Reset source offsets only for lost positions;", true},
 			{"no more snapshot-first wording", p, "snapshot a table missing rows instead", false},
 		}
@@ -139,7 +140,7 @@ func TestSystemPromptSmallestListedFix(t *testing.T) {
 		}
 	}
 	batch := systemPromptFor(events.PipelineKindBatch)
-	for _, cdcOnly := range []string{"smallest listed action", "Restart only a FAILED task", "schema_register", "replay missing rows"} {
+	for _, cdcOnly := range []string{"smallest listed action", "Restart only a FAILED task", "schema_register", "replay missing records"} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt carries the CDC rule %q", cdcOnly)
 		}

@@ -13,27 +13,37 @@ import (
 
 // w4iNegativeClaim is the clause W4i (KAN-507) puts in rule 1, right before
 // the competing-explanation sentence: a negative claim needs its read.
-const w4iNegativeClaim = "confirm a component with its own read before blaming it or calling it absent, healthy or unchanged."
+// Clearing a component (calling it absent, healthy or unchanged) needs its own
+// read as blaming it does.
+const w4iNegativeClaim = "confirm a component with its own read before blaming or clearing it."
+
+// w4iRule3 is rule 3 with its general clause kept (LEAD-REVIEW on #1004): a
+// fact no tool returned, such as a trace_record result never read, stays
+// forbidden whatever component it is about.
+const w4iRule3 = `3. Cite evidence by step id; assert nothing tools didn't return. Re-reading an unchanged component, or re-running an answered read with other versions or windows, is waste; "not found" is the finding.`
 
 // w4iRestart and w4iOffsets are the LEAD-ARCH scope addition on KAN-507 (the
 // audit of main run 40076876491): blocked-slot restarted an UNASSIGNED task
 // before the cause was removed, and rows-lost-after-retention proposed its fix
-// before reading the log start.
+// before reading the log start. The restart stays in the proposal removing the
+// cause (W4h's meaning: missing-grant proposed the grant alone), and the note
+// counts records, not rows, above the log start (LEAD-REVIEW on #1004).
 const (
-	w4iRestart = "- Restart only a FAILED task, never an UNASSIGNED one, after the step removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal."
-	w4iOffsets = "- Reset source offsets only for lost positions; replay missing rows above the log start (kafka_topic_offsets), else snapshot them."
+	w4iRestart = "- Restart only a FAILED task, never an UNASSIGNED one, in the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal."
+	w4iOffsets = "- Reset source offsets only for lost positions; replay missing records above the log start (kafka_topic_offsets), else snapshot them."
 	// w4iRestartMySQL is the restart bullet in a MySQL room: the replacer
 	// swaps the publication clause for the schema history bullet.
-	w4iRestartMySQL = "- Restart only a FAILED task, never an UNASSIGNED one, after the step removing its cause."
+	w4iRestartMySQL = "- Restart only a FAILED task, never an UNASSIGNED one, in the proposal removing its cause."
 )
 
 // w4iAdded is the text W4i adds, without the words its lines kept from the
 // base: the leakage checks read it, tool names taken out (they are not
 // answers).
 var w4iAdded = []string{
-	"or calling it absent, healthy or unchanged",
-	"Restart only a FAILED task, never an UNASSIGNED one, after the step",
-	"replay missing rows above the log start (kafka_topic_offsets), else snapshot them",
+	"before blaming or clearing it",
+	"assert nothing tools didn't return",
+	"Restart only a FAILED task, never an UNASSIGNED one, in the proposal",
+	"replay missing records above the log start (kafka_topic_offsets), else snapshot them",
 }
 
 // w4iAddedText is w4iAdded in lower case without tool names.
@@ -44,14 +54,16 @@ func w4iAddedText() string {
 // TestSystemPromptNegativeClaimNeedsItsRead pins W4i (KAN-507, evals run
 // 39994729845: sasl-credential-rotated told the room the ACLs were intact
 // without the kafka_acls read that shows it). The generic rule: the agent
-// does not call a component absent, healthy or unchanged without that
-// component's own read, as it does not blame one without it. It moves rule
-// 3's "assert nothing a tool didn't return" into rule 1, beside the
-// competing-explanation clause it sharpens ("rule out the nearest competing
-// explanation with one read": the read is the competing cause's own), so the
-// old sentence is gone and nothing is said twice. The scope addition's two
-// Fixes rewrites ride along, and the replacer carries all three into the
-// MySQL prompt. Word-neutral: the resume check lost "that".
+// does not clear a component (call it absent, healthy or unchanged) without
+// that component's own read, as it does not blame one without it. The clause
+// sits in rule 1, beside the competing-explanation clause it sharpens ("rule
+// out the nearest competing explanation with one read": the read is the
+// competing cause's own). Rule 3 keeps its general clause, "assert nothing
+// tools didn't return" (LEAD-REVIEW on #1004): a fact no tool returned stays
+// forbidden whatever it is about (consumer-poison-pill's unbacked
+// trace_record fact). The scope addition's two Fixes rewrites ride along, and
+// the replacer carries all of it into the MySQL prompt. Word-neutral: rule
+// 3's "a tool" became "tools" and the resume check lost "that".
 func TestSystemPromptNegativeClaimNeedsItsRead(t *testing.T) {
 	prompts := map[string]string{}
 	for _, write := range []bool{true, false} {
@@ -71,15 +83,17 @@ func TestSystemPromptNegativeClaimNeedsItsRead(t *testing.T) {
 		if want := "verifying (unconfirmed) ones; " + w4iNegativeClaim + " Before concluding, rule out the nearest competing explanation with one read;"; !strings.Contains(line, want) {
 			t.Errorf("%s: rule 1 lacks %q next to the competing-explanation clause: %s", name, want, line)
 		}
-		if n := strings.Count(p, "calling it absent, healthy or unchanged"); n != 1 {
+		if n := strings.Count(p, "before blaming or clearing it"); n != 1 {
 			t.Errorf("%s: the negative-claim clause is stated %d times, want 1", name, n)
 		}
-		// Rule 3's old sentence moved: no duplicate is left behind.
-		const rule3 = `3. Cite evidence by step id. Re-reading an unchanged component, or re-running an answered read with other versions or windows, is waste; "not found" is the finding.`
-		if got := cdcMethodRule(t, p, "3"); got != rule3 {
-			t.Errorf("%s: rule 3 =\n%s\nwant\n%s", name, got, rule3)
+		// Rule 3 keeps its general clause, stated once.
+		if got := cdcMethodRule(t, p, "3"); got != w4iRule3 {
+			t.Errorf("%s: rule 3 =\n%s\nwant\n%s", name, got, w4iRule3)
 		}
-		for _, gone := range []string{"assert nothing a tool didn't return", "A FAILED task's restart", "next step of the proposal", "replay a missing range still on the topic", "confirm that"} {
+		if n := strings.Count(p, "didn't return"); n != 1 {
+			t.Errorf("%s: \"didn't return\" is stated %d times, want 1 (rule 3)", name, n)
+		}
+		for _, gone := range []string{"assert nothing a tool didn't return", "A FAILED task's restart", "after the step removing", "replay a missing range still on the topic", "missing rows above", "confirm that"} {
 			if strings.Contains(p, gone) {
 				t.Errorf("%s: the prompt still says %q", name, gone)
 			}
@@ -128,7 +142,7 @@ func TestSystemPromptNegativeClaimNeedsItsRead(t *testing.T) {
 	if !strings.Contains(batch, "do not assert what a tool did not return") {
 		t.Error("the batch prompt lost its rule 3")
 	}
-	for _, cdcOnly := range []string{"calling it absent", "UNASSIGNED", "log start", "Restart only a FAILED task"} {
+	for _, cdcOnly := range []string{"blaming or clearing", "nothing tools", "UNASSIGNED", "log start", "Restart only a FAILED task"} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt carries the CDC rule %q", cdcOnly)
 		}

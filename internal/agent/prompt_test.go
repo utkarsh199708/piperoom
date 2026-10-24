@@ -57,8 +57,8 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// (27 words) are paid by contractions, rule 5's single clause and the
 	// pause and resume bullets' repeated words, so the prompt stays at
 	// KAN-515's 1352 words (1353 with write mode off). W4i (KAN-507) is
-	// word-neutral too: rule 1's negative claim (7 words) is paid by rule
-	// 3's old sentence (6) and the resume check's "that", and the restart
+	// word-neutral too: rule 1's "or clearing" is paid by rule 3's "a tool"
+	// becoming "tools" and the resume check's "that", and the restart
 	// bullet's extra word by the offsets note's.
 	if wc := len(strings.Fields(a)); wc > 1355 {
 		t.Fatalf("system prompt is %d words, over the 1355 limit", wc)
@@ -835,13 +835,12 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 	}
 	// Method rules a trim must not drop: evidence is cited by step id (F3
 	// receipts and the eval's cited-fact checks rest on it) and a component is
-	// confirmed with its own read before it is blamed. W4i (KAN-507) moved
-	// rule 3's "assert nothing a tool didn't return" into rule 1 as the
-	// negative claim's read (TestSystemPromptNegativeClaimNeedsItsRead).
+	// confirmed with its own read before it is blamed, or, since W4i
+	// (KAN-507), cleared (TestSystemPromptNegativeClaimNeedsItsRead).
 	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
 	for _, want := range []string{
-		"3. Cite evidence by step id.",
-		"confirm a component with its own read before blaming it",
+		"Cite evidence by step id; assert nothing tools didn't return",
+		"confirm a component with its own read before blaming or clearing it",
 	} {
 		if !strings.Contains(method, want) {
 			t.Errorf("method section missing %q", want)
@@ -1105,13 +1104,13 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 // same proposal (the signal_table hint lives in the action's parameter).
 // W4i (KAN-507, LEAD-ARCH scope addition from main run 40076876491) words it
 // as a restart only of a FAILED task, never an UNASSIGNED one (blocked-slot
-// restarted a task that never started), after the step removing its cause.
+// restarted a task that never started), in the proposal removing its cause.
 // The batch prompt keeps its own wording of each.
 func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
 	batch := systemPromptFor(events.PipelineKindBatch)
 	for _, want := range []string{
-		"Restart only a FAILED task, never an UNASSIGNED one, after the step removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
+		"Restart only a FAILED task, never an UNASSIGNED one, in the proposal removing its cause; after pg_add_publication_table, that table's pg_snapshot_signal.",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
 		"If what a driver steer asks for needs a fix no listed action can make, or could mean more than one action, ask the driver one short question with post_message and propose nothing until they answer.",
 		"If a stage failed, a component that still answers requests, even degraded or misconfigured, is at most the root-cause component, never the first failing one",
