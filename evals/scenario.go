@@ -77,6 +77,11 @@ type Scenario struct {
 	// none; its source kind defaults to postgres (the pipeline every incident
 	// scenario runs on) and it is in no target group.
 	Setup *ScenarioSetup `yaml:"setup"`
+	// PendingHarness is the board row whose harness the scenario waits for
+	// (for example U1-10). evalrun skips such a scenario, reports it apart from
+	// the pass rate and keeps it out of baseline comparison; -only still runs it.
+	// -validate refuses the marker once the row has landed (pending.go).
+	PendingHarness string `yaml:"pending_harness"`
 
 	// pipelineYAML is the pipeline as written, for the room path's owners
 	// file; nil for a scenario built in code.
