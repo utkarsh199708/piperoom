@@ -26,7 +26,7 @@ type Config struct {
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL (CONNECT_KIND=rest only)
-	ConnectKind       string // CONNECT_KIND: rest (default) | msk | confluent | aiven (ParseConnectKind)
+	ConnectKind       string // CONNECT_KIND: rest (default) | msk | confluent | aiven (ParseConnectKind; no caller yet, inert until wiring and cmd/discover call it: msk.md PR 2, U13)
 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
