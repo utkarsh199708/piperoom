@@ -181,6 +181,13 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 	if len(pairs) == 0 {
 		return errors.New("sqlserver: CreatePublication: no tables given")
 	}
+	// The capture instance names are derived, and bounded by
+	// MaxCaptureInstanceChars, before any I/O by the same function the setup
+	// driver validates against (CaptureInstances).
+	instances, err := CaptureInstances(name, tables)
+	if err != nil {
+		return err
+	}
 	if err := checkSetupScope(ctx, pairs); err != nil {
 		return err
 	}
@@ -193,9 +200,7 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 	// Check every capture instance first, then enable in a second loop: if any
 	// instance already exists the call must alter nothing, so no table may be
 	// enabled before all the checks have passed.
-	instances := make([]string, len(pairs))
-	for i, p := range pairs {
-		inst := captureInstance(name, len(pairs), p[0], p[1])
+	for _, inst := range instances {
 		var n int64
 		if err := w.db.QueryRow(ctx, `SELECT COUNT(*) FROM cdc.change_tables WHERE capture_instance = @p1`, inst).Scan(&n); err != nil {
 			return fmt.Errorf("sqlserver: read capture instance %q: %w", inst, err)
@@ -203,7 +208,6 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 		if n > 0 {
 			return fmt.Errorf("sqlserver: %w: capture instance %q already exists", errCaptureExists, inst)
 		}
-		instances[i] = inst
 	}
 	for i, p := range pairs {
 		if err := w.db.Exec(ctx, enableTableSQL, p[0], p[1], instances[i]); err != nil {
