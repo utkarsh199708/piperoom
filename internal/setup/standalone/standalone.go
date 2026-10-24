@@ -202,17 +202,16 @@ func prepare(opts Options) (paths, error) {
 	// and quickstart.Prepare refuses anything that disagrees.
 	cfg.WriteMode = "on"
 	cfg.SetupEnabled = "on"
-	// The event log carries every room event, so the project's .gitignore
-	// names it before the first line is written.
-	gitignore := []string{LogFileName}
+	// The project's .gitignore names .piperoom/ and the event log before
+	// anything is written there: the model picker stores its key in
+	// .piperoom/model.env (PUT /api/models, V7) whatever PIPEROOM_SECRETS_DIR
+	// says, and the log carries every room event (U1-4's rule, the same
+	// helper).
+	gitignore := []string{".piperoom/", LogFileName}
 	if strings.TrimSpace(cfg.SecretsDir) == "" {
 		// The pipeline's read credentials land here (U1-5d); the design keeps
 		// them next to the project, on the machine that runs the runner.
 		cfg.SecretsDir = filepath.Join(abs, ".piperoom", "secrets")
-		// The directory is where the secret store lives, so the project's
-		// .gitignore must name it even before a runner creates the store
-		// (U1-4's rule, the same helper).
-		gitignore = append([]string{".piperoom/"}, gitignore...)
 	}
 	if err := runner.EnsureGitignore(abs, gitignore...); err != nil {
 		return paths{}, err

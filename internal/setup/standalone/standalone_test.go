@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -515,5 +516,31 @@ func TestRunWritesGitignore(t *testing.T) {
 		if !strings.Contains(string(raw), want+"\n") {
 			t.Errorf(".gitignore lacks %q:\n%s", want, raw)
 		}
+	}
+}
+
+// TestRunGitignoresModelEnvWithSecretsElsewhere: with PIPEROOM_SECRETS_DIR
+// outside the project, .piperoom/ is still ignored, because the model picker
+// writes its key to <project>/.piperoom/model.env whatever the secrets
+// directory is.
+func TestRunGitignoresModelEnvWithSecretsElsewhere(t *testing.T) {
+	dir := t.TempDir()
+	writeOwners(t, dir, ownersBody("alice", "Orders CDC"))
+	cfg := testConfig()
+	cfg.SecretsDir = filepath.Join(t.TempDir(), "secrets")
+	if _, err := prepare(Options{Config: cfg, ProjectDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{".piperoom/", LogFileName} {
+		if !strings.Contains(string(raw), want+"\n") {
+			t.Errorf(".gitignore lacks %q with the secrets directory elsewhere:\n%s", want, raw)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".piperoom", "secrets")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the project got a .piperoom/secrets directory although PIPEROOM_SECRETS_DIR points elsewhere: %v", err)
 	}
 }
