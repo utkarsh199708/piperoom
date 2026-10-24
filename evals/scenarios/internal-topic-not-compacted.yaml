@@ -12,9 +12,15 @@
 # like dev/owners.yaml. To replace it with a real recording, see evals/scenarios/README.md,
 # "Worker-visibility scenarios (Q3f)".
 #
-# First failing layer: kafka-connect (a resumed connector snapshots again).
-# Root-cause layer: kafka-connect (Connect's offset storage is configured wrong); kafka is the
-#   alternative reading, since the fault is the config of a Kafka topic (root_cause_layer_alt).
+# First failing layer: kafka (the internal offsets topic connect-offsets is not compacted, so it no
+#   longer keeps the connector's stored offset). Ruling R3 (tasks/W4-evals-to-100.md, applied in
+#   W4n, KAN-497): a RUNNING connector that re-snapshots is not "broken"; the scenario is labelled
+#   by the first-failing definition, the most upstream component that no longer does its job.
+# Root-cause layer: kafka (the offsets topic's config); kafka-connect is the alternative reading,
+#   since the topic is Connect's offset storage and Connect's setup chose it (root_cause_layer_alt).
+#   R3 moves only the first failing layer; the two readings swap places because an alternative may
+#   not equal the first failing layer (evals/layers.go), so a hypothesis placing the cause in either
+#   layer still passes, as before.
 #
 # Expected label: the tool that shows the cause is connect_worker_info (Q3a): it lists the worker
 #   group's internal topics and flags "an internal topic that is not compacted" - here connect-offsets
@@ -384,14 +390,17 @@ expect:
     - [consumer, crash*]
     - [schema change]
     - [poison pill]
-  first_failing_layer: kafka-connect
-  root_cause_layer: kafka-connect
-  root_cause_layer_alt: [kafka]
+  # R3 (W4n): the uncompacted offsets topic is the first component that no longer does its job.
+  first_failing_layer: kafka
+  root_cause_layer: kafka
+  root_cause_layer_alt: [kafka-connect]
   expected_facts:
+    # Optional since W4n (KAN-497, R9): the re-snapshot is also in debezium_metrics and in the
+    # kafka-connect owner's account; the cause rests on the offsets topic's config.
     - id: f_snapshot_completed
       tool: debezium_snapshot_progress
       match: [last snapshot completed, 412880 rows]
-      required: true
+      required: false
     - id: f_snapshot_rows
       tool: debezium_metrics
       match: [rows scanned, public orders, 412880]
@@ -415,6 +424,6 @@ expect:
   claims:
     - about: root_cause
       facts: [f_snapshot_completed, f_snapshot_rows, f_module_default_delete]
-  evidence_tools: [debezium_snapshot_progress, kafka_topic_config, connect_worker_info]
+  evidence_tools: [kafka_topic_config, connect_worker_info]
   forbidden_actions: [connect_restart_connector, connect_restart_task, connect_pause_connector, kafka_reset_consumer_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
   max_tool_calls: 14

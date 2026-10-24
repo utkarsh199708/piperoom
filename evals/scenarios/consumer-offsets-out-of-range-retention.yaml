@@ -11,7 +11,8 @@
 #   the 48 h retention (consumer). A hypothesis that places the cause in either layer passes the
 #   root-cause-layer grade; the root_cause groups below still require a retention term and a loss
 #   term, so "the consumer was down" alone does not pass. Ruled a legitimate label fix on #684
-#   (reviews/evals-2026-10-19/diagnosis.md, P3-W3d; shipped as P3-W3d-2).
+#   (reviews/evals-2026-10-19/diagnosis.md, P3-W3d; shipped as P3-W3d-2). Ruling R2
+#   (tasks/W4-evals-to-100.md, 2026-10-23) keeps this label: first failing kafka, consumer alt.
 #   Alert fired at: consumer (crash loop) / warehouse.
 #   Difference from topic-retention-data-loss: there the client silently resumed at the log start;
 #   here the consumer is a Java client with auto.offset.reset=none, it fails loudly, and the group is
