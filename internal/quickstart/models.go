@@ -155,6 +155,9 @@ func (m *Models) Apply(ctx context.Context, c httpapi.ModelChoice) (httpapi.Mode
 	if err != nil {
 		return httpapi.ModelPanel{}, validationErr(fieldMessage(err.Error(), c))
 	}
+	if err := vertexBaseURL(knobs); err != nil {
+		return httpapi.ModelPanel{}, err
+	}
 	old, oerr := config.ParseModelRoles(cur)
 	rebind := oerr != nil || binding(old.Main) != binding(knobs.Roles.Main)
 	if rebind && c.Key == nil {
@@ -162,11 +165,14 @@ func (m *Models) Apply(ctx context.Context, c httpapi.ModelChoice) (httpapi.Mode
 	}
 	// An empty key clears the picker's key, and the adapter then falls back
 	// to the provider's standard variable (OPENAI_API_KEY, GROQ_API_KEY,
-	// GEMINI_API_KEY ...), which was never bound to the new endpoint.
-	if rebind && strings.TrimSpace(*c.Key) == "" && stdKeyVar(knobs.Roles.Main, knobs) != "" {
+	// GEMINI_API_KEY ...). That variable is only ever sent to the provider's
+	// default endpoint: with a base URL the picker set, an empty key is
+	// refused whether or not the binding changed, because an earlier PUT with
+	// a throwaway key can have bound that base URL already.
+	if c.Key != nil && strings.TrimSpace(*c.Key) == "" && stdKeyVar(knobs.Roles.Main, knobs) != "" && knobs.Roles.Main.BaseURL != nil {
 		return httpapi.ModelPanel{}, errKeyRequired
 	}
-	if err := m.roleRebind(old, oerr, knobs); err != nil {
+	if err := m.roleEnvKey(knobs); err != nil {
 		return httpapi.ModelPanel{}, err
 	}
 	if err := m.gate(knobs); err != nil {
@@ -304,34 +310,62 @@ func stdKeyVar(r config.ModelRole, k config.ModelKnobs) string {
 	return ""
 }
 
-// roleRebind refuses a single-shot role on another provider than the main
-// one whose endpoint changed while its key comes from the environment: such
-// a role reads only its standard variable (never the picker's key), so the
-// picker has no key to bind to the new endpoint, and the operator's key
-// would follow a host typed in the web. The message names the field and the
-// variable, never the value.
-func (m *Models) roleRebind(old config.ModelRoles, oerr error, k config.ModelKnobs) error {
+// roleEnvKey refuses a single-shot role on another provider than the main
+// one that has a base URL while its key comes from the environment: such a
+// role reads only its standard variable (never the picker's key), so the
+// picker has no key to bind to that endpoint, and the operator's key would
+// follow a host typed in the web. A standard variable goes only to the
+// provider's default endpoint, so this holds whether or not the role's
+// endpoint changed. The message names the field and the variable, never the
+// value.
+func (m *Models) roleEnvKey(k config.ModelKnobs) error {
 	for _, r := range []struct {
-		field    string
-		old, new config.ModelRole
+		field string
+		role  config.ModelRole
 	}{
-		{"roles.first_look", old.FirstLook, k.Roles.FirstLook},
-		{"roles.summary", old.Summary, k.Roles.Summary},
-		{"roles.judge", old.Judge, k.Roles.Judge},
+		{"roles.first_look", k.Roles.FirstLook},
+		{"roles.summary", k.Roles.Summary},
+		{"roles.judge", k.Roles.Judge},
 	} {
-		if r.new.Provider == k.Roles.Main.Provider {
-			// It shares the main endpoint and its key (checked above).
+		if r.role.Provider == k.Roles.Main.Provider || r.role.BaseURL == nil {
+			// It shares the main endpoint and its key (checked above), or
+			// its key goes to the provider's default endpoint.
 			continue
 		}
-		v := stdKeyVar(r.new, k)
-		if v == "" || (oerr == nil && binding(r.old) == binding(r.new)) {
+		v := stdKeyVar(r.role, k)
+		if v == "" {
 			continue
 		}
 		if val, ok := m.o.Env.Lookup(v); !ok || strings.TrimSpace(val) == "" {
 			continue
 		}
-		return validationErr(r.field + ": provider " + r.new.Provider + " would send " + v +
-			" from the environment to a new endpoint; the picker cannot bind that key: change this role in the environment instead")
+		return validationErr(r.field + ".base_url: provider " + r.role.Provider + " would send " + v +
+			" from the environment to this endpoint; the picker cannot bind that key: change this role in the environment instead")
+	}
+	return nil
+}
+
+// vertexBaseURL refuses a base URL on any gemini role when the backend is
+// Vertex: the adapter signs every request with Google application default
+// credentials, and the token would go to whatever host was typed here.
+// Every base URL in a candidate comes from the PUT (candidate replaces them
+// all).
+func vertexBaseURL(k config.ModelKnobs) error {
+	if k.GeminiBackend != config.GeminiBackendVertex {
+		return nil
+	}
+	for _, r := range []struct {
+		field string
+		role  config.ModelRole
+	}{
+		{"base_url", k.Roles.Main},
+		{"roles.first_look.base_url", k.Roles.FirstLook},
+		{"roles.summary.base_url", k.Roles.Summary},
+		{"roles.judge.base_url", k.Roles.Judge},
+	} {
+		if r.role.Provider == config.ModelProviderGemini && r.role.BaseURL != nil {
+			return validationErr(r.field + ": gemini on vertex signs with Google credentials; set it in the environment")
+		}
 	}
 	return nil
 }

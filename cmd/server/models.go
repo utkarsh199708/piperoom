@@ -95,6 +95,9 @@ func (e *liveEndpoint) endLocked() {
 // install makes ep current. The endpoint it replaces keeps its context until
 // the runs, hand-offs and first looks that started on it end: cancelling it
 // at once would break a long Vertex run's next token refresh.
+// A call that never returns therefore keeps the endpoint it started on, and
+// that endpoint's context, alive until the server ends: the cost of one
+// stale endpoint is accepted over breaking a run mid-way.
 func (l *liveModel) install(ep *agent.Endpoint, model string, cancel context.CancelFunc) {
 	if prev := l.cur.Swap(&liveEndpoint{ep: ep, model: model, cancel: cancel}); prev != nil {
 		prev.retire()

@@ -145,32 +145,119 @@ func TestPutRoleToNewHostWithEnvKeyIsRefused(t *testing.T) {
 	}
 }
 
-// An unchanged binding keeps working with the operator's key: the main role
-// with an absent or empty key, and a role on another provider that stays on
-// its endpoint.
+// An unchanged binding with an absent key keeps working with the operator's
+// key; a role on another provider at its default endpoint reads its
+// standard variable as before.
 func TestPutUnchangedBindingWithEnvKeyWorks(t *testing.T) {
 	a, hitsA, authA := hostCounter(t)
 	cfg := config.Config{ModelProvider: "openai", ModelFlavor: "openai", ModelBaseURL: a.URL + "/v1", Model: "gpt-5", ModelUnverified: "on"}
 	m, _, _ := adapterPicker(t, cfg, map[string]string{"OPENAI_API_KEY": envKey}, ModelEnv{})
-	for i, key := range []*string{nil, ptr("")} {
-		if _, err := m.Apply(context.Background(), httpapi.ModelChoice{Provider: "openai", Flavor: "openai", BaseURL: a.URL + "/v1", Model: "gpt-5.1", Key: key}); err != nil {
-			t.Fatal(err)
-		}
-		if hitsA.Load() != int32(i+1) || authA.Load() != "Bearer "+envKey {
-			t.Fatalf("hits %d auth %v", hitsA.Load(), authA.Load())
-		}
-	}
-
-	b, hitsB, authB := hostCounter(t)
-	cfg = config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5", ModelUnverified: "on",
-		SummaryProvider: "openai", SummaryModel: "gpt-5", SummaryBaseURL: b.URL + "/v1"}
-	m, _, _ = adapterPicker(t, cfg, map[string]string{"OPENAI_API_KEY": envKey, "ANTHROPIC_API_KEY": "sk-ant"}, ModelEnv{})
-	if _, err := m.Apply(context.Background(), httpapi.ModelChoice{Provider: "anthropic", Model: "claude-sonnet-5",
-		Roles: &httpapi.ModelRoleChoices{Summary: &httpapi.ModelRoleChoice{Provider: "openai", Model: "gpt-5.1", BaseURL: b.URL + "/v1"}}}); err != nil {
+	if _, err := m.Apply(context.Background(), httpapi.ModelChoice{Provider: "openai", Flavor: "openai", BaseURL: a.URL + "/v1", Model: "gpt-5.1"}); err != nil {
 		t.Fatal(err)
 	}
-	if hitsB.Load() != 1 || authB.Load() != "Bearer "+envKey {
-		t.Fatalf("hits %d auth %v", hitsB.Load(), authB.Load())
+	if hitsA.Load() != 1 || authA.Load() != "Bearer "+envKey {
+		t.Fatalf("hits %d auth %v", hitsA.Load(), authA.Load())
+	}
+
+	cfg = config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5", ModelUnverified: "on", SummaryProvider: "openai", SummaryModel: "gpt-5"}
+	m, _, builds := adapterPicker(t, cfg, map[string]string{"OPENAI_API_KEY": envKey, "ANTHROPIC_API_KEY": "sk-ant"}, ModelEnv{})
+	if _, err := m.Apply(context.Background(), httpapi.ModelChoice{Provider: "anthropic", Model: "claude-sonnet-5",
+		Roles: &httpapi.ModelRoleChoices{Summary: &httpapi.ModelRoleChoice{Provider: "openai", Model: "gpt-5.1"}}}); err != nil || builds.Load() != 1 {
+		t.Fatalf("Apply = %v, builds %d", err, builds.Load())
+	}
+}
+
+// A standard key variable goes only to the provider's default endpoint: a
+// role on another provider with a base URL is refused while that variable is
+// set, even when the endpoint did not change.
+func TestPutRoleWithBaseURLAndEnvKeyIsRefusedUnchanged(t *testing.T) {
+	b, hitsB, _ := hostCounter(t)
+	cfg := config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5", ModelUnverified: "on",
+		SummaryProvider: "openai", SummaryModel: "gpt-5", SummaryBaseURL: b.URL + "/v1"}
+	m, _, builds := adapterPicker(t, cfg, map[string]string{"OPENAI_API_KEY": envKey, "ANTHROPIC_API_KEY": "sk-ant"}, ModelEnv{})
+	_, err := m.Apply(context.Background(), httpapi.ModelChoice{Provider: "anthropic", Model: "claude-sonnet-5",
+		Roles: &httpapi.ModelRoleChoices{Summary: &httpapi.ModelRoleChoice{Provider: "openai", Model: "gpt-5.1", BaseURL: b.URL + "/v1"}}})
+	if code(err) != "validation" || !strings.Contains(err.Error(), "roles.summary.base_url") || !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+		t.Fatalf("Apply = %v", err)
+	}
+	if builds.Load() != 0 || hitsB.Load() != 0 {
+		t.Fatalf("builds %d, requests %d; want none", builds.Load(), hitsB.Load())
+	}
+}
+
+// B1-1: a first PUT binds the new host with a throwaway key; a second PUT on
+// the same binding with an empty key would clear it and let the adapter fall
+// back to the operator's standard variable. The second PUT is key_required
+// and the host receives nothing beyond the first PUT's probe, which carried
+// the throwaway key.
+func TestPutTwoStepEmptyKeyIsKeyRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		cfg       config.Config
+		c         httpapi.ModelChoice
+	}{
+		{"openai", "OPENAI_API_KEY", config.Config{ModelProvider: "openai", ModelFlavor: "openai", Model: "gpt-5", ModelUnverified: "on"},
+			httpapi.ModelChoice{Provider: "openai", Flavor: "openai", Model: "gpt-5"}},
+		{"groq", "GROQ_API_KEY", config.Config{ModelProvider: "openai", ModelFlavor: "groq", Model: "openai/gpt-oss-120b", ModelUnverified: "on"},
+			httpapi.ModelChoice{Provider: "openai", Flavor: "groq", Model: "openai/gpt-oss-120b"}},
+		{"gemini", "GEMINI_API_KEY", config.Config{ModelProvider: "gemini", Model: "gemini-3-pro", ModelUnverified: "on"},
+			httpapi.ModelChoice{Provider: "gemini", Model: "gemini-3-pro"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evil, hitsEvil, authEvil := hostCounter(t)
+			m, env, _ := adapterPicker(t, tc.cfg, map[string]string{tc.env: envKey}, ModelEnv{})
+			first := tc.c
+			first.BaseURL, first.Key = evil.URL+"/v1", ptr("junk")
+			if _, err := m.Apply(context.Background(), first); err != nil {
+				t.Fatal(err)
+			}
+			if hitsEvil.Load() != 1 || authEvil.Load() != "Bearer junk" {
+				t.Fatalf("first PUT: hits %d auth %v", hitsEvil.Load(), authEvil.Load())
+			}
+			hitsEvil.Store(0)
+			second := first
+			second.Key = ptr(" ")
+			if _, err := m.Apply(context.Background(), second); code(err) != "key_required" {
+				t.Fatalf("second PUT = %v, want key_required", err)
+			}
+			if hitsEvil.Load() != 0 {
+				t.Fatalf("the new host got %d requests after the empty key", hitsEvil.Load())
+			}
+			if env.get(tc.env) != envKey || env.get(config.EnvModelAPIKey) != "junk" {
+				t.Fatal("the environment changed on a refusal")
+			}
+		})
+	}
+}
+
+// B1-2: gemini on Vertex signs with Google application default credentials,
+// so no base URL typed in the picker is accepted, on the main role or any
+// other.
+func TestPutGeminiVertexBaseURLIsRefused(t *testing.T) {
+	evil, hitsEvil, _ := hostCounter(t)
+	for name, tc := range map[string]struct {
+		cfg   config.Config
+		c     httpapi.ModelChoice
+		field string
+	}{
+		"main": {config.Config{ModelProvider: "gemini", Model: "gemini-3-pro", GeminiBackend: "vertex", ModelUnverified: "on"},
+			httpapi.ModelChoice{Provider: "gemini", Model: "gemini-3-pro", BaseURL: evil.URL + "/v1", Key: ptr("")}, "base_url"},
+		"judge": {config.Config{ModelProvider: "anthropic", Model: "claude-opus-5-5", GeminiBackend: "vertex", ModelUnverified: "on"},
+			httpapi.ModelChoice{Provider: "anthropic", Model: "claude-opus-5-5",
+				Roles: &httpapi.ModelRoleChoices{Judge: &httpapi.ModelRoleChoice{Provider: "gemini", Model: "gemini-3-pro", BaseURL: evil.URL + "/v1"}}},
+			"roles.judge.base_url"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, _, builds := adapterPicker(t, tc.cfg, map[string]string{"ANTHROPIC_API_KEY": "sk-ant"}, ModelEnv{})
+			_, err := m.Apply(context.Background(), tc.c)
+			want := tc.field + ": gemini on vertex signs with Google credentials; set it in the environment"
+			if code(err) != "validation" || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Apply = %v, want validation %q", err, want)
+			}
+			if builds.Load() != 0 || hitsEvil.Load() != 0 {
+				t.Fatalf("builds %d, requests %d; want none", builds.Load(), hitsEvil.Load())
+			}
+		})
 	}
 }
 
