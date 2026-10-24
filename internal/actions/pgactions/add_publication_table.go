@@ -239,6 +239,9 @@ func (a *addPublicationTable) CheckScope(pl owners.Pipeline, raw json.RawMessage
 }
 
 func addPubInScope(pl owners.Pipeline, p addPublicationTableParams) error {
+	if err := refuseMySQL(AddPublicationTableName, pl); err != nil {
+		return err
+	}
 	if pl.KindOrDefault() != events.PipelineKindCDC {
 		return fmt.Errorf("pgactions: %s: %w: pipeline %q is not a CDC pipeline", AddPublicationTableName, tools.ErrOutOfScope, pl.ID)
 	}

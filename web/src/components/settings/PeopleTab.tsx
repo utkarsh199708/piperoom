@@ -1,6 +1,6 @@
 import { Users } from 'lucide-react'
 import type { AdminPerson } from '@/api/types'
-import { Badge, layerVariant } from '@/components/ui/badge'
+import { Badge, layerLabel, layerVariant } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { lines } from '@/lib/settings'
 
@@ -70,7 +70,7 @@ export function PeopleTab({ people }: { people: readonly AdminPerson[] }) {
                   <span className="flex flex-wrap gap-1">
                     {lines(p.layers).map((l) => (
                       <Badge key={l} variant={layerVariant(l)}>
-                        {l}
+                        {layerLabel(l)}
                       </Badge>
                     ))}
                   </span>
