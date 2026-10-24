@@ -51,8 +51,54 @@
 #     handshake goes to a black hole.
 #   - internal/tools/kafkatools/connect_tools.go: connect_config shows database.hostname and
 #     database.port; connect_status keeps the "Caused by:" lines of a failed task.
+#   - internal/tools/nettools (net_probe): the dns and tcp checks run from Piperoom's own position;
+#     the connect_view check asks Connect to validate the running config within one 3 s step, and
+#     a validation that has not finished is "Connect did not finish validating connector ... within
+#     the step's time". The JDBC driver's connect timeout (10 s by default) is longer than that
+#     step and than connect_validate_config's 10 s budget, so against a black-holed host both
+#     reads time out instead of returning Connect's own error text.
+#
+# W4c (KAN-494): root-cause terms and fix targets come from what the agent can observe. Run
+#   39994729845 failed this scenario 0/3 on "wrong root cause": no read the room offers returns
+#   192.0.2.1, /etc/hosts or a resolution result from inside the Connect container (the runner's
+#   net_probe op in evals/setup/recordings is not a room tool), so the term group naming the
+#   address could only be met by guessing. The room's net_probe now answers {target: source} with
+#   Piperoom's dns (172.18.0.2) and tcp passing and Connect's view timing out: the contrast the
+#   story needs observed. The root cause is the Connect side's name resolution; the address
+#   group is dropped (192.0.2.1 is shown nowhere, and "stale" matches the alert's "47m stale").
+#   firewall leaves root_cause_forbidden: from the room a black-holed address and a dropping
+#   firewall read the same, so it is not a wrong story the reads can rule out. The other misses
+#   of that run (connect_validate_config, connect_source_offsets, connect_worker_logs,
+#   connect_worker_info) are recorded as the real tools answer them on this stack; none of them
+#   shows the bad address either.
+# W4c fix round (live run 40034120325, 0/1 here): the room's net_probe cannot show what the
+#   Connect worker resolved either. Its connect_view check only asks Connect to validate the
+#   running config and keeps the host and port messages of that validation (connectview.go);
+#   Debezium's message for a black-holed host is pgjdbc's "The connection attempt failed.", with
+#   no address, and here the validation does not even finish within the step. So the honest
+#   observable contrast is Piperoom resolving and reaching postgres:5432 while Connect cannot.
+#   Lead ruling R10 (#939) keeps the cause at the Connect side's name resolution
+#   ([resolv*, dns, hosts, name resolution]; "network path"/"route*" let the judged-wrong
+#   hypotheses of 39994729845 pass) and fails hypotheses that clear DNS or echo net_probe's
+#   "dns ok" line (root_cause_forbidden). Ruling R9 accepts the evidence change:
+#   f_server_answers now comes from net_probe's tcp check (Piperoom opens a TCP connection to
+#   postgres:5432), the read the agent used instead of source_settings, so source_settings is no
+#   longer required evidence (W4a: no duplicate evidence); its recording stays.
 
 name: setup/db-unreachable-from-connect
+# Held out until W4c-resolver (lead ruling R10, #939): cause not observable by any read tool. The
+# root cause is the Connect container's name resolution (a stale /etc/hosts entry), and no read
+# shows what the Connect worker resolved postgres to. net_probe's connect_view keeps only Connect's
+# validation messages (internal/tools/nettools/connectview.go). The failed task's trace and any
+# worker log carry the JDK's "Connect timed out" (sun.nio.ch.NioSocketImpl.timedFinishConnect,
+# rethrown unchanged as an InterruptedIOException) under pgjdbc's "The connection attempt failed."
+# (org.postgresql.core.v3.ConnectionFactoryImpl, IOException branch): neither names an address.
+# The setup compose project also has no Loki (connect_worker_logs: not configured), and the
+# runner's net_probe op probes from the runner, not from the Connect container. Live run
+# 40043829982 named the network path, as R10 predicted. -validate refuses this marker once
+# internal/tools/nettools declares ConnectResolveCheck (the follow-up resolver probe; ticket to
+# be opened by the leads).
+pending_harness: W4c-resolver
 description: |
   The person re-ran piperoom-setup after moving the project between hosts. The run stopped at its
   reachability step: check connect-source-reachable fails, because the Connect container resolves
@@ -63,8 +109,15 @@ description: |
   itself is healthy: the room's own source reads answer, wal_level is logical, and the connector's
   config names the right host and port.
 
-  Root cause: name resolution inside the Connect container maps postgres to the black-hole address
-  192.0.2.1, so the worker's task can never open a TCP connection to postgres:5432.
+  Root cause: name resolution inside the Connect container (a stale /etc/hosts entry) maps
+  postgres to an address that routes nowhere, so the worker's task can never open a TCP
+  connection to postgres:5432, while Piperoom's own DNS and TCP checks reach the database. The
+  room's reads show that contrast (net_probe: Connect's view does not finish, Piperoom's dns and
+  tcp pass), not the bad address itself: a hypothesis that places the cause in the Connect
+  container's name resolution (DNS or its hosts file) states the root cause; neither the address
+  192.0.2.1 nor the exact hosts entry is required. Saying only that the task cannot reach
+  postgres:5432, or blaming a broken network path without naming name resolution, is the
+  symptom, not the cause; a hypothesis that calls DNS fine is wrong.
 
   Expected label: failing check connect-source-reachable; fixing op compose_restart
   {services: [connect]}, which regenerates the container's /etc/hosts and starts a JVM with an
@@ -333,6 +386,147 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4c: the misses of run 39994729845, as the real tools answer them on this stack.
+  # net_probe (3 of 3 runs): Piperoom's own dns and tcp checks reach postgres:5432 (the address
+  # the compose network gives the database, as in the runner's post-fix probe); Connect's
+  # validation of the running config does not finish within the 3 s step (connectView: Fix is
+  # the generic one, Problem the timeout text; no Detail before validation returns).
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (postgres:5432): 1 of 4 checks failed
+      - connect_view fail: Connect did not finish validating connector pg-orders-connector within the step's time; fix: check that Connect is up, that the plugin class is installed on every worker, and that the Connect login may validate configs
+      - dns postgres:5432 ok: 172.18.0.2
+      - tcp postgres:5432 ok: TCP connected
+      - tls postgres:5432 skip: not configured with TLS
+    data:
+      checks:
+        - addr: postgres:5432
+          detail: 172.18.0.2
+          id: dns
+          ms: 1
+          status: ok
+        - addr: postgres:5432
+          detail: TCP connected
+          id: tcp
+          ms: 1
+          status: ok
+        - addr: postgres:5432
+          detail: not configured with TLS
+          id: tls
+          ms: 0
+          status: skip
+        - fix: check that Connect is up, that the plugin class is installed on every worker, and that the Connect login may validate configs
+          id: connect_view
+          ms: 3001
+          problem: Connect did not finish validating connector pg-orders-connector within the step's time
+          status: fail
+      endpoints:
+        - postgres:5432
+      kind: source_db
+      target: source
+  # connect_validate_config (3 of 3 runs, with base_connector and the running config): Connect's
+  # validation opens a JDBC connection to postgres:5432 from the worker, which outlasts the
+  # tool's 10 s budget, so the HTTP request ends on the deadline.
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    error: 'connect_validate_config: io.debezium.connector.postgresql.PostgresConnector: connect: PUT /connector-plugins/io.debezium.connector.postgresql.PostgresConnector/config/validate: Put "http://connect:8083/connector-plugins/io.debezium.connector.postgresql.PostgresConnector/config/validate": context deadline exceeded'
+  # connect_source_offsets (2 of 3 runs): the offsets the connector committed before the move;
+  # Connect's internal topics came along (Connect brings the connector back from its config
+  # topic), and the newest one is the last change in pg.public.orders, 47 minutes ago.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=24526632, lsn_proc=24526632, ts_usec=1792918386000000, txId=1187
+    data:
+      connectors:
+        - connector: pg-orders-connector
+          offsets:
+            - partition: {server: pg}
+              offset: {lsn: 24526632, lsn_proc: 24526632, ts_usec: 1792918386000000, txId: 1187}
+  # connect_worker_logs (3 of 3 runs, since 2h with or without a limit): the compose project
+  # piperoom-setup writes has no Loki, so WORKER_LOGS_LOKI_URL is unset and the tool says so.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+    data:
+      connector: pg-orders-connector
+      min_level: WARN
+      since: "2026-10-25T07:40:00Z"
+      until: "2026-10-25T09:40:00Z"
+      lines: []
+      bytes: 0
+      summary_lines: 0
+  # connect_worker_info (1 of 3 runs, after the steer): the compose project's one worker
+  # (GROUP_ID piperoom-connect, internal topics _connect_configs/_connect_offsets/_connect_status
+  # on the single broker, internal/setup/targets/compose/templates.go).
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group piperoom-connect (Stable): 1 worker; runs the pipeline's connectors
+        - worker 172.18.0.5 http://connect:8083/ leader; runs pg-orders-connector
+      Internal topics (name match):
+      - config _connect_configs: 1 partitions, RF 1, cleanup compact
+      - offset _connect_offsets: 25 partitions, RF 1, cleanup compact
+      - status _connect_status: 5 partitions, RF 1, cleanup compact
+      Plugins: Kafka 4.0.0; 4 plugins (4 source) (connect_plugins lists them)
+      Log levels: root INFO
+    data:
+      groups:
+        - group_id: piperoom-connect
+          state: Stable
+          why: runs the pipeline's connectors
+          workers:
+            - connectors:
+                - pg-orders-connector
+              host: 172.18.0.5
+              leader: true
+              member_id: connect-1-3b9e
+              url: http://connect:8083/
+      internal_topics:
+        - brokers: 1
+          cleanup_policy: compact
+          min_insync_replicas: 0
+          name: _connect_configs
+          partitions: 1
+          replication_factor: 1
+          role: config
+        - brokers: 1
+          cleanup_policy: compact
+          min_insync_replicas: 0
+          name: _connect_offsets
+          partitions: 25
+          replication_factor: 1
+          role: offset
+        - brokers: 1
+          cleanup_policy: compact
+          min_insync_replicas: 0
+          name: _connect_status
+          partitions: 5
+          replication_factor: 1
+          role: status
+      kafka_version: 4.0.0
+      loggers:
+        - level: INFO
+          logger: root
+      plugin_count: 4
+      plugins:
+        - class: io.debezium.connector.postgresql.PostgresConnector
+          type: source
+          version: 3.2.0.Final
+        - class: org.apache.kafka.connect.mirror.MirrorCheckpointConnector
+          type: source
+          version: 4.0.0
+        - class: org.apache.kafka.connect.mirror.MirrorHeartbeatConnector
+          type: source
+          version: 4.0.0
+        - class: org.apache.kafka.connect.mirror.MirrorSourceConnector
+          type: source
+          version: 4.0.0
+      plugins_by_type:
+        source: 4
+      topics_source: name match
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: connect_status
     error: 'connect: GET /connectors/<name>/status: not found'
@@ -367,9 +561,12 @@ inputs:
 
 expect:
   root_cause:
-    # The worker's name resolution, and the address it lands on.
-    - [name resolution, dns, hosts, resolve*]
-    - [192.0.2.1, black hole, black-hole, test net, test-net, stale, /etc/hosts]
+    # The Connect side's name resolution (lead ruling R10, #939): what net_probe's contrast shows,
+    # Piperoom's dns and tcp passing while Connect's view of the same host does not finish. The
+    # real tool cannot show what the worker resolved, so the address (192.0.2.1) is not required.
+    # No path or symptom word: "network path" and "route*" let the judged-wrong hypotheses of
+    # 39994729845 pass, and "cannot reach postgres:5432" alone is the symptom.
+    - [resolv*, dns, hosts, name resolution]
   # The wrong stories of a task that cannot connect.
   root_cause_forbidden:
     - ['schema change']
@@ -380,8 +577,24 @@ expect:
     - [slot, lost]
     - [database, down]
     - [wrong host, bad host]
-    - [firewall]
     - [listen*, localhost]
+    # R10: a hypothesis that clears DNS, or echoes net_probe's "dns postgres:5432 ok" line, meets
+    # the group by the word "dns" alone; these rows fail it. "DNS is fine" needs the phrase: the
+    # matcher reads "is fine" as clearing the word before it, so [dns, fine] cannot fire there.
+    - [dns, ok]
+    - [dns, pass*]
+    - [dns, works]
+    - [dns, succeed*]
+    - [dns, fine]
+    - ['dns is fine']
+    - ['dns is ok']
+    - ['dns is healthy']
+    - ['dns look fine']
+    - ['dns looks fine']
+    - ['hosts file is fine']
+    - ['hosts file looks fine']
+    - ['resolution is fine']
+    - ['resolution works']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:
@@ -389,10 +602,16 @@ expect:
       tool: connect_status
       match: [connect timed out, connection attempt failed]
       required: true
+    # W4c fix round: the server answering is what net_probe's tcp check shows (Piperoom opens a
+    # TCP connection to postgres:5432), the read live run 40034120325 used; source_settings
+    # repeats it and is optional.
     - id: f_server_answers
+      tool: net_probe
+      match: [tcp postgres 5432 ok, tcp connected]
+      required: true
+    - id: f_settings_logical
       tool: source_settings
       match: [wal level logical]
-      required: true
     - id: f_config_right
       tool: connect_config
       match: [database hostname postgres, database port 5432]
@@ -405,9 +624,28 @@ expect:
     - id: f_not_connected
       tool: debezium_metrics
       match: [connected false, queue]
+    # W4c: Connect's half of the contrast; not required (f_server_answers already needs the
+    # same net_probe read).
+    - id: f_connect_view_times_out
+      tool: net_probe
+      match: [connect view fail, did not finish validating]
   claims:
     - about: root_cause
       facts: [f_connect_timeout, f_server_answers]
-  evidence_tools: [connect_status, source_settings]
+  # W4c fix round, ruling R9: source_settings leaves (W4a rule: f_server_answers comes from
+  # net_probe, so it would be duplicate evidence; run 3 of 39994729845 and run 1 of 40034120325
+  # never called it).
+  evidence_tools: [connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  # Budget (W4c). No run of 39994729845 passed, so it is derived from the expected standard
+  # path, not from a passing run (calls were 9, 11, 11, all failing):
+  #   alert turn: 9 reads - pg_recent_ddl (rule 2), connect_status, connect_config,
+  #     pg_replication_slots, source_settings (database settings, rule 2), net_probe
+  #     {target: source} (the server answers Piperoom; Connect's view against Piperoom's),
+  #     connect_validate_config (Connect's own validation),
+  #     similar_incidents, and one read ruling out the nearest competing story (rule 1:
+  #     source_role_grants or debezium_metrics);
+  #   steer turn ("What do I change on the Connect side?"): 1 read the driver's question names
+  #     (connect_worker_info, as run 3 did);
+  #   10 + 2 = 12 (unchanged). Re-derive as max passing + 2 from W4c's verification run.
   max_tool_calls: 12

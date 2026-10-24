@@ -456,6 +456,21 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		// Validate sees the same scope the write will run under. The room id
 		// travels too, so a client keeping per-room state (--demo) uses this
 		// room's, not another's.
+		// Q7k: the step's approving layer is derived again with the room's
+		// pipeline as it is now (actions.StepLayer). A step whose stored
+		// layer no longer matches (owners.yaml moved a repo glob to another
+		// layer, a source_kind changed) was approved by the wrong owner and
+		// does not run.
+		if want, lerr := s.stepLayer(snap, pipelineID, action, step.Params); lerr != nil {
+			s.stopOnStep(tracker, p, i, "layer check failed: "+lerr.Error())
+			return nil
+		} else if want != step.Layer {
+			s.stopOnStep(tracker, p, i, fmt.Sprintf("layer check failed: the step was approved as layer %q but its layer is now %q; propose it again", step.Layer, want))
+			return nil
+		}
+		// Q7: the step's identity travels to the action (actions.StepRef):
+		// a fix PR names its branch after it and lists the approvers.
+		actx = actions.WithStep(actx, s.stepRef(snap, p, i))
 		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
@@ -467,7 +482,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		out, err := s.executeStep(actx, p.ProposalID, action, step.Params, bound)
+		out, pr, err := s.executeStep(actx, p.ProposalID, action, step.Params, bound)
 		output := out
 		if err != nil {
 			output = err.Error()
@@ -478,7 +493,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		// A step whose runner socket dropped is unknown, not failed: it may
 		// have run (docs/design/setup-agent.md §2.1).
 		unknown := errors.Is(err, ErrRunnerLost)
-		if err := s.finishStepOutcome(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown, planIdx); err != nil {
+		if err := s.finishStepResult(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown, planIdx, pr); err != nil {
 			if errors.Is(err, store.ErrClaimLost) {
 				// The sweep declared this run dead while the step ran and
 				// has recorded the outcome; a second event would contradict
@@ -589,13 +604,23 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 // stepTimeout outruns the stale-claim window, so the claim is kept fresh while
 // the step runs, and a claim taken by the stale sweep cancels the step. The
 // refresher is stopped by defer, so a panicking action cannot leak it.
-func (s *Service) executeStep(actx context.Context, proposalID string, action actions.Action, params json.RawMessage, bound time.Duration) (string, error) {
+func (s *Service) executeStep(actx context.Context, proposalID string, action actions.Action, params json.RawMessage, bound time.Duration) (string, *events.PullRequestRef, error) {
 	sctx, cancel := context.WithTimeout(actx, bound)
 	defer cancel()
 	if bound > stepTimeout {
 		defer s.keepClaimFresh(proposalID, cancel)()
 	}
-	return action.Execute(sctx, params)
+	if opener, ok := action.(actions.PullRequestOpener); ok {
+		// Q7: the executor prefers ExecutePullRequest and stores the PR
+		// on action.executed, which starts the room's follower (Q7e).
+		out, ref, err := opener.ExecutePullRequest(sctx, params)
+		if err != nil {
+			return out, nil, err
+		}
+		return out, &ref, nil
+	}
+	out, err := action.Execute(sctx, params)
+	return out, nil, err
 }
 
 // finishStep checks the local transition, records the step result in the store
@@ -613,7 +638,17 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 // travels on the event so the fold marks the right plan step
 // (ActionExecutedPayload.PlanStepIndex).
 func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool, planIdx *int) error {
-	output = maskExecOutput(output) // action output is tool text and may hold secrets
+	return s.finishStepResult(roomID, proposalID, paramsHash, t, i, ok, output, unknown, planIdx, nil)
+}
+
+// finishStepResult is finishStepOutcome with the pull request a
+// PullRequestOpener step opened (nil for every other step, and for a step
+// that failed): it travels on action.executed (Q7).
+func (s *Service) finishStepResult(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool, planIdx *int, pr *events.PullRequestRef) error {
+	output = maskExecOutput(output)
+	if !ok {
+		pr = nil
+	} // action output is tool text and may hold secrets
 	status := "done"
 	if !ok {
 		status = "failed"
@@ -629,7 +664,7 @@ func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *st
 	// The DB state is authoritative; a failed event append must not undo it.
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
-		OutcomeUnknown: unknown, PlanStepIndex: planIdx,
+		OutcomeUnknown: unknown, PlanStepIndex: planIdx, PullRequest: pr,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}

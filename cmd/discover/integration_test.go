@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -104,5 +105,63 @@ func TestWriteOwnersDevStack(t *testing.T) {
 	table := stdout.String()
 	if !strings.Contains(table, "pg-orders") || !strings.Contains(table, "MISSING") {
 		t.Errorf("summary table lacks pg-orders / MISSING:\n%s", table)
+	}
+}
+
+// TestDiscoverDevStackMySQL runs discovery against the dev stack with the
+// mysql profile (dev/scenarios.md: docker compose -f dev/docker-compose.yml
+// --profile mysql up -d --wait mysql; any MySQL `devctl break` registers
+// orders-mysql) and checks that the drafted pipeline loads with owners.Load
+// as source_kind: mysql, its mysql layer owned (Q8h).
+func TestDiscoverDevStackMySQL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	deps, closeDeps, err := buildDeps(ctx, config.Load(), false)
+	if err != nil {
+		t.Fatalf("build clients: %v", err)
+	}
+	defer closeDeps()
+
+	res, err := discover.Discover(ctx, deps, discover.Options{})
+	if err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	var p *discover.Pipeline
+	for i := range res.Pipelines {
+		if res.Pipelines[i].Connector == "orders-mysql" {
+			p = &res.Pipelines[i]
+		}
+	}
+	if p == nil {
+		t.Skipf("no orders-mysql connector: start the mysql profile (dev/scenarios.md); got %+v", res.Pipelines)
+	}
+	if p.SourceKind != "mysql" || p.TopicPrefix != "shop" {
+		t.Errorf("orders-mysql = %+v, want source_kind mysql, topic_prefix shop", p)
+	}
+	for _, table := range []string{"shop.orders", "shop.order_items"} {
+		if !slices.Contains(p.SourceTables, table) {
+			t.Errorf("SourceTables = %v, want %s", p.SourceTables, table)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := discover.RenderOwned(&buf, res, "it_discover"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own, err := owners.Load(path)
+	if err != nil {
+		t.Fatalf("owners.Load: %v\n%s", err, buf.String())
+	}
+	op, ok := own.Pipeline(p.ID)
+	if !ok || !op.IsMySQL() {
+		t.Fatalf("pipeline %s = %+v (found %v), want source_kind mysql", p.ID, op, ok)
+	}
+	if _, ok := own.CanApprove(p.ID, owners.LayerMySQL, "it_discover", nil); !ok {
+		t.Errorf("it_discover cannot approve the mysql layer of %s", p.ID)
 	}
 }

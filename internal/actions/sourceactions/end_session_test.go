@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
 )
 
@@ -45,7 +44,7 @@ func TestEndSessionValidate(t *testing.T) {
 	if err := a.Validate(scopedCtx(), esParams(9999, testStart)); err == nil || !strings.Contains(err.Error(), "not in source_blocking_sessions") {
 		t.Fatalf("unknown pid = %v", err)
 	}
-	if err := a.Validate(scopedCtx(), esParams(4242, testStart.Add(time.Second))); !errors.Is(err, postgres.ErrSessionChanged) {
+	if err := a.Validate(scopedCtx(), esParams(4242, testStart.Add(time.Second))); !errors.Is(err, clients.ErrSessionChanged) {
 		t.Fatalf("other start = %v, want ErrSessionChanged", err)
 	}
 	if err := a.Validate(scopedCtx(), esParams(77, testStart)); err == nil || !strings.Contains(err.Error(), "connector \"pg-orders\"'s own database.user") {
@@ -137,8 +136,8 @@ func TestEndSessionExecute(t *testing.T) {
 	if src.calls == 0 {
 		t.Fatal("Execute did not re-read the blocking list")
 	}
-	w.err = postgres.ErrSessionProtected
-	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, postgres.ErrSessionProtected) {
+	w.err = clients.ErrSessionProtected
+	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, clients.ErrSessionProtected) {
 		t.Fatalf("writer error = %v", err)
 	}
 }
@@ -151,7 +150,7 @@ func TestEndSessionExecuteRechecks(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 	src.sessions = []DBSession{{PID: 4242, StartedAt: testStart.Add(time.Hour), User: "app", InScope: true}}
-	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, postgres.ErrSessionChanged) {
+	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, clients.ErrSessionChanged) {
 		t.Fatalf("reused pid = %v, want ErrSessionChanged", err)
 	}
 	src.sessions = nil
@@ -290,7 +289,7 @@ func TestEndSessionHorizonHolderOutOfScope(t *testing.T) {
 	}
 
 	// A different start time at Execute is refused before the writer.
-	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart.Add(time.Second))); !errors.Is(err, postgres.ErrSessionChanged) {
+	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart.Add(time.Second))); !errors.Is(err, clients.ErrSessionChanged) {
 		t.Fatalf("Execute with a changed start = %v, want ErrSessionChanged", err)
 	}
 	if len(w.calls) != 1 {
@@ -379,7 +378,7 @@ func TestEndSessionHorizonHolderRefusals(t *testing.T) {
 				src.sessions = src.sessions[1:]
 			}
 		}
-		if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, postgres.ErrSessionChanged) {
+		if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, clients.ErrSessionChanged) {
 			t.Fatalf("Validate = %v, want ErrSessionChanged", err)
 		}
 	})

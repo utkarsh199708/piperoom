@@ -9,12 +9,15 @@ import (
 
 // TestSystemPromptOffsetsRule pins Q5d: in both write modes the CDC Fixes
 // section says when to clear a source connector's stored offsets (only for a
-// position the source no longer has) and when to snapshot one table instead
-// (P3a-5). Wiring registers connect_reset_source_offsets in both modes (P0
-// ruling #606), so the write-off prompt carries the rule too; the batch
-// prompt does not.
+// position the source no longer has) and, since W4h (KAN-505), how missing
+// rows come back: replayed from the topic while their records are still on
+// it, snapshotted from the source otherwise (the old "snapshot a table
+// missing rows instead" sent consumer-skipped-range to pg_resnapshot_rows).
+// Wiring registers connect_reset_source_offsets in both modes (P0 ruling
+// #606), so the write-off prompt carries the rule too; the batch prompt does
+// not.
 func TestSystemPromptOffsetsRule(t *testing.T) {
-	const want = "- Reset source offsets only if their position is gone; snapshot a table missing rows instead."
+	const want = "- Reset source offsets only for lost positions; replay a missing range still on the topic; otherwise snapshot the rows."
 	for _, write := range []bool{true, false} {
 		p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
 		fixes := p[strings.Index(p, "Fixes\n"):strings.Index(p, "Tools\n")]

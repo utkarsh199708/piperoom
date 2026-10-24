@@ -27,7 +27,7 @@ func TestServerSetsRegisterNetProbe(t *testing.T) {
 		opts = o
 		return nil, stop
 	}
-	newEndpoint := func(context.Context, config.Config, *slog.Logger, *aws.Config) (*agent.Endpoint, error) {
+	newEndpoint := func(context.Context, config.Config, *slog.Logger, *aws.Config, func(string) string) (*agent.Endpoint, error) {
 		return nil, errors.New("must not build a model endpoint for the scripted agent")
 	}
 	_, err := wireAgent(context.Background(), openStacks, newEndpoint, wireAgentInput{

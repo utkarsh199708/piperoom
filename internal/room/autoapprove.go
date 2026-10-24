@@ -231,6 +231,11 @@ func (s *Service) scheduleCheckLocked(st *roomState, proposalID string) error {
 	if !ok || p.Origin == events.ProposalOriginDriver || p.sched.set {
 		return errNotAutoApprovable
 	}
+	// Q7k: a Deferred (pull-request) step is never approved by a policy,
+	// whatever auto_approve: says (owners Load refuses it there too).
+	if s.hasDeferredStep(st.snap.PipelineID, p.Steps) {
+		return errNotAutoApprovable
+	}
 	for _, l := range p.RequiredLayers {
 		if p.Approvals[l] != "pending" {
 			return errNotAutoApprovable
@@ -293,7 +298,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 		return
 	}
 	p, ok := openProposal(st.snap, proposalID)
-	if !ok || p.Origin == events.ProposalOriginDriver || p.sched.set {
+	if !ok || p.Origin == events.ProposalOriginDriver || p.sched.set || s.hasDeferredStep(st.snap.PipelineID, p.Steps) {
 		return
 	}
 	for _, l := range p.RequiredLayers {
@@ -311,7 +316,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 			return errNotAutoApprovable
 		}
 		p, ok := openProposal(st.snap, proposalID)
-		if !ok || p.sched.set || !previewAllOK(p) {
+		if !ok || p.sched.set || !previewAllOK(p) || s.hasDeferredStep(st.snap.PipelineID, p.Steps) {
 			return errNotAutoApprovable
 		}
 		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
@@ -369,6 +374,12 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 	// Fully approved: the policy is done; the executor (or write mode) has it.
 	if !ok || !p.sched.pending() || fullyApproved(p) || s.now().Before(p.sched.runAt) {
 		return Proposal{}, errScheduleGone
+	}
+	// Q7k: never a policy approval of a Deferred step, on either policy,
+	// even if a countdown was logged for one (a second wall behind the
+	// schedule checks).
+	if s.hasDeferredStep(st.snap.PipelineID, p.Steps) {
+		return Proposal{}, &policyRefusal{why: "a pull-request step is never approved by a policy"}
 	}
 	if st.snap.IsSetupRoom() {
 		// A setup room has one policy, setup_local, and it may only run a T1

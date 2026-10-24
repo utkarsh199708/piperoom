@@ -72,7 +72,7 @@ func TestFakeAgentUnsetUsesRealAgent(t *testing.T) {
 			t.Fatal("the real path must build the endpoint before the stacks")
 			return nil, nil
 		},
-		func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+		func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error) {
 			endpointBuilt = true
 			return nil, errors.New("model endpoint")
 		},
@@ -137,7 +137,7 @@ func TestFakeAgentScriptedWiring(t *testing.T) {
 	openStacks := func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts wiring.StackOptions) (*wiring.Stacks, error) {
 		return wiring.OpenStacks(ctx, cfg, awsCfg, own, opts)
 	}
-	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	newEndpoint := func(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config, getenv func(string) string) (*agent.Endpoint, error) {
 		endpointBuilt = true
 		return nil, errors.New("must not build a model endpoint for the scripted agent")
 	}

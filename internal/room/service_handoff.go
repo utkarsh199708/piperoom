@@ -156,6 +156,9 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 	if !s.isDriver(st2, user.ID) {
 		return events.Event{}, ErrNotDriver()
 	}
+	// Q7e: the hand-off names every fix PR still open, whatever the summary
+	// says: the next driver must know a merge may still change the system.
+	summary.Open = openPRLines(st2.snap, summary.Open)
 
 	handoffID := NewID("h_")
 	summaryJSON, err := json.Marshal(summary)

@@ -1,0 +1,576 @@
+{
+  "scenario": "setup/no-supplemental-logging",
+  "source": "oracle",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-28T09:40:00Z",
+  "note": "Composed from the U9a Oracle client's DTOs (internal/clients/oracle: DatabaseInfo, TableSupplementalLogging, LogMinerGrants; the writer's CreateCanaryTable and its AlterSystem refusal), the compose driver's templates and the ladder's notes, on the fixed clock of the U9d scenarios. The Oracle source driver (U9b) is not on main, so its check reads are recorded under the remote clients' source op names (source_settings, source_table_replication, source_role_info) with the U9a client's values. Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC. No Docker session: re-record on the oracle profile per evals/scenarios/README.md, Setup scenarios: Oracle (U9d).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "docker 27.3.1; docker compose v2.29.7; project dir /home/priya/orders",
+        "data": {
+          "os": "linux",
+          "arch": "amd64",
+          "project_dir": "/home/priya/orders",
+          "tools": {
+            "docker": "27.3.1",
+            "docker compose": "v2.29.7"
+          }
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "version",
+            "--short"
+          ],
+          "target": "/home/priya/orders",
+          "exit_code": 0,
+          "at": "2026-10-28T09:10:01Z",
+          "took_ms": 38,
+          "out_mac": "565af2ffff7f44adb4c378708a15f6f2fddf9c9e61f35fd6ce25f50c9ab9b95c"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "d042fd791447f932774ccb8ed4cf38d7beee3a89dffd7f8a3576e77db55d6854",
+      "params": {
+        "templates": [
+          "kafka-kraft",
+          "connect",
+          "registry"
+        ],
+        "project": "piperoom-orders",
+        "file": "compose.yaml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote compose.yaml (3120 bytes), services: connect, kafka, schema-registry",
+        "data": {
+          "file": "compose.yaml",
+          "bytes": 3120,
+          "changed": true,
+          "services": [
+            "connect",
+            "kafka",
+            "schema-registry"
+          ]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-28T09:10:24Z",
+          "took_ms": 7,
+          "out_mac": "66c40ac13a124ef6573e0e8edc986d749286ad7b60f6e7068a43aec648350ecf"
+        }
+      }
+    },
+    {
+      "op": "compose_up",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "2edda557d7ffe7272d3400c6d4671f57276d8bc58a757953c3b39a1bfe9f36d0",
+      "params": {
+        "file": "compose.yaml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "compose up: connect (healthy), kafka (healthy), schema-registry (healthy)",
+        "data": {
+          "project": "piperoom-orders",
+          "services": [
+            {
+              "service": "connect",
+              "state": "running",
+              "health": "healthy"
+            },
+            {
+              "service": "kafka",
+              "state": "running",
+              "health": "healthy"
+            },
+            {
+              "service": "schema-registry",
+              "state": "running",
+              "health": "healthy"
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "--project-directory",
+            "/home/priya/orders",
+            "-f",
+            "compose.yaml",
+            "--env-file",
+            ".env",
+            "up",
+            "-d",
+            "--wait"
+          ],
+          "target": "piperoom-orders",
+          "exit_code": 0,
+          "at": "2026-10-28T09:11:52Z",
+          "took_ms": 81344,
+          "out_mac": "2291285ba50cbacfcc937491d547a4fc8c2ae0cbd4b0fdc66b097b284149bb2d"
+        }
+      }
+    },
+    {
+      "op": "source_settings",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "FREE (CDB, container FREEPDB1, PDBs FREEPDB1), Oracle Database 23ai Free Release 23.0.0.0.0 - Develop, Learn, and Run for Free; LOG_MODE=ARCHIVELOG; supplemental logging: minimal=YES, all=NO",
+        "data": {
+          "name": "FREE",
+          "is_cdb": true,
+          "container": "FREEPDB1",
+          "pdbs": [
+            "FREEPDB1"
+          ],
+          "log_mode": "ARCHIVELOG",
+          "force_logging": "NO",
+          "supplemental_logging": {
+            "minimal": true,
+            "primary_key": false,
+            "all": false,
+            "foreign_key": false,
+            "unique_index": false
+          },
+          "version": "Oracle Database 23ai Free Release 23.0.0.0.0 - Develop, Learn, and Run for Free",
+          "edition": "Free"
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:12:10Z",
+          "took_ms": 112,
+          "out_mac": "4f2e40127e00e274b40834e807019c4e1862b883e705dc23c4f885169bef61cc"
+        }
+      }
+    },
+    {
+      "op": "source_table_replication",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "tables": [
+          "PIPEROOM.ORDERS",
+          "PIPEROOM.PIPEROOM_CANARY"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "PIPEROOM.ORDERS: ALL COLUMNS (always); PIPEROOM.PIPEROOM_CANARY: ALL COLUMNS (always)",
+        "data": [
+          {
+            "table": "PIPEROOM.ORDERS",
+            "all_columns": true,
+            "always": true
+          },
+          {
+            "table": "PIPEROOM.PIPEROOM_CANARY",
+            "all_columns": true,
+            "always": true
+          }
+        ],
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:12:11Z",
+          "took_ms": 47,
+          "out_mac": "7a960a61c7671eb0a93f96c7bfe9542b01a071ae8eb713822a34106cc76c9147"
+        }
+      }
+    },
+    {
+      "op": "source_role_info",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "role": "C##DBZUSER",
+        "tables": [
+          "PIPEROOM.ORDERS",
+          "PIPEROOM.PIPEROOM_CANARY"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "C##DBZUSER: system privileges CREATE SESSION, FLASHBACK ANY TABLE, LOGMINING, SELECT ANY TRANSACTION, SET CONTAINER; roles SELECT_CATALOG_ROLE; SELECT on PIPEROOM.ORDERS, PIPEROOM.PIPEROOM_CANARY",
+        "data": {
+          "user": "C##DBZUSER",
+          "roles": [
+            "SELECT_CATALOG_ROLE"
+          ],
+          "system_privileges": [
+            "CREATE SESSION",
+            "FLASHBACK ANY TABLE",
+            "LOGMINING",
+            "SELECT ANY TRANSACTION",
+            "SET CONTAINER"
+          ],
+          "table_privileges": [
+            {
+              "table": "PIPEROOM.ORDERS",
+              "privilege": "SELECT",
+              "grantable": false
+            },
+            {
+              "table": "PIPEROOM.PIPEROOM_CANARY",
+              "privilege": "SELECT",
+              "grantable": false
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:12:12Z",
+          "took_ms": 63,
+          "out_mac": "25a2d09133010248f57787b22e810b4fbbb04cc7cb7a07c74ff78cda6498df9f"
+        }
+      }
+    },
+    {
+      "op": "source_create_canary_table",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "062f8904b319a4e6b99c133c83cd8a6454b6f3db8058e05e8e6810b76e4249c0",
+      "params": {
+        "table": "PIPEROOM.PIPEROOM_CANARY"
+      },
+      "result": {
+        "ok": true,
+        "summary": "created PIPEROOM.PIPEROOM_CANARY with an ALL COLUMNS supplemental log group",
+        "data": {
+          "table": "PIPEROOM.PIPEROOM_CANARY",
+          "supplemental_logging": "ALL COLUMNS"
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:15:02Z",
+          "took_ms": 1904,
+          "out_mac": "55efb448465502645a9baab58f13d777f8fe8d96bf2820533263e8075b814d6e"
+        }
+      }
+    },
+    {
+      "op": "connect_create_connector",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_4",
+      "step_index": 0,
+      "params_hash": "172ac7c4c6f5d0e6bd363183bc85ec6ed9a4a2ec65e76e3685331c199a8361fa",
+      "params": {
+        "connector": "ora-orders-connector",
+        "config": {
+          "connector.class": "io.debezium.connector.oracle.OracleConnector",
+          "database.connection.adapter": "logminer",
+          "database.dbname": "FREE",
+          "database.hostname": "oracle",
+          "database.password": "${secret:oracle_logminer_password}",
+          "database.pdb.name": "FREEPDB1",
+          "database.port": "1521",
+          "database.user": "c##dbzuser",
+          "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+          "schema.history.internal.kafka.topic": "schema-changes.orders-ora",
+          "table.include.list": "PIPEROOM.ORDERS,PIPEROOM.PIPEROOM_CANARY",
+          "topic.prefix": "ora"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "created ora-orders-connector (RUNNING, 1 task)",
+        "data": {
+          "connector": "ora-orders-connector",
+          "state": "RUNNING",
+          "tasks": 1
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "http://127.0.0.1:8083/connectors",
+          "exit_code": 0,
+          "at": "2026-10-28T09:20:03Z",
+          "took_ms": 521,
+          "out_mac": "da192e42d32abe24d1c92942c4462794dee490fe0527f4939ec46db33c06e48a"
+        }
+      }
+    },
+    {
+      "op": "source_settings",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "FREE (CDB, container FREEPDB1, PDBs FREEPDB1), Oracle Database 23ai Free Release 23.0.0.0.0 - Develop, Learn, and Run for Free; LOG_MODE=ARCHIVELOG; supplemental logging: minimal=NO, all=NO",
+        "data": {
+          "name": "FREE",
+          "is_cdb": true,
+          "container": "FREEPDB1",
+          "pdbs": [
+            "FREEPDB1"
+          ],
+          "log_mode": "ARCHIVELOG",
+          "force_logging": "NO",
+          "supplemental_logging": {
+            "minimal": false,
+            "primary_key": false,
+            "all": false,
+            "foreign_key": false,
+            "unique_index": false
+          },
+          "version": "Oracle Database 23ai Free Release 23.0.0.0.0 - Develop, Learn, and Run for Free",
+          "edition": "Free"
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:40:10Z",
+          "took_ms": 112,
+          "out_mac": "a3d18feb0943015064e1f2c6bb5ff51e5d485504f3fa86001195240275a85225"
+        }
+      }
+    },
+    {
+      "op": "source_table_replication",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "tables": [
+          "PIPEROOM.ORDERS",
+          "PIPEROOM.PIPEROOM_CANARY"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "PIPEROOM.ORDERS: no ALL COLUMNS group; PIPEROOM.PIPEROOM_CANARY: ALL COLUMNS (always)",
+        "data": [
+          {
+            "table": "PIPEROOM.ORDERS",
+            "all_columns": false,
+            "always": false
+          },
+          {
+            "table": "PIPEROOM.PIPEROOM_CANARY",
+            "all_columns": true,
+            "always": true
+          }
+        ],
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:40:11Z",
+          "took_ms": 47,
+          "out_mac": "a68224834098d9f9da23a8b120fcfa743984ab650f22eeecee95f50c4ad4a4e8"
+        }
+      }
+    },
+    {
+      "op": "source_role_info",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "role": "C##DBZUSER",
+        "tables": [
+          "PIPEROOM.ORDERS",
+          "PIPEROOM.PIPEROOM_CANARY"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "C##DBZUSER: system privileges CREATE SESSION, FLASHBACK ANY TABLE, LOGMINING, SELECT ANY TRANSACTION, SET CONTAINER; roles SELECT_CATALOG_ROLE; SELECT on PIPEROOM.ORDERS, PIPEROOM.PIPEROOM_CANARY",
+        "data": {
+          "user": "C##DBZUSER",
+          "roles": [
+            "SELECT_CATALOG_ROLE"
+          ],
+          "system_privileges": [
+            "CREATE SESSION",
+            "FLASHBACK ANY TABLE",
+            "LOGMINING",
+            "SELECT ANY TRANSACTION",
+            "SET CONTAINER"
+          ],
+          "table_privileges": [
+            {
+              "table": "PIPEROOM.ORDERS",
+              "privilege": "SELECT",
+              "grantable": false
+            },
+            {
+              "table": "PIPEROOM.PIPEROOM_CANARY",
+              "privilege": "SELECT",
+              "grantable": false
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "oracle:1521/FREEPDB1",
+          "exit_code": 0,
+          "at": "2026-10-28T09:40:12Z",
+          "took_ms": 63,
+          "out_mac": "a6dbffc3f31de4872eaecb092446083e30dbd0d6a62b33f60fd603ba1a7fd64a"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_ora_setup",
+    "nonce_hash": "3ce390e999adeb8009ae6e9c4f4ced6a1526d00b0c77b47a3b6aac5d02ad1474",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "ora-orders-connector",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED"
+            }
+          ]
+        },
+        "at": "2026-10-28T09:39:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "ora-orders-connector",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED"
+            }
+          ]
+        },
+        "at": "2026-10-28T09:39:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "ora.PIPEROOM.PIPEROOM_CANARY",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 1
+            }
+          ],
+          "total_records": 1
+        },
+        "at": "2026-10-28T09:39:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {
+          "connector": "ora-orders-connector",
+          "metrics_found": 12,
+          "snapshot": {
+            "SnapshotCompleted": 1,
+            "SnapshotRunning": 0
+          }
+        },
+        "at": "2026-10-28T09:39:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {
+          "topic": "ora.PIPEROOM.PIPEROOM_CANARY",
+          "key": "b19c7e4f0d2a83e6c5b1a9f7d3e08c24",
+          "found": false
+        },
+        "at": "2026-10-28T09:39:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {
+          "subjects": [
+            "ora.PIPEROOM.PIPEROOM_CANARY-key",
+            "ora.PIPEROOM.PIPEROOM_CANARY-value"
+          ],
+          "deleted_subjects": []
+        },
+        "at": "2026-10-28T09:39:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {
+          "name": "connector_running",
+          "ok": true,
+          "note": "the connector is RUNNING"
+        },
+        {
+          "name": "tasks_running",
+          "ok": false,
+          "note": "task 0 is FAILED"
+        },
+        {
+          "name": "canary_topic",
+          "ok": true,
+          "note": "the topic exists with 1 partition(s)"
+        },
+        {
+          "name": "snapshot_complete",
+          "ok": true,
+          "note": "SnapshotCompleted"
+        },
+        {
+          "name": "canary_event",
+          "ok": false,
+          "note": "no record with the canary key yet"
+        },
+        {
+          "name": "canary_subject",
+          "ok": true,
+          "note": "2 subject(s) under the canary topic's prefix"
+        },
+        {
+          "name": "sink_row",
+          "ok": true,
+          "note": "no sink was set up"
+        },
+        {
+          "name": "person_change",
+          "ok": false,
+          "note": "awaiting the person's change"
+        }
+      ]
+    },
+    "table": "PIPEROOM.ORDERS",
+    "example_sql": "INSERT INTO PIPEROOM.ORDERS (customer_id, amount, status) VALUES (42, 4250, 'packed');"
+  }
+}

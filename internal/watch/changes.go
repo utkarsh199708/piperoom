@@ -172,7 +172,12 @@ func (w *Watcher) readChanges(ctx context.Context, ts []target) *setChanges {
 		}
 		wg.Wait()
 	}
-	if ddl == nil {
+	// A MySQL source has no DDL audit table (RecentDDL is always
+	// clients.ErrNotSupported there), so its set is treated as one with no
+	// reader, as observe skips its slot reads: no call, no WARN. Wiring
+	// refuses a set that mixes kinds; a set with any Postgres pipeline still
+	// reads, so a mix can never turn a Postgres DDL feed off.
+	if ddl == nil || allMySQL(ts) {
 		sc.ddlErr = errNoDDL
 		return sc
 	}
@@ -181,6 +186,16 @@ func (w *Watcher) readChanges(ctx context.Context, ts []target) *setChanges {
 		return ddl.RecentDDL(c, sc.ddlWindow, ddlLimit)
 	})
 	return sc
+}
+
+// allMySQL reports whether every target of a set is a MySQL pipeline.
+func allMySQL(ts []target) bool {
+	for _, t := range ts {
+		if !t.p.IsMySQL() {
+			return false
+		}
+	}
+	return len(ts) > 0
 }
 
 // ddlSince is where the next DDL read of a client set starts: two intervals

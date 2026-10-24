@@ -92,6 +92,9 @@ type Server struct {
 	// Connector config versions (WithConfigVersions): configversions.go.
 	configVersions clients.ConfigVersionReader
 
+	// Model panel and picker (WithModels): models.go.
+	models Models
+
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
 	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
@@ -239,6 +242,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Use(middleware.Timeout(requestTimeout))
 
 				short.Get("/me", s.handleMe)
+				if s.models != nil {
+					// The model panel (V7): any logged-in user, viewers too.
+					short.Get("/models", s.handleGetModels)
+				}
 				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
@@ -313,6 +320,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// Admin settings (WithAdmin; admin.go): their own group, so the
 		// admin check answers before the content type and body checks.
 		s.mountAdmin(api)
+		// The model picker's write route (models.go): its own group too.
+		s.mountModelsPut(api)
 	})
 	s.gw.OriginPatterns = s.wsOriginPatterns()
 	s.handler = r
@@ -367,6 +376,13 @@ func (s *Server) wsOriginPatterns() []string {
 // which is trusted here.
 func (s *Server) crossOriginProtection() *http.CrossOriginProtection {
 	cop := http.NewCrossOriginProtection()
+	if s.models != nil && s.models.Editable() {
+		// PUT /api/models runs a stricter check of its own (modelsOrigin:
+		// Origin required and equal to this server's, Sec-Fetch-Site
+		// same-origin, a JSON body), which answers 403 origin as docs/api.md
+		// says; this generic check would answer first with its own body.
+		cop.AddInsecureBypassPattern("PUT " + modelsPath)
+	}
 	if h := s.publicHostInList(); h != "" {
 		if err := cop.AddTrustedOrigin(s.public.Scheme + "://" + h); err != nil {
 			s.log.Error("httpapi: trusted origin", "host", h, "err", err)
@@ -383,9 +399,10 @@ func userFrom(ctx context.Context) room.User {
 func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if setupSecretPath(r.URL.Path) {
+			if setupSecretPath(r.URL.Path) || modelsRoute(r.URL.Path) {
 				// A secret value is in this body: no request line is written
-				// for it (docs/api.md, POST /api/rooms/{id}/setup/secret).
+				// for it (docs/api.md, POST /api/rooms/{id}/setup/secret and
+				// PUT /api/models, whose body may carry a model key).
 				next.ServeHTTP(w, r)
 				return
 			}
