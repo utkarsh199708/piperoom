@@ -163,6 +163,10 @@ type Proposal struct {
 	Class string `json:"class,omitempty"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
+	// approvers is the actor name of each layer's approval.given
+	// ("layer -> display name"): the executor's actions.StepRef.Approvals
+	// (Q7k). Copy-on-write in Apply.
+	approvers map[string]string
 	// outcomes is each step's action.executed outcome so far, by step index
 	// (outcomeNotRun until one arrives). Copy-on-write in Apply. It feeds the
 	// proposal_executed input of a driver's proposal (proposalExecutedInput).
@@ -287,6 +291,11 @@ type RoomSnapshot struct {
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
+	// PullRequests are the fix PRs the room's steps opened (Q7,
+	// docs/api.md "Q7 snapshot field"): room-level, newest first, at most
+	// maxSnapshotPullRequests; never null. An executed proposal leaves
+	// OpenProposals, but its PR stays here and stays followed (Q7e).
+	PullRequests []PullRequest `json:"pull_requests"`
 
 	// finished is the driver-authored proposal the last folded event ended
 	// (action.executed), nil after any other event. Never mutated once set.
@@ -897,6 +906,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		setApproval(snap.OpenProposals, p.ProposalID, p.Layer, "approved")
+		setApprover(snap.OpenProposals, p.ProposalID, p.Layer, e.Actor.Name)
 		foldScheduleDecision(snap.OpenProposals, p.ProposalID, e.Actor.Kind == events.ActorSystem && p.Grant == events.GrantPolicy)
 
 	case events.ProposalScheduled:
@@ -930,10 +940,28 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		foldStepOutcome(&snap, e.Seq, p)
+		if p.OK && p.PullRequest != nil {
+			origin := ""
+			if op, ok := openProposal(snap, p.ProposalID); ok {
+				origin = op.Origin
+			}
+			snap.PullRequests = notePROrigin(addPullRequest(snap.PullRequests, p, e.At), p.ProposalID, p.StepIndex, origin)
+		}
 		// The proposal leaves the open list when its last step runs, or when
 		// any step fails (the executor stops there, so it is decided).
 		if !p.OK || isLastStep(snap.OpenProposals, p.ProposalID, p.StepIndex) {
 			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
+		}
+
+	case events.PullRequestUpdated:
+		if p, ok := decode[events.PullRequestUpdatedPayload](e); ok {
+			snap.PullRequests = applyPRUpdate(snap.PullRequests, p, e.At)
+			snap.PullRequests = notePRFinal(snap.PullRequests, p, e)
+		}
+
+	case events.AgentVerification:
+		if p, ok := decode[events.AgentVerificationPayload](e); ok {
+			snap.PullRequests = notePRVerified(snap.PullRequests, p.ProposalID)
 		}
 	}
 
@@ -991,6 +1019,9 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 	}
 	if snap.TeamPages == nil {
 		snap.TeamPages = []TeamPaged{}
+	}
+	if snap.PullRequests == nil {
+		snap.PullRequests = []PullRequest{}
 	}
 	if snap.AgentStatus.State == "" {
 		snap.AgentStatus.State = "idle"
@@ -1165,6 +1196,21 @@ func setApproval(proposals []Proposal, proposalID, layer, decision string) {
 			}
 			m[layer] = decision
 			proposals[i].Approvals = m
+			return
+		}
+	}
+}
+
+// setApprover records who gave a layer's approval (copy-on-write).
+func setApprover(proposals []Proposal, proposalID, layer, name string) {
+	for i := range proposals {
+		if proposals[i].ProposalID == proposalID {
+			m := make(map[string]string, len(proposals[i].approvers)+1)
+			for k, v := range proposals[i].approvers {
+				m[k] = v
+			}
+			m[layer] = name
+			proposals[i].approvers = m
 			return
 		}
 	}

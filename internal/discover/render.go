@@ -24,6 +24,7 @@ const (
 	ownedLayersNote  = "Every layer is owned by one user so a single person can approve everything. Give a layer to another user (and list it in USERS_FILE) when the team grows."
 	sinkMissingTODO  = "TODO: sink table not found; fill in sink_tables (schema.table) and sink_ts_column"
 	sinkFoundTODOFmt = "TODO: sink table found in a sink connector config: %s; add it to sink_tables and set sink_ts_column (the column is not discoverable)"
+	mysqlOwnersNote  = "a MySQL source: its layer is mysql, owned here (the layers: map names postgres)"
 )
 
 // Render writes r as a draft owners file in the dev/owners.yaml shape. It
@@ -97,7 +98,7 @@ func renderDoc(w io.Writer, r Result, owner string) error {
 	owned := owner != ""
 	pipelines := &yaml.Node{Kind: yaml.SequenceNode}
 	for _, p := range r.Pipelines {
-		pipelines.Content = append(pipelines.Content, pipelineNode(p, owned))
+		pipelines.Content = append(pipelines.Content, pipelineNode(p, owner))
 	}
 	if len(pipelines.Content) == 0 {
 		pipelines.Style = yaml.FlowStyle
@@ -143,7 +144,8 @@ func encode(w io.Writer, doc *yaml.Node) error {
 	return nil
 }
 
-func pipelineNode(p Pipeline, owned bool) *yaml.Node {
+func pipelineNode(p Pipeline, owner string) *yaml.Node {
+	owned := owner != ""
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	if len(p.Notes) > 0 {
 		lines := make([]string, len(p.Notes))
@@ -169,6 +171,11 @@ func pipelineNode(p Pipeline, owned bool) *yaml.Node {
 	m.Content = append(m.Content,
 		str("id"), str(p.ID),
 		str("title"), title,
+	)
+	if p.SourceKind != "" {
+		m.Content = append(m.Content, str("source_kind"), str(p.SourceKind))
+	}
+	m.Content = append(m.Content,
 		str("topic_prefix"), str(p.TopicPrefix),
 		str("source_tables"), flowList(p.SourceTables),
 		str("connectors"), flowList([]string{p.Connector}),
@@ -176,7 +183,26 @@ func pipelineNode(p Pipeline, owned bool) *yaml.Node {
 		sinkKey, flowList(nil),
 		str("sink_ts_column"), &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "", Style: yaml.DoubleQuotedStyle},
 	)
+	if p.SourceKind == sourceKindMySQL {
+		m.Content = append(m.Content, str("owners"), mysqlOwners(owner))
+	}
 	return m
+}
+
+// mysqlOwners is the per-pipeline owners: block of a MySQL pipeline. Its
+// source layer is mysql, which the top-level layers: map (the CDC layers,
+// postgres first) does not name, so the pipeline names its owner here: the
+// owner of the owned form, else TODO. The users file does not change: the
+// server checks it against the top-level layers only.
+func mysqlOwners(owner string) *yaml.Node {
+	who := "TODO"
+	if owner != "" {
+		who = "user:" + owner
+	}
+	key := str(sourceKindMySQL)
+	key.HeadComment = comment(mysqlOwnersNote)
+	rights := &yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle, Content: []*yaml.Node{str("approvers"), str(who)}}
+	return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{key, rights}}
 }
 
 func footer(r Result) string {

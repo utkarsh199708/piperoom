@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
 
@@ -310,6 +311,8 @@ func componentForTool(tool string) string {
 		return "kafka"
 	case strings.HasPrefix(tool, "pg_"):
 		return "postgres"
+	case strings.HasPrefix(tool, "mysql_"):
+		return events.LayerMySQL
 	case strings.HasPrefix(tool, "warehouse_"):
 		return "warehouse"
 	}

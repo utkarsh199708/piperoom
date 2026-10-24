@@ -1224,7 +1224,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S20"
@@ -1237,7 +1238,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S2"
@@ -1250,7 +1252,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S21"
@@ -1278,7 +1281,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S14"
@@ -1304,7 +1308,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S12"
@@ -1317,7 +1322,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S7"
@@ -1331,7 +1337,6 @@
       "keyword": false,
       "items": [
         "root_cause",
-        "first_failing_layer",
         "root_cause_layer"
       ],
       "sources": [
@@ -1345,7 +1350,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S18"
@@ -1358,7 +1364,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S9"
@@ -1401,7 +1408,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S23"
@@ -1414,7 +1422,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S17"
@@ -1427,7 +1436,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S19"
@@ -1470,7 +1480,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S11"

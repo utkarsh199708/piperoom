@@ -11,6 +11,7 @@ import { clockTime } from '../../lib/time'
 import { verdictKind, verdictWords } from '../../lib/execution'
 import { recoveryOutcome } from '../../lib/recovery'
 import { RecoveryResult } from './RecoveryCard'
+import { fixPROutcomeWords } from '../../lib/fixpr'
 
 export interface CloseNudge {
   /** The room is open, so closing it is still possible. */
@@ -90,11 +91,17 @@ export function VerificationCard({
   const outcome = isRecovery ? recoveryOutcome(verification) : undefined
   const ok = outcome ? outcome === 'recovered' && verification.recovered : kind === 'recovered'
   const flow = verification.data_flow
+  // Q7: a fix PR that closed unmerged, or merged but never showed up, is not "not recovered": say which.
+  const prOutcome = outcome ? undefined : fixPROutcomeWords(verification.outcome)
   return (
     <div role="status" className="flex flex-col gap-2 px-3.5 py-2.5 text-sm" data-testid="verification-card">
       <div className="flex flex-col gap-0.5">
         {outcome ? (
           <RecoveryResult verification={verification} outcome={outcome} recovery={recovery} />
+        ) : prOutcome ? (
+          <p className="m-0 font-medium text-warning-foreground" data-testid="fixpr-outcome">
+            {prOutcome}
+          </p>
         ) : (
           <p
             className={cn(

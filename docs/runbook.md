@@ -163,6 +163,51 @@ Rooms that existed before it get their byte count in the background after the se
 
 Live evals are `evals-live.yml`, documented in `evals/README.md` ("CI (evals-live)").
 
+### Gate run of a model provider (`evals-live.yml`, V12)
+
+A model other than Claude is admitted by its own gate run (`docs/design/model-providers.md` section 5; the published
+table is `docs/pilot/models.md`, added by V14). Actions, evals-live, Run workflow, on `main`:
+
+| Input | Value |
+|---|---|
+| `provider` | `openai`, `gemini` or `bedrock-converse` (`anthropic` is today's Claude run; `supported-list` below) |
+| `flavor` | with `openai` only: `openai`, `azure`, `deepseek`, `qwen`, `mistral`, `groq`, `together`, `openrouter`, `xai`, `ollama`, `vllm`, `generic` |
+| `model` | the pinned model id (required for every provider but `anthropic`) |
+| `only`, `runs` | `all` and `3`: a run of less cannot be gated, and the dispatch is refused before any approval |
+| `make_baseline` | leave off; it is for the Claude default baseline |
+
+The run is gated against `evals/baseline/default.json` (`evalrun -gate`) and, when `evals/baseline/<provider>-<model>.json`
+exists, compared with it (`-baseline`, `-fail-on-regression`). Exit **4** (a hard gate failed) fails the job; exit **5**
+(a quality floor missed) is a warning, and the model can be admitted as `experimental` only. The report is the artifact
+`baseline-<provider>-<model>` (14 days): commit it as `evals/baseline/<provider>-<model>.json` (model id with `/` and `:`
+as `_`) in a PR, then A4 adds the `supported.json` row (V13).
+
+**Secrets** (Settings, Environments, `evals`, with its required reviewers): one per provider, named after the key
+variable the adapter reads: `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `DASHSCOPE_API_KEY` (qwen),
+`MISTRAL_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
+`AWS_BEARER_TOKEN_BEDROCK`. The job gets the secret of the chosen provider only. `ANTHROPIC_API_KEY` stays for the
+judge, which is Anthropic for every model so a candidate is judged like the reference; without it the judge is off
+and the run is for development, not for admission. Variables of the same environment: `EVALS_MODEL_BASE_URL` (the
+https endpoint of `ollama`, `vllm` and `generic`), `EVALS_AZURE_BASE_URL` (`azure`) and `EVALS_AWS_REGION`
+(`bedrock-converse`). Each is passed only to the legs it belongs to, so no other provider's key reaches that endpoint.
+`vllm` and `generic` legs run without a key.
+
+**A missing secret skips, it does not fail.** The first step checks that the chosen provider's secret (and, where it
+applies, the variable above) is set, prints a `::notice::` naming it, and the job ends green with no checkout, no build
+and no spend. `ollama` needs no secret but a hosted runner cannot serve a local model: without
+`EVALS_MODEL_BASE_URL` it skips the same way; run Ollama on a developer machine (`evals/README.md`, "A free local run on
+Ollama").
+
+**All supported rows at once.** `provider: supported-list` re-gates every row of `internal/agent/llm/supported.json`,
+one at a time (`max-parallel: 1`), in `gate_order` (default `ollama,openai,gemini,deepseek,qwen`: provider names, or
+openai flavor names; rows not named run last; decision 9 of the design). Rows past their `sunset` are left out. A row
+listed as `supported` whose run misses a quality floor fails its leg: change the row to `experimental` in the PR that
+moves the reference. The nightly `schedule` is still commented out; turn it on in the same file when the budget allows.
+
+`ci.yml` checks the list on every PR (`go test -run TestSupportedListGate ./evals/`): each row needs its 3-run baseline
+passing `-gate` against the reference, and no `sunset` may have passed. After a sunset date the check fails on the next
+PR; remove the row or replace the model.
+
 Allowlist upkeep: an entry past its review-by date fails the job for every PR, so the owner named on the line renews it
 or fixes the test before that date.
 

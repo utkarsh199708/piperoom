@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -16,6 +18,8 @@ import (
 )
 
 // setupScenarioNames are the six U1-19 scenarios U1-20 scores in replay mode.
+// Every other session in setup/recordings (another source's setup scenarios)
+// is scored the same way after them, without a list to keep.
 var setupScenarioNames = []string{
 	"setup/compose-postgres-clean",
 	"setup/compose-privileged-refused",
@@ -26,10 +30,11 @@ var setupScenarioNames = []string{
 }
 
 // TestSetupScenariosScoreInReplayMode is the U1-20 done-when for setup runs:
-// each of the six U1-19 scenarios has a recorded runner session, the session
-// replays every op it records, its verification ladder recomputes the
-// recorded setup.verified from its own reads, and the scenario itself scores
-// 100 in the harness with no model. No real runner, no Docker, no network.
+// each of the six U1-19 scenarios, and every other scenario with a recorded
+// runner session, has its session replay every op it records, its
+// verification ladder recompute the recorded setup.verified from its own
+// reads, and the scenario itself score 100 in the harness with no model. No
+// real runner, no Docker, no network.
 func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
@@ -48,10 +53,23 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 		byName[sc.Name] = sc
 	}
 
+	// The six U1-19 scenarios first, then every other recorded session by
+	// name.
+	names := append([]string(nil), setupScenarioNames...)
+	var others []string
+	for name := range recs {
+		if !slices.Contains(names, name) {
+			others = append(others, name)
+		}
+	}
+	sort.Strings(others)
+	names = append(names, others...)
+	wantTarget, wantSource := map[string]int{}, map[string]int{}
+
 	ctx := context.Background()
-	attached := make([]Scenario, 0, len(setupScenarioNames))
+	attached := make([]Scenario, 0, len(names))
 	var results []RunResult
-	for _, name := range setupScenarioNames {
+	for _, name := range names {
 		sc, ok := byName[name]
 		if !ok {
 			t.Fatalf("%s: no scenario file", name)
@@ -60,6 +78,8 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: no runner recording", name)
 		}
+		wantTarget[rec.Target]++
+		wantSource[rec.SourceKind()]++
 		t.Run(name, func(t *testing.T) {
 			// The recorded op session replays without a runner: every op it
 			// records answers, with its receipt, and nothing is left over.
@@ -141,8 +161,8 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 			if !r.Pass || r.Score != 100 || len(r.Misses) != 0 {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v", r.Pass, r.Score, r.Misses, r.Failures)
 			}
-			if len(rep.Scenarios) != 1 || rep.Scenarios[0].SourceKind != "postgres" || rep.Scenarios[0].Target != "compose" {
-				t.Errorf("scenario kinds = %+v, want postgres/compose from the recording", rep.Scenarios)
+			if len(rep.Scenarios) != 1 || rep.Scenarios[0].SourceKind != rec.SourceKind() || rep.Scenarios[0].Target != rec.Target {
+				t.Errorf("scenario kinds = %+v, want %s/%s from the recording", rep.Scenarios, rec.SourceKind(), rec.Target)
 			}
 			attachSetup(&sc, rec)
 			attached = append(attached, sc)
@@ -150,17 +170,28 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 		})
 	}
 
-	// The six run as one report: every target and source group is green, and
-	// the existing overall fields still cover the same runs.
+	// They run as one report: every target and source group is green with
+	// the recordings' counts (the six U1-19 sessions are postgres on
+	// compose), and the existing overall fields still cover the same runs.
+	if wantSource["postgres"] < len(setupScenarioNames) {
+		t.Errorf("postgres sessions = %d, want at least the %d U1-19 ones", wantSource["postgres"], len(setupScenarioNames))
+	}
 	rep := buildReport(Config{Label: "setup-replay", Runs: 1}, attached, results, timeZero())
-	if len(rep.ByTarget) != 1 || rep.ByTarget[0].Kind != "compose" || rep.ByTarget[0].Runs != 6 || rep.ByTarget[0].Passes != 6 {
-		t.Errorf("by target = %+v, want compose 6/6", rep.ByTarget)
+	checkGroups := func(by string, got []Breakdown, want map[string]int) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Errorf("by %s = %+v, want the groups %v", by, got, want)
+		}
+		for _, g := range got {
+			if n := want[g.Kind]; g.Runs != n || g.Passes != n {
+				t.Errorf("by %s %s = %d/%d, want %d/%d", by, g.Kind, g.Passes, g.Runs, n, n)
+			}
+		}
 	}
-	if len(rep.BySource) != 1 || rep.BySource[0].Kind != "postgres" || rep.BySource[0].Runs != 6 || rep.BySource[0].Passes != 6 {
-		t.Errorf("by source = %+v, want postgres 6/6", rep.BySource)
-	}
-	if rep.Overall.Runs != 6 || rep.Overall.Passes != 6 || rep.Overall.PassRate != 1 {
-		t.Errorf("overall = %+v, want the unchanged 6/6 fields", rep.Overall)
+	checkGroups("target", rep.ByTarget, wantTarget)
+	checkGroups("source", rep.BySource, wantSource)
+	if n := len(names); rep.Overall.Runs != n || rep.Overall.Passes != n || rep.Overall.PassRate != 1 {
+		t.Errorf("overall = %+v, want %d/%d", rep.Overall, n, n)
 	}
 }
 

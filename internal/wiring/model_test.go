@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/config"
 )
 
@@ -27,7 +29,9 @@ func TestEndpointConfigCopiesTheModelSettings(t *testing.T) {
 		VertexProject: "p", VertexRegion: "r",
 		TriageModel: "tri", RoomTokenBudget: "123",
 	}
-	if got != want {
+	// EndpointConfig holds func fields (Getenv, WrapModel), so == does not
+	// compile; both are nil here.
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("EndpointConfig = %+v, want %+v", got, want)
 	}
 }
@@ -204,5 +208,47 @@ func TestNewAgentEndpointNewProviderRunsTheStartChecks(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `msg="model role" role=main`) {
 		t.Fatalf("no role line:\n%s", buf.String())
+	}
+}
+
+func TestNewAgentEndpointWithOptions(t *testing.T) {
+	calls := map[string]int{}
+	wrap := WithModelWrap(func(role string, m llm.Model) llm.Model {
+		calls[role]++
+		return m
+	})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ep, err := NewAgentEndpointWith(context.Background(), config.Config{}, log, nil,
+		WithGetenv(func(k string) string {
+			if k == "ANTHROPIC_API_KEY" {
+				return "sk-ant-picker"
+			}
+			return ""
+		}), wrap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls["main"] != 1 {
+		t.Fatalf("wrap calls = %v, want main once", calls)
+	}
+	// Wiring always sets the knobs, so every configured role is listed, all
+	// on the one Claude client.
+	var names []string
+	for _, r := range ep.Roles() {
+		if r.Provider != agent.ProviderAnthropic || !r.PromptCache {
+			t.Fatalf("role %+v", r)
+		}
+		names = append(names, r.Name)
+	}
+	if got := strings.Join(names, ","); got != "main,first_look,summary,judge" {
+		t.Fatalf("roles = %s", got)
+	}
+
+	// The override replaces the process environment for the key: an empty
+	// one refuses start, even when the process has a key.
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-process")
+	_, err = NewAgentEndpointWithEnv(context.Background(), config.Config{}, log, nil, func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || strings.Contains(err.Error(), "sk-ant-process") {
+		t.Fatalf("err = %v, want a start error naming ANTHROPIC_API_KEY and no key", err)
 	}
 }
