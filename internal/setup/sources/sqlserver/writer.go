@@ -114,5 +114,5 @@ func (w *Writer) CreateReadRole(ctx context.Context, role string, tables []strin
 // AlterSystem has no SQL Server equivalent on the setup allow-list: it is
 // clients.ErrNotSupported before any I/O, whatever the wrapped writer is.
 func (w *Writer) AlterSystem(_ context.Context, name, _ string) (bool, error) {
-	return false, fmt.Errorf("sqlserver writer: alter system %s: %w", clipName(name), clients.ErrNotSupported)
+	return false, fmt.Errorf("sqlserver writer: alter system %q: %w", clipName(name), clients.ErrNotSupported)
 }

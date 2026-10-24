@@ -93,6 +93,9 @@ func TestConnectorConfigRefusals(t *testing.T) {
 		{"system database", func(o *ConnectorOptions) { o.Database = "master" }},
 		{"database with a space", func(o *ConnectorOptions) { o.Database = "or ders" }},
 		{"sa user", func(o *ConnectorOptions) { o.User = "sa" }},
+		{"guest user", func(o *ConnectorOptions) { o.User = "guest" }},
+		{"cdc user", func(o *ConnectorOptions) { o.User = "cdc" }},
+		{"history broker ipv6 without brackets", func(o *ConnectorOptions) { o.HistoryBootstrap = "::1:9092" }},
 		{"user with a bracket", func(o *ConnectorOptions) { o.User = "ro]" }},
 		{"no secret name", func(o *ConnectorOptions) { o.PasswordSecret = "" }},
 		{"secret name with a slash", func(o *ConnectorOptions) { o.PasswordSecret = "../../etc/passwd" }},
@@ -114,5 +117,45 @@ func TestConnectorConfigRefusals(t *testing.T) {
 				t.Fatalf("accepted: %v", cfg)
 			}
 		})
+	}
+}
+
+// TestConnectorConfigTLSKeysPassQ4aShapes: the keys written only with Encrypt
+// on are Connect config keys and not credential keys (their values are plain
+// booleans, so LooksSecret must not claim them), trustServerCertificate is
+// absent with encryption off, and an IPv6 broker keeps its brackets.
+func TestConnectorConfigTLSKeysPassQ4aShapes(t *testing.T) {
+	o := testConnectorOptions()
+	o.Encrypt, o.TrustServerCertificate = true, true
+	o.HistoryBootstrap = "[::1]:9092,kafka:9092"
+	cfg, err := ConnectorConfig(o)
+	if err != nil {
+		t.Fatalf("ConnectorConfig: %v", err)
+	}
+	keyRe := regexp.MustCompile(`^[A-Za-z0-9_$][A-Za-z0-9._$-]*$`)
+	for k, v := range cfg {
+		if !keyRe.MatchString(k) {
+			t.Errorf("key %q is not a Connect config key", k)
+		}
+		if strings.Contains(v, "${") && (!strings.HasPrefix(v, "${secret:") || !actions.LooksSecret(k)) {
+			t.Errorf("%s holds a reference %q outside a credential key", k, v)
+		}
+		if actions.LooksSecret(k) && !strings.HasPrefix(v, "${secret:") {
+			t.Errorf("%s is a credential key with a plaintext value", k)
+		}
+	}
+	if cfg["database.encrypt"] != "true" || cfg["database.trustServerCertificate"] != "true" {
+		t.Fatalf("TLS keys: %v", cfg)
+	}
+	if got := cfg["schema.history.internal.kafka.bootstrap.servers"]; got != "[::1]:9092,kafka:9092" {
+		t.Fatalf("bootstrap servers = %q", got)
+	}
+	o.Encrypt = false
+	cfg, err = ConnectorConfig(o)
+	if err != nil {
+		t.Fatalf("ConnectorConfig without TLS: %v", err)
+	}
+	if _, ok := cfg["database.trustServerCertificate"]; ok || cfg["database.encrypt"] != "false" {
+		t.Fatalf("trustServerCertificate written with encryption off: %v", cfg)
 	}
 }
