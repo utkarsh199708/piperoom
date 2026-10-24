@@ -1672,9 +1672,20 @@ type SetupRequest struct {
 }
 
 // SetupTarget is one host or account a setup room may reach. Kind says what
-// it is ("postgres", "kafka", "connect", "registry", "kubernetes", "aws",
-// "confluent", "aiven", "host"); Address is a host:port, a URL, a kubectl
-// context and namespace, or an account id. Class is a floor: the person may
+// it is ("postgres", "kafka", "connect", "registry", "image_registry",
+// "kubernetes", "aws", "confluent", "aiven", "host"); "registry" always means
+// the Schema Registry, "image_registry" the container registry a Strimzi
+// build pushes to. Address is a host:port, a URL, a kubectl context and
+// namespace, or an account id. Forms that are not a host:
+//   - kind "kafka" on the strimzi target: strimzi://<name> (the Kafka CR);
+//   - kind "aws": <account id>/<region>[/<cluster arn>];
+//   - kind "confluent": <environment id>/<cluster id>;
+//   - kind "aiven": <project>/<service>.
+//
+// PIPEROOM_SETUP_PROD_PATTERNS matches the first segment of the cloud forms.
+// The server's address denylist skips DNS resolution for these non-host
+// addresses; the runner's dial hook stays the guarantee. The targets routes
+// accept kind "image_registry". Class is a floor: the person may
 // raise a class above what the server derives, never lower it, and a
 // registered target is never below "shared" (docs/design/setup-agent.md
 // §2.6, §3.5). Empty means "let the server derive it".
