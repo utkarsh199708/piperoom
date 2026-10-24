@@ -55,6 +55,21 @@ type Report struct {
 	// are additive: no existing field changes.
 	ByTarget []Breakdown `json:"by_target,omitempty"`
 	BySource []Breakdown `json:"by_source,omitempty"`
+	// Provider and Flavor are the main model's provider (anthropic,
+	// bedrock, vertex, openai, gemini, bedrock-converse) and, for openai,
+	// its flavor; PromptHashKind is PromptHashKind(PromptHashes): the
+	// Anthropic tap's "sha256", the other adapters' "neutral-sha256", or
+	// "untapped". Hashes of two kinds never compare. Set by evalrun (V10);
+	// empty in reports written before it.
+	Provider       string `json:"provider,omitempty"`
+	Flavor         string `json:"flavor,omitempty"`
+	PromptHashKind string `json:"prompt_hash_kind,omitempty"`
+	// PendingHarness lists the scenarios skipped because they wait for a harness
+	// row (pending_harness); PendingHarnessRan lists those an explicit -only
+	// ran anyway. Neither counts in a baseline comparison, and the skipped ones
+	// are in no rate.
+	PendingHarness    []string `json:"pending_harness,omitempty"`
+	PendingHarnessRan []string `json:"pending_harness_ran,omitempty"`
 }
 
 // Breakdown is one group of a report's per-target or per-source pass rate.
@@ -121,10 +136,22 @@ type Summary struct {
 // (U1-20); SourceKind defaults to postgres, Target is "" when the scenario
 // names none.
 type ScenarioSummary struct {
-	Name       string `json:"name"`
+	Name string `json:"name"`
+	// SourceKind is the scenario room's source kind (Q8j) or, for a setup
+	// scenario, its setup source kind; "" in a report written before Q8j,
+	// which reads as postgres.
 	SourceKind string `json:"source_kind,omitempty"`
 	Target     string `json:"target,omitempty"`
 	Summary
+}
+
+// sourceKindOf is the BySource key: a scenario row's source kind, postgres
+// when "" (a report written before Q8j).
+func sourceKindOf(s ScenarioSummary) string {
+	if s.SourceKind == "" {
+		return DefaultSourceKind
+	}
+	return s.SourceKind
 }
 
 func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started time.Time) Report {
@@ -155,7 +182,7 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	}
 	rep.Overall = combine(withRuns)
 	rep.Overall.Infra = totalInfra(rep.Scenarios)
-	rep.BySource = rateBy(rep.Scenarios, func(s ScenarioSummary) string { return s.SourceKind })
+	rep.BySource = rateBy(rep.Scenarios, sourceKindOf)
 	rep.ByTarget = rateBy(rep.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
@@ -354,7 +381,7 @@ func (r Report) Restrict(names []string) Report {
 	}
 	out.Overall = combine(withRuns)
 	out.Overall.Infra = totalInfra(out.Scenarios)
-	out.BySource = rateBy(out.Scenarios, func(s ScenarioSummary) string { return s.SourceKind })
+	out.BySource = rateBy(out.Scenarios, sourceKindOf)
 	out.ByTarget = rateBy(out.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	return out
 }
@@ -448,6 +475,12 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
 	writeBreakdowns(&b, r)
+	if len(r.PendingHarness) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (skipped, in no rate):** %s\n", mdCell(strings.Join(r.PendingHarness, ", ")))
+	}
+	if len(r.PendingHarnessRan) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (ran by -only, not compared with the baseline):** %s\n", mdCell(strings.Join(r.PendingHarnessRan, ", ")))
+	}
 	writeInvalidLine(&b, r.Overall, r.Results)
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)

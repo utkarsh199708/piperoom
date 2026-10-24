@@ -181,6 +181,16 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 		case "proposal_executed":
 			// A driver's fix ran: verify it as after the agent's own (P3e).
 			one = r.verifyDriverProposal(ctx, in)
+		case "pr_merged":
+			// A fix PR merged: wait for it to reach the system (Q7f).
+			one = r.prMerged(ctx, in)
+		case "pr_closed":
+			one = r.prClosed(ctx, in)
+		case kindApplyChecked:
+			one = r.applyChecked(ctx, in)
+		case "steer":
+			// A steer restarts the check of a merged PR not seen in time.
+			one.notes = r.restartNotDeployed(ctx)
 		default:
 			continue
 		}
@@ -212,10 +222,12 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	id, step, parsed := actionResultFields(in)
 	switch {
 	case in.OK == nil:
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	}
 	if !parsed {
 		return actionOutcome{}
@@ -224,6 +236,10 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if !ok {
 		r.log.Warn("agent: action_result for a proposal the agent did not create", "proposal", id)
 		return actionOutcome{}
+	}
+	if step >= 0 && step < len(rec.steps) && r.isDeferredAction(rec.steps[step].Action) {
+		// A fix-PR step only opened its PR: nothing to verify yet (Q7f).
+		return r.deferredOpened(ctx, id, rec.steps, step, events.ProposalOriginAgent)
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.

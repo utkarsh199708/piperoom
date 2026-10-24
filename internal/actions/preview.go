@@ -153,14 +153,17 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 	if err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
-	// A heartbeat key on a connector that is not a Debezium source would be
+	// A heartbeat or MySQL key on a connector it does not apply to would be
 	// refused at Execute: the preview must not promise it.
-	for _, k := range set.keys() {
-		if isHeartbeatKey(k) {
-			if err := checkHeartbeatGuard(set.connector, k, cfg); err != nil {
-				return PreviewResult{}, previewErr(a.Name(), err)
-			}
-		}
+	if err := set.checkSourceGuards(cfg); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	if err := a.d.checkServerID(ctx, set, false); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	recoveryNote, err := a.d.checkRecoveryName(ctx, set, cfg)
+	if err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
 	}
 	keys := set.keys()
 	todo, same := set.plan(cfg)
@@ -194,6 +197,10 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 	if len(sameText) > 0 {
 		res.Expected += " (unchanged: " + strings.Join(sameText, ", ") + ")"
 	}
+	if recoveryNote != "" {
+		res.Expected += "; " + recoveryNote
+	}
+	res.Downstream = append(res.Downstream, mysqlKeyPreview(todo)...)
 	prev, note := a.undoValues(ctx, cfg, todoKeys)
 	if prev != nil {
 		res.Reversible = true

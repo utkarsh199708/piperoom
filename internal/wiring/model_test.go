@@ -3,12 +3,18 @@ package wiring
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/config"
 )
 
@@ -23,7 +29,9 @@ func TestEndpointConfigCopiesTheModelSettings(t *testing.T) {
 		VertexProject: "p", VertexRegion: "r",
 		TriageModel: "tri", RoomTokenBudget: "123",
 	}
-	if got != want {
+	// EndpointConfig holds func fields (Getenv, WrapModel), so == does not
+	// compile; both are nil here.
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("EndpointConfig = %+v, want %+v", got, want)
 	}
 }
@@ -34,7 +42,7 @@ func TestNewAgentEndpointStartupErrors(t *testing.T) {
 		cfg  config.Config
 		want string
 	}{
-		{"unknown provider", config.Config{ModelProvider: "openai"}, "allowed values"},
+		{"unknown provider", config.Config{ModelProvider: "cohere"}, "PIPEROOM_MODEL_PROVIDER"},
 		{"bedrock without region", config.Config{ModelProvider: "bedrock"}, "AWS_REGION"},
 		{"vertex without project", config.Config{ModelProvider: "vertex", VertexRegion: "global"}, "VERTEX_PROJECT_ID"},
 		{"vertex without region", config.Config{ModelProvider: "vertex", VertexProject: "p"}, "VERTEX_REGION"},
@@ -131,5 +139,116 @@ func TestNewAgentEndpointNeutraliseControlTokens(t *testing.T) {
 	_, err := NewAgentEndpoint(context.Background(), config.Config{ModelProvider: "anthropic", ModelNeutraliseControlTokens: "off"}, log, nil)
 	if err == nil || !strings.Contains(err.Error(), "PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS") {
 		t.Fatalf("err = %v, want a refusal naming the variable", err)
+	}
+}
+
+// TestNewAgentEndpointClaudeUnchanged: on anthropic, bedrock and vertex an
+// unlisted id, a Bedrock inference-profile id, an application ARN and a
+// versioned Vertex id start as before V6, with today's warnings and today's
+// one log line; no start check, probe or role line runs (design 5, V6).
+func TestNewAgentEndpointClaudeUnchanged(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      config.Config
+		bedrockW bool // today's "does not look like a Bedrock model" warning
+	}{
+		{"anthropic default", config.Config{}, false},
+		{"anthropic unlisted id", config.Config{Model: "claude-future-9"}, false},
+		{"bedrock inference profile", config.Config{ModelProvider: "bedrock", AWSRegion: "us-east-1", Model: "us.anthropic.claude-opus-5-5-v1:0"}, false},
+		{"bedrock application ARN", config.Config{ModelProvider: "bedrock", AWSRegion: "us-east-1", Model: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc"}, false},
+		{"bedrock first-party name keeps today's warning", config.Config{ModelProvider: "bedrock", AWSRegion: "us-east-1", Model: "claude-opus-5-5"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AWS_ACCESS_KEY_ID", "AKIDTEST")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+			var buf bytes.Buffer
+			ep, err := NewAgentEndpoint(context.Background(), tt.cfg, slog.New(slog.NewTextHandler(&buf, nil)), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ep.NeedsStartChecks() {
+				t.Fatal("a Claude deployment needs start checks")
+			}
+			log := buf.String()
+			if strings.Count(log, `msg="model endpoint ready"`) != 1 || strings.Contains(log, "model role") || strings.Contains(log, "probe") {
+				t.Fatalf("log is not today's:\n%s", log)
+			}
+			// The first look's default (claude-haiku-5-5) warns on Bedrock today too.
+			if got := strings.Contains(log, "setting=PIPEROOM_MODEL "); got != tt.bedrockW {
+				t.Fatalf("bedrock warning = %v, want %v:\n%s", got, tt.bedrockW, log)
+			}
+		})
+	}
+}
+
+func TestNewAgentEndpointNewProviderRunsTheStartChecks(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		b, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"1","type":"function","function":{"name":"piperoom_start_probe","arguments":"{\"status\":\"ready\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":%d,"completion_tokens":3}}`, len(b)/3)
+	}))
+	defer srv.Close()
+	cfg := config.Config{ModelProvider: "openai", ModelFlavor: "ollama", Model: "qwen3:32b", ModelBaseURL: srv.URL}
+	if _, err := NewAgentEndpoint(context.Background(), cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "PIPEROOM_MODEL_UNVERIFIED=on") {
+		t.Fatalf("an unlisted model: err = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("a refused start sent %d requests", calls)
+	}
+	cfg.ModelUnverified = "on"
+	var buf bytes.Buffer
+	if _, err := NewAgentEndpoint(context.Background(), cfg, slog.New(slog.NewTextHandler(&buf, nil)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("probe requests = %d, want 1", calls)
+	}
+	if !strings.Contains(buf.String(), `msg="model role" role=main`) {
+		t.Fatalf("no role line:\n%s", buf.String())
+	}
+}
+
+func TestNewAgentEndpointWithOptions(t *testing.T) {
+	calls := map[string]int{}
+	wrap := WithModelWrap(func(role string, m llm.Model) llm.Model {
+		calls[role]++
+		return m
+	})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ep, err := NewAgentEndpointWith(context.Background(), config.Config{}, log, nil,
+		WithGetenv(func(k string) string {
+			if k == "ANTHROPIC_API_KEY" {
+				return "sk-ant-picker"
+			}
+			return ""
+		}), wrap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls["main"] != 1 {
+		t.Fatalf("wrap calls = %v, want main once", calls)
+	}
+	// Wiring always sets the knobs, so every configured role is listed, all
+	// on the one Claude client.
+	var names []string
+	for _, r := range ep.Roles() {
+		if r.Provider != agent.ProviderAnthropic || !r.PromptCache {
+			t.Fatalf("role %+v", r)
+		}
+		names = append(names, r.Name)
+	}
+	if got := strings.Join(names, ","); got != "main,first_look,summary,judge" {
+		t.Fatalf("roles = %s", got)
+	}
+
+	// The override replaces the process environment for the key: an empty
+	// one refuses start, even when the process has a key.
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-process")
+	_, err = NewAgentEndpointWithEnv(context.Background(), config.Config{}, log, nil, func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || strings.Contains(err.Error(), "sk-ant-process") {
+		t.Fatalf("err = %v, want a start error naming ANTHROPIC_API_KEY and no key", err)
 	}
 }

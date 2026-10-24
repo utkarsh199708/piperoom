@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "replication-slot-lost-failover",
   "hypothesis": "The Postgres failover promoted orders-db-2, and logical replication slots are not copied to a standby, so the slot debezium_orders is missing on the new primary and Debezium task 0 FAILED. A plain restart will not help; it needs a new slot plus a snapshot for the gap.",
-  "truth_sha256": "fa26ddedfcae6870adcbc11dafafd1a20906d1be5d2195baa67147e10141c233",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "80fc3dfb77bda06bb86aaa85b3613eb145ae3a2e74b71e7781e7baaa93ad6255",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": true,
     "root_cause_correct": true,
     "root_cause_layer_correct": true,
-    "reason": "The hypothesis names the root cause: the debezium_orders slot is missing on the new primary after the failover/promotion. It places the failure in Postgres, which is both the first failing layer and the root-cause layer."
+    "reason": "The hypothesis correctly says the debezium_orders slot was lost in the failover and is missing on the new primary. It places the root cause in postgres and has the Debezium task (kafka-connect) as the first failure."
   }
 }

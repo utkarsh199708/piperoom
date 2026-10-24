@@ -7,6 +7,8 @@ import { shortHash } from '../../lib/hash'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { RollbackButton } from './RollbackButton'
+import { PullRequestBadge } from './PullRequestBadge'
+import { waitingOnMerge } from '../../lib/fixpr'
 import { cn } from '@/lib/utils'
 
 function headerText(proposal: ProposalState): string {
@@ -16,7 +18,9 @@ function headerText(proposal: ProposalState): string {
     case 'running':
       return `Running · step ${step} of ${of}${action ? ` · ${action}` : ''}`
     case 'done':
-      return proposal.verification ? `Ran ${of} of ${of}` : `Ran ${of} of ${of} · verifying…`
+      if (proposal.verification) return `Ran ${of} of ${of}`
+      // Q7: an open fix PR is verified only after a reviewer merges it, not now.
+      return waitingOnMerge(proposal.pull_requests) ? `Ran ${of} of ${of} · waiting for a reviewer to merge` : `Ran ${of} of ${of} · verifying…`
     case 'failed':
       return `Stopped at step ${step} of ${of}`
     case 'unknown':
@@ -58,7 +62,7 @@ export function ExecutionCard({
   if (proposal.executed.length === 0 && info.phase !== 'running') return null
   const byStep = new Map(proposal.executed.map((x) => [x.step_index, x]))
   const running = info.phase === 'running'
-  const verifying = info.phase === 'done' && !proposal.verification
+  const verifying = info.phase === 'done' && !proposal.verification && !waitingOnMerge(proposal.pull_requests)
   return (
     <div className="flex flex-col gap-2 px-3.5 py-2.5 text-sm">
       <p
@@ -74,6 +78,7 @@ export function ExecutionCard({
           const ex = byStep.get(i)
           const isRunning = running && !ex && i === info.step - 1
           const differs = !!ex?.params_hash && !!proposal.params_hash && ex.params_hash !== proposal.params_hash
+          const pr = proposal.pull_requests?.[i]
           return (
             <li key={i} className="flex flex-wrap items-center gap-2" data-testid={`exec-step-${i}`}>
               {ex?.outcome_unknown ? (
@@ -110,6 +115,11 @@ export function ExecutionCard({
                   <TriangleAlert className="size-3" aria-hidden="true" />
                   fingerprint differs from proposal
                 </Badge>
+              )}
+              {pr && (
+                <div className="basis-full pl-6">
+                  <PullRequestBadge pr={pr} stepIndex={i} />
+                </div>
               )}
             </li>
           )

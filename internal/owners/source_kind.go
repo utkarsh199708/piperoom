@@ -60,6 +60,12 @@ func sourceLayer(sourceKind string) string {
 	return ""
 }
 
+// SourceLayerOf is events.SourceLayer of design §5.1 until it lands there:
+// the layer whose owner approves a step on a source database of the given
+// kind ("" = postgres), "" for an unknown kind. Callers that know only a
+// kind string, not a Pipeline (sourceactions.LayerFor, Q8n), use it.
+func SourceLayerOf(sourceKind string) string { return sourceLayer(sourceKind) }
+
 // layersOfSource returns the layers of a pipeline of kind and sourceKind,
 // upstream first: events.LayersOf(kind) with the source layer of a cdc
 // pipeline (index 0) replaced by sourceLayer(sourceKind). A batch pipeline

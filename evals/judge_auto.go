@@ -24,8 +24,9 @@ const DefaultJudgeMaxCalls = 50
 
 // JudgeStats is what the judge did in one evaluation (Report.Judge).
 type JudgeStats struct {
-	// Ambiguous counts diagnose runs whose final hypothesis had an ambiguous
-	// item, in any judge mode.
+	// Ambiguous counts runs with an ambiguous item, in any judge mode: a
+	// diagnose run's final hypothesis, or a healthy run's verdict
+	// (gradeHealthy).
 	Ambiguous int `json:"ambiguous"`
 	// Judged counts the auto-mode runs a verdict settled, CacheHits and
 	// LiveVerdicts of them by where the verdict came from.
@@ -152,14 +153,9 @@ func (g *judgeGate) settle(ctx context.Context, sc Scenario, hypothesis string) 
 	if g.live == nil {
 		return Verdict{}, "", unjudgedError{"no recorded verdict and no live judge (build evalrun with -tags livejudge)"}
 	}
-	g.mu.Lock()
-	if g.maxCalls < 0 || g.stats.LiveCalls >= g.maxCalls {
-		g.mu.Unlock()
-		return Verdict{}, "", unjudgedError{fmt.Sprintf("the judge call cap (%d per run) is reached", max(g.maxCalls, 0))}
+	if why, ok := g.reserveLiveCall(); !ok {
+		return Verdict{}, "", unjudgedError{why}
 	}
-	// Reserve the call before making it, so parallel runs cannot pass the cap.
-	g.stats.LiveCalls++
-	g.mu.Unlock()
 	v, err := g.call(ctx, sc, hypothesis)
 	if err != nil {
 		return Verdict{}, "", err
@@ -168,11 +164,29 @@ func (g *judgeGate) settle(ctx context.Context, sc Scenario, hypothesis string) 
 	return v, ambiguityLive, nil
 }
 
+// reserveLiveCall counts one auto-mode live call against the cap before it
+// is made, so parallel runs cannot pass the cap; ok is false, with the reason,
+// when the cap is reached.
+func (g *judgeGate) reserveLiveCall() (why string, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.maxCalls < 0 || g.stats.LiveCalls >= g.maxCalls {
+		return fmt.Sprintf("the judge call cap (%d per run) is reached", max(g.maxCalls, 0)), false
+	}
+	g.stats.LiveCalls++
+	return "", true
+}
+
 // gradeFinal applies the run's judge mode to a result Judge scored: terms
 // keeps it; claude replaces the root cause and layers with a live verdict for
 // every diagnose hypothesis; auto does so only when the tri-state pass finds
 // an ambiguous item. The ambiguity is recorded in every mode.
 func gradeFinal(ctx context.Context, cfg Config, g *judgeGate, sc Scenario, res RunResult) (RunResult, error) {
+	// A healthy scenario has no root cause, but its verdict can be
+	// ambiguous: a healthy phrase beside a fault word.
+	if sc.Expect.outcome() == OutcomeHealthy {
+		return gradeHealthy(ctx, cfg, g, sc, res)
+	}
 	// Nothing to grade without a hypothesis; the terms verdict already says
 	// so. Healthy, abstain and ask scenarios have no root cause for a judge.
 	if res.FinalHypothesis == "" || sc.Expect.outcome() != OutcomeDiagnose {

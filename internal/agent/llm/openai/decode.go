@@ -21,9 +21,11 @@ type wireResponse struct {
 
 type wireChoice struct {
 	Message struct {
-		Content   json.RawMessage `json:"content"` // a string, null, or text parts
-		Refusal   *string         `json:"refusal"`
-		ToolCalls []struct {
+		Content json.RawMessage `json:"content"` // a string, null, or text parts
+		Refusal *string         `json:"refusal"`
+		// ReasoningContent is DeepSeek's thinking (deepseek-reasoner).
+		ReasoningContent string `json:"reasoning_content"`
+		ToolCalls        []struct {
 			ID       string `json:"id"`
 			Function struct {
 				Name string `json:"name"`
@@ -43,9 +45,12 @@ type wireFilterResult struct {
 }
 
 type wireUsage struct {
-	PromptTokens        int64 `json:"prompt_tokens"`
-	CompletionTokens    int64 `json:"completion_tokens"`
-	PromptTokensDetails *struct {
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	// PromptCacheHitTokens is DeepSeek's cached share of prompt_tokens
+	// (prompt_tokens = hit + miss).
+	PromptCacheHitTokens int64 `json:"prompt_cache_hit_tokens"`
+	PromptTokensDetails  *struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {
@@ -77,6 +82,11 @@ func (m *Model) decode(req llm.Request, raw []byte, reqBytes int) (llm.Response,
 	if err != nil {
 		return llm.Response{}, err
 	}
+	if m.flavor.name == FlavorDeepSeek && c.Message.ReasoningContent != "" {
+		// Kept as provider state, never as text: the room shows the answer,
+		// and the thinking goes back only by the rule of deepSeekReasoning.
+		resp.Message.Parts = append(resp.Message.Parts, deepSeekReasoningPart(c.Message.ReasoningContent, req.Model))
+	}
 	if text != "" {
 		resp.Message.Parts = append(resp.Message.Parts, llm.Part{Kind: llm.PartText, Text: text})
 	}
@@ -85,7 +95,7 @@ func (m *Model) decode(req llm.Request, raw []byte, reqBytes int) (llm.Response,
 		if id == "" {
 			// Some local servers send no id; the history needs one to pair
 			// the result with its call.
-			id = newCallID()
+			id = newCallID(m.flavor.name)
 		}
 		resp.Message.Parts = append(resp.Message.Parts, llm.Part{Kind: llm.PartToolCall, ToolCall: &llm.ToolCall{
 			ID: id, Name: tc.Function.Name, Input: arguments(tc.Function.Arguments),
@@ -98,6 +108,11 @@ func (m *Model) decode(req llm.Request, raw []byte, reqBytes int) (llm.Response,
 		resp.Stop, resp.StopDetail = llm.StopRefusal, *c.Message.Refusal
 	case c.FinishReason == "content_filter":
 		resp.Stop, resp.StopDetail = llm.StopRefusal, filterDetail(c.ContentFilterResults)
+		if resp.StopDetail == "content_filter" && text != "" {
+			// A host without categories (DeepSeek, DashScope, Mistral)
+			// explains the stop in the content.
+			resp.StopDetail += ": " + text
+		}
 	case len(c.Message.ToolCalls) > 0:
 		resp.Stop = llm.StopToolUse
 	case c.FinishReason == "stop":
@@ -173,8 +188,11 @@ func usage(u *wireUsage, reqBytes, respBytes int) llm.Usage {
 	}
 	var cached, reasoning int64
 	if u.PromptTokensDetails != nil {
-		cached = min(max(u.PromptTokensDetails.CachedTokens, 0), u.PromptTokens)
+		cached = u.PromptTokensDetails.CachedTokens
 	}
+	// DeepSeek reports its cache as prompt_cache_hit_tokens; a host that
+	// sends both fields counts the same tokens twice, so the larger wins.
+	cached = min(max(cached, u.PromptCacheHitTokens, 0), u.PromptTokens)
 	if u.CompletionTokensDetails != nil {
 		reasoning = max(u.CompletionTokensDetails.ReasoningTokens, 0)
 	}
@@ -202,9 +220,54 @@ func filterDetail(results map[string]wireFilterResult) string {
 	return "content_filter: " + strings.Join(hit, ", ")
 }
 
-// newCallID makes a tool call id for a server that sent none.
-func newCallID() string {
+// newCallID makes a tool call id for a server that sent none. Mistral
+// accepts only ids of 9 letters and digits.
+func newCallID(flavorName string) string {
+	if flavorName == FlavorMistral {
+		const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		var b [9]byte
+		_, _ = rand.Read(b[:])
+		for i := range b {
+			b[i] = alnum[int(b[i])%len(alnum)]
+		}
+		return string(b[:])
+	}
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	return "call_" + hex.EncodeToString(b[:])
+}
+
+// deepSeekNative is the Native.Raw of a DeepSeek reasoning part: the
+// flavor, so no other host of this provider gets it back, and the text.
+type deepSeekNative struct {
+	Flavor           string `json:"flavor"`
+	ReasoningContent string `json:"reasoning_content"`
+}
+
+// deepSeekReasoningPart keeps DeepSeek's reasoning_content as provider
+// state, bound to the model that made it.
+func deepSeekReasoningPart(text, model string) llm.Part {
+	raw, _ := json.Marshal(deepSeekNative{Flavor: FlavorDeepSeek, ReasoningContent: text})
+	return llm.Part{Kind: llm.PartReasoning, Native: &llm.Native{Provider: llm.ProviderOpenAI, Model: model, Raw: raw}}
+}
+
+// deepSeekReasoning returns the reasoning_content of p when p is a DeepSeek
+// reasoning part this adapter made for model.
+//
+// The rule its fixture proves (TestDeepSeekReasoningRule): DeepSeek's
+// thinking mode with tool calls wants the reasoning_content of the turns
+// that answer the current question sent back while the tool loop runs, and
+// the reasoning of earlier questions left out (the API documents that it
+// ignores or refuses them). So encode sends it back only on the assistant
+// turns after the last user message that asks a new question
+// (currentQuestion), and only to the model that made it.
+func deepSeekReasoning(p llm.Part, model string) (string, bool) {
+	if p.Native == nil || p.Native.Provider != llm.ProviderOpenAI || p.Native.Model != model {
+		return "", false
+	}
+	var n deepSeekNative
+	if json.Unmarshal(p.Native.Raw, &n) != nil || n.Flavor != FlavorDeepSeek || n.ReasoningContent == "" {
+		return "", false
+	}
+	return n.ReasoningContent, true
 }
