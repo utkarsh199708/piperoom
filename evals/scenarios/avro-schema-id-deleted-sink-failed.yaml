@@ -66,9 +66,10 @@
 #   (eight schema_registry_diff variants are recorded because runs walk every version pair);
 #   that is redundant reading, which A4's E7a addresses in the prompt, not a budget defect.
 #   W4l (KAN-496): max_tool_calls stays 18. Run 39994729845 (23, 21, 23 calls) has no passing run; 8-9
-#   calls of each were the same schema_registry_diff without from_version, answered "bad tool input:
-#   from_version or schema is required" every time (the real tool's answer, recorded above). Without
-#   that loop the runs are 14, 13 and 15 calls, inside the 18 that the passing runs of 39212981319
+#   calls of each were the same schema_registry_diff without from_version, which the tool then
+#   refused as a missing-argument bad input every time. Since #965 the tool diffs the latest version
+#   against the one before it instead, and the subject-only answer is recorded above (re-recorded in
+#   #971, KAN-489). Without that loop the runs are 14, 13 and 15 calls, inside the 18 that the passing runs of 39212981319
 #   set (16 + 2). The budget is not raised to absorb the loop: it is a W4m or A2 item. One entry per
 #   input turn, from those loop-free runs: turn 0, the alert, 11-13 reads (the six above plus
 #   connect_config of both connectors, the registry's subjects with deleted versions, the key
