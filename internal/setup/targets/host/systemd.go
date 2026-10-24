@@ -22,6 +22,10 @@ type serviceManager interface {
 	// artifact renders what install registers (a unit file on Linux) so a
 	// preview can diff it before anything runs.
 	artifact(s serviceSpec) ([]byte, error)
+	// complete completes s with what only the platform's manager knows (on
+	// Windows: the service home, the release and the paths in it); Linux
+	// returns s unchanged.
+	complete(env ops.Env, s serviceSpec) (serviceSpec, error)
 	status(ctx context.Context, env ops.Env, unit string) (ops.Result, error)
 	install(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error)
 	restart(ctx context.Context, env ops.Env, unit string) (ops.Result, error)
@@ -141,6 +145,8 @@ type systemdUser struct {
 
 func (systemdUser) artifact(s serviceSpec) ([]byte, error) { return RenderUnit(s.Rendered) }
 
+func (systemdUser) complete(_ ops.Env, s serviceSpec) (serviceSpec, error) { return s, nil }
+
 func (m systemdUser) status(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
 	st, res, err := show(ctx, env, unit)
 	if err != nil {
@@ -228,7 +234,7 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 			ErrDetect, s.Unit, q(st["FragmentPath"]), q(s.UnitPath))
 	}
 	existed := requireFile(env, s.UnitFile, false) == nil
-	clean, changed, err := writeConfined(env, s.UnitFile, text, 0o644, true)
+	clean, changed, err := writeDriverFile(env, s.UnitFile, text, 0o644, UnitDir)
 	if err != nil {
 		return ops.Result{}, err
 	}
