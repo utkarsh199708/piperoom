@@ -7,16 +7,16 @@ import (
 	"testing"
 )
 
-// pendingPair are the scenarios held out until U1-10 (W4s, KAN-501).
+// pendingPair were held out until U1-10 (W4s, KAN-501). U1-10 declared
+// wiring.SetupStack (#1012), so their markers are gone and they run.
 var pendingPair = []string{"setup/compose-postgres-clean", "setup/compose-privileged-refused"}
 
-// pendingRows are every held-out scenario and the row it waits for: the pair
-// above, and setup/db-unreachable-from-connect until W4c-resolver (W4c,
-// KAN-494, lead ruling R10: its cause is in no read tool's output).
+// pendingRows are every held-out scenario and the row it waits for:
+// setup/db-unreachable-from-connect until container-resolve-op (W4c, KAN-494,
+// lead ruling R10; re-keyed by the KAN-526 ruling: its cause is observable
+// only once the runner op container_resolve exists).
 var pendingRows = map[string]string{
-	"setup/compose-postgres-clean":      "U1-10",
-	"setup/compose-privileged-refused":  "U1-10",
-	"setup/db-unreachable-from-connect": "W4c-resolver",
+	"setup/db-unreachable-from-connect": "container-resolve-op",
 }
 
 func TestPendingHarnessMarkerOnThePair(t *testing.T) {
@@ -31,8 +31,8 @@ func TestPendingHarnessMarkerOnThePair(t *testing.T) {
 		}
 	}
 	for _, name := range pendingPair {
-		if got[name] != "U1-10" {
-			t.Errorf("%s: pending_harness = %q, want U1-10", name, got[name])
+		if got[name] != "" {
+			t.Errorf("%s: pending_harness = %q, want none: U1-10 has landed", name, got[name])
 		}
 	}
 	if len(got) != len(pendingRows) {
@@ -127,32 +127,137 @@ func TestRepositoryPendingMarkersMatchTheCondition(t *testing.T) {
 	}
 }
 
-// TestW4cResolverRowCondition: setup/db-unreachable-from-connect's marker
-// (W4c-resolver, lead ruling R10) is accepted while internal/tools/nettools does
-// not declare ConnectResolveCheck and refused once it does, so the scenario
-// runs again as soon as a read can show what the Connect worker resolved.
-func TestW4cResolverRowCondition(t *testing.T) {
-	pending := []Scenario{{Name: "setup/db-unreachable-from-connect", PendingHarness: "W4c-resolver"}}
+// TestContainerResolveOpRowCondition: setup/db-unreachable-from-connect's
+// marker (container-resolve-op, the KAN-526 ruling) is accepted while no
+// package under internal/setup declares a runner op named container_resolve,
+// and refused once one does, in either way the catalogue names its ops. A
+// string that is not an op's name (a tier table, a room tool's spec, a test
+// file, a type without the ops.Op methods) does not land the row, and
+// nettools.ConnectResolveCheck alone no longer does.
+func TestContainerResolveOpRowCondition(t *testing.T) {
+	pending := []Scenario{{Name: "setup/db-unreachable-from-connect", PendingHarness: "container-resolve-op"}}
 	root := t.TempDir()
-	dir := filepath.Join(root, "internal", "tools", "nettools")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+	write := func(rel, src string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	src := filepath.Join(dir, "tool.go")
-	if err := os.WriteFile(src, []byte("package nettools\n\nfunc Other() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
+	accepted := func(stage string) {
+		t.Helper()
+		if err := CheckPendingHarness(pending, root); err != nil {
+			t.Errorf("%s: %v", stage, err)
+		}
 	}
-	if err := CheckPendingHarness(pending, root); err != nil {
-		t.Errorf("before the resolver check lands: %v", err)
+	refused := func(stage string) {
+		t.Helper()
+		err := CheckPendingHarness(pending, root)
+		if err == nil || !strings.Contains(err.Error(), "remove the marker") || !strings.Contains(err.Error(), "runner op container_resolve") {
+			t.Errorf("%s: err = %v, want the marker refused", stage, err)
+		}
 	}
+
+	// No internal/setup at all.
+	accepted("no internal/setup")
 	if err := CheckPendingHarness(pending, ""); err != nil {
 		t.Errorf("row name check: %v", err)
 	}
-	if err := os.WriteFile(src, []byte("package nettools\n\nfunc ConnectResolveCheck() {}\n"), 0o644); err != nil {
+	// The resolver check itself does not land the row.
+	write("internal/tools/nettools/resolve.go", "package nettools\n\nfunc ConnectResolveCheck() {}\n")
+	// Decoys: a tier table, a room tool whose spec names the op, a type with
+	// Name but not the op methods, a test file, a comment.
+	write("internal/setup/plan/tier.go", `package plan
+
+// container_resolve is T0.
+var floors = map[string]string{"container_resolve": "T0"}
+`)
+	write("internal/setup/tools/read.go", `package tools
+
+type spec struct{ name, op string }
+type readTool struct{ spec spec }
+
+func (t *readTool) Name() string { return t.spec.name }
+
+var specs = []spec{{name: "container_resolve", op: "container_resolve"}}
+`)
+	write("internal/setup/targets/compose/half.go", `package compose
+
+type halfOp struct{}
+
+func (halfOp) Name() string { return "container_resolve" }
+`)
+	write("internal/setup/targets/compose/resolve_test.go", `package compose
+
+type testOp struct{}
+
+func (testOp) Name() string                 { return "container_resolve" }
+func (testOp) Execute()                     {}
+func (testOp) Validate()                    {}
+func (testOp) ParamsSchema() map[string]any { return nil }
+`)
+	accepted("decoys only")
+
+	// An op whose Name returns the literal, as container_inspect does.
+	lit := `package compose
+
+type containerResolveOp struct{}
+
+func (containerResolveOp) Name() string                 { return "container_resolve" }
+func (containerResolveOp) Execute()                     {}
+func (containerResolveOp) Validate()                    {}
+func (containerResolveOp) ParamsSchema() map[string]any { return nil }
+`
+	write("internal/setup/targets/compose/resolve.go", lit)
+	refused("literal Name")
+	if err := os.Remove(filepath.Join(root, "internal", "setup", "targets", "compose", "resolve.go")); err != nil {
 		t.Fatal(err)
 	}
-	err := CheckPendingHarness(pending, root)
-	if err == nil || !strings.Contains(err.Error(), "remove the marker") || !strings.Contains(err.Error(), "setup/db-unreachable-from-connect") {
-		t.Errorf("after the resolver check lands: err = %v, want the marker refused", err)
+	accepted("literal op removed")
+
+	// An op named by a field of a keyed literal, as compose_up is.
+	write("internal/setup/targets/compose/stack.go", `package compose
+
+type stackOp struct{ name string }
+
+func (o *stackOp) Name() string                 { return o.name }
+func (o *stackOp) Execute()                     {}
+func (o *stackOp) Validate()                    {}
+func (o *stackOp) ParamsSchema() map[string]any { return nil }
+
+var all = []any{&stackOp{name: "compose_up"}}
+`)
+	accepted("field-named op, another name")
+	write("internal/setup/targets/compose/stack2.go", `package compose
+
+var more = []any{&stackOp{name: "container_resolve"}}
+`)
+	refused("field-named op")
+}
+
+// The op check finds the ops the real catalogue declares in both forms, and
+// not container_resolve yet, so the row cannot pass by never matching.
+func TestOpDeclaredOnTheRealCatalogue(t *testing.T) {
+	root := FindRepoRoot(".")
+	if root == "" {
+		t.Fatal("no go.mod above the evals directory")
+	}
+	dir := filepath.Join(root, "internal", "setup")
+	for op, want := range map[string]bool{
+		"container_inspect": true,  // Name() string { return "container_inspect" }
+		"compose_up":        true,  // &stackWriteOp{name: "compose_up", ...}
+		"compose_restart":   true,  // the scenario's fixing op
+		"no_such_op":        false, // control
+	} {
+		got, err := opDeclared(dir, op)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("opDeclared(%s) = %v, want %v", op, got, want)
+		}
 	}
 }

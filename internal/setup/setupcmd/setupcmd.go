@@ -24,12 +24,24 @@ import (
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/runner"
 	"piperoom/internal/setup/standalone"
+	"piperoom/internal/setup/targets/host"
 )
 
 // Run parses args as piperoom-setup's flags and runs the mode they name until
 // it ends or the process gets SIGINT or SIGTERM. Usage, parse errors and logs
 // go to stderr; the standalone URL goes to stdout.
+//
+// The one argument form parsed here first is the host target's run-service
+// subcommand (row U8b): the Windows service control manager starts
+// `piperoom-setup run-service --release ...`, and that process is the service
+// host, not a runner. It is dispatched in this package rather than in cmd/setup
+// so that every build of the runner — piperoom-setup and the umbrella
+// `piperoom setup` — answers it the same way; the service's own binary must be
+// piperoom-setup either way, and service_install refuses a binary that is not.
 func Run(args []string, stdout, stderr io.Writer) error {
+	if handled, err := host.RunServiceCommand(args, stderr); handled {
+		return err
+	}
 	fs := flag.NewFlagSet("piperoom-setup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	server := fs.String("server", "", "server origin (default $PIPEROOM_SETUP_SERVER_URL)")

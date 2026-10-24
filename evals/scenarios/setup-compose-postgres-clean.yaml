@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the person's own Compose file writes the Postgres password in plain
 # text in the service's environment, and the setup validator refuses the document before anything
-# starts. The label names the validator rule and the fixing ops (tasks/U-board.md row U1-19,
+# starts. The label names the validator rule and the fixing ops (Jira KAN-5 row U1-19,
 # step 1). Format: evals/README.md (C6). The rule and its message are
 # internal/setup/targets/compose's (validator.go, checkEnvironment, RuleSecret).
 #
@@ -57,10 +57,6 @@
 #     wrote; the .env holds references, the runner materialises them.
 
 name: setup/compose-postgres-clean
-# Held out until U1-10 (the agent's setup mode, wiring.SetupStack) lands: without it the agent cannot read the
-# compose file or the validator output (live run 40030412424: 0/2, every read errored). -validate refuses
-# this marker once internal/wiring declares SetupStack.
-pending_harness: U1-10
 description: |
   The person wrote their own compose.yaml for the project, with a postgres service whose
   environment holds the database password in plain text (POSTGRES_PASSWORD: orders). The setup run

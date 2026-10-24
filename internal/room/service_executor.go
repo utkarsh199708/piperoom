@@ -410,23 +410,32 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		if snap != nil && snap.IsSetupRoom() {
 			origin := ""
 			policyApproved := false
+			var approved Proposal
+			approvedOpen := false
 			if prop, ok := openProposal(*snap, p.ProposalID); ok {
 				origin = prop.Origin
 				policyApproved = prop.sched.policyN > 0
+				approved, approvedOpen = prop, true
 			}
 			route, rerr := resolveSetupRoute(snap, s.actionsFor(pipelineID), []events.ProposalStep{step}, setupNeedsPlan(origin), i, s.now().UTC())
 			if rerr != nil {
 				s.stopOnStep(tracker, p, i, "setup: "+rerr.Error())
 				return nil
 			}
-			// A proposal the setup_local policy approved was approved as T1.
-			// The fire path re-checks the tier right before its approvals,
-			// but a target's class (or the plan) can still rise between the
-			// fire and this step: a step that now routes T2 or T3 needs the
-			// §3.6 approver, which the policy is not.
-			if policyApproved && tierRank(route.Steps[0].Tier) > 1 {
+			// A proposal the setup_local policy approved was approved as a T1
+			// step (or, for the ladder's canary insert, as a local-class one:
+			// setupLocalRuns). The fire path re-checks that right before its
+			// approvals, but a target's class (or the plan) can still rise
+			// between the fire and this step: a step the policy no longer
+			// covers needs the §3.6 approver, which the policy is not. A
+			// proposal the fold no longer holds keeps the old T1-only rule.
+			covered := approvedOpen && setupLocalRuns(approved, route)
+			if !approvedOpen {
+				covered = tierRank(route.Steps[0].Tier) <= 1
+			}
+			if policyApproved && !covered {
 				s.stopOnStep(tracker, p, i, fmt.Sprintf(
-					"setup: step %d now routes as %s but the proposal was approved by the setup_local policy as T1; propose it again for a person's approval", i, route.Steps[0].Tier))
+					"setup: step %d now routes as %s and the setup_local policy no longer covers it; propose it again for a person's approval", i, route.Steps[0].Tier))
 				return nil
 			}
 			if route.Steps[0].Plan.Op != "" {

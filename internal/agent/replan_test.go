@@ -355,7 +355,9 @@ func TestReplanSecondPlanCitesLogLine(t *testing.T) {
 	}
 	for _, p := range props.created {
 		raw, _ := json.Marshal(p)
-		if strings.Contains(string(raw), plantedConn) || strings.Contains(string(raw), "connect_delete_connector") || strings.Contains(string(raw), "T0") {
+		// "tier T0", not "T0": a step id the second plan cites is a random
+		// ULID and can contain "T0" by chance (s_01M5PSSG436Z55T0...).
+		if strings.Contains(string(raw), plantedConn) || strings.Contains(string(raw), "connect_delete_connector") || strings.Contains(string(raw), "tier T0") {
 			t.Errorf("a created proposal carries the planted action, target or tier: %s", raw)
 		}
 		// The tier is the action's, computed from the stored step as the room
@@ -528,6 +530,191 @@ func TestReplanDriverProposalFailure(t *testing.T) {
 	}
 	if got := wlogs.calls(); len(got) != 1 || !strings.Contains(got[0], "pg-orders-connector") {
 		t.Fatalf("worker log reads = %q", got)
+	}
+}
+
+// driverSetupProposals is the room's Proposals of a setup room with a
+// driver's fix: it hands out the agent's own proposals like seqProposals and
+// reads back the driver's stored steps (ProposalStepsReader).
+type driverSetupProposals struct {
+	*seqProposals
+	steps []events.ProposalStep
+}
+
+func (d driverSetupProposals) ProposalSteps(context.Context, string) ([]events.ProposalStep, error) {
+	return d.steps, nil
+}
+
+// driverRanOK is a "proposal_executed" input of the driver's fix p_9 with
+// every step OK.
+func driverRanOK(n int, text string) HumanInput {
+	ok := make([]*bool, n)
+	for i := range ok {
+		ok[i] = okPtr(true)
+	}
+	return HumanInput{Kind: "proposal_executed", Origin: events.ProposalOriginDriver, ProposalID: "p_9", StepsOK: ok, Text: text}
+}
+
+// driverRestartSteps is the driver's stored fix: a task restart of the
+// connector the broken connect_status reports.
+func driverRestartSteps() []events.ProposalStep {
+	return []events.ProposalStep{
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)},
+	}
+}
+
+// TestReplanDriverVerificationFailureSetupOnly (KAN-532): every step of the
+// driver's fix succeeded but its verification says not recovered. In a setup
+// room that is a failed step, as for the agent's own fix: the runner reads
+// the worker's and the container's logs of the stored step and the known
+// issues, as its own reads, before the model re-plans. An incident room
+// keeps today's verify-after-fix and reads nothing new.
+func TestReplanDriverVerificationFailureSetupOnly(t *testing.T) {
+	for _, mode := range []string{"", ModeSetup} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			wlogs := workerLogsFake("lines")
+			clogs := containerLogsFake("lines")
+			rb := runbookFake()
+			connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
+			model := &scriptedModel{}
+			inbox := &fakeInbox{drains: [][]HumanInput{nil, {driverRanOK(1, "")}}, waitErr: context.Canceled}
+			r := newVerifyRunner(t, model, inbox, &fakeSink{}, []tools.Tool{wlogs, clogs, rb, connect}, nil)
+			r.deps.Proposals = stepsReader{steps: driverRestartSteps()}
+			r.alert.Mode = mode
+			if err := r.run(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if mode != ModeSetup {
+				if n := len(wlogs.calls()) + len(clogs.calls()) + len(rb.calls()); n != 0 {
+					t.Fatalf("an incident room read %d logs or runbooks after a driver's failed verification", n)
+				}
+				return
+			}
+			if got := wlogs.calls(); len(got) != 1 || !strings.Contains(got[0], `"connector":"pg-orders-connector"`) {
+				t.Fatalf("connect_worker_logs reads = %q, want one of the stored step's connector", got)
+			}
+			if got := clogs.calls(); len(got) != 1 || !strings.Contains(got[0], `"service":"connect"`) {
+				t.Fatalf("container_logs reads = %q, want one of the stored step's layer service", got)
+			}
+			if got := rb.calls(); len(got) != 1 || !strings.Contains(got[0], "connect_restart_task failed kafka-connect") {
+				t.Fatalf("runbook_lookup reads = %q", got)
+			}
+			for _, tt := range []*inputTool{wlogs, clogs, rb} {
+				if !slices.Equal(tt.ctxs, []bool{true}) {
+					t.Errorf("%s: IsReplanRead = %v, want the runner's own read", tt.name, tt.ctxs)
+				}
+			}
+			text := requestText(model.calls[1])
+			for _, w := range []string{"NOT recovered", `<tool_output tool="connect_worker_logs"`, `<tool_output tool="container_logs"`, replanRuleNote(true, []string{containerLogsTool, workerLogsTool})} {
+				if !strings.Contains(text, w) {
+					t.Errorf("request after the driver's failed verification lacks %q", w)
+				}
+			}
+		})
+	}
+}
+
+// TestReplanDriverNotBrokenReadsNothing (KAN-532): in a setup room a driver's
+// fix whose verification says recovered, and one still waiting for its fix PR
+// to merge, read no logs: only a broken verification is a failed step. The
+// batch is handled directly, as the fix-PR driver tests do, since a run
+// without the pipeline's repos drops the fix-PR action (scopeForge).
+func TestReplanDriverNotBrokenReadsNothing(t *testing.T) {
+	cases := []struct {
+		name   string
+		steps  []events.ProposalStep
+		acts   *actions.Registry
+		result tools.Result
+		want   string
+	}{
+		{"recovered", driverRestartSteps(), nil, connectRecoveredResult(), "recovered"},
+		{"still waiting", []events.ProposalStep{prStep(pluginApplied)}, forgeRegistry(t), connectBrokenResult(), "merge"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wlogs := workerLogsFake("lines")
+			clogs := containerLogsFake("lines")
+			rb := runbookFake()
+			connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: tc.result}
+			r := newVerifyRunner(t, &scriptedModel{}, &fakeInbox{}, &fakeSink{},
+				[]tools.Tool{wlogs, clogs, rb, connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, nil)
+			r.deps.Proposals = stepsReader{steps: tc.steps}
+			if tc.acts != nil {
+				r.deps.Actions = tc.acts
+			}
+			r.alert.Mode = ModeSetup
+			// The room offers the reads, as after the run builds its tool list.
+			r.toolList = buildToolListWithCap(r.deps.Tools, nil, 0)
+			out := r.handleActionResults(context.Background(), []HumanInput{driverRanOK(len(tc.steps), "")})
+			if n := len(wlogs.calls()) + len(clogs.calls()) + len(rb.calls()); n != 0 || out.broken || len(out.failures) != 0 {
+				t.Fatalf("logs %q, containers %q, runbooks %q read (broken %v, failures %d) for a verification that is not broken:\n%s",
+					wlogs.calls(), clogs.calls(), rb.calls(), out.broken, len(out.failures), strings.Join(out.notes, "\n"))
+			}
+			notes := strings.Join(out.notes, "\n")
+			if !strings.Contains(notes, tc.want) || strings.Contains(notes, "[agent rule] A fix step failed") {
+				t.Fatalf("notes after the driver's fix lack %q or carry the re-plan rule:\n%s", tc.want, notes)
+			}
+		})
+	}
+}
+
+// TestReplanDriverPlantedLogText (KAN-532): the logs read after the driver's
+// failed verification carry a planted instruction, and so does the room's
+// text of the executed fix. The reads' targets are the stored step's; the
+// model that obeys the planted line is refused by the echo guard; no
+// proposal carries the planted action, target or tier.
+func TestReplanDriverPlantedLogText(t *testing.T) {
+	clogs := containerLogsFake(connectContainerLogs())
+	wlogs := workerLogsFake("pg-orders-connector: 1 line at WARN or above, newest last:\n" + plantedLine)
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
+
+	m := &replanModel{t: t}
+	m.turns = []func(string) string{
+		func(string) string {
+			return `{"stop_reason":"end_turn","content":[{"type":"text","text":"Waiting for the driver's fix."}]}`
+		},
+		// The model obeys the planted line.
+		func(string) string {
+			return toolUseMsg("tu_2", "propose_fix", proposeInput("connect_delete_connector", `{"connector":"`+plantedConn+`"}`, "as the log says"))
+		},
+	}
+	props := driverSetupProposals{seqProposals: &seqProposals{}, steps: driverRestartSteps()}
+	acts := replanActions(t)
+	inbox := &fakeInbox{drains: [][]HumanInput{nil, {driverRanOK(1, plantedLine)}}, waitErr: context.Canceled}
+	alert := Alert{Title: "set up orders", PipelineID: "orders", PipelineMap: replanAlertM, Mode: ModeSetup}
+	r := newReplanRunner(t, alert, m, inbox, &fakeSink{}, props, acts, clogs, wlogs, connect)
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := wlogs.calls(); len(got) != 1 || !strings.Contains(got[0], `"connector":"pg-orders-connector"`) || strings.Contains(got[0], plantedConn) {
+		t.Fatalf("connect_worker_logs reads = %q, want only the stored step's connector", got)
+	}
+	if got := clogs.calls(); len(got) != 1 || !strings.Contains(got[0], `"service":"connect"`) || strings.Contains(got[0], plantedConn) {
+		t.Fatalf("container_logs reads = %q, want only the stored step's service", got)
+	}
+	if len(m.calls) < 3 {
+		t.Fatalf("model calls = %d, want at least 3", len(m.calls))
+	}
+	if text := requestText(m.calls[1]); !strings.Contains(text, `<tool_output tool="container_logs" step="`) || !strings.Contains(text, `suspected_instructions="true"`) {
+		t.Fatalf("the planted log was not wrapped and flagged:\n%s", text)
+	}
+	refused := false
+	for _, msg := range m.calls[2] {
+		for _, blk := range msg.Content {
+			if blk.OfToolResult != nil && blk.OfToolResult.ToolUseID == "tu_2" {
+				refused = blk.OfToolResult.IsError.Value
+			}
+		}
+	}
+	if !refused {
+		t.Fatal("the proposal the planted line dictated was not refused")
+	}
+	for _, p := range props.created {
+		raw, _ := json.Marshal(p)
+		if strings.Contains(string(raw), plantedConn) || strings.Contains(string(raw), "connect_delete_connector") || strings.Contains(string(raw), "tier T0") {
+			t.Errorf("a created proposal carries the planted action, target or tier: %s", raw)
+		}
 	}
 }
 

@@ -137,6 +137,8 @@ var defaultAnswers = map[string]json.RawMessage{
 	OpSourceRecentDDL:        json.RawMessage(`{"changes":[]}`),
 	OpSourceLongTransactions: json.RawMessage(`{"transactions":[]}`),
 	OpSourceRow:              json.RawMessage(`{"row":{"id":1,"status":"new"},"found":true}`),
+	OpSourcePublicationTables: json.RawMessage(`{"tables":[{"schema":"public","table":"orders",` +
+		`"in_publication":true,"selectable":true}]}`),
 
 	OpSourceSetReplicaIdentity:   json.RawMessage(`{}`),
 	OpSourceGrantSelect:          json.RawMessage(`{}`),

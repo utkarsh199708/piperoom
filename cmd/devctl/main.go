@@ -12,6 +12,7 @@
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
 //	devctl clickhouse init [--owner <tag>]  start ClickHouse and create the Kafka-backed orders sink
+//	devctl llm-up                     start the llm profile (Ollama) and pull a tool-capable model
 //	devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix API for the dev web menu (no auth)
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
@@ -61,6 +62,7 @@ const usage = `devctl — local pipeline control
   devctl rooms delete <id> --reason <text> --as <admin> [--archive]   erase one room through the running server (admin only; --archive keeps a copy)
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
   devctl clickhouse init [--owner <tag>]   start ClickHouse and create the Kafka-backed orders sink
+  devctl llm-up             start the llm profile (Ollama on 127.0.0.1:11434) and pull llama3.1:8b (dev/README.md, Local models)
   devctl lock --steal       steal a stale (>15m) lock
   devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix HTTP API for the dev web menu (no auth)
 
@@ -77,7 +79,8 @@ setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replic
 missing-grant, db-unreachable-from-connect, plugin-after-scan;
 SQL Server (profile mssql, dev/mssql/README.md): agent-stopped, cdc-not-enabled-table;
 oracle profile (dev/oracle/README.md): no-archivelog, no-supplemental-logging, missing-logminer-grant;
-mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role
+mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role;
+host profile (dev/host, the fake host of U8c): wrong-standalone-args, plugin-path-unset, java-too-old
 `
 
 func main() {
@@ -253,6 +256,13 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		return st.clickhouseInit(ctx)
+	case "llm-up":
+		// Not stack-mutating: the llm profile is a separate service with its
+		// own volume, so no stack lock is taken.
+		if len(args) != 0 {
+			return fmt.Errorf("usage: devctl llm-up")
+		}
+		return st.llmUp(ctx, ollamaBaseURL, llmModel, llmPullTimeout)
 	case "serve":
 		return serveCmd(ctx, st, args)
 	}

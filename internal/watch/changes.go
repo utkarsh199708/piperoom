@@ -177,7 +177,7 @@ func (w *Watcher) readChanges(ctx context.Context, ts []target) *setChanges {
 	// reader, as observe skips its slot reads: no call, no WARN. Wiring
 	// refuses a set that mixes kinds; a set with any Postgres pipeline still
 	// reads, so a mix can never turn a Postgres DDL feed off.
-	if ddl == nil || allMySQL(ts) {
+	if ddl == nil || allNoSlot(ts) {
 		sc.ddlErr = errNoDDL
 		return sc
 	}
@@ -188,10 +188,10 @@ func (w *Watcher) readChanges(ctx context.Context, ts []target) *setChanges {
 	return sc
 }
 
-// allMySQL reports whether every target of a set is a MySQL pipeline.
-func allMySQL(ts []target) bool {
+// allNoSlot reports whether every target of a set has no slot (a non-Postgres source).
+func allNoSlot(ts []target) bool {
 	for _, t := range ts {
-		if !t.p.IsMySQL() {
+		if !hasNoSlot(t.p) {
 			return false
 		}
 	}

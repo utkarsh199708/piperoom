@@ -1,6 +1,6 @@
 name: Setup matrix
 
-# U1-16 (tasks/U-board.md, design docs/design/setup-agent.md section 8): the
+# U1-16 (Jira KAN-5, design docs/design/setup-agent.md section 8): the
 # setup capability on the three operating systems the pilot runs on.
 #
 # Every leg runs the setup unit tests, the section 2.3 path table tests and the

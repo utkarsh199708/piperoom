@@ -2,7 +2,7 @@
 # Every prerequisite check of the SQL Server source passed, the verification ladder is green on
 # rungs 1 to 7 and waits only for the person's own change (rung 8). The room opens on that result
 # before the person hands the pipeline over; nothing is wrong. The label is the outcome: healthy, no fix
-# (tasks/U-board.md row U4d, step 4). Format: evals/README.md (C6). The source is the `mssql` dev
+# (Jira KAN-5 row U4d, step 4). Format: evals/README.md (C6). The source is the `mssql` dev
 # profile (dev/mssql/README.md, U4c) with CDC turned on by the setup run.
 #
 # RECORDED: NO. Every summary and data payload is the exact output format of the real

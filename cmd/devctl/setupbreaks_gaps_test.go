@@ -167,11 +167,13 @@ func TestWALLevelOverrideSetsReplica(t *testing.T) {
 }
 
 func TestComposeWithArgv(t *testing.T) {
-	got := strings.Join(composeWithArgv("/repo", "/tmp/o.yaml", "up", "-d", "--no-deps", "postgres"), " ")
+	// composeWithArgv joins the project path with the OS separator; compare
+	// slash-normalised so the rows hold on Windows too.
+	got := filepath.ToSlash(strings.Join(composeWithArgv("/repo", "/tmp/o.yaml", "up", "-d", "--no-deps", "postgres"), " "))
 	if want := "compose -f /repo/dev/docker-compose.yml -f /tmp/o.yaml up -d --no-deps postgres"; got != want {
 		t.Errorf("argv with override = %q, want %q", got, want)
 	}
-	got = strings.Join(composeWithArgv("/repo", "", "up", "-d", "--no-deps", "postgres"), " ")
+	got = filepath.ToSlash(strings.Join(composeWithArgv("/repo", "", "up", "-d", "--no-deps", "postgres"), " "))
 	if want := "compose -f /repo/dev/docker-compose.yml up -d --no-deps postgres"; got != want {
 		t.Errorf("argv without override = %q, want %q", got, want)
 	}

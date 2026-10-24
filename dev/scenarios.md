@@ -750,6 +750,46 @@ the standalone break takes about 4 s and its fix about 8 s; the role pair takes 
 `go test -tags integration ./cmd/devctl -run TestIntegrationMongoSetupBreaks` runs both pairs on the profile, and
 skips when it is not up.
 
+## Setup breaks: host target (`host` profile, U8c)
+
+Three more `setup-break` / `setup-fix` pairs, on the plain-host target of the setup runner
+(`internal/setup/targets/host`, U8a) instead of the dev stack. The host of the profile is a container that plays a
+Linux host (`dev/host`): a JDK, an extracted Kafka distribution's `bin/` scripts, the systemd unit
+`service_install` renders and the worker properties `properties_write` writes, under `/piperoom-host/project`.
+It runs no systemd manager and no Connect worker: each check reads the same host files a setup run reads — the
+unit's `ExecStart` argv and `Environment`, the worker properties, and `java -version` of the java the unit pins —
+through `docker exec`. The real `systemctl --user` path is U8a's own integration test and the U8-R real runs.
+
+```
+go run ./cmd/devctl setup-break --owner <your-tag> wrong-standalone-args
+go run ./cmd/devctl setup-fix   --owner <your-tag> wrong-standalone-args
+```
+
+The commands, the lock and the idempotence are the same as above. The first break or fix starts the profile itself
+(`docker compose -f dev/docker-compose.yml --profile host up -d --build --wait host`), so there is nothing to start
+by hand; the profile is opt-in and nothing else depends on it.
+
+| Scenario | Named check | What the break does | What the setup run reports |
+|---|---|---|---|
+| `wrong-standalone-args` | `host-standalone-args` | rewrites the unit's `ExecStart` so the standalone launcher gets `connect-distributed.properties` | `ExecStart passes connect-distributed.properties to connect-standalone.sh; the standalone worker reads connect-standalone.properties (offset.storage.file.filename), not the distributed file (group.id)` |
+| `plugin-path-unset` | `host-plugin-path` | removes `plugin.path` from `connect-standalone.properties` | `connect-standalone.properties has no plugin.path: the worker scans only the plugins it ships with` (`Failed to find any class that implements Connector`) |
+| `java-too-old` | `host-java-version` | points the unit's `Environment=JAVA_HOME` at the image's Java 11 (`/opt/piperoom/jdk-11`) | `JAVA_HOME=/opt/piperoom/jdk-11 reports java 11.0.22; the Debezium 3.2 postgres connector needs Java 17 or newer` |
+
+**Fixes:** write the rendered argv back (`ExecStart=<project>/kafka/bin/connect-standalone.sh
+<project>/connect-standalone.properties`); put `plugin.path=<project>/connect-plugins` back in its lexical place,
+so the file ends byte-identical to what `properties_write` rendered; point `JAVA_HOME` at the image's Temurin 21
+(`/opt/java/openjdk`). Each half writes exactly one file, so the three pairs hold in any order. A container restart
+(`docker compose --profile host restart host`) copies the baked base again and heals all three; `devctl down` and
+`devctl reset` leave the opt-in profile's container alone, like the `mongo` and `mssql` ones.
+
+**Caveats:**
+- The container is not a host: it has the host target's project layout and a JDK, but no systemd. A check that
+  needs the service manager (`service_status`, `service_restart`) is not covered here.
+- `java-too-old`'s Java 11 is a shim that answers `java -version`; nothing starts a JVM with it.
+- Unit tests: `go test ./cmd/devctl -run 'TestHost'`. The fake host they play is `dev/host/base` itself, so the
+  image and the checks cannot drift apart. Integration (a Docker daemon; the test builds the image and starts the
+  profile): `go test -tags integration ./cmd/devctl -run TestIntegrationHostSetupBreaks`.
+
 ## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`
 
 Two breaks where orders are missing from `analytics.orders` while order-sync runs at lag 0, each ended by one X2

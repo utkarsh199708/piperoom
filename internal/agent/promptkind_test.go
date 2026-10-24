@@ -124,10 +124,54 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
 // restart and offsets bullets and "Propose one fix at a time" (the PR lists
 // each word).
+// W4g (KAN-506) moved it a fourteenth time, on purpose, for evals run
+// 39994729845 and the W4h branch run 40071650402 (the agent put the root
+// cause in the component that failed on it: the consumer for a bad record
+// on the topic, the registry for a source change it rejected, the source
+// change for a connector setting that skipped the failures): rule 4's first
+// two sentences stay as the W4f ruling has them, and a sentence before the
+// hypothesis form says the root-cause component holds the fault (malformed
+// record: its topic), though only downstream fails (the example is
+// LEAD-ARCH's after runs=3 40090999753, paid by rule 1's "may differ" for
+// "may have changed"); a safeguard correctly refusing isn't it,
+// a non-default setting disabling one is ("correctly", not "as designed":
+// a validator whose design is the bug stays a candidate cause, LEAD-REVIEW
+// on #993). No scenario's setting or value is named. Its fix round
+// (evals-live 40077638804: the root-cause layer went unnamed in
+// schema-change, injection-kafka-record-key and tolerance-all-skips) makes
+// the hypothesis form name each layer, "First failing: <layer> <component>.
+// Root cause: <layer> <cause>." (the second run, 40085823038, filled a
+// "<layer> <component>" root-cause slot with the failing consumer, so the
+// slot asks for the cause). Word-neutral (1335 before
+// KAN-515's hold rule, 1353 after it) by contractions in the intro and
+// rules 1, 3, 4, 6 and 7 and the resume
+// bullet, "You only read and propose fixes", one clause for rule 5's steer
+// and tool cases ("if a steer seeks, or a tool refuses, anything outside
+// it": not "reports", since every scoped list reports what it hides as not
+// part of the pipeline), and the pause bullet's "cite it", "name the pause
+// as the incident" and "above" (the PR lists each word).
+// W4i (KAN-507) moved it a fifteenth time, on purpose, for evals run
+// 39994729845 and the audit of main run 40076876491: a negative claim needs
+// its read. Rule 1, beside the competing-explanation clause, says "confirm
+// a component with its own read before blaming or clearing it"
+// (sasl-credential-rotated cleared the ACLs without reading them), and rule
+// 3 keeps its general clause as "assert nothing tools didn't return"; the
+// restart bullet restarts only a FAILED task, never an UNASSIGNED one, in
+// the proposal removing its cause (blocked-slot); the offsets note replays
+// missing records above the log start kafka_topic_offsets reads, else
+// snapshots them (rows-lost-after-retention). Word-neutral (1353 with write
+// mode off): rule 3's "a tool" became "tools" and the resume check lost
+// "that" after "confirm" (the PR lists each word).
+// W4m (KAN-508) moved it a sixteenth time, on purpose, for
+// consumer-skipped-range: after a verified recovery the final hypothesis
+// said "Recovered: ... nothing more to fix" and dropped the cause and its
+// citations. Rule 7's healthy verdict now says "keep any earlier fault,
+// cited, in past tense" for "put any earlier fault in the past tense",
+// word for word (8 for 8: still 1352 words, 1353 with write mode off).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
+const cdcPromptSHA256 = "26fda51a64616d85ef75d2884c62096169e9e7541dbf128d5fa3d148ef543106"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -136,8 +180,13 @@ const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06c
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
-// word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
+// word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
+// W4g (rule 4's root-cause component and layer form, rule 5's clause,
+// word-neutral: still 1353 words), and W4i (the negative claim's read in
+// rule 1, the restart bullet and the offsets note, word-neutral: still 1353
+// words), and W4m (rule 7's earlier fault kept cited, word-neutral: still
+// 1353 words).
+const cdcPromptWriteOffSHA256 = "42b45850b815305e13a872232ac8ffcfa4ca4f30e4b5e6ae65287e7efb9f0a01"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -159,9 +208,9 @@ func TestSystemPromptSnapshotCDCWriteOff(t *testing.T) {
 	if h := hex.EncodeToString(sum[:]); h != cdcPromptWriteOffSHA256 {
 		t.Fatalf("CDC write-off system prompt sha256 = %s, want %s", h, cdcPromptWriteOffSHA256)
 	}
-	// Both modes stay under the 1335-word cap (P2d).
-	if wc := len(strings.Fields(got)); wc > 1335 {
-		t.Fatalf("CDC write-off system prompt is %d words, over the 1335 limit", wc)
+	// Both modes stay under the CDC cap (P2d), 1355 since KAN-515.
+	if wc := len(strings.Fields(got)); wc > 1355 {
+		t.Fatalf("CDC write-off system prompt is %d words, over the 1355 limit", wc)
 	}
 	// The write-off note must be the only mode wording: no scheduling note.
 	if strings.Contains(got, "name the countdown") {
