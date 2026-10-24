@@ -647,7 +647,13 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			continue
 		}
 		inputs = append(inputs, r.takeApplied()...)
-		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) {
+		// Track approvals as they arrive, held or not: the approval that
+		// completes a proposal must wake the agent into its wait for step
+		// results (awaitStepResults), which observes them again harmlessly.
+		for _, in := range inputs {
+			r.observe(in)
+		}
+		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) || len(r.proposals.awaiting()) > 0 {
 			return r.takeHeld(inputs), nil
 		}
 		// Only quiet inputs (or none): they never wake an idle agent. Keep
@@ -754,7 +760,27 @@ func hasHumanInput(inputs []HumanInput) bool {
 // isQuiet reports an input that rides along with the next batch but never
 // starts a turn or resets the turn guard on its own: an alert update (the
 // alert fired again, the watcher joined) is new numbers, not a request.
-func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" }
+//
+// An approval is quiet too. A live room (schema-change, 2026-10-25) spent two
+// Opus calls on every approval.given (a repeated hypothesis, then "the
+// kafka-connect owner has approved ... it still needs schema-registry"), which
+// the room's approval bar already shows; 17 calls used 536k tokens. An approval
+// that leaves a layer pending tells the model nothing it can act on. The one
+// that completes a proposal still wakes the agent, through waitForInput's
+// check of proposals awaiting step results, not through this function: the
+// agent then waits for the executor's results (awaitStepResults) and makes the
+// one turn those results get anyway, with the held approvals ahead of them. A
+// rejection, or an approval_result with no verdict, is not quiet: the agent
+// may have to re-plan.
+func isQuiet(in HumanInput) bool {
+	switch in.Kind {
+	case "alert_update":
+		return true
+	case "approval_result":
+		return in.Approved != nil && *in.Approved
+	}
+	return false
+}
 
 // resetsTurns reports whether a batch resets the per-episode turn guard: any
 // input but a quiet one does.
