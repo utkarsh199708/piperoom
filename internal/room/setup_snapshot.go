@@ -92,6 +92,12 @@ type SetupSnapshot struct {
 	// POST /api/rooms/{id}/setup/credentials asks the runner for exactly these
 	// names (setup_secrets.go; U1-5d).
 	secretNames []string
+	// credentialNames are the setup.credentials_registered names, each once:
+	// the read credentials the server holds a file for under
+	// PIPEROOM_SECRETS_DIR/<pipeline>/. pipeline_register writes connections:
+	// from these, never from secretNames (a secret the driver set but never
+	// registered has no file on the server). Unexported (U1-14).
+	credentialNames []string
 }
 
 // setupListRow is the "setup" member of a GET /api/rooms row (docs/api.md: the
@@ -321,6 +327,7 @@ func (s *SetupSnapshot) clone() *SetupSnapshot {
 		}
 	}
 	c.secretNames = append([]string{}, s.secretNames...)
+	c.credentialNames = append([]string{}, s.credentialNames...)
 	return &c
 }
 
@@ -518,6 +525,27 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		snap.Setup = snap.Setup.clone()
 		snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
+
+	case events.SetupCredentialsRegistered:
+		// The names the runner's Credentials frame wrote under the server's
+		// secrets dir (setup_secrets.go): what pipeline_register may reference
+		// as connections:. Only the room's own pipeline counts, and only names
+		// the secret route would have accepted.
+		p, ok := decode[events.SetupCredentialsRegisteredPayload](e)
+		if !ok || snap.Setup == nil || p.PipelineID != snap.PipelineID {
+			return snap
+		}
+		var names []string
+		for _, n := range p.Names {
+			if setupSecretNameRe.MatchString(n) {
+				names = append(names, n)
+			}
+		}
+		if len(names) == 0 {
+			return snap
+		}
+		snap.Setup = snap.Setup.clone()
+		snap.Setup.credentialNames = appendUnique(snap.Setup.credentialNames, names)
 
 	case events.SetupVerified:
 		p, ok := decode[events.SetupVerifiedPayload](e)
