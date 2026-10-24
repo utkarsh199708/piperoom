@@ -96,6 +96,13 @@ var scenarioTermCases = map[string][]termCase{
 		{id: "T20", text: "Retention deleted those segments long after order-sync committed past them, so retention is not the cause; order-sync is just slow."},
 		{id: "T21", text: "Postgres WAL retention deleted the segments before Debezium read them, so the re-pricing changes never left the source; raise max_slot_wal_keep_size."},
 		{id: "T22", text: "Someone reset order-sync to earliest, so it is replaying everything since the log start; retention deleted the pre-incident segments long ago, which is normal; the old row versions are replayed writes that will be overwritten as it catches up."},
+		// KAN-493 test case 2b (W4b-2): a negated loss word does not name the
+		// loss. T23 passed both groups before the fix (retention, and the
+		// bare "lost"); T24 is the real loss wording it must not take with it.
+		// The "were not lost" wordings are pinned in negated_loss_test.go: a
+		// corpus row with "not" is ambiguous and would need a judge verdict.
+		{id: "T23", text: "Retention is fine and nothing was lost; order-sync is just slow after the re-pricing job, so scale it out and wait."},
+		{id: "T24", want: true, text: "Retention on pg.public.orders (6 h) deleted the 01:00-03:00 changes while order-sync was behind: those records were lost before the consumer read them, and the data loss already happened."},
 	},
 	// #362: the trap rows #341 changed, pinned with natural trap wordings
 	// (P*: the forbidden row must fire) and the correct wordings the old rows
@@ -460,11 +467,10 @@ func TestW4bRetentionLossGroup2(t *testing.T) {
 			t.Errorf("slow-consumer trap matches the root cause: %q", trap)
 		}
 	}
-	// "Nothing was lost" is accepted by the pre-existing term "lost": the
-	// matcher has no denial for "nothing" (strongNegators lack it). Logged, not
-	// failed; fixing it is a matcher change (C6/E2), not a term change.
+	// "Nothing was lost" negates the loss word "lost" (W4b-2, lossNegated in
+	// textmatch.go; more wordings in negated_loss_test.go).
 	if matchGroups(g2, "Nothing was lost; order-sync is just slow.") {
-		t.Log("matcher limit: group 2 accepts 'nothing was lost' through the existing term 'lost'")
+		t.Error("group 2 accepts 'nothing was lost'")
 	}
 	for _, bare := range []string{"deleted", "missing from", "not applied"} {
 		if slices.Contains(sc.Expect.RootCause[1], bare) {
