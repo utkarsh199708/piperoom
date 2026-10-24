@@ -309,7 +309,7 @@ func (r *runner) readAfterFailure(ctx context.Context, fails []failedStep) []str
 // injection scan as a read the model asks for, and returns the wrapped
 // content the model reads.
 func (r *runner) replanRead(ctx context.Context, tool string, input map[string]any) string {
-	in := make(map[string]any, len(input)+1)
+	in := make(map[string]any)
 	for k, v := range input {
 		in[k] = v
 	}
