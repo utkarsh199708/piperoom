@@ -85,8 +85,8 @@ func TestRegisterReadToolsInReadOnlyRegistry(t *testing.T) {
 		t.Fatal("the registry is not read-only")
 	}
 	all := reg.All()
-	if len(all) != len(readOps) {
-		t.Fatalf("registered %d tools, want %d", len(all), len(readOps))
+	if len(all) != len(readOps)+1 {
+		t.Fatalf("registered %d tools, want %d runner reads plus setup_config_help", len(all), len(readOps))
 	}
 	names := ReadToolNames()
 	for i, tool := range all {

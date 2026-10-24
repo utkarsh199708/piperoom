@@ -4,8 +4,10 @@
 //   - the setup-only read tools (env_detect, file_read, dir_list, jar_list,
 //     java_version, docker_info, compose_ps, compose_config,
 //     container_inspect, container_logs), each one fixed runner op at T0 and
-//     nothing else. Register puts them in a tools.ReadOnlyRegistry, so a tool
-//     that ever claimed KindRoom would fail registration;
+//     nothing else, plus setup_config_help, which looks up static SMT,
+//     predicate and sink metadata from the embedded knowledge index. Register
+//     puts them in a tools.ReadOnlyRegistry, so a tool that ever claimed
+//     KindRoom would fail registration;
 //   - the two KindRoom tools, setup_plan and setup_request_verification,
 //     built by RoomTools for the agent to add beside its own room tools.
 //
