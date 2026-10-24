@@ -264,13 +264,13 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647); with schema, the registered side of the diff"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
+		"from_version": map[string]any{"type": "integer", "description": "optional: registered version to diff from (at most 2147483647). Default: the version just before to_version, i.e. latest vs previous when both are omitted; with schema, the registered side of the diff"},
+		"to_version":   map[string]any{"type": "integer", "description": "optional: registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
 		"schema":       strProp("optional raw candidate Avro schema JSON; when set, it is the to side: the registered version (from_version, else to_version, else latest) is diffed to it, so a field the candidate adds shows as added. Reported as to_version 0"),
 	}, "subject")
 }
 func (t *registryDiff) Description() string {
-	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Diff either two registered versions, or a raw schema against a version."
+	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Only subject is required: with no from_version, to_version or schema it diffs the latest version against the one before it and names both versions. Or diff two registered versions (from_version, to_version), or a raw schema against a version."
 }
 
 func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -330,7 +330,7 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		fromVersion, outTo = v, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
-			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
+			return t.diffPrevious(cctx, p.Subject, p.ToVersion)
 		}
 		v, to, err := fetch(p.ToVersion)
 		if err != nil {
@@ -351,6 +351,75 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	return res(formatChanges(changes), map[string]any{
 		"subject": p.Subject, "from_version": fromVersion, "to_version": outTo, "changes": changes,
 	}), nil
+}
+
+// diffPrevious answers a call with no from_version and no schema: it diffs
+// toVersion (0 = latest) against the registered version just before it, and
+// names both in the Summary. Models call the tool with only a subject; a bare
+// "from_version required" error made them repeat the same call until the tool
+// budget ran out. A subject with nothing earlier to compare is answered plainly,
+// and a to_version the registry does not hold is refused with the versions it
+// does hold, so the caller can pick one.
+func (t *registryDiff) diffPrevious(ctx context.Context, subject string, toVersion int) (tools.Result, error) {
+	versions, err := t.d.Registry.Versions(ctx, subject)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_diff: list versions of %s: %w", subject, err)
+	}
+	versions = append([]int(nil), versions...)
+	sort.Ints(versions)
+	if len(versions) == 0 {
+		return res(fmt.Sprintf("%s has no registered versions, so there is nothing to diff", subject),
+			map[string]any{"subject": subject, "versions": versions, "changes": []fieldChange{}}), nil
+	}
+	to := versions[len(versions)-1]
+	if toVersion > 0 {
+		if !containsInt(versions, toVersion) {
+			return tools.Result{}, fmt.Errorf("%w: to_version %d is not a registered version of %s (available versions: %v)",
+				tools.ErrBadInput, toVersion, subject, versions)
+		}
+		to = toVersion
+	}
+	from := 0
+	for _, v := range versions {
+		if v < to {
+			from = v
+		}
+	}
+	if from == 0 {
+		return res(fmt.Sprintf("%s version %d has no earlier version (available versions: %v), so there is nothing to diff; pass schema to compare a candidate against it", subject, to, versions),
+			map[string]any{"subject": subject, "versions": versions, "from_version": to, "to_version": to, "single_version": true, "changes": []fieldChange{}}), nil
+	}
+	fromSV, err := t.d.Registry.Schema(ctx, subject, from)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	toSV, err := t.d.Registry.Schema(ctx, subject, to)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	changes, err := diffFields(fromSV.Schema, toSV.Schema)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
+	}
+	which := "latest vs previous"
+	if toVersion > 0 {
+		which = "to_version vs the version before it"
+	}
+	// The header comes first so a capped Summary keeps the versions.
+	summary := fmt.Sprintf("%s: v%d → v%d (%s; pass from_version to pick another pair)\n%s", subject, from, to, which, formatChanges(changes))
+	return res(summary, map[string]any{
+		"subject": subject, "versions": versions, "from_version": from, "to_version": to, "changes": changes,
+	}), nil
+}
+
+// containsInt reports whether list holds v.
+func containsInt(list []int, v int) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // fieldChange is one field-level difference between two Avro schemas.
