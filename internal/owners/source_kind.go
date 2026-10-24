@@ -3,6 +3,7 @@ package owners
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"piperoom/internal/events"
 )
@@ -11,7 +12,7 @@ import (
 // docs/design/mysql-source.md §4.2): which database a cdc pipeline streams
 // from.
 //
-//	Pipeline.SourceKind / SourceKindOrDefault   postgres (the default) or mysql
+//	Pipeline.SourceKind / SourceKindOrDefault   postgres (the default), mysql, sqlserver, mongodb or oracle
 //	Pipeline.SourceLayer                        the layer of the source database
 //	Pipeline.Layers                             the source layer at index 0 (kind.go)
 //
@@ -28,7 +29,28 @@ import (
 const (
 	SourceKindPostgres = "postgres"
 	SourceKindMySQL    = "mysql"
+	// The SQL Server, MongoDB and Oracle sources (U4, U7, U9; KAN-529). Each
+	// is its own source layer, named like the kind, so an owner of the
+	// sqlserver layer approves steps on a SQL Server source only.
+	SourceKindSQLServer = "sqlserver"
+	SourceKindMongoDB   = "mongodb"
+	SourceKindOracle    = "oracle"
 )
+
+// sourceKinds lists every valid non-default source kind, in the order the
+// error message names them.
+var sourceKinds = []string{SourceKindMySQL, SourceKindSQLServer, SourceKindMongoDB, SourceKindOracle}
+
+// Source layers of the kinds above (the same strings as the kinds).
+const (
+	LayerSQLServer = "sqlserver"
+	LayerMongoDB   = "mongodb"
+	LayerOracle    = "oracle"
+)
+
+// extraSourceLayers are the source layers beyond postgres that KnownLayers
+// adds to events.Layers while the contract does not list them.
+var extraSourceLayers = []string{LayerMySQL, LayerSQLServer, LayerMongoDB, LayerOracle}
 
 // LayerMySQL is the source layer of a pipeline whose source_kind is mysql: it
 // takes the place of "postgres" in the pipeline's layers.
@@ -42,8 +64,10 @@ const layerPostgres = "postgres"
 // events.Layers unchanged, in its order). New slice per call.
 func KnownLayers() []string {
 	out := slices.Clone(events.Layers)
-	if !slices.Contains(out, LayerMySQL) {
-		out = append(out, LayerMySQL)
+	for _, l := range extraSourceLayers {
+		if !slices.Contains(out, l) {
+			out = append(out, l)
+		}
 	}
 	return out
 }
@@ -56,6 +80,12 @@ func sourceLayer(sourceKind string) string {
 		return layerPostgres
 	case SourceKindMySQL:
 		return LayerMySQL
+	case SourceKindSQLServer:
+		return LayerSQLServer
+	case SourceKindMongoDB:
+		return LayerMongoDB
+	case SourceKindOracle:
+		return LayerOracle
 	}
 	return ""
 }
@@ -105,44 +135,55 @@ func (p *Pipeline) SourceLayer() string {
 	return sourceLayer(p.SourceKindOrDefault())
 }
 
+// hasNoSlot reports whether the pipeline is a cdc pipeline on a source other
+// than Postgres: it has no replication slot and no WAL, so the slot watch
+// signals never run for it.
+func (p *Pipeline) hasNoSlot() bool {
+	if p == nil || p.isBatch() {
+		return false
+	}
+	return sourceLayer(p.SourceKind) != "" && p.SourceKindOrDefault() != SourceKindPostgres
+}
+
 // IsMySQL reports whether the pipeline is a cdc pipeline on a MySQL source.
 func (p *Pipeline) IsMySQL() bool {
 	return p != nil && !p.isBatch() && p.SourceKind == SourceKindMySQL
 }
 
 // validateSourceKind checks source_kind on a cdc pipeline (validateBatch
-// refuses the key on a batch one) and, on a MySQL pipeline, refuses the
-// Postgres-only watch fields: there is no replication slot and no WAL, so the
-// block would promise a check that never runs. The errors do not name the
-// pipeline; the caller adds it.
+// refuses the key on a batch one) and, on a source other than Postgres,
+// refuses the Postgres-only watch fields: there is no replication slot and no
+// WAL, so the block would promise a check that never runs. The errors do not
+// name the pipeline; the caller adds it.
 func (p *Pipeline) validateSourceKind() error {
 	switch p.SourceKind {
 	case "", SourceKindPostgres:
 		return nil
-	case SourceKindMySQL:
-	default:
-		return fmt.Errorf("source_kind %s: want %s or %s (leave it out for %s)",
-			quoteName(p.SourceKind), SourceKindPostgres, SourceKindMySQL, SourceKindPostgres)
+	}
+	if !slices.Contains(sourceKinds, p.SourceKind) {
+		return fmt.Errorf("source_kind %s: want %s (leave it out for %s)",
+			quoteName(p.SourceKind), strings.Join(append([]string{SourceKindPostgres}, sourceKinds...), ", "), SourceKindPostgres)
 	}
 	w := p.WatchSpec
 	if w == nil {
 		return nil
 	}
+	k := p.SourceKind
 	switch {
 	case w.Slot != "":
-		return fmt.Errorf("watch.slot: a %s source has no replication slot; remove the key", SourceKindMySQL)
+		return fmt.Errorf("watch.slot: a %s source has no replication slot; remove the key", k)
 	case w.WALHeadroomBytes != "":
-		return fmt.Errorf("watch.wal_headroom_bytes: a %s source has no WAL; remove the key", SourceKindMySQL)
+		return fmt.Errorf("watch.wal_headroom_bytes: a %s source has no WAL; remove the key", k)
 	}
 	for _, s := range []string{SignalSlotInactive, SignalSlotWAL} {
 		if _, ok := w.Signals[s]; ok {
-			return fmt.Errorf("watch.signals.%s: a %s source has no replication slot; remove the signal", s, SourceKindMySQL)
+			return fmt.Errorf("watch.signals.%s: a %s source has no replication slot; remove the signal", s, k)
 		}
 	}
 	return nil
 }
 
-// noSlotSignals turns the slot signals off in w, for a MySQL pipeline: the
+// noSlotSignals turns the slot signals off in w, for a non-Postgres pipeline: the
 // watcher must never read replication slots for it (they answer
 // ErrNotSupported).
 func noSlotSignals(w *WatchConfig) {

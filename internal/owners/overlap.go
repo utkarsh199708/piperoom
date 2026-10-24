@@ -192,10 +192,31 @@ func defaultPort(key string) string {
 // a MySQL pipeline default to 3306, so its bare "db.acme" and a typed
 // "db.acme:3306" are one host (Q8d).
 func (p Pipeline) defaultPortFor(key string) string {
-	if p.IsMySQL() && (key == "source_db_url" || key == "source_db_write_url") {
-		return "3306"
+	if key == "source_db_url" || key == "source_db_write_url" {
+		if port := sourceDefaultPort(p); port != "" {
+			return port
+		}
 	}
 	return defaultPort(key)
+}
+
+// sourceDefaultPort is the standard port of a non-Postgres cdc source kind, ""
+// for Postgres, a batch pipeline or an unknown kind (defaultPort then applies).
+func sourceDefaultPort(p Pipeline) string {
+	if p.isBatch() {
+		return ""
+	}
+	switch p.SourceKind {
+	case SourceKindMySQL:
+		return "3306"
+	case SourceKindSQLServer:
+		return "1433"
+	case SourceKindMongoDB:
+		return "27017"
+	case SourceKindOracle:
+		return "1521"
+	}
+	return ""
 }
 
 // schemeDefaultPort is the standard port for a URL scheme, used when a URL
@@ -210,6 +231,12 @@ func schemeDefaultPort(scheme string) string {
 		return "5432"
 	case "mysql":
 		return "3306"
+	case "sqlserver", "mssql":
+		return "1433"
+	case "mongodb":
+		return "27017"
+	case "oracle":
+		return "1521"
 	}
 	return ""
 }

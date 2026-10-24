@@ -9,8 +9,9 @@
 // and it supervises the Connect JVM.
 //
 // Ops: service_status, properties_read and journal_tail (T0, row U5a);
-// properties_write (T1, the project directory only); service_install and
-// service_restart (T2).
+// properties_write (T1 for a worker file at the project root; T2 for a worker
+// file outside the project directory, lead ruling on U8a: PropertiesWriteTier);
+// service_install and service_restart (T2).
 //
 // The S1 rule of §2.5 for the service: service_install takes a service name and
 // a worker mode, nothing else. ExecStart, WorkingDirectory and Environment (the
@@ -25,12 +26,14 @@
 // takes a drive-absolute path with a space or a parenthesis, which
 // mgr.CreateService and the argv slice pass through unchanged.
 //
-// Why user scope only on Linux: a system unit file must be root-owned and
-// outside every user-writable directory, or its owner can edit it into a root
-// service. The confinement rule (§2.3) puts every file the runner writes under
-// the project directory, so a system unit linked from there would be exactly
-// that hole. A system-scope install needs a design ruling (a root-owned unit
-// directory outside the project) and is not in this row. A Windows service
+// Unit scope on Linux (lead ruling on U8a, scope.go): a user unit by default.
+// A system unit file must be root-owned and outside every user-writable
+// directory, or its owner can edit it into a root service, so a project file
+// is never linked into the system manager. A system unit is selected only by
+// detection (the runner runs as root) or by the target class (production),
+// never by a param; its file is written to SystemUnitDir from the same
+// template, and it is installed and restarted only while the project, the
+// distribution, the worker file and the JDK are root-only. A Windows service
 // always installs into the machine's service database and therefore needs an
 // elevated prompt; for the same reason it never runs from the project. Install
 // stages a release into an admin-only home under Program Files (servicehome.go:
@@ -63,6 +66,7 @@ package host
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -140,6 +144,11 @@ var (
 	// (no elevated prompt, the service already exists, it is marked for
 	// deletion). The underlying error is wrapped too.
 	ErrServiceManager = errors.New("host: service manager refused")
+	// ErrTierRouting: the step needs a tier above the op's floor (a
+	// properties file outside the project directory is T2) and the
+	// catalogue does not route the op by its params' tier yet
+	// (Options.TierRouted).
+	ErrTierRouting = errors.New("host: the step's tier is not routed")
 )
 
 // Options configures a Driver.
@@ -156,15 +165,34 @@ type Options struct {
 	// unit pins the JDK that java_version reported. nil means
 	// filepath.EvalSymlinks; tests pass a fake.
 	ResolvePath func(string) (string, error)
+	// TierRouted says the catalogue and the server route properties_write
+	// by PropertiesWriteTier, so a step that names a file outside the
+	// project directory reaches the runner only at T2 with the driver's
+	// click. Until that routing lands (the PR's Contract change request:
+	// the registry's Floor and the setup action's Tier read the op's
+	// floor only), it is false and such a file is refused at Validate, so a
+	// T1 step can never write outside the project.
+	TierRouted bool
+
+	// Detection hooks for this package's tests: the runner's effective uid
+	// (nil: os.Geteuid), the system unit directory ("": SystemUnitDir) and a
+	// file's owner (nil: fileOwner). They are unexported, so no wiring and
+	// no param can select the system scope or move its unit directory.
+	geteuid       func() int
+	systemUnitDir string
+	owner         func(fs.FileInfo) (uint64, bool)
 }
 
 // Driver holds the target's options and the registry it registered with.
 type Driver struct {
-	reg     *ops.Registry
-	class   string
-	mgr     serviceManager
-	goos    string
-	resolve func(string) (string, error)
+	reg        *ops.Registry
+	class      string
+	mgr        serviceManager
+	goos       string
+	resolve    func(string) (string, error)
+	scope      UnitScope
+	unitDir    string
+	tierRouted bool
 }
 
 // Register adds the host ops to r and registers the directories the service
@@ -179,16 +207,26 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("host: unknown target class %q", opts.Class)
 	}
-	d := &Driver{reg: r, class: opts.Class, goos: opts.GOOS, resolve: opts.ResolvePath}
+	d := &Driver{reg: r, class: opts.Class, goos: opts.GOOS, resolve: opts.ResolvePath, tierRouted: opts.TierRouted}
 	if d.goos == "" {
 		d.goos = runtime.GOOS
 	}
 	if d.resolve == nil {
 		d.resolve = filepath.EvalSymlinks
 	}
+	geteuid := opts.geteuid
+	if geteuid == nil {
+		geteuid = os.Geteuid
+	}
+	euid := geteuid()
+	d.scope = selectScope(d.goos, euid, opts.Class)
+	d.unitDir = opts.systemUnitDir
+	if d.unitDir == "" {
+		d.unitDir = SystemUnitDir
+	}
 	switch d.goos {
 	case "linux":
-		d.mgr = systemdUser{resolve: d.resolve}
+		d.mgr = systemdManager{resolve: d.resolve, scope: d.scope, unitDir: d.unitDir, euid: euid, owner: opts.owner}
 	case "windows":
 		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable, defaultProgramFiles, defaultServiceACL(), defaultTrust())
 	}

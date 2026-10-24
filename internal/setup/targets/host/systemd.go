@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"regexp"
@@ -59,19 +60,39 @@ var systemctlVerbs = map[string]struct {
 	"restart":       {operand: "unit"},
 }
 
-// SystemctlArgv builds the one argv shape of this package:
-//
-//	systemctl --user <verb> [fixed flags] [operand]
-//
-// The verb comes from a fixed table; the operand is a piperoom unit name, or,
-// for enable, the absolute path of a unit file in the project's unit
-// directory. Nothing else reaches the argv and there is no shell.
+// SystemctlArgv is SystemctlArgvScope for a user unit, the default scope.
 func SystemctlArgv(verb, operand string) ([]string, error) {
+	return SystemctlArgvScope(ScopeUser, verb, operand)
+}
+
+// SystemctlArgvScope builds the one argv shape of this package:
+//
+//	systemctl --user <verb> [fixed flags] [operand]   (ScopeUser)
+//	systemctl <verb> [fixed flags] [operand]          (ScopeSystem)
+//
+// The scope is a typed value the driver selected (selectScope), never a
+// string from params. The verb comes from a fixed table; the operand is a
+// piperoom unit name, or, for a user unit's enable, the absolute path of a
+// unit file in the project's unit directory (a system unit's file is already
+// in SystemUnitDir, so its enable names the unit). Nothing else reaches the
+// argv and there is no shell.
+func SystemctlArgvScope(scope UnitScope, verb, operand string) ([]string, error) {
 	v, ok := systemctlVerbs[verb]
 	if !ok {
 		return nil, fmt.Errorf("%w: systemctl verb %s is not allowed", ErrParams, q(verb))
 	}
-	argv := append([]string{systemctlBin, "--user", verb}, v.flags...)
+	var argv []string
+	switch scope {
+	case ScopeUser:
+		argv = append([]string{systemctlBin, "--user", verb}, v.flags...)
+	case ScopeSystem:
+		argv = append([]string{systemctlBin, verb}, v.flags...)
+		if v.operand == "path" {
+			v.operand = "unit"
+		}
+	default:
+		return nil, fmt.Errorf("%w: unknown unit scope %d", ErrParams, int(scope))
+	}
 	switch v.operand {
 	case "":
 		if operand != "" {
@@ -136,26 +157,44 @@ func failed(what string, res cmdResult, unit string) (ops.Result, error) {
 		fmt.Errorf("%w: %s exited %d", ops.ErrExec, what, res.code)
 }
 
-// systemdUser manages user-level units through `systemctl --user`.
-type systemdUser struct {
+// systemdManager manages units through systemctl in the one scope the driver
+// selected at Register (selectScope): user units through `systemctl --user`
+// by default, system units through `systemctl` when the runner is root or the
+// target class is production. status, install and restart all use that scope,
+// so service_status and service_restart reach the unit service_install
+// installed, never the other scope's unit of the same name.
+type systemdManager struct {
 	// resolve resolves symlinks (Options.ResolvePath), to match a
 	// FragmentPath with this project's unit file.
 	resolve func(string) (string, error)
+	scope   UnitScope
+	// unitDir is SystemUnitDir; tests point it at a temporary directory.
+	unitDir string
+	// euid is the runner's effective uid at Register.
+	euid int
+	// owner reads a file's owning uid (fileOwner); tests fake it, since an
+	// unprivileged test cannot create root-owned files.
+	owner func(fs.FileInfo) (uint64, bool)
 }
 
-func (systemdUser) artifact(s serviceSpec) ([]byte, error) { return RenderUnit(s.Rendered) }
+func (systemdManager) artifact(s serviceSpec) ([]byte, error) { return RenderUnit(s.Rendered) }
 
-func (systemdUser) complete(_ ops.Env, s serviceSpec) (serviceSpec, error) { return s, nil }
+func (systemdManager) complete(_ ops.Env, s serviceSpec) (serviceSpec, error) { return s, nil }
 
-func (m systemdUser) status(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
-	st, res, err := show(ctx, env, unit)
+// argv is SystemctlArgvScope in the manager's scope.
+func (m systemdManager) argv(verb, operand string) ([]string, error) {
+	return SystemctlArgvScope(m.scope, verb, operand)
+}
+
+func (m systemdManager) status(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
+	st, res, err := m.show(ctx, env, unit)
 	if err != nil {
 		return ops.Result{}, err
 	}
 	if res.code != 0 {
 		return failed("systemctl show", res, unit)
 	}
-	data := st.data(unit)
+	data := st.data(unit, m.scope)
 	summary := statusSummary(unit, st)
 	// Unit names are per OS user, not per project: another project's
 	// service_install may own this name. Say so rather than report its
@@ -173,9 +212,9 @@ func (m systemdUser) status(ctx context.Context, env ops.Env, unit string) (ops.
 	}, nil
 }
 
-// show runs `systemctl --user show` for unit and parses it.
-func show(ctx context.Context, env ops.Env, unit string) (unitState, cmdResult, error) {
-	argv, err := SystemctlArgv("show", unit)
+// show runs `systemctl [--user] show` for unit and parses it.
+func (m systemdManager) show(ctx context.Context, env ops.Env, unit string) (unitState, cmdResult, error) {
+	argv, err := m.argv("show", unit)
 	if err != nil {
 		return nil, cmdResult{}, err
 	}
@@ -189,27 +228,51 @@ func show(ctx context.Context, env ops.Env, unit string) (unitState, cmdResult, 
 // ownFragment reports whether systemd loads unit from this project's unit
 // file, and returns that file's absolute path. A FragmentPath that is a
 // symlink to it (a linked unit seen through the user's search path) counts.
-func (m systemdUser) ownFragment(env ops.Env, unit string, st unitState) (bool, string) {
+// A system unit lives in the shared SystemUnitDir, where the file name alone
+// does not say which project wrote it, so its file must also carry this
+// project's WorkingDirectory line, the one the template renders.
+func (m systemdManager) ownFragment(env ops.Env, unit string, st unitState) (bool, string) {
 	if env.Confine == nil {
 		return false, ""
 	}
 	want := env.Confine.Dir() + "/" + UnitDir + "/" + unit
+	if m.scope == ScopeSystem {
+		want = m.unitDir + "/" + unit
+	}
 	got := st["FragmentPath"]
 	if got == "" {
 		return false, want
 	}
-	if got == want {
-		return true, want
+	same := got == want
+	if !same && m.resolve != nil {
+		a, aerr := m.resolve(got)
+		b, berr := m.resolve(want)
+		same = aerr == nil && berr == nil && a == b
 	}
-	if m.resolve == nil {
+	if !same || m.scope != ScopeSystem {
+		return same, want
+	}
+	text, exists, err := readOutside(m.unitDir, unit, "")
+	if err != nil || !exists {
 		return false, want
 	}
-	a, aerr := m.resolve(got)
-	b, berr := m.resolve(want)
-	return aerr == nil && berr == nil && a == b, want
+	return containsLine(text, "WorkingDirectory="+env.Confine.Dir()), want
 }
 
-func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error) {
+// containsLine reports whether text has line as one whole line.
+func containsLine(text, line string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimRight(l, "\r") == line {
+			return true
+		}
+	}
+	return false
+}
+
+func (m systemdManager) install(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error) {
+	if m.scope == ScopeSystem {
+		return m.installSystem(ctx, env, s)
+	}
 	text, err := m.artifact(s)
 	if err != nil {
 		return ops.Result{}, err
@@ -222,27 +285,19 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 	// systemd already loads from another file (another project's unit, a
 	// hand-written one, a mask), or enable would fail after the write and a
 	// later service_restart would reach that other worker.
-	st, res, err := show(ctx, env, s.Unit)
-	if err != nil {
+	if err := m.refuseTaken(ctx, env, s); err != nil {
 		return ops.Result{}, err
-	}
-	if res.code != 0 {
-		return failed("systemctl show", res, s.Unit)
-	}
-	if own, _ := m.ownFragment(env, s.Unit, st); !own && st["FragmentPath"] != "" {
-		return ops.Result{}, fmt.Errorf("%w: %s is already loaded from %s, not this project's %s; pick another service name",
-			ErrDetect, s.Unit, q(st["FragmentPath"]), q(s.UnitPath))
 	}
 	existed := requireFile(env, s.UnitFile, false) == nil
 	clean, changed, err := writeDriverFile(env, s.UnitFile, text, 0o644, UnitDir)
 	if err != nil {
 		return ops.Result{}, err
 	}
-	enable, err := SystemctlArgv("enable", s.UnitPath)
+	enable, err := m.argv("enable", s.UnitPath)
 	if err != nil {
 		return ops.Result{}, err
 	}
-	reload, err := SystemctlArgv("daemon-reload", "")
+	reload, err := m.argv("daemon-reload", "")
 	if err != nil {
 		return ops.Result{}, err
 	}
@@ -269,9 +324,9 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 		state = "unchanged"
 	}
 	return ops.Result{
-		Summary: fmt.Sprintf("installed %s (%s): unit file %s %s, enabled; service_restart starts it", s.Unit, s.Mode, clean, state),
+		Summary: fmt.Sprintf("installed %s (%s, user unit): unit file %s %s, enabled; service_restart starts it", s.Unit, s.Mode, clean, state),
 		Data: map[string]any{
-			"unit": s.Unit, "mode": s.Mode, "unit_file": clean, "changed": changed,
+			"unit": s.Unit, "mode": s.Mode, "scope": m.scope.String(), "unit_file": clean, "changed": changed,
 			"exec_start": s.Rendered.ExecStart, "working_directory": s.Rendered.WorkingDirectory,
 			"commands": [][]string{enable, reload},
 		},
@@ -279,14 +334,150 @@ func (m systemdUser) install(ctx context.Context, env ops.Env, s serviceSpec) (o
 	}, nil
 }
 
-func (m systemdUser) restart(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
+// refuseTaken refuses, before anything is written, a unit name systemd
+// already loads from another file (another project's unit, a hand-written
+// one, a mask): enable would fail after the write, and a later
+// service_restart would reach that other worker. Unit names are per OS user
+// in the user scope and per machine in the system scope.
+func (m systemdManager) refuseTaken(ctx context.Context, env ops.Env, s serviceSpec) error {
+	st, res, err := m.show(ctx, env, s.Unit)
+	if err != nil {
+		return err
+	}
+	if res.code != 0 {
+		_, ferr := failed("systemctl show", res, s.Unit)
+		return ferr
+	}
+	if st["FragmentPath"] == "" {
+		return nil
+	}
+	if own, _ := m.ownFragment(env, s.Unit, st); !own {
+		return fmt.Errorf("%w: %s is already loaded from %s, not this project's %s; pick another service name",
+			ErrDetect, s.Unit, q(st["FragmentPath"]), q(s.UnitPath))
+	}
+	return nil
+}
+
+// requireRoot is the system scope's precondition on the runner: only root
+// can write SystemUnitDir and drive the system manager, and only a root-only
+// tree may back a unit that runs as root (checkRootOnly).
+func (m systemdManager) requireRoot(env ops.Env, s serviceSpec) error {
+	if m.euid != 0 {
+		return fmt.Errorf("%w: this target installs a system unit (a production target class, or a runner started as root), which needs the runner to run as root; run piperoom-setup as root, or register the target as local or shared for a user unit", ErrDetect)
+	}
+	owner := m.owner
+	if owner == nil {
+		owner = fileOwner
+	}
+	return checkRootOnly(env.Confine.Dir(), s.JavaHome, []string{DistDir, s.Worker}, []string{PluginDir}, owner)
+}
+
+// requireRootAt is requireRoot for service_restart, which has only the unit
+// name: the JDK is the JAVA_HOME the installed unit file carries, and both
+// worker files are checked where they exist.
+func (m systemdManager) requireRootAt(env ops.Env, unit string) error {
+	if m.euid != 0 {
+		return fmt.Errorf("%w: %s is a system unit, which only a runner running as root may restart", ErrDetect, unit)
+	}
+	text, _, err := readOutside(m.unitDir, unit, env.Confine.Dir())
+	if err != nil {
+		return err
+	}
+	javaHome := ""
+	for _, l := range strings.Split(text, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimRight(l, "\r"), "Environment=JAVA_HOME="); ok {
+			javaHome = v
+		}
+	}
+	if javaHome == "" {
+		return fmt.Errorf("%w: %s carries no JAVA_HOME; run service_install again", ErrDetect, unit)
+	}
+	owner := m.owner
+	if owner == nil {
+		owner = fileOwner
+	}
+	optional := []string{PluginDir}
+	for _, files := range modeFiles {
+		optional = append(optional, files[1])
+	}
+	return checkRootOnly(env.Confine.Dir(), javaHome, []string{DistDir}, optional, owner)
+}
+
+// installSystem writes the unit file into SystemUnitDir (not the project,
+// which a system unit must never be linked from), reloads the system manager
+// and enables the unit by name. The unit text is the same template with the
+// system [Install] target; ExecStart, WorkingDirectory and Environment are the
+// detected paths, as in the user scope.
+func (m systemdManager) installSystem(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error) {
+	text, err := m.artifact(s)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	if err := m.requireRoot(env, s); err != nil {
+		return ops.Result{}, err
+	}
+	if err := m.refuseTaken(ctx, env, s); err != nil {
+		return ops.Result{}, err
+	}
+	_, existed, err := readOutside(m.unitDir, s.Unit, env.Confine.Dir())
+	if err != nil {
+		return ops.Result{}, err
+	}
+	changed, err := writeOutside(m.unitDir, s.Unit, env.Confine.Dir(), text, 0o644)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	reload, err := m.argv("daemon-reload", "")
+	if err != nil {
+		return ops.Result{}, err
+	}
+	enable, err := m.argv("enable", s.Unit)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	// daemon-reload first: the system manager reads SystemUnitDir only on a
+	// reload, so enable of a new unit file needs it to exist for systemd.
+	for _, argv := range [][]string{reload, enable} {
+		res, err := runSystemctl(ctx, env, argv)
+		var out ops.Result
+		if err == nil && res.code != 0 {
+			out, err = failed(strings.Join(argv[:2], " "), res, s.Unit)
+		}
+		if err != nil {
+			// A unit file this install created and could not enable is
+			// removed: the machine keeps no piperoom unit nobody enabled.
+			if !existed {
+				removeOutside(m.unitDir, s.Unit)
+			}
+			return out, err
+		}
+	}
+	state := "written"
+	if !changed {
+		state = "unchanged"
+	}
+	return ops.Result{
+		Summary: fmt.Sprintf("installed %s (%s, system unit): unit file %s %s, enabled; service_restart starts it", s.Unit, s.Mode, s.UnitPath, state),
+		Data: map[string]any{
+			"unit": s.Unit, "mode": s.Mode, "scope": m.scope.String(), "unit_file": s.UnitPath, "changed": changed,
+			"exec_start": s.Rendered.ExecStart, "working_directory": s.Rendered.WorkingDirectory,
+			"commands": [][]string{reload, enable},
+		},
+		Receipt: events.SetupReceipt{Kind: "exec", Argv: enable, Target: s.Unit},
+	}, nil
+}
+
+func (m systemdManager) restart(ctx context.Context, env ops.Env, unit string) (ops.Result, error) {
 	// Only a unit this project installed: service_install wrote its file,
 	// and systemd loads the unit from that file. Unit names are per OS
-	// user, so the file alone does not prove the name is this project's.
-	if err := requireFile(env, UnitDir+"/"+unit, false); err != nil {
-		return ops.Result{}, fmt.Errorf("%w; run service_install first", err)
+	// user (per machine for a system unit), so the file alone does not prove
+	// the name is this project's; ownFragment checks what systemd loads.
+	if m.scope == ScopeUser {
+		if err := requireFile(env, UnitDir+"/"+unit, false); err != nil {
+			return ops.Result{}, fmt.Errorf("%w; run service_install first", err)
+		}
 	}
-	st, res, err := show(ctx, env, unit)
+	st, res, err := m.show(ctx, env, unit)
 	if err != nil {
 		return ops.Result{}, err
 	}
@@ -300,7 +491,14 @@ func (m systemdUser) restart(ctx context.Context, env ops.Env, unit string) (ops
 		return ops.Result{}, fmt.Errorf("%w: systemd loads %s from %s, not this project's %s; refusing to restart it",
 			ErrDetect, unit, q(st["FragmentPath"]), q(want))
 	}
-	argv, err := SystemctlArgv("restart", unit)
+	if m.scope == ScopeSystem {
+		// What the root service runs may have changed since install: the
+		// root-only precondition is checked again before every start.
+		if err := m.requireRootAt(env, unit); err != nil {
+			return ops.Result{}, err
+		}
+	}
+	argv, err := m.argv("restart", unit)
 	if err != nil {
 		return ops.Result{}, err
 	}
@@ -362,9 +560,9 @@ func parseShow(out []byte) unitState {
 	return st
 }
 
-func (st unitState) data(unit string) map[string]any {
+func (st unitState) data(unit string, scope UnitScope) map[string]any {
 	return map[string]any{
-		"unit": unit, "scope": "user",
+		"unit": unit, "scope": scope.String(),
 		"installed":        st["LoadState"] == "loaded",
 		"running":          st["ActiveState"] == "active" && st["SubState"] == "running",
 		"load_state":       st["LoadState"],
