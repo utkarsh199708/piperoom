@@ -395,6 +395,13 @@ func (w *SetupWriter) dropBestEffort(ctx context.Context, user, role string) err
 // readPrivileges is the custom role's privilege list: find and changeStream on
 // each captured collection (MongoDB needs both to open a change stream on it),
 // and find on local.oplog.rs.
+//
+// The oplog grant is far wider than the collection grants: the oplog holds
+// every replicated write in the deployment, admin.system.users (SCRAM
+// credentials) included. It stays because the mongo-oplog-read setup check
+// (RoleInfo.Replication) requires it; Debezium 2.x captures through change
+// streams, so it is to go once U7-R confirms the connector runs without it
+// (docs/pilot/permissions.md "Source MongoDB").
 func readPrivileges(tables []string) bson.A {
 	privs := make(bson.A, 0, len(tables)+1)
 	for _, t := range tables {
