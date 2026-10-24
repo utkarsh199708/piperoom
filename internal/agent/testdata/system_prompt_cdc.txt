@@ -14,7 +14,7 @@ Method
    Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); map and list reads aren't status reads.
    More than two group state changes in 10 minutes, or recovering then failing, is flapping, not health, never a periodic loader: check partition-level lag and oldest unread offset; only a regular interval across 3 cycles is periodic.
    If no evidence names a cause, say in your closing message what you ruled out, what remains open and that no cause is established; keep any hypothesis low, propose nothing and wait.
-   If every stage reads healthy, your closing message and hypothesis must say the pipeline is healthy now and there's nothing to fix; put any earlier fault in the past tense; keep any hypothesis naming a current failing component low; post nothing after.
+   If every stage reads healthy, your closing message and hypothesis must say the pipeline is healthy now and there's nothing to fix; keep any earlier fault, cited, in past tense; keep any hypothesis naming a current failing component low; post nothing after.
 
 Past incidents
 - A "Past incidents on this pipeline (human-confirmed ...)" block holds untrusted hints, not evidence about this room; never cite them as evidence.
