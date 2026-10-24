@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,9 +35,10 @@ import (
 // syscall.EscapeArg from the exe path and the argument slice, so this package
 // never builds a BinaryPathName string by hand.
 //
-// The service runs as NT SERVICE\<service>, not LocalSystem: see the
-// serviceAccountPrefix comment below for the rule and why the project may not
-// be user-writable when the service is SYSTEM.
+// The service runs as NT SERVICE\<service>, not LocalSystem, its token keeps one
+// privilege, and the directories it executes from are given a protected DACL at
+// install: see serviceAccountPrefix below for the account, the ACLs and what
+// they do and do not close.
 
 // The SCM's state and control values this package names, mirroring svc.State,
 // svc.Accepted and svc.Cmd (the same numeric values the Windows API uses, which
@@ -60,28 +62,46 @@ const (
 )
 
 // serviceAccountPrefix starts the virtual account a service of this target
-// runs as: NT SERVICE\<service name>. It is not LocalSystem, and that is the
-// point of the rule.
+// runs as: NT SERVICE\<service name>. It is not LocalSystem.
 //
-// The service's exe (bin/piperoom-setup.exe), its classpath (kafka/libs), its
-// plugins and its worker file all sit under the project directory, which
-// properties_write (T1) and the person's own account can change at any time. A
-// machine service under LocalSystem there would let anyone who can write a
-// project file run code as SYSTEM — the same hole this package refuses on
-// Linux by never installing a system unit from a user-writable directory. The
-// virtual account closes it: the SCM creates NT SERVICE\<service> and logs the
-// service on as that identity, which has no password, no profile and no rights
-// beyond what an administrator grants it, so replacing the exe gains nothing.
-// mgr.Config exposes the account as ServiceStartName (go doc
-// golang.org/x/sys/windows/svc/mgr.Config) and the virtual-account SID as
-// SidType SERVICE_SID_TYPE_UNRESTRICTED.
+// The service's exe (bin\piperoom-setup.exe), its classpath (kafka\libs), its
+// plugins (connect-plugins\), the worker file and its JDK all sit in places the
+// person's own account writes. A machine service under LocalSystem would run
+// whatever that account puts there as SYSTEM — the same hole this package
+// refuses on Linux by never installing a system unit from a user-writable
+// directory. Three things narrow it, and none of them closes it alone:
 //
-// Consequence, which the definition records and the summary states: the
-// project directory and the JDK must be readable by NT SERVICE\<service>. A
-// directory under a user profile usually grants only that user, SYSTEM and
-// Administrators, so a service installed from there starts, cannot read its
-// worker file and reports the JVM's exit code. Row U8e documents the account
-// and where to install for the operator.
+//   - The account: the SCM logs the service on as NT SERVICE\<service>, which
+//     has no password, no profile and no rights beyond what an administrator
+//     grants it (mgr.Config.ServiceStartName, and SidType
+//     SERVICE_SID_TYPE_UNRESTRICTED so the SID is in the token). A process of
+//     the person's account therefore no longer becomes SYSTEM directly.
+//   - The DACLs: install gives bin\, kafka\, connect-plugins\ and services\ a
+//     protected DACL owned by Administrators — Administrators and SYSTEM full
+//     control, NT SERVICE\<service> and Users read and execute — so the exe,
+//     the jars, the plugins and the recorded definition stop being writable by
+//     the person's account (acl.go). logs\ and a standalone worker's offset
+//     file are the service's to write.
+//   - The token: the service's token keeps SeChangeNotifyPrivilege and nothing
+//     else (serviceRequiredPrivileges), so the SeImpersonatePrivilege every
+//     service token otherwise carries — the public "potato" step from a service
+//     account to SYSTEM — is gone.
+//
+// What is left: the worker properties file at the project root stays writable
+// by the person's account, because properties_write (T1) writes it through an
+// unelevated run. That file names plugin.path and the connectors' classes, so
+// it still decides what the service loads. Closing it needs an elevated
+// properties_write on Windows or a design ruling (acl.go, and the U8b row's
+// PR). A virtual account also authenticates to a domain as the machine account
+// (DOMAIN\HOST$) rather than as the person; that network identity is the
+// reason U8e tells the operator to install on a host the person does not share.
+//
+// Consequence for the operator, which the definition records and the summary
+// states: after install, changing the distribution, a plugin or the exe needs
+// an elevated run (install is elevated already), and the project directory, the
+// JDK and the log directory must stay readable by NT SERVICE\<service> — the
+// DACLs install sets grant exactly that. Row U8e documents the account and
+// where to install.
 const serviceAccountPrefix = `NT SERVICE\`
 
 // serviceSIDTypeUnrestricted is windows.SERVICE_SID_TYPE_UNRESTRICTED: the
@@ -94,6 +114,19 @@ const serviceSIDTypeUnrestricted = 1
 // serviceAccount is the account the service runs as.
 func serviceAccount(service string) string { return serviceAccountPrefix + service }
 
+// serviceRequiredPrivileges is the whole privilege set the service's token
+// keeps (SERVICE_REQUIRED_PRIVILEGES_INFO, which the SCM applies when it logs
+// the service on; winsvc_windows.go). SeChangeNotifyPrivilege is "bypass
+// traverse checking", which the service needs to reach a project directory
+// under a profile it can open but not list. Everything else a service token
+// otherwise gets is dropped, and SeImpersonatePrivilege and
+// SeCreateGlobalPrivilege are the two that matter: "Impersonate a client after
+// authentication" is granted to the SERVICE group by default, and a token that
+// holds it can be raised to SYSTEM by the public potato/PrintSpoofer tools,
+// which Microsoft does not treat as a vulnerability. The Connect JVM needs no
+// privilege beyond reading its files and opening sockets.
+var serviceRequiredPrivileges = []string{"SeChangeNotifyPrivilege"}
+
 // Timing of the SCM calls. The poll interval bounds how long a stop or start
 // the manager asked for may take before the op reports it did not happen; the
 // service host's own wait hint (servicehost.go) is the SCM's copy of it.
@@ -104,6 +137,10 @@ const (
 	// deleted: the SCM may still hold the name ("marked for deletion") until
 	// every handle to it is closed.
 	deleteRetries = 10
+	// exeReplaceTimeout bounds the retries of the exe copy: Windows refuses to
+	// replace an image a process still has mapped, and the old service host is
+	// gone a moment after the SCM reports it Stopped.
+	exeReplaceTimeout = 5 * time.Second
 )
 
 // Errors the SCM's answers map to, so callers branch with errors.Is on a
@@ -195,6 +232,10 @@ type serviceConfig struct {
 	// ServiceSID asks for SERVICE_SID_TYPE_UNRESTRICTED, so the virtual
 	// account's SID is in the service's token.
 	ServiceSID bool
+	// Privileges is the privilege set the token keeps
+	// (SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO); empty leaves the SCM's
+	// default set, which is what install must not do (serviceRequiredPrivileges).
+	Privileges []string
 }
 
 // serviceAPI is the service control manager behind the Windows manager and the
@@ -231,13 +272,16 @@ type windowsManager struct {
 	// self returns the running binary's path: the file install copies to
 	// bin/piperoom-setup.exe, which is what the SCM runs.
 	self func() (string, error)
+	// acl sets the DACLs of the directories the service executes from, after the
+	// service exists (its virtual account has no SID before that).
+	acl  aclAPI
 	poll time.Duration
 }
 
 // newWindowsManager builds the manager over the platform's SCM binding. self is
 // os.Executable in production; the tests pass a small file.
-func newWindowsManager(connect func() (serviceAPI, error), self func() (string, error)) *windowsManager {
-	return &windowsManager{connect: connect, self: self, poll: defaultPollInterval}
+func newWindowsManager(connect func() (serviceAPI, error), self func() (string, error), acl aclAPI) *windowsManager {
+	return &windowsManager{connect: connect, self: self, acl: acl, poll: defaultPollInterval}
 }
 
 func (m *windowsManager) artifact(s serviceSpec) ([]byte, error) { return renderServiceDefinition(s) }
@@ -306,14 +350,30 @@ func (m *windowsManager) status(ctx context.Context, env ops.Env, name string) (
 	}, nil
 }
 
+// installState is what install found before it changed anything: the recorded
+// definition, whether the files it writes existed, whether the name belonged to
+// this project and whether that service was running. It is what a failure puts
+// back (rollbackInstall).
+type installState struct {
+	previous      []byte
+	recordExisted bool
+	exeExisted    bool
+	replaced      bool
+	wasRunning    bool
+	created       bool
+}
+
 // install registers the service, or replaces this project's earlier install of
 // the same name. Anything named exe or argument comes from s, which the spec
 // built from the template and the project directory.
 //
-// The order is the replace guarantee: the new exe copy and definition are
-// written before the working service is stopped and deleted, and a failed
-// create puts the previous definition back and re-creates the previous service,
-// so a replacement that cannot finish leaves a service behind rather than none.
+// The order is the replace guarantee. A running service is stopped first, since
+// Windows refuses to replace an image a running process has mapped and an
+// upgrade is exactly the case of replacing a running runner binary. Then the
+// new files are written and the old service deleted, and a failure at any step
+// after the stop puts the previous service back — created from its validated
+// record and started again — so a replacement that cannot finish leaves the
+// previous worker running rather than none.
 func (m *windowsManager) install(ctx context.Context, env ops.Env, s serviceSpec) (ops.Result, error) {
 	def, err := m.artifact(s)
 	if err != nil {
@@ -341,8 +401,8 @@ func (m *windowsManager) install(ctx context.Context, env ops.Env, s serviceSpec
 	}
 	defer api.Close()
 
-	previous, recordExisted := readDefinition(env, s.UnitFile)
-	replaced := false
+	st := installState{}
+	st.previous, st.recordExisted = readDefinition(env, s.UnitFile)
 	h, err := api.Open(s.Unit)
 	switch {
 	case err == nil:
@@ -353,65 +413,198 @@ func (m *windowsManager) install(ctx context.Context, env ops.Env, s serviceSpec
 			return ops.Result{}, fmt.Errorf("%w: a service named %s is already installed and this project did not install it (no %s/%s.txt); pick another service name",
 				ErrDetect, q(s.Unit), ServiceDir, s.Unit)
 		}
+		before, qerr := h.Query()
 		h.Close()
-		replaced = true
+		if qerr != nil {
+			return ops.Result{}, fmt.Errorf("%w: querying %s: %w", ErrServiceManager, q(s.Unit), qerr)
+		}
+		st.replaced = true
+		st.wasRunning = before.State != stateStopped
 	case !errors.Is(err, errServiceNotExist):
 		return ops.Result{}, fmt.Errorf("%w: opening %s: %w", ErrServiceManager, q(s.Unit), err)
 	}
 
+	// Only a stopped service lets its image be replaced.
+	if st.wasRunning {
+		if err := m.stopExisting(ctx, api, s.Unit); err != nil {
+			return ops.Result{}, err
+		}
+	}
+	fail := func(cause error) (ops.Result, error) {
+		return ops.Result{}, m.rollbackInstall(ctx, api, env, s, st, cause)
+	}
+
+	// The directories the SCM runs from and the account writes to exist before
+	// any DACL names them.
+	if err := ensureServiceFiles(env, s); err != nil {
+		return fail(err)
+	}
 	exeBytes, err := os.ReadFile(runner)
 	if err != nil {
-		return ops.Result{}, fmt.Errorf("%w: reading the piperoom-setup binary %s: %w", ErrDetect, q(runner), err)
+		return fail(fmt.Errorf("%w: reading the piperoom-setup binary %s: %w", ErrDetect, q(runner), err))
 	}
-	exeExisted := requireFile(env, exeName, false) == nil
-	cleanExe, exeChanged, err := writeDriverFile(env, exeName, exeBytes, 0o755, BinDir)
+	st.exeExisted = requireFile(env, exeName, false) == nil
+	cleanExe, exeChanged, err := m.writeExe(ctx, env, exeName, exeBytes)
 	if err != nil {
-		return ops.Result{}, err
+		return fail(err)
 	}
 	record, recordChanged, err := writeDriverFile(env, s.UnitFile, def, 0o600, ServiceDir)
 	if err != nil {
-		undoDriverFiles(env, exeName, exeExisted)
-		return ops.Result{}, err
+		return fail(err)
 	}
-	if replaced {
+	if st.replaced {
 		if err := m.deleteExisting(ctx, api, s.Unit); err != nil {
-			restoreDefinition(env, s.UnitFile, previous, recordExisted)
-			undoDriverFiles(env, exeName, exeExisted)
-			return ops.Result{}, err
+			return fail(err)
 		}
 	}
 	h, err = m.create(ctx, api, s)
 	if err != nil {
-		if replaced {
-			// Put the service back: the person had a working worker before
-			// this step, and the definition just read still names its exe and
-			// arguments.
-			if rerr := m.restore(ctx, api, s.Unit, previous); rerr != nil {
-				err = fmt.Errorf("%w; restoring the previous service also failed: %v", err, rerr)
-			}
-		}
-		restoreDefinition(env, s.UnitFile, previous, recordExisted)
-		undoDriverFiles(env, exeName, exeExisted)
-		return ops.Result{}, err
+		return fail(err)
 	}
 	h.Close()
-
+	st.created = true
 	account := serviceAccount(s.Unit)
-	summary := fmt.Sprintf("installed %s (%s) as a Windows service: %s", s.Unit, s.Mode, cleanExe)
-	if replaced {
-		summary = fmt.Sprintf("replaced %s (%s): the previous install was stopped and removed first; now %s", s.Unit, s.Mode, cleanExe)
+	// The service exists now, so its virtual account has a SID to grant. A
+	// service that could not be hardened is removed rather than installed: its
+	// files would stay writable by the account the DACLs exist to keep out.
+	if err := m.acl.Harden(account, serviceACLTargets(s)); err != nil {
+		return fail(fmt.Errorf("%w: %w", ErrServiceManager, err))
 	}
-	summary += "; start=automatic, account=" + account + " (the project directory and the JDK must be readable by it); service_restart starts it"
+	restarted := false
+	var startErr error
+	if st.wasRunning {
+		restarted, startErr = m.startExisting(ctx, api, s.Unit)
+	}
+
+	summary := fmt.Sprintf("installed %s (%s) as a Windows service: %s", s.Unit, s.Mode, cleanExe)
+	if st.replaced {
+		summary = fmt.Sprintf("replaced %s (%s); now %s", s.Unit, s.Mode, cleanExe)
+		if st.wasRunning {
+			summary += "; the running worker was stopped first"
+			if restarted {
+				summary += " and started again"
+			} else if startErr != nil {
+				summary += " and did not start again (" + startErr.Error() + "); service_restart retries"
+			}
+		}
+	}
+	summary += "; start=automatic, account=" + account + ", its token keeps " + strings.Join(serviceRequiredPrivileges, ",")
+	summary += "; " + aclSummary(serviceACLTargets(s)) + " are Administrators-owned, read-only for it"
+	if !st.replaced {
+		summary += "; service_restart starts it"
+	}
 	return ops.Result{
 		Summary: summary,
 		Data: map[string]any{
 			"unit": s.Unit, "service": s.Unit, "mode": s.Mode, "exe": cleanExe,
 			"exe_changed": exeChanged, "args": s.Args, "java": s.Java,
 			"record": record, "record_changed": recordChanged, "definition": string(def),
-			"replaced": replaced, "start_type": "automatic", "account": account,
+			"replaced": st.replaced, "was_running": st.wasRunning, "started": restarted,
+			"start_type": "automatic", "account": account, "privileges": serviceRequiredPrivileges,
+			"acl": serviceACLTargets(s),
 		},
 		Receipt: events.SetupReceipt{Kind: "file", Target: record},
 	}, nil
+}
+
+// aclSummary names the project-relative targets of the DACL, for the summary an
+// approver reads.
+func aclSummary(targets []aclTarget) string {
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		names = append(names, lastComponent(t.Path))
+	}
+	return strings.Join(names, ", ")
+}
+
+// writeExe writes the runner copy at bin/piperoom-setup.exe, retrying while the
+// old service host is still exiting: Windows refuses to replace an image that
+// is still mapped, and the SCM reports Stopped a moment before the process is
+// gone (and a sibling service of this project may still be running from the
+// same copy). The retries are bounded and the wait is the caller's.
+func (m *windowsManager) writeExe(ctx context.Context, env ops.Env, name string, data []byte) (string, bool, error) {
+	deadline := time.Now().Add(exeReplaceTimeout)
+	for {
+		clean, changed, err := writeDriverFile(env, name, data, 0o755, BinDir)
+		if err == nil {
+			return clean, changed, nil
+		}
+		if !time.Now().Add(m.pollOrDefault()).Before(deadline) {
+			return "", false, fmt.Errorf("%w (a service running from it must be stopped first; service_status names it)", err)
+		}
+		select {
+		case <-ctx.Done():
+			return "", false, err
+		case <-time.After(m.pollOrDefault()):
+		}
+	}
+}
+
+// stopExisting stops a service and waits for it to reach Stopped.
+func (m *windowsManager) stopExisting(ctx context.Context, api serviceAPI, name string) error {
+	h, err := api.Open(name)
+	if errors.Is(err, errServiceNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: opening %s: %w", ErrServiceManager, q(name), err)
+	}
+	defer h.Close()
+	if _, err := h.Control(controlStop); err != nil && !errors.Is(err, errServiceNotActive) {
+		return fmt.Errorf("%w: stopping %s: %w", ErrServiceManager, q(name), err)
+	}
+	return m.waitForState(ctx, h, name, stateStopped, 0)
+}
+
+// startExisting starts a service and waits for it to run, reporting a JVM that
+// died at once with its exit code instead of polling for the whole timeout.
+func (m *windowsManager) startExisting(ctx context.Context, api serviceAPI, name string) (bool, error) {
+	h, err := api.Open(name)
+	if err != nil {
+		return false, fmt.Errorf("%w: opening %s: %w", ErrServiceManager, q(name), err)
+	}
+	defer h.Close()
+	if err := h.Start(); err != nil {
+		return false, fmt.Errorf("%w: starting %s: %w", ErrServiceManager, q(name), err)
+	}
+	if err := m.waitForState(ctx, h, name, stateRunning, stateStopped); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// rollbackInstall puts back what install changed when it cannot finish: the
+// service it created is deleted, the previous service is created from its
+// validated definition and started again if it was running, and the record and
+// the exe copy are restored. Every step is attempted; the failures are appended
+// to the cause the op reports.
+func (m *windowsManager) rollbackInstall(ctx context.Context, api serviceAPI, env ops.Env, s serviceSpec, st installState, cause error) error {
+	err := cause
+	if st.created {
+		if derr := m.deleteExisting(ctx, api, s.Unit); derr != nil {
+			err = fmt.Errorf("%w; removing the new service also failed: %v", err, derr)
+		}
+	}
+	if st.replaced {
+		if rerr := m.restore(ctx, api, env, s, st.previous); rerr != nil {
+			err = fmt.Errorf("%w; restoring the previous service also failed: %v", err, rerr)
+		} else if st.wasRunning {
+			if _, serr := m.startExisting(ctx, api, s.Unit); serr != nil {
+				err = fmt.Errorf("%w; the previous service was restored but did not start again: %v", err, serr)
+			}
+		}
+	}
+	restoreDefinition(env, s.UnitFile, st.previous, st.recordExisted)
+	undoDriverFiles(env, BinDir+"/"+RunnerExe, st.exeExisted)
+	return err
+}
+
+// pollOrDefault is the poll interval, never zero.
+func (m *windowsManager) pollOrDefault() time.Duration {
+	if m.poll <= 0 {
+		return defaultPollInterval
+	}
+	return m.poll
 }
 
 // create registers the service s describes.
@@ -420,7 +613,8 @@ func (m *windowsManager) create(ctx context.Context, api serviceAPI, s serviceSp
 }
 
 // config is what the SCM is told about s: the template's display name,
-// automatic start, and the service's own virtual account.
+// automatic start, the service's own virtual account and its reduced privilege
+// set.
 func (m *windowsManager) config(s serviceSpec) serviceConfig {
 	return serviceConfig{
 		DisplayName: serviceDisplayName(s),
@@ -428,6 +622,7 @@ func (m *windowsManager) config(s serviceSpec) serviceConfig {
 		Automatic:   true,
 		Account:     serviceAccount(s.Unit),
 		ServiceSID:  true,
+		Privileges:  serviceRequiredPrivileges,
 	}
 }
 
@@ -503,18 +698,16 @@ func (m *windowsManager) deleteExisting(ctx context.Context, api serviceAPI, nam
 }
 
 // restore re-creates a service install replaced, from the definition it
-// recorded before this install. The exe path is the same bin/ copy (now the
-// new runner), and the recorded arguments still name this project, so the
-// previous worker comes back as it was.
-func (m *windowsManager) restore(ctx context.Context, api serviceAPI, name string, previous []byte) error {
-	exe, args, display, err := parseDefinition(previous)
+// recorded before this install. The record is under services/, which the
+// person's account could write before this install hardened it, so nothing in
+// it is trusted: parseRecord accepts it only when it is exactly what
+// renderServiceDefinition writes for this project and service.
+func (m *windowsManager) restore(ctx context.Context, api serviceAPI, env ops.Env, s serviceSpec, previous []byte) error {
+	prev, err := parseRecord(env, s.Unit, previous)
 	if err != nil {
 		return err
 	}
-	h, err := m.createService(ctx, api, name, exe, args, serviceConfig{
-		DisplayName: display, Automatic: true,
-		Account: serviceAccount(name), ServiceSID: true,
-	})
+	h, err := m.createService(ctx, api, prev.Unit, prev.ExePath, prev.Args, m.config(prev))
 	if err != nil {
 		return err
 	}
@@ -557,27 +750,117 @@ func restoreDefinition(env ops.Env, name string, previous []byte, existed bool) 
 	}
 }
 
-// parseDefinition reads the exe, arguments and display name of a definition
-// record (renderServiceDefinition's output).
-func parseDefinition(record []byte) (exe string, args []string, display string, err error) {
+// parseRecord reads a definition record (renderServiceDefinition's output) back
+// into the spec install would have written for it, and refuses one it did not
+// write. The record is a file under the project, so a person's account can
+// plant exe= and arg= lines in it; the elevated install must never hand them to
+// CreateService. Nothing in the record is taken on trust:
+//
+//   - the exe must be this project's bin\piperoom-setup.exe copy, whatever the
+//     record says (a record naming cmd.exe is refused);
+//   - the arguments must be exactly run-service and this service's own flags,
+//     with --project the confined project directory and --java a service path;
+//   - every value must pass the definition's own checks, and the record must
+//     round-trip byte for byte through renderServiceDefinition, so an added,
+//     removed or reordered line is refused too.
+func parseRecord(env ops.Env, name string, record []byte) (serviceSpec, error) {
+	refuse := func(why string) (serviceSpec, error) {
+		return serviceSpec{}, fmt.Errorf("%w: the recorded definition of %s is not one service_install wrote (%s); run service_install to rewrite it",
+			ErrDetect, q(name), why)
+	}
+	s := serviceSpec{Unit: name, UnitFile: ServiceDir + "/" + name + ".txt"}
+	var account, start string
 	for _, line := range strings.Split(string(record), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return refuse("a line without a key")
+		}
+		if err := checkDefinitionValue(value); err != nil {
+			return refuse("a value a definition cannot carry")
+		}
 		switch key {
-		case "exe":
-			exe = value
-		case "arg":
-			args = append(args, value)
+		case "service":
+			if value != name {
+				return refuse("it names another service")
+			}
 		case "display":
-			display = value
+			// Compared through the round-trip: the display name is derived from
+			// the mode.
+		case "account":
+			account = value
+		case "start":
+			start = value
+		case "project":
+			s.ProjectDir = value
+		case "exe":
+			s.ExePath = value
+		case "arg":
+			s.Args = append(s.Args, value)
+		case "java-arg":
+			s.Java = append(s.Java, value)
+		case "log":
+			s.LogFile = value
+		default:
+			return refuse("it holds an unknown key " + q(key))
 		}
 	}
-	if exe == "" || display == "" {
-		return "", nil, "", fmt.Errorf("%w: the recorded definition of the service to restore names no exe or display name", ErrDetect)
+	if env.Confine == nil {
+		return serviceSpec{}, errors.New("host: the project root is not open")
 	}
-	return exe, args, display, nil
+	dir := env.Confine.Dir()
+	if s.ProjectDir != dir {
+		return refuse("its project is not this project directory")
+	}
+	if err := CheckServicePath(s.ProjectDir); err != nil {
+		return refuse("its project path cannot be written back")
+	}
+	if s.ExePath != nativeJoin(dir, BinDir, RunnerExe) {
+		return refuse("its exe is not the project's " + BinDir + "/" + RunnerExe + " copy")
+	}
+	if account != serviceAccount(name) || start != "automatic" {
+		return refuse("its account or start type is not the one install sets")
+	}
+	// The arguments are exactly the ones specWindows builds: the subcommand, the
+	// project directory, this service's name and mode, and the JDK home.
+	args := s.Args
+	if len(args) != 9 || args[0] != RunServiceSubcommand ||
+		args[1] != "--project" || args[2] != dir ||
+		args[3] != "--name" || args[5] != "--mode" || args[7] != "--java" {
+		return refuse("its arguments are not " + RunServiceSubcommand + " with --project, --name, --mode and --java")
+	}
+	if _, ok := modeFiles[args[6]]; !ok {
+		return refuse("its mode is neither " + ModeDistributed + " nor " + ModeStandalone)
+	}
+	if strings.HasPrefix(name, UnitPrefix) && args[4] != strings.TrimPrefix(name, UnitPrefix) {
+		return refuse("its --name is not this service's")
+	}
+	for _, v := range append([]string{s.ExePath}, args...) {
+		if err := CheckServiceToken(v); err != nil {
+			return refuse("an argument is not a token a service definition can carry")
+		}
+	}
+	if err := CheckServicePath(args[8]); err != nil {
+		return refuse("its --java is not an absolute path")
+	}
+	if err := CheckServicePath(s.LogFile); err != nil {
+		return refuse("its log path is not absolute")
+	}
+	s.Mode = args[6]
+	s.Worker = modeFiles[s.Mode][1]
+	if s.Mode == ModeStandalone {
+		s.Offsets = nativeJoin(dir, OffsetsFile)
+	}
+	// The round-trip is the last check: the record must be exactly the bytes
+	// install writes for the spec above, so a display name, a log path or a JVM
+	// argument the record does not share with install is refused.
+	rendered, err := renderServiceDefinition(s)
+	if err != nil || !bytes.Equal(rendered, record) {
+		return refuse("it is not the exact text service_install writes")
+	}
+	return s, nil
 }
 
 // restart stops the service if it runs and starts it, then reports the state

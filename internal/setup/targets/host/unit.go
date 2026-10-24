@@ -214,6 +214,10 @@ type serviceSpec struct {
 	Args       []string // run-service --project ... --name ... --mode ... --java ...
 	Java       []string // the JVM argv the service host starts
 	LogFile    string   // <project>\logs\piperoom-service.log
+	// Offsets is a standalone worker's offset file (<project>\connect.offsets),
+	// the second place the service writes; empty for a distributed worker, whose
+	// offsets live in a Kafka topic.
+	Offsets string
 }
 
 // spec resolves params into a service definition. Paths come from the project
@@ -314,13 +318,17 @@ func (d *Driver) specWindows(p ServiceParams, unit string, env ops.Env) (service
 			return serviceSpec{}, err
 		}
 	}
-	return serviceSpec{
+	spec := serviceSpec{
 		Unit: unit, Mode: p.Mode, Worker: files[1],
 		UnitFile:   ServiceDir + "/" + unit + ".txt",
 		UnitPath:   nativeJoin(dir, ServiceDir, unit+".txt"),
 		ProjectDir: dir, ExePath: exe, Args: args, Java: java,
 		LogFile: nativeJoin(dir, LogDir, ServiceLogName),
-	}, nil
+	}
+	if p.Mode == ModeStandalone {
+		spec.Offsets = nativeJoin(dir, OffsetsFile)
+	}
+	return spec, nil
 }
 
 // checkPath is the path rule of the artifact this driver renders: a systemd

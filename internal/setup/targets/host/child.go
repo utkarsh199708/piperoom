@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"time"
 )
@@ -19,7 +18,9 @@ import (
 
 // terminateGrace is how long Terminate waits for the child to exit after it
 // asked it to stop, before it kills it. It sits inside the service host's stop
-// timeout (25 s) and its wait hint (30 s).
+// timeout (25 s) and its wait hint (30 s), and it is spent only where the ask
+// exists: on Unix, where SIGINT reaches a JVM's shutdown hook. On Windows there
+// is no ask at all (interruptChild), so Terminate does not wait.
 const terminateGrace = 5 * time.Second
 
 // processContainment is a resource that ends the child when it is closed: the
@@ -87,15 +88,28 @@ func (c *processChild) Wait() (int, error) {
 
 // Terminate ends the process and returns when it is gone or ctx is done.
 //
-// It asks first and kills as a last resort. The ask is os.Interrupt, which on
-// Unix is SIGINT and reaches a JVM's shutdown hook. A Windows service runs in
-// session 0 with no console, so there is neither a Ctrl-Break to send nor a
-// window message to post, and Windows' os.Process rejects every signal but
-// Kill: the request fails at once and the grace period elapses, after which
-// TerminateProcess (what `taskkill /f` does) ends the JVM. Kafka Connect's
-// offsets are flushed on an interval (offset.flush.interval.ms) and commit
-// durably, so a terminated worker re-reads its committed offsets on the next
-// start; the SCM would kill the process at the wait hint regardless.
+// Where the platform has a stop request, it is sent first and the kill is a
+// last resort: os.Interrupt is SIGINT on Unix, which reaches a JVM's shutdown
+// hook, and Terminate waits terminateGrace for the child to exit on its own.
+//
+// On Windows it does not wait, because there is no stop request to send: a
+// Windows service runs in session 0 with no console of its own, os.Process
+// rejects every signal but Kill (the request fails at once with EWINDOWS), and
+// sending a console Ctrl-Break would need the host to allocate and share a
+// console with the child first — the JVM would then have a console whose
+// control events the host has to filter — for a graceful step that
+// TerminateProcess is taking anyway inside the SCM's shutdown budget
+// (WaitToKillServiceTimeout is a few seconds on current client Windows). So on
+// Windows TerminateProcess (what `taskkill /f` does) is the only path, and
+// Terminate calls it immediately rather than spending 5 s first. Kafka
+// Connect's offsets are flushed on an interval (offset.flush.interval.ms) and
+// commit durably, so a terminated worker re-reads its committed offsets on the
+// next start.
+//
+// The trade-off, in both cases: a killed distributed worker never leaves the
+// group, so its tasks are only reassigned when their member is evicted —
+// scheduled.rebalance.max.delay.ms, 5 minutes by default, and then the eager or
+// cooperative rebalance. A clean stop lets the worker leave the group first.
 //
 // The Job object from startChild is the second half of that promise: if this
 // process dies without running Stop, Windows closes the job and kills the JVM
@@ -104,14 +118,15 @@ func (c *processChild) Terminate(ctx context.Context) error {
 	if c.cmd.Process == nil {
 		return nil
 	}
-	_ = c.cmd.Process.Signal(os.Interrupt)
-	grace := time.NewTimer(terminateGrace)
-	defer grace.Stop()
-	select {
-	case <-c.done:
-		return nil
-	case <-ctx.Done():
-	case <-grace.C:
+	if interruptChild(c.cmd.Process) {
+		grace := time.NewTimer(terminateGrace)
+		defer grace.Stop()
+		select {
+		case <-c.done:
+			return nil
+		case <-ctx.Done():
+		case <-grace.C:
+		}
 	}
 	if err := c.cmd.Process.Kill(); err != nil {
 		// The JVM may have exited between the grace period and the kill; that

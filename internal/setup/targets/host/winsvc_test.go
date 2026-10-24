@@ -126,6 +126,7 @@ type fakeService struct {
 	deletes    int
 	closes     int
 	onStart    func()
+	onStop     func()
 }
 
 func (s *fakeService) Start() error {
@@ -160,6 +161,9 @@ func (s *fakeService) Control(cmd serviceControl) (serviceStatus, error) {
 	if cmd == controlStop {
 		s.stops++
 		s.state = stateStopped
+		if s.onStop != nil {
+			s.onStop()
+		}
 	}
 	return serviceStatus{State: s.state}, nil
 }
@@ -195,6 +199,32 @@ func (s *fakeService) counts() (starts, stops, deletes int) {
 	return s.starts, s.stops, s.deletes
 }
 
+// aclCall is one recorded Harden call.
+type aclCall struct {
+	account string
+	targets []aclTarget
+}
+
+// fakeACL is aclAPI: it records the DACLs install would set, and can fail.
+type fakeACL struct {
+	mu    sync.Mutex
+	err   error
+	calls []aclCall
+}
+
+func (a *fakeACL) Harden(account string, targets []aclTarget) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, aclCall{account: account, targets: append([]aclTarget(nil), targets...)})
+	return a.err
+}
+
+func (a *fakeACL) recorded() []aclCall {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]aclCall(nil), a.calls...)
+}
+
 // winFixture is a project directory with the host driver on a Windows GOOS and
 // the fake SCM wired in.
 type winFixture struct {
@@ -203,6 +233,7 @@ type winFixture struct {
 	reg    *ops.Registry
 	drv    *Driver
 	scm    *fakeSCM
+	acl    *fakeACL
 	self   string
 	java   string
 	noExec bool
@@ -211,7 +242,7 @@ type winFixture struct {
 func newWindowsFixture(t *testing.T) *winFixture {
 	t.Helper()
 	dir := t.TempDir()
-	f := &winFixture{t: t, dir: dir, scm: newFakeSCM(), java: fakeJava}
+	f := &winFixture{t: t, dir: dir, scm: newFakeSCM(), acl: &fakeACL{}, java: fakeJava}
 	reg, err := ops.New(ops.Config{
 		ProjectDir: dir,
 		LookPath: func(name string) (string, error) {
@@ -244,7 +275,7 @@ func newWindowsFixture(t *testing.T) *winFixture {
 			return nil, f.scm.connectErr
 		}
 		return f.scm, nil
-	}, func() (string, error) { return f.self, nil })
+	}, func() (string, error) { return f.self, nil }, f.acl)
 	mgr.poll = time.Millisecond
 	drv.mgr = mgr
 	return f
@@ -1015,6 +1046,238 @@ func TestWindowsChildArgvFromProgramFiles(t *testing.T) {
 	}
 }
 
+// TestWindowsServiceInstallHardensTheServiceFiles: the service runs as its own
+// virtual account with one privilege, and install gives the directories it
+// executes or loads from a protected DACL it then owns (acl.go), so the exe,
+// the jars, the plugins and the record stop being writable by the person's
+// account.
+func TestWindowsServiceInstallHardensTheServiceFiles(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.acl.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("%d Harden calls, want 1", len(calls))
+	}
+	if calls[0].account != `NT SERVICE\piperoom-connect` {
+		t.Errorf("hardened for %q, want the service's own account", calls[0].account)
+	}
+	want := []aclTarget{
+		{Path: filepath.Join(f.dir, BinDir)},
+		{Path: filepath.Join(f.dir, DistDir)},
+		{Path: filepath.Join(f.dir, PluginDir)},
+		{Path: filepath.Join(f.dir, ServiceDir)},
+		{Path: filepath.Join(f.dir, LogDir), Write: true},
+	}
+	if got := calls[0].targets; !equalTargets(got, want) {
+		t.Errorf("hardened %+v, want %+v", got, want)
+	}
+	// The directories the account writes to exist before any DACL names them: a
+	// directory the person's account creates later would carry their ACEs.
+	for _, dir := range []string{BinDir, PluginDir, ServiceDir, LogDir} {
+		if fi, err := os.Stat(filepath.Join(f.dir, dir)); err != nil || !fi.IsDir() {
+			t.Errorf("%s was not created before hardening: %v", dir, err)
+		}
+	}
+	// The token keeps one privilege, and the SCM call is told so.
+	creates := f.scm.createdCalls()
+	if len(creates) != 1 || !equalStrings(creates[0].cfg.Privileges, serviceRequiredPrivileges) {
+		t.Fatalf("create calls %+v, want the reduced privilege set %q", creates, serviceRequiredPrivileges)
+	}
+}
+
+// TestWindowsServiceInstallOffsetsFile: a standalone worker writes its offsets
+// file at the project root, which the service account cannot write, so install
+// creates the file and grants the account modify on it.
+func TestWindowsServiceInstallOffsetsFile(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	res, err := f.run("service_install", ServiceParams{Mode: ModeStandalone})
+	if err != nil {
+		t.Fatalf("service_install: %v (%s)", err, res.Summary)
+	}
+	want := aclTarget{Path: filepath.Join(f.dir, OffsetsFile), Write: true}
+	found := false
+	for _, target := range f.acl.recorded()[0].targets {
+		if target == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("hardened targets %+v, want the offsets file %v", f.acl.recorded()[0].targets, want)
+	}
+	if fi, err := os.Stat(want.Path); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("the offsets file was not created before hardening: %v", err)
+	}
+	// A distributed worker keeps its offsets in a topic, so there is no file.
+	if got := serviceACLTargets(serviceSpec{Unit: "piperoom-connect", ProjectDir: f.dir}); len(got) != 5 {
+		t.Errorf("a distributed spec hardens %d targets, want 5", len(got))
+	}
+}
+
+// TestWindowsServiceInstallStopsTheRunningService: replacing a running service
+// stops it before the exe copy (Windows refuses to replace a mapped image) and
+// starts the new one again, so upgrading a running worker needs no manual stop.
+func TestWindowsServiceInstallStopsTheRunningService(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	old := f.scm.add("piperoom-connect", stateRunning)
+	newSelf := []byte("MZ piperoom-setup v2\n")
+	f.writeFileAt(f.self, newSelf)
+	var copiedDuringStop string
+	old.onStop = func() { copiedDuringStop = f.read(BinDir + "/" + RunnerExe) }
+	res, err := f.run("service_install", ServiceParams{})
+	if err != nil {
+		t.Fatalf("upgrade: %v (%s)", err, res.Summary)
+	}
+	if copiedDuringStop != string(selfBytes) {
+		t.Errorf("the exe copy was %q while the service stopped, want the old binary: the copy must wait for the stop", copiedDuringStop)
+	}
+	if got := f.read(BinDir + "/" + RunnerExe); got != string(newSelf) {
+		t.Errorf("bin copy %q, want the new runner", got)
+	}
+	if starts, stops, _ := old.counts(); starts != 0 || stops != 1 {
+		t.Errorf("the old service: %d starts, %d stops; want 0/1", starts, stops)
+	}
+	f.scm.mu.Lock()
+	replacement := f.scm.services["piperoom-connect"]
+	f.scm.mu.Unlock()
+	if replacement == nil {
+		t.Fatal("the replacement service is missing")
+	}
+	if starts, _, _ := replacement.counts(); starts != 1 {
+		t.Errorf("the replacement was started %d times, want 1: it was running before the upgrade", starts)
+	}
+	for _, want := range []string{"the running worker was stopped first", "started again"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Errorf("summary %q lacks %q", res.Summary, want)
+		}
+	}
+}
+
+// TestWindowsServiceRestoreRefusesAPlantedRecord: services/ was writable by the
+// person's account, so the recorded exe and arguments are data, not a command.
+// A planted record is refused instead of reaching CreateService.
+func TestWindowsServiceRestoreRefusesAPlantedRecord(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	planted := "# Generated by piperoom setup (service_install, Windows); service_install rewrites this file.\n" +
+		"service=piperoom-connect\ndisplay=Piperoom Kafka Connect worker (distributed)\n" +
+		"account=NT SERVICE\\piperoom-connect\nstart=automatic\n" +
+		"project=" + f.dir + "\nexe=C:\\Windows\\System32\\cmd.exe\narg=/c\narg=whoami > C:\\x.txt\n" +
+		"log=" + filepath.Join(f.dir, LogDir, ServiceLogName) + "\n"
+	f.write(ServiceDir+"/piperoom-connect.txt", planted, 0o600)
+	f.scm.add("piperoom-connect", stateStopped)
+	f.scm.createErrs = []error{errors.New("the service database is locked")}
+	_, err := f.run("service_install", ServiceParams{Mode: ModeStandalone})
+	if !errors.Is(err, ErrServiceManager) || !strings.Contains(err.Error(), "restoring the previous service also failed") {
+		t.Fatalf("second install: %v, want the failed create and the refused restore", err)
+	}
+	calls := f.scm.createdCalls()
+	if len(calls) != 2 {
+		t.Errorf("%d Create calls, want 2 (the install and the failed replace): the planted record is never created", len(calls))
+	}
+	for _, c := range calls {
+		if c.exe != filepath.Join(f.dir, BinDir, RunnerExe) {
+			t.Errorf("CreateService was given exe %q, want only the project's bin copy", c.exe)
+		}
+	}
+}
+
+// TestParseRecord: only the exact text service_install writes for this project
+// and service is read back, so a record the person's account edited cannot
+// choose an exe, an argument, an account or a project.
+func TestParseRecord(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	env := f.envForTest(t)
+	valid := f.read(ServiceDir + "/piperoom-connect.txt")
+	if spec, err := parseRecord(env, "piperoom-connect", []byte(valid)); err != nil {
+		t.Fatalf("the record install wrote was refused: %v", err)
+	} else if spec.Mode != ModeDistributed || spec.ExePath != filepath.Join(f.dir, BinDir, RunnerExe) {
+		t.Errorf("parsed spec %+v", spec)
+	}
+	lines := splitLines(valid)
+	cases := []struct {
+		name string
+		edit func([]string) []string
+	}{
+		{"an exe that is not the runner copy", func(l []string) []string {
+			return replaceRecordLine(l, "exe=", `exe=C:\Windows\System32\cmd.exe`)
+		}},
+		{"an extra argument", func(l []string) []string { return insertRecordLine(l, "log=", "arg=/c") }},
+		{"another project directory", func(l []string) []string {
+			return replaceRecordLine(l, "project=", `project=C:\other`)
+		}},
+		{"a different argument order", func(l []string) []string {
+			return replaceRecordLine(l, "arg="+RunServiceSubcommand, "arg=run-service2")
+		}},
+		{"LocalSystem", func(l []string) []string { return replaceRecordLine(l, "account=", "account=LocalSystem") }},
+		{"manual start", func(l []string) []string { return replaceRecordLine(l, "start=", "start=manual") }},
+		{"an unknown key", func(l []string) []string { return insertRecordLine(l, "log=", "trust=me") }},
+		{"no display name", func(l []string) []string { return dropRecordLine(l, "display=") }},
+		{"another service name", func(l []string) []string {
+			return replaceRecordLine(l, "service=", "service=piperoom-other")
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			record := strings.Join(c.edit(lines), "\n") + "\n"
+			if _, err := parseRecord(env, "piperoom-connect", []byte(record)); !errors.Is(err, ErrDetect) {
+				t.Errorf("parseRecord accepted a planted record: %v", err)
+			}
+		})
+	}
+}
+
+// TestWindowsServiceInstallACLFailure: a service whose files could not be
+// hardened is not installed at all. The new service is removed and the previous
+// one — which was running — comes back, so a failed upgrade does not leave a
+// service whose files the person's account can still write.
+func TestWindowsServiceInstallACLFailure(t *testing.T) {
+	f := newWindowsFixture(t)
+	f.layout()
+	if _, err := f.run("service_install", ServiceParams{}); err != nil {
+		t.Fatal(err)
+	}
+	old := f.scm.add("piperoom-connect", stateRunning)
+	f.acl.err = errors.New("Access is denied.")
+	_, err := f.run("service_install", ServiceParams{Mode: ModeStandalone})
+	if !errors.Is(err, ErrServiceManager) || !strings.Contains(err.Error(), "Access is denied") {
+		t.Fatalf("install with a failing DACL: %v, want ErrServiceManager naming the failure", err)
+	}
+	if _, stops, _ := old.counts(); stops != 1 {
+		t.Errorf("the running service was stopped %d times, want 1", stops)
+	}
+	f.scm.mu.Lock()
+	restored := f.scm.services["piperoom-connect"]
+	f.scm.mu.Unlock()
+	if restored == nil {
+		t.Fatal("the previous service was not restored")
+	}
+	if starts, _, _ := restored.counts(); starts != 1 {
+		t.Errorf("the restored service was started %d times, want 1: it was running before", starts)
+	}
+	calls := f.scm.createdCalls()
+	if len(calls) != 3 {
+		t.Fatalf("%d Create calls, want 3 (install, the new definition, the restore): the unhardened service is deleted", len(calls))
+	}
+	if got, want := calls[len(calls)-1].args, wantServiceArgs(f.dir, ModeDistributed); !equalStrings(got, want) {
+		t.Errorf("the restored service's args %q, want the previous definition's %q", got, want)
+	}
+}
+
 // envForTest is an ops.Env over the fixture's project, for the manager methods
 // that take one.
 func (f *winFixture) envForTest(t *testing.T) ops.Env {
@@ -1046,4 +1309,50 @@ func argLines(key string, args []string) []string {
 		out = append(out, key+"="+a+"\n")
 	}
 	return out
+}
+
+// equalTargets compares two DACL target lists.
+func equalTargets(a, b []aclTarget) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// replaceRecordLine replaces every line that starts with prefix.
+func replaceRecordLine(lines []string, prefix, replacement string) []string {
+	out := append([]string(nil), lines...)
+	for i, line := range out {
+		if strings.HasPrefix(line, prefix) {
+			out[i] = replacement
+		}
+	}
+	return out
+}
+
+// insertRecordLine puts a line before the first one that starts with before.
+func insertRecordLine(lines []string, before, line string) []string {
+	out := make([]string, 0, len(lines)+1)
+	for _, l := range lines {
+		if strings.HasPrefix(l, before) {
+			out = append(out, line)
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// dropRecordLine removes the first line that starts with prefix.
+func dropRecordLine(lines []string, prefix string) []string {
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return append(append([]string(nil), lines[:i]...), lines[i+1:]...)
+		}
+	}
+	return lines
 }

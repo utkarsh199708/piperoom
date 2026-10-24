@@ -5,7 +5,10 @@ package host
 import (
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -78,7 +81,35 @@ func (c *mgrConnection) Create(name, exe string, args []string, cfg serviceConfi
 	if err != nil {
 		return nil, mapSCMError(err)
 	}
+	if len(cfg.Privileges) > 0 {
+		// The privilege set is a second call: CreateService has no field for it.
+		// A service left with the SCM's default set would keep SeImpersonate,
+		// which is the step from a service account to SYSTEM, so a failure here
+		// removes the service rather than leaving it wider than its record.
+		if err := setRequiredPrivileges(s.Handle, cfg.Privileges); err != nil {
+			_ = s.Delete()
+			_ = s.Close()
+			return nil, fmt.Errorf("%w: restricting the privileges of %s to %s: %w", ErrServiceManager, q(name), strings.Join(cfg.Privileges, ", "), err)
+		}
+	}
 	return &mgrService{s: s}, nil
+}
+
+// setRequiredPrivileges sets SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO on a
+// service: the whole set of privileges its token keeps, written as the
+// double-null-terminated multi-string the API takes.
+func setRequiredPrivileges(h windows.Handle, privileges []string) error {
+	var buf []uint16
+	for _, p := range privileges {
+		buf = append(buf, windows.StringToUTF16(p)...)
+	}
+	buf = append(buf, 0)
+	// SERVICE_REQUIRED_PRIVILEGES_INFO is one LPWSTR; x/sys has no mirror, so
+	// the one-field struct is declared where it is used.
+	info := struct{ Privileges *uint16 }{Privileges: &buf[0]}
+	err := windows.ChangeServiceConfig2(h, windows.SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, (*byte)(unsafe.Pointer(&info)))
+	runtime.KeepAlive(buf)
+	return err
 }
 
 func (c *mgrConnection) Open(name string) (serviceHandle, error) {

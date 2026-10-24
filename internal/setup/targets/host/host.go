@@ -32,10 +32,16 @@
 // that hole. A system-scope install needs a design ruling (a root-owned unit
 // directory outside the project) and is not in this row. A Windows service
 // always installs into the machine's service database and therefore needs an
-// elevated prompt, but its files stay in the project: it runs as its own
-// virtual account (NT SERVICE\<service>), never LocalSystem, so a project file
-// the person's account can change cannot become SYSTEM code (winsvc.go,
-// serviceAccountPrefix). Row U8e documents the account and where to install.
+// elevated prompt. It runs as its own virtual account (NT SERVICE\<service>,
+// never LocalSystem) with a token that keeps one privilege, and install gives
+// the directories the service executes or loads from (bin\, kafka\,
+// connect-plugins\, services\) a protected DACL owned by Administrators, so a
+// file the person's account writes can no longer become code the service runs
+// (winsvc.go, serviceAccountPrefix; acl.go). One file is still theirs: the
+// worker properties file at the project root, which properties_write (T1)
+// writes unelevated and which decides what the service loads — the remaining
+// risk, and the reason a Windows install wants its own host. Row U8e documents
+// the account, the ACLs and where to install.
 //
 // The unit file is written to systemd/<unit> under the project directory and
 // linked into the user's unit search path by `systemctl --user enable
@@ -185,7 +191,7 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	case "linux":
 		d.mgr = systemdUser{resolve: d.resolve}
 	case "windows":
-		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable)
+		d.mgr = newWindowsManager(defaultServiceAPI, os.Executable, defaultServiceACL())
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},
