@@ -25,7 +25,8 @@ type Config struct {
 	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source database (postgres:// or mysql://, matching source_kind, Q8) as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
-	ConnectURL        string // CONNECT_URL
+	ConnectURL        string // CONNECT_URL (CONNECT_KIND=rest only)
+	ConnectKind       string // CONNECT_KIND: rest (default) | msk | confluent | aiven (ParseConnectKind; no caller yet, inert until wiring and cmd/discover call it: msk.md PR 2, U13)
 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
@@ -355,6 +356,7 @@ func Load() Config {
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
+		ConnectKind:       get("CONNECT_KIND", DefaultConnectKind),
 		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
@@ -2602,4 +2604,51 @@ func ParseAutonomy(c Config) (bool, error) {
 		return false, err
 	}
 	return on && write, nil
+}
+
+// Connect backend kinds (CONNECT_KIND). Confluent and Aiven clients get their
+// credentials per pipeline from owners.yaml connections: (docs/design/tenancy.md
+// §3.2); there are no server-wide CONFLUENT_* variables.
+const (
+	DefaultConnectKind   = "rest"
+	ConnectKindREST      = "rest"
+	ConnectKindMSK       = "msk"
+	ConnectKindConfluent = "confluent"
+	ConnectKindAiven     = "aiven"
+)
+
+// ParseConnectKind validates CONNECT_KIND and the settings that go with it.
+// Empty means rest. "msk" talks to the AWS MSK Connect API with the default
+// AWS credential chain in AWS_REGION instead of the Connect REST API, so the
+// REST login variables must be empty: a value there means the operator thinks
+// they are used. The error names the env var. "confluent" and "aiven" take
+// their endpoint and keys per pipeline, so there is nothing to check here.
+func ParseConnectKind(c Config) (string, error) {
+	kind := strings.ToLower(strings.TrimSpace(c.ConnectKind))
+	if kind == "" {
+		kind = DefaultConnectKind
+	}
+	switch kind {
+	case ConnectKindREST, ConnectKindConfluent, ConnectKindAiven:
+		return kind, nil
+	case ConnectKindMSK:
+		if strings.TrimSpace(c.AWSRegion) == "" {
+			return "", fmt.Errorf("config: CONNECT_KIND=msk needs AWS_REGION")
+		}
+		restVars := []struct{ name, value string }{
+			{"CONNECT_USERNAME", c.ConnectUsername},
+			{"CONNECT_PASSWORD", c.ConnectPassword},
+			{"CONNECT_TLS_CA_FILE", c.ConnectTLSCAFile},
+			{"CONNECT_TLS_CERT_FILE", c.ConnectTLSCertFile},
+			{"CONNECT_TLS_KEY_FILE", c.ConnectTLSKeyFile},
+		}
+		for _, v := range restVars {
+			if v.value != "" {
+				return "", fmt.Errorf("config: %s is set but CONNECT_KIND=msk uses the AWS SDK, not the Connect REST API; unset it", v.name)
+			}
+		}
+		return kind, nil
+	default:
+		return "", fmt.Errorf("config: CONNECT_KIND=%q: want rest, msk, confluent or aiven", c.ConnectKind)
+	}
 }

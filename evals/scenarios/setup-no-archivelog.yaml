@@ -1,6 +1,6 @@
 # C7 setup scenario (U9d): the source Oracle database was restarted in NOARCHIVELOG mode after the
 # setup run, so LogMiner has no archived redo to read and the connector's task fails its start check.
-# The label names the failing check and the fix with its tier (tasks/U-board.md rows U9a, U9b and
+# The label names the failing check and the fix with its tier (Jira KAN-5 rows U9a, U9b and
 # U9d, step 9). Format: evals/README.md (C6). Built on `devctl setup-break no-archivelog`
 # (dev/oracle/README.md, cmd/devctl/setupbreaks_oracle.go, U9c).
 #
@@ -52,7 +52,7 @@
 #     oracle-archive-log-mode.
 #   - internal/clients/oracle/writer.go: AlterSystem allows only archive_log and refuses with
 #     clients.ErrNotSupported, naming the DBA steps (ORA-01126 on an open database).
-#   - tasks/U-board.md U9b: "archive log mode off is a T3 check with a maintenance window on anything
+#   - Jira KAN-5 U9b: "archive log mode off is a T3 check with a maintenance window on anything
 #     this room did not create (a restart)".
 #   - https://debezium.io/documentation/reference/3.2/connectors/oracle.html#setting-up-oracle: LogMiner
 #     needs ARCHIVELOG.

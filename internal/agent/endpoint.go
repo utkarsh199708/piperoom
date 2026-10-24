@@ -606,11 +606,24 @@ func (e *Endpoint) Forget(roomID string) {
 // *BudgetError.
 func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
 	opts = opts.withDefaults()
-	b := e.budgetWithLimit(alert.RoomID, opts.TokenBudget)
+	limit := opts.TokenBudget
+	var setupErr error
+	if alert.Mode == ModeSetup {
+		// A setup room's cap is its own token budget (Options.Setup, the
+		// server fills it from PIPEROOM_SETUP_TOKEN_BUDGET; nil bounds mean
+		// the design's default), not the room budget. A refused value leaves
+		// the cap as it is (limit 0) and is returned after the Usage report
+		// is in place, which Deps.Usage promises however Run ends.
+		limit, setupErr = setupTokenBudget(opts.Setup)
+	}
+	b := e.budgetWithLimit(alert.RoomID, limit)
 	if usage := deps.Usage; usage != nil {
 		// b is this run's own pointer, so a Forget(roomID) from the room-closed
 		// hook cannot change what is reported.
 		defer func() { usage(b.Used()) }()
+	}
+	if setupErr != nil {
+		return setupErr
 	}
 	m := &budgetModel{inner: e.model, budget: b, loop: true, guard: e.guardWith(alert.RoomID, alert.PipelineID, e.mainQuals)}
 	r, err := newRunnerWith(alert, deps, opts, m)

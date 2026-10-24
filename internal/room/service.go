@@ -488,6 +488,12 @@ type Service struct {
 	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
 	credMu      sync.Mutex
 	credPending map[string]pendingCredentials
+	// ladderMu guards ladderRuns: the rooms whose verification ladder run is
+	// in flight on this replica (setup_ladder.go; U1-8b). ladderTiming, when
+	// set (tests only), replaces the production waits.
+	ladderMu     sync.Mutex
+	ladderRuns   map[string]bool
+	ladderTiming *setupLadderTimings
 
 	// Pull request follower (pr_follow.go; Q7e). prReader is nil with no
 	// forge: then nothing below runs. changeW records a merged PR in the
@@ -1203,6 +1209,10 @@ var agentEventTypes = map[events.Type]bool{
 	// One poll of a recovery action's Verify (X2, internal/agent): progress
 	// for the recovery card; the verdict is still the agent.verification.
 	events.AgentRecoveryCheck: true,
+	// setup_request_verification's request (internal/setup/tools, U1-7): the
+	// agent asks the room's ladder runner for verification. It is a request,
+	// never a result: setup.verified stays refused here (U1-8b).
+	TypeSetupVerificationRequested: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -1239,7 +1249,19 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 		}
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
-	return err
+	if err != nil {
+		return err
+	}
+	if typ == TypeSetupVerificationRequested {
+		// The agent asked for the ladder; the room's runner answers, on the
+		// service lifetime. It starts after the request is in the log, and a
+		// run already in flight (the person clicked too) is not an error: that
+		// run will read the request's plan like any other.
+		if serr := s.startSetupLadder(roomID); serr != nil && !errors.Is(serr, errSetupLadderInFlight) {
+			s.log.Warn("room: agent asked for verification; the ladder did not start", "room", roomID, "err", serr)
+		}
+	}
+	return nil
 }
 
 // fenceLocked refuses a write of agent run `run` that may no longer speak for

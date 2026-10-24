@@ -124,6 +124,15 @@ type Spec struct {
 	// and Execute all refuse such params before anything is sent; a refusal
 	// is ErrBadInput.
 	CheckParams func(json.RawMessage) error
+	// TierFor is an optional no-I/O tier of one step from its params alone,
+	// for an op whose runner side implements ops.ParamTierer (host
+	// properties_write: T1 at the project root, T2 outside the project
+	// directory). Tier and the request a step sends take the higher of it
+	// and the spec's Tier before plan.TierOf raises it to the class, so the
+	// room routes the step at the tier the runner will check. It can only
+	// raise the floor; an error refuses the params (ErrBadInput) rather than
+	// fall back to the lower floor.
+	TierFor func(json.RawMessage) (string, error)
 	// Timeout bounds one write request of this action (OpRequest.Deadline,
 	// the time at which the runner stops the op). Zero uses the tier's
 	// default (writeTimeout for T1/T2, t3Timeout for T3); a T3 step gets the
@@ -250,18 +259,40 @@ func (a *Adapter) Validate(_ context.Context, params json.RawMessage) error {
 	return a.validateParams(params)
 }
 
-// Tier returns the step's tier: the op's floor raised to the class of the
-// endpoint the room resolved from params (plan.TierOf). It does no I/O; an
-// unknown class is an error, never a silent tier.
+// Tier returns the step's tier: the op's floor, raised by the params' own
+// tier when the spec has a TierFor, then raised to the class of the endpoint
+// the room resolved from params (plan.TierOf). It does no I/O; an unknown
+// class or params whose tier cannot be computed are an error, never a silent
+// tier.
 func (a *Adapter) Tier(params json.RawMessage, class string) (string, error) {
 	if err := a.validateParams(params); err != nil {
 		return "", err
 	}
-	tier, err := plan.TierOf(a.spec.Tier, class)
+	floor, err := a.floorFor(params)
+	if err != nil {
+		return "", err
+	}
+	tier, err := plan.TierOf(floor, class)
 	if err != nil {
 		return "", fmt.Errorf("setupactions: %s: %w", a.spec.Name, err)
 	}
 	return tier, nil
+}
+
+// floorFor is the floor of one step: the spec's Tier raised by its TierFor
+// (the runner's Registry.FloorFor computes the same from the op's TierFor).
+func (a *Adapter) floorFor(params json.RawMessage) (string, error) {
+	if a.spec.TierFor == nil {
+		return a.spec.Tier, nil
+	}
+	need, err := a.spec.TierFor(params)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s: the step's tier: %s", ErrBadInput, a.spec.Name, clipText(err.Error()))
+	}
+	if !plan.ValidTier(need) {
+		return "", fmt.Errorf("%w: %s: the step's tier %q is not T0..T3", ErrBadInput, a.spec.Name, clipText(need))
+	}
+	return raiseTier(a.spec.Tier, need), nil
 }
 
 // CheckScope applies the spec's scope rule: a target outside the provisional
@@ -349,10 +380,31 @@ func (a *Adapter) sendStepRequest(ctx context.Context, step room.SetupStep, para
 	if err != nil {
 		return protocol.OpResult{}, fmt.Errorf("setupactions: %s: %v: %w", a.spec.Name, err, ErrStepMismatch)
 	}
-	if step.Tier != "" {
-		if !plan.ValidTier(step.Tier) {
-			return protocol.OpResult{}, fmt.Errorf("setupactions: %s: the step has tier %q: %w", a.spec.Name, clipText(step.Tier), ErrStepMismatch)
+	if step.Tier != "" && !plan.ValidTier(step.Tier) {
+		return protocol.OpResult{}, fmt.Errorf("setupactions: %s: the step has tier %q: %w", a.spec.Name, clipText(step.Tier), ErrStepMismatch)
+	}
+	// The params' own tier (Spec.TierFor) is part of the step's route: a step
+	// the room routed below it was approved on the wrong route (a T1 step
+	// for a file outside the project directory, which needs the T2
+	// approver), so it is refused here rather than sent at the raised tier
+	// under an approval that never covered it. A step the room left without
+	// a tier is raised to it, as it is raised to its class above.
+	floor, err := a.floorFor(params)
+	if err != nil {
+		return protocol.OpResult{}, err
+	}
+	if floor != a.spec.Tier {
+		need, err := plan.TierOf(floor, class)
+		if err != nil {
+			return protocol.OpResult{}, fmt.Errorf("setupactions: %s: %v: %w", a.spec.Name, err, ErrStepMismatch)
 		}
+		if step.Tier != "" && rankOf(step.Tier) < rankOf(need) {
+			return protocol.OpResult{}, fmt.Errorf("setupactions: %s: the step was routed at tier %q, but its params need %s: %w",
+				a.spec.Name, clipText(step.Tier), need, ErrStepMismatch)
+		}
+		tier = raiseTier(tier, need)
+	}
+	if step.Tier != "" {
 		tier = raiseTier(tier, step.Tier)
 	}
 	idx := step.StepIndex

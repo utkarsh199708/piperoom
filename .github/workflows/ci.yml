@@ -161,6 +161,25 @@ jobs:
       # the standalone-mongod and no-oplog-role pairs instead of skipping.
       - name: Start the optional MongoDB profile
         run: docker compose -f dev/docker-compose.yml --profile mongo up -d --wait mongo
+      # The MongoDB client's own integration tests (the read client as the
+      # capture user, the setup writer as the root user; dev/mongo/README.md,
+      # local stack only), in their own step before the main one: there
+      # cmd/devctl TestIntegrationMongoSetupBreaks restarts mongod as a
+      # standalone while other packages run in parallel. The main step leaves
+      # both variables unset, so the two tests skip there (allowlisted); a
+      # skip here fails the step.
+      - name: MongoDB client integration (before the devctl breaks restart mongod)
+        env:
+          PIPEROOM_IT_MONGODB_URI: mongodb://piperoom_cdc:piperoom-dev@127.0.0.1:27017/?authSource=admin&directConnection=true
+          PIPEROOM_IT_MONGODB_WRITE_URI: mongodb://piperoom_admin:piperoom-mongo-admin@127.0.0.1:27017/?authSource=admin&directConnection=true
+        run: |
+          set +e
+          go test -count=1 -timeout 5m -json -tags integration -run 'Integration' ./internal/clients/mongodb/ > mongodb-test.json
+          rc=$?
+          set -e
+          jq -r 'select(.Action == "output" and (.Test // "") != "") | .Output' mongodb-test.json | grep -v '^$' || true
+          [ "$rc" -eq 0 ] || exit "$rc"
+          .github/scripts/fail-on-skips.sh mongodb-test.json /dev/null
       # The MySQL profile (Q8a) and its Debezium connector orders-mysql, so
       # the internal/clients/mysql integration tests and cmd/discover
       # TestDiscoverDevStackMySQL run instead of skipping. Every MySQL break

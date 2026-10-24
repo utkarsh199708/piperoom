@@ -176,7 +176,8 @@ func classifyNumber(tok string) numberClass {
 // double cannot hold finitely is replaced by a JSON string with its exact text.
 // inexact counts the numbers whose hashed form differs from the exact value.
 func hashForm(exact []byte) (out []byte, inexact int) {
-	out = make([]byte, 0, len(exact)+8)
+	// Capacity len(exact): append grows the slice for the few quoted numbers.
+	out = make([]byte, 0, len(exact))
 	last := 0
 	jsonnum.Scan(exact, func(s, e int) {
 		switch classifyNumber(string(exact[s:e])) {

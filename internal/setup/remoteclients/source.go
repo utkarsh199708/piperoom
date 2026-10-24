@@ -28,6 +28,7 @@ import (
 //	source_recent_ddl           {"changes": [clients.DDLChange, ...]}
 //	source_long_transactions    {"transactions": [clients.Transaction, ...]}
 //	source_row                  {"row": {...} | null, "found": bool}
+//	source_publication_tables   {"tables": [postgres.PublicationTable, ...]}
 //	source_create_read_role     {"secret_name": "name"}
 //	source_alter_system         {"pending_restart": bool}
 //
@@ -90,6 +91,14 @@ type heartbeatTableParams struct {
 type endSessionParams struct {
 	PID       int64     `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
+}
+
+// publicationTablesParams: Role may be empty (the read then reports no
+// privilege), Tables are "schema.table".
+type publicationTablesParams struct {
+	Publication string   `json:"publication"`
+	Role        string   `json:"role"`
+	Tables      []string `json:"tables"`
 }
 
 type publicationParams struct {
@@ -269,6 +278,30 @@ func (s *Source) Row(ctx context.Context, table, pkColumn, pk string) (map[strin
 		return nil, false, err
 	}
 	return row, true, nil
+}
+
+// PublicationTables lists the members of publication and, for each table in
+// tables ("schema.table"), whether it is a member and whether role may SELECT
+// it, as *postgres.DB.PublicationTables does on the runner. A missing
+// publication is clients.ErrNotFound (the runner's not_found code).
+func (s *Source) PublicationTables(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, error) {
+	if err := requireArg(OpSourcePublicationTables, "publication", publication); err != nil {
+		return nil, err
+	}
+	if tables == nil {
+		// The wire shape is pinned: an absent list is the empty one.
+		tables = []string{}
+	}
+	res, err := s.s.do(ctx, OpSourcePublicationTables, protocol.TierT0,
+		publicationTablesParams{Publication: publication, Role: role, Tables: tables})
+	if err != nil {
+		return nil, err
+	}
+	var out []postgres.PublicationTable
+	if err := decode(res, "tables", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ---- admin writes (Q2b) ----

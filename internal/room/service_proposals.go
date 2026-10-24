@@ -188,6 +188,12 @@ func openDriverProposals(snap RoomSnapshot) int {
 // and the proposal.created event.
 func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, events.Event, error) {
 	p = sanitizeProposal(p)
+	// The system origin grants plan-free routing and the ladder canary's
+	// setup_local auto-run (setupNeedsPlan, setupLocalRuns): only the server's
+	// own actor may claim it, never a payload from the agent or a person.
+	if p.Origin == setupProposalOriginSystem && (actor.Kind != systemActor.Kind || actor.ID != systemActor.ID) {
+		return "", events.Event{}, validation("origin system is reserved for the server's own proposals")
+	}
 	if len(p.Steps) == 0 {
 		return "", events.Event{}, validation("proposal requires at least one step")
 	}

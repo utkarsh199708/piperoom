@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"piperoom/internal/events"
@@ -16,7 +17,15 @@ import (
 // logs (never loses) an attempt whose room is unknown, such as a bad pairing
 // code or a global rate limit, with its safe outcome and source. The code and
 // the token never reach this method.
+//
+// It refuses the ladder's verdicts (setup.verified, setup.awaiting_change):
+// only the room's ladder runner writes those (setup_ladder.go, U1-8b), so no
+// runner frame, pairing path or later caller of this generic sink can claim
+// them.
 func (s *Service) EmitSetup(ctx context.Context, roomID string, typ events.Type, payload any) error {
+	if typ == events.SetupVerified || typ == events.SetupAwaitingChange {
+		return fmt.Errorf("room: EmitSetup refuses %s: only the ladder runner writes it", typ)
+	}
 	if roomID == "" {
 		outcome, source := pairingAuditFields(payload)
 		s.log.Info("room: setup pairing audit (no room)", "type", typ, "outcome", outcome, "source", source)

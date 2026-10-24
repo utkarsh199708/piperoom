@@ -251,10 +251,26 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 
 // mysqlPromptSHA256 and mysqlPromptWriteOffSHA256 pin the MySQL CDC prompt
 // beside its snapshots (Q8g), so a regenerated snapshot cannot move it
-// silently.
+// silently. #994 moved them when the replacer followed W4h's restart bullet.
+// W4g moved them again: the shared method and fixes carry W4g's wording, the
+// resume pattern follows W4g's resume check, and MySQL-only trims (the server
+// id rule folded into the config-setting bullet, a shorter intro, purged
+// binlog and resume lines) bring the prompt back under the CDC ceiling; its
+// fix round (rule 4's "correctly refusing" and <layer> <component> form,
+// rule 5's steer and tool clause) is word-neutral. With KAN-515's hold rule
+// the MySQL prompt is the CDC prompt's size: 1353 words with write mode off,
+// 1352 with it on. W4i moved them with the shared method and fixes (rule 1's
+// negative claim, rule 3, the restart bullet, the offsets note); the replacer
+// follows the restart bullet and the resume check's dropped "that", so the
+// MySQL prompt stays word-neutral too. W4m moved them with the shared rule
+// 7 ("keep any earlier fault, cited, in past tense") and R21's schema
+// history bullet: snapshot.mode recovery comes "after checking", not "only
+// if", no captured table's schema changed since the stored position, so the
+// agent reads the history instead of asking and the safety check stays
+// (2 words for 2: still 1352 and 1353 words).
 const (
-	mysqlPromptSHA256         = "20de3b3f64e66d6db460bc8bc279d73e54dbfe71c49f0994d6ec65ec28c2ec93"
-	mysqlPromptWriteOffSHA256 = "9d4a3d448696d450700a371a5e2c0bcc62df4aeda86a5dc1f7333b8155a4315b"
+	mysqlPromptSHA256         = "a9cd2f06968912dc780a0a8726ea016a980b9385da2c0e01774727219ea8da0b"
+	mysqlPromptWriteOffSHA256 = "efa173fc13bf776757599e9fc3834698a8b35cfb072248619764516ed440a62a"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {
@@ -271,12 +287,14 @@ func TestSystemPromptSnapshotMySQL(t *testing.T) {
 		if h := hex.EncodeToString(sum[:]); h != tt.sum {
 			t.Fatalf("%s: sha256 = %s, want %s", tt.file, h, tt.sum)
 		}
-		// The CDC word ceiling plus 20: W4h (#988) rewrote the shared CDC
-		// fixes, and the MySQL binlog, server id and schema history bullets
-		// are longer than the Postgres ones they replace (1351 words after
-		// the merge of #934 and #988), plus 20 for KAN-515's hold rule.
-		if wc := len(strings.Fields(got)); wc > 1375 {
-			t.Fatalf("%s: %d words, over the 1375 limit", tt.file, wc)
+		// The CDC word ceiling holds for the MySQL prompt too. #994 raised
+		// it by 20 for the merge of #934 and #988 (W4h's shared fixes made
+		// the MySQL bullets replace a clause, not a bullet), and KAN-515 by
+		// 20 more for the hold rule; W4g's MySQL-only trims bring the prompt
+		// back to the CDC prompt's size, so the ceiling is the CDC one
+		// again (1355 since KAN-515).
+		if wc := len(strings.Fields(got)); wc > 1355 {
+			t.Fatalf("%s: %d words, over the 1355 limit", tt.file, wc)
 		}
 	}
 }
@@ -308,6 +326,42 @@ func TestPostgresPromptUnchangedBySource(t *testing.T) {
 	names, err := PromptToolNamesForSource("", "")
 	if err != nil || !slices.Equal(names, PromptToolNames()) {
 		t.Fatalf(`PromptToolNamesForSource("", "") = %v, %v`, names, err)
+	}
+}
+
+// TestMySQLReplacerPatternsMatchOnce: each old string of the MySQL replacers
+// occurs exactly once in the CDC text it rewrites, its replacement reaches
+// the MySQL prompt, and the old string does not. #934's publication pattern
+// was written against the pre-W4h fixes section, matched nothing once W4h
+// landed, and showed up only as pg_* names in MySQL rooms; this names the
+// pattern instead (LEAD-REVIEW on #993).
+func TestMySQLReplacerPatternsMatchOnce(t *testing.T) {
+	for _, set := range []struct {
+		name  string
+		base  string
+		pairs []string
+	}{
+		{"promptCDCMethod", promptCDCMethod, mysqlMethodReplacements()},
+		{"promptCDCFixes", promptCDCFixes, mysqlFixesReplacements()},
+	} {
+		if len(set.pairs)%2 != 0 {
+			t.Fatalf("%s: odd number of replacer strings", set.name)
+		}
+		for i := 0; i < len(set.pairs); i += 2 {
+			old, repl := set.pairs[i], set.pairs[i+1]
+			if n := strings.Count(set.base, old); n != 1 {
+				t.Errorf("%s: pattern %d occurs %d times, want 1: %q", set.name, i/2, n, old)
+			}
+			for _, m := range []RoomMode{{Write: true}, {Write: false}} {
+				p := systemPromptForSource(events.PipelineKindCDC, events.SourceKindMySQL, m)
+				if !strings.Contains(p, repl) {
+					t.Errorf("%s: replacement %d missing from the MySQL prompt (mode %+v): %q", set.name, i/2, m, repl)
+				}
+				if strings.Contains(p, old) {
+					t.Errorf("%s: pattern %d still in the MySQL prompt (mode %+v): %q", set.name, i/2, m, old)
+				}
+			}
+		}
 	}
 }
 

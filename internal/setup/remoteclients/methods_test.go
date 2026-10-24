@@ -112,6 +112,10 @@ func TestOneOpPerMethod(t *testing.T) {
 			}
 			return err
 		}},
+		{"Source.PublicationTables", OpSourcePublicationTables, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.Source().PublicationTables(ctx, "dbz_publication", "debezium", []string{"public.orders"})
+			return err
+		}},
 		// Kafka.
 		{"Kafka.Topics", OpKafkaTopics, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
 			_, err := s.Kafka().Topics(ctx)
@@ -238,33 +242,34 @@ func TestOneOpPerMethod(t *testing.T) {
 // readWire is the exact params JSON of every read, as TestOneOpPerMethod calls
 // it. A field dropped, renamed or added on the wire fails the comparison.
 var readWire = map[string]string{
-	"Connect.ListConnectors":  `{}`,
-	"Connect.Status":          `{"connector":"pg-orders-connector"}`,
-	"Connect.Config":          `{"connector":"pg-orders-connector"}`,
-	"Connect.ValidateConfig":  `{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"c"}}`,
-	"Connect.PluginConfigDef": `{"class":"io.debezium.connector.postgresql.PostgresConnector"}`,
-	"Connect.Plugins":         `{}`,
-	"Connect.SourceOffsets":   `{"connector":"pg-orders-connector"}`,
-	"Connect.ServerInfo":      `{}`,
-	"Source.Settings":         `{}`,
-	"Source.TableReplication": `{"tables":["public.orders"]}`,
-	"Source.RoleInfo":         `{"role":"debezium","tables":["public.orders"]}`,
-	"Source.Blockers":         `{"older_than_ms":60000}`,
-	"Source.BlockersOnTables": `{"older_than_ms":60000,"scoped":true,"tables":["public.orders"]}`,
-	"Source.ReplicationSlots": `{}`,
-	"Source.RecentDDL":        `{"since":"2026-01-01T00:00:00Z","limit":10}`,
-	"Source.LongTransactions": `{"older_than_ms":60000}`,
-	"Source.Row":              `{"table":"public.orders","pk_column":"id","pk":"1"}`,
-	"Kafka.Topics":            `{}`,
-	"Kafka.TopicOffsets":      `{"topic":"pg.public.orders"}`,
-	"Kafka.ConsumerGroups":    `{}`,
-	"Kafka.GroupLag":          `{"group":"orders-consumer"}`,
-	"Kafka.FindByKey":         `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
-	"Kafka.FindByKeyScan":     `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
-	"Registry.Subjects":       `{}`,
-	"Registry.Versions":       `{"subject":"pg.public.orders-value"}`,
-	"Registry.Schema":         `{"subject":"pg.public.orders-value","version":-1}`,
-	"Registry.Compatibility":  `{"subject":"pg.public.orders-value"}`,
+	"Connect.ListConnectors":   `{}`,
+	"Connect.Status":           `{"connector":"pg-orders-connector"}`,
+	"Connect.Config":           `{"connector":"pg-orders-connector"}`,
+	"Connect.ValidateConfig":   `{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"connector.class":"c"}}`,
+	"Connect.PluginConfigDef":  `{"class":"io.debezium.connector.postgresql.PostgresConnector"}`,
+	"Connect.Plugins":          `{}`,
+	"Connect.SourceOffsets":    `{"connector":"pg-orders-connector"}`,
+	"Connect.ServerInfo":       `{}`,
+	"Source.Settings":          `{}`,
+	"Source.TableReplication":  `{"tables":["public.orders"]}`,
+	"Source.RoleInfo":          `{"role":"debezium","tables":["public.orders"]}`,
+	"Source.Blockers":          `{"older_than_ms":60000}`,
+	"Source.BlockersOnTables":  `{"older_than_ms":60000,"scoped":true,"tables":["public.orders"]}`,
+	"Source.ReplicationSlots":  `{}`,
+	"Source.RecentDDL":         `{"since":"2026-01-01T00:00:00Z","limit":10}`,
+	"Source.LongTransactions":  `{"older_than_ms":60000}`,
+	"Source.Row":               `{"table":"public.orders","pk_column":"id","pk":"1"}`,
+	"Source.PublicationTables": `{"publication":"dbz_publication","role":"debezium","tables":["public.orders"]}`,
+	"Kafka.Topics":             `{}`,
+	"Kafka.TopicOffsets":       `{"topic":"pg.public.orders"}`,
+	"Kafka.ConsumerGroups":     `{}`,
+	"Kafka.GroupLag":           `{"group":"orders-consumer"}`,
+	"Kafka.FindByKey":          `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
+	"Kafka.FindByKeyScan":      `{"topic":"pg.public.orders","key":"7","since":"2026-01-01T00:00:00Z","max_scan":100}`,
+	"Registry.Subjects":        `{}`,
+	"Registry.Versions":        `{"subject":"pg.public.orders-value"}`,
+	"Registry.Schema":          `{"subject":"pg.public.orders-value","version":-1}`,
+	"Registry.Compatibility":   `{"subject":"pg.public.orders-value"}`,
 }
 
 // TestWriteArgsBoundToStep: every write checks each argument it takes against

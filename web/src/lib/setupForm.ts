@@ -8,6 +8,19 @@ export const SETUP_TARGETS = ['compose', 'host', 'strimzi', 'msk', 'confluent', 
 export const TARGET_KINDS = ['postgres', 'kafka', 'connect', 'registry', 'kubernetes', 'aws', 'confluent', 'aiven', 'host'] as const
 export const SETUP_CLASSES = ['local', 'shared', 'production'] as const
 
+/** How a target kind reads in a form; an unknown kind falls back to its own value. */
+export const TARGET_KIND_LABELS: Record<string, string> = {
+  postgres: 'postgres',
+  kafka: 'kafka',
+  connect: 'connect',
+  registry: 'schema registry',
+  kubernetes: 'kubernetes',
+  aws: 'aws',
+  confluent: 'confluent',
+  aiven: 'aiven',
+  host: 'host',
+}
+
 /** What the empty form starts with: the demo's Compose + Postgres case. */
 export const EMPTY_SETUP_FORM: SetupFormValues = {
   tenant: '',
