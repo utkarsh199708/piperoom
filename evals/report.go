@@ -55,6 +55,12 @@ type Report struct {
 	// are additive: no existing field changes.
 	ByTarget []Breakdown `json:"by_target,omitempty"`
 	BySource []Breakdown `json:"by_source,omitempty"`
+	// PendingHarness lists the scenarios skipped because they wait for a harness
+	// row (pending_harness); PendingHarnessRan lists those an explicit -only
+	// ran anyway. Neither counts in a baseline comparison, and the skipped ones
+	// are in no rate.
+	PendingHarness    []string `json:"pending_harness,omitempty"`
+	PendingHarnessRan []string `json:"pending_harness_ran,omitempty"`
 }
 
 // Breakdown is one group of a report's per-target or per-source pass rate.
@@ -448,6 +454,12 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
 	writeBreakdowns(&b, r)
+	if len(r.PendingHarness) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (skipped, in no rate):** %s\n", mdCell(strings.Join(r.PendingHarness, ", ")))
+	}
+	if len(r.PendingHarnessRan) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (ran by -only, not compared with the baseline):** %s\n", mdCell(strings.Join(r.PendingHarnessRan, ", ")))
+	}
 	writeInvalidLine(&b, r.Overall, r.Results)
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
