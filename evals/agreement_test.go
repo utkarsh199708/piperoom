@@ -327,7 +327,7 @@ var syntheticLabels = map[string]Label{
 	"topic-retention-data-loss":     {"kafka", []string{"retention", "log start"}},
 	// The five scenarios added by #87.
 	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
-	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
+	"consumer-offsets-out-of-range-retention": {"consumer", []string{"retention", "log start", "data loss"}}, // R14 (W4n-3): order-sync fails first, Kafka holds the cause
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
 	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
@@ -412,12 +412,17 @@ var syntheticTruth = map[string]map[string]truth{
 	"slot-inactive-wal-growth":      {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"source-column-dropped":         {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"topic-retention-data-loss":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// consumer-offsets (first_failing_layer consumer since R14, W4n-3:
+	// order-sync crash-loops while Kafka answers every read): good blames
+	// retention on the topic (the cause), so its layer misses, as avro's
+	// does; lazy is order-sync's crash-loop title; wrong blames an
+	// order-sync deploy, the right layer for the wrong reason.
 	// avro (first_failing_layer kafka-connect since P3-W3d-2; the registry
 	// still answers, the sink task is what breaks): good and wrong both blame
 	// the registry, so their layer misses; lazy is the sink task's failure
 	// title. rebalance lazy: the title names the consumer group's lag.
 	"avro-schema-id-deleted-sink-failed":      {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-offsets-out-of-range-retention": {"good": {false, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"sink-connector-paused-warehouse-stale":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
@@ -571,8 +576,16 @@ func TestAgreementSyntheticAccuracy(t *testing.T) {
 			t.Errorf("scenario %q lacks synthetic hypotheses, label or truth; add them", sc.Name)
 			continue
 		}
-		if label.Layer != sc.Expect.FirstFailingLayer {
-			t.Errorf("%s: synthetic label layer %q != scenario %q", sc.Name, label.Layer, sc.Expect.FirstFailingLayer)
+		// A scenario with no first failing layer (R15: healthy now, with a
+		// past finding, consumer-duplicates) is labelled with its root-cause
+		// layer: the label is what a human would name, the component the
+		// finding is about.
+		want := sc.Expect.FirstFailingLayer
+		if want == "" {
+			want = sc.Expect.RootCauseLayer
+		}
+		if label.Layer != want {
+			t.Errorf("%s: synthetic label layer %q != scenario %q", sc.Name, label.Layer, want)
 		}
 		lazy := sc.Alert.Title
 		if sc.Start.By == StartWatcher {
