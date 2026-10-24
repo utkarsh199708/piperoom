@@ -991,6 +991,18 @@ func TestT3OffByDefault(t *testing.T) {
 	}
 }
 
+// pingBarrier sends a FramePing and waits for its FramePong. The runner's read
+// loop handles frames in order and applies a FrameCancel (or drops a resend)
+// before reading the next frame, so once the Pong arrives every frame sent
+// before the Ping has been handled. It also asserts no other frame came first.
+func pingBarrier(t *testing.T, conn *websocket.Conn, ctx context.Context) {
+	t.Helper()
+	writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FramePing})
+	if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FramePong {
+		t.Fatalf("want pong, got %+v", f)
+	}
+}
+
 // slowCheckCatalogue holds every op in its target check until release is
 // closed, so a test can land a FrameCancel while the op is still in runOp's
 // checks (not started, not prompting).
@@ -1032,18 +1044,19 @@ func TestCancelDuringChecksStopsTheOp(t *testing.T) {
 				p1 := testProposalWithAction("p1", "source_restart")
 				a := opReqPtr("a", "source_restart", tc.tier, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
 				a.Deadline = time.Now().Add(time.Hour)
-				for i := 0; i < tc.sends; i++ {
+				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+				<-cat.entered
+				for i := 1; i < tc.sends; i++ {
+					// A resend while the first request is still held is
+					// dropped; the first request answers for the id.
 					writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
-					<-cat.entered
 				}
 				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
-				// The read loop handles a cancel at once; give it ample time
-				// before the checks return.
-				time.Sleep(300 * time.Millisecond)
+				pingBarrier(t, conn, ctx)
 				close(cat.release)
-				for i := 0; i < tc.sends; i++ {
-					assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
-				}
+				assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+				// Nothing else answers for the id.
+				pingBarrier(t, conn, ctx)
 			})
 			defer srv.Close()
 			r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
@@ -1079,7 +1092,7 @@ func TestCancelBeforeThePromptDropsAStaleYes(t *testing.T) {
 		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
 		<-cat.entered
 		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
-		time.Sleep(300 * time.Millisecond)
+		pingBarrier(t, conn, ctx)
 		close(cat.release)
 		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
 		// The "y" is typed at ~600 ms; B arrives at ~1.2 s and nobody
@@ -1104,5 +1117,43 @@ func TestCancelBeforeThePromptDropsAStaleYes(t *testing.T) {
 	<-done
 	if n := cat.callCount(); n != 0 {
 		t.Fatalf("an op ran %d time(s) on a \"y\" typed before its prompt", n)
+	}
+}
+
+// TestResentT0OpRunsOnce: a T0 op has no start ledger, so a resend of an op
+// still in its checks (after a reconnect) must be dropped, not run a second
+// time.
+func TestResentT0OpRunsOnce(t *testing.T) {
+	cat := &slowCheckCatalogue{
+		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT0}},
+		entered:       make(chan struct{}, 2),
+		release:       make(chan struct{}),
+	}
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT0, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		a.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		<-cat.entered
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		pingBarrier(t, conn, ctx)
+		close(cat.release)
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Fatalf("want one result, got %+v", f)
+		}
+		pingBarrier(t, conn, ctx)
+	})
+	defer srv.Close()
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("op ran %d time(s), want 1", n)
 	}
 }

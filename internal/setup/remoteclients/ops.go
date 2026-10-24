@@ -1,6 +1,7 @@
 package remoteclients
 
 import (
+	"piperoom/internal/setup/errcode"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -146,14 +147,16 @@ func Ops() []OpSpec { return append([]OpSpec(nil), specs...) }
 // real client's errors are sentinels the Q actions match with errors.Is, and
 // the runner's OpResult has no reason field yet, so the runner catalogue puts
 // one of these in Data for the failures a caller branches on. The PR carries a
-// contract change request to add the field to protocol.OpResult.
+// contract change request to add the field to protocol.OpResult. The values
+// live in the leaf package internal/setup/errcode, so a package that cannot
+// import this one (it imports internal/room) still spells the same codes.
 const (
-	ErrorCodeNotFound            = "not_found"
-	ErrorCodeNotSupported        = "not_supported"
-	ErrorCodeConnectorExists     = "connector_exists"
-	ErrorCodeConnectorNotStopped = "connector_not_stopped"
-	ErrorCodeRebalancing         = "rebalancing"
-	ErrorCodeSessionChanged      = "session_changed"
-	ErrorCodeSessionProtected    = "session_protected"
-	ErrorCodeOutOfScope          = "out_of_scope"
+	ErrorCodeNotFound            = errcode.NotFound
+	ErrorCodeNotSupported        = errcode.NotSupported
+	ErrorCodeConnectorExists     = errcode.ConnectorExists
+	ErrorCodeConnectorNotStopped = errcode.ConnectorNotStopped
+	ErrorCodeRebalancing         = errcode.Rebalancing
+	ErrorCodeSessionChanged      = errcode.SessionChanged
+	ErrorCodeSessionProtected    = errcode.SessionProtected
+	ErrorCodeOutOfScope          = errcode.OutOfScope
 )

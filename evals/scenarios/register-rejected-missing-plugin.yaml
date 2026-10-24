@@ -16,6 +16,11 @@
 #   Postgres, Kafka, Schema Registry and the warehouse are untouched; the slot is inactive only
 #   because no connector runs.
 #
+# Grading: the class name comes from connect_status's error text ("Failed to find any class that
+#   implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector"),
+#   so the connect_config fact f_class_in_config is optional (required: false) and connect_status is
+#   the only evidence tool; reading connect_config adds nothing the status text does not give.
+#
 # Expected label: the plugin is io.debezium.connector.postgresql.PostgresConnector (the Debezium
 #   connector for PostgreSQL). It is not on the worker: the class cannot be loaded, so neither
 #   the stored connector nor a re-registration of it can start, and no config key can fix that.
@@ -464,7 +469,7 @@ expect:
     - id: f_class_in_config
       tool: connect_config
       match: [connector class, postgres connector]
-      required: true
+      required: false
     - id: f_no_ddl
       tool: pg_recent_ddl
       match: [no ddl]
@@ -474,6 +479,6 @@ expect:
   claims:
     - about: root_cause
       facts: [f_plugin_class_missing]
-  evidence_tools: [connect_status, connect_config]
+  evidence_tools: [connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility, pg_drop_replication_slot]
   max_tool_calls: 12

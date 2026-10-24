@@ -299,6 +299,17 @@ func (r *Registry) Floor(op string) (string, bool) {
 	return o.Tier(), true
 }
 
+// LayerOf returns the owners layer of the op ("environment", ...), and false
+// for an op not in the catalogue. setup_plan fills each stored step's Layer
+// from it (setuptools.LayerCatalogue).
+func (r *Registry) LayerOf(op string) (string, bool) {
+	o, ok := r.Get(op)
+	if !ok {
+		return "", false
+	}
+	return o.Layer(), true
+}
+
 // Target returns the target kind the request reaches: the op's own kind, or
 // the kind its params name for http_get and net_probe. "" means no registered
 // target and lets the runner's class floor for "" apply (it never raises).
