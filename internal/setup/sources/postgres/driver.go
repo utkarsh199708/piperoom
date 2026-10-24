@@ -40,7 +40,7 @@ const (
 	opAlterSystem         = plan.OpSourceAlterSystem // "source_alter_system", T3
 	opCreatePublication   = "source_create_publication"
 	opAddPublicationTable = "pg_add_publication_table"
-	opDropSlot            = "pg_drop_replication_slot"
+	opDropSlot            = plan.OpPGDropReplicationSlot
 	opSetReplicaIdentity  = "pg_set_replica_identity"
 	opCreateReadRole      = "source_create_read_role"
 	opGrantSelect         = "source_grant_select"
@@ -137,19 +137,6 @@ func (c Check) Fix(d Driver, ev Evidence) (fixOp, ask string) {
 	return c.FixOp, c.FixAsk
 }
 
-// guardOp is the fix's op as the guard table spells it. The drop-slot action
-// is registered under pgactions.DropSlotName and the guard row under
-// plan.OpSourceDropSlot; plan §3.6 forbids the drop on production whichever
-// name the step carries, so the check asks about the guard's name (the
-// contract change that should give the guard every registered spelling is
-// recorded in the PR, not worked around here).
-func (c Check) guardOp() string {
-	if c.FixOp == opDropSlot {
-		return plan.OpSourceDropSlot
-	}
-	return c.FixOp
-}
-
 // Tier is the tier the check's fix runs at on class: the higher of the op's
 // floor and the class (plan.TierOf), so a production target routes a T2 fix to
 // T3. It returns plan.ErrGuard when the guard table forbids the fix on class
@@ -160,11 +147,11 @@ func (c Check) Tier(class string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if c.guardOp() == "" {
+	if c.FixOp == "" {
 		return tier, nil
 	}
 	if row, forbidden := plan.Forbidden(plan.GuardRequest{
-		Op:    c.guardOp(),
+		Op:    c.FixOp,
 		Class: class,
 		Facts: plan.StepFacts{Param: c.FixParam},
 	}); forbidden {

@@ -207,11 +207,11 @@ var relationalSourceKeys = mergeSourceKeys(commonSourceKeys, map[string]sourceKe
 // transforms and predicates families are routed through the index.
 var sourceKeyTables = map[string]map[string]sourceKeySpec{
 	"postgres": mergeSourceKeys(relationalSourceKeys, map[string]sourceKeySpec{
-		"plugin.name":                              {rule: sourceText, values: []string{"pgoutput", "decoderbufs", "wal2json", "wal2json_rds", "wal2json_streaming", "wal2json_rds_streaming"}},
-		"slot.name":                                {rule: sourceName},
-		"slot.drop.on.stop":                        {rule: sourceBool},
-		"publication.name":                         {rule: sourceName},
-		"publication.autocreate.mode":              {rule: sourceText, values: []string{"all_tables", "disabled", "filtered"}},
+		"plugin.name":                 {rule: sourceText, values: []string{"pgoutput", "decoderbufs", "wal2json", "wal2json_rds", "wal2json_streaming", "wal2json_rds_streaming"}},
+		"slot.name":                   {rule: sourceName},
+		"slot.drop.on.stop":           {rule: sourceBool},
+		"publication.name":            {rule: sourceName},
+		"publication.autocreate.mode": {rule: sourceText, values: []string{"all_tables", "disabled", "filtered"}},
 		"publication.autocreate.filter.expression": {rule: sourceText},
 		"replica.identity.autoset.values":          {rule: sourceList},
 		"hstore.handling.mode":                     {rule: sourceText, values: []string{"json", "map"}},

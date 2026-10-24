@@ -120,6 +120,8 @@ exactly one reference:
 | `connect_url` | `CONNECT_URL` | required |
 | `connect_username`, `connect_password` | `CONNECT_USERNAME`, `CONNECT_PASSWORD` | |
 | `connect_tls_ca_file`, `connect_tls_cert_file`, `connect_tls_key_file` | `CONNECT_TLS_*_FILE` | path |
+| `connect_kind` | `CONNECT_KIND` | literal: `rest` (default) \| `msk` \| `confluent` \| `aiven`; not accepted until U13c extends the same two files (U12-0/U13-0) |
+| `ccloud_api_key`, `ccloud_api_secret` | – (no server-wide variable) | `file:` only; the Confluent Cloud read-only account's keys. Not accepted yet: the key table of `owners/tenancy.go` (A3) and the mapper in `wiring/connections.go` (A4) gain both keys, and the loader refuses `connect_kind: confluent` without the two, in U13c (U12-0/U13-0) |
 | `schema_registry_url` | `SCHEMA_REGISTRY_URL` | required |
 | `schema_registry_username`, `schema_registry_password` | `SCHEMA_REGISTRY_USERNAME`, `SCHEMA_REGISTRY_PASSWORD` | |
 | `schema_registry_tls_ca_file`, `schema_registry_tls_cert_file`, `schema_registry_tls_key_file` | `SCHEMA_REGISTRY_TLS_*_FILE` | path |
