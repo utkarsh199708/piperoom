@@ -246,28 +246,31 @@ func (s *Service) registerOverlapsOf(snap *RoomSnapshot) (ovs []owners.Overlap, 
 // registerCreateRefusal is the overlap refusal of the Create path: an overlap
 // whose owners can never approve the proposal refuses it (409 overlap). A
 // pipeline of another tenant's owners cannot approve here; an own-tenant
-// overlapping pipeline that owns no layer has no approver either. Overlaps
-// whose owners CAN approve are allowed: the route already makes their layers
-// the proposal's required layers (setupLayers, design §3.6), and the Execute
-// re-check below holds them to it.
+// overlapping pipeline that owns no layer has no approver either, so the
+// Execute re-check could never hold for it. Overlaps whose owners CAN approve
+// are allowed: the route already makes their layers the proposal's required
+// layers (setupLayers, design §3.6), and the Execute re-check below holds
+// them to it.
 func (s *Service) registerCreateRefusal(snap *RoomSnapshot) error {
 	ovs, pipes, foreign := s.registerOverlapsOf(snap)
 	if len(ovs) == 0 {
 		return nil
 	}
-	approvable := false
+	unapprovable := false
 	for _, p := range pipes {
+		owned := false
 		for _, layer := range owners.KnownLayers() {
 			if s.ownersNow().IsOwned(p.ID, layer) {
-				approvable = true
+				owned = true
 				break
 			}
 		}
-		if approvable {
+		if !owned {
+			unapprovable = true
 			break
 		}
 	}
-	if approvable && !foreign {
+	if !unapprovable && !foreign {
 		return nil
 	}
 	return registerOverlap(registerOverlapMessage(ovs, pipes, foreign))
@@ -308,6 +311,11 @@ func registerOverlapMessage(ovs []owners.Overlap, pipes []owners.Pipeline, forei
 // the overlapping pipeline's owners approved this proposal"). An admin or
 // fallback grant does not count for the overlap rule. With no overlapping
 // pipeline the rule holds.
+//
+// The approver's groups come from users.yaml (Users.Get): approval.given
+// records only the actor, so a group principal an IdP session supplied
+// cannot be matched from the log (contract change request in the PR). A
+// group-owned overlap then fails closed: the Execute re-check refuses it.
 func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, pipes []owners.Pipeline) bool {
 	if len(pipes) == 0 {
 		return true
@@ -316,6 +324,16 @@ func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, p
 	if !ok || len(prop.approvalActors) == 0 {
 		return false
 	}
+	groupsOf := func(id string) []string {
+		if s.users == nil {
+			return nil
+		}
+		u, ok := s.users.Get(id)
+		if !ok {
+			return nil
+		}
+		return u.Groups
+	}
 	for _, p := range pipes {
 		covered := false
 		for _, actor := range prop.approvalActors {
@@ -323,7 +341,7 @@ func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, p
 				continue
 			}
 			for _, layer := range owners.KnownLayers() {
-				if _, ok := s.ownersNow().CanApprove(p.ID, layer, actor.ID, nil); ok {
+				if _, ok := s.ownersNow().CanApprove(p.ID, layer, actor.ID, groupsOf(actor.ID)); ok {
 					covered = true
 					break
 				}
@@ -364,9 +382,9 @@ func (s *Service) executeRegister(ctx context.Context, params json.RawMessage) (
 	if err := setupRegisterGate(snap); err != nil {
 		return "", events.PullRequestRef{}, err
 	}
-	ovs, pipes, _ := s.registerOverlapsOf(snap)
+	ovs, pipes, foreign := s.registerOverlapsOf(snap)
 	if len(ovs) > 0 && !s.registerApprovalsHold(snap, step.ProposalID, pipes) {
-		return "", events.PullRequestRef{}, registerOverlap(registerOverlapMessage(ovs, pipes, true))
+		return "", events.PullRequestRef{}, registerOverlap(registerOverlapMessage(ovs, pipes, foreign))
 	}
 
 	entry, watchedBy, err := s.registerEntry(snap)
@@ -382,6 +400,24 @@ func (s *Service) executeRegister(ctx context.Context, params json.RawMessage) (
 	}
 	if err := s.reloadAfterRegister(sctx); err != nil {
 		return "", events.PullRequestRef{}, err
+	}
+	// The reload is the entry's validation: LoadDir skips a per-pipeline file
+	// that does not load (parse, shape or validation — the reason is logged
+	// and recorded in DirSkips) and keeps the rest. A skipped entry is then
+	// removed here and the step fails, so a registration never records a
+	// pipeline the server did not load. owners.Load cannot be this check: a
+	// per-pipeline file must not carry the tenants: block its tenant: key
+	// needs (loadDir).
+	if _, ok := s.ownersNow().Pipeline(snap.PipelineID); !ok {
+		reason := "the owners config does not validate with it"
+		for _, skip := range s.ownersNow().DirSkips() {
+			if skip.File == path {
+				reason = skip.Reason
+				break
+			}
+		}
+		_ = os.Remove(path)
+		return "", events.PullRequestRef{}, fmt.Errorf("room: %s: the written entry was not loaded: %s (the file was removed)", registerActionName, reason)
 	}
 	payload := events.PipelineRegisteredPayload{
 		PipelineID: snap.PipelineID, Tenant: snap.SetupTenant(), Path: path, WatchedBy: watchedBy,
@@ -494,6 +530,13 @@ func (s *Service) appendRegistered(ctx context.Context, roomID, proposalID strin
 	if err := setupRegisterGate(snap); err != nil {
 		return events.Event{}, err
 	}
+	// The overlap re-check runs here too, against the owners set the
+	// registration's own reload just published: a pipeline another room
+	// registered between the executor's check and this append is seen, and
+	// the recorded approvals must cover it as well (design §3.6).
+	if ovs, pipes, foreign := s.registerOverlapsOf(snap); len(ovs) > 0 && !s.registerApprovalsHold(snap, proposalID, pipes) {
+		return events.Event{}, registerOverlap(registerOverlapMessage(ovs, pipes, foreign))
+	}
 	payload.By = snap.Setup.creator
 	if payload.By.ID == "" {
 		payload.By = systemActor
@@ -511,9 +554,9 @@ func (s *Service) appendRegistered(ctx context.Context, roomID, proposalID strin
 // reloadAfterRegister reloads the owners set after the registration file
 // landed and tells the watcher (Deps.OnOwnersReloaded; cmd/server rebuilds
 // the watcher, whose next tick then lists the new pipeline). A reload that
-// fails is reported with the file left in place: LoadDir skips a file that
-// fails validation with a logged reason, so the operator sees the reason on
-// the next start rather than lose the file.
+// errors is reported with the file left in place for the operator; a file
+// the reload SKIPS (LoadDir logs the reason) is removed by executeRegister,
+// which checks the reloaded set for the pipeline.
 func (s *Service) reloadAfterRegister(ctx context.Context) error {
 	if s.reloadOwners == nil {
 		return fmt.Errorf("room: %s: this server has no OWNERS_DIR to reload (standalone servers write next to the project)", registerActionName)
@@ -559,7 +602,7 @@ func (s *Service) registerEntry(snap *RoomSnapshot) ([]byte, string, error) {
 	if creatorID == "" {
 		creatorID = "piperoom"
 	}
-	doc := registerOwnersNode(prov, creatorID, setup, watchedBy, conns)
+	doc := registerOwnersNode(prov, creatorID, snap.ID, setup, watchedBy, conns)
 	var b strings.Builder
 	enc := yaml.NewEncoder(&b)
 	enc.SetIndent(2)
@@ -617,10 +660,12 @@ func (s *Service) registerConnections(setup *SetupSnapshot, prov owners.Pipeline
 }
 
 // writeRegisterFile writes the entry to OWNERS_DIR/<pipeline id>.yaml, to a
-// temporary file renamed into place, validated with owners.Load first (the
-// same order as discover's installOwners: a file that does not load is never
-// moved into place). An existing target that is a symlink is refused, never
-// followed.
+// temporary file renamed into place. An existing target that is a symlink is
+// refused, never followed, and an existing regular file is refused too: a
+// registration never overwrites (a second register is refused or a no-op).
+// The entry's validation is the reload that follows (reloadAfterRegister +
+// the executeRegister check): owners.Load cannot judge a per-pipeline file,
+// whose tenant: key needs the main file's tenants: block.
 func (s *Service) writeRegisterFile(ctx context.Context, snap *RoomSnapshot, entry []byte) (string, error) {
 	dir := strings.TrimSpace(s.setupCfg.OwnersDir)
 	if dir == "" {
@@ -661,11 +706,6 @@ func (s *Service) writeRegisterFile(ctx context.Context, snap *RoomSnapshot, ent
 	}
 	if err := tmp.Close(); err != nil {
 		return "", fmt.Errorf("room: %s: close %s: %w", registerActionName, tmpName, err)
-	}
-	// The file must load on its own before it is moved into place; the
-	// reload below re-checks it against the whole set.
-	if _, err := owners.Load(tmpName); err != nil {
-		return "", fmt.Errorf("room: %s: the written entry does not load: %v", registerActionName, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return "", fmt.Errorf("room: %s: move the entry into place: %w", registerActionName, err)
@@ -716,8 +756,19 @@ func (s *Service) closeRegisteredSetup(ctx context.Context, roomID string) {
 // (the repos: path waits for pr_merged, docs/api.md). The follower calls it
 // after recording the merge (pr_follow.go). url is the merged PR's URL; the
 // room closes only when it is the registration PR the room's
-// pipeline.registered recorded.
+// pipeline.registered recorded. Every other room and PR is a silent no-op:
+// the follower sees merges of every followed PR, incident rooms included, so
+// only a setup room that recorded a registration PR even reads on.
 func (s *Service) registerPRMerged(ctx context.Context, roomID, proposalID, url string) {
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil || snap.Setup.regPullRequestURL == "" {
+		return
+	}
+	if url != "" && snap.Setup.regPullRequestURL != url {
+		return
+	}
+	// closeRoom re-checks under the lock; the read above only keeps the
+	// follower's ordinary (non-registration) merges quiet.
 	if _, err := s.closeRoom(ctx, roomID, systemActor, func(st *roomState) (string, error) {
 		reg := st.snap.Setup
 		if !st.snap.IsSetupRoom() || reg == nil || reg.regPullRequestURL == "" {
@@ -762,15 +813,18 @@ func (s *Service) labelRegistered(ctx context.Context, roomID, proposalID string
 
 // ---- Rendering the owners entry (byte-equal to discover -write-owners) ----
 
-// registerOwnersNode builds the entry's document: the pipeline mapping
-// rendered exactly as discover's RenderOwned renders the same pipeline (the
-// keys, their order, the flow lists and the comments — internal/discover's
-// render.go pipelineNode), then tenant:, owners:, connections:,
-// auto_approve: [] and the setup: block. The discover part is duplicated
-// here because RenderOwned writes a whole owners document (pipelines: plus
-// layers:) while the per-pipeline file must not carry the top-level blocks;
-// the byte-equality test pins the two renderings together.
-func registerOwnersNode(prov owners.Pipeline, creatorID string, setup *SetupSnapshot, watchedBy string, conns map[string]string) *yaml.Node {
+// registerOwnersNode builds the entry's document: a complete owners document
+// (pipelines: with exactly one pipeline — the shape LoadDir requires of an
+// OWNERS_DIR file), the pipeline mapping rendered exactly as discover's
+// RenderOwned renders the same pipeline (the keys, their order, the flow
+// lists and the comments — internal/discover's render.go pipelineNode), then
+// tenant:, owners:, connections:, auto_approve: [] and the setup: block.
+// roomID is the setup room's id, the setup: block's room_id (design §3.9).
+// The discover part is duplicated here because RenderOwned writes the whole
+// document (pipelines: plus layers:) while the per-pipeline file must not
+// carry the top-level blocks; the byte-equality test pins the two renderings
+// together.
+func registerOwnersNode(prov owners.Pipeline, creatorID, roomID string, setup *SetupSnapshot, watchedBy string, conns map[string]string) *yaml.Node {
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	title := str(prov.Title)
 	title.LineComment = comment(titleTODO)
@@ -801,9 +855,12 @@ func registerOwnersNode(prov owners.Pipeline, creatorID string, setup *SetupSnap
 	}
 	m.Content = append(m.Content,
 		str("auto_approve"), flowList(nil),
-		str("setup"), registerSetupNode(setup, watchedBy),
+		str("setup"), registerSetupNode(setup, roomID, watchedBy),
 	)
-	return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{m}}
+	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		str("pipelines"), &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{m}},
+	}}
+	return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}}
 }
 
 // registerLayersNode is the per-pipeline owners: block: the room's creator
@@ -838,8 +895,9 @@ func registerConnectionsNode(conns map[string]string) *yaml.Node {
 	return m
 }
 
-// registerSetupNode renders the setup: block (owners.SetupSpec).
-func registerSetupNode(setup *SetupSnapshot, watchedBy string) *yaml.Node {
+// registerSetupNode renders the setup: block (owners.SetupSpec; design
+// §3.9: target, runner_label, room_id and watched_by).
+func registerSetupNode(setup *SetupSnapshot, roomID, watchedBy string) *yaml.Node {
 	m := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
 		str("target"), str(setup.req.Target),
 		str("watched_by"), str(watchedBy),
@@ -847,15 +905,16 @@ func registerSetupNode(setup *SetupSnapshot, watchedBy string) *yaml.Node {
 	if setup.Runner != nil && setup.Runner.Label != "" {
 		m.Content = append(m.Content, str("runner_label"), str(setup.Runner.Label))
 	}
+	m.Content = append(m.Content, str("room_id"), str(roomID))
 	return m
 }
 
 // The discover renderer's fixed comments (internal/discover/render.go),
 // duplicated so the byte-equality holds.
 const (
-	titleTODO       = "TODO: human-friendly title"
+	titleTODO        = "TODO: human-friendly title"
 	sinkFoundTODOFmt = "TODO: sink table found in a sink connector config: %s; add it to sink_tables and set sink_ts_column (the column is not discoverable)"
-	sinkMissingTODO = "TODO: sink table not found; fill in sink_tables (schema.table) and sink_ts_column"
+	sinkMissingTODO  = "TODO: sink table not found; fill in sink_tables (schema.table) and sink_ts_column"
 )
 
 // str, flowList and comment are discover's renderer helpers, duplicated for

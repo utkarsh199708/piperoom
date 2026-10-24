@@ -100,7 +100,9 @@ func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
 // CanSeePipeline reports whether the person may see rooms of the pipeline:
 // always with the filter off; with it on, the solo user sees every tenant and
 // everyone else the tenants they belong to (owners.InTenant). A pipeline that
-// owners.yaml does not define is in no tenant.
+// owners.yaml does not define is in no tenant. The check reads the current
+// owners set (ownersNow): a pipeline another room just registered is visible
+// to its tenant at once, not only after a restart (U1-14).
 func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if !s.TenancyOn() {
 		return true
@@ -108,7 +110,7 @@ func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if s.IsSolo(u.ID) {
 		return true
 	}
-	return s.owners.CanSeePipeline(pipelineID, u.ID, u.Groups)
+	return s.ownersNow().CanSeePipeline(pipelineID, u.ID, u.Groups)
 }
 
 // errHidden is the answer for an object outside the person's tenants: the
