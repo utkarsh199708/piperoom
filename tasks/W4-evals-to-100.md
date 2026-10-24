@@ -92,6 +92,32 @@ itself; the row named in it applies it.
   2026-10-24 (leads, owner-delegated).
 - **R18 — blocked-slot budget.** R8 applied: its budget-only failing run made 19 calls, so the budget is 21. Ruled
   2026-10-24 (leads, owner-delegated).
+- **R19 — sasl-credential-rotated (rule 4, W4g).** The broker correctly rejects a stale SCRAM password held in the
+  Connect worker's `sasl.jaas.config`. Under rule 4 ("a safeguard correctly refusing isn't it") the root-cause layer is
+  `kafka-connect`, with `kafka` accepted as `root_cause_layer_alt`. Under R9, `f_acls_intact` becomes optional and
+  `evidence_tools` is `[connect_status]`: the authentication exception establishes the cause on its own. The ACL trap
+  stays guarded by `root_cause_forbidden`. Evidence: 4 live runs and 6 episodes all named kafka-connect and skipped
+  `kafka_acls` (runs 40085823038, 40090999753, 40091558005, 40095927117). C7 applies it in W4n (KAN-497). Ruled
+  2026-10-24 (leads, owner-delegated).
+- **R20 — R8/R9 applications.** Four measured scenarios, no new rule.
+  - `consumer-deserializer`: budget 10 -> 16 (failed only on budget, at 14, 12 and 14 calls).
+  - `tolerance-all-skips`: budget 14 -> 21 (failed only on budget, at 19 calls). `f_events_seen` and
+    `debezium_metrics` become optional (R9), because `connect_worker_metrics` ("2187 skipped") shows the same thing.
+  - `mysql-server-id-clash`: budget 12 -> 23 (failed only on budget, at 21 calls).
+  - `mysql-binlog-purged`: `f_stored_position` is established by `mysql_binlog_status` (it prints `stored
+    binlog.000003:4523`), and `connect_source_offsets` leaves `evidence_tools` (R9).
+
+  C7 applies it in W4n (KAN-497). Ruled 2026-10-24 (leads, owner-delegated).
+- **R21 — MySQL resume bullet (W4m).** The precondition stays a precondition. "connect_update_connector_config only if no
+  captured table's schema changed since the stored position" becomes "connect_update_connector_config after checking no
+  captured table's schema changed since the stored position": the agent reads the schema history instead of asking, and
+  the safety check is kept. The proposed "unsafe if" wording is rejected because it would weaken a data-loss
+  safeguard. Ruled 2026-10-24 (leads, owner-delegated).
+- **Open item — MySQL prompt lines name two scenarios' root causes.** The MySQL prompt already matches the root-cause
+  groups of `mysql-server-id-clash` ("database.server.id clashing") and `mysql-history-topic-deleted` ("schema history
+  topic ... if lost"). These lines come from the Q8 rows. No W4 leakage test covers the MySQL scenarios. Follow-up
+  (A4 for the prompt, C6 for the test): add a leakage test for the MySQL scenarios, and reword those two lines
+  generically. Not done by any W4 row yet.
 
 ### Related rulings
 

@@ -346,7 +346,7 @@ func (p Pipeline) Watch() WatchConfig {
 		return batchWatch()
 	}
 	w := DefaultWatch()
-	if p.IsMySQL() {
+	if p.hasNoSlot() {
 		noSlotSignals(&w)
 	}
 	return w

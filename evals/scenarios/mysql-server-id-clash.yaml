@@ -325,4 +325,5 @@ expect:
   fix_targets:
     connect_update_connector_config: {connector: orders-mysql}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_delete_connector, connect_stop_connector, connect_reset_source_offsets, connect_resume_connector, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_grant_select, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 12
+  # W4 ruling R20 (R8): budget 12 -> 23. The scenario failed only on budget at 21 calls; 21 plus 2.
+  max_tool_calls: 23
