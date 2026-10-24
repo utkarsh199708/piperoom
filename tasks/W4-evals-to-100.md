@@ -72,6 +72,27 @@ itself; the row named in it applies it.
 - **R13 — W4j enabler.** KAN-510's "no code" covered the comparison itself; adding `set=heldout` to `evals-live`
   (C1) is the enabler the dispatch needs and is accepted. Ruled 2026-10-24 (leads, owner-delegated).
 
+- **R14 — consumer-offsets-out-of-range-retention relabel (amends R2).** Under rule 4 as W4f kept it, order-sync is
+  the stage whose own read shows it failed (crash loop, OffsetOutOfRange), and Kafka still answers every read, so
+  Kafka is at most the root cause. Label: `first_failing_layer: consumer`, `root_cause_layer: kafka`, no alt. The 15
+  cached verdicts are refilled. Ruled 2026-10-24 (leads, owner-delegated).
+- **R15 — consumer-duplicates grades no current first-failing layer (refines R4).** A healthy-now verdict with a past
+  finding has no current failing component, so `first_failing_layer` is empty; `root_cause_layer: kafka` with the
+  kafka-connect alt stays. The finding's terms accept the redelivery wording (`re-sent`, `at-least-once`, `same lsn`,
+  `dedup*`). Ruled 2026-10-24 (leads, owner-delegated).
+- **R16 — internal-topic-not-compacted keeps R3.** A consumer that is Stable and reading does its job however large
+  its lag; a stage's own store (Connect's offsets topic) is Kafka. The label stays; the fix is a prompt clarification
+  for a later A4 row, paid word-neutrally. Ruled 2026-10-24 (leads, owner-delegated).
+- **R17 — a replay world shows the replayed state.** A scenario whose expected fix rewrites data (replay,
+  re-snapshot) gives the reads after that fix the post-fix answers, via a phase transition without `ok: true` (so no
+  recovered phase and no runner recovery verdict). consumer-skipped-range and rows-lost-after-retention get it. A
+  post-recovery "the pipeline is healthy" is not a forbidden story in a scenario whose fix restores the data, so
+  rows-lost-after-retention and consumer-skipped-range drop the `pipeline is healthy` and `nothing is wrong`
+  forbidden rows; the false stories stay failed by their term groups and `false alarm`/`false positive`. Ruled
+  2026-10-24 (leads, owner-delegated).
+- **R18 — blocked-slot budget.** R8 applied: its budget-only failing run made 19 calls, so the budget is 21. Ruled
+  2026-10-24 (leads, owner-delegated).
+
 ### Related rulings
 
 - **W4f first-failing definition (KAN-504).** Rule 4 of the CDC prompt keeps the P3-W3 wording: "the most upstream
