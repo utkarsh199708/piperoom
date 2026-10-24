@@ -502,17 +502,21 @@ func insideWrapper(s string, at int) bool {
 // TC1/E1: both prompts ask for the hypothesis's scope in the rule that says
 // what update_hypothesis names, the CDC suspect is a change near the alert,
 // and update_hypothesis offers scope, team and change_id as optional fields
-// (a hypothesis written without them still passes).
+// (a hypothesis written without them still passes). The CDC rule's wording is
+// W4f's (KAN-504): a cause is named as "First failing: ... Root cause: ...".
 func TestPromptAndSchemaAskForScope(t *testing.T) {
-	for _, kind := range []string{events.PipelineKindCDC, events.PipelineKindBatch} {
+	for kind, rule := range map[string]string{
+		events.PipelineKindCDC:   "update_hypothesis names a cause:",
+		events.PipelineKindBatch: "update_hypothesis must name",
+	} {
 		p := systemPromptFor(kind)
-		i := strings.Index(p, "update_hypothesis must name")
+		i := strings.Index(p, rule)
 		if i < 0 {
 			t.Fatalf("%s prompt lost the update_hypothesis rule", kind)
 		}
 		line := p[i:]
 		line = line[:strings.Index(line, "\n")]
-		if !strings.HasSuffix(line, "Set its scope.") {
+		if !strings.HasSuffix(strings.ToLower(line), "set its scope.") {
 			t.Errorf("%s prompt: the update_hypothesis rule does not ask for the scope: %s", kind, line)
 		}
 	}
