@@ -633,6 +633,39 @@ injected text.
 **Synthesised, not recorded** (`RECORDED: NO`): no repository was read and no Docker ran. `runbook_lookup` is
 not recorded in `debezium-upgrade`; the harness runs it live over the Q1 known-issues index.
 
+### Setup scenarios: MongoDB (U7d)
+
+Three setup scenarios on a MongoDB 7.0 source (the `mongo` dev profile, a one-member replica set `rs0`,
+`dev/mongo/README.md`) and the Compose target, each with a runner session in `evals/setup/recordings` (the eval
+replay). Two are built on the U7c `devctl setup-break` names; their labels name the failing check (the check names
+and messages of `cmd/devctl/setupbreaks_mongo.go`, which read the U7a client `internal/clients/mongodb`) and the fix
+with its tier from `tasks/U-board.md` (U7a, U7b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-mongodb-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every MongoDB check passed | - | outcome `healthy`; no proposal |
+| `setup/standalone-mongod` | task 0 FAILED (`MongoTimeoutException`); check `mongo-change-streams` failed | mongod recreated without `--replSet rs0`: a standalone has no change streams, and the driver (`replicaSet=rs0`) drops it from its cluster view | kafka-connect / postgres | `mongo-change-streams`; restart mongod with `--replSet rs0` (a documented ask: the person's own mongod; T1 only when the room created it, by receipt), then `connect_restart_task` |
+| `setup/no-oplog-role` | the run stopped at the source checks; check `mongo-oplog-read` failed | the capture user `piperoom_cdc` holds `readAnyDatabase`, which leaves out `local`, so it cannot read `local.oplog.rs` | postgres / postgres | `mongo-oplog-read`; grant read on `local` (a documented ask to the person's user administrator), or the setup's own capture user with `source_create_read_role` (T2) |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U7a client's DTOs, and the MongoDB driver (U7b) and the client's `SetupSourceWriter` half are not on main, so the
+check reads are recorded under the remote clients' source op names (`source_settings`, `source_role_info`).
+Digests are synthetic placeholders. `standalone-mongod`'s task trace is composed from the MongoDB Java driver's
+server-selection timeout and Debezium's change-event-producer wrapper. `no-oplog-role` stops before a connector
+exists, so, like `setup/compose-postgres-clean`, it replays only `similar_incidents` and has no `expected_facts`;
+its runner session goes on past the person's grant to a green verification. Conventions shared with the other
+setup sources: the source database is graded as the source layer `postgres` (owners.yaml has no `mongodb`
+source kind), the room's `source_*` tools record their real "cannot read database settings" error, and a title names
+the step and the check, not the check's message. A MongoDB topic is `<topic.prefix>.<db>.<collection>`, which is
+owners.yaml's `<topic_prefix>.<table>` for a `db.collection` table.
+
+To re-record on the dev stack once U7b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mongo up -d --wait mongo`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break standalone-mongod` after the first verification (or
+`no-oplog-role` before the run), re-verify and re-run the checks. Take the room's tool results from `GET
+/api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Setup scenarios (U1-19)
 
 Six files about `piperoom-setup`, where the failure is a setup check, a compose validator rule or the
@@ -697,6 +730,50 @@ as misses; nothing recorded makes a fix look right and every fix stays forbidden
 reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
 one-line edit in `../agreement_test.go` (C6's) and a judge refill.
 
+### Setup scenarios: SQL Server (U4d)
+
+Three setup scenarios on a SQL Server 2022 source (the `mssql` dev profile, `dev/mssql/README.md`) and the Compose
+target, each with a runner session in `evals/setup/recordings` (the eval replay). Two are built on the U4c
+`devctl setup-break` names; their labels name the failing check (the check names and messages of
+`cmd/devctl/setupbreaks_mssql.go`, which read what the U4a client `internal/clients/sqlserver` reads) and the fix with
+its tier from `tasks/U-board.md` (U4a, U4b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-sqlserver-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every SQL Server check passed | - | outcome `healthy`; no proposal |
+| `setup/agent-stopped` | re-verification failed at `canary_event`; check `sqlserver-agent-running` failed | SQL Server Agent stopped, so the CDC capture job does not run; the connector stays RUNNING | postgres / postgres | `sqlserver-agent-running`; start the Agent: T2 `service_restart` on a host target, a documented ask on this Compose project (the person's container) and on managed SQL; no connector action |
+| `setup/cdc-not-enabled-table` | rung 8 timed out; check `sqlserver-table-cdc` failed | CDC on for the database, `dbo.orders` untracked (its capture instance dropped); the canary table still flows | postgres / postgres | `sqlserver-table-cdc`; `source_create_publication` for `dbo.orders` (T2, `sp_cdc_enable_table`), then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U4a client's DTOs, and the SQL Server driver (U4b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. Conventions the three share, which a re-recording keeps:
+
+- **Layers.** `owners.yaml` has no `sqlserver` source kind yet, so the source database is graded as the source
+  layer, `postgres` (`events.Layers[0]`); `textmatch.go` counts "SQL Server" (and the other setup sources' names,
+  MongoDB and Oracle) as words of that layer.
+- **Topics.** Debezium's SQL Server connector names a topic `<topic.prefix>.<database>.<schema>.<table>`; owners.yaml
+  names it `<topic_prefix>.<schema>.<table>`, so the pipeline's `topic_prefix` is `mssql.orders` while the
+  connector's `topic.prefix` is `mssql`.
+- **Source tools.** The room's `source_settings`, `source_role_grants` and `source_table_replication` have no SQL
+  Server reader on main; the scenarios record their real error ("the source client cannot read database settings"),
+  so a run that tries them sees the gap, and the Agent and table state come from the setup check in the alert.
+- **Titles.** An alert title names the failed rung and the check, not the check's message: the message states the
+  cause, and a title that hands the cause back must not pass (`TestScoringOldVsNew`).
+
+The two breaks set no `expect.fix`: starting the Agent is no room action, and `source_create_publication` is a setup
+runner op, not in `evals.LiveActions`. `setup/agent-stopped` forbids every connector write (the task is RUNNING; a
+restart starts no Agent job); `setup/cdc-not-enabled-table` forbids `pg_add_publication_table` (a Postgres
+publication is not what SQL Server lacks) and the connector writes other than the task restart that follows the
+fix.
+
+To re-record on the dev stack once U4b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mssql up -d --wait mssql`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break agent-stopped` (or `cdc-not-enabled-table`) after the first
+verification, re-verify and re-run the checks. Take the room's tool results from `GET /api/rooms/{id}/export` and
+the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Provider-neutral scenarios (V15)
 
 Three scenarios for the multi-provider model interface (`docs/design/model-providers.md`). All are
@@ -753,6 +830,38 @@ regenerate them if a tool's format changes. Decisions a reader should know:
   path (15 + 2). Its turn split was not measured (see the scenario header). `consumer-rebalance-storm` stays 14 (its
   live run passed at 14; never 16), and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule
   would give 13 and 12; a row that only records misses does not lower a budget).
+
+### Setup scenarios: Oracle (U9d)
+
+Four setup scenarios on an Oracle Database Free 23ai source (the `oracle` dev profile: CDB `FREE`, PDB `FREEPDB1`,
+LogMiner user `C##DBZUSER`, `dev/oracle/README.md`) and the Compose target, each with a runner session in
+`evals/setup/recordings` (the eval replay). Three are built on the U9c `devctl setup-break` names; their labels name
+the failing check (the check names and messages of `cmd/devctl/setupbreaks_oracle.go`, which evaluate the U9a client
+`internal/clients/oracle`'s types) and the fix with its tier from `tasks/U-board.md` (U9a, U9b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-oracle-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every Oracle check passed | - | outcome `healthy`; no proposal |
+| `setup/no-archivelog` | task 0 FAILED; check `oracle-archive-log-mode` failed | the database restarted in NOARCHIVELOG, so LogMiner has no archived redo | kafka-connect / postgres | `oracle-archive-log-mode`; T3 in a maintenance window: a DBA's `SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN` (the allow-listed `source_alter_system archive_log` is refused by the U9a writer on an open instance; the runner session records it), then `connect_restart_task` |
+| `setup/no-supplemental-logging` | task 0 FAILED; check `oracle-supplemental-logging` failed | the minimal supplemental logging and the table's ALL COLUMNS group were dropped | kafka-connect / postgres | `oracle-supplemental-logging`; a DBA's `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA`, `source_create_publication` for `PIPEROOM.ORDERS` (T2, the ALL COLUMNS group), then `connect_restart_task` |
+| `setup/missing-logminer-grant` | task 0 FAILED (ORA-01031); check `oracle-logminer-grants` failed | `LOGMINING` revoked from `C##DBZUSER` | kafka-connect / postgres | `oracle-logminer-grants`; `GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL` (a documented ask: the person's user), or the setup's own LogMiner user from `source_create_read_role` (T2); then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U9a client's DTOs, and the Oracle driver (U9b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. The task traces are Debezium's own archive log and supplemental logging checks and Oracle's ORA-01031,
+each under Debezium's change-event-producer wrapper. Conventions shared with the other setup sources: the source
+database is graded as the source layer `postgres` (owners.yaml has no `oracle` source kind), the room's `source_*`
+tools record their real "cannot read database settings" error, and a title names the failed task and the check, not
+the check's message. The topic prefix is `ora`, so a topic (`ora.PIPEROOM.ORDERS`, Oracle's upper case kept) is not a
+word of the source layer.
+
+To re-record on the dev stack once U9b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile oracle up -d --wait oracle`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then one of `devctl setup-break no-archivelog`, `no-supplemental-logging` or
+`missing-logminer-grant` after the first verification, re-verify and re-run the checks. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl
+setup-fix` restores the profile.
 
 ## Outcome scenarios (E2)
 

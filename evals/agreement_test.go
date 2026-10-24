@@ -385,6 +385,11 @@ var syntheticLabels = map[string]Label{
 	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
 	"blocked-slot":        {"kafka-connect", []string{"48213", "blocks_slot"}}, // R1 (W4n)
 	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
+	// The U9d Oracle setup scenarios: the alert titles name the failed task and
+	// the check, not the check's message.
+	"setup/no-archivelog":           {"kafka-connect", []string{"noarchivelog"}},
+	"setup/no-supplemental-logging": {"kafka-connect", []string{"minimal supplemental logging", "all columns"}},
+	"setup/missing-logminer-grant":  {"kafka-connect", []string{"logmining"}},
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
 	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
@@ -392,6 +397,10 @@ var syntheticLabels = map[string]Label{
 	// known-issue id of the Q1 index and the key or value it is about.
 	"renamed-property-after-upgrade": {"kafka-connect", []string{"dbz-topic-heartbeat-transaction", "heartbeat.topics.prefix", "topic.heartbeat.prefix"}},
 	"removed-decoder-plugin":         {"kafka-connect", []string{"dbz-wal2json-removed", "wal2json"}},
+	// The U7d MongoDB setup scenarios: the alert titles name the failed task or
+	// the stopped step and the check, not the check's message.
+	"setup/standalone-mongod": {"kafka-connect", []string{"standalone", "replset"}},
+	"setup/no-oplog-role":     {"postgres", []string{"readanydatabase", "read on local"}},
 	// The U1-19 setup scenarios: the label terms name the cause; the alert
 	// titles name the failing check, which is why the check names are not
 	// terms here (a title that names its own check is not a diagnosis).
@@ -401,6 +410,11 @@ var syntheticLabels = map[string]Label{
 	"setup/wal-level-replica":           {"kafka-connect", []string{"wal_level", "replica"}},
 	"setup/missing-grant":               {"kafka-connect", []string{"devctl_setup_grant", "select on", "needs replication"}},
 	"setup/db-unreachable-from-connect": {"kafka-connect", []string{"192.0.2.1", "black-hole", "etc/hosts"}},
+	// The U4d SQL Server setup scenarios. The alert titles name the rung and
+	// the failing check, not the check's message, so no title states a label
+	// term.
+	"setup/agent-stopped":         {"postgres", []string{"sql server agent", "capture job"}},
+	"setup/cdc-not-enabled-table": {"postgres", []string{"not tracked", "capture instance", "is_tracked_by_cdc"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -529,6 +543,14 @@ var syntheticTruth = map[string]map[string]truth{
 	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}}, // R1 (W4n): labelled kafka-connect; the lost-slot text blames postgres
 	"idle-wal-growth":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U9d: each good text leads with the failed task (kafka-connect, the label
+	// layer) and names the source database as the cause; each lazy title names
+	// the failed task and no cause; each wrong text blames another source
+	// setting (a grant, the log mode, the logging): a source story, not the
+	// failed task.
+	"setup/no-archivelog":           {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/no-supplemental-logging": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/missing-logminer-grant":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
 	// cause. The renamed-key wrong text blames the Schema Registry; the
 	// missing-plugin one blames the connector's role (kafka-connect, the right
@@ -542,6 +564,15 @@ var syntheticTruth = map[string]map[string]truth{
 	// table's WAL and a dropped slot (both postgres).
 	"renamed-property-after-upgrade": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"removed-decoder-plugin":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U7d: the source layer is postgres (owners.yaml has no mongodb kind).
+	// standalone-mongod's good text leads with the source cause, not the
+	// failed task (kafka-connect, the label layer), as wal-level-replica's
+	// does; its lazy title names the failed task, its wrong text blames the
+	// Connect worker's network route (kafka-connect). no-oplog-role's lazy
+	// title names the connector it did not register first; its wrong text
+	// blames the source's standalone mongod: the right layer, the wrong cause.
+	"setup/standalone-mongod": {"good": {false, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/no-oplog-role":     {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	// U1-19: the lazy texts are the alert titles, which name the failing check
 	// and the service it failed on. The first layer word is postgres for
 	// compose-postgres-clean (the label layer) and for wal-level-replica (a
@@ -558,6 +589,13 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/wal-level-replica":           {"good": {false, true}, "lazy": {false, true}, "wrong": {false, false}},
 	"setup/missing-grant":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U4d: the source layer is postgres (owners.yaml has no sqlserver kind).
+	// Both lazy titles name a SQL Server check (the source layer) and no cause.
+	// The agent-stopped wrong text blames the connector (kafka-connect); the
+	// cdc-not-enabled-table one blames the stopped Agent on the source: the
+	// right layer, the wrong cause.
+	"setup/agent-stopped":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/cdc-not-enabled-table": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit

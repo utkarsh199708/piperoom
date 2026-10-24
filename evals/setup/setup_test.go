@@ -27,8 +27,10 @@ func TestLoadDirReadsTheSixSetupSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recs) != len(sixScenarios) {
-		t.Fatalf("recordings = %d, want %d", len(recs), len(sixScenarios))
+	// The other sources' sessions (U4d, U7d, U9d) are in the directory too;
+	// TestLoadDirReadsEverySetupSession checks them.
+	if len(recs) < len(sixScenarios) {
+		t.Fatalf("recordings = %d, want at least %d", len(recs), len(sixScenarios))
 	}
 	for _, name := range sixScenarios {
 		rec, ok := recs[name]
@@ -57,6 +59,39 @@ func TestLoadDirReadsTheSixSetupSessions(t *testing.T) {
 			if !r.OK {
 				t.Errorf("%s: rung %s is not green: %s", name, r.Name, r.Note)
 			}
+		}
+		if rungs[7].OK {
+			t.Errorf("%s: the person's change is green in a replay with no person", name)
+		}
+	}
+}
+
+// TestLoadDirReadsEverySetupSession: every recording, whatever its source,
+// names a setup source and target kind, records ops, and ends with the
+// eight-rung verification of plan.Ladder in which rung 8, the person's own
+// change, is still awaited (no person acts in a replay). A rung before it may
+// be red: a break's re-verification records where it failed, and the replay
+// test recomputes every rung from the recorded reads.
+func TestLoadDirReadsEverySetupSession(t *testing.T) {
+	recs, err := LoadDir("recordings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rec := range recs {
+		if !ValidSourceKind(rec.SourceKind()) || !ValidTargetKind(rec.Target) {
+			t.Errorf("%s: source %q, target %q: want setup kinds", name, rec.SourceKind(), rec.Target)
+		}
+		if len(rec.Ops) == 0 {
+			t.Errorf("%s: no ops", name)
+		}
+		if rec.Ladder == nil || len(rec.Ladder.Reads) == 0 || rec.Ladder.Verified == nil {
+			t.Errorf("%s: no ladder reads or verification", name)
+			continue
+		}
+		rungs := rec.Ladder.Verified.Rungs
+		if len(rungs) != 8 {
+			t.Errorf("%s: %d rungs, want 8", name, len(rungs))
+			continue
 		}
 		if rungs[7].OK {
 			t.Errorf("%s: the person's change is green in a replay with no person", name)

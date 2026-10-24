@@ -180,7 +180,8 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 		if p := r.followDeferred(id, r.driverSteps(ctx, id), events.ProposalOriginDriver); p != nil {
 			p.final = true
 		}
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)}}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)},
+			failures: []failedStep{{proposalID: id, index: failed, steps: r.driverSteps(ctx, id), text: in.Text}}}
 	case none || unknown >= 0:
 		// An unknown outcome claims neither way: no verdict is stored, so a
 		// later report of the same proposal is judged on its own.
