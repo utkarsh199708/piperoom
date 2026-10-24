@@ -466,14 +466,14 @@ function DoneStep({
         aria-expanded={open}
         aria-controls={regionId}
         onClick={() => setOpen((o) => !o)}
-        className="flex min-h-9 coarse:min-h-11 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-h-9 coarse:min-h-11 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn('size-3.5 shrink-0 text-subtle-foreground transition-transform motion-reduce:transition-none', open && 'rotate-90')}
         />
         <StepNumber n={n} error={failed} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium sm:flex-none">{step.title}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{step.title}</span>
         {first && <ToolBadge tool={first.tool} />}
         {more > 0 && <span className="font-mono text-xs text-subtle-foreground">+{more}</span>}
         {tags[0] && (
