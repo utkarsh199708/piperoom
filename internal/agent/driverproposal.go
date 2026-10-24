@@ -227,6 +227,10 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 	}
 	out := r.verifyExecuted(ctx, rec, executedAt)
 	r.setDriverVerdict(id, out.recovered)
+	// In a setup room a failed verification of the driver's fix is a failed
+	// step, as for the agent's own (U5b): the runner reads the logs of the
+	// last step the room stored before the model re-plans.
+	out = r.setupVerifyFailure(out, id, len(rec.steps)-1, rec.steps)
 	// The model reads the verdict of a fix it did not write and tells the room
 	// what it means for its hypothesis; that turn is charged like any other.
 	out.needsModel = true
