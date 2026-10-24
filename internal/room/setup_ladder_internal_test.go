@@ -869,3 +869,86 @@ func TestSetupLadderGreenRungDropsAnEarlierReadsNote(t *testing.T) {
 		t.Fatalf("rung = %+v, want green with no note", out)
 	}
 }
+
+// The ladder's reads run under the room's provisional pipeline plus the canary
+// table: a real read tool resolves its scope from ctx and refuses a call with
+// none (tools.ErrNoScope), or a topic outside it. The read's secrets never
+// reach the room log, while the predicate still sees the raw Data.
+func TestSetupLadderReadsAreScopedAndRedacted(t *testing.T) {
+	r := newLadderRig(t, tierOpts{local: true})
+	roomID := r.openSetup("shipments-setup", "a", "alice", "127.0.0.1:5432", "")
+	snap, err := r.svc.readRoom(context.Background(), roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov, ok := snap.SetupProvisional()
+	if !ok {
+		t.Fatal("no provisional pipeline")
+	}
+	table := setupLadderCanaryTable(prov)
+	topic := setupLadderTopic(prov.TopicPrefix, table)
+
+	reg := tools.NewRegistry()
+	if err := reg.Register(&ladderTool{name: "kafka_topic_offsets", kind: tools.KindRead, run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
+		var p struct {
+			Topic string `json:"topic"`
+		}
+		_ = json.Unmarshal(in, &p)
+		sc, err := tools.ScopeFor(ctx, nil)
+		if err != nil {
+			return tools.Result{}, err
+		}
+		if err := sc.CheckTopic(p.Topic); err != nil {
+			return tools.Result{}, err
+		}
+		return tools.Result{
+			Summary: "connected with password=Pa55word",
+			Data:    map[string]any{"topic": p.Topic, "dsn": "postgres://app:Pa55-word!@db:5432/orders"},
+		}, nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.tools = reg
+
+	l := &setupLadder{s: r.svc, roomID: roomID, prov: prov, scope: setupLadderScope(prov, table), timings: r.svc.ladderTimings()}
+	read := l.issueRead(context.Background(), "kafka_topic_offsets", map[string]any{"topic": topic})
+	if read.IsError {
+		t.Fatalf("scoped read failed: %s", read.Summary)
+	}
+	if !strings.Contains(string(read.Data), "Pa55-word!") {
+		t.Fatalf("predicate data = %s, want the raw read", read.Data)
+	}
+	if strings.Contains(prov.SourceTables[len(prov.SourceTables)-1], setupLadderCanaryName) {
+		t.Fatal("setupLadderScope changed the provisional pipeline itself")
+	}
+
+	stepID := l.startStep(context.Background(), plan.RungCanaryTopic)
+	if l.recordRead(context.Background(), stepID, read) == "" {
+		t.Fatal("read not recorded")
+	}
+	for _, e := range roomEvents(t, r.svc, roomID) {
+		if e.Type == events.AgentToolResult && (strings.Contains(string(e.Payload), "Pa55word") || strings.Contains(string(e.Payload), "Pa55-word")) {
+			t.Fatalf("tool_result carries a secret: %s", e.Payload)
+		}
+	}
+
+	// The provisional pipeline alone leaves the canary topic out of scope.
+	l.scope = prov
+	if read := l.issueRead(context.Background(), "kafka_topic_offsets", map[string]any{"topic": topic}); !read.IsError {
+		t.Fatal("canary topic read passed without the canary table in scope")
+	}
+}
+
+func TestCreateProposalReservesSystemOrigin(t *testing.T) {
+	r := newLadderRig(t, tierOpts{local: true})
+	roomID := r.openSetup("shipments-setup", "a", "alice", "127.0.0.1:5432", "")
+	p := events.ProposalCreatedPayload{
+		Title: "x", Origin: setupProposalOriginSystem,
+		Steps: []events.ProposalStep{{Action: setupLadderOpInsertCanary, Layer: "postgres", Params: json.RawMessage(`{"table":"public.piperoom_canary","nonce":"n"}`)}},
+	}
+	for _, actor := range []events.Actor{events.AgentActor, {Kind: events.ActorHuman, ID: "alice"}} {
+		if _, _, err := r.svc.createProposal(context.Background(), roomID, p, actor, nil); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("actor %s: err = %v, want the system origin refused", actor.ID, err)
+		}
+	}
+}
