@@ -376,9 +376,19 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
   `is not the cause`/`problem`/`issue`, `isn't the cause`/`problem`, `not to blame`, `not at fault`,
   `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
 
+A forward denial stops at `because`, `since`, `after`, `when`, `before` or `until`: the clause they
+open has its own polarity ("no consumer read them before they were deleted" states the deletion).
+
 `no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
-without amount", "nothing reads the slot" all state the cause). A term that starts with a negator
-(`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
+without amount", "nothing reads the slot" all state the cause), except before a **loss word**
+(`lost`, `loss*`, `lose*`, `losing`, `delet*`, `purg*`, `expir*`, `gone`, `skipped`, `discard*`,
+`remov*`, `dropped`, `aged`; W4b-2): a term holding one does not count when `nothing`, `none`,
+`nobody`, `without` or `zero` stands anywhere before it in its part of the fragment, or `not`, `n't`
+or `never` up to two words before it, with no `because`/`since`/`after`/`when`/`before`/`until` in
+between. So "nothing was lost", "none of the changes were lost", "records were not lost", "without any
+data loss" name no loss, while "records were lost before the consumer read them", "the changes that
+order-sync never read were deleted" and "not all changes were lost" still do. A term that starts with
+a negator (`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
 `healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not `not healthy`) clears what
 comes before it up to the previous `,` or `and`: "Connect is healthy" does not name Connect, while
 "Connect is healthy and order-sync crashes" and "order-sync is stuck on partition 1, partitions 0 and

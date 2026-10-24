@@ -139,7 +139,71 @@ var (
 	// ("Connect is healthy"), unless a negator stands just before them
 	// ("Connect is not healthy").
 	exonerators = []string{"healthy", "fine", "unrelated", "unaffected", "working normally", "running normally"}
+	// denialBarriers end a forward denial's reach, as faultNegatorBarriers end
+	// a fault negator's: the clause they open has its own polarity. "No
+	// consumer read them before they were deleted" states the deletion.
+	denialBarriers = []string{"because", "since", "after", "when", "before", "until"}
 )
+
+// Loss words state that data went away. Unlike other root-cause words, a
+// negator a few words back denies them even before a verb: "records were not
+// lost" says nothing was lost, where "cannot read the slot" still names the
+// slot. lossQuantifiers ("nothing was lost", "none of the changes were
+// lost", "without any data loss") reach back over the whole sub, as a fault
+// negator does (faultNegated); lossVerbNegators ("were not lost", "was never
+// lost", "haven't been lost") only the lossVerbWindow words before the loss
+// word, so "the changes that order-sync never read were deleted" still states
+// the deletion. Neither reaches past a denialBarrier. "no" is a strong
+// negator already (see denied).
+var (
+	lossWords        = []string{"lost", "loss*", "lose*", "losing", "delet*", "purg*", "expir*", "gone", "skipped", "discard*", "remov*", "dropped", "aged"}
+	lossQuantifiers  = []string{"nothing", "none", "nobody", "without", "zero"}
+	lossVerbNegators = []string{"not", "t", "never"}
+)
+
+// lossVerbWindow is how many words before a loss word a lossVerbNegator
+// reaches.
+const lossVerbWindow = 2
+
+// lossNegated reports whether the occurrence of term at i holds a loss word
+// that a negator denies (see lossWords).
+func lossNegated(c clauseToks, i int, term string) bool {
+	want, _, ok := termTokens(term)
+	if !ok {
+		return false
+	}
+	for k := i; k < i+len(want) && k < len(c.toks); k++ {
+		if phraseAt(c.toks, k, lossWords) == 0 {
+			continue
+		}
+		for j := k - 1; j >= 0 && c.sub[j] == c.sub[k]; j-- {
+			if phraseAt(c.toks, j, denialBarriers) > 0 {
+				break
+			}
+			if j >= i && j < i+len(want) {
+				continue // the term's own words ("can no longer be replayed")
+			}
+			if phraseAt(c.toks, j, lossQuantifiers) > 0 {
+				return true
+			}
+			if k-j <= lossVerbWindow && phraseAt(c.toks, j, lossVerbNegators) > 0 && !notAllOrOnly(c.toks, j) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// notAllOrOnly reports whether the negator at j starts "not all", "not
+// only" or "not just": they assert part of what follows ("not all changes
+// were lost").
+func notAllOrOnly(toks []string, j int) bool {
+	if j+1 >= len(toks) || toks[j] != "not" {
+		return false
+	}
+	next := toks[j+1]
+	return next == "all" || next == "only" || next == "just"
+}
 
 // denied marks, per token of c, whether a denial covers it. With layers set,
 // exonerators clear what precedes them in their own sub: "Connect is healthy"
@@ -165,7 +229,7 @@ func denied(c clauseToks, layers bool) []bool {
 			}
 		}
 		if l := forwardDenial(c.toks, j); l > 0 {
-			for i := j + l; i < n && c.sub[i] == c.sub[j]; i++ {
+			for i := j + l; i < n && c.sub[i] == c.sub[j] && phraseAt(c.toks, i, denialBarriers) == 0; i++ {
 				neg[i] = true
 			}
 		}
@@ -269,7 +333,7 @@ func occursUndeniedOutside(cls []clauseToks, terms, shadows []string, layers boo
 				if shadowed(c.toks, i, term, shadows) {
 					continue
 				}
-				if !neg[i] {
+				if !neg[i] && (layers || !lossNegated(c, i, term)) {
 					return true
 				}
 			}
