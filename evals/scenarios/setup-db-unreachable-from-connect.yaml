@@ -86,6 +86,19 @@
 #   longer required evidence (W4a: no duplicate evidence); its recording stays.
 
 name: setup/db-unreachable-from-connect
+# Held out until W4c-resolver (lead ruling R10, #939): cause not observable by any read tool. The
+# root cause is the Connect container's name resolution (a stale /etc/hosts entry), and no read
+# shows what the Connect worker resolved postgres to. net_probe's connect_view keeps only Connect's
+# validation messages (internal/tools/nettools/connectview.go). The failed task's trace and any
+# worker log carry the JDK's "Connect timed out" (sun.nio.ch.NioSocketImpl.timedFinishConnect,
+# rethrown unchanged as an InterruptedIOException) under pgjdbc's "The connection attempt failed."
+# (org.postgresql.core.v3.ConnectionFactoryImpl, IOException branch): neither names an address.
+# The setup compose project also has no Loki (connect_worker_logs: not configured), and the
+# runner's net_probe op probes from the runner, not from the Connect container. Live run
+# 40043829982 named the network path, as R10 predicted. -validate refuses this marker once
+# internal/tools/nettools declares ConnectResolveCheck (the follow-up resolver probe; ticket to
+# be opened by the leads).
+pending_harness: W4c-resolver
 description: |
   The person re-ran piperoom-setup after moving the project between hosts. The run stopped at its
   reachability step: check connect-source-reachable fails, because the Connect container resolves

@@ -662,8 +662,12 @@ expect:
     # The preview's follow-up config step; an allowed extra, not required.
     connect_update_connector_config: {connector: pg-orders-connector}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_pause_connector, schema_register, schema_set_compatibility]
-  # Budget (W4c). No run of 39994729845 passed (calls 12, 14, 13, all failing), so it is derived
-  # from the expected standard path, not from a passing run:
+  # Budget (ruling R8, #939): 18. Live run 40043829982 (W4c re-run) scored root cause, layer and
+  # right action at 100% and failed on the budget alone with 16 calls; 16 + 2 = 18. Its per-turn
+  # split was not measured: by the standard path below it is about 13 in the alert turn and 3 in
+  # the steer turn (assumed, not measured). Re-check against the next passing run.
+  # Before R8 (W4c). No run of 39994729845 passed (calls 12, 14, 13, all failing), so it was
+  # derived from the expected standard path, not from a passing run:
   #   alert turn: 11 reads - pg_recent_ddl (rule 2), pg_replication_slots, pg_streaming_liveness
   #     (quiet, not stalled), source_blocking_sessions or pg_long_transactions (nothing holds the
   #     slot; optional evidence since the fix round), source_settings
@@ -673,5 +677,5 @@ expect:
   #     competing story, rule 1), similar_incidents;
   #   steer turn ("propose it"): 1 read - pg_publication_tables, the publication the heartbeat
   #     table joins (propose_fix is not a read);
-  #   12 + 2 = 14 (unchanged). Re-derive as max passing + 2 from W4c's verification run.
-  max_tool_calls: 14
+  #   12 + 2 = 14, superseded by R8 above.
+  max_tool_calls: 18

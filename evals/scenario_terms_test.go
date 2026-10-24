@@ -867,3 +867,29 @@ func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
 		t.Errorf("the source_blocking_sessions recording is gone or no longer establishes f_no_blockers")
 	}
 }
+
+// TestW4cRerunLabels pins the W4c re-run round (live run 40043829982): ruling R8
+// (#939) sets idle-wal-growth's budget to its 16 measured calls + 2, and
+// setup/db-unreachable-from-connect is held out until W4c-resolver (ruling
+// R10: its cause, the Connect container's name resolution, is in no read
+// tool's output). Negatives: idle-wal-growth is not held out, and the setup
+// scenario keeps its labels, so it scores as before once the marker goes.
+func TestW4cRerunLabels(t *testing.T) {
+	idle := w4cScenario(t, "idle-wal-growth")
+	if idle.Expect.MaxToolCalls != 18 {
+		t.Errorf("idle-wal-growth max_tool_calls = %d, want 18 (R8: 16 + 2)", idle.Expect.MaxToolCalls)
+	}
+	if idle.Pending() {
+		t.Errorf("idle-wal-growth is held out: %q", idle.PendingHarness)
+	}
+	setup := w4cScenario(t, "setup/db-unreachable-from-connect")
+	if setup.PendingHarness != "W4c-resolver" {
+		t.Errorf("setup/db-unreachable-from-connect pending_harness = %q, want W4c-resolver", setup.PendingHarness)
+	}
+	if !reflect.DeepEqual(setup.Expect.RootCause, [][]string{{"resolv*", "dns", "hosts", "name resolution"}}) {
+		t.Errorf("setup/db-unreachable-from-connect root_cause = %v", setup.Expect.RootCause)
+	}
+	if err := CheckPendingHarness([]Scenario{setup}, ""); err != nil {
+		t.Errorf("-validate's row check refuses the marker: %v", err)
+	}
+}

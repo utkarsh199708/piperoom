@@ -10,25 +10,41 @@ import (
 // pendingPair are the scenarios held out until U1-10 (W4s, KAN-501).
 var pendingPair = []string{"setup/compose-postgres-clean", "setup/compose-privileged-refused"}
 
+// pendingRows are every held-out scenario and the row it waits for: the pair
+// above, and setup/db-unreachable-from-connect until W4c-resolver (W4c,
+// KAN-494, lead ruling R10: its cause is in no read tool's output).
+var pendingRows = map[string]string{
+	"setup/compose-postgres-clean":      "U1-10",
+	"setup/compose-privileged-refused":  "U1-10",
+	"setup/db-unreachable-from-connect": "W4c-resolver",
+}
+
 func TestPendingHarnessMarkerOnThePair(t *testing.T) {
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
+	got := map[string]string{}
 	for _, sc := range scs {
 		if sc.Pending() {
-			if sc.PendingHarness != "U1-10" {
-				t.Errorf("%s: pending_harness = %q, want U1-10", sc.Name, sc.PendingHarness)
-			}
-			got = append(got, sc.Name)
+			got[sc.Name] = sc.PendingHarness
 		}
 	}
-	if strings.Join(got, ",") != strings.Join(pendingPair, ",") {
-		t.Errorf("pending scenarios = %v, want %v", got, pendingPair)
+	for _, name := range pendingPair {
+		if got[name] != "U1-10" {
+			t.Errorf("%s: pending_harness = %q, want U1-10", name, got[name])
+		}
+	}
+	if len(got) != len(pendingRows) {
+		t.Errorf("pending scenarios = %v, want %v", got, pendingRows)
+	}
+	for name, row := range pendingRows {
+		if got[name] != row {
+			t.Errorf("%s: pending_harness = %q, want %q", name, got[name], row)
+		}
 	}
 	run, held := SplitPending(scs)
-	if len(held) != 2 || len(run) != len(scs)-2 {
+	if len(held) != len(pendingRows) || len(run) != len(scs)-len(pendingRows) {
 		t.Errorf("SplitPending: %d run, %d held of %d", len(run), len(held), len(scs))
 	}
 	for _, sc := range run {
@@ -108,5 +124,35 @@ func TestRepositoryPendingMarkersMatchTheCondition(t *testing.T) {
 	}
 	if err := CheckPendingHarness(scs, root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestW4cResolverRowCondition: setup/db-unreachable-from-connect's marker
+// (W4c-resolver, lead ruling R10) is accepted while internal/tools/nettools does
+// not declare ConnectResolveCheck and refused once it does, so the scenario
+// runs again as soon as a read can show what the Connect worker resolved.
+func TestW4cResolverRowCondition(t *testing.T) {
+	pending := []Scenario{{Name: "setup/db-unreachable-from-connect", PendingHarness: "W4c-resolver"}}
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "tools", "nettools")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "tool.go")
+	if err := os.WriteFile(src, []byte("package nettools\n\nfunc Other() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPendingHarness(pending, root); err != nil {
+		t.Errorf("before the resolver check lands: %v", err)
+	}
+	if err := CheckPendingHarness(pending, ""); err != nil {
+		t.Errorf("row name check: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("package nettools\n\nfunc ConnectResolveCheck() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckPendingHarness(pending, root)
+	if err == nil || !strings.Contains(err.Error(), "remove the marker") || !strings.Contains(err.Error(), "setup/db-unreachable-from-connect") {
+		t.Errorf("after the resolver check lands: err = %v, want the marker refused", err)
 	}
 }
