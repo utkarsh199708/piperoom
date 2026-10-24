@@ -36,6 +36,7 @@ func TestFloorsAndTargets(t *testing.T) {
 		{"net_probe", protocol.TierT0, ""},
 		{"file_write", protocol.TierT1, ""},
 		{"file_delete", protocol.TierT1, ""},
+		{"source_publication_tables", protocol.TierT0, "postgres"},
 	}
 	r := testRegistry(t)
 	if len(r.Names()) != len(cases) {
