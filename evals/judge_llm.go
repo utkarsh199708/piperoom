@@ -102,6 +102,15 @@ func (j *LLMJudge) JudgeHypothesisMetered(ctx context.Context, sc Scenario, hypo
 // the reply in the history; the second reply is returned as it is, so the
 // strict parser reports its failure.
 func (j *LLMJudge) send(ctx context.Context, system, user string) (string, JudgeUsage, error) {
+	return j.sendSchema(ctx, system, user, verdictSchema, func(s string) error {
+		_, err := parseVerdict(s)
+		return err
+	}, judgeRetryNote)
+}
+
+// sendSchema is send for any reply schema: parse checks a reply and
+// retryNote asks again for one.
+func (j *LLMJudge) sendSchema(ctx context.Context, system, user string, schema map[string]any, parse func(string) error, retryNote string) (string, JudgeUsage, error) {
 	if j == nil || j.m == nil {
 		return "", JudgeUsage{}, errors.New("no judge model")
 	}
@@ -111,16 +120,16 @@ func (j *LLMJudge) send(ctx context.Context, system, user string) (string, Judge
 		Messages:     []llm.Message{{Role: llm.RoleUser, Parts: []llm.Part{{Kind: llm.PartText, Text: user}}}},
 		MaxTokens:    judgeMaxTokens,
 		Effort:       judgeEffort,
-		OutputSchema: verdictSchema,
+		OutputSchema: schema,
 	}
 	text, msg, u, err := j.turn(ctx, req)
 	if err != nil || j.m.Capabilities(j.model).StructuredOutput {
 		return text, u, err
 	}
-	if _, perr := parseVerdict(text); perr == nil {
+	if parse(text) == nil {
 		return text, u, nil
 	}
-	req.Messages = append(req.Messages, retryTurns(msg)...)
+	req.Messages = append(req.Messages, retryTurnsWith(msg, retryNote)...)
 	text, _, u2, err := j.turn(ctx, req)
 	u.InputTokens += u2.InputTokens
 	u.OutputTokens += u2.OutputTokens
@@ -132,6 +141,11 @@ func (j *LLMJudge) send(ctx context.Context, system, user string) (string, Judge
 // fallback) is answered first with an error result, since every provider
 // wants each call answered before the next user text.
 func retryTurns(reply llm.Message) []llm.Message {
+	return retryTurnsWith(reply, judgeRetryNote)
+}
+
+// retryTurnsWith is retryTurns with its own retry note.
+func retryTurnsWith(reply llm.Message, note string) []llm.Message {
 	reply.Role = llm.RoleAssistant
 	var parts []llm.Part
 	for _, p := range reply.Parts {
@@ -140,7 +154,7 @@ func retryTurns(reply llm.Message) []llm.Message {
 				CallID: p.ToolCall.ID, Name: p.ToolCall.Name, Content: "not a valid verdict", IsError: true}})
 		}
 	}
-	parts = append(parts, llm.Part{Kind: llm.PartText, Text: judgeRetryNote})
+	parts = append(parts, llm.Part{Kind: llm.PartText, Text: note})
 	return []llm.Message{reply, {Role: llm.RoleUser, Parts: parts}}
 }
 

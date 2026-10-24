@@ -81,10 +81,14 @@ const (
 )
 
 // Node is one part of a pipeline. ID is "<prefix>:<name>" with prefixes
-// pg, connect, topic, dlq, group, wh, sr, for batch pipelines dag, task,
-// model, and for a ClickHouse warehouse kafka_engine, materialized_view (e.g.
-// "connect:pg-orders-connector", "dlq:orders-dlq", "sr:pg.public.orders-value",
-// "dag:revenue_daily", "kafka_engine:analytics.orders_kafka").
+// pg, mysql, connect, topic, dlq, group, wh, sr, for batch pipelines dag,
+// task, model, and for a ClickHouse warehouse kafka_engine, materialized_view
+// (e.g. "connect:pg-orders-connector", "dlq:orders-dlq",
+// "sr:pg.public.orders-value", "dag:revenue_daily",
+// "kafka_engine:analytics.orders_kafka"). A MySQL source table is
+// "mysql:<db>.<table>" (e.g. "mysql:shop.orders"), layer "mysql", kind
+// source_table like a Postgres one: there is no MySQL NodeKind, the layer
+// tells the two apart. (Q8)
 type Node struct {
 	ID     string            `json:"id"`
 	Kind   NodeKind          `json:"kind"`

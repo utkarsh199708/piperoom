@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/clients/postgres/srcneutral"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -136,10 +137,25 @@ func replicaIdentityInScope(pl owners.Pipeline, p replicaIdentityParams) error {
 	if err := pipelineKindCDC(SetReplicaIdentityName, pl); err != nil {
 		return err
 	}
+	if err := refusePostgresOnly(SetReplicaIdentityName, pl); err != nil {
+		return err
+	}
 	return sourceTablesScope(SetReplicaIdentityName, pl, p.Table)
 }
 
+// refuseMySQLClient refuses a MySQL source client. Without a pipeline in ctx
+// (the unscoped opt-out) the client's own kind is the only guard.
+func (a *setReplicaIdentity) refuseMySQLClient() error {
+	if srcneutral.KindOf(a.d.Source) == srcneutral.KindMySQL {
+		return fmt.Errorf("sourceactions: %s: the source is MySQL, which has no replica identity; %s is a Postgres-only action", SetReplicaIdentityName, SetReplicaIdentityName)
+	}
+	return nil
+}
+
 func (a *setReplicaIdentity) reader() (TableReplicationReader, error) {
+	if err := a.refuseMySQLClient(); err != nil {
+		return nil, err
+	}
 	r, ok := a.d.Source.(TableReplicationReader)
 	if !ok {
 		return nil, fmt.Errorf("sourceactions: %s: the source client cannot read replica identities (no TableReplication)", SetReplicaIdentityName)
@@ -390,6 +406,9 @@ func (a *setReplicaIdentity) Execute(ctx context.Context, raw json.RawMessage) (
 	}
 	if a.d.Writer == nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", SetReplicaIdentityName, errNoWriter)
+	}
+	if err := a.refuseMySQLClient(); err != nil {
+		return "", err
 	}
 	if err := a.d.Writer.SetReplicaIdentity(ctx, p.Table, p.Mode, p.Index); err != nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", SetReplicaIdentityName, err)

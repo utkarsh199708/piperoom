@@ -35,6 +35,10 @@ type route struct {
 type call struct {
 	query string
 	args  []any
+	// conn is the id of the connection the statement ran on (1, 2, ...),
+	// so a test can check that statements shared a pinned connection.
+	conn int
+	exec bool
 }
 
 type fakeServer struct {
@@ -47,6 +51,7 @@ type fakeServer struct {
 	ping      error
 	// block, when set, makes every query wait for the context to end.
 	block bool
+	conns int
 }
 
 func (f *fakeServer) on(substr string, cols []string, rows ...[]driver.Value) *fakeServer {
@@ -70,13 +75,30 @@ func (f *fakeServer) queries() []call {
 	return append([]call(nil), f.calls...)
 }
 
-func (f *fakeServer) answer(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+func (f *fakeServer) answer(ctx context.Context, conn int, q string, args []driver.NamedValue) (driver.Rows, error) {
+	res, err := f.route(ctx, conn, false, q, args)
+	if err != nil {
+		return nil, err
+	}
+	return &fakeRows{cols: res.cols, rows: res.rows}, nil
+}
+
+// answerExec runs an Exec: a route's error is returned, anything else is
+// one affected row.
+func (f *fakeServer) answerExec(ctx context.Context, conn int, q string, args []driver.NamedValue) (driver.Result, error) {
+	if _, err := f.route(ctx, conn, true, q, args); err != nil {
+		return nil, err
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func (f *fakeServer) route(ctx context.Context, conn int, exec bool, q string, args []driver.NamedValue) (result, error) {
 	f.mu.Lock()
 	vals := make([]any, len(args))
 	for i, a := range args {
 		vals[i] = a.Value
 	}
-	f.calls = append(f.calls, call{query: q, args: vals})
+	f.calls = append(f.calls, call{query: q, args: vals, conn: conn, exec: exec})
 	left := time.Duration(-1)
 	if dl, ok := ctx.Deadline(); ok {
 		left = time.Until(dl)
@@ -87,7 +109,7 @@ func (f *fakeServer) answer(ctx context.Context, q string, args []driver.NamedVa
 	f.mu.Unlock()
 	if block {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return result{}, ctx.Err()
 	}
 	for _, r := range routes {
 		if !strings.Contains(q, r.substr) {
@@ -98,17 +120,21 @@ func (f *fakeServer) answer(ctx context.Context, q string, args []driver.NamedVa
 			res = r.fn(args)
 		}
 		if res.err != nil {
-			return nil, res.err
+			return result{}, res.err
 		}
-		return &fakeRows{cols: res.cols, rows: res.rows}, nil
+		return res, nil
 	}
-	return nil, fmt.Errorf("fake: no route for %q", q)
+	return result{}, fmt.Errorf("fake: no route for %q", q)
 }
 
 type fakeConnector struct{ srv *fakeServer }
 
 func (c fakeConnector) Connect(context.Context) (driver.Conn, error) {
-	return &fakeConn{srv: c.srv}, nil
+	c.srv.mu.Lock()
+	c.srv.conns++
+	id := c.srv.conns
+	c.srv.mu.Unlock()
+	return &fakeConn{srv: c.srv, id: id}, nil
 }
 func (c fakeConnector) Driver() driver.Driver { return fakeDriver{} }
 
@@ -118,14 +144,20 @@ func (fakeDriver) Open(string) (driver.Conn, error) {
 	return nil, errors.New("fake: use the connector")
 }
 
-type fakeConn struct{ srv *fakeServer }
+type fakeConn struct {
+	srv *fakeServer
+	id  int
+}
 
 func (c *fakeConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("fake: prepare") }
 func (c *fakeConn) Close() error                        { return nil }
 func (c *fakeConn) Begin() (driver.Tx, error)           { return nil, errors.New("fake: no transactions") }
 func (c *fakeConn) Ping(context.Context) error          { return c.srv.ping }
 func (c *fakeConn) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
-	return c.srv.answer(ctx, q, args)
+	return c.srv.answer(ctx, c.id, q, args)
+}
+func (c *fakeConn) ExecContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Result, error) {
+	return c.srv.answerExec(ctx, c.id, q, args)
 }
 
 type fakeRows struct {

@@ -34,17 +34,6 @@ const (
 	roleJudge     = "judge"
 )
 
-// ModelFactory builds the client of a provider this package has no adapter
-// for yet. It is the hook for bedrock-converse: V5's adapter is wired here
-// when it lands (wiring passes a factory in EndpointConfig.Converse); until
-// then a nil factory refuses that provider at start.
-type ModelFactory interface {
-	// NewModel builds the client of role. main is true for the main role,
-	// whose key may come from PIPEROOM_MODEL_API_KEY; another role reads
-	// only its provider's standard credentials.
-	NewModel(ctx context.Context, role config.ModelRole, main bool) (llm.Model, error)
-}
-
 // roleClient is the client and model id of one single-shot role. A nil m
 // means the main client (Endpoint.model); an empty modelID means the
 // request's Options.Model, as before V6.
@@ -102,7 +91,8 @@ type clientBuilder struct {
 	c      EndpointConfig
 	getenv func(string) string
 	ld     providerLoaders
-	// limits hands out one limiter per OpenAI-compatible host, shared by
+	// limits hands out one limiter per new-provider endpoint (an
+	// OpenAI-compatible host, a Gemini host, a Bedrock region), shared by
 	// every role on it (design 7.4).
 	limits *retry.Limiters
 	log    *slog.Logger
@@ -146,14 +136,7 @@ func (b clientBuilder) build(ctx context.Context, env string, r config.ModelRole
 	case llm.ProviderGemini:
 		return b.gemini(ctx, env, r, main)
 	case llm.ProviderBedrockConverse:
-		if c.Converse == nil {
-			return nil, fmt.Errorf("agent: %s: provider bedrock-converse is not built yet (V5, the Bedrock Converse adapter); use bedrock for Claude on Bedrock", providerVar(env, main))
-		}
-		m, err := c.Converse.NewModel(ctx, r, main)
-		if err != nil {
-			return nil, fmt.Errorf("agent: %s=bedrock-converse: %w", providerVar(env, main), err)
-		}
-		return m, nil
+		return b.bedrockConverse(ctx, env, main)
 	}
 	return nil, fmt.Errorf("agent: unknown %s %q; allowed values: %s", providerVar(env, main), r.Provider, allowedProviders)
 }

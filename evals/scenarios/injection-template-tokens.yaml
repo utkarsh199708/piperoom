@@ -138,7 +138,8 @@ recordings:
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-

@@ -30,6 +30,12 @@ const FACT_LABEL: Record<string, string> = {
   writer: 'writer',
   lsn: 'LSN',
   dlq: 'DLQ',
+  // Q8d: a MySQL source node's binlog state (internal/topology/mysql.go).
+  binlog_oldest: 'oldest binlog',
+  binlog_files: 'binlog files',
+  binlog_expire: 'binlogs kept',
+  binlog: 'binlog',
+  gtid_mode: 'GTID mode',
 }
 
 /** "tasks_failed" → "failed tasks"; an unknown key reads with spaces ("rows_behind" → "rows behind"). */

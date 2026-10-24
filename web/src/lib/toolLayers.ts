@@ -5,6 +5,7 @@ const PREFIXES: [string, string][] = [
   ['connect_', 'kafka-connect'],
   ['schema_', 'schema-registry'],
   ['pg_', 'postgres'],
+  ['mysql_', 'mysql'],
   ['kafka_', 'kafka'],
   ['consumer_', 'consumer'],
   ['warehouse_', 'warehouse'],
