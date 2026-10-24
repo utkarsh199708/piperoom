@@ -606,6 +606,10 @@ func TestNamespacesFromConfig(t *testing.T) {
 		{"keyword dsn", config.Config{SourceDBURL: "host=PG.example port=6543 dbname=shop user=u password=pw-SECRET", KafkaBrokers: "k",
 			WarehouseKind: "clickhouse", WarehouseDBURL: "clickhouse://r:ch-SECRET@ch.example:9440/analytics?secure=true"},
 			"postgres://pg.example:6543", "shop", "kafka://k:9092", "clickhouse://ch.example:9440", "analytics"},
+		{"mysql url", config.Config{SourceDBURL: "mysql://dbz:my-SECRET@MY.internal/shop?tls=true", KafkaBrokers: "k"},
+			"mysql://my.internal:3306", "shop", "kafka://k:9092", "", ""},
+		{"mysql url no database", config.Config{SourceDBURL: "mysql://dbz:my-SECRET@my.internal:3307"},
+			"mysql://my.internal:3307", "", "", "", ""},
 		{"bigquery", config.Config{WarehouseKind: "bigquery", WarehouseDBURL: "bigquery://my-proj/us?billing_project=b"},
 			"", "", "", "bigquery", "my-proj"},
 		{"databricks", config.Config{WarehouseKind: "databricks", WarehouseDBURL: "token:dapi-SECRET@adb-1.azuredatabricks.net/sql/1.0/warehouses/x?catalog=main"},
@@ -631,6 +635,7 @@ func TestDatasetNames(t *testing.T) {
 	ch := Namespaces{WarehouseKind: "clickhouse", Warehouse: "clickhouse://ch:9000", WarehouseDB: "analytics"}
 	bq := Namespaces{WarehouseKind: "bigquery", Warehouse: "bigquery", WarehouseDB: "proj"}
 	pg := Namespaces{Source: "postgres://pg:5432", SourceDB: "orders", WarehouseKind: "postgres", Warehouse: "postgres://wh:5432", WarehouseDB: "wh"}
+	my := Namespaces{Source: "mysql://my:3306", SourceDB: "shop"}
 	for _, tc := range []struct {
 		ns   Namespaces
 		node topology.Node
@@ -643,6 +648,8 @@ func TestDatasetNames(t *testing.T) {
 		{bq, topology.Node{ID: "kafka_engine:x.y", Kind: topology.KindKafkaEngine, Name: "x.y"}, ""},
 		{pg, topology.Node{ID: "pg:orders", Kind: topology.KindSourceTable, Name: "orders"}, "orders.public.orders"},
 		{pg, topology.Node{ID: "mysql:shop.orders", Kind: topology.KindSourceTable, Name: "shop.orders"}, ""},
+		{my, topology.Node{ID: "mysql:shop.orders", Kind: topology.KindSourceTable, Name: "shop.orders"}, "shop.orders"},
+		{my, topology.Node{ID: "pg:orders", Kind: topology.KindSourceTable, Name: "orders"}, ""},
 		{pg, topology.Node{ID: "wh:clickhouse:public.orders", Kind: topology.KindSinkTable, Name: "public.orders"}, ""},
 		{pg, topology.Node{ID: "wh:postgres:public.orders", Kind: topology.KindSinkTable, Name: "public.orders"}, "wh.public.orders"},
 		{pg, topology.Node{ID: "model:revenue", Kind: topology.KindModel, Name: "revenue"}, ""},

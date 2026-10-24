@@ -321,7 +321,8 @@ func (c *Client) pull(repo RepoRef, a pullAnswer) (PullRequest, error) {
 	return pr, nil
 }
 
-// PullRequest reads one pull request with its head checks.
+// PullRequest reads one pull request with its head checks. HeadRepo is the
+// answer's head.repo.full_name ("" for a deleted fork).
 func (c *Client) PullRequest(ctx context.Context, repo RepoRef, number int) (PullRequest, error) {
 	if err := checkRepo(repo); err != nil {
 		return PullRequest{}, err

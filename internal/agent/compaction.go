@@ -333,10 +333,13 @@ func (r *runner) compactHistory(ctx context.Context, messages []llm.Message, cut
 }
 
 // openingParts is the opening turn without the human input that came with it:
-// the alert, the worked examples and the staging note.
+// the alert, the worked examples, the staging note and the fix-PR repo note.
 func (r *runner) openingParts() []llm.Part {
 	blocks := openingBlocks(r.alert, r.past)
 	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
+		blocks = append(blocks, textPart(note))
+	}
+	if note := repoNote(r.repos, r.deps.Actions); note != "" {
 		blocks = append(blocks, textPart(note))
 	}
 	return blocks

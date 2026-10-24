@@ -123,8 +123,18 @@ func TestStartFailures(t *testing.T) {
 			c.TriageModel = "claude-haiku-5-5"
 			return c
 		}(), nil, []string{"PIPEROOM_TRIAGE_MODEL", "another provider"}},
-		{"bedrock-converse is not built yet", config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0", AWSRegion: "us-east-1"}, nil,
-			[]string{"bedrock-converse", "not built yet"}},
+		{"a Claude model on bedrock-converse", config.Config{ModelProvider: "bedrock-converse", Model: "us.anthropic.claude-opus-5-5-v1:0", AWSRegion: "us-east-1"}, nil,
+			[]string{`PIPEROOM_MODEL="us.anthropic.claude-opus-5-5-v1:0"`, "is a Claude model", "use PIPEROOM_MODEL_PROVIDER=bedrock"}},
+		{"a Claude summary model on bedrock-converse names its own variable", config.Config{Model: "claude-opus-5-5", SummaryProvider: "bedrock-converse",
+			SummaryModel: "anthropic.claude-haiku-5-5-v1:0", AWSRegion: "us-east-1"}, nil,
+			[]string{`PIPEROOM_SUMMARY_MODEL="anthropic.claude-haiku-5-5-v1:0"`, "set PIPEROOM_SUMMARY_PROVIDER=bedrock"}},
+		{"a Claude judge model behind a Nova main is named, not the main", config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0",
+			JudgeModel: "us.anthropic.claude-opus-5-5-v1:0", AWSRegion: "us-east-1", ModelUnverified: "on"}, nil,
+			[]string{`PIPEROOM_JUDGE_MODEL="us.anthropic.claude-opus-5-5-v1:0"`, "set PIPEROOM_JUDGE_PROVIDER=bedrock"}},
+		{"bedrock-converse without a region", config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0"}, nil,
+			[]string{"PIPEROOM_MODEL_PROVIDER=bedrock-converse needs AWS_REGION"}},
+		{"a Nova model not listed", config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0", AWSRegion: "us-east-1"}, nil,
+			[]string{`PIPEROOM_MODEL="amazon.nova-pro-v1:0"`, "supported.json", "PIPEROOM_MODEL_UNVERIFIED=on"}},
 		{"prompt variant is reserved", config.Config{ModelPromptVariant: "small"}, nil, []string{"PIPEROOM_MODEL_PROMPT_VARIANT"}},
 	}
 	for _, tt := range tests {
@@ -264,14 +274,6 @@ func TestCheckFitNamesRoleModelAndNumbers(t *testing.T) {
 	}
 }
 
-// fakeConverse is a ModelFactory standing in for V5's adapter.
-type fakeConverse struct{ got config.ModelRole }
-
-func (f *fakeConverse) NewModel(_ context.Context, r config.ModelRole, _ bool) (llm.Model, error) {
-	f.got = r
-	return capsModel{provider: llm.ProviderBedrockConverse}, nil
-}
-
 // capsModel answers Capabilities and Provider only.
 type capsModel struct {
 	provider string
@@ -283,18 +285,6 @@ func (m capsModel) Turn(context.Context, llm.Request) (llm.Response, error) {
 }
 func (m capsModel) Capabilities(string) llm.Capabilities { return m.caps }
 func (m capsModel) Provider() string                     { return m.provider }
-
-func TestConverseHookBuildsTheRole(t *testing.T) {
-	c := config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0", AWSRegion: "us-east-1"}
-	f := &fakeConverse{}
-	ep, err := newEndpoint(context.Background(), EndpointConfig{AWSRegion: "us-east-1", Knobs: knobsOf(t, c), Converse: f}, envOf(nil), testLoaders(nil), discardLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.got.Model != "amazon.nova-pro-v1:0" || ep.Provider() != llm.ProviderBedrockConverse {
-		t.Fatalf("factory got %+v, provider %q", f.got, ep.Provider())
-	}
-}
 
 // TestPricingRule is design 8.2 and decision 4 under a daily cost cap.
 func TestPricingRule(t *testing.T) {
