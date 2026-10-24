@@ -129,8 +129,9 @@ func TestSystemPromptRootCauseComponent(t *testing.T) {
 			{"an unexplained pause still asks who and proposes the resume", cdcFixesLine(t, p, "- A PAUSED or STOPPED connector"),
 				"Without one, ask who paused it and when, propose connect_resume_connector after the checks;"},
 			{"the resume checks still come first", p, "- Before proposing a resume or restart, confirm"},
+			// W4i (KAN-507) dropped "that" after "confirm".
 			{"the resume checks are still reads", cdcFixesLine(t, p, "- Before proposing a resume or restart"),
-				"confirm that a source connector's slot exists and holds its position, and no maintenance or migration still runs. If a needed read fails, propose nothing"},
+				"confirm a source connector's slot exists and holds its position, and no maintenance or migration still runs. If a needed read fails, propose nothing"},
 			{"a rejected fix is still not re-proposed unchanged", cdcFixesLine(t, p, "- After a rejection or failed action"),
 				"never re-propose a fix unchanged."},
 			{"the agent still only reads and proposes", p, "You only read and propose fixes."},
