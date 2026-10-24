@@ -134,6 +134,42 @@ recordings:
     summary: |
       publication dbz_publication (connector user piperoom)
       public.orders: in_publication=yes, selectable=yes
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, dbtools, logtools, nettools}; the values are composed to agree with the recordings above.
+  # connect_source_offsets: positions the connector stored before the 09:40:12 disconnect.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=262706098888, lsn_proc=262706098888, ts_usec=1791711602000000, txId=4417203
+  # connect_worker_logs: the replay has no Loki (WORKER_LOGS_LOKI_URL is unset), so the real tool answers with its
+  # not-configured text (internal/tools/logtools/logtools.go) whatever the connector or window.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+  - tool: source_settings
+    summary: |
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1 MB
+      wal_sender_timeout=60000 ms
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3D/2A80F2C8 unchanged, active=false); not a stall; connector pg-orders-connector state RUNNING; the slot is INACTIVE, so no walsender is streaming it
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (postgres:5432): all checks ok: dns ok, tcp ok, connect_view ok
+      - connect_view ok: Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)
+      - dns postgres:5432 ok: 172.18.0.3
+      - tcp postgres:5432 ok: TCP connected
+      - tls postgres:5432 skip: not configured with TLS
 expect:
   # The cause is the Postgres restart that cut the replication connection,
   # not "the task failed" (the symptom) and not the restart that fixes it:

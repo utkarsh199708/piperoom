@@ -27,6 +27,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -592,19 +596,27 @@ type ACLReader interface {
 	ACLs(ctx context.Context, topics, groups []string) ([]ACLEntry, error)
 }
 
-// ---- Source Postgres (the CDC source) ----
+// ---- Source database (the CDC source: Postgres, or MySQL from Q8) ----
 
-// SourceReader is the source Postgres client as read-only tools take it.
+// SourceReader is the source database client as read-only tools take it:
+// Postgres, or MySQL when the pipeline's source_kind is mysql (Q8).
 type SourceReader interface {
+	// ReplicationSlots lists the Postgres replication slots. MySQL has none:
+	// ErrNotSupported.
 	ReplicationSlots(ctx context.Context) ([]ReplicationSlot, error)
 	// RecentDDL reads the DDL audit table written by an event trigger
-	// (see dev/postgres-init). Newest first.
+	// (see dev/postgres-init). Newest first. MySQL has no DDL trigger:
+	// ErrNotSupported; a MySQL pipeline's DDL is in the connector's schema
+	// history topic (tool kafka_schema_history).
 	RecentDDL(ctx context.Context, since time.Time, limit int) ([]DDLChange, error)
 	// LongTransactions lists open transactions older than olderThan. Read-only
 	// ones are included (they block DDL and VACUUM); Transaction.HasXID marks
-	// writers, the only ones that hold the WAL horizon for a slot.
+	// writers, the only ones that hold the WAL horizon for a slot. On MySQL
+	// PID is the processlist id and HasXID means the transaction has
+	// modified rows.
 	LongTransactions(ctx context.Context, olderThan time.Duration) ([]Transaction, error)
-	// Row reads one row by primary key. table is "schema.table".
+	// Row reads one row by primary key. table is "schema.table" on Postgres,
+	// "db.table" on MySQL.
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
 }
 
@@ -647,6 +659,201 @@ type SourceWriter interface {
 	// connector's signal.data.collection, "schema.table") and returns the row
 	// id. connectorID names the connector the signal is for.
 	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
+}
+
+// ---- Q0 item 2: source settings and admin (Q2a, Q2b; MySQL Q8) ----
+
+// SourceSettingsReader is the read-only source-settings surface of a CDC
+// source. Postgres (Q2a) and MySQL (Q8b) implement it. It is not embedded in
+// SourceDB: a tool asserts it at use time, so the fakes and the eval replay
+// need not implement it. Every method is read-only and bounded by a 10 s
+// deadline. Table identifiers are validated (^[a-zA-Z_][a-zA-Z0-9_]*$) before
+// any I/O.
+type SourceSettingsReader interface {
+	// Settings returns the fixed list of CDC-relevant settings that the
+	// server reports, in the client's report order. A setting the server
+	// does not have (max_slot_wal_keep_size before PG 13,
+	// rds.logical_replication outside RDS/Aurora) is simply absent from the
+	// result.
+	Settings(ctx context.Context) ([]DBSetting, error)
+	// TableReplication returns one entry per table, in that order, with its
+	// primary key presence and replica identity (default, full, index or
+	// nothing). A table that does not exist is ErrNotFound.
+	TableReplication(ctx context.Context, tables []string) ([]TableReplication, error)
+	// RoleInfo reports whether role exists, can log in and may replicate,
+	// and its SELECT privilege on each table. A missing role is not an error:
+	// Exists is false and every table is false in Selectable.
+	RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error)
+	// Blockers lists the sessions that can hold back the CDC stream: an open
+	// transaction older than olderThan, or (Postgres) the session holding the
+	// oldest xmin. Query is redacted (N5) and cut to a short fragment.
+	Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error)
+}
+
+// ScopedBlockerReader is the pipeline-scoped Blockers: a session that holds or
+// waits for no lock on one of tables comes back anonymised (InScope false).
+// Postgres (Q2a) and MySQL (Q8b) implement it next to SourceSettingsReader.
+type ScopedBlockerReader interface {
+	BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error)
+}
+
+// DBSetting is one server setting with its changed-but-not-yet-applied flag.
+type DBSetting struct {
+	Name           string `json:"name"`
+	Value          string `json:"value"`
+	Unit           string `json:"unit,omitempty"`
+	PendingRestart bool   `json:"pending_restart,omitempty"`
+}
+
+// TableReplication is a table's primary key presence, replica identity and
+// (MySQL) storage engine.
+type TableReplication struct {
+	Table           string `json:"table"`
+	HasPrimaryKey   bool   `json:"has_primary_key"`
+	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none (MySQL)
+	// Engine is the MySQL storage engine (InnoDB, MyISAM, ...); "" on
+	// Postgres. A non-transactional engine changes what a snapshot can
+	// promise. (Q8)
+	Engine string `json:"engine,omitempty"`
+}
+
+// RoleInfo is a source role's login/replication rights and SELECT privilege
+// per table.
+type RoleInfo struct {
+	Role        string          `json:"role"`
+	Exists      bool            `json:"exists"`
+	CanLogin    bool            `json:"can_login"`
+	Replication bool            `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and REPLICATION CLIENT
+	Selectable  map[string]bool `json:"selectable"`  // table -> SELECT
+	// Accounts are the MySQL accounts ("user@host") with this user name;
+	// nil on Postgres. With more than one, every flag above and in
+	// Privileges is true only if it is true for every account. (Q8)
+	Accounts []string `json:"accounts,omitempty"`
+	// Privileges are the further global privileges the source's CDC
+	// connector needs, by the source's own name (MySQL: RELOAD, LOCK TABLES,
+	// SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT); nil when the
+	// source has none to report. (Q8)
+	Privileges map[string]bool `json:"privileges,omitempty"`
+}
+
+// DBSession is one session that can hold back the CDC stream. Query is
+// untrusted text: redacted and cut before it leaves the client. InScope is
+// false for a session a scoped read anonymised (ScopedBlockerReader): its
+// User, App and Query are blank because they belong to another pipeline, user
+// or database.
+type DBSession struct {
+	// PID is the backend pid on Postgres, the processlist id (what KILL
+	// takes) on MySQL.
+	PID int64 `json:"pid"`
+	// StartedAt is, with PID, the identity EndSession re-checks: the backend
+	// start on Postgres; on MySQL the open transaction's start
+	// (innodb_trx.trx_started), or zero for a session without one.
+	StartedAt time.Time `json:"started_at"`
+	XactStart time.Time `json:"xact_start"`
+	User      string    `json:"user"`
+	App       string    `json:"application"`
+	State     string    `json:"state"`
+	Query     string    `json:"query"` // untrusted, redacted, at most 200 bytes
+	// BlocksSlot is true on Postgres for the session holding back the
+	// slot's horizon; on MySQL it means "holds a lock a session of the
+	// connector's user waits for".
+	BlocksSlot bool `json:"blocks_slot"`
+	InScope    bool `json:"in_scope"`
+	// OldXact, SameDB and ClientBackend are never shown: the session's
+	// transaction is older than the read's threshold (by the server's
+	// clock), it is connected to the database this client reads (not
+	// another tenant's database on the server), and it is an ordinary client
+	// backend (not autovacuum, a logical replication worker or another
+	// background process). source_end_session needs all three before it ends
+	// a session whose identity the scoped read withheld.
+	OldXact       bool `json:"-"`
+	SameDB        bool `json:"-"`
+	ClientBackend bool `json:"-"`
+}
+
+// SourceAdminWriter is the source admin writer (Q2b; MySQL Q8f). It is built
+// only with write mode on, on the SOURCE_DB_WRITE_URL pool, never on the
+// read-only SourceDB pool; no SOURCE_DB_WRITE_URL = no writer. Not embedded in
+// SourceDB or SourceWriter. Every method requires the room's pipeline scope in
+// ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out, and
+// refuses with tools.ErrNoScope / tools.ErrOutOfScope before any I/O.
+// Identifiers are checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted by the
+// source's rule (AGENTS.md §4 rule 6); values are parameters; no statement is
+// built from untrusted text.
+type SourceAdminWriter interface {
+	// SetReplicaIdentity sets ALTER TABLE ... REPLICA IDENTITY: mode full |
+	// default | index, where index is the unique index's name and only mode
+	// index takes one.
+	SetReplicaIdentity(ctx context.Context, table, mode, index string) error
+	// GrantSelect grants SELECT and nothing else on tables to role.
+	GrantSelect(ctx context.Context, role string, tables []string) error
+	// CreateHeartbeatTable creates the Debezium heartbeat table if it does
+	// not exist.
+	CreateHeartbeatTable(ctx context.Context, table string) error
+	// EndSession ends the session pid, refused as ErrSessionChanged when pid
+	// no longer names the session that started at startedAt, and as
+	// ErrSessionProtected for a session Piperoom never ends.
+	EndSession(ctx context.Context, pid int64, startedAt time.Time) error
+}
+
+// ErrSessionChanged is returned (wrapped) by SourceAdminWriter.EndSession when
+// pid no longer names the session that was read: the session is gone, or the
+// pid now names a session that started at another time. Nothing was ended.
+var ErrSessionChanged = errors.New("clients: database session changed since it was read")
+
+// ErrSessionProtected is returned (wrapped) by SourceAdminWriter.EndSession
+// for a session Piperoom never ends: its own pools' sessions, the CDC
+// stream's session (a Postgres walsender, a MySQL binlog dump thread), the
+// server's background threads. Nothing was ended.
+var ErrSessionProtected = errors.New("clients: refusing to end a protected session")
+
+// ---- Q8: MySQL binlog (optional on a SourceDB, asserted at use time) ----
+
+// MaxBinlogFiles caps BinlogStatus.Binlogs; the oldest files are kept,
+// because the oldest file is the fact a purge check needs. (Q8)
+const MaxBinlogFiles = 500
+
+// BinlogReader is implemented by the MySQL source client (Q8b). It is never
+// embedded in SourceDB: a Postgres client, the fakes and the eval replay have
+// none, and a tool that asserts it on them answers ErrNotSupported. Read-only;
+// 10 s per call. (Q8)
+type BinlogReader interface {
+	BinlogStatus(ctx context.Context) (BinlogStatus, error)
+}
+
+// BinlogStatus is the binlog state of a MySQL server: positions and names
+// only, never event contents. (Q8)
+type BinlogStatus struct {
+	// File and Pos are the current write position (SHOW BINARY LOG STATUS,
+	// SHOW MASTER STATUS before 8.2).
+	File string `json:"file"`
+	Pos  int64  `json:"pos"`
+	// GTIDMode is @@gtid_mode (OFF, OFF_PERMISSIVE, ON_PERMISSIVE, ON).
+	GTIDMode string `json:"gtid_mode"`
+	// GTIDExecuted and GTIDPurged are @@global.gtid_executed and
+	// @@global.gtid_purged, as the server prints them; "" with GTIDs off.
+	GTIDExecuted string `json:"gtid_executed"`
+	GTIDPurged   string `json:"gtid_purged"`
+	// ServerID and ServerUUID identify the server, so a stored position from
+	// another server (after a failover) can be told apart.
+	ServerID   int64  `json:"server_id"`
+	ServerUUID string `json:"server_uuid"`
+	// Binlogs are the files the server still has (SHOW BINARY LOGS), oldest
+	// first, at most MaxBinlogFiles; BinlogsOmitted counts the newest ones
+	// left out.
+	Binlogs        []BinlogFile `json:"binlogs"`
+	BinlogsOmitted int          `json:"binlogs_omitted,omitempty"`
+	// ExpireSeconds is binlog_expire_logs_seconds; 0 = never purged by age.
+	// RetentionHours is RDS/Aurora's "binlog retention hours"
+	// (mysql.rds_show_configuration); nil when not on RDS or not readable.
+	ExpireSeconds  int64  `json:"expire_seconds"`
+	RetentionHours *int64 `json:"retention_hours,omitempty"`
+}
+
+// BinlogFile is one binlog file the server still has. (Q8)
+type BinlogFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // ---- X2: targeted re-snapshot over a signal table (recovery) ----
@@ -1417,12 +1624,13 @@ const (
 	ChangeSourceStatuspage = "statuspage" // a pipeline's owners.yaml vendor_status_url poller (X4a)
 )
 
-// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first then the
-// external ones, as a fresh slice. The room store and the "what changed" tool
-// validate kinds against it, so a new kind is added here once. (X4)
+// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first, then the
+// external ones, then ChangePullRequest (Q7), as a fresh slice. The room
+// store and the "what changed" tool validate kinds against it, so a new kind
+// is added here once. (X4)
 func ChangeKinds() []string {
 	return []string{ChangeDDL, ChangeConnectorConfig, ChangeConnectorState, ChangeSchemaVersion,
-		ChangeDeploy, ChangeMigration, ChangeVendorIncident}
+		ChangeDeploy, ChangeMigration, ChangeVendorIncident, ChangePullRequest}
 }
 
 // IsExternalChange reports whether kind is a change made outside the
@@ -1850,3 +2058,305 @@ type ConfigVersionReader interface {
 	ConfigVersions(ctx context.Context, pipelineID, connector string, limit int) ([]ConnectorConfigVersion, error)
 	ConfigVersion(ctx context.Context, pipelineID, connector, hash string) (ConnectorConfigVersion, error)
 }
+
+// ---- Q7: forge (the pull-request fix, docs/design/fix-pr.md) ----
+//
+// New interfaces and types only, so every existing fake, the eval replay and
+// the demo compile unchanged. The PR state types the room log needs are
+// defined in package events and mirrored there, not aliased: this package
+// imports nothing from piperoom/...
+
+// RepoRef is one repository of a pipeline's owners.yaml repos: block, resolved
+// by the caller (action, tool, room) from the repo id. The model only ever
+// names the id; Owner, Name and Base come from owners.yaml. (Q7)
+type RepoRef struct {
+	ID    string `json:"id"`    // owners.yaml repos[].id
+	Owner string `json:"owner"` // from repos[].url: https://<host>/<owner>/<name>
+	Name  string `json:"name"`
+	Base  string `json:"base"` // repos[].base, the branch PRs target
+	// Host is the repo URL's host, lower case with any port. A forge client
+	// refuses a RepoRef whose Host is set and is not its own web host, so a
+	// repo of one forge never reaches another forge's API. "" skips the
+	// check (callers that built the ref from the forge itself).
+	Host string `json:"host,omitempty"`
+}
+
+// RepoInfo is what a fix PR needs to know about the repository itself. (Q7)
+type RepoInfo struct {
+	Visibility    string `json:"visibility"` // public | private | internal
+	Archived      bool   `json:"archived"`
+	DefaultBranch string `json:"default_branch"`
+}
+
+// RepoFile is one regular file read at a commit. Content is untrusted text,
+// at most MaxRepoFileBytes, never logged and never put in an event. (Q7)
+type RepoFile struct {
+	Path    string `json:"path"`
+	SHA     string `json:"sha"`      // the commit the file was read at; never a branch name
+	BlobSHA string `json:"blob_sha"` // git blob id; equal blob ids mean equal content
+	Size    int    `json:"size"`
+	Content []byte `json:"-"`
+}
+
+// RepoEntry is one path of a tree listing. (Q7)
+type RepoEntry struct {
+	Path    string `json:"path"`
+	BlobSHA string `json:"blob_sha"`
+	Size    int    `json:"size"`
+}
+
+// ForgeReader is optional and read-only: built whenever a forge is configured,
+// write mode on or off. Every method takes a 10 s deadline from the caller and
+// scopes its token to repo alone (docs/design/fix-pr.md §4.2). (Q7)
+type ForgeReader interface {
+	// RepoInfo reads visibility, archived and the default branch.
+	RepoInfo(ctx context.Context, repo RepoRef) (RepoInfo, error)
+	// BaseHead returns the commit the base branch points at now.
+	BaseHead(ctx context.Context, repo RepoRef) (sha string, err error)
+	// File reads one regular file at commit sha. ErrNotFound when absent;
+	// ErrNotRegularFile for a directory, symlink or submodule;
+	// ErrRepoFileTooLarge above MaxRepoFileBytes (Size is still set).
+	File(ctx context.Context, repo RepoRef, sha, path string) (RepoFile, error)
+	// ListFiles lists the regular files of the tree at commit sha, at most
+	// MaxRepoListEntries; truncated reports a cut listing.
+	ListFiles(ctx context.Context, repo RepoRef, sha string) (entries []RepoEntry, truncated bool, err error)
+	// PullRequest reads one pull request with its head checks. ErrNotFound when absent.
+	PullRequest(ctx context.Context, repo RepoRef, number int) (PullRequest, error)
+}
+
+// ForgeWriter is built only with write mode on and a forge configured. It
+// writes one new branch and opens one pull request; it never pushes to an
+// existing branch, never merges, never deletes a ref it did not create in
+// the same call. (Q7)
+type ForgeWriter interface {
+	// OpenPullRequest commits req.Files on top of req.BaseSHA to the new
+	// branch req.Branch and opens a pull request into repo.Base.
+	//   - ErrBaseMoved: a file of req.Files differs between req.BaseSHA and
+	//     the base head now (a file that did not exist at BaseSHA exists now,
+	//     or the reverse). Nothing is written.
+	//   - A branch req.Branch that already holds exactly this change (same
+	//     parent, same tree) is reused, and an open pull request on it is
+	//     returned instead of a new one, so a retried call is idempotent;
+	//     a branch with other content is ErrBranchExists.
+	OpenPullRequest(ctx context.Context, repo RepoRef, req PullRequestRequest) (PullRequest, error)
+}
+
+// PullRequestRequest is one fix PR. Files hold the whole new content of each
+// file (mode 100644 always); the action computes them from the approved
+// edits (docs/design/fix-pr.md §6.1). (Q7)
+type PullRequestRequest struct {
+	BaseSHA       string
+	Branch        string // FixBranch(...)
+	Title         string
+	Body          string
+	CommitMessage string
+	Draft         bool
+	Files         []FileChange
+}
+
+// FileChange is one file of a fix PR. Content is never logged. (Q7)
+type FileChange struct {
+	Path    string
+	Content []byte
+}
+
+// String names the file and its size, never its content, so a FileChange
+// printed with %v in a log or error does not leak the file. (Q7)
+func (f FileChange) String() string {
+	return fmt.Sprintf("FileChange{%s, %d bytes}", f.Path, len(f.Content))
+}
+
+// PullRequest is the state of one pull request. Checks.Failed holds check
+// names written by the repository's CI: untrusted, redacted, cut. (Q7)
+type PullRequest struct {
+	Repo    string `json:"repo"` // RepoRef.ID
+	Number  int    `json:"number"`
+	URL     string `json:"url"`   // the html URL on the forge's web host
+	State   string `json:"state"` // PRStateOpen | PRStateMerged | PRStateClosed
+	HeadRef string `json:"head_ref"`
+	HeadSHA string `json:"head_sha"`
+	// HeadRepo is "owner/name" of the repository the head branch lives in;
+	// "" when that repository was deleted (a removed fork). A PR whose
+	// HeadRef is a fix branch but whose HeadRepo is not the RepoRef's own
+	// repository was opened from a fork and is never Piperoom's.
+	HeadRepo string            `json:"head_repo,omitempty"`
+	MergeSHA string            `json:"merge_sha,omitempty"`
+	MergedAt time.Time         `json:"merged_at,omitzero"`
+	Checks   PullRequestChecks `json:"checks"`
+}
+
+// PullRequestChecks folds check runs and commit statuses on the head. (Q7)
+type PullRequestChecks struct {
+	State  string   `json:"state"` // ChecksNone | ChecksPending | ChecksSuccess | ChecksFailure
+	Total  int      `json:"total"`
+	Failed []string `json:"failed,omitempty"` // at most 10 names of at most 100 bytes
+}
+
+// Pull request and check states. Merged is a state of its own: a merged PR
+// is closed on the forge, but the room must never read it as "not applied".
+const (
+	PRStateOpen   = "open"
+	PRStateMerged = "merged"
+	PRStateClosed = "closed" // closed without merge
+	ChecksNone    = "none"
+	ChecksPending = "pending"
+	ChecksSuccess = "success"
+	ChecksFailure = "failure"
+)
+
+// Caps of the PR fix. (Q7)
+const (
+	MaxRepoFileBytes   = 64 << 10  // one file, before and after the change
+	MaxFixFiles        = 10        // files per step
+	MaxFixParamsBytes  = 64 << 10  // a step's params (edits, title, body)
+	MaxFixDiffBytes    = 128 << 10 // a step's unified diff; a bigger one is refused, never cut
+	MaxRepoListEntries = 1000
+	MaxRepoPathBytes   = 255
+)
+
+// Errors of the forge clients and of CheckRepoPath. (Q7)
+var (
+	ErrBaseMoved        = errors.New("clients: a file of the change was modified on the base branch")
+	ErrBranchExists     = errors.New("clients: the fix branch exists with other content")
+	ErrNotRegularFile   = errors.New("clients: not a regular file")
+	ErrRepoFileTooLarge = errors.New("clients: repository file too large")
+	ErrRepoPathDenied   = errors.New("clients: repository path is not allowed")
+)
+
+// FixBranchPrefix starts every branch a ForgeWriter writes; owners.yaml
+// refuses a base branch under it (Q7a). (Q7)
+const FixBranchPrefix = "piperoom/"
+
+// FixBranch is the only branch name a ForgeWriter writes:
+// "piperoom/<roomID>-<proposalID>-<step>". roomID and proposalID are the
+// room's own ids (r_..., p_...). (Q7)
+func FixBranch(roomID, proposalID string, step int) string {
+	return FixBranchPrefix + roomID + "-" + proposalID + "-" + strconv.Itoa(step)
+}
+
+var branchNameRE = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+
+// ValidBranchName reports whether s is a branch name owners.yaml may use as a
+// base: ^[A-Za-z0-9._/-]{1,200}$, no "..", "//", "@{", no leading "-" or "/",
+// no trailing "/" or ".", no segment starting with "." or ending in ".lock". (Q7)
+func ValidBranchName(s string) bool {
+	if !branchNameRE.MatchString(s) {
+		return false
+	}
+	if strings.Contains(s, "..") || strings.Contains(s, "//") || strings.Contains(s, "@{") {
+		return false
+	}
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".") {
+		return false
+	}
+	for _, seg := range strings.Split(s, "/") {
+		if strings.HasPrefix(seg, ".") || strings.HasSuffix(seg, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// deniedRepoDirs are the directories (any segment, any case) whose files run
+// with the repository's secrets on a same-repo PR or configure its hooks and
+// dev containers: no fix PR writes under them, whatever a glob says. The
+// leads' list (docs/design/fix-pr.md §6.2 rule 4); a test pins it. (Q7)
+var deniedRepoDirs = []string{
+	".github", ".git", ".gitlab", ".circleci", ".buildkite", ".azure-pipelines",
+	".woodpecker", ".husky", ".devcontainer",
+}
+
+// deniedRepoFiles are file names (the last segment, any case) that run CI or
+// decide who reviews: refused anywhere in the tree. The leads' list; a test
+// pins it. (Q7)
+var deniedRepoFiles = []string{
+	"codeowners", ".gitmodules", ".gitattributes", ".gitignore", ".gitlab-ci.yml",
+	".travis.yml", ".drone.yml", "jenkinsfile", "azure-pipelines.yml",
+	"bitbucket-pipelines.yml", ".pre-commit-config.yaml",
+}
+
+// CheckRepoPath checks one repository path (or, with glob true, a pattern of
+// owners.yaml repos[].paths) against the fixed rules of
+// docs/design/fix-pr.md §6.2: clean, relative, at most MaxRepoPathBytes, no
+// "." or ".." segment, no backslash, NUL or control character, and not under
+// the deny list (CI and repository-governance files, case-insensitive). The
+// error wraps ErrRepoPathDenied. The deny list is the leads': it changes only
+// by a contract change, and no setting relaxes it. (Q7)
+//
+// A directory on the list is refused as any segment, a file name as the last
+// one. A glob is checked segment by segment: a literal segment like a path;
+// a segment with a wildcard is refused when it is malformed (path.Match) or
+// when it matches a denied name without starting with "*" (".git*",
+// "[.]github"): a pattern spelled to reach a denied name is a mistake in
+// owners.yaml. A broad segment ("*", "**", "*.yml") passes: every concrete
+// path a step writes is checked again with glob false, so a glob never makes
+// a denied file writable.
+func CheckRepoPath(p string, glob bool) error {
+	deny := func(why string) error {
+		return fmt.Errorf("%w: %q: %s", ErrRepoPathDenied, p, why)
+	}
+	switch {
+	case p == "":
+		return deny("empty")
+	case len(p) > MaxRepoPathBytes:
+		return deny(fmt.Sprintf("longer than %d bytes", MaxRepoPathBytes))
+	case !utf8.ValidString(p):
+		return deny("not valid UTF-8")
+	case strings.ContainsRune(p, '\\'):
+		return deny("backslash")
+	case strings.HasPrefix(p, "/"):
+		return deny("absolute")
+	}
+	for _, r := range p {
+		if r == 0 || unicode.IsControl(r) {
+			return deny("control character")
+		}
+	}
+	segs := strings.Split(p, "/")
+	for _, seg := range segs {
+		if seg == "." || seg == ".." {
+			return deny("a . or .. segment")
+		}
+	}
+	if path.Clean(p) != p {
+		return deny("not a clean path")
+	}
+	for i, seg := range segs {
+		last := i == len(segs)-1
+		lower := strings.ToLower(seg)
+		if glob && strings.ContainsAny(seg, "*?[") {
+			if _, err := path.Match(lower, ""); err != nil {
+				return deny("malformed pattern")
+			}
+			if strings.HasPrefix(seg, "*") {
+				continue
+			}
+			for _, d := range deniedRepoDirs {
+				if ok, _ := path.Match(lower, d); ok {
+					return deny("matches the denied directory " + d)
+				}
+			}
+			if last {
+				for _, f := range deniedRepoFiles {
+					if ok, _ := path.Match(lower, f); ok {
+						return deny("matches the denied file name " + f)
+					}
+				}
+			}
+			continue
+		}
+		if slices.Contains(deniedRepoDirs, lower) {
+			return deny("under the denied directory " + lower)
+		}
+		if last && slices.Contains(deniedRepoFiles, lower) {
+			return deny("the denied file name " + lower)
+		}
+	}
+	return nil
+}
+
+// ChangePullRequest is the PipelineChange kind of a fix PR that merged:
+// Object "<repo id>#<number>", Summary its title, After the merge SHA. The
+// room writes it when it sees the merge (Q7e). Not external: the agent opened
+// it. ChangeKinds lists it after ChangeVendorIncident. (Q7)
+const ChangePullRequest = "pull_request"

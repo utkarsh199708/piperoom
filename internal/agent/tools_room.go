@@ -384,6 +384,57 @@ type proposeFixTool struct {
 	// upstream_app or vendor every proposal is labelled a mitigation. Nil
 	// labels none.
 	causes *externalCauses
+	// source is the room's source kind (SourceKind; "" reads as postgres). A
+	// step's layer is actions.StepLayer with the room's pipeline (stepLayer),
+	// so a source admin step of a MySQL room goes to the mysql owner and a
+	// fix-PR step to its files' layer, as the room checks it (Q8o, Q7k).
+	source string
+}
+
+// layerOf is the layer the action list shows for a in this tool's room,
+// without params: a Layered action (a fix PR) has none until its files are
+// known, so the list says where it comes from.
+func (t *proposeFixTool) layerOf(a actions.Action) string {
+	if _, ok := a.(actions.Layered); ok {
+		return "layer of the files' globs"
+	}
+	return actions.LayerFor(a, t.source)
+}
+
+// stepLayer is the approving layer of one step of a with params:
+// actions.StepLayer with the room's pipeline from ctx (the room service puts
+// it in the run ctx). Without one, a pipeline of the room's source kind
+// stands in, which gives every action but a Layered one its layer as
+// before; a Layered action then fails closed (no repos, no layer).
+func (t *proposeFixTool) stepLayer(ctx context.Context, a actions.Action, params json.RawMessage) (string, error) {
+	p, _ := tools.PipelineFrom(ctx)
+	if p.SourceKind == "" {
+		p.SourceKind = t.source
+	}
+	return actions.StepLayer(a, p, params)
+}
+
+// checkDeferred applies the Deferred proposal rule before anything is
+// stored (the room applies it again, Q7k): a proposal with a fix-PR step
+// holds only fix-PR steps, at most actions.MaxDeferredSteps, so a live
+// stop-gap is a proposal of its own and a PR is never verified together
+// with a step that ran at once.
+func checkDeferred(acts []actions.Action) error {
+	n := 0
+	for _, a := range acts {
+		if _, ok := a.(actions.Deferred); ok {
+			n++
+		}
+	}
+	switch {
+	case n == 0:
+		return nil
+	case n != len(acts):
+		return fmt.Errorf("%w: a proposal with a pull-request step (repo_open_pull_request) holds only pull-request steps; propose a live stop-gap as a separate proposal", tools.ErrBadInput)
+	case n > actions.MaxDeferredSteps:
+		return fmt.Errorf("%w: a proposal holds at most %d pull-request steps, not %d", tools.ErrBadInput, actions.MaxDeferredSteps, n)
+	}
+	return nil
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -406,7 +457,7 @@ func (t *proposeFixTool) Description() string {
 		b.WriteString("(none)\n")
 	}
 	for _, a := range acts {
-		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
+		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), t.layerOf(a), describeFor(a, t.source))
 	}
 	b.WriteString("steps is an array; each step has action, params and a short description, and may have verify (at most 200 characters): what you will check after the step runs, for example \"task 0 RUNNING within 60 s\". ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
@@ -597,6 +648,29 @@ func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
 	return &proposeFixTool{actions: reg, proposals: proposals}
 }
 
+// NewProposeFixToolForSource is NewProposeFixTool for a room whose source is
+// of sourceKind ("" = postgres, or mysql): its steps carry the layer
+// actions.LayerFor gives (a source admin step of a MySQL room is the mysql
+// owner's) and its action list the source's descriptions (Q8g). An unknown
+// kind is an error, as in SourceKind.
+func NewProposeFixToolForSource(reg *actions.Registry, proposals Proposals, sourceKind string) (tools.Tool, error) {
+	sk, err := SourceKind(sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	return &proposeFixTool{actions: reg, proposals: proposals, source: sk}, nil
+}
+
+// setRoomSource gives the room tools that depend on it the room's source
+// kind (Q8g): today propose_fix alone.
+func setRoomSource(room []tools.Tool, sourceKind string) {
+	for _, t := range room {
+		if p, ok := t.(*proposeFixTool); ok {
+			p.source = sourceKind
+		}
+	}
+}
+
 // checkStep resolves a step to its action and decoded params, or returns the
 // error the model sees. Order: the action must exist, params must be a JSON
 // object that fits the action's ParamsSchema (types, required fields, enums,
@@ -751,12 +825,33 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	steps := make([]events.ProposalStep, 0, len(in.Steps))
 	seenLayers := map[string]bool{}
 	var layers []string
+	acts := make([]actions.Action, 0, len(in.Steps))
+	for _, s := range in.Steps {
+		if t.actions == nil {
+			break
+		}
+		if a, ok := t.actions.Get(s.Action); ok {
+			acts = append(acts, a)
+		}
+	}
+	// An unknown action is refused by checkStep below with its own error.
+	if len(acts) == len(in.Steps) {
+		if err := checkDeferred(acts); err != nil {
+			return tools.Result{}, err
+		}
+	}
 	for i, s := range in.Steps {
 		a, params, err := t.checkStep(ctx, i, s.Action, s.Params)
 		if err != nil {
 			return tools.Result{}, err
 		}
-		layer := a.Layer()
+		// One step, one layer: a fix PR whose files sit under globs of two
+		// layers has no layer and is refused here (two layers are two steps,
+		// so two approvals are never folded into one).
+		layer, err := t.stepLayer(ctx, a, params)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, s.Action, err)
+		}
 		verify := strings.TrimSpace(s.Verify)
 		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
 			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)

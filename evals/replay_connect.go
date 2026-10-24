@@ -10,6 +10,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/debeziumtools"
@@ -99,12 +100,18 @@ func registerWorkerToolDefs(reg *tools.Registry) error {
 
 // registerLifecycle adds the Q5 lifecycle actions to reg through
 // actions.RegisterLifecycle over replay clients that read res and recs and
-// record every write in wl.
-func registerLifecycle(reg *actions.Registry, res Resources, recs []Recording, wl *writeLog) error {
-	if err := actions.RegisterLifecycle(reg, actions.LifecycleDeps{
+// record every write in wl. binlog is a MySQL room's binlog reader
+// (replayBinlog), nil in a Postgres room, as wiring passes it (Q8g).
+func registerLifecycle(reg *actions.Registry, res Resources, recs []Recording, wl *writeLog, binlog mysql.BinlogReader) error {
+	d := actions.LifecycleDeps{
 		Connect: replayLifecycle{replayConfig: replayConfig{res: res, recs: recs}, log: wl},
 		Source:  replaySource{res: res, recs: recs},
-	}); err != nil {
+	}
+	// Never a typed nil: the actions treat a non-nil reader as a MySQL room.
+	if binlog != nil {
+		d.Binlog = binlog
+	}
+	if err := actions.RegisterLifecycle(reg, d); err != nil {
 		return fmt.Errorf("evals: lifecycle action definitions: %w", err)
 	}
 	return nil

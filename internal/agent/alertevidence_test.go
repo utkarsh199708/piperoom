@@ -218,7 +218,10 @@ func TestFirstUserMessageTriageBlock(t *testing.T) {
 }
 
 func TestSystemPromptMentionsFirstLook(t *testing.T) {
-	if !strings.Contains(systemPrompt(), "A first look (triage) is a hint, verify it; do not repeat a read it already shows unless the numbers may have changed.") {
+	// W4f (KAN-504) rephrased "a read it already shows" as "its reads" to pay
+	// for rule 4's hypothesis form, and W4h (KAN-505) dropped "the" before
+	// "numbers"; the batch prompt keeps the longer words.
+	if !strings.Contains(systemPrompt(), "A first look (triage) is a hint, verify it; do not repeat its reads unless numbers may have changed.") {
 		t.Fatal("system prompt lacks the first-look line")
 	}
 }

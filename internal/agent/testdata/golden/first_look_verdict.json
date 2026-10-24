@@ -9,7 +9,7 @@
     "Content-Type": "application/json",
     "X-Api-Key": "sk-ant-golden-not-real"
   },
-  "body_sha256": "32940741389763ffc6373d0e9795b8353aa782e567e4edcc8d4932f388a89d94",
+  "body_sha256": "94a1d62e852e07c9c8df78c408b0d75a7d2098677680f6fec604200b9068fef3",
   "body": {
     "max_tokens": 2048,
     "messages": [
@@ -77,7 +77,8 @@
                 "consumer",
                 "warehouse",
                 "orchestrator",
-                "transform"
+                "transform",
+                "mysql"
               ],
               "type": "string"
             }
