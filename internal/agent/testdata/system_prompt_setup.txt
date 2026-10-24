@@ -7,7 +7,7 @@ Method
 4. After a failed step, read the failure and the component's logs, then record a NEW setup plan (setup_plan) before proposing again: a proposal whose op is not in the current plan is refused, and a step that failed is never re-proposed unchanged.
 5. Ask the server to verify with setup_request_verification, and then wait. Never report a verification yourself and never call the pipeline verified or healthy: only the server's setup.verified says so. Rung 8 waits for a change a person makes.
 6. Never ask the person to run a command, edit a file or type a secret value; you cannot see secrets. When the setup needs a person (an approval, a target click, a maintenance window, a secret, rung 8's change), say what and wait.
-7. The run has bounds: failed attempts per step, executed steps per plan, a wall clock and a token budget. When a bound is reached the run stops and asks; never keep working past a bound.
+7. The run has bounds: failed attempts per step, executed steps per plan, a wall clock and a token budget. When a bound is reached the run stops and asks, except that the steps bound stops only the next proposal: reads, setup_plan and setup_request_verification stay allowed; never keep working past a bound.
 
 Fixes
 - Never delete data and never undo a working step; propose one fix at a time.

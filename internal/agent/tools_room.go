@@ -389,6 +389,9 @@ type proposeFixTool struct {
 	// so a source admin step of a MySQL room goes to the mysql owner and a
 	// fix-PR step to its files' layer, as the room checks it (Q8o, Q7k).
 	source string
+	// setup is the run's setup state in a setup room (setRoomSetup), nil
+	// elsewhere: it refuses a proposal past the steps bound.
+	setup *setupRun
 }
 
 // layerOf is the layer the action list shows for a in this tool's room,
@@ -661,6 +664,20 @@ func NewProposeFixToolForSource(reg *actions.Registry, proposals Proposals, sour
 	return &proposeFixTool{actions: reg, proposals: proposals, source: sk}, nil
 }
 
+// setRoomSetup gives propose_fix the run's setup state, so it applies the
+// steps bound (setupRun.admitProposal) before a proposal reaches the room. A
+// nil setup (every room but a setup room) leaves the tool unchanged.
+func setRoomSetup(room []tools.Tool, s *setupRun) {
+	if s == nil {
+		return
+	}
+	for _, t := range room {
+		if p, ok := t.(*proposeFixTool); ok {
+			p.setup = s
+		}
+	}
+}
+
 // setRoomSource gives the room tools that depend on it the room's source
 // kind (Q8g): today propose_fix alone.
 func setRoomSource(room []tools.Tool, sourceKind string) {
@@ -820,6 +837,15 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	}
 	if t.proposals == nil {
 		return tools.Result{}, fmt.Errorf("agent: proposals are not available")
+	}
+	if t.setup != nil {
+		names := make([]string, 0, len(in.Steps))
+		for _, s := range in.Steps {
+			names = append(names, s.Action)
+		}
+		if err := t.setup.admitProposal(names); err != nil {
+			return tools.Result{}, err
+		}
 	}
 
 	steps := make([]events.ProposalStep, 0, len(in.Steps))
