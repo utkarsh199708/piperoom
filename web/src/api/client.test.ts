@@ -404,3 +404,31 @@ describe('idempotency key (#459)', () => {
     expect(JSON.parse(String(lastCall().init.body))).toEqual({ text: 'stop' })
   })
 })
+
+describe('setup routes (U1-5b, U1-5d; U1-12b controls)', () => {
+  it('setupSecret POSTs the name and value to its own route', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+    await api.setupSecret('r 1', { name: 'DB_PASSWORD', value: 's3cr3t!' })
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r%201/setup/secret')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ name: 'DB_PASSWORD', value: 's3cr3t!' })
+  })
+
+  it('setupCredentials asks the runner with no body at all', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 202 }))
+    await api.setupCredentials('r_1')
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r_1/setup/credentials')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('setupTargetClass sends the target as a path segment and the class in the body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { seq: 1 }))
+    await api.setupTargetClass('r_1', 'db.acme:5432', { class: 'production' })
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r_1/setup/targets/db.acme%3A5432/class')
+    expect(JSON.parse(String(init.body))).toEqual({ class: 'production' })
+  })
+})

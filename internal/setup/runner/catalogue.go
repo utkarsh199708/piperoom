@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"piperoom/internal/setup/protocol"
@@ -44,6 +45,18 @@ type Catalogue interface {
 // checked only by Execute.
 type TargetChecker interface {
 	CheckTarget(req protocol.OpRequest) (reason string)
+}
+
+// ParamFloorer is an optional Catalogue capability: FloorFor returns the tier
+// floor of one request, the op's fixed floor raised by the tier its params
+// need (internal/setup/ops: Registry.FloorFor over an op's TierFor; a host
+// properties file outside the project directory is T2). ok is false for an op
+// not in the catalogue. A non-nil err means the floor cannot be computed from
+// the params, and the runner refuses the request with RefuseSchema rather than
+// fall back to the fixed floor. A catalogue that does not implement it is
+// checked against Floor alone.
+type ParamFloorer interface {
+	FloorFor(op string, params json.RawMessage) (tier string, ok bool, err error)
 }
 
 // nopCatalogue is the default catalogue until internal/setup/ops lands: it

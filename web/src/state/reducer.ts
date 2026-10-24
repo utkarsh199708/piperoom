@@ -43,12 +43,14 @@ import type {
   RoomLabelledPayload,
   SetupAwaitingChangePayload,
   SetupBlockedPayload,
+  SetupCredentialsRegisteredPayload,
   SetupMaintenanceWindowPayload,
   SetupPipelineExtendedPayload,
   SetupPlanPayload,
   SetupRequest,
   SetupRunnerAttachedPayload,
   SetupRunnerLostPayload,
+  SetupSecretSetPayload,
   SetupTargetClassedPayload,
   SetupTargetRegisteredPayload,
   SetupVerifiedPayload,
@@ -1447,6 +1449,34 @@ function applyCore(state: RoomState, event: Event): RoomState {
         setup: {
           ...state.setup,
           maintenance_window: { start: p.start, end: p.end },
+        },
+      };
+      break;
+    }
+
+    case "setup.secret_set": {
+      if (!state.setup) break;
+      const p = as<SetupSecretSetPayload>(event);
+      // The name, never the value: the payload has none and the web keeps none.
+      if (!p.name) break;
+      const names = state.setup.secret_names.includes(p.name)
+        ? state.setup.secret_names
+        : [...state.setup.secret_names, p.name];
+      next = { ...state, setup: { ...state.setup, secret_names: names } };
+      break;
+    }
+
+    case "setup.credentials_registered": {
+      if (!state.setup) break;
+      const p = as<SetupCredentialsRegisteredPayload>(event);
+      next = {
+        ...state,
+        setup: {
+          ...state.setup,
+          credentials: {
+            names: p.names ?? [],
+            runner_label: p.runner_label ?? "",
+          },
         },
       };
       break;

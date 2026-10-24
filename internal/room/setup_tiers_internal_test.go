@@ -272,6 +272,25 @@ func (r *tierRig) tick() {
 	<-r.done
 }
 
+// waitCountdown waits until one tick of the policy loop can fire pid's
+// countdown. The loop judges the snapshot each room published (scheduleDue),
+// never the log, and leaves a room whose lock is busy for its next check
+// (firePolicy). The log is ahead of both: proposal.scheduled is in the store
+// while the writer that appended it still holds the room's lock, and
+// unlockRoom publishes the countdown before it releases that lock. So this
+// waits for the countdown in the room view, then takes the room's lock once,
+// which waits for that writer's hold to end.
+func (r *tierRig) waitCountdown(roomID, pid string) {
+	r.t.Helper()
+	waitForCond(r.t, 5*time.Second, func() bool {
+		p, ok := openProposal(mustRoom(r.t, r.svc, roomID), pid)
+		return ok && p.Scheduled != nil
+	}, "the countdown of "+pid+" never reached the room view")
+	if st := r.svc.lockCachedRoom(roomID); st != nil {
+		r.svc.unlockRoom(st)
+	}
+}
+
 func (r *tierRig) user(id string) User {
 	r.t.Helper()
 	u, ok := r.svc.LookupUser(id)
