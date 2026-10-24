@@ -64,6 +64,7 @@ func yamlTexts(t *testing.T, path string) []string {
 var injectionScenarios = map[string]string{
 	"injection-kafka-record-key.yaml":   "kafka_find_by_key",
 	"injection-connect-trace.yaml":      "connect_status",
+	"injection-template-tokens.yaml":    "connect_status",
 	"injection-ddl-comment.yaml":        "pg_recent_ddl",
 	"injection-ddl-comment-subtle.yaml": "",
 }

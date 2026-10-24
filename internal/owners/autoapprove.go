@@ -2,6 +2,7 @@ package owners
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -32,7 +33,23 @@ func LoadWithActions(path string, actionNames []string) (*Owners, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := o.checkAutoApproveNames(actionNames); err != nil {
+	if err := o.checkAutoApproveNames(actionNames, nil); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
+	}
+	return o, nil
+}
+
+// LoadWithDeferred is LoadWithActions that also refuses an `auto_approve:`
+// entry naming one of deferredNames, the actions.Deferred actions (Q7a,
+// docs/design/fix-pr.md §5.8): a pull-request fix is never approved by a
+// policy. It is the design's two-argument LoadWithActions under a new name,
+// so the existing callers compile until they pass the deferred names.
+func LoadWithDeferred(path string, actionNames, deferredNames []string) (*Owners, error) {
+	o, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := o.checkAutoApproveNames(actionNames, deferredNames); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
 	return o, nil
@@ -48,15 +65,25 @@ func (o *Owners) ValidateAutoApprove(actionNames []string) error {
 	if o == nil {
 		return nil
 	}
-	if err := o.checkAutoApproveNames(actionNames); err != nil {
+	return o.ValidateAutoApproveDeferred(actionNames, nil)
+}
+
+// ValidateAutoApproveDeferred is ValidateAutoApprove that also refuses an
+// entry naming one of deferredNames (see LoadWithDeferred).
+func (o *Owners) ValidateAutoApproveDeferred(actionNames, deferredNames []string) error {
+	if o == nil {
+		return nil
+	}
+	if err := o.checkAutoApproveNames(actionNames, deferredNames); err != nil {
 		return fmt.Errorf("owners: %w", err)
 	}
 	return nil
 }
 
 // checkAutoApproveNames returns the first entry (file order) that is not in
-// actionNames. It lists the known names so the fix is one edit away.
-func (o *Owners) checkAutoApproveNames(actionNames []string) error {
+// actionNames, or that is in deferredNames. It lists the known names so the
+// fix is one edit away.
+func (o *Owners) checkAutoApproveNames(actionNames, deferredNames []string) error {
 	known := make(map[string]bool, len(actionNames))
 	for _, n := range actionNames {
 		known[n] = true
@@ -64,6 +91,9 @@ func (o *Owners) checkAutoApproveNames(actionNames []string) error {
 	for i := range o.Pipelines {
 		p := &o.Pipelines[i]
 		for _, a := range p.AutoApprove {
+			if slices.Contains(deferredNames, a) {
+				return fmt.Errorf("pipeline %q: auto_approve: %q is never approved by a policy (it opens a pull request that a reviewer merges)", p.ID, a)
+			}
 			if !known[a] {
 				return fmt.Errorf("pipeline %q: auto_approve: unknown action %q (known: %s)", p.ID, a, knownList(known))
 			}

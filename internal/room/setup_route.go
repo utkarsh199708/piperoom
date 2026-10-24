@@ -247,6 +247,11 @@ func setupStepTier(acts *actions.Registry, step events.ProposalStep, class strin
 	if !plan.ValidTier(tier) {
 		return "", fmt.Errorf("tier of %q is %q, not T0..T3", cleanPlanName(step.Action), cleanPlanName(tier))
 	}
+	if isDeferred(a) {
+		// Q7k: a Deferred (pull-request) step is never a setup T1 step, so
+		// setup_local never schedules it, whatever its Tier says.
+		tier = raiseTier(tier, plan.TierT2)
+	}
 	return tier, nil
 }
 
@@ -617,7 +622,7 @@ func (s *Service) setupLayers(snap *RoomSnapshot, route setupRoute, steps []even
 
 // setupOverlapLayers returns the layers of the existing pipelines whose host,
 // topic prefix, connector or table the provisional pipeline shares, in
-// events.Layers order: the proposal's approvers are those pipelines' owners
+// owners.KnownLayers order: the proposal's approvers are those pipelines' owners
 // (design §3.6). A pipeline of another tenant is not included: its owners
 // cannot approve here, and its admins are only a contact.
 func (s *Service) setupOverlapLayers(snap *RoomSnapshot) []string {
@@ -627,7 +632,7 @@ func (s *Service) setupOverlapLayers(snap *RoomSnapshot) []string {
 	}
 	seen := map[string]bool{}
 	out := []string{}
-	for _, layer := range events.Layers {
+	for _, layer := range owners.KnownLayers() {
 		for _, p := range pipelines {
 			if !seen[layer] && s.owners.IsOwned(p.ID, layer) {
 				seen[layer] = true

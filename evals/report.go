@@ -48,6 +48,42 @@ type Report struct {
 	// being scored are in Results with an "infra: " error, in no rate and in
 	// no comparison.
 	InfraStop string `json:"infra_stop,omitempty"`
+	// ByTarget and BySource are the pass rate grouped by the setup target
+	// kind and the source kind (U1-20), pooled over every scored run of the
+	// group. A scenario's source kind defaults to postgres; a scenario that
+	// names no target (every incident scenario) is in no target group. They
+	// are additive: no existing field changes.
+	ByTarget []Breakdown `json:"by_target,omitempty"`
+	BySource []Breakdown `json:"by_source,omitempty"`
+	// Provider and Flavor are the main model's provider (anthropic,
+	// bedrock, vertex, openai, gemini, bedrock-converse) and, for openai,
+	// its flavor; PromptHashKind is PromptHashKind(PromptHashes): the
+	// Anthropic tap's "sha256", the other adapters' "neutral-sha256", or
+	// "untapped". Hashes of two kinds never compare. Set by evalrun (V10);
+	// empty in reports written before it.
+	Provider       string `json:"provider,omitempty"`
+	Flavor         string `json:"flavor,omitempty"`
+	PromptHashKind string `json:"prompt_hash_kind,omitempty"`
+	// PendingHarness lists the scenarios skipped because they wait for a harness
+	// row (pending_harness); PendingHarnessRan lists those an explicit -only
+	// ran anyway. Neither counts in a baseline comparison, and the skipped ones
+	// are in no rate.
+	PendingHarness    []string `json:"pending_harness,omitempty"`
+	PendingHarnessRan []string `json:"pending_harness_ran,omitempty"`
+}
+
+// Breakdown is one group of a report's per-target or per-source pass rate.
+// Kind is the target or source kind; Scenarios is how many scenarios
+// contribute a scored run.
+type Breakdown struct {
+	Kind      string  `json:"kind"`
+	Scenarios int     `json:"scenarios"`
+	Runs      int     `json:"runs"`
+	Passes    int     `json:"passes"`
+	PassRate  float64 `json:"pass_rate"`
+	// Infra are the group's runs the model API's refusal kept from being
+	// scored. They are in no rate.
+	Infra int `json:"infra,omitempty"`
 }
 
 // Summary aggregates runs. Rates are 0..1. In Report.Overall every scenario
@@ -95,10 +131,27 @@ type Summary struct {
 	Usage *UsageSummary `json:"usage,omitempty"`
 }
 
-// ScenarioSummary aggregates one scenario's runs.
+// ScenarioSummary aggregates one scenario's runs. SourceKind and Target are
+// the setup kinds the report's per-source and per-target rates group by
+// (U1-20); SourceKind defaults to postgres, Target is "" when the scenario
+// names none.
 type ScenarioSummary struct {
 	Name string `json:"name"`
+	// SourceKind is the scenario room's source kind (Q8j) or, for a setup
+	// scenario, its setup source kind; "" in a report written before Q8j,
+	// which reads as postgres.
+	SourceKind string `json:"source_kind,omitempty"`
+	Target     string `json:"target,omitempty"`
 	Summary
+}
+
+// sourceKindOf is the BySource key: a scenario row's source kind, postgres
+// when "" (a report written before Q8j).
+func sourceKindOf(s ScenarioSummary) string {
+	if s.SourceKind == "" {
+		return DefaultSourceKind
+	}
+	return s.SourceKind
 }
 
 func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started time.Time) Report {
@@ -121,13 +174,16 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	var withRuns []Summary
 	for _, sc := range scenarios {
 		s := summarize(byName[sc.Name])
-		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{Name: sc.Name, Summary: s})
+		source, target := sc.setupKinds()
+		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{Name: sc.Name, SourceKind: source, Target: target, Summary: s})
 		if s.Runs > 0 {
 			withRuns = append(withRuns, s)
 		}
 	}
 	rep.Overall = combine(withRuns)
 	rep.Overall.Infra = totalInfra(rep.Scenarios)
+	rep.BySource = rateBy(rep.Scenarios, sourceKindOf)
+	rep.ByTarget = rateBy(rep.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
 	}
@@ -325,6 +381,8 @@ func (r Report) Restrict(names []string) Report {
 	}
 	out.Overall = combine(withRuns)
 	out.Overall.Infra = totalInfra(out.Scenarios)
+	out.BySource = rateBy(out.Scenarios, sourceKindOf)
+	out.ByTarget = rateBy(out.Scenarios, func(s ScenarioSummary) string { return s.Target })
 	return out
 }
 
@@ -336,6 +394,45 @@ func totalInfra(ss []ScenarioSummary) int {
 		n += s.Infra
 	}
 	return n
+}
+
+// rateBy pools the scored runs of the scenarios by a kind key (a source or
+// target kind; the key returns "" for a scenario outside that grouping). The
+// rate is passes over runs within the group, not the mean of the per-scenario
+// rates, so a group with more runs weighs more. Groups are sorted by kind. A
+// scenario whose key is empty is in no group.
+func rateBy(ss []ScenarioSummary, key func(ScenarioSummary) string) []Breakdown {
+	byKind := map[string]*Breakdown{}
+	for _, s := range ss {
+		kind := key(s)
+		if kind == "" || s.Runs == 0 {
+			// A group is a pass rate: a scenario all of whose runs were infra
+			// has none. Its infra runs stay in ScenarioSummary.Infra and in
+			// the report's overall count.
+			continue
+		}
+		b := byKind[kind]
+		if b == nil {
+			b = &Breakdown{Kind: kind}
+			byKind[kind] = b
+		}
+		b.Infra += s.Infra
+		b.Scenarios++
+		b.Runs += s.Runs
+		b.Passes += s.Passes
+	}
+	if len(byKind) == 0 {
+		return nil
+	}
+	out := make([]Breakdown, 0, len(byKind))
+	for _, b := range byKind {
+		if b.Runs > 0 {
+			b.PassRate = float64(b.Passes) / float64(b.Runs)
+		}
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
+	return out
 }
 
 // WriteJSON writes the report as indented JSON.
@@ -377,6 +474,13 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	writeBreakdowns(&b, r)
+	if len(r.PendingHarness) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (skipped, in no rate):** %s\n", mdCell(strings.Join(r.PendingHarness, ", ")))
+	}
+	if len(r.PendingHarnessRan) > 0 {
+		fmt.Fprintf(&b, "\n**Pending harness (ran by -only, not compared with the baseline):** %s\n", mdCell(strings.Join(r.PendingHarnessRan, ", ")))
+	}
 	writeInvalidLine(&b, r.Overall, r.Results)
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
@@ -399,6 +503,25 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		return fmt.Errorf("evals: write report: %w", err)
 	}
 	return nil
+}
+
+// writeBreakdowns prints the per-source and per-target pass rates (U1-20)
+// under the table, one compact line each. They are absent when no scenario
+// names a kind (a report written before the rates existed, or one built from
+// scenario summaries without the fields).
+func writeBreakdowns(b *strings.Builder, r Report) {
+	line := func(label string, bs []Breakdown) {
+		if len(bs) == 0 {
+			return
+		}
+		parts := make([]string, 0, len(bs))
+		for _, x := range bs {
+			parts = append(parts, fmt.Sprintf("%s %d/%d (%.0f%%)", mdCell(x.Kind), x.Passes, x.Runs, 100*x.PassRate))
+		}
+		fmt.Fprintf(b, "\n%s: %s\n", label, strings.Join(parts, " · "))
+	}
+	line("by source", r.BySource)
+	line("by target", r.ByTarget)
 }
 
 // writeReplayWrites lists, per run, the writes its actions took on the replay

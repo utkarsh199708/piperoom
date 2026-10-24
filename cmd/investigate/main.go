@@ -32,6 +32,7 @@ func main() {
 		pipeline  = flag.String("pipeline", "orders", "pipeline id to investigate")
 		title     = flag.String("title", "orders stale", "alert title")
 		fakeTools = flag.Bool("fake-tools", false, "use the built-in schema-change replay tools instead of real clients")
+		provider  = flag.String("provider", "", "model provider override: anthropic, bedrock, vertex, openai, gemini or bedrock-converse (default PIPEROOM_MODEL_PROVIDER); the role, key and start-check rules are the server's")
 		model     = flag.String("model", "", "model override (default from config)")
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
@@ -44,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	o := runOptions{
-		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Model: *model, Effort: *effort,
+		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Provider: *provider, Model: *model, Effort: *effort,
 		MaxTurns: *maxTurns, RecordDir: *record, ApproveAll: *approve, ConfirmDevStack: *confirm,
 		Kind: *kind, ListTools: *listOnly,
 	}
@@ -72,6 +73,8 @@ func exitCode(err error, w io.Writer) int {
 type runOptions struct {
 	Pipeline, Title string
 	FakeTools       bool
+	// Provider is -provider: "" keeps PIPEROOM_MODEL_PROVIDER.
+	Provider        string
 	Model, Effort   string
 	MaxTurns        int
 	RecordDir       string
@@ -87,7 +90,7 @@ type runOptions struct {
 func run(o runOptions) (err error) {
 	pipeline, title, fakeTools := o.Pipeline, o.Title, o.FakeTools
 	model, effort, maxTurns := o.Model, o.Effort, o.MaxTurns
-	cfg := config.Load()
+	cfg := withModelFlags(config.Load(), o.Provider, model)
 
 	// The owners file is read first: the approve-all guard must see the
 	// pipeline's connections before anything is opened.
@@ -108,7 +111,7 @@ func run(o runOptions) (err error) {
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
-		reg, err := listToolsRegistry(own, fakeTools)
+		reg, err := listToolsRegistry(listOwners(own, pipe, havePipe), fakeTools)
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
@@ -140,7 +143,8 @@ func run(o runOptions) (err error) {
 
 	// The model endpoint (provider, triage model, token budget) comes from the
 	// same settings as the server; a bad value stops the run before any tool opens.
-	// One AWS config for the process, shared by Bedrock and MSK IAM.
+	// One AWS config for the process, shared by Bedrock, Bedrock Converse and
+	// MSK IAM.
 	awsCfg, err := wiring.LoadAWS(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("investigate: %w", err)
@@ -198,7 +202,9 @@ func run(o runOptions) (err error) {
 		if commit == "" {
 			commit = "unknown"
 		}
-		promptHash, herr := agent.PromptHashFor(kind)
+		// The prompt follows the pipeline's source kind too (Q8g); without
+		// the pipeline in owners (fake tools) it is the Postgres one.
+		promptHash, herr := agent.PromptHashForSource(kind, sourceKindOf(pipe, havePipe))
 		if herr != nil {
 			return fmt.Errorf("investigate: %w", herr)
 		}
@@ -227,7 +233,14 @@ func run(o runOptions) (err error) {
 		Teams: alertTeams(own, pipeline),
 	}
 
-	err = ep.Run(ctx, alert, agent.Deps{
+	runCtx := ctx
+	if havePipe && len(pipe.Repos) > 0 {
+		// A pipeline with repos: gets the fix PR as in a room (Q7f): the
+		// action reads the repos from the whole pipeline, which the room
+		// service puts in the run ctx. Other pipelines keep the id-only scope.
+		runCtx = tools.WithPipeline(ctx, pipe)
+	}
+	err = ep.Run(runCtx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
 		Inbox:     agentInbox,
@@ -238,6 +251,19 @@ func run(o runOptions) (err error) {
 		return fmt.Errorf("investigate: %w", err)
 	}
 	return nil
+}
+
+// withModelFlags applies -provider and -model to cfg before the endpoint is
+// built, so the start checks (supported list, probe, pricing) judge the model
+// the run will use. Empty flags keep the environment's values.
+func withModelFlags(cfg config.Config, provider, model string) config.Config {
+	if provider != "" {
+		cfg.ModelProvider = provider
+	}
+	if model != "" {
+		cfg.Model = model
+	}
+	return cfg
 }
 
 // alertTeams is agent.Alert.Teams: the owners.yaml teams of the pipeline's

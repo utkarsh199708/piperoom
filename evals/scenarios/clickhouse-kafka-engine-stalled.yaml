@@ -30,6 +30,37 @@
 #   - A stalled engine leaves no INSERT exceptions in query_log (the materialized view never fires), so
 #     the only load-error lines are the Kafka engine consumer exceptions.
 #   - The freshness number alone reads like a slow consumer; the Kafka engine exception is the cause.
+#
+# order-sync is not ClickHouse (W4k, KAN-495). In run 39994729845 all three runs took order-sync for
+#   the Kafka engine table's consumer, and run 3 named the consumer as the first failing layer. order-sync
+#   is the application consumer (owner kabir); the Kafka engine table analytics.orders_queue reads the
+#   topic with its own consumer group, ch_orders_queue (its kafka_group_name), which is part of the
+#   warehouse (owner meera). owners.yaml does not list it: the topology derives it from the engine's
+#   CREATE statement and the read tools accept it (owners.SetDerivedConsumerGroups), so kafka_list_groups
+#   shows both groups and kafka_consumer_lag shows ch_orders_queue Stable with its committed offsets
+#   frozen at 08:15 (lag 208575 on three partitions) while order-sync is at lag 0. The live run on 3fd6b3f
+#   (40039230615) listed only order-sync, so its agent hypothesised that the engine's group "is not
+#   visible on pg.public.orders" and abstained. Meera's steer says only that order-sync is the
+#   application consumer and the engine has its own, and not the cause (TestW4kSteerDoesNotNameTheCause).
+#   The labels do not change. The alert's pipeline_map (and its recording) is still the hand-composed
+#   one without the CH-3 group, engine and view nodes; the group reads above are where the agent finds it.
+#
+# W4k also records the reads that run made and no recording covered (misses table
+#   reviews/evals-2026-10-23/misses.md): connect_config, reconcile, schema_registry_*, pg_recent_ddl,
+#   connect_worker_logs (the tool's own "not configured" answer, no log lines), kafka_dup_keys,
+#   kafka_throughput and similar_incidents, plus the real tools' not-found answers for names the
+#   scenario does not know.
+#
+# Budget (W4k, KAN-495): max_tool_calls 12 -> 17. Live run 40044065663 (after the recordings and the
+#   engine's consumer group above) named the root cause and the layer (both 100%) and failed on the
+#   budget alone: 15 calls against 12. Under R8 (#939) a run that fails only on its budget is a passing
+#   path, so the budget is its call count + 2 = 17. Turn split of that run: NOT MEASURED (its
+#   transcript was not read). The scenario has two input turns, the alert and Meera's steer; the
+#   baseline runs of 39994729845 split 11 + 5, 9 + 4 and 9 + 4 (16, 13, 13 calls), which is the only
+#   split on record. The standard path, not measured: alert turn (freshness, load errors, order-sync lag,
+#   group list, ch_orders_queue lag, topic offsets, connector status, the DDL and registry checks that
+#   rule out a schema cause), steer turn (a re-read or two, the reconcile and the warehouse_row it
+#   points to, throughput or duplicate keys to rule out the topic).
 
 name: clickhouse-kafka-engine-stalled
 description: |
@@ -90,9 +121,6 @@ recordings:
       partition 0: 51206447–66706447 (15500000 records), newest just now
       partition 1: 51198902–66698902 (15500000 records), newest just now
       partition 2: 51211360–66711360 (15500000 records), newest just now
-  - tool: kafka_list_groups
-    summary: |-
-      order-sync: Stable
   - tool: kafka_consumer_lag
     input: {group: order-sync}
     summary: |-
@@ -114,11 +142,353 @@ recordings:
       - 2026-10-20T08:15:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
       - 2026-10-20T08:10:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
       - 2026-10-20T08:05:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
+  # W4k (KAN-495): reads the agent made in run 39994729845 that no recording covered. The real
+  # tools' output over this stack (the Kafka engine table stopped loading at 08:15; the topic and
+  # the source keep writing 75 rows/s). connect_worker_logs is the tool's own answer for a server
+  # with no log store.
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: reconcile
+    input: {since: "2026-10-20T07:45:00Z", table: public.orders}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 7m0s from 2026-10-20T07:45:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      07:45 | 31500 | 32445 | 31500 | +0
+      07:52 | 31500 | 32445 | 31500 | +0
+      07:59 | 31500 | 32445 | 31500 | +0
+      08:06 | 31500 | 32445 | 31500 | +0
+      08:13 | 31500 | 32445 | 9000 | -22500
+      08:20 | 31500 | 32445 | 0 | -31500
+      08:27 | 31500 | 32445 | 0 | -31500
+      08:34 | 31500 | 32445 | 0 | -31500
+      08:41 | 31500 | 32445 | 0 | -31500
+      08:48 | 31500 | 32445 | 0 | -31500
+      08:55 | 13500 | 13905 | 0 | -13500
+      verdict: sink is missing 193500 rows in 08:13–09:02; the topic carried 208575 change events for 202500 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
+      keys not compared: the warehouse client cannot list keys
+      note: rows newer than 2026-10-20T08:58:00Z (the last 2m0s) are in flight and not judged
+    data:
+      buckets:
+        - bucket: "2026-10-20T07:45:00Z"
+          sink: 31500
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T07:52:00Z"
+          sink: 31500
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T07:59:00Z"
+          sink: 31500
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:06:00Z"
+          sink: 31500
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:13:00Z"
+          sink: 9000
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:20:00Z"
+          sink: 0
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:27:00Z"
+          sink: 0
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:34:00Z"
+          sink: 0
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:41:00Z"
+          sink: 0
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:48:00Z"
+          sink: 0
+          source: 31500
+          topic: 32445
+        - bucket: "2026-10-20T08:55:00Z"
+          sink: 0
+          source: 13500
+          topic: 13905
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-19T09:00:00Z)
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: kafka_list_groups
+    summary: |-
+      ch_orders_queue: Stable
+      order-sync: Stable
+    data:
+      - group: ch_orders_queue
+        state: Stable
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: ch_orders_queue}
+    summary: |-
+      ch_orders_queue: Stable, 1 members, total lag 208575
+        pg.public.orders/0: committed 66636922, end 66706447, lag 69525
+        pg.public.orders/1: committed 66629377, end 66698902, lag 69525
+        pg.public.orders/2: committed 66641835, end 66711360, lag 69525
+    data:
+      group: ch_orders_queue
+      members: 1
+      state: Stable
+      total_lag: 208575
+      worst_partitions:
+        - committed: 66636922
+          end: 66706447
+          lag: 69525
+          partition: 0
+          topic: pg.public.orders
+        - committed: 66629377
+          end: 66698902
+          lag: 69525
+          partition: 1
+          topic: pg.public.orders
+        - committed: 66641835
+          end: 66711360
+          lag: 69525
+          partition: 2
+          topic: pg.public.orders
+  - tool: kafka_dup_keys
+    input: {topic: pg.public.orders}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 20 000 records
+      scanned 20 000 (capped): max_scan stopped the scan before the end of partition(s) [0 1 2]; newer records were not checked, use a later since
+    data:
+      capped: true
+      duplicates: 0
+      keys: 0
+      max_scan: 20000
+      order_regressions: 0
+      partial: false
+      partitions:
+        - done: false
+          end: 66706447
+          from: 66436447
+          next: 66443114
+          partition: 0
+          scanned: 6667
+        - done: false
+          end: 66698902
+          from: 66428902
+          next: 66435569
+          partition: 1
+          scanned: 6667
+        - done: false
+          end: 66711360
+          from: 66441360
+          next: 66448026
+          partition: 2
+          scanned: 6666
+      regression_keys: 0
+      scanned: 20000
+      since: "2026-10-20T08:00:00Z"
+      tombstones: 0
+      topic: pg.public.orders
+      undecodable: 0
+  - tool: kafka_throughput
+    input: {window: 15m}
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 69525 records (77/s) over 3 partitions; median 26/s, max p0 26/s → even
+      order-sync (Stable, 2 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          lag: 0
+          members: 2
+          state: Stable
+      partitions:
+        - partition: 0
+          per_second: 25.75
+          records: 23175
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 25.75
+          records: 23175
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 25.75
+          records: 23175
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 25.75
+          median_per_second: 25.75
+          partitions: 3
+          per_second: 77.25
+          records: 69525
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 900
+  - tool: kafka_throughput
+    input: {window: 30m}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 139050 records (77/s) over 3 partitions; median 26/s, max p0 26/s → even
+      order-sync (Stable, 2 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          lag: 0
+          members: 2
+          state: Stable
+      partitions:
+        - partition: 0
+          per_second: 25.75
+          records: 46350
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 25.75
+          records: 46350
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 25.75
+          records: 46350
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 25.75
+          median_per_second: 25.75
+          partitions: 3
+          per_second: 77.25
+          records: 139050
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 1800
+  - tool: kafka_throughput
+    input: {window: 1h}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 278100 records (77/s) over 3 partitions; median 26/s, max p0 26/s → even
+      order-sync (Stable, 2 members): lag 0
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+    data:
+      consume_note: 'no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)'
+      consume_scope: 'pipeline: the consumed rate is the total of the pipeline''s consumer groups, from the watcher''s group_lag samples; Kafka keeps no committed-offset history, so there is no per-partition consume rate'
+      groups:
+        - group: order-sync
+          lag: 0
+          members: 2
+          state: Stable
+      partitions:
+        - partition: 0
+          per_second: 25.75
+          records: 92700
+          topic: pg.public.orders
+        - partition: 1
+          per_second: 25.75
+          records: 92700
+          topic: pg.public.orders
+        - partition: 2
+          per_second: 25.75
+          records: 92700
+          topic: pg.public.orders
+      partitions_omitted: 0
+      rates_available: true
+      topics:
+        - max_partition: 0
+          max_per_second: 25.75
+          median_per_second: 25.75
+          partitions: 3
+          per_second: 77.25
+          records: 278100
+          skewed: false
+          topic: pg.public.orders
+      window_seconds: 3600
+  - tool: warehouse_row
+    summary: |-
+      not found
+    data:
+      found: false
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
 
 inputs:
   - kind: steer
     from: Meera
-    text: "analytics.orders is 45 minutes stale but everything upstream looks fine. Find out why the ClickHouse warehouse stopped getting rows."
+    text: "analytics.orders is 45 minutes stale but everything upstream looks fine. order-sync is our application consumer; the ClickHouse Kafka engine table has a consumer of its own. Find out why the ClickHouse warehouse is not getting rows."
 
 expect:
   root_cause:
@@ -150,4 +520,5 @@ expect:
       facts: [f_kafka_engine_exception]
   evidence_tools: [warehouse_load_errors, warehouse_freshness]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 12
+  # 15 calls (run 40044065663) + 2, see the header.
+  max_tool_calls: 17

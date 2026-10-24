@@ -6,6 +6,7 @@ import (
 
 	"piperoom/internal/agent/llm"
 	anthropicllm "piperoom/internal/agent/llm/anthropic"
+	"piperoom/internal/config"
 )
 
 // model is the seam between the agent and the model provider: one request,
@@ -44,5 +45,7 @@ func newModel(opts Options, log *slog.Logger) model {
 // (a test server's base URL and key) injected.
 func newModelWith(getenv func(string) string, log *slog.Logger, extra ...anthropicllm.RequestOption) model {
 	reqOpts := append(clientOptions(getenv), extra...)
-	return anthropicllm.New(ProviderAnthropic, reqOpts, log)
+	// Outside an Endpoint there is no config to read the knob from, so the
+	// default holds: control tokens are neutralised (controltokens.go).
+	return withNeutraliser(anthropicllm.New(ProviderAnthropic, reqOpts, log), config.NeutraliseAll)
 }

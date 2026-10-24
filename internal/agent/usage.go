@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 )
 
@@ -41,6 +42,40 @@ type Prices map[string]ModelPrice
 func (p Prices) Has(model string) bool {
 	_, ok := p[model]
 	return ok
+}
+
+// qualified returns the table as a role whose price keys may carry quals
+// sees it (design 8.1): a key "<qual>:<model>" prices <model>, and wins over
+// the bare "<model>"; a later qualifier wins over an earlier one
+// (priceQualifiers puts the flavor after the provider, so
+// "groq:<model>" wins over "openai:<model>"). Every key also stays as written,
+// so a Bedrock id or ARN with colons in it prices itself. The table is not
+// changed; nil quals return p itself.
+func (p Prices) qualified(quals []string) Prices {
+	if len(p) == 0 || len(quals) == 0 {
+		return p
+	}
+	out := make(Prices, len(p))
+	for k, v := range p {
+		out[k] = v
+	}
+	for _, q := range quals {
+		prefix := q + ":"
+		for k, v := range p {
+			if m, ok := strings.CutPrefix(k, prefix); ok && m != "" {
+				out[m] = v
+			}
+		}
+	}
+	return out
+}
+
+// PriceFor reports the price of model on a role of provider (and, for
+// openai, flavor), by the provider-qualified lookup of design 8.1:
+// "<flavor>:<model>", then "<provider>:<model>", then "<model>".
+func (p Prices) PriceFor(provider, flavor, model string) (ModelPrice, bool) {
+	mp, ok := p.qualified(priceQualifiers(config.ModelRole{Provider: provider, Flavor: flavor}))[model]
+	return mp, ok
 }
 
 // LoadModelPrices reads the PIPEROOM_MODEL_PRICES file. An empty path means no
@@ -233,7 +268,25 @@ func usagePayloads(model, role string, u llm.Usage, took time.Duration, prices P
 		// The pass runs inside the same request; its time is in the request's.
 		out = append(out, usagePayload(model, events.UsageRoleCompaction, comp, 0, prices))
 	}
+	if u.Estimated {
+		for i := range out {
+			out[i].Estimated = true
+		}
+	}
 	return out
+}
+
+// withProvider sets the provider of usage events from a new provider, so a
+// reader can tell a "groq" price from an "openai" one (design 8.1). Events of
+// the Claude providers stay as before V6 (no provider field: every earlier
+// event came from Claude).
+func withProvider(ps []events.AgentUsagePayload, provider string) []events.AgentUsagePayload {
+	if newProvider(provider) {
+		for i := range ps {
+			ps[i].Provider = provider
+		}
+	}
+	return ps
 }
 
 func usagePayload(model, role string, c callTokens, latencyMS int64, prices Prices) events.AgentUsagePayload {
@@ -293,7 +346,7 @@ func (m *reportingModel) Turn(ctx context.Context, req llm.Request) (llm.Respons
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(req.Model, m.role, resp.Usage, time.Since(start), m.prices) {
+		for _, p := range withProvider(usagePayloads(req.Model, m.role, resp.Usage, time.Since(start), m.prices), m.inner.Provider()) {
 			m.report(ectx, p)
 		}
 	}

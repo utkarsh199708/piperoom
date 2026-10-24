@@ -26,7 +26,7 @@ type HumanInput struct {
 	// uses the time it first read the input, which is never earlier.
 	At        time.Time    `json:"at,omitzero"`
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged" | "pr_merged" | "pr_closed"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -68,6 +68,16 @@ type HumanInput struct {
 	// true when every staged step was healthy, false otherwise. A healthy
 	// stage is evidence, never approval: the agent must not claim the fix
 	// worked in production. (X8)
+	//
+	// Q7: Kinds "pr_merged" and "pr_closed" are sent once per fix PR (a step
+	// of a Deferred action, actions.Deferred), from its pull_request.updated
+	// with state merged or closed. ProposalID and StepIndex identify the
+	// step, At is the merge (or close) time, and Text is the server's
+	// rendering ("PR #12 in connect-config merged at 14:02 (merge 1a2b3c4);
+	// edited after approval: no"). Both wake an idle agent. "pr_closed" is
+	// final for that step: the outcome is events.DeferredNotApplied. After
+	// "pr_merged" the agent waits for the change to reach the system before
+	// it verifies (docs/design/fix-pr.md §8.2). (Q7)
 }
 
 // Inbox delivers human input to the agent between model turns.

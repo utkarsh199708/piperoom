@@ -10,17 +10,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/auth"
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
@@ -67,7 +66,7 @@ type Deps struct {
 	WriteHandoff    agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
 	// off after its fix (F2). Nil gives the events-only draft:
-	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODE=off.
 	WritePostmortem agent.PostmortemWriter
 	// Triage, when set, runs the triage pass (F6) for every room opened in
 	// this process, before its agent waits for a slot; not for shadow rooms
@@ -225,6 +224,14 @@ type Deps struct {
 	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
 	// slack_off and writes nothing.
 	TeamPager TeamPager
+
+	// PullRequests reads the fix PRs the rooms follow (Q7e, pr_follow.go):
+	// the forge's reader. Nil (FORGE_KIND empty) means no follower: an
+	// opened PR stays in pull_requests as open.
+	PullRequests PullRequestReader
+	// PRPollTicker, when set, replaces the follower's ticker, like
+	// LeaseTicker. Nil uses time.NewTicker.
+	PRPollTicker func(d time.Duration) (<-chan time.Time, func())
 }
 
 type roomState struct {
@@ -452,6 +459,17 @@ type Service struct {
 	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
 	credMu      sync.Mutex
 	credPending map[string]pendingCredentials
+
+	// Pull request follower (pr_follow.go; Q7e). prReader is nil with no
+	// forge: then nothing below runs. changeW records a merged PR in the
+	// pipeline change log (nil when the store keeps none). prTickDone, when
+	// set (tests only), runs after each check of the loop.
+	prReader   PullRequestReader
+	prTicker   func(d time.Duration) (<-chan time.Time, func())
+	prOnce     sync.Once
+	prTickDone func()
+	prf        *prFollower
+	changeW    clients.ChangeWriter
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -490,6 +508,7 @@ func New(d Deps) *Service {
 	}
 	shadowStore, _ := d.Store.(store.ShadowStore)
 	changes, _ := d.Store.(clients.ChangeReader)
+	changeW, _ := d.Store.(clients.ChangeWriter)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:           d.Store,
@@ -520,6 +539,10 @@ func New(d Deps) *Service {
 		onActionExec:    d.OnActionExecuted,
 		onActionResult:  d.OnActionResult,
 		teamPager:       d.TeamPager,
+		prReader:        d.PullRequests,
+		prTicker:        d.PRPollTicker,
+		prf:             newPRFollower(),
+		changeW:         changeW,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
@@ -624,6 +647,7 @@ func (s *Service) Load(ctx context.Context) error {
 	s.startCoordination()
 	s.startLeaseExpiry()
 	s.startAutoApprove()
+	s.startPRFollower()
 	return nil
 }
 
@@ -1375,6 +1399,17 @@ func (in *inbox) pushFront(items []agent.HumanInput) {
 	}
 }
 
+// holds reports whether an input of kind for proposalID and step is waiting
+// to be drained.
+func (in *inbox) holds(kind, proposalID string, step *int) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return slices.ContainsFunc(in.items, func(it agent.HumanInput) bool {
+		return it.Kind == kind && it.ProposalID == proposalID &&
+			(it.StepIndex == nil) == (step == nil) && (step == nil || *it.StepIndex == *step)
+	})
+}
+
 // pending returns how many inputs are waiting to be drained.
 func (in *inbox) pending() int {
 	in.mu.Lock()
@@ -1503,7 +1538,10 @@ func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
 // event decides it (emitLocked), as for a steer.
 func startsAgent(snap RoomSnapshot, e events.Event) bool {
 	for _, in := range inputsFor(snap, e) {
-		if in.Kind == "proposal_created" || in.Kind == "proposal_executed" {
+		// Q7: a fix PR that merged or closed wakes an idle agent too: it
+		// verifies after a merge and reports a close (agent.HumanInput).
+		switch in.Kind {
+		case "proposal_created", "proposal_executed", "pr_merged", "pr_closed":
 			return true
 		}
 	}
@@ -1672,6 +1710,10 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Seq: e.Seq, Actor: e.Actor, Kind: "proposal_staged",
 			Text: stagedInputText(p), OK: &healthy, ProposalID: p.ProposalID,
 		}
+	case events.PullRequestUpdated:
+		// Q7: pr_merged or pr_closed, once per fix PR (the follower writes
+		// one event per state, and a merged or closed PR is not followed).
+		return prInput(e)
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -1747,6 +1789,35 @@ func (p proposalCreator) ProposalSteps(ctx context.Context, proposalID string) (
 	return steps, nil
 }
 
+// ProposalOrigin is who wrote a proposal of this run's room,
+// events.ProposalOriginAgent or events.ProposalOriginDriver (the optional
+// agent.ProposalOriginReader): a run rebuilt after a restart or a lease move
+// takes a fix PR's attribution from it, never from whether it remembers the
+// proposal. It answers from the room's snapshot: an open proposal, or the fix
+// PRs its steps opened. Any other id (unknown, another room's, or a proposal
+// that opened no PR and is decided) is a not-found error.
+func (p proposalCreator) ProposalOrigin(ctx context.Context, proposalID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// The published snapshot, read with no lock: the runner never calls the
+	// room under its lock, and this read needs no newer state than that.
+	st := p.s.cached(p.roomID)
+	if st == nil || st.pub.Load() == nil {
+		return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
+	}
+	snap := *st.pub.Load()
+	if op, ok := openProposal(snap, proposalID); ok {
+		return proposalOrigin(op.Origin), nil
+	}
+	for _, pr := range snap.PullRequests {
+		if pr.ProposalID == proposalID && pr.origin != "" {
+			return proposalOrigin(pr.origin), nil
+		}
+	}
+	return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
+}
+
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed
 // agent run is retried with growing backoff so a transient error does not
 // leave the room without an agent forever.
@@ -1782,6 +1853,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentRun++
 	run := st.agentRun
 	openedAt := st.snap.OpenedAt
+	// Q7: a fix PR that merged or closed with no verdict yet is told to
+	// this run again; the run that read it may be gone with its apply wait.
+	s.queuePRReplayLocked(st)
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
@@ -1834,6 +1908,15 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				// up to its deadline, so a slow pass cannot hold the slot.
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
+			}
+			if attempt > 1 {
+				// A retry is a new run with no memory of the last one: the
+				// fix PRs still waiting for a verdict are told to it again.
+				s.lockState(st)
+				if !st.gone && st.agentRun == run {
+					s.queuePRReplayLocked(st)
+				}
+				s.unlockRoom(st)
 			}
 			// X2c: the run ctx carries the room's whole pipeline, so the
 			// agent's recovery Verify calls read in its scope (actions need
@@ -1909,35 +1992,19 @@ func isBudgetStop(err error) bool {
 }
 
 // isUnretryable reports an error a second attempt cannot cure: bad input, a
-// validation failure, a closed room, or a model request the API refused
-// (modelRefused).
+// validation failure, a closed room, or a model request the provider refused
+// (llm.Unretryable: auth, billing, unknown model, bad request, truncated).
+// A too-long prompt is about one run's history and a fresh run starts from one
+// message, so it is retried, as are throttling and network errors.
 func isUnretryable(err error) bool {
 	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
 		return true
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) && modelRefused(apiErr) {
+	if llm.Unretryable(err) {
 		return true
 	}
 	var re *Error
 	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
-}
-
-// modelRefused reports a model error every run repeats: a 4xx (a bad key, an
-// unknown model) other than 408, 409 and 429, which the SDK already retried.
-// A 413, or a 400 saying the prompt is too long, is about one run's history
-// (as internal/agent's triage reads it): a fresh run starts from one message,
-// so it is retried.
-func modelRefused(apiErr *anthropic.Error) bool {
-	switch c := apiErr.StatusCode; {
-	case c < 400 || c >= 500:
-		return false
-	case c == http.StatusRequestTimeout, c == http.StatusConflict, c == http.StatusTooManyRequests, c == http.StatusRequestEntityTooLarge:
-		return false
-	case c == http.StatusBadRequest:
-		return !strings.Contains(strings.ToLower(apiErr.RawJSON()), "too long")
-	}
-	return true
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the

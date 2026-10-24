@@ -12,6 +12,9 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+
+	"piperoom/internal/agent/llm"
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 )
 
 // refusingModel answers every request with status and body, counting them.
@@ -30,6 +33,9 @@ func refusingModel(t *testing.T, status int, body string) (*fakeModel, *atomic.I
 
 const creditBody = `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
 
+// TestAPIRefusal gives today's answers for the API's own errors, classified
+// by the Claude adapter as the agent's model turn sees them (V9: APIRefusal
+// reads llm.APIError kinds, not the SDK's error).
 func TestAPIRefusal(t *testing.T) {
 	mk := func(t *testing.T, code int, body string) error {
 		fake, _ := refusingModel(t, code, body)
@@ -38,7 +44,7 @@ func TestAPIRefusal(t *testing.T) {
 			Model: "m", MaxTokens: 1,
 			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("x"))},
 		})
-		return fmt.Errorf("agent: model turn: %w", err)
+		return fmt.Errorf("agent: model turn: %w", anthropicllm.ClassifyError(llm.ProviderAnthropic, err, nil))
 	}
 	for _, tc := range []struct {
 		name   string
@@ -50,6 +56,11 @@ func TestAPIRefusal(t *testing.T) {
 		{"other 400", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`, false},
 		{"401", 401, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`, true},
 		{"403", 403, `{"type":"error","error":{"type":"permission_error","message":"forbidden"}}`, true},
+		// The adapter calls this 403 model_not_found (for the triage
+		// switch); an evaluation still stops on it, as before V9.
+		{"403 naming the model", 403, `{"type":"error","error":{"type":"permission_error","message":"You do not have access to the model claude-x"}}`, true},
+		{"404 model", 404, `{"type":"error","error":{"type":"not_found_error","message":"model: claude-x"}}`, false},
+		{"too long 400", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`, false},
 		{"429", 429, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`, false},
 		{"500", 500, `{"type":"error","error":{"type":"api_error","message":"oops"}}`, false},
 	} {
@@ -62,6 +73,39 @@ func TestAPIRefusal(t *testing.T) {
 	}
 	if _, ok := APIRefusal(errors.New("connection refused")); ok {
 		t.Error("a plain error is not a refusal")
+	}
+}
+
+// TestAPIRefusalKinds decides on the llm.APIError kind of any provider: auth
+// and billing stop the evaluation, every other kind does not.
+func TestAPIRefusalKinds(t *testing.T) {
+	for _, tc := range []struct {
+		kind   llm.ErrorKind
+		status int
+		refuse bool
+	}{
+		{llm.ErrAuth, 401, true},
+		{llm.ErrAuth, 403, true},
+		{llm.ErrBilling, 429, true}, // OpenAI insufficient_quota
+		{llm.ErrBilling, 402, true},
+		{llm.ErrModelNotFound, 404, false},
+		{llm.ErrModelNotFound, 403, true}, // a 403 is the key's access
+		{llm.ErrBadRequest, 400, false},
+		{llm.ErrTooLong, 400, false},
+		{llm.ErrRateLimited, 429, false},
+		{llm.ErrOverloaded, 529, false},
+		{llm.ErrTruncated, 200, false},
+		{llm.ErrNetwork, 0, false},
+	} {
+		err := fmt.Errorf("agent: model turn: %w", &llm.APIError{Provider: llm.ProviderOpenAI, Status: tc.status, Kind: tc.kind})
+		status, ok := APIRefusal(err)
+		if ok != tc.refuse || status != tc.status {
+			t.Errorf("%s %d: APIRefusal = %d, %v; want %d, %v", tc.kind, tc.status, status, ok, tc.status, tc.refuse)
+		}
+	}
+	// The SDK's own error, unclassified, is no longer read.
+	if _, ok := APIRefusal(&anthropic.Error{StatusCode: 401}); ok {
+		t.Error("an unclassified SDK error is not a refusal")
 	}
 }
 

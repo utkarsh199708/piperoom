@@ -5,9 +5,11 @@
 # generated from fake clients, so regenerate them if a tool's output format changes.
 # kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
-# First failing layer: postgres (the replication slot is gone). Alert fired at: kafka-connect.
-#   Root-cause layer: postgres. The visible failure is the Debezium task; the cause is that
+# First failing layer: kafka-connect (the Debezium task is FAILED; the source still answers every read).
+#   Alert fired at: kafka-connect. Root-cause layer: postgres. The cause is that
 #   debezium_orders does not exist on the new primary (orders-db-2, promoted at 06:58:12Z).
+#   Ruling R1 (tasks/W4-evals-to-100.md, applied in W4n-2, KAN-497): a component that answers every
+#   read is not the first failing one; the task that stopped is, and the lost slot is the root cause.
 #
 # Modelling note: Debezium normally CREATES a missing slot on task start, so silent loss is the common
 #   real path. This scenario models the FAILED-on-reconnect path (the walsender connection drops and
@@ -41,6 +43,16 @@
 #   - PostgreSQL: ERROR: replication slot "x" does not exist (START_REPLICATION on a missing slot).
 #   - PostgreSQL docs, logical replication failover (17+): logical slots are not copied to standbys by default.
 #   - Debezium snapshot.mode=initial: with offsets present no new snapshot is taken.
+#
+# Tool budget (W4l, KAN-496; max_tool_calls 12 -> 13). Measured on passing runs: the two passing runs of
+#   39994729845 used 9 and 11 calls, the third 15 (11 + 4 reads asked again after the comment) and failed
+#   on budget alone; highest passing 11 + 2 = 13. One entry per input turn (the alert, then Priya's
+#   comment), from the 11-call run: turn 0, the alert, 9 calls (connect_status, pg_recent_ddl,
+#   pg_replication_slots, similar_incidents, connect_config, pg_publication_tables, and the offsets,
+#   settings and net_probe reads); turn 1, Priya's comment, 2 calls (the offsets read again,
+#   pg_long_transactions). Step 1 (run 40034874651) took 16 > 13: the agent said two checks on the new
+#   primary kept failing and asked for the offsets and settings reads again (6 misses). Both are
+#   answered now, so those retries should go; the budget stays at the measured 13.
 
 name: replication-slot-lost-failover
 description: |
@@ -132,7 +144,8 @@ recordings:
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
@@ -234,6 +247,52 @@ recordings:
     input: {connector: "pg-orders-connector"}
     summary: |-
       pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  # W4l (KAN-496): answers to reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{nettools,dbtools,logtools}) over this scenario's state on the clock
+  # above; orders-db.internal resolves to the promoted standby (composed address).
+  #
+  # connect_source_offsets and source_settings were left unanswered at first (a stored offset or clean CDC
+  # settings can read as "the resume checks pass"), and run 40034874651 retried both (6 misses, 16 > 13
+  # calls). They are answered now with what the real tools would say, none of which makes a fix look
+  # right: the stored offset is the old primary's last committed LSN (0/5A3B2F8 = 94614264, 06:57:44Z),
+  # ahead of what the async standby had replayed at promotion (it was about 3.8 MB behind), so the new
+  # primary has never seen it and no slot holds it; the settings are the new primary's ordinary ones, which
+  # say nothing about the lost slot or a safe snapshot. The slot list stays empty, the fix stays forbidden
+  # (TestW4lSlotLostRecordsNoFixSupport).
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (orders-db.internal:5432): all checks ok: dns ok, tcp ok, connect_view ok
+      - connect_view ok: Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)
+      - dns orders-db.internal:5432 ok: 10.20.6.32
+      - tcp orders-db.internal:5432 ok: TCP connected
+      - tls orders-db.internal:5432 skip: not configured with TLS
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+  # The agent asked for three days of history (since 2026-10-10T06:40:00Z): the real tool's refusal,
+  # as for the 12:30Z variant recorded above.
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-10T06:40:00Z"}
+    error: "bad tool input: the window is 72h40m0s, at most 6h0m0s"
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=94614264, lsn_proc=94614264, ts_usec=1791874664000000, txId=3318842
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1 MB
+      wal_sender_timeout=60000 ms
 
 inputs:
   - kind: comment
@@ -251,7 +310,8 @@ expect:
        'did not carry the logical slot debezium_orders', 'didn''t carry logical slot debezium_orders',
        'didn''t carry the logical slot debezium_orders']
     - [failover, promot*, standby, 'new primary']
-  first_failing_layer: postgres
+  # R1 (W4n-2): the stopped task fails first; Postgres holds the cause.
+  first_failing_layer: kafka-connect
   root_cause_layer: postgres
   # The failover itself is only in Priya's comment.
   expected_facts:
@@ -274,4 +334,4 @@ expect:
       facts: [f_slot_does_not_exist, f_no_slots]
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
-  max_tool_calls: 12
+  max_tool_calls: 13

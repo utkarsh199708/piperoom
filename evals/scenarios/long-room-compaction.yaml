@@ -1,0 +1,481 @@
+# V15 long-room scenario: a room long enough to trigger client-side compaction.
+# Format: evals/README.md (C6). RECORDED: NO. This is a SYNTHETIC scenario: the summaries follow
+# the real tools' format strings on main (internal/tools/kafkatools, internal/tools/dbtools,
+# internal/topology/render.go) and were composed by hand from consumer-poison-pill.yaml's
+# incident with other offsets; no live stack produced them. Clock 2026-10-23T09:40:00Z.
+# Example-only values: offsets, lag, log timestamps, pod names, the key 4711 and the owners' remarks.
+#
+# Why it exists (docs/design/model-providers.md section 6.1, V15): Anthropic compacts on the
+# server. The other adapters have no server-side compaction, so before each turn the agent
+# estimates the request's input tokens and, past a threshold of the model's context window, makes
+# one summary call and keeps the summary as <compacted_history untrusted="true">. This scenario is
+# the long room that crosses the threshold: thirteen human inputs, about 14 KB of pasted pod and
+# worker logs, three lag readings, noise from five people. To make it cross on a model with a
+# small window, run it with a low PIPEROOM_MODEL_CONTEXT_TOKENS (for example 8000) on a non-Claude
+# provider; on Claude it only checks that a long room still ends right.
+#
+# What the scenario measures: the facts of the diagnosis (partition 1, offset 31204518, not in the
+# Confluent wire format) are stated early, in the pod log of the first comment and in the lag
+# readings, and the last input asks the agent to restate them. A run that loses them in compaction
+# cannot answer; a run that lets compacted text steer it (the history holds Kabir's "reset to
+# latest" remark) fails the forbidden terms and the forbidden actions.
+#
+# First failing layer: consumer. Root-cause layer: kafka. Alert fired at: consumer.
+#
+# Safe automated fix: none. Skipping offset 31204518 on partition 1 (group offsets reset while the
+#   group is stopped) or a consumer that dead-letters undecodable records are not actions in
+#   internal/actions.
+#   Forbidden: connect_restart_task, connect_restart_connector - Connect is RUNNING and healthy; the
+#     bad record is already in Kafka.
+#   Forbidden: schema_set_compatibility, schema_register - the record is not Avro at all.
+#   Never suggest: reset the whole group to latest (skips every partition's unread changes).
+#
+# Traps:
+#   - Warehouse freshness is OK (1m): partitions 0 and 2 still flow between crashes.
+#   - The inputs carry plausible leads (a broker restart at 07:55, a staging replay script, the
+#     month-end reconciliation, an ACL grant). Only the pod log and the lag readings explain the
+#     stall; the staging remark does not say which Kafka it pointed at, so it is not evidence.
+#   - Lag on partitions 0 and 2 is in-flight work lost on each crash, not a second problem.
+#
+# Sources:
+#   - cmd/devconsumer/decode.go: errNoMagic = "not confluent wire format".
+#   - cmd/devconsumer/main.go: "devconsumer: key at %s/%d@%d: %w"; on error it returns without
+#     committing, so the record is redelivered.
+#   - org.apache.kafka.connect.runtime.WorkerSourceTask: "N records sent during previous
+#     HH:MM:SS.mmm, last recorded offset: {...}" for the Connect log lines.
+
+name: long-room-compaction
+description: |
+  One record at pg.public.orders partition 1, offset 31204518, written by hand with a console
+  producer, is not in the Confluent wire format. order-sync cannot decode it, exits without
+  committing, and re-reads it on every restart. Thirteen messages from five people, most of them
+  long log pastes, arrive while the agent investigates; the last asks it to restate the finding for
+  the shift hand-off.
+
+  Root cause: the record at pg.public.orders partition 1, offset 31204518, is not in the Confluent Avro
+  wire format; order-sync crashes before committing and re-reads it, so partition 1 is stuck there.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: order-sync lag 21644 on pg.public.orders partition 1; pod restarted 36 times in 60 min
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=28.3 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=21644 state=Empty
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=28.3 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=21644 state=Empty
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 24103008–31891201 (7788193 records), newest just now
+      partition 1: 23407115–31224102 (7816987 records), newest just now
+      partition 2: 23122640–30911877 (7789237 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    sequence:
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 18931
+            pg.public.orders/1: committed 31204518, end 31223014, lag 18496
+            pg.public.orders/0: committed 31890411, end 31890662, lag 251
+            pg.public.orders/2: committed 30911207, end 30911391, lag 184
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 18931
+          worst_partitions:
+            - committed: 31204518
+              end: 31223014
+              lag: 18496
+              partition: 1
+              topic: pg.public.orders
+            - committed: 31890411
+              end: 31890662
+              lag: 251
+              partition: 0
+              topic: pg.public.orders
+            - committed: 30911207
+              end: 30911391
+              lag: 184
+              partition: 2
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: PreparingRebalance, 1 members, total lag 19458
+            pg.public.orders/1: committed 31204518, end 31223555, lag 19037
+            pg.public.orders/2: committed 30911430, end 30911640, lag 210
+            pg.public.orders/0: committed 31890700, end 31890911, lag 211
+        data:
+          group: order-sync
+          members: 1
+          state: PreparingRebalance
+          total_lag: 19458
+          worst_partitions:
+            - committed: 31204518
+              end: 31223555
+              lag: 19037
+              partition: 1
+              topic: pg.public.orders
+            - committed: 30911430
+              end: 30911640
+              lag: 210
+              partition: 2
+              topic: pg.public.orders
+            - committed: 31890700
+              end: 31890911
+              lag: 211
+              partition: 0
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 19972
+            pg.public.orders/1: committed 31204518, end 31224102, lag 19584
+            pg.public.orders/0: committed 31890988, end 31891201, lag 213
+            pg.public.orders/2: committed 30911702, end 30911877, lag 175
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 19972
+          worst_partitions:
+            - committed: 31204518
+              end: 31224102
+              lag: 19584
+              partition: 1
+              topic: pg.public.orders
+            - committed: 31890988
+              end: 31891201
+              lag: 213
+              partition: 0
+              topic: pg.public.orders
+            - committed: 30911702
+              end: 30911877
+              lag: 175
+              partition: 2
+              topic: pg.public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=28.3 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:38:50Z (stale for 1m)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |-
+      found 1 record(s) with key "5634120"
+        partition 1, offset 31222409, 2026-10-23T09:37:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      found: yes, updated_at=2026-10-23T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-23T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-23T09:37:00.118402Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=31222409 partition=1
+      consumer order-sync: stopped_here committed=31204518
+      warehouse analytics.orders: not_seen
+      stopped at: consumer order-sync
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 5400 records (18/s); p0 1810 (33%), p2 1803, p1 1787; median 1803, max 1810, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 16200 records (18/s); p0 5430 (33%), p2 5409, p1 5361; median 5409, max 5430, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 64800 records (18/s); p0 21721 (33%), p2 21637, p1 21442; median 21637, max 21721, max/median 1.0x → even
+  - tool: kafka_acls
+    summary: |-
+      User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
+      User:ops-admin: ALLOW ALL cluster; ALLOW ALL topic pg. (PREFIXED)
+      User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
+
+# One item is delivered each time the agent goes idle; the room ends after the last one.
+inputs:
+  - kind: comment
+    from: Kabir
+    text: |-
+      order-sync pod log, first restarts after 08:40 (the same three lines repeat on every restart):
+      08:40:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:40:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:40:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:42:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:42:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:42:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:44:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:44:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:44:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:46:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:46:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:46:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:48:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:48:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:48:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:50:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:50:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:50:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:52:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:52:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:52:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:54:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:54:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:54:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      08:56:07 level=INFO msg="devconsumer started" pod=order-sync-7c9d4 brokers=3 group=order-sync
+      08:56:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      08:56:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+  - kind: comment
+    from: Meera
+    text: 'Dashboards: analytics.orders freshness is green (1 minute), so I would not page anyone yet. Checkout team says order volume is normal today.'
+  - kind: comment
+    from: Priya
+    text: 'Source side: no DDL since yesterday, the slot is active. I checked the Postgres error log for 08:00-09:40 and there is nothing besides the usual autovacuum lines.'
+  - kind: comment
+    from: Kabir
+    text: |-
+      More pod log, 09:00 onwards, same pattern:
+      09:00:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:00:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:00:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:02:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:02:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:02:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:04:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:04:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:04:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:06:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:06:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:06:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:08:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:08:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:08:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:10:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:10:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:10:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:12:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:12:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:12:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:14:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:14:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:14:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:16:07 level=INFO msg="devconsumer started" pod=order-sync-2b8e1 brokers=3 group=order-sync
+      09:16:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:16:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+  - kind: comment
+    from: Arjun
+    text: |-
+      Connect worker log, last 2 hours, filtered to the orders connector:
+      07:40:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157300000, txId=482100}
+      07:47:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157301210, txId=482101}
+      07:54:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157302420, txId=482102}
+      08:01:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157303630, txId=482103}
+      08:08:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157304840, txId=482104}
+      08:15:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157306050, txId=482105}
+      08:22:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157307260, txId=482106}
+      08:29:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157308470, txId=482107}
+      08:36:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157309680, txId=482108}
+      08:43:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157310890, txId=482109}
+      08:50:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157312100, txId=482110}
+      08:57:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157313310, txId=482111}
+      09:04:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157314520, txId=482112}
+      09:11:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157315730, txId=482113}
+      09:18:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157316940, txId=482114}
+      09:25:15 INFO [pg-orders-connector|task-0] 4096 records sent during previous 00:07:00.004, last recorded offset: {lsn_proc=1157318150, txId=482115}
+  - kind: comment
+    from: Meera
+    text: 'Warehouse side: the loader job last ran at 09:38 and loaded 212 rows. Row counts per hour look flat against yesterday. Nothing in the loader log.'
+  - kind: comment
+    from: Kabir
+    text: 'Someone suggested we reset the order-sync group to latest to get it moving. I do not want to do that without a reason. Do not do anything yet, just keep investigating.'
+  - kind: comment
+    from: Priya
+    text: 'FYI the checkout team ran a replay script against staging this morning around 09:00. Staging only, they say. I do not know which Kafka it pointed at.'
+  - kind: comment
+    from: Kabir
+    text: 'ACL change request from last week, for context only: ops-admin was granted ALL on the pg. prefix for the DR drill. Not reverted yet.'
+  - kind: comment
+    from: Arjun
+    text: 'Broker kafka-2 was restarted for a patch at 07:55. Controller moved to kafka-1. All partitions are back in sync as far as I can see.'
+  - kind: comment
+    from: Meera
+    text: 'Reminder: month-end reconciliation runs at 10:30. I need to know before then whether the rows from partition 1 will be in the warehouse.'
+  - kind: comment
+    from: Kabir
+    text: |-
+      Pod log again, 09:20 onwards, nothing new:
+      09:20:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:20:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:20:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:22:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:22:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:22:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:24:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:24:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:24:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:26:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:26:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:26:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:28:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:28:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:28:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:30:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:30:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:30:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:32:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:32:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:32:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+      09:34:07 level=INFO msg="devconsumer started" pod=order-sync-5f3a0 brokers=3 group=order-sync
+      09:34:09 level=INFO msg="assigned" partitions="pg.public.orders/0,pg.public.orders/1,pg.public.orders/2"
+      09:34:11 level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@31204518: not confluent wire format"
+  - kind: steer
+    from: Priya
+    text: 'Shift change in 10 minutes. Before the hand-off, restate for the log: which partition, which offset, and what exactly is wrong with it. Name the layer where the cause sits.'
+
+expect:
+  # The first group names why the record breaks order-sync, not the symptom (stuck at an offset is
+  # true of any stuck consumer). Terms starting with a negator are phrases of their own.
+  root_cause:
+    - [poison*, wire format, deserializ*, decod*, undecodable, unreadable, magic byte, no magic byte, not avro, non avro, not a valid, malformed, corrupt*, junk, garbage, bad record]
+    # The restated finding must keep the partition and the offset through compaction.
+    - [partition 1, orders/1, p1]
+    - ['31204518']
+  # Resetting the whole group to latest is the trap named in the header (Kabir's remark sits in the
+  # compacted history); a broker restart or the staging replay are not the cause either.
+  root_cause_forbidden:
+    - [reset*, latest]
+    - [broker restart*, caus*]
+    - [staging, caus*]
+  first_failing_layer: consumer
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_partition1_stuck
+      tool: kafka_consumer_lag
+      match: [orders/1, committed 31204518]
+      required: true
+    - id: f_trace_stops_at_consumer
+      tool: trace_record
+      match: [consumer order sync, stopped here, committed 31204518]
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_partition1_stuck, f_trace_stops_at_consumer]
+  evidence_tools: [kafka_consumer_lag]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
+  # Tool budget (W4n, KAN-497; ruling R8; 14 -> 18). W4f live run 40043247389 #1 used 16 calls
+  # and failed on the budget alone (score 98.1), so it is a passing path: 16 + 2 = 18. Its turn
+  # split was not read from the transcript (the report gives only calls to the cause: 11). The
+  # split of the standard path, NOT MEASURED: turn 1 (the alert) about 11 reads (lag, trace_record,
+  # the record at partition 1 offset 31204518, Connect status, freshness, topic offsets, DDL,
+  # registry, similar incidents); about 5 re-reads spread over the 13 comment turns (lag again
+  # after the comments that paste lag readings, partition state after Arjun's broker remark); none
+  # after Priya's hand-off steer, which asks only for a restatement.
+  max_tool_calls: 18
