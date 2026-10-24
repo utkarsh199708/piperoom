@@ -5,7 +5,6 @@ package quickstart
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,19 +18,14 @@ import (
 	"piperoom/internal/room"
 )
 
-// Env reads and changes the process environment the model adapters read
-// their key from. cmd/server passes the real one; tests a map.
-type Env interface {
-	Lookup(name string) (string, bool)
-	Set(name, value string) error
-	Unset(name string) error
-}
-
 // BuildFunc builds the model endpoint for cfg (its start checks included)
 // without installing it. Exactly one of commit (install it) and discard
 // (release it unused) is called after a nil error. ctx bounds the build only:
-// the endpoint must outlive it. Nothing is installed on error.
-type BuildFunc func(ctx context.Context, cfg config.Config) (commit, discard func(), err error)
+// the endpoint must outlive it. Nothing is installed on error. getenv answers
+// the model key variables (the picker's Keys over the process environment):
+// the endpoint reads every key through it (wiring.WithGetenv), never through
+// os.Getenv, and may keep it for its whole life.
+type BuildFunc func(ctx context.Context, cfg config.Config, getenv func(string) string) (commit, discard func(), err error)
 
 // ModelsOptions configures NewModels.
 type ModelsOptions struct {
@@ -49,8 +43,11 @@ type ModelsOptions struct {
 	// SoloUser may change the model; "" lets no one.
 	SoloUser string
 	Build    BuildFunc
-	Env      Env
-	// Panel builds the panel; Mode, State and Config are filled in.
+	// Env is the real process environment, read only; nil = os.LookupEnv.
+	// The picker's keys are laid over it (NewKeys(Env, Stored) at start).
+	Env Env
+	// Panel builds the panel; Mode, State, Config and Getenv (the keys)
+	// are filled in.
 	Panel httpapi.PanelInput
 	Now   func() time.Time
 }
@@ -63,16 +60,15 @@ type Models struct {
 	// probe (up to the route's 90 s); mu is held only to read or commit the
 	// state below, so a GET never waits behind a PUT.
 	applyMu sync.Mutex
-	// pickerVars are the key variables the picker itself put in the
-	// environment (model.env's at start, then each PUT's). Only these are
-	// removed when a new target no longer reads them: an operator's own
-	// variables are never touched. Guarded by applyMu.
-	pickerVars map[string]bool
 
 	mu     sync.Mutex
 	cfg    config.Config
 	stored ModelEnv
 	ready  bool
+	// keys is the overlay the current endpoint was built on: model.env's key
+	// at start, then each committed PUT's. A PUT builds on a copy and keeps
+	// it only once it is committed.
+	keys Keys
 }
 
 // NewModels returns the picker over o.
@@ -80,12 +76,8 @@ func NewModels(o ModelsOptions) *Models {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	m := &Models{o: o, cfg: o.Config, stored: o.Stored, ready: o.Ready, pickerVars: map[string]bool{}}
-	if o.Stored.KeyVar != "" && o.Stored.Key != "" {
-		// cmd/server put model.env's key in the environment at start.
-		m.pickerVars[o.Stored.KeyVar] = true
-	}
-	return m
+	// cmd/server built the start endpoint on the same overlay.
+	return &Models{o: o, cfg: o.Config, stored: o.Stored, ready: o.Ready, keys: NewKeys(o.Env, o.Stored)}
 }
 
 // Editable is always true: a team server uses a read-only httpapi.Models.
@@ -110,7 +102,7 @@ func (m *Models) Panel() httpapi.ModelPanel {
 
 func (m *Models) panelLocked() httpapi.ModelPanel {
 	in := m.o.Panel
-	in.Mode, in.Config = m.o.Mode, m.cfg
+	in.Mode, in.Config, in.Getenv = m.o.Mode, m.cfg, m.keys.Getenv
 	in.State = httpapi.ModelStateReady
 	if !m.ready {
 		in.State = httpapi.ModelStateNoModel
@@ -145,7 +137,7 @@ func (m *Models) Apply(ctx context.Context, c httpapi.ModelChoice) (httpapi.Mode
 	// Only Apply changes cfg and stored, and applyMu keeps it to one at a
 	// time, so this snapshot stays current until the commit below.
 	m.mu.Lock()
-	cur, stored := m.cfg, m.stored
+	cur, stored, keys := m.cfg, m.stored, m.keys
 	m.mu.Unlock()
 	cand, err := candidate(cur, c)
 	if err != nil {
@@ -193,25 +185,21 @@ func (m *Models) Apply(ctx context.Context, c httpapi.ModelChoice) (httpapi.Mode
 			stored.KeyVar = ""
 		}
 	}
-	restore, pv, err := m.setKey(c.Key, keyVar, usedKeyVars(knobs))
+	// The candidate's keys are a copy: a failed build or write leaves the
+	// current keys as they were, which is the restore.
+	next := nextKeys(keys, c.Key, keyVar, usedKeyVars(knobs))
+	commit, discard, err := m.o.Build(ctx, cand, next.Getenv)
 	if err != nil {
-		return httpapi.ModelPanel{}, err
-	}
-	commit, discard, err := m.o.Build(ctx, cand)
-	if err != nil {
-		restore()
 		return httpapi.ModelPanel{}, validationErr("model: the endpoint did not start: " + scrub(err.Error(), c))
 	}
 	if err := WriteModelEnv(m.o.ProjectDir, stored); err != nil {
 		discard()
-		restore()
 		return httpapi.ModelPanel{}, err
 	}
-	m.pickerVars = pv
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	commit()
-	m.cfg, m.stored, m.ready = cand, stored, true
+	m.cfg, m.stored, m.ready, m.keys = cand, stored, true, next
 	return m.panelLocked(), nil
 }
 
@@ -336,7 +324,9 @@ func (m *Models) roleEnvKey(k config.ModelKnobs) error {
 		if v == "" {
 			continue
 		}
-		if val, ok := m.o.Env.Lookup(v); !ok || strings.TrimSpace(val) == "" {
+		// The operator's environment, past the picker's keys: the picker
+		// never sets a standard variable.
+		if val, ok := lookupEnv(m.o.Env, v); !ok || strings.TrimSpace(val) == "" {
 			continue
 		}
 		return validationErr(r.field + ".base_url: provider " + r.role.Provider + " would send " + v +
@@ -408,70 +398,34 @@ func keyVarOf(r config.ModelRole, k config.ModelKnobs, key string) (string, erro
 	return "", nil
 }
 
-// setKey puts the key in the environment the adapters read and returns how
-// to undo it, and the picker's variables once it is done. A nil key keeps
-// the stored one; an empty key removes the main key variables, so no old key
-// reaches a target that takes none. A variable the picker set earlier that
-// no role of the new target reads (used) is removed too, so a key entered for
-// one provider does not stay behind after a switch.
-func (m *Models) setKey(key *string, keyVar string, used map[string]bool) (func(), map[string]bool, error) {
-	names := []string{config.EnvModelAPIKey, config.EnvModelAPIKeyFile, "ANTHROPIC_API_KEY"}
-	pv := map[string]bool{}
-	for n := range m.pickerVars {
-		pv[n] = true
-		names = append(names, n)
-	}
-	type saved struct {
-		v  string
-		ok bool
-	}
-	before := map[string]saved{}
-	for _, n := range names {
-		v, ok := m.o.Env.Lookup(n)
-		before[n] = saved{v, ok}
-	}
-	restore := func() {
-		for n, s := range before {
-			if s.ok {
-				_ = m.o.Env.Set(n, s.v)
-			} else {
-				_ = m.o.Env.Unset(n)
+// nextKeys is the overlay for a PUT, as a copy of cur. A nil key keeps the
+// stored one; an empty key removes the main key variables (the operator's
+// too, as seen by the adapters), so no old key reaches a target that takes
+// none. A key the picker set that no role of the new target reads (used) is
+// removed too, so a key entered for one provider does not stay behind after
+// a switch; an operator's own variable is never touched.
+func nextKeys(cur Keys, key *string, keyVar string, used map[string]bool) Keys {
+	return cur.with(func(vars map[string]keyEntry) {
+		unset := func(n string) { vars[n] = keyEntry{unset: true} }
+		if key != nil {
+			k := strings.TrimSpace(*key)
+			switch {
+			case k == "" || keyVar == "":
+				unset(config.EnvModelAPIKey)
+				unset(config.EnvModelAPIKeyFile)
+			case keyVar == config.EnvModelAPIKey:
+				unset(config.EnvModelAPIKeyFile)
+				vars[keyVar] = keyEntry{value: netsec.Secret(k)}
+			default:
+				vars[keyVar] = keyEntry{value: netsec.Secret(k)}
 			}
 		}
-	}
-	var err error
-	if key != nil {
-		k := strings.TrimSpace(*key)
-		switch {
-		case k == "" || keyVar == "":
-			// No key for this target: the main key variables go, so an old
-			// key cannot follow the change.
-			for _, n := range []string{config.EnvModelAPIKey, config.EnvModelAPIKeyFile} {
-				err = errors.Join(err, m.o.Env.Unset(n))
-				delete(pv, n)
+		for n, e := range vars {
+			if !e.unset && !used[n] {
+				unset(n)
 			}
-		case keyVar == config.EnvModelAPIKey:
-			err = errors.Join(m.o.Env.Unset(config.EnvModelAPIKeyFile), m.o.Env.Set(keyVar, k))
-			delete(pv, config.EnvModelAPIKeyFile)
-			pv[keyVar] = true
-		default:
-			err = m.o.Env.Set(keyVar, k)
-			pv[keyVar] = true
 		}
-	}
-	for n := range pv {
-		if !used[n] {
-			err = errors.Join(err, m.o.Env.Unset(n))
-			delete(pv, n)
-		}
-	}
-	if err != nil {
-		restore()
-		// errors.Join of setenv errors names variables, never values, but
-		// the message is fixed so nothing can leak.
-		return nil, nil, errors.New("quickstart: set the model key in the environment")
-	}
-	return restore, pv, nil
+	})
 }
 
 // envFields maps a variable named in a config error to the ModelChoice field.
