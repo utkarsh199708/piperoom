@@ -73,6 +73,10 @@ func withReplayChecks(sc Scenario, tr Transcript, res RunResult) RunResult {
 	res.RightAction = judgeRightAction(sc, tr.Events)
 	res.RightFiles = judgeRightFiles(sc, tr.Events)
 	res.ToolCallChecks = checkToolCalls(tr.Events)
+	// The recorded setup session and ladder (U1-20) are part of the scenario's
+	// evidence: a setup scenario whose recording is missing or broken fails
+	// here, and score() returns 0 for it.
+	res.SetupReplay = setupReplay(sc)
 	res.ToolCalls -= res.VerifyCalls
 	res.Score = score(sc, res)
 	res.Failures = failures(sc, res)

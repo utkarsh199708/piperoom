@@ -4,7 +4,7 @@
   "target": "compose",
   "sink": "none",
   "recorded_at": "2026-10-25T09:40:00Z",
-  "note": "Composed from jar_list's listing (internal/setup/ops/envops.go), container_logs' format (internal/setup/targets/compose/logs.go, U5a) over Kafka Connect plugin-scan messages, and compose_restart's argv, on the fixed clock of the setup scenarios. The install is recorded as already done (jar_list sees the plugin directory); no Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c).",
+  "note": "Composed from jar_list's listing (internal/setup/ops/envops.go), container_logs' format (internal/setup/targets/compose/logs.go, U5a) over Kafka Connect plugin-scan messages, and compose_restart's argv, on the fixed clock of the setup scenarios. The install is recorded as already done (jar_list sees the plugin directory); no Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
   "ops": [
     {
       "op": "jar_list",
@@ -34,7 +34,7 @@
           "exit_code": 0,
           "at": "2026-10-25T09:40:07Z",
           "took_ms": 12,
-          "out_mac": "91b3d5f7902a4c6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e"
+          "out_mac": "8aab59c009cb80da763d06b7b79e625c9f307448d5a8a82b35b191c811546b09"
         }
       }
     },
@@ -94,7 +94,7 @@
       "class": "local",
       "proposal_id": "p_setup_1",
       "step_index": 0,
-      "params_hash": "4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d",
+      "params_hash": "55e1f3e3076ef459f54896b49b0c44df3b83fe825dc5321bc93c7e38644eb087",
       "params": {
         "services": [
           "connect"
