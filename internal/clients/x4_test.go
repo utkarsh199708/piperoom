@@ -62,7 +62,8 @@ func TestX4ExternalChangeRoundTrip(t *testing.T) {
 
 func TestX4ChangeKinds(t *testing.T) {
 	kinds := clients.ChangeKinds()
-	want := []string{"ddl", "connector_config", "connector_state", "schema_version", "deploy", "migration", "vendor_incident"}
+	// Q7 appends pull_request: a merged fix PR the agent opened, not external.
+	want := []string{"ddl", "connector_config", "connector_state", "schema_version", "deploy", "migration", "vendor_incident", "pull_request"}
 	if !slices.Equal(kinds, want) {
 		t.Fatalf("ChangeKinds() = %v, want %v", kinds, want)
 	}
@@ -70,8 +71,9 @@ func TestX4ChangeKinds(t *testing.T) {
 	if clients.ChangeKinds()[0] != "ddl" {
 		t.Fatal("ChangeKinds shares its slice")
 	}
+	external := want[4:7]
 	for _, k := range want {
-		if got, ext := clients.IsExternalChange(k), slices.Contains(want[4:], k); got != ext {
+		if got, ext := clients.IsExternalChange(k), slices.Contains(external, k); got != ext {
 			t.Errorf("IsExternalChange(%q) = %v, want %v", k, got, ext)
 		}
 	}

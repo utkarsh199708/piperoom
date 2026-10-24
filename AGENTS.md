@@ -372,6 +372,10 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 5. No global mutable state. Construct things with `New...(deps)` and pass dependencies in.
 6. SQL: parameters with `$1`; identifiers (table/column names from input) only via
    `pgx.Identifier{...}.Sanitize()` after checking they match `^[a-zA-Z_][a-zA-Z0-9_]*$`.
+   MySQL: values as `?` parameters (server-side prepared, `InterpolateParams` off); identifiers only after the same
+   `^[a-zA-Z_][a-zA-Z0-9_]*$` check (at most 64 characters), quoted with backticks (`` `db`.`table` ``); an account
+   host only after `^[A-Za-z0-9_.:%-]{1,255}$`, quoted as `'host'`; a number (a processlist id) only from an `int64`
+   formatted with `strconv`. Never a DSN parameter from configuration passed to the driver.
 7. HTTP clients: one `*http.Client` with a timeout; close bodies; check status codes;
    cap response size (`io.LimitReader`, 4 MB).
 8. Tools return small `Summary` text (≤ `tools.MaxSummaryBytes`, use `tools.Truncate`) and put detail in `Data`.

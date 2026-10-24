@@ -134,7 +134,7 @@ type Client struct {
 	}
 }
 
-var _ ForgeReader = (*Client)(nil)
+var _ clients.ForgeReader = (*Client)(nil)
 
 // New checks cfg and returns a reader. Nothing is dialled here.
 func New(cfg Config) (*Client, error) {

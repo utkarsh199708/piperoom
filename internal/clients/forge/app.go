@@ -195,7 +195,8 @@ func (t *tokens) store(key tokenKey, c cachedToken) {
 // when none is cached or the cached one expires within tokenRefresh. A repo
 // that names its web host (RepoRef.Host, filled from repos[].url) is refused
 // when it is not this forge's: the App's token is never asked for, and no
-// request is sent, for a repository owners.yaml placed on another host.
+// request is sent, for a repository owners.yaml placed on another host. This
+// backs up owners.CheckRepoHosts, which cmd/server runs at start.
 func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secret, error) {
 	if err := c.checkHost(repo); err != nil {
 		return "", err
@@ -244,7 +245,8 @@ func (c *Client) token(ctx context.Context, repo RepoRef, s scope) (netsec.Secre
 }
 
 // checkHost refuses a RepoRef whose Host is set and is not this forge's web
-// host (case-insensitive). owners.Repo.Ref always sets Host from the url.
+// host (case-insensitive); "" skips the check. owners.Repo.Ref always sets
+// Host from the url.
 func (c *Client) checkHost(repo RepoRef) error {
 	if repo.Host != "" && !strings.EqualFold(repo.Host, c.webHost) {
 		return fmt.Errorf("%w: repo %q is on host %q, but the forge is %q", ErrRefused, oneLine(repo.ID, 80), oneLine(repo.Host, 100), c.webHost)

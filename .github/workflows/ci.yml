@@ -74,6 +74,13 @@ jobs:
         run: go test ./...
       - name: eval scenarios (validate only; no model calls, no API key, no network)
         run: go run ./evals/cmd/evalrun -validate
+      - name: "evals: supported-model list (baselines pass the gate, no sunset passed)"
+        # V12, design 5.3 and 5.4. Every row of internal/agent/llm/supported.json
+        # needs its committed 3-run baseline, passing evalrun -gate against the
+        # current reference, and a sunset date not yet passed. -count=1: the
+        # result depends on today's date, which the test cache cannot see.
+        # It is also part of go test ./... above; this step names the failure.
+        run: go test -count=1 -run 'TestSupportedListGate|TestCheckSupportedFixtures|TestEvalsLiveHasEveryProviderKey' ./evals/
       - name: "evals: generated files are current"
         # LEAD-ARCH rule: a PR that changes tool output regenerates the eval
         # files in the same PR. -check lists the stale files and exits 1.
@@ -154,11 +161,25 @@ jobs:
       # the standalone-mongod and no-oplog-role pairs instead of skipping.
       - name: Start the optional MongoDB profile
         run: docker compose -f dev/docker-compose.yml --profile mongo up -d --wait mongo
+      # The MySQL profile (Q8a) and its Debezium connector orders-mysql, so
+      # the internal/clients/mysql integration tests and cmd/discover
+      # TestDiscoverDevStackMySQL run instead of skipping. Every MySQL break
+      # and fix registers orders-mysql when it is missing and waits for its
+      # snapshot; `fix binlog-purged` on a RUNNING connector changes nothing
+      # else (dev/scenarios.md "MySQL source").
+      - name: Start the optional MySQL profile and register orders-mysql
+        run: |
+          docker compose -f dev/docker-compose.yml --profile mysql up -d --wait mysql
+          go run ./cmd/devctl fix --owner ci binlog-purged
       - name: go test -tags integration ./internal/... ./cmd/...
         env:
           PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
           CLICKHOUSE_INTEGRATION_DSN: clickhouse://piperoom_reader:piperoom-clickhouse-reader@127.0.0.1:9001/analytics
           CLICKHOUSE_INTEGRATION_ADMIN_DSN: clickhouse://piperoom_admin:piperoom-clickhouse-admin@127.0.0.1:9001/analytics
+          # The mysql profile's dev users (dev/mysql/README.md; local stack
+          # only). A loopback host, so the client allows TLS off.
+          PIPEROOM_IT_MYSQL_URL: mysql://piperoom:piperoom-dev@127.0.0.1:13306/shop
+          PIPEROOM_IT_MYSQL_WRITE_URL: mysql://piperoom_write:piperoom-dev-write@127.0.0.1:13306/shop
         run: |
           set +e
           go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
@@ -195,7 +216,7 @@ jobs:
         run: .github/scripts/wait-healthy.sh 180
       - name: Dump stack logs
         if: failure()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mssql --profile mongo logs --no-color --tail=300
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mssql --profile mongo --profile mysql logs --no-color --tail=300
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -206,7 +227,7 @@ jobs:
           retention-days: 7
       - name: Tear down
         if: always()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mssql --profile mongo down -v --remove-orphans
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mssql --profile mongo --profile mysql down -v --remove-orphans
 
   # P1c-2: the README's "Quickstart (5 minutes)" path, timed. `make quickstart`
   # runs discover, builds the UI and starts `server --quickstart` against the

@@ -72,7 +72,7 @@ func runJudgeFill(f flags, stdout io.Writer) (int, error) {
 		if provider == agent.ProviderAnthropic && os.Getenv("ANTHROPIC_API_KEY") == "" {
 			return 1, errors.New("ANTHROPIC_API_KEY is not set (-dry-run estimates the fill without it)")
 		}
-		if judge, err = newJudge(f.judgeModel); err != nil {
+		if judge, err = newJudge(f.judgeModel, ""); err != nil {
 			return 1, err
 		}
 		if id, ok := judge.(interface{ JudgeID() string }); ok && id.JudgeID() != "" {

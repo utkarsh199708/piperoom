@@ -139,7 +139,170 @@ var (
 	// ("Connect is healthy"), unless a negator stands just before them
 	// ("Connect is not healthy").
 	exonerators = []string{"healthy", "fine", "unrelated", "unaffected", "working normally", "running normally"}
+	// conjunctionBarriers end a denial's reach, as faultNegatorBarriers end
+	// a fault negator's: the clause they open has its own polarity ("the slot
+	// is not the cause because the connector failed").
+	conjunctionBarriers = []string{"because", "when"}
+	// prepositionBarriers end it only as conjunctions, after a verb in their
+	// sub: "no consumer read them before they were deleted" states the
+	// deletion, while in "no events since the restart were lost" "since" is a
+	// preposition and the denial reaches on (see isBarrier).
+	prepositionBarriers = []string{"since", "after", "before", "until"}
+	// barrierVerbs are the verbs isBarrier sees without a part-of-speech
+	// tagger: auxiliaries, modals and irregular pasts, besides words ending
+	// in -ed. A present-tense verb ("no events reach the warehouse since the
+	// slot was dropped") is not seen, so that "since" stays a preposition.
+	barrierVerbs = []string{"is", "was", "were", "are", "am", "s", "has", "had", "have", "did", "does", "do",
+		"be", "been", "being", "t", "will", "would", "can", "could", "should", "may", "might", "must",
+		"read", "built", "made", "sent", "kept", "found", "run", "ran", "set", "put", "seen", "saw", "done",
+		"got", "went", "came", "took", "fell", "left", "began", "broke", "caught", "reset"}
 )
+
+// isBarrier reports whether toks[b] of c ends the reach of a denial whose
+// negator ends before from: a conjunctionBarrier always; a
+// prepositionBarrier when a verb (see barrierVerb) stands between the
+// negator and it, so it opens a clause rather than a noun phrase ("no
+// changes before the outage were lost"). Unless strict, a verb before the
+// negator also counts when another follows the barrier ("it's not the
+// registry since the connector crashed"), but not when a noun phrase ends
+// the sub ("there are no errors since the connector restart").
+func isBarrier(c clauseToks, from, b int, strict bool) bool {
+	if phraseAt(c.toks, b, conjunctionBarriers) > 0 {
+		return true
+	}
+	if phraseAt(c.toks, b, prepositionBarriers) == 0 {
+		return false
+	}
+	before := false
+	for i := b - 1; i >= 0 && c.sub[i] == c.sub[b]; i-- {
+		if barrierVerb(c.toks, i) {
+			if i >= from {
+				return true
+			}
+			before = true
+		}
+	}
+	if strict || !before {
+		return false
+	}
+	for i := b + 1; i < len(c.toks) && c.sub[i] == c.sub[b]; i++ {
+		if barrierVerb(c.toks, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// barrierVerb reports whether toks[i] is a verb isBarrier sees: one of
+// barrierVerbs ("s" only after a pronoun: "it's", not "Tuesday's"), or a
+// word ending in -ed that no determiner precedes ("no unprocessed records"
+// is a noun phrase, "nobody consumed the topic" a clause).
+func barrierVerb(toks []string, i int) bool {
+	t := toks[i]
+	if t == "s" {
+		return i > 0 && phraseAt(toks, i-1, pronounsBeforeS) > 0
+	}
+	if phraseAt(toks, i, barrierVerbs) > 0 {
+		return true
+	}
+	return len(t) > 3 && strings.HasSuffix(t, "ed") && i > 0 && phraseAt(toks, i-1, determiners) == 0
+}
+
+// pronounsBeforeS are the words whose "'s" is "is" or "has"; determiners
+// start a noun phrase, so an -ed word after one is an adjective.
+var (
+	pronounsBeforeS = []string{"it", "there", "that", "what", "here", "who", "he", "she"}
+	determiners     = []string{"no", "the", "a", "an", "any", "all", "these", "those", "its", "their", "every", "some", "of"}
+)
+
+// Loss words state that data went away. Unlike other root-cause words, a
+// negator a few words back denies them even before a verb: "records were not
+// lost" says nothing was lost, where "cannot read the slot" still names the
+// slot. lossQuantifiers ("nothing was lost", "none of the changes were
+// lost") reach back over the whole sub, as a fault negator does
+// (faultNegated); lossCounters ("zero data loss", "without any data loss")
+// only the lossCounterWindow words before the loss word; lossVerbNegators
+// ("were not lost", "has not yet been deleted") the lossVerbWindow words
+// before it, and only across lossVerbFillers, so "the changes that order-sync
+// never read were deleted" still states the deletion. None reaches past a
+// barrier (isBarrier). "no" is a strong negator already (see denied).
+var (
+	lossWords        = []string{"lost", "loss*", "lose*", "losing", "delet*", "purg*", "expir*", "gone", "skipped", "discard*", "remov*", "dropped", "aged"}
+	lossQuantifiers  = []string{"nothing", "none", "nobody"}
+	lossCounters     = []string{"without", "zero"}
+	lossVerbNegators = []string{"not", "t", "never"}
+	// lossVerbFillers may stand between a lossVerbNegator and its loss word:
+	// "has not yet been deleted", "was never actually lost". Any other word
+	// is the negated verb ("never read", "weren't consumed", "can't
+	// restore") and the loss word after it is affirmed.
+	lossVerbFillers = []string{"be", "been", "being", "yet", "actually", "really", "ever", "even"}
+)
+
+// lossVerbWindow is how many words before a loss word a lossVerbNegator
+// reaches; lossCounterWindow is the same for lossCounters ("zero data
+// loss", "without any data loss", but not "zero-lag consumer still lost").
+const (
+	lossVerbWindow    = 3
+	lossCounterWindow = 3
+)
+
+// onlyFillers reports whether every token of toks[from:to] is a lossVerbFiller.
+func onlyFillers(toks []string, from, to int) bool {
+	for i := from; i < to; i++ {
+		if phraseAt(toks, i, lossVerbFillers) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// lossNegated reports whether the occurrence of term at i holds a loss word
+// that a negator denies (see lossWords).
+func lossNegated(c clauseToks, i int, term string) bool {
+	want, _, ok := termTokens(term)
+	if !ok {
+		return false
+	}
+	for k := i; k < i+len(want) && k < len(c.toks); k++ {
+		if phraseAt(c.toks, k, lossWords) == 0 {
+			continue
+		}
+		prep := -1 // nearest prepositionBarrier between a negator and the loss word
+		for j := k - 1; j >= 0 && c.sub[j] == c.sub[k]; j-- {
+			if phraseAt(c.toks, j, conjunctionBarriers) > 0 {
+				break
+			}
+			if phraseAt(c.toks, j, prepositionBarriers) > 0 {
+				if prep < 0 {
+					prep = j
+				}
+				continue
+			}
+			if j >= i && j < i+len(want) {
+				continue // the term's own words ("can no longer be replayed")
+			}
+			neg := phraseAt(c.toks, j, lossQuantifiers) > 0 || prep >= 0 && c.toks[j] == "no" && !affirmsDoubt(c.toks, j) ||
+				k-j <= lossCounterWindow && phraseAt(c.toks, j, lossCounters) > 0 ||
+				k-j <= lossVerbWindow && phraseAt(c.toks, j, lossVerbNegators) > 0 && !notAllOrOnly(c.toks, j) &&
+					onlyFillers(c.toks, j+1, k)
+			if neg {
+				return prep < 0 || !isBarrier(c, j+1, prep, true)
+			}
+		}
+	}
+	return false
+}
+
+// notAllOrOnly reports whether the negator at j starts "not all", "not
+// only" or "not just": they assert part of what follows ("not all changes
+// were lost").
+func notAllOrOnly(toks []string, j int) bool {
+	if j+1 >= len(toks) || toks[j] != "not" {
+		return false
+	}
+	next := toks[j+1]
+	return next == "all" || next == "only" || next == "just"
+}
 
 // denied marks, per token of c, whether a denial covers it. With layers set,
 // exonerators clear what precedes them in their own sub: "Connect is healthy"
@@ -165,7 +328,7 @@ func denied(c clauseToks, layers bool) []bool {
 			}
 		}
 		if l := forwardDenial(c.toks, j); l > 0 {
-			for i := j + l; i < n && c.sub[i] == c.sub[j]; i++ {
+			for i := j + l; i < n && c.sub[i] == c.sub[j] && !isBarrier(c, j+l, i, false); i++ {
 				neg[i] = true
 			}
 		}
@@ -252,6 +415,12 @@ func matchGroups(groups [][]string, text string) bool {
 // occursUndenied reports whether one of terms occurs in a clause at a
 // position no denial (or, with layers, no exoneration) covers.
 func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
+	return occursUndeniedOutside(cls, terms, nil, layers)
+}
+
+// occursUndeniedOutside is occursUndenied that also skips a term found inside
+// a longer occurrence of one of shadows (see layerShadows).
+func occursUndeniedOutside(cls []clauseToks, terms, shadows []string, layers bool) bool {
 	for _, c := range cls {
 		neg := denied(c, layers)
 		for _, term := range terms {
@@ -260,7 +429,10 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 				if term == "connect" && i+1 < len(c.toks) && c.toks[i+1] == "to" {
 					continue
 				}
-				if !neg[i] {
+				if shadowed(c.toks, i, term, shadows) {
+					continue
+				}
+				if !neg[i] && (layers || !lossNegated(c, i, term)) {
 					return true
 				}
 			}
@@ -277,29 +449,36 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 var layerTerms = map[string][]string{
 	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
 		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal",
-		"postgre sql"}, // tokenize splits "PostgreSQL" into "postgre sql"
+		"postgre sql", // tokenize splits "PostgreSQL" into "postgre sql"
+		// The other setup sources (U4d, U7d, U9d): owners.yaml has no source kind
+		// for them yet, so their source database is graded as this layer.
+		// Whole words only: a topic prefix or pipeline id such as "mongo" or
+		// "orders-mssql" must not name the source layer.
+		"sql server", "sqlserver", "mongodb", "mongo db", "mongod", "oracle"},
 	"kafka-connect":   {"connect", "connector*", "debezium"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
 	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
 	"consumer":        {"consumer*"},
 	"warehouse":       {"warehouse*", "sink table"},
+	// The MySQL source (Q0 item 7, Q8j). tokenize splits "MySQL" into "my sql".
+	"mysql": {"mysql*", "my sql", "binlog*", "binary log*", "gtid*"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its
-// consumer groups name the consumer ("order-sync is stuck"), its topics
-// (topic_prefix.source_table, "pg.public.orders/1") Kafka, its connectors
-// Connect and its sink tables the warehouse.
+// source tables name Postgres ("no SELECT on public.orders", as its sink
+// tables name the warehouse), its consumer groups the consumer ("order-sync
+// is stuck"), its topics (topic_prefix.source_table, "pg.public.orders/1")
+// Kafka, its connectors Connect and its sink tables the warehouse. Grants and
+// privileges are not Postgres words: Kafka ACL stories use them too.
 func layerTermsFor(p owners.Pipeline, layer string) []string {
 	terms := append([]string(nil), layerTerms[layer]...)
 	switch layer {
+	case "postgres":
+		terms = append(terms, p.SourceTables...)
 	case "consumer":
 		terms = append(terms, p.ConsumerGroups...)
 	case "kafka":
-		for _, t := range p.SourceTables {
-			if p.TopicPrefix != "" {
-				terms = append(terms, p.TopicPrefix+"."+t)
-			}
-		}
+		terms = append(terms, topicNames(p)...)
 	case "kafka-connect":
 		terms = append(terms, p.Connectors...)
 	case "warehouse":
@@ -308,10 +487,59 @@ func layerTermsFor(p owners.Pipeline, layer string) []string {
 	return terms
 }
 
+// topicNames are the pipeline's topics, topic_prefix.source_table.
+func topicNames(p owners.Pipeline) []string {
+	if p.TopicPrefix == "" {
+		return nil
+	}
+	var out []string
+	for _, t := range p.SourceTables {
+		out = append(out, p.TopicPrefix+"."+t)
+	}
+	return out
+}
+
+// layerShadows are the longer names a layer's words must not be read from
+// inside: a source table inside its topic ("public.orders" in
+// "pg.public.orders") names Kafka, not Postgres.
+func layerShadows(p owners.Pipeline, layer string) []string {
+	if layer == "postgres" {
+		return topicNames(p)
+	}
+	return nil
+}
+
+// shadowed reports whether term, found at i in toks, lies inside an
+// occurrence of a longer phrase of shadows.
+func shadowed(toks []string, i int, term string, shadows []string) bool {
+	want, _, ok := termTokens(term)
+	if !ok {
+		return false
+	}
+	for _, s := range shadows {
+		st, _, ok := termTokens(s)
+		if !ok || len(st) <= len(want) {
+			continue
+		}
+		for _, k := range findTerm(toks, s) {
+			if k <= i && i+len(want) <= k+len(st) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // namesLayer reports whether text names a layer through one of terms, at a
 // position no denial or exoneration covers.
 func namesLayer(terms []string, text string) bool {
 	return occursUndenied(clausesOf(text), terms, true)
+}
+
+// namesPipelineLayer is namesLayer with the pipeline's names
+// (layerTermsFor) and without the ones inside a longer name (layerShadows).
+func namesPipelineLayer(p owners.Pipeline, layer, text string) bool {
+	return occursUndeniedOutside(clausesOf(text), layerTermsFor(p, layer), layerShadows(p, layer), true)
 }
 
 // healthyTerms say there is nothing to fix.
@@ -378,10 +606,24 @@ func shortDelay(c clauseToks, j int) bool {
 	return k < len(c.toks) && phraseAt(c.toks, k, shortDurations) > 0
 }
 
-// faultNegators make a fault term a non-fault when they sit in the three words
-// before it: "no errors", "not stuck any more", "no longer lagging",
-// "nothing is broken".
+// faultNegators make a fault term a non-fault when they sit before it in its
+// sub: "no errors", "not stuck any more", "no longer lagging", "nothing is
+// broken", and further back too, as a healthy phrase's negators reach its
+// whole sub: "no component is currently failing", "two reads don't prove the
+// restart loop has stopped" (healthy-after-recovery, run 39994729845). A
+// negator after the fault term denies something else: "task 0 is failing with
+// no retries left".
 var faultNegators = []string{"not", "t", "no", "never", "no longer", "nothing", "none", "without", "nobody"}
+
+// faultNegatorBarriers end a negator's reach back across a sub: in "Kafka
+// never got the change because the connector is failing" the fault after
+// "because" is affirmed whatever came before it.
+var faultNegatorBarriers = []string{"because", "since", "after", "when"}
+
+// exampleMarkers before a fault term in its sub make it an example of what to
+// look for, not a fault the agent observed: "check the pod's restart reason,
+// for example running out of memory or a failing health check".
+var exampleMarkers = []string{"for example", "for instance"}
 
 // pastMarkers in a fault's sub make it history, not a current fault: "order-sync
 // was stuck until 09:24", "task 0 failed earlier and was restarted",
@@ -461,12 +703,7 @@ func faultClause(text string) (term, clause string, found bool) {
 			if phraseAt(c.toks, j, faultTerms) == 0 || isLabel(subToks(c, j)) {
 				continue
 			}
-			negated := false
-			for i := max(0, j-3); i < j; i++ {
-				if c.sub[i] == c.sub[j] && phraseAt(c.toks, i, faultNegators) > 0 {
-					negated = true
-				}
-			}
+			negated := faultNegated(c, j)
 			past, alert := false, false
 			for i := range c.toks {
 				if c.sub[i] == c.sub[j] && phraseAt(c.toks, i, pastMarkers) > 0 {
@@ -493,6 +730,24 @@ func faultClause(text string) (term, clause string, found bool) {
 		}
 	}
 	return "", "", false
+}
+
+// faultNegated reports whether a negator or an example marker stands before
+// the fault term at j in its sub, with no barrier between them. "no doubt"
+// and "no question" affirm what follows, they do not negate it.
+func faultNegated(c clauseToks, j int) bool {
+	for i := j - 1; i >= 0 && c.sub[i] == c.sub[j]; i-- {
+		if phraseAt(c.toks, i, faultNegatorBarriers) > 0 {
+			return false
+		}
+		if phraseAt(c.toks, i, exampleMarkers) > 0 {
+			return true
+		}
+		if phraseAt(c.toks, i, faultNegators) > 0 && !affirmsDoubt(c.toks, i) {
+			return true
+		}
+	}
+	return false
 }
 
 // healthyNote explains in a few words how text grades for a healthy verdict,
