@@ -124,10 +124,24 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // meaning-preserving rewordings in rules 1, 2, 3, 5 and 7, the resume,
 // restart and offsets bullets and "Propose one fix at a time" (the PR lists
 // each word).
+// W4g (KAN-506) moved it a fourteenth time, on purpose, for evals run
+// 39994729845 and the W4h branch run 40071650402 (the agent put the root
+// cause in the component that failed on it: the consumer for a bad record
+// on the topic, the registry for a source change it rejected, the source
+// change for a connector setting that skipped the failures): rule 4's first
+// two sentences stay as the W4f ruling has them, and a sentence before the
+// hypothesis form says the root-cause component is where the cause sits,
+// even if only downstream fails; a safeguard refusing as designed is not
+// it, a non-default setting disabling one is. No scenario's setting or
+// value is named. Word-neutral against 1335 by contractions in the intro
+// and rules 1, 3, 6 and 7 and the resume bullet, "You only read and
+// propose fixes", one clause for rule 5's steer and tool cases, and the
+// pause bullet's "cite it" and "name the pause as the incident" (the PR
+// lists each word).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06cdb96bfa0a"
+const cdcPromptSHA256 = "a7afa993d2b1920aa9ed34f8bc94ac1239dd7684c9515723c7ecd6bb27e04876"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -136,8 +150,9 @@ const cdcPromptSHA256 = "68b4b96e4f61fa036feff07b93295878cb1b93e1db1e2239639a06c
 // did Q4b and Q2e, and Q5d (its trims and the offsets bullet), and W4f (rules
 // 4 and 6, word-neutral: still 1335 words), and W4h (rule 7's smallest
 // listed fix, the restart and compatibility bullets and the offsets note,
+// word-neutral: still 1335 words), and W4g (rule 4's root-cause component,
 // word-neutral: still 1335 words).
-const cdcPromptWriteOffSHA256 = "1196270c9a43f6c8ceb8aa9c9126e81185138818b9fa4e6d64f8808275782de0"
+const cdcPromptWriteOffSHA256 = "decd6e946548383d1fee196cbc715b5666e079974d5eee63897e4ea8036dd962"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

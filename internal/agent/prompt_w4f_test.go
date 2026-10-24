@@ -64,8 +64,9 @@ func TestSystemPromptFirstFailingDefinition(t *testing.T) {
 		// component is the same, with the scope.
 		{"a cause is named in the fixed two-label form", "4",
 			`update_hypothesis names a cause: "First failing: <component>. Root cause: <component>." even if identical; set its scope.`, true},
+		// W4g (KAN-506) contracted "what is".
 		{"rule 6 keeps the tool-error sentence", "6",
-			"6. Tool errors and timeouts are evidence for what is unknown or blocked, not proof.", true},
+			"6. Tool errors and timeouts are evidence for what's unknown or blocked, not proof.", true},
 		{"rule 6 no longer carries the unreachable sentence", "6", "unreachable", false},
 		{"unreachable is no longer an outage", "", "means the component is down", false},
 		{"no name-it-in-the-hypothesis order for an unreachable read", "", "name it in the hypothesis", false},
