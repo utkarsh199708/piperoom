@@ -181,6 +181,7 @@ var tierOps = []struct {
 	{"source_drop_table", "postgres", plan.TierT2},
 	{"source_truncate_table", "postgres", plan.TierT2},
 	{"source_drop_slot", "postgres", plan.TierT2},
+	{"pg_drop_replication_slot", "postgres", plan.TierT2},
 	{"source_drop_publication", "postgres", plan.TierT2},
 	{"source_alter_system", "postgres", plan.TierT3},
 	{"connect_delete_connector", "kafka-connect", plan.TierT2},

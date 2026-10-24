@@ -48,7 +48,9 @@ type stack struct {
 	// image's user, "0" = root); it wins over execInFn when both are set.
 	execAsFn         func(ctx context.Context, user, container string, argv ...string) (string, int, error)
 	clickhouseExecFn func(ctx context.Context, query string) error
-	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// llmHTTP replaces the pull client (llm-up) in unit tests.
+	llmHTTP *http.Client
+	groupFn func(ctx context.Context, group string) (groupView, error)
 	// detachFn replaces runDetached (`docker exec -d …`, a session that
 	// outlives devctl) in unit tests.
 	detachFn func(ctx context.Context, name string, args ...string) error
