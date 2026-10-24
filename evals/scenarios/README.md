@@ -609,10 +609,11 @@ regenerate them if a tool's format changes. Decisions a reader should know:
   three runs; the live run on 3fd6b3f listed only order-sync and its agent abstained. Meera's steer says only that the
   two consumers differ, not the cause. Labels did not change. The alert's `pipeline_map` is still the hand-composed
   one without the CH-3 group, engine and view nodes.
-- A budget is set only from a passing run. No `max_tool_calls` changed in W4k: `consumer-rebalance-storm` stays 14
-  (15 only if a live run with misses 0 passes at 15 calls; never 16), `clickhouse-kafka-engine-stalled` stays 12 until a
-  zero-miss run measures it, and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule would
-  give 13 and 12; a row that only records misses does not lower a budget).
+- A budget comes from a passing path. In W4k only `clickhouse-kafka-engine-stalled` changed, 12 to 17: live run
+  40044065663 named the cause and layer and failed on the budget alone at 15 calls, which R8 (#939) counts as a passing
+  path (15 + 2). Its turn split was not measured (see the scenario header). `consumer-rebalance-storm` stays 14 (its
+  live run passed at 14; never 16), and `dead-slot-wal-no-context` and `slot-inactive-wal-growth` keep 14 (the rule
+  would give 13 and 12; a row that only records misses does not lower a budget).
 
 ## Outcome scenarios (E2)
 

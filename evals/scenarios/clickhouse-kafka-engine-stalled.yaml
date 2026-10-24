@@ -49,8 +49,18 @@
 #   reviews/evals-2026-10-23/misses.md): connect_config, reconcile, schema_registry_*, pg_recent_ddl,
 #   connect_worker_logs (the tool's own "not configured" answer, no log lines), kafka_dup_keys,
 #   kafka_throughput and similar_incidents, plus the real tools' not-found answers for names the
-#   scenario does not know. max_tool_calls stays 12: no run of that baseline passed, so no budget can
-#   be measured yet. The first zero-miss live run sets it (highest passing call count + 2).
+#   scenario does not know.
+#
+# Budget (W4k, KAN-495): max_tool_calls 12 -> 17. Live run 40044065663 (after the recordings and the
+#   engine's consumer group above) named the root cause and the layer (both 100%) and failed on the
+#   budget alone: 15 calls against 12. Under R8 (#939) a run that fails only on its budget is a passing
+#   path, so the budget is its call count + 2 = 17. Turn split of that run: NOT MEASURED (its
+#   transcript was not read). The scenario has two input turns, the alert and Meera's steer; the
+#   baseline runs of 39994729845 split 11 + 5, 9 + 4 and 9 + 4 (16, 13, 13 calls), which is the only
+#   split on record. The standard path, not measured: alert turn (freshness, load errors, order-sync lag,
+#   group list, ch_orders_queue lag, topic offsets, connector status, the DDL and registry checks that
+#   rule out a schema cause), steer turn (a re-read or two, the reconcile and the warehouse_row it
+#   points to, throughput or duplicate keys to rule out the topic).
 
 name: clickhouse-kafka-engine-stalled
 description: |
@@ -510,4 +520,5 @@ expect:
       facts: [f_kafka_engine_exception]
   evidence_tools: [warehouse_load_errors, warehouse_freshness]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 12
+  # 15 calls (run 40044065663) + 2, see the header.
+  max_tool_calls: 17

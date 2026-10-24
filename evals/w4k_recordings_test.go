@@ -325,6 +325,27 @@ func TestW4kSteerDoesNotNameTheCause(t *testing.T) {
 	}
 }
 
+// TestW4kKafkaEngineBudget: 15 calls of live run 40044065663, which failed on
+// the budget alone, plus 2 (R8); the header says the turn split was not measured.
+func TestW4kKafkaEngineBudget(t *testing.T) {
+	sc, err := LoadScenario("scenarios/clickhouse-kafka-engine-stalled.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sc.Expect.MaxToolCalls; got != 17 {
+		t.Errorf("max_tool_calls = %d, want 17 (15 + 2)", got)
+	}
+	b, err := os.ReadFile("scenarios/clickhouse-kafka-engine-stalled.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"40044065663", "R8", "NOT MEASURED"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the budget derivation comment lacks %q", want)
+		}
+	}
+}
+
 // TestW4kKafkaEngineGroupIsVisible: the ClickHouse Kafka engine consumes the
 // topic with its own group (ch_orders_queue), so the group listing and
 // kafka_consumer_lag show it, stalled, next to order-sync at lag 0. The live run
