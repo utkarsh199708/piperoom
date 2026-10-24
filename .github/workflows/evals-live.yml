@@ -30,6 +30,13 @@ on:
         description: "Agent turns per episode (caps the cost of a runaway episode)"
         type: string
         default: "25"
+      set:
+        description: "Scenario set: default (evals/scenarios) or heldout (evals/scenarios/heldout: report only, no baseline comparison, never tune prompts on it)"
+        type: choice
+        options:
+          - default
+          - heldout
+        default: default
       judge_fill:
         description: "Refill evals/judgecache verdicts for the dispatched branch (PAID, ~$0.01 per call) and push the cache back to that branch; runs no episodes"
         type: boolean
@@ -101,11 +108,17 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAKE_BASELINE: ${{ inputs.make_baseline }}
+          SET: ${{ github.event_name == 'workflow_dispatch' && inputs.set || 'default' }}
           # Manual runs choose scope; the nightly run uses the full set, 3 runs.
           ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
           RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
           MAX_TURNS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_turns || '25' }}
         run: |
+          case "$SET" in default|heldout) ;; *) echo "::error::set must be default or heldout"; exit 1;; esac
+          if [ "$SET" = "heldout" ] && [ "$MAKE_BASELINE" = "true" ]; then
+            echo "::error::make_baseline is refused with set=heldout: the held-out set has no baseline file and must never get one."
+            exit 1
+          fi
           case "$RUNS" in ''|*[!0-9]*) echo "::error::runs must be a whole number"; exit 1;; esac
           case "$MAX_TURNS" in ''|*[!0-9]*) echo "::error::max_turns must be a whole number"; exit 1;; esac
           # A name may be a path under evals/scenarios (setup/<x>), so "/" is allowed.
@@ -125,9 +138,15 @@ jobs:
           # Episodes run 6 at a time with a 10-minute cap each; one at a time
           # (the evalrun default) cannot finish 75 episodes inside the job limit.
           args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
+          if [ "$SET" = "heldout" ]; then
+            args+=(-set heldout)
+          fi
           if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then
             args+=(-only "$ONLY")
             n_scenarios="$(printf '%s' "$ONLY" | tr ',' '\n' | grep -c .)"
+          elif [ "$SET" = "heldout" ]; then
+            # -set heldout reads evals/scenarios/heldout/*.yaml (fixtures/ is a subdirectory).
+            n_scenarios="$(find evals/scenarios/heldout -maxdepth 1 -name '*.yaml' | wc -l)"
           else
             # evalrun's default set is the top-level *.yaml of evals/scenarios;
             # heldout/ and learned/ are subdirectories and are not run.
@@ -138,7 +157,9 @@ jobs:
           judge_cap=$((2 * n_scenarios * RUNS))
           echo "::notice::${n_scenarios} scenario(s) x ${RUNS} run(s): -judge-max-calls ${judge_cap}"
           args+=(-judge-max-calls "$judge_cap" -transcripts transcripts)
-          if [ "$MAKE_BASELINE" = "true" ]; then
+          if [ "$SET" = "heldout" ]; then
+            echo "::notice::set=heldout: report only; no comparison with evals/baseline/default.json (that is the default set)."
+          elif [ "$MAKE_BASELINE" = "true" ]; then
             echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
           elif [ -f evals/baseline/default.json ]; then
             args+=(-baseline evals/baseline/default.json -fail-on-regression)
@@ -155,18 +176,31 @@ jobs:
           set +e
           "$RUNNER_TEMP/evalrun" "${args[@]}"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
+      # The default set's report. A held-out run uploads its report only as
+      # heldout-<sha> below: the cand and transcripts artifacts are what rows
+      # read to tune scenarios, and nobody tunes on held-out answers (KAN-489).
       - name: Upload report
-        if: steps.key.outputs.run == 'true' && hashFiles('cand.json') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cand
+          path: cand.json
+          retention-days: 14
+      # The held-out reference for the W4j comparison (KAN-510); never committed
+      # as a baseline file. W4j reads results only, so no transcript of a
+      # held-out run is uploaded.
+      - name: Upload held-out report
+        if: steps.key.outputs.run == 'true' && inputs.set == 'heldout' && hashFiles('cand.json') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: heldout-${{ github.sha }}
           path: cand.json
           retention-days: 14
       # Each run's transcript and result (replayed synthetic tool output and the
       # agent's text). The API key is only in the environment of the process and
       # is never part of a transcript.
       - name: Upload transcripts
-        if: steps.key.outputs.run == 'true' && hashFiles('transcripts/**') != ''
+        if: steps.key.outputs.run == 'true' && inputs.set != 'heldout' && hashFiles('transcripts/**') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: transcripts
@@ -184,6 +218,7 @@ jobs:
         env:
           RC: ${{ steps.run.outputs.rc }}
           MAKE_BASELINE: ${{ inputs.make_baseline }}
+          SET: ${{ github.event_name == 'workflow_dispatch' && inputs.set || 'default' }}
         run: |
           if [ "$RC" = "2" ]; then
             echo "::error::A scenario regressed against evals/baseline/default.json (see the comparison above)."
@@ -195,7 +230,9 @@ jobs:
             echo "::error::evalrun failed (exit ${RC:-unknown}) before it could compare."
             exit 1
           fi
-          if [ "$MAKE_BASELINE" = "true" ] || [ ! -f evals/baseline/default.json ]; then
+          # The held-out set is gated on evalrun errors only (above), never on a
+          # comparison with the default set's baseline.
+          if [ "$SET" = "heldout" ] || [ "$MAKE_BASELINE" = "true" ] || [ ! -f evals/baseline/default.json ]; then
             exit 0
           fi
           # Misses (tool calls the scenario had no recording for) growing means
