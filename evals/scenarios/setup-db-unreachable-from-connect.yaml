@@ -76,12 +76,14 @@
 #   running config and keeps the host and port messages of that validation (connectview.go);
 #   Debezium's message for a black-holed host is pgjdbc's "The connection attempt failed.", with
 #   no address, and here the validation does not even finish within the step. So the honest
-#   observable cause is the Connect side's network path to postgres:5432, of which its name
-#   resolution is one reading: the term group accepts either, and the symptom alone ("cannot
-#   reach postgres:5432") still fails. f_server_answers now comes from net_probe's tcp check
-#   (Piperoom opens a TCP connection to postgres:5432), the read the agent used instead of
-#   source_settings, so source_settings is no longer required evidence (W4a: no duplicate
-#   evidence); its recording stays.
+#   observable contrast is Piperoom resolving and reaching postgres:5432 while Connect cannot.
+#   Lead ruling R10 (#939) keeps the cause at the Connect side's name resolution
+#   ([resolv*, dns, hosts, name resolution]; "network path"/"route*" let the judged-wrong
+#   hypotheses of 39994729845 pass) and fails hypotheses that clear DNS or echo net_probe's
+#   "dns ok" line (root_cause_forbidden). Ruling R9 accepts the evidence change:
+#   f_server_answers now comes from net_probe's tcp check (Piperoom opens a TCP connection to
+#   postgres:5432), the read the agent used instead of source_settings, so source_settings is no
+#   longer required evidence (W4a: no duplicate evidence); its recording stays.
 
 name: setup/db-unreachable-from-connect
 description: |
@@ -94,15 +96,15 @@ description: |
   itself is healthy: the room's own source reads answer, wal_level is logical, and the connector's
   config names the right host and port.
 
-  Root cause: the network path from the Connect container to postgres:5432 is broken on the
-  Connect side: its name resolution (a stale /etc/hosts entry) maps postgres to an address that
-  routes nowhere, so the worker's task can never open a TCP connection, while Piperoom's own DNS
-  and TCP checks reach the database. The room's reads show that contrast (net_probe: Connect's
-  view does not finish, Piperoom's dns and tcp pass), not the bad address or the hosts entry: a
-  hypothesis that places the cause in the Connect container's network path to the database, or
-  in its name resolution (DNS or hosts file), states the root cause; neither the address
-  192.0.2.1 nor /etc/hosts is required. Saying only that the task cannot reach postgres:5432 is
-  the symptom, not the cause.
+  Root cause: name resolution inside the Connect container (a stale /etc/hosts entry) maps
+  postgres to an address that routes nowhere, so the worker's task can never open a TCP
+  connection to postgres:5432, while Piperoom's own DNS and TCP checks reach the database. The
+  room's reads show that contrast (net_probe: Connect's view does not finish, Piperoom's dns and
+  tcp pass), not the bad address itself: a hypothesis that places the cause in the Connect
+  container's name resolution (DNS or its hosts file) states the root cause; neither the address
+  192.0.2.1 nor the exact hosts entry is required. Saying only that the task cannot reach
+  postgres:5432, or blaming a broken network path without naming name resolution, is the
+  symptom, not the cause; a hypothesis that calls DNS fine is wrong.
 
   Expected label: failing check connect-source-reachable; fixing op compose_restart
   {services: [connect]}, which regenerates the container's /etc/hosts and starts a JVM with an
@@ -546,12 +548,12 @@ inputs:
 
 expect:
   root_cause:
-    # The Connect side's network path to the database, or its name resolution (W4c fix round):
-    # what net_probe's contrast shows, Piperoom's dns and tcp passing while Connect's view of the
-    # same host does not finish. The real tool cannot show what the worker resolved, so the
-    # address (192.0.2.1) and the hosts entry are not required. No bare symptom word: "reach",
-    # "timeout" and "address" are not terms, so "cannot reach postgres:5432" alone fails.
-    - [resolv*, dns, hosts, network path, route*]
+    # The Connect side's name resolution (lead ruling R10, #939): what net_probe's contrast shows,
+    # Piperoom's dns and tcp passing while Connect's view of the same host does not finish. The
+    # real tool cannot show what the worker resolved, so the address (192.0.2.1) is not required.
+    # No path or symptom word: "network path" and "route*" let the judged-wrong hypotheses of
+    # 39994729845 pass, and "cannot reach postgres:5432" alone is the symptom.
+    - [resolv*, dns, hosts, name resolution]
   # The wrong stories of a task that cannot connect.
   root_cause_forbidden:
     - ['schema change']
@@ -563,6 +565,23 @@ expect:
     - [database, down]
     - [wrong host, bad host]
     - [listen*, localhost]
+    # R10: a hypothesis that clears DNS, or echoes net_probe's "dns postgres:5432 ok" line, meets
+    # the group by the word "dns" alone; these rows fail it. "DNS is fine" needs the phrase: the
+    # matcher reads "is fine" as clearing the word before it, so [dns, fine] cannot fire there.
+    - [dns, ok]
+    - [dns, pass*]
+    - [dns, works]
+    - [dns, succeed*]
+    - [dns, fine]
+    - ['dns is fine']
+    - ['dns is ok']
+    - ['dns is healthy']
+    - ['dns look fine']
+    - ['dns looks fine']
+    - ['hosts file is fine']
+    - ['hosts file looks fine']
+    - ['resolution is fine']
+    - ['resolution works']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:
@@ -600,8 +619,9 @@ expect:
   claims:
     - about: root_cause
       facts: [f_connect_timeout, f_server_answers]
-  # W4c fix round: source_settings leaves (W4a rule: f_server_answers comes from net_probe, so it
-  # would be duplicate evidence; run 3 of 39994729845 and run 1 of 40034120325 never called it).
+  # W4c fix round, ruling R9: source_settings leaves (W4a rule: f_server_answers comes from
+  # net_probe, so it would be duplicate evidence; run 3 of 39994729845 and run 1 of 40034120325
+  # never called it).
   evidence_tools: [connect_status]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
   # Budget (W4c). No run of 39994729845 passed, so it is derived from the expected standard

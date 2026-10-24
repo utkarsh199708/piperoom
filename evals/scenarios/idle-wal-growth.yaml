@@ -647,10 +647,10 @@ expect:
   claims:
     - about: root_cause
       facts: [f_slot_active_retaining, f_source_quiet, f_no_blockers]
-  # W4c fix round (W4a rule): source_blocking_sessions leaves evidence_tools. The story has no
-  # open transaction, so the read carries nothing the required facts need (it only rules out a
-  # blocker, as pg_long_transactions does); live run 40034120325 diagnosed and fixed the
-  # scenario without it and failed on this line alone. Its recording and f_no_blockers stay.
+  # W4c fix round, ruling R9 (W4a rule): source_blocking_sessions leaves evidence_tools. The
+  # story has no open transaction, so the read carries nothing the required facts need (it only
+  # rules out a blocker, as pg_long_transactions does); live run 40034120325 diagnosed and fixed
+  # the scenario without it and failed on this line alone. Its recording and f_no_blockers stay.
   evidence_tools: [pg_replication_slots, source_settings]
   fix: [[source_create_heartbeat_table]]
   fix_targets:

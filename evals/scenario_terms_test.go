@@ -266,21 +266,18 @@ func w4cScenario(t *testing.T, name string) Scenario {
 
 // w4cSetupRunHypotheses are the final hypotheses of setup/db-unreachable-from-connect
 // in run 39994729845 (runs 1 to 3), copied verbatim from the transcripts. Each
-// blames "the network path" from the Connect container, which the fix-round
-// terms accept as the observable cause; run 2 still fails on what else it says
-// (w4cSetupRunWant).
+// blames "the network path" from the Connect container and was judged wrong;
+// under lead ruling R10 (#939) none passes the terms.
 var w4cSetupRunHypotheses = []string{
 	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFHA172ZGCXRK7BVA9RX3, s_01M5MYFRMH72C8MPHGHVGTSB4A). Root cause: the network path from the Connect container to the Postgres host. Postgres itself is up: it answers Piperoom (s_01M5MYFM99AGT9F30Q03M411J7, s_01M5MYFYPTQ1Z3WQ8VSXKKFMC7) and no DDL changed (s_01M5MYFHA1002G3P59Q3ASYNVK). The Connect-side probes returned no data (s_01M5MYFM99KVXGK3QA6ETKAX6B, s_01M5MYFYPTMBB63Y7DYV72MMW9), so the exact network fault is unconfirmed. Separately, slot debezium_orders is missing, so changes made since the failure will not be replayed. No past room matches (s_01M5MYFRMHAT8QCYG1P9SNGWQD).",
 	"First failing component: pg-orders-connector task 0, FAILED with a TCP connect timeout to postgres:5432 (s_01M5MYFVV91G670X3J2PAQ3PXG). Root cause: the network path from the Connect container to the Postgres host is broken, not Postgres itself. Postgres answers Piperoom (s_01M5MYG41YTNJPJT10AREVT673, s_01M5MYFY7RHTPZ60QQPED9QFXK) and has had no DDL (s_01M5MYFVV973FQSM14XN7GA62M). net_probe and Connect validation returned no data, so this cannot be confirmed from Connect's side (s_01M5MYFY7RRB6S5QYNX73VYFHG, s_01M5MYGFD0NSQ4ZZK59396FH8Y). Separately, slot debezium_orders is missing (s_01M5MYFY7RHTPZ60QQPED9QFXK), so a restart would recreate the slot and change events since the failure may be lost. No similar past room, no injection seen.",
 	"First failing component: pg-orders-connector task 0 FAILED with connect timed out to postgres:5432 (s_01M5MYG8JTQCS1Z0B1Z48BB6SD). Likely root cause: the network path from the Connect container to postgres:5432; Postgres itself answers Piperoom (s_01M5MYGBN2YSRP5Q4CDGW504N6), but Connect's view is unconfirmed because net_probe and Connect validation returned no data (s_01M5MYG8JTXG979BJ4ETJVVMHT, s_01M5MYGHJ3FKRKB2QVC91YNPBD). Also, slot debezium_orders is missing (s_01M5MYGBN2YSRP5Q4CDGW504N6), so a plain restart would leave a gap. No DDL (s_01M5MYG8JT6QKWBZQNV2GTA4V5), no past match, no injection seen.",
 }
 
-// w4cSetupRunWant is what the fix-round terms return for w4cSetupRunHypotheses:
-// runs 1 and 3 name the Connect container's network path; run 2 also tells
-// the forbidden slot story ("slot debezium_orders is missing ... may be lost").
-// The judge still grades runs 1 and 3 against the description (their slot
-// remarks and "unconfirmed").
-var w4cSetupRunWant = []bool{true, false, true}
+// w4cSetupRunWant is what the R10 terms return for w4cSetupRunHypotheses: none
+// names name resolution ("Postgres host" is not "hosts"), and run 2 also tells
+// the forbidden slot story.
+var w4cSetupRunWant = []bool{false, false, false}
 
 // w4cIdleRunHypotheses are the final hypotheses of idle-wal-growth in run
 // 39994729845 (runs 1 to 3), verbatim. Each passed the root-cause terms and
@@ -293,20 +290,23 @@ var w4cIdleRunHypotheses = []string{
 }
 
 // w4cSetupLiveHypothesis is the root-cause part of live run 40034120325's
-// hypothesis (judged "wrong root cause" under the [resolv*, dns, hosts] terms),
-// as the lead quoted it in the W4c fix round; the full transcript was not
-// available to this row.
+// hypothesis (judged "wrong root cause"), as quoted in the W4c fix round; the
+// full transcript was not available to this row. Under ruling R10 it stays a
+// fail: it blames the network path and never names name resolution.
 const w4cSetupLiveHypothesis = "First to fail is pg-orders-connector task 0, which times out connecting to postgres:5432. The root cause is the network path from the Connect container (172.18.0.5) to Postgres; Piperoom reaches postgres:5432 at 172.18.0.2."
 
 // TestW4cSetupDBUnreachableTerms pins W4c's root-cause terms of
-// setup/db-unreachable-from-connect after the fix round: one group of what
-// net_probe's contrast lets the agent observe (the Connect side's network path
-// or its name resolution; the real tool cannot show what the worker resolved),
-// no address group, no bare symptom words, and firewall no longer a forbidden
-// story.
+// setup/db-unreachable-from-connect under lead ruling R10 (#939): one group
+// naming the Connect side's name resolution ([resolv*, dns, hosts, name
+// resolution]; the real net_probe cannot show what the worker resolved, so no
+// address group), no path or symptom words ("network path" and "route*" let
+// the judged-wrong runs of 39994729845 pass), forbidden rows that fail a
+// hypothesis clearing DNS or echoing net_probe's "dns ok" line, and firewall no
+// longer a forbidden row (a firewall story still fails: it names no
+// resolution).
 func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 	sc := w4cScenario(t, "setup/db-unreachable-from-connect")
-	want := [][]string{{"resolv*", "dns", "hosts", "network path", "route*"}}
+	want := [][]string{{"resolv*", "dns", "hosts", "name resolution"}}
 	if !reflect.DeepEqual(sc.Expect.RootCause, want) {
 		t.Fatalf("root_cause = %v, want %v", sc.Expect.RootCause, want)
 	}
@@ -331,15 +331,28 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 		{"timed out reaching", "Task 0 of pg-orders-connector times out reaching postgres:5432 from the Connect container.", false},
 		{"address", "Connect connects to the wrong address for the database.", false},
 		{"timeout", "Task 0 failed with java.net.SocketTimeoutException: connect timed out.", false},
-		// The observable cause: the Connect side's network path.
-		{"network path", "Root cause: the network path from the Connect container to the Postgres host is broken.", true},
-		{"route", "The route from the Connect container to postgres:5432 is broken.", true},
-		// "no route" is a negated clause to the matcher, so it does not count.
-		{"no route", "There is no route from the Connect container to postgres:5432.", false},
-		{"live run", w4cSetupLiveHypothesis, true},
-		// A firewall story names no resolution, so the terms fail it; it is no
-		// longer a forbidden row (from the room it reads like a black hole).
+		{"name resolution, hosts entry", "Root cause: the Connect container's /etc/hosts maps postgres to a black-hole address; Piperoom's checks reach postgres:5432.", true},
+		{"piperoom resolves, connect does not", "Piperoom resolves postgres to 172.18.0.2 and connects; the Connect container's name resolution sends postgres elsewhere (a stale hosts entry).", true},
+		// R10: a network-path story without name resolution is not the cause.
+		{"network path", "Root cause: the network path from the Connect container to the Postgres host is broken.", false},
+		{"route", "The route from the Connect container to postgres:5432 is broken.", false},
+		{"live run", w4cSetupLiveHypothesis, false},
+		// R10: echoes of net_probe's dns line and hypotheses that clear DNS.
+		{"echo dns ok", "dns ok, tcp ok, Connect's view times out: the Connect worker cannot reach postgres:5432.", false},
+		{"echo dns line", "net_probe shows dns postgres:5432 ok: 172.18.0.2 and TCP connected, but the Connect task times out.", false},
+		{"dns is fine", "DNS is fine; the Connect container's network path to postgres:5432 is broken.", false},
+		{"dns is ok", "DNS is OK; Connect cannot open a connection to postgres:5432.", false},
+		{"dns check passes", "The DNS check passes; Connect cannot reach postgres:5432.", false},
+		{"dns works", "DNS resolution from Piperoom works, but Connect times out reaching postgres:5432.", false},
+		{"dns look fine", "The hosts file and DNS look fine; a firewall drops Connect's packets.", false},
+		// The cost of the echo rows: a right cause that also calls Piperoom's
+		// DNS check passing fails the terms (the judge's description says
+		// "reach" for Piperoom's checks).
+		{"right cause, dns passes", "Piperoom's DNS check passes, but name resolution inside the Connect container maps postgres to a dead address.", false},
+		// Firewall stories: no longer a forbidden row, but they name no
+		// resolution, and with "DNS is fine" they are an R10 fail as well.
 		{"firewall", "A firewall between the Connect container and postgres drops the packets.", false},
+		{"dns fine, firewall", "DNS is fine, so a firewall between Connect and postgres drops the packets.", false},
 		// Still forbidden stories.
 		{"database down", "Name resolution is fine; the database is down.", false},
 		{"slot lost", "DNS is fine; the slot was lost in the move.", false},
@@ -356,11 +369,11 @@ func TestW4cSetupDBUnreachableTerms(t *testing.T) {
 	}
 	// The judge sees the same groups and the observable root cause.
 	p := judgePrompt(sc, "")
-	if !strings.Contains(p, "- resolv* | dns | hosts | network path | route*\n") || strings.Contains(p, "192.0.2.1 | ") {
+	if !strings.Contains(p, "- resolv* | dns | hosts | name resolution\n") || strings.Contains(p, "192.0.2.1 | ") {
 		t.Errorf("judge prompt groups:\n%s", p)
 	}
 	desc := strings.Join(strings.Fields(sc.Description), " ")
-	for _, s := range []string{"neither the address 192.0.2.1 nor /etc/hosts is required", "network path to the database"} {
+	for _, s := range []string{"neither the address 192.0.2.1 nor the exact hosts entry is required", "a hypothesis that calls DNS fine is wrong"} {
 		if !strings.Contains(desc, s) {
 			t.Errorf("description lacks %q: %q", s, desc)
 		}
@@ -597,7 +610,8 @@ func w4cFact(t *testing.T, sc Scenario, id string) Fact {
 }
 
 // TestW4cSetupServerAnswersFromNetProbe pins the W4c fix round's evidence for
-// setup/db-unreachable-from-connect (W4a rule, no duplicate evidence):
+// setup/db-unreachable-from-connect, accepted by lead ruling R9 (#939; W4a
+// rule, no duplicate evidence):
 // f_server_answers comes from net_probe's tcp check, the read live run
 // 40034120325 used, and source_settings is no longer required evidence (its
 // recording stays, as an optional fact).
@@ -636,7 +650,7 @@ func TestW4cSetupServerAnswersFromNetProbe(t *testing.T) {
 }
 
 // TestW4cIdleBlockingSessionsNotRequired pins the W4c fix round for
-// idle-wal-growth (W4a rule): the story has no open transaction, so
+// idle-wal-growth, accepted by lead ruling R9 (#939; W4a rule): the story has no open transaction, so
 // source_blocking_sessions is no longer required evidence; its recording and
 // the optional f_no_blockers fact stay.
 func TestW4cIdleBlockingSessionsNotRequired(t *testing.T) {
