@@ -297,9 +297,12 @@ func TestStackRefusesSymlinkBind(t *testing.T) {
 			}
 			_ = os.RemoveAll(filepath.Join(dir, tc.link))
 			if err := os.Symlink("/etc", filepath.Join(dir, tc.link)); err != nil {
-				// A Windows user without SeCreateSymbolicLinkPrivilege
-				// (no Developer Mode) cannot create one.
-				t.Skipf("symlinks unavailable: %v", err)
+				if runtime.GOOS == "windows" {
+					// A Windows user without SeCreateSymbolicLinkPrivilege
+					// (no Developer Mode) cannot create one.
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				t.Fatalf("create symlink: %v", err)
 			}
 			if _, err := runOp(t, reg, "compose_up", map[string]any{}); !errors.Is(err, ErrStack) || RuleOf(err) != RuleMount {
 				t.Fatalf("compose_up with a symlinked bind = %v, want ErrStack and the mount rule", err)
