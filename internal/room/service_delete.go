@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -323,8 +324,14 @@ func (s *Service) archiveRoom(ctx context.Context, roomID string) (int64, error)
 	return ex.upTo, nil
 }
 
-// syncDir fsyncs a directory inside root.
+// syncDir fsyncs a directory inside root. Windows has no directory fsync:
+// FlushFileBuffers on a directory handle opened for reading fails with
+// "Access is denied", and NTFS journals the rename itself, so it is a no-op
+// there.
 func syncDir(root *os.Root, dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	d, err := root.Open(dir)
 	if err != nil {
 		return err
