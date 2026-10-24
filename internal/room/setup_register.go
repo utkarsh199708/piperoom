@@ -312,10 +312,14 @@ func registerOverlapMessage(ovs []owners.Overlap, pipes []owners.Pipeline, forei
 // fallback grant does not count for the overlap rule. With no overlapping
 // pipeline the rule holds.
 //
-// The approver's groups come from users.yaml (Users.Get): approval.given
-// records only the actor, so a group principal an IdP session supplied
-// cannot be matched from the log (contract change request in the PR). A
-// group-owned overlap then fails closed: the Execute re-check refuses it.
+// The approver's groups are the users.yaml groups (Users.Get) plus the group
+// principal the approval itself was granted under: approval.given's
+// identity.grant is the principal the approval route matched ("group:<name>"
+// or "backup:group:<name>" when a group right gave it), which the server
+// derived from the session's groups at approval time (appendApprovalLocked).
+// So an approval an IdP group gave is matched from the log alone, with no
+// contract change; an approver the server cannot place in any owning
+// principal still fails closed.
 func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, pipes []owners.Pipeline) bool {
 	if len(pipes) == 0 {
 		return true
@@ -324,24 +328,27 @@ func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, p
 	if !ok || len(prop.approvalActors) == 0 {
 		return false
 	}
-	groupsOf := func(id string) []string {
-		if s.users == nil {
-			return nil
+	groupsOf := func(layer, id string) []string {
+		var groups []string
+		if s.users != nil {
+			if u, ok := s.users.Get(id); ok {
+				groups = append(groups, u.Groups...)
+			}
 		}
-		u, ok := s.users.Get(id)
-		if !ok {
-			return nil
+		if g, ok := grantGroup(prop.approvalGrants[layer]); ok {
+			groups = append(groups, g)
 		}
-		return u.Groups
+		return groups
 	}
 	for _, p := range pipes {
 		covered := false
-		for _, actor := range prop.approvalActors {
+		for layer, actor := range prop.approvalActors {
 			if actor.Kind != events.ActorHuman {
 				continue
 			}
-			for _, layer := range owners.KnownLayers() {
-				if _, ok := s.ownersNow().CanApprove(p.ID, layer, actor.ID, groupsOf(actor.ID)); ok {
+			groups := groupsOf(layer, actor.ID)
+			for _, l := range owners.KnownLayers() {
+				if _, ok := s.ownersNow().CanApprove(p.ID, l, actor.ID, groups); ok {
 					covered = true
 					break
 				}
@@ -355,6 +362,80 @@ func (s *Service) registerApprovalsHold(snap *RoomSnapshot, proposalID string, p
 		}
 	}
 	return true
+}
+
+// grantGroup returns the group of a group principal detail ("group:<name>"
+// or "backup:group:<name>", as owners.CanApprove reports them); false for
+// every other detail (a user principal, admin, fallback, solo, policy).
+func grantGroup(detail string) (string, bool) {
+	detail = strings.TrimPrefix(detail, owners.GrantBackupPrefix)
+	if name, ok := strings.CutPrefix(detail, owners.KindGroup+":"); ok && name != "" {
+		return name, true
+	}
+	return "", false
+}
+
+// registerPreconditions are the server-side conditions a registration needs
+// beyond the ladder gate and the overlap rule, checked at Create (so the
+// proposal is refused with the reason) and again before Execute writes
+// anything:
+//
+//   - the pipeline id is not in the owners set already (409 pipeline_exists:
+//     someone added it by hand since the room opened);
+//   - without repos:, this server has an OWNERS_DIR and an owners reload
+//     (Deps.ReloadOwners); with repos:, a forge (Deps.SetupForge). Checked
+//     before the write: a file written and then not reloaded would refuse
+//     the next attempt as "already exists";
+//   - a pipeline this server will watch has read credentials registered for
+//     at least one connection key: an entry with no connections: block makes
+//     the server read the pipeline with its own process-wide settings
+//     (owners.Pipeline.HasConnections), which design §3.7 rules out — the
+//     person's click registers the credentials, and nothing is registered
+//     without it. A local target is watched by the standalone server and
+//     needs none here.
+//
+// The configuration refusals are 400 validation: the setup API has no code
+// for a server that cannot register, and the message names what is missing.
+func (s *Service) registerPreconditions(snap *RoomSnapshot) error {
+	if snap == nil || snap.Setup == nil {
+		return notSetupRoom()
+	}
+	if o := s.ownersNow(); o != nil {
+		if _, ok := o.Pipeline(snap.PipelineID); ok {
+			return pipelineExists(snap.PipelineID)
+		}
+	}
+	if len(snap.Setup.req.Repos) > 0 {
+		if s.setupForge == nil || s.setupForge.PR == nil {
+			return validation("pipeline_register cannot open the registration pull request on this server: repos: is set but no forge is configured")
+		}
+	} else {
+		if strings.TrimSpace(s.setupCfg.OwnersDir) == "" {
+			return validation("pipeline_register cannot write the owners entry on this server: OWNERS_DIR is not configured (a standalone server writes next to the project)")
+		}
+		if s.reloadOwners == nil {
+			return validation("pipeline_register cannot register on this server: it has no owners reload wired (the owners set would not see the new pipeline)")
+		}
+	}
+	watchedBy, err := s.registerWatchedBy(snap.Setup)
+	if err != nil {
+		return err
+	}
+	if watchedBy != events.WatchedByServer {
+		return nil
+	}
+	prov, ok := snap.SetupProvisional()
+	if !ok {
+		return notSetupRoom()
+	}
+	conns, err := s.registerConnections(snap.Setup, prov)
+	if err != nil {
+		return err
+	}
+	if len(conns) == 0 {
+		return validation("pipeline_register needs the pipeline's read credentials registered with this server first (Register read credentials: POST /api/rooms/{id}/setup/credentials); a pipeline this server watches never reads the server's own connection settings")
+	}
+	return nil
 }
 
 // executeRegister is the registration's Execute. The room id, proposal id and
@@ -382,6 +463,13 @@ func (s *Service) executeRegister(ctx context.Context, params json.RawMessage) (
 	if err := setupRegisterGate(snap); err != nil {
 		return "", events.PullRequestRef{}, err
 	}
+	// The server-side preconditions again (Create checked them too): a
+	// pipeline the owners set gained meanwhile, a server that cannot reload
+	// or has no forge, or a server-watched pipeline with no registered
+	// credentials refuses here, before anything is written.
+	if err := s.registerPreconditions(snap); err != nil {
+		return "", events.PullRequestRef{}, err
+	}
 	ovs, pipes, foreign := s.registerOverlapsOf(snap)
 	if len(ovs) > 0 && !s.registerApprovalsHold(snap, step.ProposalID, pipes) {
 		return "", events.PullRequestRef{}, registerOverlap(registerOverlapMessage(ovs, pipes, foreign))
@@ -394,30 +482,9 @@ func (s *Service) executeRegister(ctx context.Context, params json.RawMessage) (
 	if len(snap.Setup.req.Repos) > 0 {
 		return s.executeRegisterPR(sctx, snap, step, entry, watchedBy)
 	}
-	path, err := s.writeRegisterFile(sctx, snap, entry)
+	path, err := s.registerFile(sctx, snap, entry)
 	if err != nil {
 		return "", events.PullRequestRef{}, err
-	}
-	if err := s.reloadAfterRegister(sctx); err != nil {
-		return "", events.PullRequestRef{}, err
-	}
-	// The reload is the entry's validation: LoadDir skips a per-pipeline file
-	// that does not load (parse, shape or validation — the reason is logged
-	// and recorded in DirSkips) and keeps the rest. A skipped entry is then
-	// removed here and the step fails, so a registration never records a
-	// pipeline the server did not load. owners.Load cannot be this check: a
-	// per-pipeline file must not carry the tenants: block its tenant: key
-	// needs (loadDir).
-	if _, ok := s.ownersNow().Pipeline(snap.PipelineID); !ok {
-		reason := "the owners config does not validate with it"
-		for _, skip := range s.ownersNow().DirSkips() {
-			if skip.File == path {
-				reason = skip.Reason
-				break
-			}
-		}
-		_ = os.Remove(path)
-		return "", events.PullRequestRef{}, fmt.Errorf("room: %s: the written entry was not loaded: %s (the file was removed)", registerActionName, reason)
 	}
 	payload := events.PipelineRegisteredPayload{
 		PipelineID: snap.PipelineID, Tenant: snap.SetupTenant(), Path: path, WatchedBy: watchedBy,
@@ -551,12 +618,54 @@ func (s *Service) appendRegistered(ctx context.Context, roomID, proposalID strin
 	return s.emitLocked(ctx, st, roomID, events.PipelineRegistered, systemActor, payload)
 }
 
+// registerFile is the OWNERS_DIR path of a registration: the entry is written
+// (writeRegisterFile), the owners set reloads (reloadAfterRegister), and the
+// reloaded set is checked for the pipeline. The write and the reload are one
+// step: when the reload fails, or skips the file, the file is removed again,
+// so a failed registration leaves no entry behind and the next attempt is not
+// refused as "already exists". The reload is the entry's validation: LoadDir
+// skips a per-pipeline file that does not load (parse, shape or validation;
+// the reason is logged and recorded in DirSkips) and keeps the rest, so a
+// registration never records a pipeline the server did not load. owners.Load
+// cannot be this check: a per-pipeline file must not carry the tenants: block
+// its tenant: key needs (loadDir). The skip check comes first: a pipeline the
+// main file gained meanwhile would make the id "loaded" while this file was
+// skipped.
+func (s *Service) registerFile(ctx context.Context, snap *RoomSnapshot, entry []byte) (string, error) {
+	path, err := s.writeRegisterFile(ctx, snap, entry)
+	if err != nil {
+		return "", err
+	}
+	if err := s.reloadAfterRegister(ctx); err != nil {
+		s.removeRegisterFile(path)
+		return "", fmt.Errorf("%w (the written entry was removed again)", err)
+	}
+	o := s.ownersNow()
+	for _, skip := range o.DirSkips() {
+		if filepath.Clean(skip.File) == filepath.Clean(path) {
+			s.removeRegisterFile(path)
+			return "", fmt.Errorf("room: %s: the written entry was not loaded: %s (the file was removed)", registerActionName, skip.Reason)
+		}
+	}
+	if _, ok := o.Pipeline(snap.PipelineID); !ok {
+		s.removeRegisterFile(path)
+		return "", fmt.Errorf("room: %s: the written entry was not loaded: the reloaded owners config does not list the pipeline (the file was removed)", registerActionName)
+	}
+	return path, nil
+}
+
+// removeRegisterFile removes the entry a failed registration wrote. A failure
+// to remove is logged, never hidden: the file would refuse the next attempt.
+func (s *Service) removeRegisterFile(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.log.Warn("room: remove the owners entry of a failed registration", "path", path, "err", err)
+	}
+}
+
 // reloadAfterRegister reloads the owners set after the registration file
 // landed and tells the watcher (Deps.OnOwnersReloaded; cmd/server rebuilds
-// the watcher, whose next tick then lists the new pipeline). A reload that
-// errors is reported with the file left in place for the operator; a file
-// the reload SKIPS (LoadDir logs the reason) is removed by executeRegister,
-// which checks the reloaded set for the pipeline.
+// the watcher, whose next tick then lists the new pipeline). The caller
+// (registerFile) removes the file when the reload errors or skips it.
 func (s *Service) reloadAfterRegister(ctx context.Context) error {
 	if s.reloadOwners == nil {
 		return fmt.Errorf("room: %s: this server has no OWNERS_DIR to reload (standalone servers write next to the project)", registerActionName)
@@ -630,13 +739,23 @@ func (s *Service) registerWatchedBy(setup *SetupSnapshot) (string, error) {
 	return "", fmt.Errorf("room: %s: the room's target class %q is not a class", registerActionName, class)
 }
 
-// registerConnections maps the provisional pipeline's connection keys to the
-// registered read credentials (design §3.7): for every connection key the
-// provisional pipeline names whose secret name the credentials click
-// registered, the entry is a file: reference to
-// <PIPEROOM_SECRETS_DIR>/<pipeline>/<name>. A key with no registered
-// credential is left out, so the pipeline fails closed rather than read a
-// process-wide setting of the server.
+// registerConnections maps the registered read credentials to the entry's
+// connections: block (design §3.7): every name the credentials click
+// registered with this server (setup.credentials_registered, the names the
+// server holds a file for) that is an owners connection key
+// (owners.ConnectionKeys) becomes a file: reference to
+// <PIPEROOM_SECRETS_DIR>/<pipeline>/<name>. The keys are not limited to the
+// ones the provisional pipeline's targets name: that set never holds
+// warehouse_db_url, which the owners validation requires of every cdc block,
+// so a block built from it alone could never load. A secret the driver set
+// but never registered (setup.secret_set only) has no file here and is not
+// referenced; a registered name that is not a connection key is the runner's
+// own store name and is left out. A key with no registered credential is left
+// out: the owners validation refuses a connections: block that misses a
+// required key, so the reload skips such an entry and the registration fails
+// with the reason; an entry with no key at all is refused before the write
+// (registerPreconditions), because a pipeline without a connections: block
+// reads the server's process-wide settings.
 func (s *Service) registerConnections(setup *SetupSnapshot, prov owners.Pipeline) (map[string]string, error) {
 	dir := strings.TrimSpace(s.setupCfg.SecretsDir)
 	if dir == "" {
@@ -645,27 +764,38 @@ func (s *Service) registerConnections(setup *SetupSnapshot, prov owners.Pipeline
 	if !secretsPipelineID(prov.ID) {
 		return nil, fmt.Errorf("room: %s: the pipeline id is not a valid pipeline id", registerActionName)
 	}
-	byName := map[string]bool{}
-	for _, name := range setup.secretNames {
-		byName[name] = true
+	known := map[string]bool{}
+	for _, key := range owners.ConnectionKeys() {
+		known[key] = true
 	}
+	// The value is the plain absolute path the loader checks (checkRef:
+	// "file: must be an absolute path"), never owners.FileRef: that is the
+	// canonical comparison form ("file:" + a lower-cased, forward-slashed
+	// path) CheckSharedRefs uses, and written into the entry it would make
+	// every registered block fail validation.
 	out := map[string]string{}
-	for key := range prov.Connections {
-		if !byName[key] {
+	for _, name := range setup.credentialNames {
+		if !known[name] {
 			continue
 		}
-		out[key] = owners.FileRef(filepath.Join(dir, prov.ID, key))
+		out[name] = filepath.Join(dir, prov.ID, name)
 	}
 	return out, nil
 }
 
-// writeRegisterFile writes the entry to OWNERS_DIR/<pipeline id>.yaml, to a
-// temporary file renamed into place. An existing target that is a symlink is
-// refused, never followed, and an existing regular file is refused too: a
-// registration never overwrites (a second register is refused or a no-op).
-// The entry's validation is the reload that follows (reloadAfterRegister +
-// the executeRegister check): owners.Load cannot judge a per-pipeline file,
-// whose tenant: key needs the main file's tenants: block.
+// writeRegisterFile writes the entry to OWNERS_DIR/<pipeline id>.yaml. The
+// final path is created exclusively (O_EXCL): anything already there,
+// whatever it is, refuses the write, so two registrations of one id cannot
+// both succeed and a registration never overwrites; a symlink in the way is
+// reported as such and never followed. The bytes are written to that file and
+// synced, and the file is removed again when any step fails. A temporary file
+// renamed into place would be atomic for a reader but not exclusive: rename
+// replaces an existing file on every platform, so a check-then-rename could
+// overwrite an entry another registration wrote in between. The reload that
+// follows (registerFile) reads the complete file; a reader that catches a
+// partial write skips it with a reason and sees it whole on its next reload.
+// The entry's validation is that reload: owners.Load cannot judge a
+// per-pipeline file, whose tenant: key needs the main file's tenants: block.
 func (s *Service) writeRegisterFile(ctx context.Context, snap *RoomSnapshot, entry []byte) (string, error) {
 	dir := strings.TrimSpace(s.setupCfg.OwnersDir)
 	if dir == "" {
@@ -690,25 +820,26 @@ func (s *Service) writeRegisterFile(ctx context.Context, snap *RoomSnapshot, ent
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("room: %s: create OWNERS_DIR: %w", registerActionName, err)
 	}
-	tmp, err := os.CreateTemp(dir, ".owners-*.tmp")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
-		return "", fmt.Errorf("room: %s: create a temporary file in OWNERS_DIR: %w", registerActionName, err)
+		if errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("room: %s: %s already exists", registerActionName, path)
+		}
+		return "", fmt.Errorf("room: %s: create %s: %w", registerActionName, path, err)
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(entry); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("room: %s: write %s: %w", registerActionName, tmpName, err)
+	if _, err := f.Write(entry); err != nil {
+		_ = f.Close()
+		s.removeRegisterFile(path)
+		return "", fmt.Errorf("room: %s: write %s: %w", registerActionName, path, err)
 	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("room: %s: %s: %w", registerActionName, tmpName, err)
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		s.removeRegisterFile(path)
+		return "", fmt.Errorf("room: %s: sync %s: %w", registerActionName, path, err)
 	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("room: %s: close %s: %w", registerActionName, tmpName, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return "", fmt.Errorf("room: %s: move the entry into place: %w", registerActionName, err)
+	if err := f.Close(); err != nil {
+		s.removeRegisterFile(path)
+		return "", fmt.Errorf("room: %s: close %s: %w", registerActionName, path, err)
 	}
 	return path, nil
 }
@@ -725,8 +856,9 @@ func registerSummary(p events.PipelineRegisteredPayload) string {
 // pipeline_register proposal executed in full without repos: (the file path
 // registered and reloaded). It runs after the proposal status is recorded
 // (service_executor.go), like closeRolledBackSetup. A repos: registration
-// stays open until the PR merges (registerPRMerged).
-func (s *Service) closeRegisteredSetup(ctx context.Context, roomID string) {
+// stays open until the PR merges (registerPRMerged). proposalID is the
+// register proposal, room.labelled's fix_proposal_id.
+func (s *Service) closeRegisteredSetup(ctx context.Context, roomID, proposalID string) {
 	snap, err := s.readRoom(ctx, roomID)
 	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil {
 		return
@@ -746,7 +878,7 @@ func (s *Service) closeRegisteredSetup(ctx context.Context, roomID string) {
 			return
 		}
 	}
-	if err := s.labelRegistered(ctx, roomID, ""); err != nil {
+	if err := s.labelRegistered(ctx, roomID, proposalID); err != nil {
 		s.log.Warn("room: labelling the registered room failed", "room", roomID, "err", err)
 	}
 	s.log.Info("room: setup registered; room closed", "room", roomID)
@@ -755,16 +887,18 @@ func (s *Service) closeRegisteredSetup(ctx context.Context, roomID string) {
 // registerPRMerged closes a setup room whose registration pull request merged
 // (the repos: path waits for pr_merged, docs/api.md). The follower calls it
 // after recording the merge (pr_follow.go). url is the merged PR's URL; the
-// room closes only when it is the registration PR the room's
-// pipeline.registered recorded. Every other room and PR is a silent no-op:
-// the follower sees merges of every followed PR, incident rooms included, so
-// only a setup room that recorded a registration PR even reads on.
+// room closes only when it equals the registration PR's URL that the room's
+// pipeline.registered recorded. An empty url never matches (fail closed: a
+// merge the follower cannot name is not proof that the registration PR
+// merged). Every other room and PR is a silent no-op: the follower sees
+// merges of every followed PR, incident rooms included, so only a setup room
+// that recorded a registration PR even reads on.
 func (s *Service) registerPRMerged(ctx context.Context, roomID, proposalID, url string) {
 	snap, err := s.readRoom(ctx, roomID)
 	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil || snap.Setup.regPullRequestURL == "" {
 		return
 	}
-	if url != "" && snap.Setup.regPullRequestURL != url {
+	if url == "" || snap.Setup.regPullRequestURL != url {
 		return
 	}
 	// closeRoom re-checks under the lock; the read above only keeps the
@@ -774,7 +908,7 @@ func (s *Service) registerPRMerged(ctx context.Context, roomID, proposalID, url 
 		if !st.snap.IsSetupRoom() || reg == nil || reg.regPullRequestURL == "" {
 			return "", notSetupRoom()
 		}
-		if url != "" && reg.regPullRequestURL != url {
+		if url == "" || reg.regPullRequestURL != url {
 			return "", notSetupRoom()
 		}
 		return pipelineLiveResolution, nil

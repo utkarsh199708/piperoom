@@ -527,7 +527,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 	// reloaded (setup_register.go, U1-14). A repos: registration stays open
 	// until the PR merges, which the follower closes (registerPRMerged).
 	if stepsContainRegister(steps) {
-		s.closeRegisteredSetup(ctx, p.RoomID)
+		s.closeRegisteredSetup(ctx, p.RoomID, p.ProposalID)
 	}
 	// A setup room closes "rolled back" once the last step its plan executed
 	// has been undone (setup_rollback.go, U1-14b). A proposal that is not part

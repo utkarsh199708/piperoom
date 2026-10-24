@@ -337,6 +337,14 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 			if oerr := s.registerCreateRefusal(&st.snap); oerr != nil {
 				return "", events.Event{}, oerr
 			}
+			// And what the server itself needs to register (an owners dir
+			// and reload, or a forge with repos:; registered read
+			// credentials for a pipeline this server will watch; an id the
+			// owners set does not already hold), so the proposal is refused
+			// here with the reason instead of failing at Execute.
+			if perr := s.registerPreconditions(&st.snap); perr != nil {
+				return "", events.Event{}, perr
+			}
 		}
 		p.RequiredLayers, p.FallbackLayers = s.setupLayers(&st.snap, route, p.Steps)
 	} else {
