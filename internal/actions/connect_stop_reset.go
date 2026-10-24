@@ -203,7 +203,7 @@ var (
 func (a *resetSourceOffsets) Name() string  { return ResetSourceOffsetsName }
 func (a *resetSourceOffsets) Layer() string { return "kafka-connect" }
 func (a *resetSourceOffsets) Describe() string {
-	return "Clears or moves the stored source offsets of one of the pipeline's Kafka Connect source connectors (KIP-875, Kafka Connect 3.6+). With no position the connector forgets where it was: on the next start it decides from its config (snapshot.mode) whether to re-read the tables in a snapshot, so use it to re-read data the connector skipped. With a position (partition and offset as connect_source_offsets shows them) it resumes from that position instead; the position must match a partition and the offset keys the connector stores. The connector must be STOPPED: put a connect_stop_connector step before this one in the same proposal and set stop_first: true. To bring the connector back in the same proposal, set resume_after: true on this step (after the reset it resumes the connector, PUT /connectors/{name}/resume, and waits for RUNNING); do not add a connect_resume_connector step after it, which is refused because the connector is not yet stopped when the proposal is checked. The reset itself loses nothing in Kafka; a snapshot re-emits existing rows, so sinks that do not upsert by key see duplicates."
+	return "Clears or moves the stored source offsets of one of the pipeline's Kafka Connect source connectors (KIP-875, Kafka Connect 3.6+). With no position the connector forgets where it was: on the next start it decides from its config (snapshot.mode) whether to re-read the tables in a snapshot, so use it to re-read data the connector skipped. With a position (partition and offset as connect_source_offsets shows them) it resumes from that position instead; the position must match a partition and the offset keys the connector stores. For a Debezium MySQL connector the position is {\"server\": topic.prefix} with file and pos, and gtids when the server runs gtid_mode=ON; it is checked against the source's binlog: a purged binlog file, a pos past the file's end, or a GTID set that misses gtid_purged or goes beyond gtid_executed is refused. The connector must be STOPPED: put a connect_stop_connector step before this one in the same proposal and set stop_first: true. To bring the connector back in the same proposal, set resume_after: true on this step (after the reset it resumes the connector, PUT /connectors/{name}/resume, and waits for RUNNING); do not add a connect_resume_connector step after it, which is refused because the connector is not yet stopped when the proposal is checked. The reset itself loses nothing in Kafka; a snapshot re-emits existing rows, so sinks that do not upsert by key see duplicates."
 }
 
 func (a *resetSourceOffsets) ParamsSchema() map[string]any {
@@ -458,14 +458,38 @@ func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) 
 	if err := checkResetTarget(offs, p); err != nil {
 		return err
 	}
-	if p.Position != nil && len(offs) == 0 {
-		cfg, err := a.d.Connect.Config(ctx, p.Connector)
-		if err != nil {
-			return fmt.Errorf("actions: %s: read config of %s: %w", ResetSourceOffsetsName, p.Connector, err)
-		}
-		return checkPositionWithoutShape(p.Connector, cfg, *p.Position)
+	if p.Position == nil {
+		return nil
 	}
-	return nil
+	cfg, err := a.d.Connect.Config(ctx, p.Connector)
+	if err != nil {
+		return fmt.Errorf("actions: %s: read config of %s: %w", ResetSourceOffsetsName, p.Connector, err)
+	}
+	if len(offs) == 0 {
+		if err := checkPositionWithoutShape(p.Connector, cfg, *p.Position); err != nil {
+			return err
+		}
+	}
+	_, err = a.checkMySQL(ctx, p.Connector, cfg, *p.Position)
+	return err
+}
+
+// checkMySQL runs the MySQL position checks (mysql_positions.go) when cfg is
+// a Debezium MySQL connector, and returns the binlog state it checked
+// against; nil for any other connector.
+func (a *resetSourceOffsets) checkMySQL(ctx context.Context, name string, cfg map[string]string, pos sourcePosition) (*clients.BinlogStatus, error) {
+	if !isMySQLConnector(cfg) {
+		return nil, nil
+	}
+	br, ok := binlogReaderOf(a.d.Binlog, a.d.Source)
+	st, err := readBinlog(ctx, br, ok, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMySQLPosition(name, cfg, pos, st); err != nil {
+		return nil, err
+	}
+	return &st, nil
 }
 
 // checkResetTarget checks the offsets a reset writes against what Connect
@@ -579,6 +603,22 @@ func (a *resetSourceOffsets) previewReset(ctx context.Context, p resetSourceOffs
 			return PreviewResult{}, previewErr(a.Name(), err)
 		}
 	}
+	var binlog *clients.BinlogStatus
+	if p.Position != nil {
+		if binlog, err = a.checkMySQL(ctx, p.Connector, cfg, *p.Position); err != nil {
+			return PreviewResult{}, previewErr(a.Name(), err)
+		}
+	}
+	// mysqlNote is appended to Expected wherever the preview promises a write.
+	mysqlNote := func(stored map[string]any) string {
+		switch {
+		case binlog != nil:
+			return "; " + mysqlPositionNote(*binlog, *p.Position, stored)
+		case p.Position == nil && isMySQLConnector(cfg):
+			return mysqlClearNote(cfg)
+		}
+		return ""
+	}
 	state := "STOPPED"
 	if st.State != "STOPPED" {
 		state = fmt.Sprintf("%s; it must be stopped first (the stop step)", orUnknown(st.State))
@@ -593,7 +633,7 @@ func (a *resetSourceOffsets) previewReset(ctx context.Context, p resetSourceOffs
 			res.Expected = "no change: the connector stores no offsets"
 			return res, nil
 		}
-		res.Expected = "no stored offsets after the reset; " + snapshotRestart(cfg, a.tableEstimate(ctx), false)
+		res.Expected = "no stored offsets after the reset; " + snapshotRestart(cfg, a.tableEstimate(ctx), false) + mysqlNote(nil)
 		// The advertised rollback writes the cleared position back AFTER the
 		// clear, when the connector stores no shape to compare with: that
 		// path (checkPositionWithoutShape) only accepts a Debezium
@@ -611,8 +651,8 @@ func (a *resetSourceOffsets) previewReset(ctx context.Context, p resetSourceOffs
 	} else if len(offs) == 0 {
 		// No entry to compare with (a full reset left none): the partition was
 		// checked against the config above.
-		res.Expected = fmt.Sprintf("stored offset set to %s (the connector stores no position now, so only the partition and the scalar value types are checked); %s",
-			formatPosition(*p.Position), snapshotRestart(cfg, "", true))
+		res.Expected = fmt.Sprintf("stored offset set to %s (the connector stores no position now, so only the partition and the scalar value types are checked); %s%s",
+			formatPosition(*p.Position), snapshotRestart(cfg, "", true), mysqlNote(nil))
 		res.Reversible = false // there is no stored position to write back
 	} else {
 		stored, err := matchPosition(p.Connector, offs, *p.Position)
@@ -631,12 +671,12 @@ func (a *resetSourceOffsets) previewReset(ctx context.Context, p resetSourceOffs
 		if stored.Offset == nil {
 			// There is no stored position to write back; a full reset would
 			// clear every partition, not just this one.
-			res.Expected = fmt.Sprintf("stored offset set to %s%s (the connector stores no position for this partition, so only the partition and the scalar value types are checked); %s",
-				formatPosition(*p.Position), extra, snapshotRestart(cfg, "", true))
+			res.Expected = fmt.Sprintf("stored offset set to %s%s (the connector stores no position for this partition, so only the partition and the scalar value types are checked); %s%s",
+				formatPosition(*p.Position), extra, snapshotRestart(cfg, "", true), mysqlNote(nil))
 			res.Reversible = false
 			return res, nil
 		}
-		res.Expected = fmt.Sprintf("stored offset %s replaced by %s%s; %s", formatStoredOffset(stored), formatPosition(*p.Position), extra, snapshotRestart(cfg, "", true))
+		res.Expected = fmt.Sprintf("stored offset %s replaced by %s%s; %s%s", formatStoredOffset(stored), formatPosition(*p.Position), extra, snapshotRestart(cfg, "", true), mysqlNote(stored.Offset))
 		res.Reversible = true
 		res.Rollback = resetRollback(p.Connector, stored)
 	}
@@ -722,12 +762,18 @@ func (a *resetSourceOffsets) executeReset(ctx context.Context, p resetSourceOffs
 	if err := checkResetTarget(offs, p); err != nil {
 		return "", err
 	}
-	if p.Position != nil && len(offs) == 0 {
+	if p.Position != nil {
+		// Re-checked here: the server may have purged binlogs since Validate.
 		cfg, err := a.d.Connect.Config(ctx, p.Connector)
 		if err != nil {
 			return "", fmt.Errorf("actions: %s: read config of %s: %w", ResetSourceOffsetsName, p.Connector, err)
 		}
-		if err := checkPositionWithoutShape(p.Connector, cfg, *p.Position); err != nil {
+		if len(offs) == 0 {
+			if err := checkPositionWithoutShape(p.Connector, cfg, *p.Position); err != nil {
+				return "", err
+			}
+		}
+		if _, err := a.checkMySQL(ctx, p.Connector, cfg, *p.Position); err != nil {
 			return "", err
 		}
 	}

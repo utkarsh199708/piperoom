@@ -391,7 +391,7 @@ func TestNoPipelinesWritesNoOwnersFile(t *testing.T) {
 	if code != exitError {
 		t.Fatalf("exit = %d; stderr:\n%s", code, stderr)
 	}
-	for _, want := range []string{"no Debezium Postgres source connector found", "nothing written", "skipped: s3-sink: not a Debezium Postgres source"} {
+	for _, want := range []string{"no Debezium Postgres or MySQL source connector found", "nothing written", "skipped: s3-sink: not a Debezium Postgres source"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}

@@ -515,15 +515,13 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		}
 	} else {
 		if m.quickstart {
-			// The picker's stored key reaches the adapters as the variable
-			// they read; a standalone or quickstart server with no usable
-			// model starts in the no model state (models.go).
-			if err := setStoredKey(m.modelEnv, osEnv{}); err != nil {
-				return err
-			}
-			live = &liveModel{}
+			// The picker's stored key reaches the adapters through the key
+			// overlay (wiring.WithGetenv), not the process environment; a
+			// standalone or quickstart server with no usable model starts in
+			// the no model state (models.go).
+			live = &liveModel{startKeys: quickstart.NewKeys(nil, m.modelEnv)}
 		}
-		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpoint, wireAgentInput{
+		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpointWithEnv, wireAgentInput{
 			cfg:        cfg,
 			log:        log,
 			own:        own,
@@ -578,7 +576,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		}
 	}
 
+	// Q7e: the follower of opened fix PRs; nil with FORGE_KIND empty.
+	prReader, err := forgeSetup(cfg, own, log)
+	if err != nil {
+		return err
+	}
+
 	svc := newRoomService(room.Deps{
+		PullRequests:      prReader,
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,

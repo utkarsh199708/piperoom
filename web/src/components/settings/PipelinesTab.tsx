@@ -1,6 +1,6 @@
 import { Workflow } from 'lucide-react'
 import type { AdminPipeline } from '@/api/types'
-import { Badge, layerVariant } from '@/components/ui/badge'
+import { Badge, layerLabel, layerVariant } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { lines, principalLabel } from '@/lib/settings'
 
@@ -89,7 +89,7 @@ export function PipelinesTab({ pipelines }: { pipelines: readonly AdminPipeline[
                     {lines(p.owners).map((o) => (
                       <li key={o.layer} className="contents">
                         <Badge variant={layerVariant(o.layer)} className="justify-self-start">
-                          {o.layer}
+                          {layerLabel(o.layer)}
                         </Badge>
                         <span className="truncate text-sm">{lines(o.principals).map(principalLabel).join(', ')}</span>
                       </li>

@@ -18,16 +18,24 @@ import (
 // alone needs the admin writer, and that exists only with write mode on and
 // a source write URL: it is the set's own source writer (*postgres.Writer on
 // SOURCE_DB_WRITE_URL, or the pipeline's connections.source_db_write_url),
-// which implements postgres.SourceAdminWriter (Q2b). Off, every writer below
-// is an untyped nil, so Execute refuses ("no write credentials") before any
-// I/O, while Validate still passes so the agent can propose the step
-// (P0 ruling #606).
+// which implements postgres.SourceAdminWriter (Q2b), or *mysql.Writer on a
+// MySQL set (Q8f; pg_set_replica_identity is not registered there, Q8g).
+// Off, every writer below is an untyped nil, so Execute refuses ("no write
+// credentials") before any I/O, while Validate still passes so the agent can
+// propose the step (P0 ruling #606).
 
 // adminWriter returns w's source admin writer: nil unless w was opened with
 // write mode on and its source writer has the Q2b admin methods. It is never
 // an interface holding a typed nil.
 func adminWriter(w *Wired) postgres.SourceAdminWriter {
-	if !w.write || w.writers.source == nil {
+	if !w.write {
+		return nil
+	}
+	// A MySQL set's writer is held as the admin writer alone (Q8g).
+	if w.writers.admin != nil && !isNilIface(w.writers.admin) {
+		return w.writers.admin
+	}
+	if w.writers.source == nil {
 		return nil
 	}
 	if a, ok := w.writers.source.(postgres.SourceAdminWriter); ok && !isNilIface(a) {

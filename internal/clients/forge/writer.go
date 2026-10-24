@@ -31,7 +31,7 @@ const (
 // exists. Safe for concurrent use.
 type Writer struct{ c *Client }
 
-var _ ForgeWriter = (*Writer)(nil)
+var _ ForgeWriter = (*Writer)(nil) // clients.ForgeWriter (an alias)
 
 // NewWriter returns the writer over c's App installation.
 func NewWriter(c *Client) (*Writer, error) {

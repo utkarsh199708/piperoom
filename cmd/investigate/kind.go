@@ -7,6 +7,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/agent/fake"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/wiring"
@@ -47,6 +48,36 @@ func listKind(flagKind string, pipe owners.Pipeline, havePipe bool) (string, err
 		return k, nil
 	}
 	return roomKind("", pipe, havePipe)
+}
+
+// sourceKindOf is the run's source kind: the pipeline's owners.yaml
+// source_kind, or "" (postgres) without the pipeline.
+func sourceKindOf(pipe owners.Pipeline, havePipe bool) string {
+	if !havePipe {
+		return ""
+	}
+	return pipe.SourceKindOrDefault()
+}
+
+// listOwners is the owners view -list-tools registers over. With the
+// pipeline in the owners file it is every batch pipeline and every CDC
+// pipeline of the pipeline's source kind, so -kind still lists any kind's
+// room and a CDC room's list is its source's (one client set has one source
+// kind, Q8g). Without the pipeline it is the whole file, which then must not
+// mix source kinds.
+func listOwners(own *owners.Owners, pipe owners.Pipeline, havePipe bool) *owners.Owners {
+	if own == nil || !havePipe {
+		return own
+	}
+	want := pipe.SourceKindOrDefault()
+	var ids []string
+	for i := range own.Pipelines {
+		p := &own.Pipelines[i]
+		if p.KindOrDefault() != events.PipelineKindCDC || p.SourceKindOrDefault() == want {
+			ids = append(ids, p.ID)
+		}
+	}
+	return own.Only(ids...)
 }
 
 // listToolsRegistry registers the read tools as the server does for the

@@ -43,12 +43,15 @@ GRANT SELECT ON mysql.default_roles TO 'piperoom'@'%';
 
 -- Piperoom's write user (SOURCE_DB_WRITE_URL, Q8f): grant SELECT on the
 -- captured tables, end sessions, create the heartbeat table (design §6.8).
-CREATE DATABASE piperoom_heartbeat;
+-- The heartbeat table sits in a database of the pipeline's source tables
+-- (design §6.8), so CREATE is on shop. SELECT ... WITH GRANT OPTION is on the
+-- database (design §6.8 allows the database) so a captured table added later
+-- can be granted too. DROP is dev-only: the writer's integration test drops
+-- the tables it creates.
 CREATE USER 'piperoom_write'@'%' IDENTIFIED BY 'piperoom-dev-write';
-GRANT SELECT ON shop.orders TO 'piperoom_write'@'%' WITH GRANT OPTION;
-GRANT SELECT ON shop.order_items TO 'piperoom_write'@'%' WITH GRANT OPTION;
+GRANT SELECT ON shop.* TO 'piperoom_write'@'%' WITH GRANT OPTION;
 GRANT CONNECTION_ADMIN, PROCESS, REPLICATION CLIENT ON *.* TO 'piperoom_write'@'%';
-GRANT CREATE, INSERT, UPDATE, SELECT ON piperoom_heartbeat.* TO 'piperoom_write'@'%';
+GRANT CREATE, DROP ON shop.* TO 'piperoom_write'@'%';
 GRANT SELECT ON performance_schema.* TO 'piperoom_write'@'%';
 GRANT SELECT (User, Host, account_locked, password_expired, Repl_slave_priv, Repl_client_priv,
               Select_priv, Reload_priv, Lock_tables_priv, Show_db_priv) ON mysql.user TO 'piperoom_write'@'%';

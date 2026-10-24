@@ -26,8 +26,17 @@ type harnessCondition struct {
 // and the validator output. A symbol check over the source, not an import of
 // internal/wiring, keeps evals free of an import cycle and of the wiring's
 // dependency weight.
+//
+// W4c-resolver is the follow-up to W4c (KAN-494): a net_probe check that reports
+// what the Connect worker resolves the source host to. No read tool shows it
+// today (connect_view keeps only Connect's validation messages, and neither the
+// JDK's "Connect timed out" nor pgjdbc's "The connection attempt failed." names
+// an address), so setup/db-unreachable-from-connect's cause, a stale hosts entry
+// in the Connect container, is not observable. The row lands when nettools
+// declares ConnectResolveCheck.
 var harnessConditions = map[string]harnessCondition{
-	"U1-10": {Dir: "internal/wiring", Symbol: "SetupStack"},
+	"U1-10":        {Dir: "internal/wiring", Symbol: "SetupStack"},
+	"W4c-resolver": {Dir: "internal/tools/nettools", Symbol: "ConnectResolveCheck"},
 }
 
 // Pending reports whether the scenario waits for a harness row (pending_harness).

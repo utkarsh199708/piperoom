@@ -1,5 +1,6 @@
 // Package dbtools registers the read-only tools that inspect the source
-// Postgres, the warehouse, and the pipeline topology.
+// database (Postgres, or MySQL with Deps.SourceKind mysql), the warehouse,
+// and the pipeline topology.
 package dbtools
 
 import (
@@ -23,7 +24,14 @@ import (
 // Deps are the collaborators the tools read from.
 type Deps struct {
 	Src clients.SourceDB
-	Wh  clients.Warehouse
+	// SourceKind is the kind of Src, as owners.yaml source_kind spells it:
+	// "" or "postgres" (the default) or "mysql" (Q8n). It picks Register's
+	// tool list: a MySQL source gets no pg_* tool (PostgresOnlyTools), gets
+	// source_row and source_long_transactions (MySQLOnlyTools) and the
+	// MySQL descriptions of the source_* tools; a Postgres source's list is
+	// the one it always had. Wiring (Q8g) sets it from the set's pipelines.
+	SourceKind string
+	Wh         clients.Warehouse
 	// WarehouseKind is the configured warehouse kind: "postgres" (or empty, the
 	// default), "snowflake", "clickhouse", "bigquery", or "databricks" (the
 	// constants in internal/wiring/warehouse.go). It decides only how the
@@ -108,7 +116,27 @@ func Register(reg *tools.Registry, d Deps) error {
 	if d.Owners == nil {
 		return fmt.Errorf("dbtools: Owners is nil (wiring error)")
 	}
-	list := []tools.Tool{
+	var list []tools.Tool
+	switch d.SourceKind {
+	case "", owners.SourceKindPostgres:
+		list = postgresTools(d)
+	case owners.SourceKindMySQL:
+		list = mysqlTools(d)
+	default:
+		return fmt.Errorf("dbtools: unknown SourceKind %q (want postgres or mysql)", d.SourceKind)
+	}
+	for _, t := range list {
+		if err := reg.Register(t); err != nil {
+			return fmt.Errorf("dbtools: register %s: %w", t.Name(), err)
+		}
+	}
+	return nil
+}
+
+// postgresTools is the Postgres tool list in registration order (the order
+// of the model's tool list), unchanged by Q8n.
+func postgresTools(d Deps) []tools.Tool {
+	return []tools.Tool{
 		pgReplicationSlotsTool(d),
 		pgStreamingLivenessTool(d),
 		pgRecentDDLTool(d),
@@ -128,12 +156,6 @@ func Register(reg *tools.Registry, d Deps) error {
 		pipelineMapTool(d),
 		traceRecordTool(d),
 	}
-	for _, t := range list {
-		if err := reg.Register(t); err != nil {
-			return fmt.Errorf("dbtools: register %s: %w", t.Name(), err)
-		}
-	}
-	return nil
 }
 
 // tool is a small Tool implementation backed by a run function.

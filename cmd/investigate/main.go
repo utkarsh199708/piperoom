@@ -111,7 +111,7 @@ func run(o runOptions) (err error) {
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
-		reg, err := listToolsRegistry(own, fakeTools)
+		reg, err := listToolsRegistry(listOwners(own, pipe, havePipe), fakeTools)
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
@@ -202,7 +202,9 @@ func run(o runOptions) (err error) {
 		if commit == "" {
 			commit = "unknown"
 		}
-		promptHash, herr := agent.PromptHashFor(kind)
+		// The prompt follows the pipeline's source kind too (Q8g); without
+		// the pipeline in owners (fake tools) it is the Postgres one.
+		promptHash, herr := agent.PromptHashForSource(kind, sourceKindOf(pipe, havePipe))
 		if herr != nil {
 			return fmt.Errorf("investigate: %w", herr)
 		}
@@ -231,7 +233,14 @@ func run(o runOptions) (err error) {
 		Teams: alertTeams(own, pipeline),
 	}
 
-	err = ep.Run(ctx, alert, agent.Deps{
+	runCtx := ctx
+	if havePipe && len(pipe.Repos) > 0 {
+		// A pipeline with repos: gets the fix PR as in a room (Q7f): the
+		// action reads the repos from the whole pipeline, which the room
+		// service puts in the run ctx. Other pipelines keep the id-only scope.
+		runCtx = tools.WithPipeline(ctx, pipe)
+	}
+	err = ep.Run(runCtx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
 		Inbox:     agentInbox,

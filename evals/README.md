@@ -408,9 +408,9 @@ the call cap; `-judge llm` asks live; `-judge terms` keeps the keyword grade. Wi
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `source_tables` (outside a topic name), topics, `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. A connector task that never starts while its source answers reads is the first failing component (`blocked-slot`: kafka-connect, root cause postgres; ruling R1, `tasks/W4-evals-to-100.md`). A slot or database stall that stops the connector makes kafka-connect the first failing layer and postgres the root cause (ruling R1). A consumer that crash-loops while Kafka answers every read is the first failing component, and Kafka at most the root cause (`consumer-offsets-out-of-range-retention`: consumer, root cause kafka; ruling R14). A healthy-now verdict with a past finding has no first failing layer: leave the field unset (`consumer-duplicates`; ruling R15). The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `source_tables` (outside a topic name), topics, `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
-| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (the diagnosis names two: a consumer down for 87 h against a 48 h retention is a consumer story and a retention story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
+| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (`consumer-duplicates`: copies of change events on the topic are a Kafka story, and, since an unclean connector restart usually produces them, a Connect story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
 | `expected_facts` | list | what the diagnosis must rest on, see below |
 | `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts **before** the hypothesis was posted |
@@ -969,6 +969,81 @@ read is a miss (at most two per run) and no versions are passed, as before.
 Every lifecycle write (`StopConnector`, `ResetSourceOffsets`, `AlterSourceOffsets`, `CreateConnector`,
 `DeleteConnector`) is a no-op recorded in the run's write log, without config values or positions.
 
+### MySQL rooms (Q8j)
+
+A scenario whose `pipeline.source_kind` is `mysql` runs in a MySQL room, built the way wiring builds a MySQL
+client set (Q8g): `LiveToolsFor("mysql")` gives dbtools' MySQL list (no `pg_*` tool; `source_row` and
+`source_long_transactions` instead), `mysql_binlog_status` and `kafka_schema_history`, and the agent reads the
+room as MySQL from that list (its MySQL prompt). Its actions are every production action but the `pg_*` ones,
+and the Connect actions get a binlog reader, so `connect_update_connector_config` offers `database.server.id`
+and `snapshot.mode`. A Postgres scenario's room is unchanged: `LiveTools()` is `LiveToolsFor("postgres")`, byte
+for byte the list it was. `-check` validates a MySQL file against the MySQL tools, and its `fix_targets` against
+the MySQL actions; `forbidden_actions` may still name a `pg_*` action.
+
+| read | from |
+|---|---|
+| binlog status (`@@server_id`, binlog files, GTID sets) | the first `mysql_binlog_status` recording with `data.server` (the tool's own Data) |
+| connector config (class, `snapshot.mode`, the pipeline's other `database.server.id`s) | as for the P3 actions (`connect_config` data, `resources.connector_configs`) |
+
+Without a `mysql_binlog_status` recording a `database.server.id` step fails Validate: the id cannot be checked
+against the server's. Each scenario row carries its room's `source_kind`, and the
+report's per-source pass rate (`by_source` in the JSON, the "by source" line under the table; runs are pooled
+within a kind) groups the MySQL and Postgres rooms; a row with no `source_kind` reads as postgres.
+
+### Pull-request fixes: the forge replay and "right files changed" (Q7j)
+
+A scenario whose pipeline lists `repos:` (owners.yaml's block, `docs/design/fix-pr.md` §3) runs in a room with a
+forge, as Q7f's wiring builds one: the repository tools `repo_list_files`, `repo_read_file` and `pr_status` after
+the room's own list, and `repo_open_pull_request` after every other action. Every other scenario gets neither, so
+its tool and action lists are byte for byte what they were (`TestForgeOnlyForPipelinesWithRepos`).
+
+The forge is `internal/clients/forge/fake`, seeded per run from `resources.repos`: per repo id of
+`pipeline.repos`, the files its base branch holds, under the scenario's own `base_sha`.
+
+```yaml
+resources:
+  repos:
+    connect-image:
+      base_sha: 9a41c7e2d35b08f6a1c4e7d290b3f58e6c1a0d47   # 40 lower-case hex; what the reads show
+      visibility: private                                 # default; public is refused without public_ok
+      files:
+        docker/connect/Dockerfile: |
+          ARG DEBEZIUM_CONNECTORS="mysql"
+      # dir: ../testdata/repos/<scenario>/<repo>          # files read from a directory, relative to the file
+```
+
+The repository tools **run live** over that forge (as `runbook_lookup` runs over its library), so a scenario
+records no `repo_*` result (validation refuses one): the model sees the real tools' answer (numbered lines,
+masked secrets, the untrusted-text fence and injectscan's warning), and the action's Validate and Preview read
+the same bytes. Use `dir` for text no `evals/scenarios/*.yaml` file may hold, such as a planted injection:
+`internal/injectscan`'s precision test reads every scenario file. The writer is a recording no-op: an executed
+PR step opens the PR in the in-memory fake (the room gets a PR reference) and the write log notes repo, branch and
+paths, never content. A `pipeline.repos` entry without a fixture is a warning; its reads are "not found".
+
+`expect.fix_files` grades what the PR would change. Each entry is one expected PR step: its repo and, per file,
+the lines it removes and adds (in file order; a new file removes nothing). It needs `fix_targets` for
+`repo_open_pull_request`.
+
+```yaml
+expect:
+  fix: [[repo_open_pull_request]]
+  fix_targets: {repo_open_pull_request: {repo: connect-image}}
+  fix_files:
+    - repo: connect-image
+      files:
+        - path: docker/connect/Dockerfile
+          removed: ['ARG DEBEZIUM_CONNECTORS="mysql"']
+          added: ['ARG DEBEZIUM_CONNECTORS="postgres mysql"']
+```
+
+Every `repo_open_pull_request` step the room created is applied to the fixture as the action applies it (each
+`old` exactly once, in order) and diffed line by line against the file at `base_sha`. It is right when the repo is
+the entry's, the path set is the entry's, and each file removes and adds exactly the entry's lines (compared with
+surrounding white space trimmed). A step that changes one more line, one more file (a workflow, a Dockerfile the
+file's text asks for), the wrong value or another repo, and a run with no PR step, fail with "wrong files changed"
+(`right_files` in the JSON; the reasons name paths and line counts, never file text). It runs on created
+proposals only: a step Validate refused never reached an approver.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
@@ -1149,9 +1224,9 @@ request's tool list in its order, each as `{"name","description","schema","stric
 neutral request the agent hands the adapter, so one prompt has one neutral hash on every adapter; the model id,
 history and other fields are not in it. `bedrock` and `vertex` stay untapped, as before.
 
-**Not wired yet:** the agent has no hook to wrap its role models (it builds them inside `internal/agent`, A4's
-folder). Until the hook lands (V11's thread ask to A4), evalrun prints a note and a non-Anthropic run records
-`untapped`, never a tap that saw nothing (`none`).
+**Wiring:** evalrun wraps each role's model through the agent's `wiring.WithModelWrap` hook (A4, #974), so a
+non-Anthropic run records the models called and a `neutral-sha256` hash. The wrap sits outside the control-token
+neutraliser and sees each role's client once; roles that share the main client are not counted twice.
 
 **Key check.** Before any scenario, evalrun checks that every model role has its credentials, by the agent's
 rules (`internal/agent/roles.go`; the main role may also use `PIPEROOM_MODEL_API_KEY` or
