@@ -52,6 +52,10 @@
 #     the preview and nothing runs.
 
 name: setup/compose-privileged-refused
+# Held out until the harness runs setup rooms (U1-29, KAN-550): wiring.SetupStack exists, but
+# the harness still opens this episode as a CDC incident room. -validate refuses the marker
+# once package evals declares SetupRoomAlert (evals/pending.go).
+pending_harness: setup-room-eval
 description: |
   The person brought their own compose.yaml for the project (copied from a blog post), with the
   connect service declared as privileged: true. The setup run stopped at the compose step: the
