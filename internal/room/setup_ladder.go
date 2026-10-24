@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/redact"
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/tools"
 )
@@ -254,6 +257,7 @@ func (s *Service) runSetupLadder(ctx context.Context, roomID string) {
 	}
 	l.canaryTopic = setupLadderTopic(prov.TopicPrefix, l.canaryTable)
 	l.changeTopic = l.canaryTopic
+	l.scope = setupLadderScope(prov, l.canaryTable)
 	if len(prov.Connectors) > 0 {
 		l.connector = prov.Connectors[0]
 	}
@@ -268,6 +272,9 @@ type setupLadder struct {
 	planID string
 	prov   owners.Pipeline
 	rungs  []plan.Rung
+	// scope is the pipeline every read runs under: prov plus the canary
+	// table, so the canary topic is one of the pipeline's topics.
+	scope owners.Pipeline
 
 	nonce     string // this run's canary key; in the proposal params, never in setup.verified
 	nonceHash string // SHA-256 of nonce, the only form setup.verified carries
@@ -301,9 +308,13 @@ func (l *setupLadder) run(ctx context.Context) {
 
 	decided := make([]events.SetupRung, 0, len(l.rungs))
 	var latency *int64
-	for _, rung := range l.rungs {
+	var personRung *plan.Rung
+	for i, rung := range l.rungs {
 		if rung.Name == plan.RungPersonChange {
-			break
+			// Found by name, not position: the ladder's order is plan's to
+			// keep, and a missing rung 8 must not become an index panic.
+			personRung = &l.rungs[i]
+			continue
 		}
 		out := l.evaluate(ctx, rung)
 		if rung.Name == plan.RungCanaryEvent {
@@ -324,11 +335,11 @@ func (l *setupLadder) run(ctx context.Context) {
 	}
 	// Rungs 1 to 7 first: pipeline_register needs exactly these, and the
 	// person's change (rung 8) must not hold them up (design §3.4, §3.9).
-	if !l.emitVerified(ctx, decided, latency) {
+	if !l.emitVerified(ctx, decided, latency) || personRung == nil {
 		return
 	}
 
-	person := l.evaluate(ctx, l.rungs[len(l.rungs)-1])
+	person := l.evaluate(ctx, *personRung)
 	if !person.OK {
 		// A timeout is a note, not a failed step: nothing ran and nothing is
 		// wrong with the pipeline's first seven rungs.
@@ -507,6 +518,10 @@ func (l *setupLadder) evaluate(ctx context.Context, rung plan.Rung) events.Setup
 // issued is returned so the caller can.
 func (l *setupLadder) onePass(ctx context.Context, out events.SetupRung, rung plan.Rung, predicate plan.Predicate, record bool) (events.SetupRung, *ladderRead) {
 	var last *ladderRead
+	// Each pass starts with no note: a waiting rung's earlier polls, or a
+	// read before the deciding one, must not leave their failure on a rung
+	// this pass decides.
+	out.Note = ""
 	for _, tool := range rung.Reads {
 		input, err := l.readInput(rung.Name, tool)
 		if err != nil {
@@ -527,12 +542,12 @@ func (l *setupLadder) onePass(ctx context.Context, out events.SetupRung, rung pl
 			continue
 		}
 		ok, pnote := predicate(r.Data)
+		if ok {
+			out.OK, out.Note = true, pnote
+			return out, last
+		}
 		if pnote != "" {
 			out.Note = pnote
-		}
-		if ok {
-			out.OK = true
-			return out, last
 		}
 	}
 	return out, last
@@ -569,14 +584,15 @@ func (l *setupLadder) readInput(rungName, tool string) (map[string]any, error) {
 // ladderRead is one read the ladder issued: the tool, its input and the
 // answer, whether or not the room log holds it yet (issueRead makes the read,
 // recordRead writes the agent.tool_call and agent.tool_result pair). Data is
-// the read's own Data, which the rung's predicate judges; the event carries
-// its truncated form.
+// the read's own Data, which the rung's predicate judges; LogData is its
+// redacted form, which the event carries (truncated). Summary is redacted.
 type ladderRead struct {
 	Tool    string
 	Input   json.RawMessage
 	UseID   string
 	Summary string
 	Data    json.RawMessage
+	LogData json.RawMessage
 	IsError bool
 	TookMS  int64
 	// Note says why the read did not answer: "" when it did.
@@ -603,7 +619,9 @@ func (l *setupLadder) issueRead(ctx context.Context, tool string, input map[stri
 		r.Note = "the tool " + cleanPlanName(tool) + " is not a read"
 		return r
 	}
-	rctx, cancel := context.WithTimeout(ctx, l.timings.Step)
+	// The read tools refuse a call with no pipeline scope (tools.ErrNoScope);
+	// the ladder runs on the service lifetime, so it adds the room's own.
+	rctx, cancel := context.WithTimeout(tools.WithPipeline(ctx, l.scope), l.timings.Step)
 	start := time.Now()
 	res, rerr := t.Run(rctx, raw)
 	cancel()
@@ -618,12 +636,37 @@ func (l *setupLadder) issueRead(ctx context.Context, tool string, input map[stri
 		r.Note = "the read " + cleanPlanName(tool) + " failed: " + r.Summary
 		return r
 	}
-	if res.Data != nil {
-		if b, merr := json.Marshal(res.Data); merr == nil {
-			r.Data = b
-		}
-	}
+	r.Summary, r.Data, r.LogData = redactLadderRead(res.Summary, res.Data)
 	return r
+}
+
+// redactLadderRead masks secrets in a successful read's summary and data the
+// way the agent's scrubToolResult does: the room log only ever gets this form.
+// The rung's predicate keeps judging the raw Data, so a masked value (the
+// nonce is 32 hex characters) never turns a rung red. Encoding the data can
+// run a tool type's own MarshalJSON, which may panic; the panic drops the data
+// instead of taking the run down.
+func redactLadderRead(summary string, data any) (string, json.RawMessage, json.RawMessage) {
+	masked, _ := redact.Text(summary)
+	if data == nil {
+		return masked, nil, nil
+	}
+	var raw, logged json.RawMessage
+	func() {
+		defer func() {
+			if recover() != nil {
+				raw, logged = nil, nil
+			}
+		}()
+		if b, err := json.Marshal(data); err == nil {
+			raw = b
+		}
+		red, _ := redact.JSONStats(data)
+		if b, err := json.Marshal(red); err == nil {
+			logged = b
+		}
+	}()
+	return masked, raw, logged
 }
 
 // recordRead writes one read as an agent.tool_call and agent.tool_result of
@@ -645,10 +688,10 @@ func (l *setupLadder) recordRead(ctx context.Context, stepID string, r *ladderRe
 		StepID: stepID, ToolUseID: useID, Tool: r.Tool,
 		Summary: r.Summary, IsError: r.IsError, TookMS: r.TookMS,
 	}
-	if r.Data != nil {
-		payload.Data = r.Data
-		if max := l.s.limits.EventMaxDataBytes; max > 0 && int64(len(r.Data)) > max {
-			if cut, truncated := events.TruncateData(r.Data, int(max)); truncated {
+	if r.LogData != nil {
+		payload.Data = r.LogData
+		if max := l.s.limits.EventMaxDataBytes; max > 0 && int64(len(r.LogData)) > max {
+			if cut, truncated := events.TruncateData(r.LogData, int(max)); truncated {
 				payload.Data, payload.Truncated = cut, true
 			}
 		}
@@ -745,13 +788,45 @@ func setupLadderHash(nonce string) string {
 // setupLadderCanaryTable is the canary table in the schema of the pipeline's
 // first source table: the setup creates it there, and the connector publishes
 // it like any table of the schema.
+// A source table name comes from the setup request, and the schema part ends
+// up in the topic name and in exampleSQL's statement, which the person is
+// asked to run: a part that is not a plain identifier (rule 6) is skipped.
 func setupLadderCanaryTable(prov owners.Pipeline) string {
 	for _, t := range prov.SourceTables {
-		if i := strings.LastIndex(t, "."); i > 0 && i < len(t)-1 {
+		if i := strings.LastIndex(t, "."); i > 0 && i < len(t)-1 && setupLadderIdents(t[:i]) {
 			return t[:i] + "." + setupLadderCanaryName
 		}
 	}
 	return "public." + setupLadderCanaryName
+}
+
+// setupLadderScope is the pipeline the ladder's reads run under: the
+// provisional pipeline plus the canary table. The setup creates that table
+// (source_create_canary_table) and the connector publishes it, but it is not
+// one of the tables the request named, so without it the canary topic is out
+// of the pipeline's topic scope (tools.Scope.Topics) and rungs 3, 5, 6 and 8
+// are refused. The copy leaves prov itself, and the actions' scope, as is.
+func setupLadderScope(prov owners.Pipeline, canaryTable string) owners.Pipeline {
+	scope := prov
+	scope.SourceTables = append([]string{}, prov.SourceTables...)
+	if !slices.Contains(scope.SourceTables, canaryTable) {
+		scope.SourceTables = append(scope.SourceTables, canaryTable)
+	}
+	return scope
+}
+
+// setupLadderIdentRe is AGENTS.md rule 6's identifier shape.
+var setupLadderIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// setupLadderIdents reports whether every dotted part of name is a plain
+// identifier.
+func setupLadderIdents(name string) bool {
+	for _, part := range strings.Split(name, ".") {
+		if !setupLadderIdentRe.MatchString(part) {
+			return false
+		}
+	}
+	return true
 }
 
 // setupLadderTopic is the topic a table of the pipeline reaches

@@ -122,11 +122,21 @@ func TestSlackWebhook(t *testing.T) {
 	for _, in := range []string{
 		"posting to https://hooks.slack.com/services/T0ABC1234/B0DEF5678/" + sec + " failed: 404",
 		"SLACK_WEBHOOK_URL=https://hooks.slack.com/triggers/T0ABC1234/1234567890/" + sec,
+		"hooks.slack.com/services/T0ABC1234/B0DEF5678/" + sec,
+		"url=edge.hooks.slack.com/services/T0ABC1234/B0DEF5678/" + sec,
 	} {
 		out, st := Text(in)
 		if strings.Contains(out, sec) || st.Total == 0 {
 			t.Errorf("Text(%q) = %q", in, out)
 		}
+	}
+}
+
+func TestSlackWebhookNeedsTheSlackHost(t *testing.T) {
+	in := "https://evilhooks.slack.com/services/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"
+	out, st := Text(in)
+	if st.ByKind[KindSlackHook] != 0 {
+		t.Errorf("look-alike host taken for a Slack hook: Text(%q) = %q", in, out)
 	}
 }
 

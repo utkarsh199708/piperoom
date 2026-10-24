@@ -80,6 +80,8 @@ export type EventType =
   | 'setup.verified'
   | 'setup.awaiting_change'
   | 'pipeline.registered'
+  // Q7: a fix PR's state changed (state, head, merge or checks).
+  | 'pull_request.updated'
 
 export interface Event {
   room_id: string
@@ -368,6 +370,37 @@ export interface PreviewResult {
   count?: number
   /** X2: what `count` counts. Anything else is shown without a unit word. */
   unit?: RecoveryUnit
+  /** Q7: the whole change of a repo_open_pull_request step; absent on every other action. */
+  diff?: DiffPreview
+}
+
+/**
+ * Q7 (events.DiffPreview): a fix PR step's whole change at `base_sha`, every line redacted, never cut.
+ * Every string here comes from a repository: render it as text.
+ */
+export interface DiffPreview {
+  repo: string
+  repo_url: string
+  base: string
+  base_sha: string
+  /** The branch Execute will create, piperoom/<room>-<proposal>-<step>. */
+  branch: string
+  layer: string
+  files: FileDiff[]
+  /** Hosts of URLs in added lines, sorted, unique. */
+  hosts?: string[]
+  /** Risk flags (a new image, a download, TLS off, ...), one line each; flags, never refusals. */
+  warnings?: string[]
+  draft?: boolean
+}
+
+/** Q7 (events.FileDiff): one file of a DiffPreview. `unified` has 3 lines of context. */
+export interface FileDiff {
+  path: string
+  status: 'modified' | 'added' | string
+  unified: string
+  added: number
+  removed: number
 }
 
 export interface StepPreview {
@@ -451,6 +484,12 @@ export type RecoveryUnit = 'rows' | 'records'
 /** X2: how a recovery proposal ended (events.RecoveryOutcomeFor). */
 export type RecoveryOutcome = 'recovered' | 'partial' | 'not_recovered' | 'unverifiable'
 
+/**
+ * Q7: how a fix PR proposal ended when it did not apply (`recovered` false for both): `not_applied` the PR
+ * closed without merge; `not_deployed` merged but not seen in the system within the apply timeout.
+ */
+export type FixPROutcome = 'not_applied' | 'not_deployed'
+
 /** X2: proposal.created.class. Absent reads as "fix". */
 export type ProposalClass = 'fix' | 'recovery' | 'performance'
 
@@ -483,7 +522,7 @@ export interface AgentVerificationPayload {
    * wire (absent for `unverifiable`); `after: 0` is a real count, never "missing". `recovered` is true
    * only with outcome "recovered".
    */
-  outcome?: RecoveryOutcome
+  outcome?: RecoveryOutcome | FixPROutcome
   before?: number | null
   after?: number | null
   unit?: RecoveryUnit
@@ -522,6 +561,10 @@ export interface ActionInfo {
   params_schema: Record<string, unknown>
   /** Whether the action implements actions.Preview. */
   preview: boolean
+  /** Q7: an actions.Layered action (`layer` is ""): a step's layer comes from its params and the pipeline. */
+  layer_by_params?: boolean
+  /** Q7: an actions.Deferred action: it applies only when a reviewer merges, never by a policy. */
+  deferred?: boolean
 }
 
 /** POST /api/rooms/{id}/proposals (P3c): a driver-authored fix. Only registered actions with their params. */
@@ -592,6 +635,54 @@ export interface ActionExecutedPayload {
   params_hash?: string
   /** The step may or may not have run (its executor stopped mid-step); never retried. */
   outcome_unknown?: boolean
+  /** Q7: the PR a repo_open_pull_request step opened; absent otherwise. */
+  pull_request?: PullRequestRef
+}
+
+/** Q7 (events.PullRequestRef): the PR a fix step opened. `head_sha` is the commit Piperoom wrote. */
+export interface PullRequestRef {
+  repo: string
+  number: number
+  url: string
+  branch: string
+  head_sha: string
+}
+
+/** Q7: pull request states. Merged is its own state: a merged PR is never read as "not applied". */
+export type PullRequestStateName = 'open' | 'merged' | 'closed'
+
+/** Q7 (events.PRChecks): check runs and commit statuses on the PR head. `failed` names are CI text: untrusted. */
+export interface PRChecks {
+  state: 'none' | 'pending' | 'success' | 'failure' | string
+  total: number
+  failed?: string[]
+}
+
+/** pull_request.updated (Q7, system actor): one observed change of a fix PR's state, head, merge or checks. */
+export interface PullRequestUpdatedPayload extends PullRequestRef {
+  proposal_id: string
+  step_index: number
+  state: PullRequestStateName | string
+  /** The branch head is no longer the commit Piperoom wrote: a reviewer pushed to the PR. */
+  head_changed?: boolean
+  merge_sha?: string
+  merged_at?: string
+  checks: PRChecks
+}
+
+/** RoomSnapshot.pull_requests (Q7e): room-level, newest first, at most 20. */
+export interface PullRequestSummary {
+  proposal_id: string
+  step_index: number
+  repo: string
+  number: number
+  url: string
+  branch: string
+  state: PullRequestStateName | string
+  head_changed?: boolean
+  checks: PRChecks
+  merged_at?: string | null
+  updated_at: string
 }
 
 export interface HandoffSummary {
@@ -668,7 +759,14 @@ export const LAYERS = [
   'transform',
 ] as const
 
-export type Layer = (typeof LAYERS)[number]
+/**
+ * Q8: the source layer of a source_kind: mysql pipeline, in place of postgres (docs/design/mysql-source.md §4.1).
+ * Nodes, steps, proposals and owners may carry it. It is not in LAYERS yet: LAYERS feeds the label forms, and the
+ * server's events.IncidentLayers does not accept "mysql" until the Q0 item 7 contract change lands.
+ */
+export const LAYER_MYSQL = 'mysql'
+
+export type Layer = (typeof LAYERS)[number] | typeof LAYER_MYSQL
 
 // ---- REST / WS objects (docs/api.md) ----
 
@@ -1017,6 +1115,8 @@ export interface RoomSnapshot {
   forecast?: ForecastSummary
   /** U wave: present on a setup room only (docs/api.md "U-wave snapshot fields"). */
   setup?: SetupSnapshot
+  /** Q7: the fix PRs of the room, newest first, at most 20; absent until Q7e. The web folds the log instead. */
+  pull_requests?: PullRequestSummary[]
 }
 
 /**
@@ -1494,4 +1594,73 @@ export interface ProbeResult {
   ok: boolean
   took_ms: number
   checks: ProbeCheck[]
+}
+
+// ---- Models (V8; docs/api.md "Models", docs/design/model-providers.md section 11) ----
+
+/** Server mode of GET /api/models. Only standalone and quickstart can change the model. */
+export type ModelMode = 'team' | 'standalone' | 'quickstart'
+
+/** `reference` is a Claude provider (never checked against the list). */
+export type ModelStatus = 'reference' | 'supported' | 'experimental' | 'unverified'
+
+/** USD per million tokens. */
+export interface ModelPrice {
+  input: number
+  output: number
+  cache_write?: number
+  cache_read?: number
+}
+
+export interface ModelRole {
+  /** main | triage | first_look | summary | judge. */
+  role: string
+  provider: string
+  /** Only for provider `openai`. */
+  flavor?: string
+  model: string
+  /** The host only; the server never sends a whole base URL or a key. */
+  base_url_host?: string
+  region?: string
+  status: ModelStatus
+  prompt_cache: boolean
+  /** null when unpriced. */
+  price: ModelPrice | null
+  /** Present only when supported.json sets one. */
+  sunset?: string
+  /** Whether a key is configured for the role's provider. Never the key. */
+  key_set: boolean
+}
+
+export interface SupportedModel {
+  provider: string
+  flavor?: string
+  model: string
+  status: 'supported' | 'experimental'
+  alias: boolean
+  /** null while the row carries no baseline numbers: shown as "not measured yet". */
+  pass_rate: number | null
+  root_cause_rate: number | null
+  cost_per_run_usd: number | null
+  gated_at: string
+  sunset: string
+}
+
+/** GET /api/models, and the answer of PUT /api/models. */
+export interface ModelPanel {
+  mode: ModelMode
+  /** `no_model` only on a standalone or quickstart server with no usable model. */
+  state: 'ready' | 'no_model'
+  roles: ModelRole[] | null
+  supported: SupportedModel[] | null
+}
+
+/** PUT /api/models body. `key` is sent on this request only and never read back. */
+export interface ModelChoice {
+  provider: string
+  flavor?: string
+  base_url?: string
+  model: string
+  /** Absent keeps the stored key; "" means this target takes no key. */
+  key?: string
 }

@@ -1,8 +1,11 @@
 // Package nettools registers net_probe, the read-only probe of a room's
 // configured endpoints: DNS, TCP and TLS (chain, SANs, expiry) per target, the
 // brokers' advertised listeners, and Kafka Connect's own view of the source
-// database. The model names a target label, never an address: every endpoint
-// comes from config, the pipeline's connections: or its connectors.
+// database: its validation of the running config (connect_view) and, through
+// a WorkerResolver, the worker's own name resolution of the database host
+// (connect_resolve, ConnectResolveCheck). The model names a target label,
+// never an address: every endpoint comes from config, the pipeline's
+// connections: or its connectors.
 package nettools
 
 import (
@@ -57,6 +60,12 @@ type Deps struct {
 	// TargetsFromSetup; nil builds RoomTargets(Config, Connect), whose
 	// connector-config reads are bounded by StepTimeout.
 	Targets TargetSource
+	// ConnectWorker answers name resolution and TCP from inside a Kafka
+	// Connect worker, for the connect_resolve check of target source (what
+	// the worker resolves the connector's database.hostname to, and whether
+	// that address answers from the worker). Nil leaves the check out, so a
+	// probe without it reads exactly as before.
+	ConnectWorker WorkerResolver
 	// Location is the network position the probe runs from. Nil =
 	// ProcessLocation{} (the room service's own position).
 	Location Location
@@ -94,7 +103,8 @@ func (t *netProbe) InputSchema() map[string]any {
 func (t *netProbe) Description() string {
 	return "Probes one configured target from Piperoom's network position: DNS, TCP and TLS (chain, subject, SANs and expiry). " +
 		"With target kafka it also reads the brokers' advertised listeners from cluster metadata and probes each one, so a listener that only works inside the cluster shows up; " +
-		"with target source it asks Kafka Connect to validate the pipeline's running source connector config, so the database as Connect sees it is compared with what Piperoom reaches. " +
+		"with target source it asks Kafka Connect to validate the pipeline's running source connector config, so the database as Connect sees it is compared with what Piperoom reaches, " +
+		"and, where a view from inside the Connect worker is configured, reports what the worker itself resolves the connector's database host to and whether that address answers TCP from the worker (connect_resolve). " +
 		"It takes a label, never an address, presents no client certificate, sends no credential and changes nothing. " +
 		"Use it for connection refused, timeout, DNS, handshake or certificate errors, or when Connect and Piperoom disagree about whether a host is reachable."
 }
@@ -170,7 +180,15 @@ func (t *netProbe) Run(ctx context.Context, raw json.RawMessage) (tools.Result, 
 	case KindKafka:
 		checks = append(checks, t.listenerChecks(cctx, checks, tgt)...)
 	case KindSource:
-		checks = append(checks, t.connectView(cctx, tgt))
+		// connect_resolve runs first: it is the cheaper read, and when the
+		// worker resolves the host to a dead address it is the decisive one,
+		// so it gets the tool's budget before Connect's validation does.
+		var src sourceConfig
+		local := checks
+		if t.d.ConnectWorker != nil {
+			checks = append(checks, t.connectResolve(cctx, tgt, &src, local))
+		}
+		checks = append(checks, t.connectView(cctx, tgt, &src))
 	}
 
 	data := probeData{Target: tgt.Label, Kind: tgt.Kind, Endpoints: addrs(tgt), Checks: checks, Note: tgt.Note}

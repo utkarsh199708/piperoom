@@ -48,6 +48,7 @@ const HIGH = [
   /^internal\/owners\//, /^internal\/wiring\//, /^cmd\/server\//, /^internal\/tools\/scope\.go$/,
   /^internal\/auth\//, /^internal\/httpapi\/(auth|server)/, /^internal\/alertin\//, /^internal\/store\//,
   /^internal\/agent\/llm\//,                                      // model adapters: provider keys, the SSRF dialer, wire translation (V wave)
+  /^internal\/clients\/forge\//, /^internal\/tools\/forgetools\//, // the GitHub App key and token, repo writes, untrusted repo text (Q7)
   /^internal\/redact\//, /^internal\/injectscan\//, /^internal\/agent\/(alerttext|alertevidence|injectflag|approvals|prompt|readonly|redact|run\.go$)/,
   /^migrations\//, /^deploy\//, /Dockerfile$/, /^go\.(mod|sum)$/, /^web\/package(-lock)?\.json$/,
   CONTRACT, PIPELINE,

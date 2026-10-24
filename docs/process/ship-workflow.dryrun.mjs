@@ -338,7 +338,8 @@ const HIGH_FILES = ['internal/room/service_executor.go', 'internal/room/executor
   'internal/alertin/ingest.go', 'internal/store/events.go', 'internal/httpapi/server.go', 'internal/httpapi/auth.go', 'internal/httpapi/auth_oidc.go',
   'internal/auth/session.go', 'internal/actions/kafka_actions.go', 'internal/actions/pgactions/reset.go', 'internal/redact/redact.go',
   'internal/injectscan/scan.go', 'internal/agent/alerttext.go', 'internal/agent/alertevidence.go', 'internal/agent/injectflag.go',
-  'internal/agent/approvals.go', 'internal/agent/prompt.go', 'migrations/0042_leases.sql', 'deploy/helm/values.yaml', 'Dockerfile',
+  'internal/agent/approvals.go', 'internal/agent/prompt.go', 'internal/clients/forge/client.go', 'internal/tools/forgetools/read_file.go',
+  'migrations/0042_leases.sql', 'deploy/helm/values.yaml', 'Dockerfile',
   'cmd/devconsumer/Dockerfile', 'go.mod', 'go.sum', 'web/package.json', 'web/package-lock.json', ...CONTRACT_FILES, ...PIPELINE_FILES]
 const MEDIUM_FILES = ['internal/clients/warehouse/load_test.go', 'internal/topology/build_test.go', 'internal/clients/warehouse/load.go',
   'internal/topology/build.go', 'evals/scenarios/schema-change.yaml', 'evals/scenarios/heldout/x.yaml', 'web/src/App.test.tsx',

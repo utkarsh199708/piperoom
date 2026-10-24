@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"piperoom/internal/agent"
 	"strings"
 	"testing"
 
@@ -267,5 +268,101 @@ func TestReplayPastIncidentsLookupIsNotCounted(t *testing.T) {
 	}
 	if m := rp.Misses(); len(m) != 1 {
 		t.Errorf("misses = %+v, want the model's one", m)
+	}
+}
+
+// w4cUpdateHeartbeatConfig is the config step every idle-wal-growth run of
+// 39994729845 tried (action_attempts, run 3's exact params).
+const w4cUpdateHeartbeatConfig = `{"connector":"pg-orders-connector","changes":{"heartbeat.interval.ms":"60000","heartbeat.action.query":"INSERT INTO public.debezium_heartbeat (id, ts) VALUES (1, NOW()) ON CONFLICT (id) DO UPDATE SET ts = NOW()"}}`
+
+// validateUpdateConfig validates w4cUpdateHeartbeatConfig against res and the
+// scenario's recordings.
+func validateUpdateConfig(t *testing.T, sc Scenario, res Resources) error {
+	t.Helper()
+	reg, err := LiveActions(res, sc.Recordings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := reg.Get("connect_update_connector_config")
+	if !ok {
+		t.Fatal("no action connect_update_connector_config")
+	}
+	return a.Validate(tools.WithPipeline(context.Background(), sc.Pipeline), json.RawMessage(w4cUpdateHeartbeatConfig))
+}
+
+// TestReplayServesDeclaredConnectorConfig: a connector declared in
+// resources.connector_configs has its config served to the actions.Register
+// actions too (the connect_config recording merged with the declared keys),
+// so connect_update_connector_config validates in replay.
+func TestReplayServesDeclaredConnectorConfig(t *testing.T) {
+	sc, err := LoadScenario("scenarios/idle-wal-growth.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sc.Resources.ConnectorConfigs["pg-orders-connector"]; !ok {
+		t.Fatal("idle-wal-growth declares no connector_configs for pg-orders-connector")
+	}
+	if err := validateUpdateConfig(t, sc, sc.Resources); err != nil {
+		t.Fatalf("Validate with a declared config = %v, want nil", err)
+	}
+	c := replayConnect{res: sc.Resources, recs: sc.Recordings}
+	cfg, err := c.Config(context.Background(), "pg-orders-connector")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// From the connect_config recording, and the declared key.
+	if cfg["slot.name"] != "debezium_orders" || cfg["publication.autocreate.mode"] != "filtered" {
+		t.Errorf("served config = %v", cfg)
+	}
+}
+
+// TestReplayUndeclaredConnectorConfigNotReplayed: without the declaration the
+// registered actions' Config read is not replayed, exactly as before, even
+// when a connect_config recording exists.
+func TestReplayUndeclaredConnectorConfigNotReplayed(t *testing.T) {
+	sc, err := LoadScenario("scenarios/idle-wal-growth.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := sc.Resources
+	res.ConnectorConfigs = nil
+	err = validateUpdateConfig(t, sc, res)
+	const want = "actions: read config of pg-orders-connector: evals: not available in replay"
+	if err == nil || err.Error() != want || !errors.Is(err, errNotReplayed) {
+		t.Fatalf("Validate without a declared config = %v, want %q", err, want)
+	}
+	if _, err := (replayConnect{res: res, recs: sc.Recordings}).Config(context.Background(), "pg-orders-connector"); !errors.Is(err, errNotReplayed) {
+		t.Errorf("Config = %v, want errNotReplayed", err)
+	}
+}
+
+type otherMark struct{}
+
+// agentOwnRead is the production isLookup: a context the runner did not mark
+// (the model's own calls, or any other value) is never the agent's own read.
+// The marked cases (past-incidents, running versions, replan) cannot be built
+// outside internal/agent, so they are covered by that package's tests of
+// IsReplanRead and friends.
+func TestAgentOwnReadUnmarkedContexts(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"background", context.Background()},
+		{"unrelated value", context.WithValue(context.Background(), otherMark{}, true)},
+		{"cancelled", func() context.Context {
+			c, cancel := context.WithCancel(context.Background())
+			cancel()
+			return c
+		}()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if agentOwnRead(tt.ctx) {
+				t.Error("a model call counted as the agent's own read")
+			}
+			if agent.IsReplanRead(tt.ctx) {
+				t.Error("IsReplanRead true on an unmarked context")
+			}
+		})
 	}
 }

@@ -1,0 +1,463 @@
+# Debezium tuning entries (U10a). Schema: Entry in ../index.go, kind tuning
+# in ../tuning.go.
+#
+# Every key and default was read from the Debezium sources jar named in
+# "source" (Maven Central): CommonConnectorConfig and Heartbeat in
+# debezium-core for the keys every source shares, each connector's
+# *ConnectorConfig and *Connector.taskConfigs for the rest. A ">=2.7.2.Final"
+# lower bound means the same default was also read from the 2.7.2.Final
+# sources jar (the oldest release plugins.go pins); ">=3.2.0.Final" means
+# only 3.2.0.Final was checked. "doc" is the Debezium reference page that
+# documents the key; where the docs and the source disagree, the source
+# wins and the check says so.
+#
+# "symptoms" are what must be seen before the plan proposes the entry
+# (U10b): a tuning step is never proposed by default.
+
+- name: dbz-max-batch-size
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Maximum number of change events the connector hands to Kafka Connect in one poll.
+  keys:
+    - {name: max.batch.size, default: "2048", check: "A positive integer; max.queue.size must stay larger."}
+  symptoms:
+    - Streaming lag (the MilliSecondsBehindSource metric) keeps growing while the source database is busy and the task is healthy.
+    - The change event queue stays full (the QueueRemainingCapacity metric near 0) while Kafka is not the bottleneck.
+    - An initial snapshot reads rows faster than the connector publishes them.
+  checks:
+    - Raise it together with max.queue.size; the connector refuses a queue that is not larger than the batch ("Must be larger than the maximum batch size").
+    - A larger batch holds more events in the worker heap; watch the heap after raising it.
+    - On Debezium Server the key is debezium.source.max.batch.size.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-max-batch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-max-queue-size
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Number of change events buffered between the database reader and Kafka Connect.
+  keys:
+    - {name: max.queue.size, default: "8192", check: "Must be positive and larger than max.batch.size."}
+  symptoms:
+    - The queue stays full (QueueRemainingCapacity near 0) and the database reader blocks, so lag grows during bursts.
+    - "java.lang.OutOfMemoryError: Java heap space in the worker log while the queue is full of large rows (lower it, or bound it in bytes with max.queue.size.in.bytes)."
+  checks:
+    - Keep it larger than max.batch.size, or the connector config fails validation.
+    - Every queued event is held in the worker heap; with wide rows a byte bound (max.queue.size.in.bytes) is safer than a larger count.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-max-queue-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-max-queue-size-in-bytes
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Upper bound in bytes of the change event queue; 0 bounds it by count only.
+  keys:
+    - {name: max.queue.size.in.bytes, default: "0", check: "0 disables the byte bound; any positive value caps the queue at that many bytes."}
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space in the worker log on tables with large text, JSON or binary columns."
+    - The CurrentQueueSizeInBytes metric approaches the worker's maximum heap.
+  checks:
+    - Size it well under the worker heap (KAFKA_HEAP_OPTS), leaving room for the producer buffer and other connectors.
+    - The count bound max.queue.size still applies; whichever is reached first blocks the reader.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-max-queue-size-in-bytes
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-poll-interval
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Time the connector waits for new change events after a poll that returned none.
+  keys:
+    - {name: poll.interval.ms, default: "500", check: "Milliseconds, positive."}
+  symptoms:
+    - End-to-end latency on a quiet table is consistently about half a second above the database commit time.
+  checks:
+    - It only adds latency when no events are waiting; lowering it does not raise throughput under load (max.batch.size and max.queue.size do).
+    - Very low values make an idle task poll in a tight loop.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-poll-interval-ms
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-heartbeat-interval
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: How often the connector emits a heartbeat record so its offset advances when captured tables are quiet; 0 disables heartbeats.
+  keys:
+    - {name: heartbeat.interval.ms, default: "0", check: "Milliseconds; 0 disables heartbeats."}
+    - {name: heartbeat.action.query, check: "Optional SQL the connector runs on each heartbeat, for example an update of a heartbeat table that is itself captured, so the source log position moves too."}
+  symptoms:
+    - On Postgres the WAL retained by the replication slot keeps growing while the captured tables see no writes.
+    - The connector's committed offset (source position) stops advancing for hours on a low-traffic source.
+  checks:
+    - Heartbeat records go to a topic named heartbeat.topics.prefix (default __debezium-heartbeat), a dot and topic.prefix; it must exist or be creatable.
+    - When the WAL comes from writes in another database on the same Postgres server, the slot's own database sees no change; pair the interval with heartbeat.action.query writing to a captured heartbeat table.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-heartbeat-interval-ms
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-snapshot-max-threads
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Number of threads an initial snapshot uses to read tables in parallel.
+  keys:
+    - {name: snapshot.max.threads, default: "1", check: "A positive integer."}
+  symptoms:
+    - An initial snapshot of many tables runs for hours while the source database has spare CPU and I/O.
+  checks:
+    - Parallelism is across tables; one large table is still read by one thread.
+    - Each thread holds its own database connection; check the source's connection limit.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-snapshot-max-threads
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-incremental-snapshot-chunk-size
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: Rows (or documents) read per chunk of a signal-triggered incremental snapshot.
+  keys:
+    - {name: incremental.snapshot.chunk.size, default: "1024", check: "A non-negative integer."}
+  symptoms:
+    - An incremental snapshot started with an execute-snapshot signal progresses slowly while streaming keeps up.
+    - Heap pressure or OutOfMemoryError during an incremental snapshot of a table with wide rows (lower it).
+  checks:
+    - Each chunk is held in memory to deduplicate against streamed changes; larger chunks cost heap.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-incremental-snapshot-chunk-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: dbz-retriable-restart
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  versions: ">=2.7.2.Final"
+  summary: How the connector restarts itself after a retriable error such as a dropped database connection.
+  keys:
+    - {name: retriable.restart.connector.wait.ms, default: "10000", check: "Milliseconds to wait before the restart."}
+    - {name: errors.max.retries, default: "-1", check: "-1 retries without limit; 0 fails at the first retriable error."}
+  symptoms:
+    - The task restarts in a tight loop during a database failover or maintenance window, flooding the log.
+    - The task fails and stays FAILED after a short network blip (errors.max.retries set too low).
+  checks:
+    - Raising the wait trades recovery time for fewer reconnect attempts against a database that is down.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-retriable-restart-connector-wait-ms
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+# Snapshot fetch size, per source: the connectors pass different defaults to
+# CommonConnectorConfig.
+
+- name: snapshot-fetch-size-postgres
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: postgres
+  versions: ">=2.7.2.Final"
+  summary: Rows the Postgres connector fetches per round trip while snapshotting a table.
+  keys:
+    - {name: snapshot.fetch.size, default: "10240", check: "A non-negative integer."}
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space during the initial snapshot of a table with wide rows (lower it)."
+    - The initial snapshot of a large table with narrow rows is slow and network round trips dominate (raise it).
+  checks:
+    - The rows of one fetch are held in the worker heap together with the change event queue.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-snapshot-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-sources.jar
+
+- name: snapshot-fetch-size-mysql
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: mysql
+  versions: ">=3.2.0.Final"
+  summary: How the MySQL connector reads a table during a snapshot, streamed row by row or fetched with a cursor.
+  keys:
+    - name: snapshot.fetch.size
+      default: "-2147483648"
+      check: >-
+        The default (Integer.MIN_VALUE) tells MySQL Connector/J to stream the result row by row. A positive
+        value switches the snapshot to a server-side cursor fetch of that many rows per round trip.
+    - {name: min.row.count.to.stream.results, default: "1000", check: "Tables with fewer rows are read whole into memory; 0 streams every table."}
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space while snapshotting a table whose row count is below min.row.count.to.stream.results but whose rows are large."
+  checks:
+    - Lower min.row.count.to.stream.results (to 0 to always stream) before changing snapshot.fetch.size.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mysql.html#mysql-advanced-connector-configuration-properties
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-binlog/3.2.0.Final/debezium-connector-binlog-3.2.0.Final-sources.jar
+
+- name: snapshot-fetch-size-sqlserver
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: sqlserver
+  versions: ">=3.2.0.Final"
+  summary: Rows the SQL Server connector reads per round trip while snapshotting a table.
+  keys:
+    - {name: snapshot.fetch.size, default: "2000", check: "A non-negative integer."}
+  symptoms:
+    - The initial snapshot of a large table is slow and round trips to SQL Server dominate (raise it).
+    - "java.lang.OutOfMemoryError: Java heap space during the snapshot of a table with wide rows (lower it)."
+  checks:
+    - The rows of one fetch are held in the worker heap.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/sqlserver.html#sqlserver-property-snapshot-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: snapshot-fetch-size-oracle
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: Rows the Oracle connector reads per round trip while snapshotting a table.
+  keys:
+    - {name: snapshot.fetch.size, default: "10000", check: "A non-negative integer."}
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space during the snapshot of a table with LOB or wide columns (lower it)."
+    - The initial snapshot of a large table is slow and round trips dominate (raise it).
+  checks:
+    - The rows of one fetch are held in the worker heap.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-snapshot-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: snapshot-fetch-size-mongodb
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: mongodb
+  versions: ">=3.2.0.Final"
+  summary: Documents the MongoDB connector reads per batch while snapshotting a collection; 0 lets the server choose.
+  keys:
+    - {name: snapshot.fetch.size, default: "0", check: "0 leaves the batch size to the MongoDB server."}
+  symptoms:
+    - "java.lang.OutOfMemoryError: Java heap space during the snapshot of a collection with large documents (set a small batch)."
+    - The snapshot of a large collection of small documents is slow and getMore round trips dominate.
+  checks:
+    - A batch is held in the worker heap; documents can be up to 16 MB each.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mongodb.html#mongodb-property-snapshot-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mongodb/3.2.0.Final/debezium-connector-mongodb-3.2.0.Final-sources.jar
+
+# tasks.max per source: what each connector's taskConfigs does with it.
+
+- name: tasks-max-postgres
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: postgres
+  versions: ">=2.7.2.Final"
+  summary: The Postgres connector always runs one task; tasks.max above 1 changes nothing.
+  keys:
+    - {name: tasks.max, default: "1", check: "Leave it at 1."}
+  symptoms:
+    - Someone raised tasks.max to speed up a slow Postgres connector and only one task appears in its status.
+  checks:
+    - One replication slot feeds one task. To parallelise, split the tables over several connectors, each with its own slot and publication, and weigh the extra WAL each slot retains.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-property-tasks-max
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-sources.jar
+
+- name: tasks-max-mysql
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: mysql
+  versions: ">=3.2.0.Final"
+  summary: The MySQL connector runs one task and fails when tasks.max is above 1.
+  keys:
+    - {name: tasks.max, default: "1", check: "Must be 1."}
+  symptoms:
+    - The connector fails to start with "Only a single connector task may be started".
+  checks:
+    - One binlog reader feeds one task. To parallelise, split the tables over several connectors, each with its own unique database.server.id.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mysql.html#mysql-required-connector-configuration-properties
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-binlog/3.2.0.Final/debezium-connector-binlog-3.2.0.Final-sources.jar
+
+- name: tasks-max-sqlserver
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: sqlserver
+  versions: ">=3.2.0.Final"
+  summary: The SQL Server connector can split the databases in database.names over up to tasks.max tasks.
+  keys:
+    - {name: tasks.max, default: "1", check: "Above 1 only with database.names listing several databases; the task count is the smaller of the two."}
+  symptoms:
+    - One connector capturing several SQL Server databases lags while the worker has idle CPU.
+    - The connector fails with "Only a single connector task may be started in single-partition mode".
+  checks:
+    - A task captures whole databases; one busy database is still read by one task.
+    - Building the task configs connects to SQL Server, so the worker must reach it when the connector starts.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/sqlserver.html#sqlserver-property-tasks-max
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-sqlserver/3.2.0.Final/debezium-connector-sqlserver-3.2.0.Final-sources.jar
+
+- name: tasks-max-oracle
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: The Oracle connector runs one task and fails when tasks.max is above 1.
+  keys:
+    - {name: tasks.max, default: "1", check: "Must be 1."}
+  symptoms:
+    - The connector fails to start with "Only a single connector task may be started".
+  checks:
+    - LogMiner throughput is tuned with the log.mining.* keys, not with tasks.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-tasks-max
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: tasks-max-mongodb
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: mongodb
+  versions: ">=3.2.0.Final"
+  summary: The MongoDB connector runs one task over its change stream; tasks.max above 1 changes nothing.
+  keys:
+    - {name: tasks.max, default: "1", check: "Leave it at 1."}
+  symptoms:
+    - Someone raised tasks.max to speed up a slow MongoDB connector and only one task appears in its status.
+  checks:
+    - To parallelise, split the collections over several connectors, each with its own change stream.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mongodb.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mongodb/3.2.0.Final/debezium-connector-mongodb-3.2.0.Final-sources.jar
+
+# Streaming fetch sizes and source-specific readers.
+
+- name: query-fetch-size-sqlserver
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: sqlserver
+  versions: ">=3.2.0.Final"
+  summary: Rows the SQL Server connector fetches per round trip when reading the change tables while streaming.
+  keys:
+    - name: query.fetch.size
+      default: "10000"
+      check: >-
+        0 uses the JDBC driver's default. The 3.2 reference page says "No default"; the 3.2.0.Final source
+        sets 10000.
+  symptoms:
+    - Streaming lag grows on a busy database while each change-table query returns many rows.
+    - "java.lang.OutOfMemoryError: Java heap space while streaming large transactions with wide rows (lower it)."
+  checks:
+    - The rows of one fetch are held in the worker heap.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/sqlserver.html#sqlserver-property-query-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-sqlserver/3.2.0.Final/debezium-connector-sqlserver-3.2.0.Final-sources.jar
+
+- name: query-fetch-size-oracle
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: Rows the Oracle connector fetches per round trip from the LogMiner view while streaming.
+  keys:
+    - {name: query.fetch.size, default: "10000", check: "0 uses the JDBC driver's default."}
+  symptoms:
+    - Streaming lag grows while LogMiner queries return many rows and network round trips dominate.
+  checks:
+    - The rows of one fetch are held in the worker heap.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-query-fetch-size
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: oracle-log-mining-batch-size
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: The SCN window each LogMiner session mines, which the connector grows and shrinks between a minimum and a maximum.
+  keys:
+    - {name: log.mining.batch.size.default, default: "20000", check: "The starting SCN window."}
+    - {name: log.mining.batch.size.min, default: "1000"}
+    - {name: log.mining.batch.size.max, default: "100000"}
+    - {name: log.mining.batch.size.increment, default: "20000", check: "The step by which the window grows or shrinks."}
+  symptoms:
+    - Streaming lag (MilliSecondsBehindSource) keeps growing on a database with a high redo rate and the window stays at its maximum.
+    - Each LogMiner session runs long and the mining query is a heavy load on the database (lower the maximum).
+  checks:
+    - Keep min <= default <= max.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-log-mining-batch-size-default
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: oracle-log-mining-sleep-time
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: The pause between LogMiner sessions, which the connector adjusts between a minimum and a maximum.
+  keys:
+    - {name: log.mining.sleep.time.default.ms, default: "1000"}
+    - {name: log.mining.sleep.time.min.ms, default: "0"}
+    - {name: log.mining.sleep.time.max.ms, default: "3000"}
+    - {name: log.mining.sleep.time.increment.ms, default: "200"}
+  symptoms:
+    - Changes on a quiet Oracle database arrive seconds after commit (lower the maximum).
+    - Mining queries use database CPU even when nothing changes (raise the minimum).
+  checks:
+    - Keep min <= default <= max.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-log-mining-sleep-time-default-ms
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: oracle-log-mining-query-filter
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: oracle
+  versions: ">=3.2.0.Final"
+  summary: Whether the LogMiner query filters schemas and tables in the database or the connector filters every row itself.
+  keys:
+    - {name: log.mining.query.filter.mode, default: "none", values: [none, in, regex]}
+  symptoms:
+    - Streaming lag grows on a database where most redo comes from tables the connector does not capture.
+  checks:
+    - in needs plain schema and table names in the include and exclude lists; regex uses Oracle REGEXP_LIKE and accepts patterns.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/oracle.html#oracle-property-log-mining-query-filter-mode
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-oracle/3.2.0.Final/debezium-connector-oracle-3.2.0.Final-sources.jar
+
+- name: mysql-keep-alive
+  kind: tuning
+  component: debezium
+  runtime: connect
+  scope: connector
+  connector: mysql
+  versions: ">=3.2.0.Final"
+  summary: The keep-alive thread that checks and re-establishes the binlog connection.
+  keys:
+    - {name: connect.keep.alive, default: "true", values: ["true", "false"]}
+    - {name: connect.keep.alive.interval.ms, default: "60000"}
+  symptoms:
+    - The binlog connection is dropped by a proxy, load balancer or firewall idle timeout on a quiet database and the connector reconnects or stalls.
+  checks:
+    - Keep the interval shorter than the shortest idle timeout on the path to MySQL.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mysql.html#mysql-advanced-connector-configuration-properties
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-binlog/3.2.0.Final/debezium-connector-binlog-3.2.0.Final-sources.jar

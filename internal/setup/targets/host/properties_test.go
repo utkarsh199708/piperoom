@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -45,6 +46,7 @@ func with(base map[string]string, kv ...string) map[string]string {
 }
 
 func TestPropertiesWriteDistributed(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	res, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()})
 	if err != nil {
@@ -59,15 +61,17 @@ func TestPropertiesWriteDistributed(t *testing.T) {
 		"listeners=http://127.0.0.1:8083\n" +
 		"offset.storage.replication.factor=1\n" +
 		"offset.storage.topic=piperoom-offsets\n" +
-		"plugin.path=" + f.dir + "/connect-plugins\n" +
+		"plugin.path=" + slashed(f.dir) + "/connect-plugins\n" +
 		"status.storage.replication.factor=1\n" +
 		"status.storage.topic=piperoom-status\n" +
 		"value.converter=org.apache.kafka.connect.json.JsonConverter\n"
 	if got := f.read("connect-distributed.properties"); got != want {
 		t.Errorf("file:\n%s\nwant:\n%s", got, want)
 	}
+	// Windows does not model the POSIX mode bits (Stat reports 0666 there), so
+	// the mode is a Linux and macOS assertion.
 	fi, err := os.Stat(f.dir + "/connect-distributed.properties")
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && (err != nil || fi.Mode().Perm() != 0o600) {
 		t.Errorf("mode %v %v", fi.Mode(), err)
 	}
 	if !strings.Contains(res.Summary, "defaults added: listeners, plugin.path") || res.Receipt.Kind != "file" {
@@ -83,6 +87,7 @@ func TestPropertiesWriteDistributed(t *testing.T) {
 }
 
 func TestPropertiesWriteStandaloneAndPaths(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	entries := map[string]string{
 		"bootstrap.servers": "127.0.0.1:29092",
@@ -96,8 +101,8 @@ func TestPropertiesWriteStandaloneAndPaths(t *testing.T) {
 	}
 	got := f.read("connect-standalone.properties")
 	for _, line := range []string{
-		"plugin.path=" + f.dir + "/connect-plugins/debezium," + f.dir + "/connect-plugins\n",
-		"offset.storage.file.filename=" + f.dir + "/connect.offsets\n",
+		"plugin.path=" + slashed(f.dir) + "/connect-plugins/debezium," + slashed(f.dir) + "/connect-plugins\n",
+		"offset.storage.file.filename=" + slashed(f.dir) + "/connect.offsets\n",
 		"listeners=http://localhost:18083\n",
 	} {
 		if !strings.Contains(got, line) {
@@ -227,12 +232,13 @@ func TestPropertiesWriteRefusals(t *testing.T) {
 }
 
 func TestPropertiesWritePluginPathTrailingSlash(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	if _, err := f.run("properties_write", PropertiesParams{File: "connect-distributed.properties",
 		Entries: with(distributedEntries(), "plugin.path", "connect-plugins/,connect-plugins/debezium/")}); err != nil {
 		t.Fatalf("trailing slash: %v", err)
 	}
-	if got := f.read("connect-distributed.properties"); !strings.Contains(got, "\nplugin.path="+f.dir+"/connect-plugins,"+f.dir+"/connect-plugins/debezium\n") {
+	if got := f.read("connect-distributed.properties"); !strings.Contains(got, "\nplugin.path="+slashed(f.dir)+"/connect-plugins,"+slashed(f.dir)+"/connect-plugins/debezium\n") {
 		t.Errorf("file:\n%s", got)
 	}
 }
@@ -260,8 +266,10 @@ func TestPropertiesWriteReplacesAHardLink(t *testing.T) {
 }
 
 // TestPropertiesWriteFixesTheMode: the same bytes at a wider mode are
-// rewritten at 0600.
+// rewritten at 0600 (a POSIX file system only: Windows reports 0666 for every
+// writable file).
 func TestPropertiesWriteFixesTheMode(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	params := PropertiesParams{File: "connect-distributed.properties", Entries: distributedEntries()}
 	if _, err := f.run("properties_write", params); err != nil {
@@ -299,23 +307,31 @@ func TestWriteConfinedRules(t *testing.T) {
 	f := newFixture(t, Options{})
 	env := f.env()
 	for _, name := range []string{"kafka/bin/x", "connect-distributed.properties", "systemd/sub/piperoom-x.service"} {
-		if _, _, err := writeConfined(env, name, []byte("x\n"), 0o644, true); !errors.Is(err, ErrPath) {
+		if _, _, err := writeDriverFile(env, name, []byte("x\n"), 0o644, UnitDir); !errors.Is(err, ErrPath) {
 			t.Errorf("unit file at %s: %v, want ErrPath", name, err)
 		}
 	}
 	env.MountDirs = []string{DistDir}
-	if _, _, err := writeConfined(env, "kafka/config/x.properties", []byte("x\n"), 0o600, false); !errors.Is(err, ops.ErrExecutedName) {
+	if _, _, err := writeConfined(env, "kafka/config/x.properties", []byte("x\n"), 0o600); !errors.Is(err, ops.ErrExecutedName) {
 		t.Errorf("mounted path: %v", err)
 	}
 	f.write("connect-distributed.properties", "secret\n", 0o600)
 	env.Materialised = []string{"connect-distributed.properties"}
+	write := func(unitFile bool, name string) error {
+		if unitFile {
+			_, _, err := writeDriverFile(env, name, []byte("x\n"), 0o600, UnitDir)
+			return err
+		}
+		_, _, err := writeConfined(env, name, []byte("x\n"), 0o600)
+		return err
+	}
 	for _, unit := range []bool{false, true} {
 		name := "connect-distributed.properties"
 		if unit {
 			env.Materialised = []string{UnitDir}
 			name = UnitDir + "/piperoom-connect.service"
 		}
-		if _, _, err := writeConfined(env, name, []byte("x\n"), 0o600, unit); !errors.Is(err, ops.ErrSecretPath) {
+		if err := write(unit, name); !errors.Is(err, ops.ErrSecretPath) {
 			t.Errorf("materialised %s: %v, want ErrSecretPath", name, err)
 		}
 	}
@@ -402,6 +418,7 @@ func TestPropertiesRead(t *testing.T) {
 }
 
 func TestPreviewsAreDiffs(t *testing.T) {
+	skipOnWindows(t)
 	f := newFixture(t, Options{})
 	f.distribution()
 	env := f.env()

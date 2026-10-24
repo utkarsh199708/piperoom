@@ -8,6 +8,7 @@ import type {
   ProposalPreviewedPayload,
   ProposalStageStartedPayload,
   ProposalStagedPayload,
+  PullRequestUpdatedPayload,
   RoomSnapshot,
   Actor,
   AgentHypothesisPayload,
@@ -1084,6 +1085,24 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ? {
                 ...prop,
                 executed: [...prop.executed, p],
+                // Q7: the step opened a pull request; nothing changes until a reviewer merges it.
+                ...(p.pull_request
+                  ? {
+                      pull_requests: {
+                        ...prop.pull_requests,
+                        [p.step_index]: {
+                          repo: p.pull_request.repo,
+                          number: p.pull_request.number,
+                          url: p.pull_request.url,
+                          branch: p.pull_request.branch,
+                          head_sha: p.pull_request.head_sha,
+                          state: "open",
+                          head_changed: false,
+                          updated_at: event.at,
+                        },
+                      },
+                    }
+                  : {}),
                 // X2: the clock of "recovered in 3 min" starts when the last step finished ok.
                 ...(prop.class === "recovery" && p.ok
                   ? { recovery: { ...prop.recovery, ran_at: event.at } }
@@ -1107,6 +1126,39 @@ function applyCore(state: RoomState, event: Event): RoomState {
               }),
             }
           : {}),
+      };
+      break;
+    }
+
+    // Q7: one observed change of a fix PR. The newest event wins whole: the follower writes the full
+    // state each time, so nothing of an older one is kept but head_sha when the event has none.
+    case "pull_request.updated": {
+      const p = as<PullRequestUpdatedPayload>(event);
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop;
+          const cur = prop.pull_requests?.[p.step_index];
+          return {
+            ...prop,
+            pull_requests: {
+              ...prop.pull_requests,
+              [p.step_index]: {
+                repo: p.repo ?? cur?.repo ?? "",
+                number: p.number ?? cur?.number ?? 0,
+                url: p.url ?? cur?.url ?? "",
+                branch: p.branch ?? cur?.branch ?? "",
+                head_sha: p.head_sha || cur?.head_sha || "",
+                state: p.state,
+                head_changed: p.head_changed === true,
+                checks: p.checks ?? cur?.checks,
+                ...(p.merge_sha ? { merge_sha: p.merge_sha } : {}),
+                ...(p.merged_at ? { merged_at: p.merged_at } : {}),
+                updated_at: event.at,
+              },
+            },
+          };
+        }),
       };
       break;
     }

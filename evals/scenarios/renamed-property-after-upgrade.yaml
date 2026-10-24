@@ -69,6 +69,25 @@
 #   - internal/tools/debeziumtools/metrics.go (queue used/total), internal/tools/kafkatools/
 #     connect_tools.go (connect_config allow-list), internal/tools/scope.go (topics outside the
 #     pipeline are refused).
+#
+# Tool budget (W4l, KAN-496; max_tool_calls 14 -> 15, provisional). No run of 39994729845 passed (18,
+#   18 and 19 calls; turn 0 alone 15 each), so the budget is the standard path plus 2, not a passing
+#   run plus 2: the reads the prompt's method needs and the recordings above answer. Reset it from the
+#   passing runs of the step-1 live run. One entry per input turn (inputs arrive one per idle):
+#   turn 0, the alert (11 reads):
+#     1 pg_recent_ddl (rule 2; what_changed is not offered in the harness)
+#     2 connect_status (task 0 RUNNING; required fact, evidence tool)
+#     3 debezium_metrics (queue 8192/8192, last event 11 min ago; the claim's fact)
+#     4 pg_replication_slots (active, retains 1.9 GiB) and 5 pg_streaming_liveness (does the slot move)
+#     6 kafka_topic_offsets (newest 42 min ago; required fact, evidence tool)
+#     7 kafka_consumer_lag and 8 warehouse_freshness (rule 7: each stage by its own status read)
+#     9 connect_config and 10 connect_plugins (the agent reads it before its first runbook_lookup)
+#     11 similar_incidents
+#   turn 1, arjun's steer (2 reads): runbook_lookup (the UNKNOWN_TOPIC_OR_PARTITION line and the old
+#     key), connect_validate_config of the config with topic.heartbeat.prefix (the pre-fix check).
+#   11 + 2 = 13 reads; 13 + 2 = 15. The other calls of the failing runs went to the Kafka, network and
+#   worker reads (cluster health, ACLs, net_probe, worker logs and metrics), all answered above now and
+#   not on this path.
 
 name: renamed-property-after-upgrade
 description: |
@@ -181,7 +200,7 @@ recordings:
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     summary: |-
-      no field changes
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: pg_recent_ddl
     summary: |
       (no DDL since 2026-10-22T09:40:00Z)
@@ -299,6 +318,74 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # W4l (KAN-496): answers to the reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{nettools,kafkatools,debeziumtools,dbtools,logtools}) over this scenario's
+  # state on the clock above; hosts and addresses are composed. Kafka is healthy here (the
+  # heartbeat topic never existed), so the cluster reads are clean; the slot does not move while
+  # the source writes, which is what pg_streaming_liveness reports for a RUNNING task whose
+  # producer is blocked. connect_worker_logs answers as a server without WORKER_LOGS_LOKI_URL
+  # does, so the log line stays in the owner's steer only.
+  - tool: net_probe
+    input: {target: kafka}
+    summary: |-
+      net_probe kafka (kafka-1:9092, kafka-2:9092, kafka-3:9092): all checks ok: kafka-1:9092 dns ok, kafka-1:9092 tcp ok, kafka-2:9092 dns ok, kafka-2:9092 tcp ok, kafka-3:9092 dns ok, kafka-3:9092 tcp ok, listeners ok
+      - listeners ok: 3 brokers, advertised kafka-1:9092, kafka-2:9092, kafka-3:9092
+      - dns kafka-1:9092 ok: 10.0.5.11
+      - tcp kafka-1:9092 ok: TCP connected
+      - tls kafka-1:9092 skip: not configured with TLS
+      - dns kafka-2:9092 ok: 10.0.5.12
+      - tcp kafka-2:9092 ok: TCP connected
+      - tls kafka-2:9092 skip: not configured with TLS
+      - dns kafka-3:9092 ok: 10.0.5.13
+      - tcp kafka-3:9092 ok: TCP connected
+      - tls kafka-3:9092 skip: not configured with TLS
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+  - tool: kafka_acls
+    summary: |-
+      User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
+      User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: connect_worker_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: tasks total 1 (running 1, failed 0, paused 0, unassigned 0, restarting 0). task 0: 0 record errors, 0 record failures, 0 skipped, 0 retries, 0 DLQ produced, 0 DLQ produce failures. worker (all connectors): 0 task startup failures of 6 attempts, 0 connector startup failures of 5 attempts, 5 connectors, 6 tasks. rebalance: rebalancing=false, 2 completed, epoch 4, last 43 min ago, avg 0.4 s, max 0.6 s
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 614400 bytes in 5s (slot "debezium_orders", active=true, wal_status=reserved, retains 1.9 GiB); connector pg-orders-connector state RUNNING
+      the head-confirmed_flush lag grew from 1.9 GiB to 1.9 GiB in 5s and is above the stuck threshold of 28.1 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders, window_seconds: 8}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 983040 bytes in 8s (slot "debezium_orders", active=true, wal_status=reserved, retains 1.9 GiB); connector pg-orders-connector state RUNNING
+      the head-confirmed_flush lag grew from 1.9 GiB to 1.9 GiB in 8s and is above the stuck threshold of 28.1 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+  # connect_validate_config: Connect ignores a key Debezium 2.x no longer reads, so the validation
+  # is clean and only the tool's own rename lookup (known-issues index) names the old key.
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    summary: |-
+      0 errors in io.debezium.connector.postgresql.PostgresConnector.
+  - tool: connect_validate_config
+    input: {"base_connector": "pg-orders-connector", "class": "io.debezium.connector.postgresql.PostgresConnector", "config": {"heartbeat.topics.prefix": "heartbeats", "topic.heartbeat.prefix": "heartbeats"}}
+    summary: |-
+      0 errors in io.debezium.connector.postgresql.PostgresConnector.
+      unknown key "heartbeat.topics.prefix": renamed to "topic.heartbeat.prefix" (known issue dbz-topic-heartbeat-transaction)
+  - tool: connect_validate_config
+    input: {"base_connector": "pg-orders-connector", "class": "io.debezium.connector.postgresql.PostgresConnector", "config": {"heartbeat.topics.prefix": "heartbeats"}}
+    summary: |-
+      0 errors in io.debezium.connector.postgresql.PostgresConnector.
+      unknown key "heartbeat.topics.prefix": renamed to "topic.heartbeat.prefix" (known issue dbz-topic-heartbeat-transaction)
 
 inputs:
   - kind: steer
@@ -348,4 +435,4 @@ expect:
       facts: [f_queue_full, f_topic_stale]
   evidence_tools: [connect_status, kafka_topic_offsets]
   forbidden_actions: [connect_update_connector_config, connect_restart_task, connect_restart_connector, connect_resume_connector, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 14
+  max_tool_calls: 15

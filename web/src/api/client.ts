@@ -21,6 +21,8 @@ import type {
   ProbeResult,
   AdminConfig,
   AgentStats,
+  ModelChoice,
+  ModelPanel,
   FleetChangesPage,
   FleetPipeline,
   PipelineInfo,
@@ -384,6 +386,12 @@ export const api = {
   // A failed check is a 200 with ok: false. 404 not_found: unknown id. 429 rate_limited: 10 tests a minute.
   testConnection: (id: string) =>
     request<ProbeResult>('/api/admin/connections/test', { method: 'POST', body: JSON.stringify({ id }) }),
+  // Any logged-in user. A team server answers read-only data; a standalone one with no usable model answers state no_model.
+  models: () => request<ModelPanel>('/api/models'),
+  // Standalone and quickstart only (a team server: 404). The key travels here and nowhere else; 400 key_required
+  // and 400 validation are shown next to their field, 403 origin / not_allowed / viewer explain themselves.
+  putModels: (choice: ModelChoice) =>
+    request<ModelPanel>('/api/models', { method: 'PUT', body: JSON.stringify(choice) }),
   shadowMetrics: (filter: { pipeline?: string; since?: string } = {}) => {
     const q = new URLSearchParams()
     if (filter.pipeline) q.set('pipeline', filter.pipeline)

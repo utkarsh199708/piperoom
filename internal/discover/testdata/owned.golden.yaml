@@ -36,4 +36,4 @@ layers:
   environment: user:alice
 
 # skipped connectors:
-#   wh-sink: not a Debezium Postgres source (class io.confluent.connect.jdbc.JdbcSinkConnector)
+#   wh-sink: not a Debezium Postgres or MySQL source (class io.confluent.connect.jdbc.JdbcSinkConnector)

@@ -187,10 +187,29 @@ func missing(p grantParams, info RoleInfo) []string {
 	return out
 }
 
-// checkRole refuses a missing role and a grant that changes nothing.
-func checkRole(p grantParams, info RoleInfo) error {
+// checkRole refuses a missing role and a grant that changes nothing. On
+// MySQL it also refuses root and a user name with more than one account
+// before approval (design §8.1): a guess between user@% and user@10.0.% could
+// widen the wrong account, so a DBA grants it.
+func checkRole(kind string, p grantParams, info RoleInfo) error {
+	if isMySQL(kind) && strings.EqualFold(p.Role, "root") {
+		return fmt.Errorf("sourceactions: %s: %q is MySQL's administrator, never a connector's database.user", GrantSelectName, p.Role)
+	}
 	if !info.Exists {
 		return fmt.Errorf("sourceactions: %s: role %q does not exist on the source: %w", GrantSelectName, p.Role, clients.ErrNotFound)
+	}
+	if isMySQL(kind) {
+		switch len(info.Accounts) {
+		case 0:
+			return fmt.Errorf("sourceactions: %s: the source named no account of user %q, so the grant's account cannot be shown to the approvers", GrantSelectName, p.Role)
+		case 1:
+		default:
+			accts := make([]string, len(info.Accounts))
+			for i, ac := range info.Accounts {
+				accts[i] = mysqlAccount(ac)
+			}
+			return fmt.Errorf("sourceactions: %s: user %q has accounts %s; grant by hand or remove one (a guess could widen the wrong account)", GrantSelectName, p.Role, strings.Join(accts, ", "))
+		}
 	}
 	if len(missing(p, info)) == 0 {
 		return fmt.Errorf("sourceactions: %s: role %q can already SELECT every listed table; nothing to do", GrantSelectName, p.Role)
@@ -219,7 +238,7 @@ func (a *grantSelect) Validate(ctx context.Context, raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	return checkRole(p, info)
+	return checkRole(stepKind(ctx, a.d.Source), p, info)
 }
 
 // Preview reads the connector's database.user and the role's privileges on
@@ -241,7 +260,79 @@ func (a *grantSelect) Preview(ctx context.Context, raw json.RawMessage) (actions
 	if err != nil {
 		return actions.PreviewResult{}, err
 	}
+	kind := stepKind(ctx, a.d.Source)
+	if isMySQL(kind) {
+		return mysqlGrantPreview(p, info), nil
+	}
 	return grantPreview(p, info), nil
+}
+
+// mysqlGrantPreview is the MySQL preview: it names the one account the
+// grant goes to (user@host, resolved from mysql.user) and the further
+// privileges the connector needs, which this action never grants.
+func mysqlGrantPreview(p grantParams, info RoleInfo) actions.PreviewResult {
+	res := actions.PreviewResult{
+		Target: fmt.Sprintf("user %s (connector %s's database.user) on the source MySQL", p.Role, p.Connector),
+	}
+	var has, lacks []string
+	for _, t := range p.Tables {
+		if info.Selectable[t] {
+			has = append(has, t)
+		} else {
+			lacks = append(lacks, t)
+		}
+	}
+	var cur strings.Builder
+	if !info.Exists {
+		fmt.Fprintf(&cur, "user %s has no account", p.Role)
+	} else {
+		accts := make([]string, len(info.Accounts))
+		for i, ac := range info.Accounts {
+			accts[i] = mysqlAccount(ac)
+		}
+		fmt.Fprintf(&cur, "user %s: %s %s (login %s, REPLICATION SLAVE and CLIENT %s)", p.Role,
+			tools.Plural(len(accts), "account", "accounts"), strings.Join(accts, ", "), yesNo(info.CanLogin), yesNo(info.Replication))
+		if len(has) > 0 {
+			fmt.Fprintf(&cur, "; can SELECT %s", strings.Join(has, ", "))
+		}
+		if len(lacks) > 0 {
+			fmt.Fprintf(&cur, "; cannot SELECT %s", strings.Join(lacks, ", "))
+		}
+		if l := lackingPrivileges(info.Privileges); l != "" {
+			fmt.Fprintf(&cur, "; lacks %s (not granted by this step)", l)
+		}
+	}
+	res.Current = cur.String()
+	if err := checkRole(owners.SourceKindMySQL, p, info); err != nil {
+		res.Expected = "no change: this step is refused (" + strings.TrimPrefix(err.Error(), "sourceactions: "+GrantSelectName+": ") + ")"
+		return res
+	}
+	account := mysqlAccount(info.Accounts[0])
+	res.Target = fmt.Sprintf("account %s (connector %s's database.user) on the source MySQL", account, p.Connector)
+	var b strings.Builder
+	fmt.Fprintf(&b, "GRANT SELECT ON %s TO %s, one statement per table: SELECT only, no GRANT OPTION, no other privilege, this account only; %d of %d tables gain it.",
+		quoteTablesFor(owners.SourceKindMySQL, p.Tables), account, len(lacks), len(p.Tables))
+	if !info.CanLogin {
+		b.WriteString(" The account is locked or its password expired, so the connector still fails until a DBA unlocks it.")
+	}
+	b.WriteString(" A failed snapshot or task needs a restart (connect_restart_task) to read the tables.")
+	res.Expected = b.String()
+	res.Reversible = true
+	res.Rollback = fmt.Sprintf("REVOKE SELECT ON %s FROM %s (by a DBA; no registered action; only the tables that lacked it)", quoteTablesFor(owners.SourceKindMySQL, lacks), account)
+	return res
+}
+
+// lackingPrivileges lists, sorted, the global privileges RoleInfo reports as
+// missing ("" when none or none reported).
+func lackingPrivileges(privs map[string]bool) string {
+	var out []string
+	for name, ok := range privs {
+		if !ok {
+			out = append(out, oneLine(name, 32))
+		}
+	}
+	slices.Sort(out)
+	return strings.Join(out, ", ")
 }
 
 func grantPreview(p grantParams, info RoleInfo) actions.PreviewResult {
@@ -269,7 +360,7 @@ func grantPreview(p grantParams, info RoleInfo) actions.PreviewResult {
 		}
 	}
 	res.Current = cur.String()
-	if err := checkRole(p, info); err != nil {
+	if err := checkRole(owners.SourceKindPostgres, p, info); err != nil {
 		res.Expected = "no change: this step is refused (" + strings.TrimPrefix(err.Error(), "sourceactions: "+GrantSelectName+": ") + ")"
 		return res
 	}

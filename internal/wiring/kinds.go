@@ -20,6 +20,7 @@ import (
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/logtools"
+	"piperoom/internal/tools/mysqltools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
 )
@@ -111,8 +112,25 @@ var (
 // set gets no pg_*, reconcile or trace_record tool over its absent source.
 func toolPackages() []toolPackage {
 	return []toolPackage{
+		// SourceKind picks dbtools' list (Q8n): a MySQL set gets no pg_* tool,
+		// and source_row and source_long_transactions instead.
 		{name: "db tools", kinds: bothKinds, register: func(reg *tools.Registry, w *Wired) error {
-			return dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka})
+			return dbtools.Register(reg, dbtools.Deps{Src: w.Source, SourceKind: w.source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka})
+		}},
+		// mysql_binlog_status (Q8c) only on a MySQL set: a Postgres set's
+		// list does not change.
+		{name: "mysql tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
+			if w.source != events.SourceKindMySQL {
+				return nil
+			}
+			d := mysqltools.Deps{Owners: w.Owners, Now: w.Now}
+			if !isNilIface(w.Source) {
+				d.Src = w.Source
+			}
+			if c := readConnect(w); !isNilIface(c) {
+				d.Connect = c
+			}
+			return mysqltools.Register(reg, d)
 		}},
 		{name: "kafka tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			// kafka_throughput reads the watcher's group_lag samples from the
@@ -180,19 +198,39 @@ func toolPackages() []toolPackage {
 		// live DDL read (changes.Deps.Src nil).
 		{name: "what_changed", register: func(reg *tools.Registry, w *Wired) error {
 			chg := changes.Deps{Src: w.Source, Transform: w.Transform, Owners: w.Owners}
+			// MySQL has no live DDL read (RecentDDL is ErrNotSupported; its
+			// DDL is in the schema history topic, kafka_schema_history), so
+			// a MySQL set skips it rather than noting a failed read on every
+			// call (Q8g).
+			if w.source == events.SourceKindMySQL {
+				chg.Src = nil
+			}
 			if cr, ok := w.Rooms.(clients.ChangeReader); ok {
 				chg.Changes = cr
 			}
 			return changes.Register(reg, chg)
 		}},
+		// The fix-PR read tools (Q7f) only with a forge configured
+		// (FORGE_KIND): without one every list stays as it was. The agent
+		// offers them only in a room whose pipeline lists repos:.
+		{name: "forge tools", kinds: cdcKind, register: registerForgeTools},
 	}
 }
 
 // registerToolsWith registers the packages the set's kinds need, each into a
 // scratch registry first, then copies into reg only the tools that serve one
 // of the set's kinds (agent.ToolServesKind), in package order.
+//
+// It keeps only the tools of the set's source kind too (Q8g,
+// agent.ToolServesSource): no pg_* tool on a MySQL set; no mysql_* tool,
+// source_row, source_long_transactions or kafka_schema_history on a
+// Postgres one, whose list is then the one it had before MySQL.
 func registerToolsWith(reg *tools.Registry, w *Wired, pkgs []toolPackage) error {
 	ks := kindsOf(w.Owners)
+	src, err := w.sourceKind()
+	if err != nil {
+		return err
+	}
 	for _, p := range pkgs {
 		if !ks.hasAny(p.kinds) {
 			continue
@@ -202,7 +240,7 @@ func registerToolsWith(reg *tools.Registry, w *Wired, pkgs []toolPackage) error 
 			return fmt.Errorf("wiring: register %s: %w", p.name, err)
 		}
 		for _, t := range scratch.All() {
-			if !servesAny(t.Name(), ks) {
+			if !servesAny(t.Name(), ks) || !agent.ToolServesSource(t.Name(), src) {
 				continue
 			}
 			if err := reg.Register(t); err != nil {

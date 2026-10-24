@@ -83,12 +83,23 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 // (docs/api.md: a sixth answers 429 too_many_proposals).
 const maxOpenDriverProposals = 5
 
+// driverLayerAccepted reports whether a driver's step layer sent stands for
+// the layer the server derived (want, from actions.StepLayer): empty, want
+// itself, or the room-less catalogue value GET /api/actions served for the
+// action (a.Layer()). Any other value is a different approver and is refused.
+// The agent's proposals never take this path: they must send want.
+func driverLayerAccepted(a actions.Action, sent, want string) bool {
+	return sent == "" || sent == want || sent == a.Layer()
+}
+
 // CreateDriverProposal is POST /api/rooms/{id}/proposals (P3c): the driver
 // authors a fix proposal. Driver only (403 not_driver), open rooms only
 // (409 room_closed), never in a shadow room (400 validation), at most
 // maxOpenDriverProposals open driver-authored proposals per room
 // (429 too_many_proposals). It is validated exactly like an agent proposal
-// (createProposal: registered action, layer match, Validate under the room's
+// (createProposal: registered action, layer match (the driver's step layer
+// may also be "" or the catalogue's a.Layer(); the server stores the derived
+// one, see driverLayerAccepted), Validate under the room's
 // pipeline ctx, param keys, scope, params_hash, preview); only the typed text
 // is refused rather than sanitized, and Origin is forced to
 // ProposalOriginDriver, which also keeps the auto-approve policy off it
@@ -165,6 +176,12 @@ func openDriverProposals(snap RoomSnapshot) int {
 // and the proposal.created event.
 func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, events.Event, error) {
 	p = sanitizeProposal(p)
+	// The system origin grants plan-free routing and the ladder canary's
+	// setup_local auto-run (setupNeedsPlan, setupLocalRuns): only the server's
+	// own actor may claim it, never a payload from the agent or a person.
+	if p.Origin == setupProposalOriginSystem && (actor.Kind != systemActor.Kind || actor.ID != systemActor.ID) {
+		return "", events.Event{}, validation("origin system is reserved for the server's own proposals")
+	}
 	if len(p.Steps) == 0 {
 		return "", events.Event{}, validation("proposal requires at least one step")
 	}
@@ -192,13 +209,24 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 	// Structural checks first: they do not need the room state.
-	// The class comes from the registry, never from the proposer (X2, X6).
-	p.Class = ""
-	for i, step := range p.Steps {
+	stepActs := make([]actions.Action, 0, len(p.Steps))
+	for _, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
 			return "", events.Event{}, validation(fmt.Sprintf("unknown action %q", step.Action))
 		}
+		stepActs = append(stepActs, a)
+	}
+	// Q7k: a proposal with a Deferred (pull-request) step holds only
+	// Deferred steps, at most actions.MaxDeferredSteps.
+	deferredSteps, err := checkDeferredSteps(stepActs)
+	if err != nil {
+		return "", events.Event{}, err
+	}
+	// The class comes from the registry, never from the proposer (X2, X6).
+	p.Class = ""
+	for i, step := range p.Steps {
+		a := stepActs[i]
 		switch c := actions.ClassOf(a); {
 		case c == actions.ClassFix:
 		case p.Class != "" && p.Class != c:
@@ -207,8 +235,23 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		default:
 			p.Class = c
 		}
-		if step.Layer != a.Layer() {
-			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
+		// The one layer rule (actions.StepLayer): the room's pipeline and the
+		// step's params decide the approver, never the proposer (Q7k, Q8o).
+		want, lerr := s.stepLayer(setupSnap, pipelineID, a, step.Params)
+		if lerr != nil {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): no approving layer: %v", i, step.Action, lerr))
+		}
+		if p.Origin == events.ProposalOriginDriver && driverLayerAccepted(a, step.Layer, want) {
+			// The driver's form only knows GET /api/actions, which has no
+			// room: it sends the catalogue's a.Layer() ("postgres" for a
+			// SourceLayered action, "" for a Layered one) or nothing. The
+			// server sets the derived layer, so the proposer still never
+			// picks the approver (review of #934, MySQL Major 2).
+			step.Layer = want
+			p.Steps[i].Layer = want
+		}
+		if step.Layer != want {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, want))
 		}
 		if !isKnownLayer(step.Layer) {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
@@ -243,6 +286,14 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// pipeline nothing can be scoped to.
 	if s.proposalsDisabled(st) {
 		return "", events.Event{}, errProposalsDisabled(st.snap.PipelineID)
+	}
+
+	// Q7k: at most maxOpenFixPRs fix PRs open (or about to open) per room.
+	if deferredSteps > 0 {
+		if n := s.pendingFixPRs(&st.snap); n+deferredSteps > maxOpenFixPRs {
+			return "", events.Event{}, validation(fmt.Sprintf(
+				"a room holds at most %d open fix pull requests (%d open or proposed); wait until one merges or closes", maxOpenFixPRs, n))
+		}
 	}
 
 	// Scope check against the room's pipeline (docs/api.md): a step must

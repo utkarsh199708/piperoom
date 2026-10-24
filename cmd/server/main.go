@@ -199,6 +199,11 @@ type serveMode struct {
 	log         *slog.Logger
 	// stdout receives the quickstart URL once the listener is bound.
 	stdout io.Writer
+	// The model picker (V7), quickstart and standalone only: the panel's
+	// mode, where model.env lives, and what it held at start.
+	modelMode  string
+	projectDir string
+	modelEnv   quickstart.ModelEnv
 }
 
 // serverSettings are the parsed settings the server needs. The real and demo
@@ -482,6 +487,8 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		// usage hands the hand-off's agent.usage events to the room service
 		// once it exists.
 		usage = &usageRelay{log: log}
+		// live is the picker's swappable endpoint; nil outside quickstart.
+		live *liveModel
 	)
 	// Both stores keep the spend tables; the in-memory one only for --demo.
 	spendStore, ok := st.(store.SpendStore)
@@ -507,7 +514,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 			writePM = demo.WritePostmortem
 		}
 	} else {
-		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpoint, wireAgentInput{
+		if m.quickstart {
+			// The picker's stored key reaches the adapters through the key
+			// overlay (wiring.WithGetenv), not the process environment; a
+			// standalone or quickstart server with no usable model starts in
+			// the no model state (models.go).
+			live = &liveModel{startKeys: quickstart.NewKeys(nil, m.modelEnv)}
+		}
+		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpointWithEnv, wireAgentInput{
 			cfg:        cfg,
 			log:        log,
 			own:        own,
@@ -519,6 +533,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 			fakeAgent:  s.fakeAgent,
 			pmMode:     s.pmMode,
 			writeOn:    s.writeOn,
+			live:       live,
 		})
 		if err != nil {
 			return err
@@ -561,7 +576,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		}
 	}
 
+	// Q7e: the follower of opened fix PRs; nil with FORGE_KIND empty.
+	prReader, err := forgeSetup(cfg, own, log)
+	if err != nil {
+		return err
+	}
+
 	svc := newRoomService(room.Deps{
+		PullRequests:      prReader,
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,
@@ -707,6 +729,13 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 			return fmt.Errorf("server: admin settings: %w", err)
 		}
 		httpOpts = append(httpOpts, httpapi.WithAdmin(adm))
+	}
+	modelsOpt, err := modelsOption(m, cfg, s.spend.prices, live, soloUser, users)
+	if err != nil {
+		return err
+	}
+	if modelsOpt != nil {
+		httpOpts = append(httpOpts, modelsOpt)
 	}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the

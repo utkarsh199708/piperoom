@@ -163,6 +163,53 @@ Debezium MBeans: names as `connect_worker_metrics` reads them, except that expor
 return data on the stack. The first live run should record
 the time to healthy here (the row's target is under 2 minutes).
 
+## Local models: the `llm` profile (V17)
+
+Run Piperoom's agent on a free local model. Profile `llm` adds Ollama (`ollama/ollama:0.40.1`, pinned) with
+`OLLAMA_CONTEXT_LENGTH=131072`: Ollama cuts a prompt past its context window without an error, and its default
+window (2k to 4k tokens) is far under one investigation turn (`docs/design/model-providers.md` §6.2). It listens on
+`127.0.0.1:11434` only and keeps models in the named volume `ollama-models`. Without the profile nothing changes.
+
+```
+docker compose -f dev/docker-compose.yml --profile llm up -d    # the server only
+go run ./cmd/devctl llm-up                                       # the same, then pulls llama3.1:8b (about 5 GB, once)
+```
+
+`llama3.1:8b` is tool-capable and has a 131072-token window. The endpoint is `http://localhost:11434/v1`. Point the
+server (or `cmd/investigate`) at it:
+
+| Variable | Value |
+|---|---|
+| `PIPEROOM_MODEL_PROVIDER` | `openai` |
+| `PIPEROOM_MODEL_FLAVOR` | `ollama` (its default base URL is the endpoint above; `PIPEROOM_MODEL_BASE_URL` overrides it) |
+| `PIPEROOM_MODEL` | `llama3.1:8b` |
+| `PIPEROOM_MODEL_CONTEXT_TOKENS` | `131072` (Ollama reports none the client can read) |
+| `PIPEROOM_MODEL_UNVERIFIED` | `on`: required until the model is in `supported.json` |
+
+Planned eval run, available once V10 lands: `go run ./evals/cmd/evalrun -provider openai -flavor ollama -model
+llama3.1:8b -only schema-change`. A local run is valid for development, not as a gate result.
+**First real run (2026-10-24, Windows, Docker Desktop):** `devctl llm-up` exited 0 with `model ready`; the container
+was healthy, `/api/tags` listed `llama3.1:8b` and `/v1/models` served it. The pull took about 13 minutes. The start
+probe and `evalrun` have not been run against it yet.
+
+**Memory.** The 131072 window is not optional: the agent refuses a model whose window is under 128000 tokens
+(`internal/agent/startcheck.go`), and a smaller Ollama window truncates silently. At that window `llama3.1:8b` does not
+fit an 8 GiB Docker: with Docker Desktop capped at 7.46 GiB, the first generation killed the model process
+(`llama-server process has terminated: signal: killed`); the same model at a 4096 window answered, so the model and
+the profile are fine. Give Docker Desktop more memory (Settings, Resources), or halve the KV cache before `llm-up`:
+
+```
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 go run ./cmd/devctl llm-up
+```
+
+Neither fix was measured on the 8 GiB machine; do not lower `OLLAMA_CONTEXT_LENGTH` instead.
+
+**Two machine problems seen on that run:**
+- A native Ollama install already on `127.0.0.1:11434` makes compose fail with "ports are not available". On Windows,
+  quit the tray app (`ollama app.exe`) first: it restarts `ollama.exe` if only that is killed.
+- A container left in the Created state by an aborted first attempt blocks the next one:
+  `docker rm -f piperoom-dev-ollama-1`, then `llm-up` again.
+
 ## The dev-only break/fix API (`devctl serve`)
 
 For the web "Break something" menu (A6) there is a tiny local HTTP API:

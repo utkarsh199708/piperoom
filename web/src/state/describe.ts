@@ -34,6 +34,7 @@ import type {
   ProposalCreatedPayload,
   ProposalStagedPayload,
   ProposalScheduledPayload,
+  PullRequestUpdatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   SteerDeclinedPayload,
@@ -43,6 +44,7 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { argTags } from '../lib/toolLayers'
+import { prLine } from '../lib/fixpr'
 
 const STAGE_WORDS: Record<StagedVerdict, string> = {
   healthy: 'healthy',
@@ -301,7 +303,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'action.executed': {
       const p = as<ActionExecutedPayload>(e)
+      if (p.ok && p.pull_request) return { text: `Step ${p.step_index + 1} opened pull request #${p.pull_request.number} in ${clip(p.pull_request.repo, 40)}`, kind: 'decision' }
       return { text: `Step ${p.step_index + 1} ${p.ok ? 'ran' : 'failed'}`, detail: p.output ? clip(p.output, 200) : undefined, kind: 'decision' }
+    }
+    case 'pull_request.updated': {
+      const p = as<PullRequestUpdatedPayload>(e)
+      return { text: `Pull request #${p.number} in ${clip(p.repo, 40)}: ${prLine(p)}`, kind: 'system' }
     }
     case 'handoff.requested': {
       const p = as<HandoffRequestedPayload>(e)
