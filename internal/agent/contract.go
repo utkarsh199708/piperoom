@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -224,13 +225,30 @@ type Deps struct {
 	// plain Run and the demo runner never call it. Shadow mode records the
 	// value. Nil = not wanted.
 	Usage func(used int64)
+	// Watch, when set, reads the watcher's status row of the room's pipeline.
+	// The hypothesis guard (rule 1) refuses a healthy verdict while a symptom
+	// signal fires and is not clearing. The room service passes a reader that
+	// returns no row older than 3 x PIPEROOM_WATCH_INTERVAL. No row, a stale row
+	// or a read error never refuses. Nil = rule 1 reads no row. (H1)
+	Watch clients.WatchStatusReader
 }
+
+// Hypothesis guard modes (Options.HypothesisGuard). (H1)
+const (
+	GuardOff     = "off"     // no check
+	GuardLog     = "log"     // check and log what would be refused, never refuse
+	GuardEnforce = "enforce" // refuse, then accept after two refusals with confidence low
+)
 
 // Options tune the model call.
 type Options struct {
 	Model    string // default "claude-opus-5-5"
 	Effort   string // default "high"
 	MaxTurns int    // safety stop; default 40
+	// HypothesisGuard is GuardOff, GuardLog or GuardEnforce; "" = GuardLog.
+	// Filled from PIPEROOM_HYPOTHESIS_GUARD (config.ParseHypothesisGuard);
+	// shadow rooms use the same value. (H1)
+	HypothesisGuard string
 	// TokenBudget caps model tokens for this run's room. 0 = the Endpoint's
 	// default (PIPEROOM_ROOM_TOKEN_BUDGET). A value > 0 becomes the room's
 	// limit when Run starts, even if the room's count already exists (a
