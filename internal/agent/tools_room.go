@@ -289,8 +289,9 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
 	// The hypothesis guard runs last, so a refusal it counts is one the call
-	// would otherwise have been accepted without (guard.go).
-	g, err := t.guard.check(t.Name(), t.ruledOutCheck(in))
+	// would otherwise have been accepted without (guard.go). Rule 1 reads the
+	// store, so it comes after rule 2: a rule 2 refusal never costs a read.
+	g, err := t.guard.check(t.Name(), t.ruledOutCheck(in), t.guard.symptomCheck(ctx, in.Text))
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -314,6 +315,7 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	t.steps.setHypothesisSteps(in.BasedOnSteps)
 	t.causes.record(scope, team)
 	t.guard.reset()
+	t.guard.healthyAccepted(in.Text)
 	t.guard.post(ctx, t.sink, g.notes)
 	return tools.Result{Summary: "hypothesis recorded" + guardCappedNote(g) + scopeNote(scope, team) + unbackedNote(unbacked)}, nil
 }
@@ -334,6 +336,9 @@ func (t *updateHypothesisTool) ruledOutCheck(in hypothesisInput) func() *guardFi
 func guardCappedNote(g guardResult) string {
 	if !g.capped {
 		return ""
+	}
+	if len(g.unbacked) == 0 {
+		return fmt.Sprintf("; hypothesis guard: recorded at low confidence after %d refusals", guardMaxRefusals)
 	}
 	return fmt.Sprintf("; hypothesis guard: recorded at low confidence after %d refusals, with the unbacked items marked", guardMaxRefusals)
 }
@@ -402,7 +407,7 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 			return nil
 		}
 		return checkRuledOut(in.Text, t.steps.snapshot(), nil, t.guard.offeredTool)
-	})
+	}, t.guard.symptomCheck(ctx, in.Text))
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -413,6 +418,7 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 		return tools.Result{}, fmt.Errorf("agent: emit message: %w", err)
 	}
 	t.guard.reset()
+	t.guard.healthyAccepted(in.Text)
 	t.guard.post(ctx, t.sink, g.notes)
 	return tools.Result{Summary: "message posted"}, nil
 }
