@@ -772,6 +772,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	watchStores(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
+		checkWatchLag(log, s.watchCfg.Mode, own, watchDeps.ClientsFor)
 	}
 	stopWatch, err := startElectedWatcher(ctx, elector, watchDeps, closedHook, log)
 	if err != nil {
