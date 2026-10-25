@@ -203,6 +203,10 @@ Nothing looks broken except `restart_lsn` not moving and retained WAL rising. `p
 open transaction (`xact_start` minutes ago, state `idle in transaction` or running `pg_sleep`).
 **Fix:** `pg_terminate_backend(pid)`. Retained WAL dropped to 96 kB right away.
 
+> **Detection:** with `dev/owners.fast.yaml` (`OWNERS_FILE=dev/owners.fast.yaml`) the watcher opens a room in about
+> 2 to 3 minutes. With the demo file or production defaults it does not: `slot_wal` fires at 1 GiB, so use an
+> external alert.
+
 ---
 
 ## 5. `slot-inactive` — stopped connector, WAL piling up
