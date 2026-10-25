@@ -61,8 +61,8 @@ func TestRegisterThroughHook(t *testing.T) {
 		if (i >= 0) != hook {
 			t.Fatalf("hook %v: net_probe registered = %v (%v)", hook, i >= 0, names)
 		}
-		if hook && (i == 0 || names[i-1] != "connect_worker_logs") {
-			t.Errorf("net_probe should follow connect_worker_logs: %v", names)
+		if hook && (i == 0 || names[i-1] != "consumer_logs") {
+			t.Errorf("net_probe should follow the log tools (consumer_logs last): %v", names)
 		}
 	}
 }

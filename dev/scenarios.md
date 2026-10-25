@@ -182,6 +182,12 @@ Container: `restarts=8 state=restarting` after ~40 s. Consumer log, repeated on 
 ```
 level=ERROR msg="devconsumer stopped" err="devconsumer: cannot process order 1648 at pg.public.orders/2@799 (poison pill)"
 ```
+With the `logs` profile up (dev/README.md "Logs profile") and `OWNERS_FILE=dev/owners.fast.yaml` (its `orders`
+pipeline sets `consumer_logs.selector` to `{service="devconsumer"}`), the agent can read that line with
+`consumer_logs`: the first look for `consumer_lag` / `group_unstable` reads `kafka_consumer_lag` and then
+`consumer_logs`, which collapses the crash loop into one line with a count (`×14 … level=ERROR msg="devconsumer
+stopped" err="… order 1648 …"`). The server also needs its worker log client (the same Loki as
+`connect_worker_logs`); without it the tool answers "not configured".
 Lag grows only on the partition that holds the bad record; with load, total lag rises steadily.
 **Fix:** restart devconsumer without the flag (real-world options: fix the consumer, or skip that offset).
 

@@ -1,78 +1,20 @@
 package workerlogs
 
 import (
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"piperoom/internal/clients/workerlogs/logql"
 )
 
-// maxSelectorBytes bounds WORKER_LOGS_SELECTOR. A stream selector names a
-// few labels; anything longer is a mistake.
-const maxSelectorBytes = 1024
-
-var labelNameRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*`)
-
 // CheckSelector reports whether sel is a LogQL stream selector and nothing
-// else: `{` one or more `name op "value"` matchers separated by commas `}`,
-// with op one of = != =~ !~ and the value a double-quoted or backquoted
-// string. A pipeline stage (`|= "x"`, `| json`) or a metric query is
-// refused: the operator chooses which streams are read, the tool adds the
-// filters, and a selector that already filtered would change what "the
-// newest lines" means without the tool knowing.
-func CheckSelector(sel string) error {
-	s := strings.TrimSpace(sel)
-	if s == "" {
-		return fmt.Errorf("selector is empty")
-	}
-	if len(s) > maxSelectorBytes {
-		return fmt.Errorf("selector is longer than %d bytes", maxSelectorBytes)
-	}
-	if s[0] != '{' {
-		return fmt.Errorf("selector must start with '{'")
-	}
-	s = s[1:]
-	matchers := 0
-	for {
-		s = strings.TrimLeft(s, " \t")
-		if strings.HasPrefix(s, "}") {
-			if matchers == 0 {
-				return fmt.Errorf("selector has no label matcher")
-			}
-			if rest := strings.TrimSpace(s[1:]); rest != "" {
-				return fmt.Errorf("selector has text after '}' (pipeline stages are not allowed)")
-			}
-			return nil
-		}
-		name := labelNameRE.FindString(s)
-		if name == "" {
-			return fmt.Errorf("selector matcher %d: bad label name", matchers+1)
-		}
-		s = strings.TrimLeft(s[len(name):], " \t")
-		switch {
-		case strings.HasPrefix(s, "=~"), strings.HasPrefix(s, "!~"), strings.HasPrefix(s, "!="):
-			s = s[2:]
-		case strings.HasPrefix(s, "="):
-			s = s[1:]
-		default:
-			return fmt.Errorf("selector matcher %d (%s): want = != =~ or !~", matchers+1, name)
-		}
-		s = strings.TrimLeft(s, " \t")
-		q, err := strconv.QuotedPrefix(s)
-		if err != nil || q[0] == '\'' {
-			return fmt.Errorf("selector matcher %d (%s): value is not a quoted string", matchers+1, name)
-		}
-		s = strings.TrimLeft(s[len(q):], " \t")
-		matchers++
-		switch {
-		case strings.HasPrefix(s, ","):
-			s = s[1:]
-		case strings.HasPrefix(s, "}"):
-		default:
-			return fmt.Errorf("selector matcher %d (%s): want ',' or '}' after the value", matchers, name)
-		}
-	}
-}
+// else (logql.CheckSelector): `{` one or more `name op "value"` matchers
+// `}`. A pipeline stage (`|= "x"`, `| json`) or a metric query is refused:
+// the operator chooses which streams are read, the tool adds the filters.
+// The check lives in the leaf package logql so internal/owners can apply it
+// to a pipeline's consumer_logs.selector without an import cycle.
+func CheckSelector(sel string) error { return logql.CheckSelector(sel) }
 
 // buildQuery appends the line filters for q to the operator's selector.
 // Every value from the model goes through strconv.Quote, which is the
@@ -97,11 +39,30 @@ func buildQuery(selector string, q LogQuery) string {
 			b.WriteString(strconv.Quote(q.Connector))
 		}
 	}
-	if lv := levelFilter(q.MinLevel); lv != "" {
+	writeLevelFilter(&b, q.MinLevel)
+	return b.String()
+}
+
+// buildStreamQuery appends the line filters of a StreamQuery to the
+// selector: Contains as one literal |= filter (strconv.Quote, as in
+// buildQuery, so the model's text can never close its literal and add a
+// stage), then the level filter.
+func buildStreamQuery(selector string, q StreamQuery) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(selector))
+	if q.Contains != "" {
+		b.WriteString(" |= ")
+		b.WriteString(strconv.Quote(q.Contains))
+	}
+	writeLevelFilter(&b, q.MinLevel)
+	return b.String()
+}
+
+func writeLevelFilter(b *strings.Builder, min string) {
+	if lv := levelFilter(min); lv != "" {
 		b.WriteString(" |~ ")
 		b.WriteString(strconv.Quote(lv))
 	}
-	return b.String()
 }
 
 // levelFilter is a coarse server-side regex for lines at min or above, so

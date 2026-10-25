@@ -41,20 +41,22 @@ type ruleOutTopic struct {
 }
 
 // ruleOutTopics is the claim → backing tool table of the design (§B). The
-// ownership row's only tool shows ALTER ... OWNER TO changes, not the current
-// owner (design "Tool gap"); a follow-up for A3 adds the owner to
-// source_role_grants.
+// design's ownership "Tool gap" (pg_recent_ddl shows ALTER ... OWNER TO
+// changes, not the current owner) is closed by pg_object_owners (H1).
 var ruleOutTopics = []ruleOutTopic{
 	{name: "long transactions", re: wordsRE(`long(?:[- ]running)? (?:transactions?|tx)`, `open transactions?`, `idle in transaction`, `(?:blocking|open|active) sessions?`, `xmin`),
 		tools: []string{"pg_long_transactions", "source_long_transactions", "source_blocking_sessions"}, noForm: true},
 	{name: "replication slot", re: wordsRE(`slots?`, `restart_lsn`, `retained wal`, `wal retention`),
 		tools: []string{"pg_replication_slots", "pg_streaming_liveness"}},
+	// pg_object_owners (H1) reads the publication's and the tables' owners
+	// and the connector role's membership: it answers the publication,
+	// role/grants and ownership claims of the connector-auth room.
 	{name: "publication", re: wordsRE(`publications?`),
-		tools: []string{"pg_publication_tables", "pg_connector_scope_gap"}},
+		tools: []string{"pg_publication_tables", "pg_connector_scope_gap", "pg_object_owners"}},
 	{name: "role/grants", re: wordsRE(`grants?`, `privileges?`, `permissions?`, `roles?`),
-		tools: []string{"source_role_grants", "pg_publication_tables"}},
+		tools: []string{"source_role_grants", "pg_publication_tables", "pg_object_owners"}},
 	{name: "ownership", re: wordsRE(`owners?`, `ownership`),
-		tools: []string{"pg_recent_ddl"}},
+		tools: []string{"pg_recent_ddl", "pg_object_owners"}},
 	{name: "connector config", re: wordsRE(`config\w*`, `validation`, `connector settings?`),
 		tools: []string{"connect_config", "connect_validate_config"}},
 	{name: "connector state", re: wordsRE(`connectors?`, `tasks?`, `connect`),
@@ -63,8 +65,10 @@ var ruleOutTopics = []ruleOutTopic{
 		tools: []string{"pg_recent_ddl", "what_changed"}, noForm: true},
 	{name: "schema registry", re: wordsRE(`schema registry`, `registry`, `subjects?`, `compatib\w*`),
 		tools: []string{"schema_registry_versions", "schema_registry_diff", "schema_registry_subjects"}},
+	// consumer_logs (H2) backs "consumer crashed", "consumer errors" and
+	// "consumer not processing": the consumer's own log is where those show.
 	{name: "consumer", re: wordsRE(`consumer\w*`, `lag`, `rebalanc\w*`),
-		tools: []string{"kafka_consumer_lag", "kafka_list_groups"}},
+		tools: []string{"kafka_consumer_lag", "kafka_list_groups", "consumer_logs"}},
 	{name: "dlq", re: wordsRE(`dlq`, `dead[- ]letter\w*`),
 		tools: []string{"dlq_peek"}, noForm: true},
 	{name: "topic retention", re: wordsRE(`retention`),
