@@ -57,7 +57,7 @@ func newRoomToolsWithCauses(d Deps, track *proposalTracker, steps *stepLedger, g
 	return []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink, steps: steps, gaps: gaps, causes: causes},
 		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger, causes: causes},
-		&postMessageTool{sink: d.Sink, gaps: gaps},
+		&postMessageTool{sink: d.Sink, gaps: gaps, steps: steps},
 	}
 }
 
@@ -120,6 +120,8 @@ type updateHypothesisTool struct {
 	// causes checks scope, team and change_id (X4c); nil knows no change
 	// and no team, so only a hypothesis without them passes.
 	causes *externalCauses
+	// guard is the run's hypothesis guard (guard.go); nil is off.
+	guard *hypothesisGuard
 }
 
 // stepIDRe is the shape of a step id (newStepID): "s_" and 26 Crockford digits.
@@ -286,7 +288,17 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
+	// The hypothesis guard runs last, so a refusal it counts is one the call
+	// would otherwise have been accepted without (guard.go).
+	g, err := t.guard.check(t.Name(), t.ruledOutCheck(in))
+	if err != nil {
+		return tools.Result{}, err
+	}
 	unbacked := t.unbacked(in)
+	if g.capped {
+		in.Confidence = "low"
+		unbacked = mergeUnbacked(unbacked, g.unbacked)
+	}
 	if err := t.sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{
 		Text:          in.Text,
 		BasedOnSteps:  in.BasedOnSteps,
@@ -301,7 +313,29 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	}
 	t.steps.setHypothesisSteps(in.BasedOnSteps)
 	t.causes.record(scope, team)
-	return tools.Result{Summary: "hypothesis recorded" + scopeNote(scope, team) + unbackedNote(unbacked)}, nil
+	t.guard.reset()
+	t.guard.post(ctx, t.sink, g.notes)
+	return tools.Result{Summary: "hypothesis recorded" + guardCappedNote(g) + scopeNote(scope, team) + unbackedNote(unbacked)}, nil
+}
+
+// ruledOutCheck is rule 2 over update_hypothesis: the cited steps back a
+// claim, and an uncited step that would is named in the refusal. Without a
+// ledger nothing is known about the reads, so the rule does not run.
+func (t *updateHypothesisTool) ruledOutCheck(in hypothesisInput) func() *guardFinding {
+	return func() *guardFinding {
+		if t.steps == nil {
+			return nil
+		}
+		return checkRuledOut(in.Text, t.steps.citedSteps(in.BasedOnSteps), t.steps.snapshot(), t.guard.offeredTool)
+	}
+}
+
+// guardCappedNote tells the model its verdict went in at low confidence.
+func guardCappedNote(g guardResult) string {
+	if !g.capped {
+		return ""
+	}
+	return fmt.Sprintf("; hypothesis guard: recorded at low confidence after %d refusals, with the unbacked items marked", guardMaxRefusals)
 }
 
 // scopeNote tells the model the scope it recorded when the cause is outside
@@ -322,6 +356,12 @@ type postMessageTool struct {
 	// is refused while a component is unreachable (KAN-408). Nil turns the
 	// guard off.
 	gaps *readFailures
+	// steps is the run's step ledger, for the hypothesis guard's rule 2:
+	// a message has no citations, so any step of the run backs a rule-out.
+	// Nil turns rule 2 off here.
+	steps *stepLedger
+	// guard is the run's hypothesis guard (guard.go); nil is off.
+	guard *hypothesisGuard
 }
 
 func (t *postMessageTool) Name() string { return "post_message" }
@@ -357,12 +397,23 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for post_message")
 	}
+	g, err := t.guard.check(t.Name(), func() *guardFinding {
+		if t.steps == nil {
+			return nil
+		}
+		return checkRuledOut(in.Text, t.steps.snapshot(), nil, t.guard.offeredTool)
+	})
+	if err != nil {
+		return tools.Result{}, err
+	}
 	if err := t.sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 		Text:    in.Text,
 		ReplyTo: in.ReplyTo,
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit message: %w", err)
 	}
+	t.guard.reset()
+	t.guard.post(ctx, t.sink, g.notes)
 	return tools.Result{Summary: "message posted"}, nil
 }
 
