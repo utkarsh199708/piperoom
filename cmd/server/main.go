@@ -216,6 +216,7 @@ type serverSettings struct {
 	maxAgentsGlobal   int
 	resumeOnTakeover  bool
 	watchCfg          config.Watch
+	hypothesisGuard   string // agent.GuardOff, GuardLog or GuardEnforce
 	watchMaxOpenRooms int
 	watchForecast     config.WatchForecast
 	pmMode            string
@@ -287,6 +288,11 @@ func parseServer(cfg config.Config, m serveMode) (serverSettings, error) {
 	// written into cfg by internal/quickstart.
 	if s.writeOn, err = writeModeSetup(cfg, m.demo, log); err != nil {
 		return serverSettings{}, err
+	}
+	// Hypothesis guard mode (H1): a bad PIPEROOM_HYPOTHESIS_GUARD stops the
+	// start before anything connects.
+	if s.hypothesisGuard, err = config.ParseHypothesisGuard(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
 	}
 	// The scripted agent on a real stack (PIPEROOM_FAKE_AGENT=scripted) is
 	// read only outside --demo and --quickstart. A bad value, or a scripted
@@ -597,8 +603,9 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		WritePostmortem:   writePM,
 		Triage:            triage,
 		TriagePassTimeout: triageTimeout,
-		Options:           agentOptions(cfg, limits),
-		ShadowOptions:     shadowAgentOptions(cfg, s.shadowCfg, limits),
+		Options:           agentOptions(cfg, limits, s.hypothesisGuard),
+		ShadowOptions:     shadowAgentOptions(cfg, s.shadowCfg, limits, s.hypothesisGuard),
+		Watch:             freshWatchReader(st, s.watchCfg, log),
 		ShadowGrace:       s.shadowCfg.Grace,
 		Logger:            log,
 		MaxAgents:         s.maxAgents,

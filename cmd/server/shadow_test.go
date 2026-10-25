@@ -27,7 +27,7 @@ func TestShadowAgentOptions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			o := shadowAgentOptions(c, sh, config.Limits{})
+			o := shadowAgentOptions(c, sh, config.Limits{}, "")
 			if o.TokenBudget != tc.want {
 				t.Fatalf("TokenBudget = %d, want %d", o.TokenBudget, tc.want)
 			}
@@ -37,7 +37,7 @@ func TestShadowAgentOptions(t *testing.T) {
 		})
 	}
 	sh, err := config.ParseShadow(config.Config{ShadowMaxTurns: "7", ShadowGrace: "30s"})
-	if err != nil || shadowAgentOptions(cfg, sh, config.Limits{}).MaxTurns != 7 || sh.Grace != 30*time.Second {
+	if err != nil || shadowAgentOptions(cfg, sh, config.Limits{}, "").MaxTurns != 7 || sh.Grace != 30*time.Second {
 		t.Fatalf("max turns / grace: %+v %v", sh, err)
 	}
 }
@@ -55,13 +55,13 @@ func TestAgentOptionsToolDataCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Model: "m"}
-	if got := agentOptions(cfg, lim).MaxToolDataBytes; got != 256<<10 {
+	if got := agentOptions(cfg, lim, "").MaxToolDataBytes; got != 256<<10 {
 		t.Fatalf("live MaxToolDataBytes = %d, want %d", got, 256<<10)
 	}
-	if got := shadowAgentOptions(cfg, sh, lim).MaxToolDataBytes; got != 256<<10 {
+	if got := shadowAgentOptions(cfg, sh, lim, "").MaxToolDataBytes; got != 256<<10 {
 		t.Fatalf("shadow MaxToolDataBytes = %d, want %d", got, 256<<10)
 	}
-	if o := agentOptions(cfg, lim); o.Model != "m" || o.MaxTurns != 40 {
+	if o := agentOptions(cfg, lim, ""); o.Model != "m" || o.MaxTurns != 40 {
 		t.Fatalf("options = %+v", o)
 	}
 }
