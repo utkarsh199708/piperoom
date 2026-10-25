@@ -352,11 +352,13 @@ func DefaultWatch() WatchConfig {
 			Window:      15 * time.Minute,
 		},
 		OffsetBelowLogStart: WatchSignal{Enabled: true, Action: ActionRoom},
-		// for 5m: Kafka Connect flushes offsets, and so Debezium confirms the
-		// slot, every 60 s by default; 5 min is well past any healthy pause
-		// of restart_lsn.
+		// for 2m: Kafka Connect flushes offsets, and so Debezium confirms the
+		// slot, every 60 s by default; 2 min is two flush periods, enough to
+		// ride out one late flush. Detection takes about 3 minutes in all
+		// (ticks, up to 60 s for the first flush that does not move
+		// restart_lsn, then for); it was 5m, about 6 minutes in all.
 		LongTx: LongTxSignal{
-			WatchSignal:    WatchSignal{Enabled: true, Action: ActionRoom, For: 5 * time.Minute},
+			WatchSignal:    WatchSignal{Enabled: true, Action: ActionRoom, For: 2 * time.Minute},
 			Ticks:          3,
 			MinGrowthBytes: 64 << 10,
 		},
