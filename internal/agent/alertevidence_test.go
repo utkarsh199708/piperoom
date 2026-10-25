@@ -301,3 +301,40 @@ func TestAlertUpdateDoesNotResetTurns(t *testing.T) {
 }
 
 func steerInput() HumanInput { return HumanInput{Kind: "steer", Text: "go"} }
+
+func TestAlertEvidenceLongTx(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","severity":"sev2","at":"2026-10-14T03:12:00Z","signals":[
+	 {"signal":"long_tx","severity":"sev2","slot":"debezium_orders","active":true,
+	  "restart_lsn":"16/B374D848","wal_head_first":"16/C0000000","wal_head_last":"17/10000000",
+	  "confirmed_flush_first":"16/C0000000","confirmed_flush_last":"17/0FFFFFF0",
+	  "retained_bytes":2147483648,"retained_first_bytes":1073741824,"retained_growth_bytes":1073741824,
+	  "ticks":6,"held_for_seconds":360,"note":"restart_lsn is held postgres://app:hunter2secret@db/orders\nSECOND_LINE",
+	  "unknown_key":"IGNORE ME","bad_lsn":"x","restart_lsn_extra":1}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=long_tx", "restart_lsn=16/B374D848", "wal_head_first=16/C0000000", "wal_head_last=17/10000000",
+		"confirmed_flush_first=16/C0000000", "confirmed_flush_last=17/0FFFFFF0", "retained_first_bytes=1073741824",
+		"retained_growth_bytes=1073741824", "ticks=6", "held_for_seconds=360", `note="restart_lsn is held`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("evidence misses %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"unknown_key", "IGNORE ME", "bad_lsn", "restart_lsn_extra", "hunter2secret", "SECOND_LINE"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("evidence kept %q:\n%s", banned, got)
+		}
+	}
+}
+
+func TestAlertEvidenceLongTxBadValuesAndLongNote(t *testing.T) {
+	long := strings.Repeat("n", 500)
+	raw := json.RawMessage(`{"source":"watcher","signals":[{"signal":"long_tx","restart_lsn":"16/B3; rm -rf","ticks":"six","note":"` + long + `"}]}`)
+	got := AlertEvidenceText(raw)
+	if strings.Contains(got, "rm -rf") || strings.Contains(got, "ticks=") {
+		t.Fatalf("bad values rendered:\n%s", got)
+	}
+	if strings.Contains(got, long) || !strings.Contains(got, "truncated") {
+		t.Fatalf("note not truncated:\n%s", got)
+	}
+}

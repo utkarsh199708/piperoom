@@ -316,6 +316,10 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 		wants = []tableRead{statusOrList(""), {"pg_replication_slots", map[string]any{}}}
 	case "slot_wal":
 		wants = []tableRead{{"pg_long_transactions", map[string]any{}}, {"pg_replication_slots", map[string]any{}}}
+	case "long_tx":
+		// Two reads at most: liveness shows restart_lsn flat while confirmed
+		// flush moves, long_transactions names the holder.
+		wants = []tableRead{{"pg_streaming_liveness", map[string]any{"pipeline_id": p.alert.PipelineID}}, {"pg_long_transactions", map[string]any{}}}
 	case "dlq_growth":
 		writer := firstName(sig["writers"])
 		peek := tableRead{"dlq_peek", map[string]any{"connector": writer}}
