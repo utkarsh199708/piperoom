@@ -248,7 +248,7 @@ jobs:
         if: always()
         run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mssql --profile mongo --profile mysql down -v --remove-orphans
 
-  # P1c-2: the README's "Quickstart (5 minutes)" path, timed. `make quickstart`
+  # P1c-2: the README's read-only quickstart path (docs/guides/existing-pipeline.md), timed. `make quickstart`
   # runs discover, builds the UI and starts `server --quickstart` against the
   # dev stack; the job fails unless /healthz answers within the budget with
   # write_mode "off" and the printed URL answers 200. The clock starts at
@@ -523,7 +523,7 @@ jobs:
         # esbuild's postinstall fetches its matching platform binary and is required;
         # every other package's install/postinstall/preinstall script is skipped. This
         # allowlists exactly esbuild instead of a blanket --ignore-scripts=false. See
-        # README.md "Web tooling" for why.
+        # docs/development.md "Web tooling" for why.
         run: |
           npm ci --ignore-scripts
           node node_modules/esbuild/install.js
