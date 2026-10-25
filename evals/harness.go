@@ -54,6 +54,14 @@ type Transcript struct {
 	// the room service built for the agent. Nil for a run that never opened
 	// a room.
 	Room *RoomTrace `json:"room,omitempty"`
+	// GuardMode is the hypothesis guard mode the run used ("" = log, as
+	// agent.Options.HypothesisGuard): expect.guard_refusals is graded only
+	// under enforce.
+	GuardMode string `json:"guard_mode,omitempty"`
+	// GuardRefusals is how many calls the guard refused in the run, counted
+	// from its log record (guardRefusals): a refusal is returned to the model
+	// and written to no room event, so the log is the one place a run shows it.
+	GuardRefusals int `json:"guard_refusals,omitempty"`
 }
 
 // RoomTrace records what the room service handed the agent.

@@ -88,6 +88,11 @@ func LiveToolsFor(sourceKind string) ([]tools.Tool, error) {
 	if err := dbtools.Register(reg, dd); err != nil {
 		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
 	}
+	// pg_object_owners (H2) is registered apart from dbtools.Register, as
+	// wiring does; it skips a MySQL source itself.
+	if err := dbtools.RegisterObjectOwners(reg, dd); err != nil {
+		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
 	// mysql_binlog_status (Q8c), as wiring registers it: on a MySQL room only.
 	if mysqlRoom {
 		if err := mysqltools.Register(reg, mysqltools.Deps{Owners: &owners.Owners{}}); err != nil {

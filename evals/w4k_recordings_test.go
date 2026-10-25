@@ -384,24 +384,28 @@ func TestW4kHorizonHeldRecordingsAreRealToolOutput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("pg_streaming_liveness waits its 5 s window")
 	}
-	sc, err := LoadScenario("scenarios/long-transaction-horizon-held.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, call := range [][2]string{
-		{"connect_list_connectors", `{}`},
-		{"connect_status", `{"connector":"pg-orders-connector"}`},
-		{"connect_config", `{"connector":"pg-orders-connector"}`},
-		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
-		{"pg_replication_slots", `{}`},
-		{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
-		{"pg_long_transactions", `{}`},
-		{"source_blocking_sessions", `{}`},
-	} {
-		t.Run(call[0], func(t *testing.T) {
-			t.Parallel()
-			w4kCheck(t, sc, w4kRegistry(t, w4kHorizonHeld()), "", call[0], call[1])
-		})
+	// long-tx-slot-stuck-watcher-firing (H2) records the same world: its
+	// recordings are the horizon scenario's, with a watcher row on top.
+	for _, name := range []string{"long-transaction-horizon-held", "long-tx-slot-stuck-watcher-firing"} {
+		sc, err := LoadScenario("scenarios/" + name + ".yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range [][2]string{
+			{"connect_list_connectors", `{}`},
+			{"connect_status", `{"connector":"pg-orders-connector"}`},
+			{"connect_config", `{"connector":"pg-orders-connector"}`},
+			{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+			{"pg_replication_slots", `{}`},
+			{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
+			{"pg_long_transactions", `{}`},
+			{"source_blocking_sessions", `{}`},
+		} {
+			t.Run(name+"/"+call[0], func(t *testing.T) {
+				t.Parallel()
+				w4kCheck(t, sc, w4kRegistry(t, w4kHorizonHeld()), "", call[0], call[1])
+			})
+		}
 	}
 }
 

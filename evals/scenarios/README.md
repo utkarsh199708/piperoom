@@ -920,6 +920,25 @@ the recordings above (same text, or the same tool's format with that incident's 
 | `ambiguous-lag-spike` | lag 4826, spread over all partitions | `abstain` | checks lag, Connect and DDL, finds no cause, says so at low confidence (or posts no hypothesis), proposes nothing |
 | `unclear-driver-intent` | publication-permission-denied's task 0 FAILED | `ask` | after the driver's "Sort out the owner thing and get it running again", asks the driver what they mean (a sentence ending in `?`, not a reply to a watcher) and proposes nothing: no answer comes |
 
+## Hypothesis-guard scenarios (H2)
+
+Four scenarios, and a `watch_status:` on `healthy-after-recovery`, test the hypothesis guard in enforce mode
+(`evalrun -guard enforce`, the default; format in `evals/README.md`, "Hypothesis guard in eval runs").
+`watch_status` is the watcher's status row the room reads. They are graded in log and off mode as well
+(the root cause and outcome do not depend on the mode), but `guard_refusals` is graded in enforce only.
+
+| Scenario | Outcome | Watcher row | What a good run does | Recorded |
+|---|---|---|---|---|
+| `long-tx-slot-stuck-watcher-firing` | diagnose, postgres | `long_tx` and `slot_wal` firing, 20 s old, not clearing | does not call the pipeline healthy, finds pid 51877 holding the WAL horizon (`root_cause_forbidden`: "nothing to fix", "no long transactions", "pipeline is healthy") | the real tools over `w4kHorizonHeld` (the horizon scenario's world), checked by `TestW4kHorizonHeldRecordingsAreRealToolOutput`; Kafka and warehouse reads by hand |
+| `publication-owner-ruled-out-trap` | diagnose, postgres | none | names the ownership change, and every "ruled out X" rests on a cited read that shows X (`max_unbacked_rule_outs: 0`) | `publication-permission-denied`'s recordings by hand, plus the real `pg_object_owners` over `ownerChangedSource`, checked by `TestGuardOwnerReadIsRealToolOutput` |
+| `healthy-self-recovered-watcher-clearing` | healthy | `connector_down` firing with `clearing_since` | says healthy; the guard lets it through (`guard_refusals: 0`) | all by hand, over `healthy-after-recovery`'s all-green recordings |
+| `healthy-self-recovered-watcher-lagging` | abstain | `connector_down` firing, no `clearing_since`, fresh | the first flat "nothing to fix" is refused; it says recovered-but-not-cleared-yet at low confidence (`guard_refusals: {min: 1, max: 2}`) | all by hand, as above |
+
+The lagging scenario is `abstain`, not `healthy`: a `healthy` outcome needs a plain healthy verdict, which is
+the one thing rule 1 refuses there, and its `{min: 1}` assumes a model that first says the flat verdict.
+`healthy-after-recovery` carries a fresh row with nothing firing and `guard_refusals: 0`: the pass path.
+Neither healthy scenario has a steer: the scripted runner's reply to a steer would be the last message.
+
 ## Other files
 
 - `watcher-start`: the room is opened by the built-in watcher (`start: watcher`, see

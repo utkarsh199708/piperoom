@@ -39,6 +39,13 @@ resources:
   connectors: [pg-orders-connector]
   subjects: [pg.public.orders-key, pg.public.orders-value]
 
+# H2: the watcher's row for the pipeline is fresh and lists nothing firing (its signals cleared after
+# the 09:24 fix), so the hypothesis guard's rule 1 has nothing to refuse a healthy verdict for. With
+# the guard in enforce mode this scenario must still pass with no refusal: the pass path.
+watch_status:
+  checked_at: -30s
+  signals: []
+
 alert:
   title: 'order-sync lag 13908 on pg.public.orders partition 1; pod restarted 9 times in 15 min (re-notification, first fired 09:05 UTC)'
   pipeline_map: |
@@ -264,4 +271,5 @@ expect:
       match: [stale for 1m]
   evidence_tools: [kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  guard_refusals: 0
   max_tool_calls: 10

@@ -116,6 +116,9 @@ type Summary struct {
 	CauseRetracted     int     `json:"cause_retracted"`
 	Misses             int     `json:"misses"`
 	RejectedAttempts   int     `json:"rejected_attempts"`
+	// GuardRefusals is the calls the hypothesis guard refused over the runs
+	// (RunResult.GuardRefusals): the cost of enforce mode in extra model turns.
+	GuardRefusals int `json:"guard_refusals"`
 	// InvalidToolCalls are the tool calls the agent refused before running
 	// them (invalid_calls.go), not rejected_attempts. AllToolCalls is every
 	// tool call of the runs, and InvalidToolCallRate the first over the
@@ -268,6 +271,7 @@ func summarize(all []RunResult) Summary {
 		dur += float64(r.DurationMS)
 		s.Misses += len(r.Misses)
 		s.RejectedAttempts += r.RejectedAttempts
+		s.GuardRefusals += r.GuardRefusals
 	}
 	summarizeInvalid(&s, rs)
 	n := float64(len(rs))
@@ -333,6 +337,7 @@ func combine(ss []Summary) Summary {
 		out.LayerRate += s.LayerRate
 		out.MeanToolCalls += s.MeanToolCalls
 		out.MeanDurationMS += s.MeanDurationMS
+		out.GuardRefusals += s.GuardRefusals
 		if s.MeanToolCallsToRootCause >= 0 {
 			toCause += s.MeanToolCallsToRootCause
 			found++
