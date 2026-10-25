@@ -161,8 +161,10 @@ func TestSetupAttemptsSurviveReplans(t *testing.T) {
 	}
 }
 
-// TestSetupExhaustedOrder: the bounds are checked in the design's order
-// (attempts, steps, wall clock) and the wall clock counts from Run's start.
+// TestSetupExhaustedOrder: the bounds that stop a run at the top of a turn
+// are checked in the design's order (attempts, wall clock) and the wall clock
+// counts from Run's start. The steps bound is not one of them (lead ruling on
+// #1012, item F): a spent plan only refuses the next proposal (admitProposal).
 func TestSetupExhaustedOrder(t *testing.T) {
 	s, err := newSetupRun(&SetupBounds{AttemptsPerStep: 2, StepsPerPlan: 4, WallClock: time.Hour})
 	if err != nil {
@@ -179,8 +181,8 @@ func TestSetupExhaustedOrder(t *testing.T) {
 		t.Fatalf("exhausted = %q, want attempts first", reason)
 	}
 	s.attempts = 0
-	if reason := s.exhausted(); reason != events.SetupBlockedSteps {
-		t.Fatalf("exhausted = %q, want steps second", reason)
+	if reason := s.exhausted(); reason != "" {
+		t.Fatalf("exhausted = %q with the steps bound reached, want no stop: only a proposal past it stops the run", reason)
 	}
 	s.executed = 0
 	s.start = time.Now().Add(-2 * time.Hour)
