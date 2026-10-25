@@ -137,6 +137,50 @@ func TestRuleOutToolsExist(t *testing.T) {
 			}
 		}
 	}
+	// The rows that back a claim with a later tool (H1 pg_object_owners, H2
+	// consumer_logs) keep it: a row edit that drops one fails here.
+	for topic, name := range map[string][]string{
+		"publication": {"pg_object_owners"}, "role/grants": {"pg_object_owners"}, "ownership": {"pg_object_owners"},
+		"consumer": {"consumer_logs"},
+	} {
+		i := slices.IndexFunc(ruleOutTopics, func(r ruleOutTopic) bool { return r.name == topic })
+		if i < 0 {
+			t.Errorf("no topic %s", topic)
+			continue
+		}
+		for _, n := range name {
+			if !slices.Contains(ruleOutTopics[i].tools, n) {
+				t.Errorf("topic %s does not list %s: %v", topic, n, ruleOutTopics[i].tools)
+			}
+		}
+	}
+}
+
+// TestRuleOutBackedByLaterTools: a consumer claim is backed by a read of the
+// consumer's own log (H2), and a publication or ownership claim by
+// pg_object_owners (H1), the reads that answer them.
+func TestRuleOutBackedByLaterTools(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		read []string
+	}{
+		{"Ruled out: consumer crashed.", []string{"consumer_logs"}},
+		{"Ruled out: consumer errors, consumer not processing.", []string{"consumer_logs"}},
+		{"The consumer is not the cause.", []string{"consumer_logs"}},
+		{"Ruled out: publication.", []string{"pg_object_owners"}},
+		{"Ruled out: publication ownership, role grants.", []string{"pg_object_owners"}},
+	} {
+		if len(RuledOutClaims(tc.text)) == 0 {
+			t.Errorf("%q: no claim found", tc.text)
+			continue
+		}
+		if got := UnbackedRuledOut(tc.text, tc.read); len(got) != 0 {
+			t.Errorf("%q read %v: unbacked %+v", tc.text, tc.read, got)
+		}
+		if got := UnbackedRuledOut(tc.text, []string{"connect_status"}); len(got) == 0 {
+			t.Errorf("%q: backed by connect_status", tc.text)
+		}
+	}
 }
 
 // evidence2 is the connector-auth hypothesis of the design: it rules out four
@@ -169,7 +213,7 @@ func TestCheckRuledOutEvidence2(t *testing.T) {
 		t.Fatalf("unbacked = %q, want %q (ownership is not claimed)", f.unbacked, want)
 	}
 	msg := f.refusal.Error()
-	for _, w := range []string{"bad tool input: hypothesis guard (unbacked_rule_out): ", "`role/grants` (source_role_grants or pg_publication_tables)",
+	for _, w := range []string{"bad tool input: hypothesis guard (unbacked_rule_out): ", "`role/grants` (source_role_grants, pg_publication_tables or pg_object_owners)",
 		"`connect config validation` (connect_config or connect_validate_config)", `write "not checked: <item>"`} {
 		if !strings.Contains(msg, w) {
 			t.Fatalf("refusal lacks %q:\n%s", w, msg)

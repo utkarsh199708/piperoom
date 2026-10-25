@@ -160,12 +160,18 @@ func toolPackages() []toolPackage {
 		// connect_worker_logs (Q3c) is registered whether or not a log store
 		// is set, so the tool list does not depend on setup; without one it
 		// answers "not configured". A typed nil reader counts as none.
+		// consumer_logs (H2) follows it on the same terms: registered for every
+		// CDC set, "not configured" without a Loki or without the pipeline's
+		// consumer_logs.selector.
 		{name: "worker logs", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			d := logtools.Deps{Owners: w.Owners, Now: w.Now}
 			if !isNilIface(w.WorkerLogs) {
 				d.Logs = w.WorkerLogs
 			}
-			return logtools.Register(reg, d)
+			if err := logtools.Register(reg, d); err != nil {
+				return err
+			}
+			return logtools.RegisterConsumer(reg, logtools.ConsumerDeps{Readers: consumerReaders(w), Owners: w.Owners, Now: w.Now})
 		}},
 		// net_probe (Q6a) through the caller's hook (Wired.ProbeTools): it
 		// probes the set's own endpoints and asks Connect to validate the

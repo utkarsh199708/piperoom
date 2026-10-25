@@ -182,6 +182,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"debezium_metrics", "debezium_snapshot_progress",
 		// Q3e: the Connect worker tools, registered whatever is configured.
 		"connect_worker_metrics", "connect_worker_logs",
+		// H2: the consumer's own log, registered whatever is configured.
+		"consumer_logs",
 		// Q6b: through the netwire hook.
 		"net_probe",
 		"runbook_lookup",
