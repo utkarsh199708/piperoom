@@ -51,11 +51,16 @@ func TestStormFollowerHonoursTheCooldownAfterTheStormRoomCloses(t *testing.T) {
 		t.Fatalf("cooldown not logged once\n%s", h.logs)
 	}
 
-	// After the cooldown it opens.
+	// After the cooldown the storm re-opens as one room: a and c were acked
+	// by the close and still fail, b waited out its own cooldown.
 	h.step(61 * time.Minute)
 	rooms := h.rooms.created()
-	if len(rooms) != 2 || rooms[1].alert.PipelineID != "b" {
-		t.Fatalf("rooms after the cooldown = %+v, want a second one on b", rooms)
+	if len(rooms) != 2 || rooms[1].alert.PipelineID != "a" ||
+		!strings.Contains(string(rooms[1].alert.Raw), `"affected_pipelines":["a","b","c"]`) {
+		for _, r := range rooms {
+			t.Logf("room %s pipeline=%s title=%s", r.roomID, r.alert.PipelineID, r.alert.Title)
+		}
+		t.Fatalf("rooms after the cooldown: %d, want one storm room for a, b, c\n%s", len(rooms), h.logs)
 	}
 }
 
