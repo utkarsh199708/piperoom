@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -182,6 +183,17 @@ func (replayTopology) Trace(context.Context, string, string, string) ([]events.T
 
 func (replayTopology) LayerOwner(string, string) (string, bool) { return "", false }
 
+// executesFix reports whether the scenario has the harness approve and run a
+// proposal (an action_result input with an action).
+func (s Scenario) executesFix() bool {
+	for _, in := range s.Inputs {
+		if in.Kind == "action_result" && in.Action != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // roomAgent wraps the runner the room starts. It passes everything through
 // and only observes: what alert the room built, when an attempt ends, and
 // when the agent waits for human input at the run level (the idle in which a
@@ -194,6 +206,16 @@ type roomAgent struct {
 	release chan struct{}
 	ended   chan error
 	stop    chan struct{}
+
+	// guardWakeIdle makes the agent's deadline-less, run-derived waits count
+	// as idles too. The hypothesis guard's rule 1 arms a recheck after a
+	// refusal (90 s, 3 min, 6 min of real time), and while it runs the agent
+	// waits on a context derived from the run's (agent.waitInbox), which the
+	// run-level test below would miss: the run would stall for the whole
+	// recheck, and the scripted person would never act. The only other
+	// waits of that shape are apply waits, which exist only after a fix step
+	// was executed, so the flag is set only for a scenario that executes none.
+	guardWakeIdle bool
 
 	mu       sync.Mutex
 	alert    agent.Alert
@@ -240,7 +262,11 @@ type harnessInbox struct {
 // bounded step-result waits pass straight through.
 func (w *harnessInbox) Wait(ctx context.Context) error {
 	if ctx.Done() != w.runDone {
-		return w.Inbox.Wait(ctx)
+		// A bounded step-result wait has a deadline; an unbounded one that is
+		// not the run's own is the guard's recheck (see guardWakeIdle).
+		if _, bounded := ctx.Deadline(); bounded || !w.a.guardWakeIdle {
+			return w.Inbox.Wait(ctx)
+		}
 	}
 	w.a.mu.Lock()
 	w.a.idles++
@@ -390,10 +416,28 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	}
 
 	st := memstore.New()
+	// The watcher's status row the guard's rule 1 reads (agent.Deps.Watch). A
+	// scenario without watch_status leaves Watch nil: no reader, no rule 1.
+	var watch clients.WatchStatusReader
+	if sc.WatchStatus != nil {
+		row, err := sc.WatchStatus.status(sc.Pipeline.ID, time.Now())
+		if err != nil {
+			return RunResult{}, Transcript{}, err
+		}
+		if err := st.PutWatchStatus(ctx, row); err != nil {
+			return RunResult{}, Transcript{}, fmt.Errorf("evals: scenario %q: write watch_status: %w", sc.Name, err)
+		}
+		watch = st
+	}
 	ag := newRoomAgent(cfg.Runner)
-	log := cfg.Logger.With("scenario", sc.Name, "run", run)
+	ag.guardWakeIdle = !sc.executesFix()
+	// The agent logs to this logger (the room hands it down); the counting
+	// handler reads the guard's refusals off it.
+	var guardLog guardCounter
+	log := slog.New(countingHandler{next: cfg.Logger.With("scenario", sc.Name, "run", run).Handler(), c: &guardLog})
 	svc := room.New(room.Deps{
 		Store: st,
+		Watch: watch,
 		StackFor: func(string) room.PipelineStack {
 			return room.PipelineStack{Tools: reg, Actions: areg}
 		},
@@ -424,7 +468,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, ctx.Err()
 	}
 
-	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Writes: wl.snapshot(), Replay: rp.trace()}
+	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Writes: wl.snapshot(), Replay: rp.trace(), GuardMode: cfg.Options.HypothesisGuard, GuardRefusals: int(guardLog.n.Load())}
 	alert, idles := ag.snapshot()
 	tr.Idles = idles
 	if rr.roomID != "" {

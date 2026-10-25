@@ -24,6 +24,7 @@ import (
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/clients/schemareg"
+	"piperoom/internal/clients/workerlogs"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -75,27 +76,28 @@ type Wired struct {
 	Owners *owners.Owners
 	// WorkerLogs reads the Connect workers' logs for connect_worker_logs
 	// (Q3c). Nil leaves the tool registered and answering "not configured".
-	// Like Rooms, the caller sets it after Open, before RegisterTools: the
-	// Loki settings (WORKER_LOGS_LOKI_URL, _SELECTOR, _TOKEN, _USER, _ORG_ID)
-	// are not in internal/config yet (Q3e contract change request), so
-	// nothing in production sets it today.
+	// Open sets it for a CDC set built from the process settings when
+	// WORKER_LOGS_LOKI_URL is set (with _SELECTOR, _TOKEN, _USER, _ORG_ID;
+	// config.ParseWorkerLogs). A set with its own connections: block has no
+	// Loki settings, so it stays nil there. A caller may replace it after
+	// Open, before RegisterTools.
 	WorkerLogs logtools.Reader
 	// ConsumerLogs opens a pipeline's consumer log streams for consumer_logs
 	// (H2) on the same Loki as WorkerLogs, with the pipeline's
 	// consumer_logs.selector from owners.yaml. Nil derives it from WorkerLogs
 	// when that is a *workerlogs.Client (one Loki, one set of credentials);
 	// with neither, consumer_logs is still registered and answers "not
-	// configured". Set by the caller, as WorkerLogs.
+	// configured". Open leaves it nil (derived); a caller may set it.
 	ConsumerLogs logtools.ConsumerReaders
 	// ConnectMetricsPrefix is the metric name prefix of connect_worker_metrics
 	// (CONNECT_METRICS_PREFIX, Q3b); "" is
-	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller, as
-	// WorkerLogs, until internal/config has it.
+	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller after Open,
+	// until internal/config has it.
 	ConnectMetricsPrefix string
 	// ConnectInternalTopics is CONNECT_INTERNAL_TOPICS (Q3a): the Connect
 	// cluster's config, offset and status topics, comma separated, in that
-	// order. "" lets connect_worker_info find them by name. Set by the caller,
-	// as WorkerLogs, until internal/config has it.
+	// order. "" lets connect_worker_info find them by name. Set by the caller
+	// after Open, until internal/config has it.
 	ConnectInternalTopics string
 
 	// ProbeTools registers net_probe (Q6a) over this set. It is a hook, not
@@ -310,6 +312,9 @@ type clientOpeners struct {
 	warehouse warehouseOpeners
 	writers   writerOpeners
 	batch     batchOpeners
+	// workerLogs builds the Loki client of the log tools (openWorkerLogs);
+	// nil is openWorkerLogs.
+	workerLogs func(cfg config.Config) (*workerlogs.Client, error)
 }
 
 func defaultClientOpeners() clientOpeners {
@@ -355,11 +360,21 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	// scheme (Q8g): a mismatch is a config mistake, refused before any client.
 	srcKind := events.SourceKindPostgres
 	var dm config.DebeziumMetrics
+	var logs *workerlogs.Client
 	if ks.cdc() {
 		if srcKind, err = checkSourceURLs(cfg, o); err != nil {
 			return nil, err
 		}
 		if dm, err = config.ParseDebeziumMetrics(cfg); err != nil {
+			return nil, err
+		}
+		// The log tools are registered for CDC sets only (kinds.go), so the
+		// Loki settings are read, and refused when bad, only for one.
+		openLogs := op.workerLogs
+		if openLogs == nil {
+			openLogs = func(c config.Config) (*workerlogs.Client, error) { return openWorkerLogs(c) }
+		}
+		if logs, err = openLogs(cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -434,6 +449,11 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 
 	w := assemble(o, whKind, a2, src, wh, closeOpened)
 	w.DebeziumMetrics = dm
+	// Only a built client goes into the interface: a typed nil would look
+	// configured to a plain nil check.
+	if logs != nil {
+		w.WorkerLogs = logs
+	}
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
 	w.source = srcKind
