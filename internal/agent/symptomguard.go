@@ -166,9 +166,10 @@ func blocking(row clients.WatchStatus) []clients.WatchSignal {
 }
 
 // check is rule 1 over one claim: nil passes. It reads the store only for a
-// healthy claim.
+// whole-pipeline healthy verdict (verdictclaim.go): a component found healthy
+// is a finding about that component, not a claim the symptom is gone.
 func (s *symptomGuard) check(ctx context.Context, text string, offered func(string) bool) *guardFinding {
-	if s == nil || !healthyClaim(text) {
+	if s == nil || !pipelineVerdictHealthy(text) {
 		return nil
 	}
 	row, ok := s.row(ctx)
@@ -401,7 +402,7 @@ func (g *hypothesisGuard) symptomCheck(ctx context.Context, text string) func() 
 
 // healthyAccepted ends a recheck once a healthy verdict went in.
 func (g *hypothesisGuard) healthyAccepted(text string) {
-	if g == nil || g.symptom == nil || !healthyClaim(text) {
+	if g == nil || g.symptom == nil || !pipelineVerdictHealthy(text) {
 		return
 	}
 	g.symptom.settle()
