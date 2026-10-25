@@ -88,7 +88,8 @@ func TestComposeLogsProfile(t *testing.T) {
 		t.Error("promtail does not wait for loki")
 	}
 
-	// Promtail tails the production worker only, and labels the level.
+	// Promtail tails the production worker and the dev consumer (H2), and
+	// labels the level.
 	raw, err := os.ReadFile(filepath.Join(root, "dev", "logs", "promtail.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +99,7 @@ func TestComposeLogsProfile(t *testing.T) {
 			URL string `yaml:"url"`
 		} `yaml:"clients"`
 		ScrapeConfigs []struct {
+			JobName  string `yaml:"job_name"`
 			DockerSD []struct {
 				Host    string `yaml:"host"`
 				Filters []struct {
@@ -114,12 +116,18 @@ func TestComposeLogsProfile(t *testing.T) {
 	if len(pc.Clients) != 1 || pc.Clients[0].URL != "http://loki:3100/loki/api/v1/push" {
 		t.Errorf("promtail clients = %+v", pc.Clients)
 	}
-	if len(pc.ScrapeConfigs) != 1 || len(pc.ScrapeConfigs[0].DockerSD) != 1 {
-		t.Fatalf("promtail scrape configs = %+v, want one docker_sd job", pc.ScrapeConfigs)
+	if len(pc.ScrapeConfigs) != 2 || pc.ScrapeConfigs[0].JobName != "connect" || pc.ScrapeConfigs[1].JobName != "devconsumer" {
+		t.Fatalf("promtail scrape configs = %+v, want the jobs connect and devconsumer", pc.ScrapeConfigs)
 	}
-	f := pc.ScrapeConfigs[0].DockerSD[0].Filters
-	if len(f) != 1 || f[0].Name != "label" || !slices.Equal(f[0].Values, []string{"com.docker.compose.project=piperoom-dev", "com.docker.compose.service=connect"}) {
-		t.Errorf("promtail docker filters = %+v, want project piperoom-dev and service connect", f)
+	for i, svc := range []string{"connect", "devconsumer"} {
+		sc := pc.ScrapeConfigs[i]
+		if len(sc.DockerSD) != 1 {
+			t.Fatalf("job %s: %d docker_sd configs, want one", sc.JobName, len(sc.DockerSD))
+		}
+		f := sc.DockerSD[0].Filters
+		if len(f) != 1 || f[0].Name != "label" || !slices.Equal(f[0].Values, []string{"com.docker.compose.project=piperoom-dev", "com.docker.compose.service=" + svc}) {
+			t.Errorf("job %s docker filters = %+v, want project piperoom-dev and service %s", sc.JobName, f, svc)
+		}
 	}
 	var firstline, levelRE string
 	for _, st := range pc.ScrapeConfigs[0].PipelineStages {
@@ -153,6 +161,34 @@ func TestComposeLogsProfile(t *testing.T) {
 		}
 		if got != l.level {
 			t.Errorf("level of %q = %q, want %q", l.line, got, l.level)
+		}
+	}
+
+	// The dev consumer logs Go slog, one record per line: no multiline stage,
+	// and the level from the text or the JSON format.
+	var consumerRE string
+	for _, st := range pc.ScrapeConfigs[1].PipelineStages {
+		if _, ok := st["multiline"]; ok {
+			t.Error("devconsumer job has a multiline stage; slog writes one record per line")
+		}
+		if r, ok := st["regex"]; ok {
+			consumerRE, _ = r["expression"].(string)
+		}
+	}
+	clevel := regexp.MustCompile(consumerRE)
+	for _, l := range []struct{ line, level string }{
+		{`time=2026-10-25T10:00:00.123Z level=ERROR msg="devconsumer stopped" err="devconsumer: cannot process order 1648 at pg.public.orders/2@799 (poison pill)"`, "ERROR"},
+		{`time=2026-10-25T10:00:00.123Z level=INFO msg="devconsumer started" topic=pg.public.orders group=order-sync`, "INFO"},
+		{`time=2026-10-25T10:00:00.123Z level=WARN msg="fetch error" topic=pg.public.orders partition=2`, "WARN"},
+		{`{"time":"2026-10-25T10:00:00.123Z","level":"ERROR","msg":"devconsumer stopped"}`, "ERROR"},
+		{`no level here`, ""},
+	} {
+		got := ""
+		if m := clevel.FindStringSubmatch(l.line); m != nil {
+			got = m[clevel.SubexpIndex("level")]
+		}
+		if got != l.level {
+			t.Errorf("devconsumer level of %q = %q, want %q", l.line, got, l.level)
 		}
 	}
 

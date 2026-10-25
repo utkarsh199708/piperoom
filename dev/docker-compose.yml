@@ -247,8 +247,9 @@ services:
       retries: 40
 
   # Worker logs (Q3d, dev/README.md "Logs profile"): Promtail tails the `connect`
-  # container's output through the Docker API and pushes it to Loki, which the
-  # server reads as WORKER_LOGS_LOKI_URL (connect_worker_logs). Profile "logs":
+  # and `devconsumer` containers' output through the Docker API and pushes it to
+  # Loki, which the server reads as WORKER_LOGS_LOKI_URL (connect_worker_logs, and
+  # consumer_logs with a pipeline's consumer_logs.selector). Profile "logs":
   # `docker compose --profile logs up -d --wait` starts them with the default
   # services; without the profile nothing here starts.
   loki:
