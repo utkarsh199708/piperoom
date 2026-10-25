@@ -48,11 +48,10 @@ type Report struct {
 	// being scored are in Results with an "infra: " error, in no rate and in
 	// no comparison.
 	InfraStop string `json:"infra_stop,omitempty"`
-	// ByTarget and BySource are the pass rate grouped by the setup target
-	// kind and the source kind (U1-20), pooled over every scored run of the
-	// group. A scenario's source kind defaults to postgres; a scenario that
-	// names no target (every incident scenario) is in no target group. They
-	// are additive: no existing field changes.
+	// ByTarget and BySource are the pass rates grouped by setup target and
+	// source kind (U1-20), pooled over every scored run in each group. Incident
+	// scenarios are in neither setup group. Older rows with no source kind and
+	// no exclusion marker still default to postgres for compatibility.
 	ByTarget []Breakdown `json:"by_target,omitempty"`
 	BySource []Breakdown `json:"by_source,omitempty"`
 	// Provider and Flavor are the main model's provider (anthropic,
@@ -133,21 +132,27 @@ type Summary struct {
 
 // ScenarioSummary aggregates one scenario's runs. SourceKind and Target are
 // the setup kinds the report's per-source and per-target rates group by
-// (U1-20); SourceKind defaults to postgres, Target is "" when the scenario
-// names none.
+// (U1-20). Both are "" for an incident scenario, which is in neither group;
+// SourceKindExcluded distinguishes those rows from legacy rows that lacked
+// a source kind and still default to postgres.
 type ScenarioSummary struct {
 	Name string `json:"name"`
-	// SourceKind is the scenario room's source kind (Q8j) or, for a setup
-	// scenario, its setup source kind; "" in a report written before Q8j,
-	// which reads as postgres.
+	// SourceKind is the setup source kind; empty for an incident scenario or
+	// in a report written before Q8j, which reads as postgres unless excluded.
 	SourceKind string `json:"source_kind,omitempty"`
-	Target     string `json:"target,omitempty"`
+	// SourceKindExcluded omits a current incident row from setup source rates.
+	// It is absent from older reports, preserving their postgres fallback.
+	SourceKindExcluded bool   `json:"source_kind_excluded,omitempty"`
+	Target             string `json:"target,omitempty"`
 	Summary
 }
 
-// sourceKindOf is the BySource key: a scenario row's source kind, postgres
-// when "" (a report written before Q8j).
+// sourceKindOf is the BySource key. Current incident rows are excluded;
+// legacy rows without a source kind default to postgres.
 func sourceKindOf(s ScenarioSummary) string {
+	if s.SourceKindExcluded {
+		return ""
+	}
 	if s.SourceKind == "" {
 		return DefaultSourceKind
 	}
@@ -175,7 +180,13 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	for _, sc := range scenarios {
 		s := summarize(byName[sc.Name])
 		source, target := sc.setupKinds()
-		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{Name: sc.Name, SourceKind: source, Target: target, Summary: s})
+		rep.Scenarios = append(rep.Scenarios, ScenarioSummary{
+			Name:               sc.Name,
+			SourceKind:         source,
+			SourceKindExcluded: sc.Setup == nil,
+			Target:             target,
+			Summary:            s,
+		})
 		if s.Runs > 0 {
 			withRuns = append(withRuns, s)
 		}

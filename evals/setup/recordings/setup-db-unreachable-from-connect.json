@@ -4,7 +4,7 @@
   "target": "compose",
   "sink": "none",
   "recorded_at": "2026-10-25T09:40:00Z",
-  "note": "Composed from net_probe's check list (internal/setup/ops/net_probe.go, U1-2/Q6a) and compose_restart's argv, on the fixed clock of the U1-19 setup scenarios. No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "note": "Composed from net_probe's check list (internal/setup/ops/net_probe.go, U1-2/Q6a) and compose_restart's argv, on the fixed clock of the U1-19 setup scenarios. No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
   "ops": [
     {
       "op": "net_probe",
@@ -40,7 +40,7 @@
       "class": "local",
       "proposal_id": "p_setup_1",
       "step_index": 0,
-      "params_hash": "2b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f901",
+      "params_hash": "a90258206d8c7ae70fa71b3e5755fa22d1f7c474eef7fd10b071703817d4e008",
       "params": {"services": ["connect"]},
       "result": {
         "ok": true,
