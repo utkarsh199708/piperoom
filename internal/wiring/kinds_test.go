@@ -97,6 +97,7 @@ func TestRegisterToolsCDCUnchanged(t *testing.T) {
 	old := tools.NewReadOnlyRegistry()
 	for _, err := range []error{
 		dbtools.Register(old, dbtools.Deps{Builder: w.Builder, Owners: o}),
+		dbtools.RegisterObjectOwners(old, dbtools.Deps{Builder: w.Builder, Owners: o}),
 		kafkatools.Register(old, kafkatools.Deps{Owners: o}),
 		debeziumtools.Register(old, debeziumtools.Deps{Owners: o}),
 		debeziumtools.RegisterWorkerMetrics(old, debeziumtools.Deps{Owners: o}, ""),

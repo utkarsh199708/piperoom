@@ -29,6 +29,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"source_table_replication": `{"pipeline_id":"orders"}`,
 		"source_role_grants":       `{"pipeline_id":"orders"}`,
 		"source_blocking_sessions": `{}`,
+		"pg_object_owners":         `{"pipeline_id":"orders"}`,
 		"warehouse_freshness":      `{"table":"analytics.orders","ts_column":"updated_at"}`,
 		"warehouse_row":            `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"1"}`,
 		"warehouse_load_errors":    `{"table":"analytics.orders"}`,

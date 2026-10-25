@@ -170,6 +170,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"pg_toast_risk",
 		"source_settings", "source_table_replication", "source_role_grants", "source_blocking_sessions",
 		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record",
+		// H1: registered after dbtools.Register's fixed list.
+		"pg_object_owners",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
