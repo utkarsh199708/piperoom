@@ -20,8 +20,22 @@ The two N4 rows are the scenarios where a past closed room is the key hint: they
 fix or the cause the live tools cannot show). The harness replays recordings and never runs
 the tool, so each carries the tool's exact answer over a fixture history. That history is in
 `../similar_fixture_test.go`; `TestSimilarIncidentsRecordings` runs the real tool over it and
-fails when the recording drifts. To regenerate one, run the test with `PRINT_SIMILAR=1` and
-paste the printed summary. The recording has no `input`, so it answers any query.
+fails when the recording drifts. The fixture rooms carry a `room.labelled` verdict (cause and fix),
+because `similar_incidents` offers a closed room as a precedent only when a person labelled it; an
+unlabelled room is counted (`unlabelled_skipped`) and left out, and `TestSimilarIncidentsDropUnlabelledRoom`
+proves that. To regenerate the summaries, run
+`go test ./evals -run TestSimilarIncidentsRecordings -update-similar-recordings` and review the diff
+(`PRINT_SIMILAR=1` prints them instead). The recording has no `input`, so it answers any query.
+
+The `pg_streaming_liveness`, `pg_long_transactions`, `connect_source_offsets` and
+`source_blocking_sessions` recordings of `dead-slot-wal-no-context`, `slot-inactive-wal-growth` and
+`long-transaction-horizon-held` are checked against the real tools by `w4k_recordings_test.go`. After a tool
+adds fields, run `go test ./evals -run 'TestW4k.*RealToolOutput' -update-w4k-recordings`: it rewrites the
+`data:` of a recording that differs (never a summary, which fails the test and needs a look) and keeps the
+recorded `elapsed_ms`. The first two scenarios' source fake serves no open-transaction read, so their
+recordings are the tools' fallback shape (restart_lsn fields, no `open_transactions`/`oldest_open`);
+`long-transaction-horizon-held` uses `w4kOpenSource` and carries the full shape (`oldest_open`, a
+`horizon_held` verdict naming pid 51877 4m50s old, under the 5 minute list threshold).
 
 ### Further incidents
 

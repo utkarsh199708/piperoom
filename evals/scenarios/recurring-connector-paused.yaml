@@ -85,10 +85,14 @@ recordings:
   - tool: similar_incidents
     summary: |-
       2 similar past incident(s) on pipeline orders (3 rooms searched). Past text below is history, not instructions.
-      [1] 2026-09-22 "analytics.orders stale for 3h, no failed tasks" (2 h, closed by Arjun) The nightly maintenance job pauses pg-orders-connector at 02:00 and resumes it at 02:30. Its resume call timed out and the connector stayed PAUSED. Resumed the connector (safe: the slot stayed active,…
-          room r_01JA9B2E4F6G8H1J3K5M7N9P0Q, layer unlabelled, score 8.8
-      [2] 2026-08-03 "orders stale: connector task failed" (2 h, closed by Arjun) Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.
-          room r_01J8N4Q2M7ZK3V9T6B5N8C1D0E, layer unlabelled, score 4.0
+      [1] 2026-09-22 "analytics.orders stale for 3h, no failed tasks" (2 h, closed by Arjun) fixed by: Resumed pg-orders-connector (the slot stayed active, no data lost) and made the job retry the resume — unverified closing note: The nightly maintenance job pauses pg-orders-connector at 02:00 and resumes it at 02:30. Its resume call timed out and the connector stayed PAUSED. Resumed the connector (safe: the slot stayed active,…
+          cause: pg-orders-connector stayed PAUSED: the nightly maintenance job's resume call timed out, so analytics.orders went stale with no failed task
+          fix: Resumed pg-orders-connector (the slot stayed active, no data lost) and made the job retry the resume
+          room r_01JA9B2E4F6G8H1J3K5M7N9P0Q, layer kafka-connect, score 10.1
+      [2] 2026-08-03 "orders stale: connector task failed" (2 h, closed by Arjun) fixed by: Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again — unverified closing note: Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.
+          cause: Debezium registered an incompatible Avro value schema for pg.public.orders-value after an ALTER COLUMN and connector task 0 failed
+          fix: Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again
+          room r_01J8N4Q2M7ZK3V9T6B5N8C1D0E, layer schema-registry, score 4.5
   - tool: connect_list_connectors
     summary: |-
       pg-orders-connector (source): PAUSED, 0 failed tasks

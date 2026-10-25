@@ -58,6 +58,12 @@ type pastRoom struct {
 	FixProposalID string
 	FixTitle      string
 	FixActions    []string
+	// Labelled is true when a room.labelled event decoded: a person wrote down
+	// the cause. Only labelled rooms are returned as precedents.
+	Labelled bool
+	// TestRoom marks a room opened by the unsigned dev webhook or under a
+	// smoke-/test- dedup key; such rooms are never indexed.
+	TestRoom bool
 	// Duration is room open to close; ClosedBy is the closer's name, kept
 	// only when the server vouched for it (events.Actor.Verified).
 	Duration time.Duration
@@ -94,6 +100,7 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 		return pastRoom{}, fmt.Errorf("similarincidents: room %s: %w", r.ID, err)
 	}
 	agentTextOK := false
+	layerFromLabel := false
 	for _, e := range rare {
 		switch e.Type {
 		case events.RoomCreated:
@@ -103,6 +110,7 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 				continue
 			}
 			agentTextOK = !p.Shadow
+			pr.TestRoom = isTestRoom(p.AlertSource, p.DedupKey)
 			if p.Title != "" {
 				pr.Title = clipRunes(scrub(p.Title), maxTitleBytes)
 			}
@@ -121,11 +129,16 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			if err != nil {
 				continue
 			}
+			pr.Labelled = true
 			pr.Cause = clipBytes(scrub(p.Cause), maxFieldBytes)
 			pr.FixThatWorked = clipBytes(scrub(p.FixThatWorked), maxFieldBytes)
 			pr.FixProposalID = p.FixProposalID
-			if slices.Contains(events.IncidentLayers(), p.ActualLayer) {
-				pr.Layer = p.ActualLayer
+			switch {
+			case slices.Contains(events.IncidentLayers(), p.ActualLayer):
+				pr.Layer, layerFromLabel = p.ActualLayer, true
+			case layerFromLabel:
+				// The last label names no layer: do not keep an earlier label's.
+				pr.Layer, layerFromLabel = "", false
 			}
 		case events.ShadowLabelled:
 			// One label per room; the last wins if there were ever two.
@@ -168,6 +181,14 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 	}
 	pr.addTraces(res)
 	return pr, nil
+}
+
+// isTestRoom reports whether a room came from the unsigned dev webhook
+// (alert_source "webhook") or from a smoke/test run (dedup key prefix). Their
+// resolutions are throwaway text and must not become precedents.
+func isTestRoom(alertSource, dedupKey string) bool {
+	k := strings.ToLower(dedupKey)
+	return alertSource == "webhook" || strings.HasPrefix(k, "smoke-") || strings.HasPrefix(k, "test-")
 }
 
 func clipList(xs []string) []string {
