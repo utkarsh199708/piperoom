@@ -450,6 +450,8 @@ the call cap; `-judge llm` asks live; `-judge terms` keeps the keyword grade. Wi
 | `fix` | [][]string | action-name groups that must all appear among the proposed steps. Absent = no particular fix expected |
 | `forbidden_actions` | []string | actions that must never be proposed in this scenario. A **rejected attempt** counts too: `propose_fix` drops a proposal whose step fails `Validate` and leaves no event, so the harness records every `Validate` call and fails a run that even tried a forbidden action |
 | `max_tool_calls` | int | read-tool budget (calls attempted); 0 = none |
+| `guard_refusals` | int or `{min, max}` | how many calls the hypothesis guard refused in the run (H2): a number is exact, `{min: 1, max: 2}` a range, either end may be left out. Graded **only in a run whose guard mode is `enforce`** (log and off modes refuse nothing, so a minimum could never be met); see "Hypothesis guard in eval runs" |
+| `max_unbacked_rule_outs` | int | the most "ruled out X" claims in the final hypothesis that no cited successful step read (`agent.UnbackedRuledOut`, guard rule 2). `0` is the point of the field and is a real value, so leave it out to grade nothing. Graded in every mode |
 
 **`expected_facts[]`**: `id` (unique), `tool`, `match` ([]string), `required` (bool). A fact is
 established at a step when the step called `tool`, the result was **not an error**, and every `match`
@@ -883,6 +885,44 @@ out; `alert.pipeline_map` is still the map. A run fails with an error when the w
 within 200 ticks, or opens it on other signals than `signals` (the scenario would measure another
 incident). Only `connector_down`, `slot_inactive` and `slot_wal` can fire (no Kafka client, so no
 `dlq_growth`).
+
+## Hypothesis guard in eval runs (H2)
+
+The hypothesis guard (`docs/design/hypothesis-guard.md`) refuses a healthy verdict while the watcher
+still fires a symptom (rule 1) and a "ruled out X" that no cited read backs (rule 2). Three things in the
+harness support it:
+
+- **`-guard off|log|enforce`** (env `EVAL_GUARD`) sets `agent.Options.HypothesisGuard` of every run.
+  The default is `enforce`, unlike the server's `log`, so a wording regression shows in CI before a
+  pilot sees it. A value outside the three is a usage error before any work, as for
+  `PIPEROOM_HYPOTHESIS_GUARD`. The judge and its recorded verdicts read the final text only and need
+  no mode.
+- **`watch_status:`** is the watcher's status row of the scenario's pipeline, handed to the agent as
+  `Deps.Watch` (a scenario without it gives the agent no reader, as before). Times are offsets from
+  the start of the run, so the row is fresh whenever the run happens:
+
+  ```yaml
+  watch_status:
+    checked_at: -20s                # when the watcher last ticked; default 0s
+    signals:                        # firing or acked signals only; [] is a fresh row with nothing firing
+      - {signal: connector_down, state: firing, severity: sev2, node: 'connect:pg-orders-connector',
+         since: -9m, clearing_since: -4m}   # clearing_since: the condition is gone, the signal waits out its for
+  ```
+
+  Validation checks the signal name, `firing|acked`, `sev1..sev4`, that every time is an offset in the
+  past and `clearing_since` is not before `since`. It is for alert-started rooms only (a
+  watcher-started room has the watcher's own rows).
+- **`guard_refusals` and `unbacked_rule_outs` in the report.** `guard_refusals` per run (and summed in
+  the summary) is counted from the guard's own log record, `agent: hypothesis guard refused`: a refused
+  call is returned to the model as an error and written to no room event, and the model taps are
+  neither complete (Bedrock and Vertex are untapped) nor needed. `unbacked_rule_outs` is
+  `agent.UnbackedRuledOut` over the final hypothesis and the successful steps it cites.
+
+One thing to know when the guard refuses a healthy verdict on rule 1: it arms a recheck of the status row
+(90 s, 3 min, 6 min of real time), during which the agent waits on a context derived from the run's.
+The harness counts that wait as the agent's idle (`roomAgent.guardWakeIdle`) unless the scenario executes
+a fix step, where the same kind of wait is an apply wait; without it a refused run stalls for the whole
+recheck and the scripted person never acts.
 
 ## Fix targets
 

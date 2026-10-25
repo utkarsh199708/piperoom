@@ -436,6 +436,16 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The slot debezium_orders is held back by an open transaction: pid 51877 (app refund-backfill, idle in transaction, has_xid=yes, 4m50s old) holds the WAL horizon, so restart_lsn is flat while confirmed_flush_lsn advances and the retained WAL grows; pg_streaming_liveness reports horizon_held. The connector is healthy and streams. pg_long_transactions lists nothing only because the writer is younger than its 5m threshold. Ask the postgres owner priya whether the backfill can commit or roll back; nothing needs a restart.",
 		wrong: "pg-orders-connector stopped streaming and the slot debezium_orders is stuck, so the WAL piles up. Restart the connector task so it picks up the slot again.",
 	},
+	// H2: the watcher-firing variant of the horizon story, with the horizon scenario's wrong text.
+	"long-tx-slot-stuck-watcher-firing": {
+		good:  "The slot debezium_orders is held back by an open transaction: pid 51877 (app refund-backfill, idle in transaction, has_xid=yes, 4m50s old) holds the WAL horizon, so restart_lsn is flat while confirmed_flush_lsn advances and the retained WAL grows; pg_streaming_liveness reports horizon_held, which is why the watcher still fires long_tx and slot_wal. The connector is healthy and streams. pg_long_transactions lists nothing only because the writer is younger than its 5m threshold. Ask the postgres owner priya whether the backfill can commit or roll back; nothing needs a restart.",
+		wrong: "pg-orders-connector stopped streaming and the slot debezium_orders is stuck, so the WAL piles up. Restart the connector task so it picks up the slot again.",
+	},
+	// H2: the ownership-trap variant of publication-permission-denied, with the ownership read.
+	"publication-owner-ruled-out-trap": {
+		good:  "Task 0 FAILED: Debezium fails to ALTER PUBLICATION because orders_owner now owns public.orders (permission denied; pg_object_owners reports owner_differs). The connector user needs the table owner to change the publication.",
+		wrong: "Debezium task 0 failed to publish to Kafka because a broker is unreachable; restart the connector.",
+	},
 	"idle-wal-growth": {
 		good:  "public.orders stays idle for 38 minutes while the batch database on the same server writes, so Debezium's heartbeat confirms only when a source event arrives; the active slot debezium_orders retains 34.6 MiB of WAL, and max_slot_wal_keep_size=-1 leaves retention unlimited, so Postgres keeps the WAL. source_blocking_sessions lists no blocking session. Add a heartbeat table with heartbeat.action.query (source_create_heartbeat_table) so the slot advances.",
 		wrong: "order-sync is lagging behind the batch database, so the pipeline is slow; raise max_slot_wal_keep_size and restart the connector to release the WAL.",
