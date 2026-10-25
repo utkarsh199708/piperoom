@@ -444,8 +444,9 @@ func TestResolvedAlertWhenAllSignalsClear(t *testing.T) {
 }
 
 func TestAckedAfterRoomClosedAndResetOnClear(t *testing.T) {
-	// Cooldown is tiny so that only the acked state can hold the watcher back.
-	h := newHarness(t, opts{cooldown: time.Millisecond})
+	// The cooldown outlasts the ticks below, so only the acked state holds the
+	// watcher back (after the cooldown it re-opens: rearm_test.go).
+	h := newHarness(t, opts{cooldown: 30 * time.Minute})
 	h.breakConnector("orders", "boom")
 	h.steps(4, time.Minute)
 	rooms := h.rooms.created()
@@ -458,7 +459,7 @@ func TestAckedAfterRoomClosedAndResetOnClear(t *testing.T) {
 	if h.phase("orders", owners.SignalConnectorDown) != phaseAcked {
 		t.Fatalf("phase = %v, want acked", h.phase("orders", owners.SignalConnectorDown))
 	}
-	h.steps(40, time.Minute)
+	h.steps(25, time.Minute)
 	if got := len(h.rooms.created()); got != 1 {
 		t.Fatalf("a closed room was re-opened by the same incident: %d rooms", got)
 	}

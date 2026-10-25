@@ -320,7 +320,7 @@ func TestForecastRoomCloseKeepsRealSignals(t *testing.T) {
 	if !h.w.forecastCooling(now, "orders", clients.WatchMetricSlotWALBytes) || h.w.forecastCooling(now, "orders", clients.WatchMetricTopicOldestUnreadAge) {
 		t.Fatal("cooldown is not per metric")
 	}
-	growSlot(h, &retained, 4)
+	growSlot(h, &retained, 3) // inside the 60 min cooldown (15 min samples)
 	if n := len(h.rooms.created()); n != 1 {
 		t.Fatalf("an acked forecast opened another room (%d)", n)
 	}

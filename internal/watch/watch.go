@@ -251,6 +251,9 @@ type pipeState struct {
 	// bypassCooldown: a severity rise re-opened an acked incident
 	// (reviveWorse); the next open skips the cooldown.
 	bypassCooldown bool
+	// reopenOf, when set, is when the room whose close acked the signals now
+	// firing again was closed (rearmClosed). The next room, or join, says so.
+	reopenOf time.Time
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
 	lastPost  time.Time
@@ -539,8 +542,10 @@ func (w *Watcher) tick(ctx context.Context) {
 
 // OnRoomClosed tells the watcher that the driver closed a room. Wire it to the
 // room service's room-closed hook. Signals that still fire in the pipeline
-// become acked: the same incident does not open another room, and the watcher
-// stays quiet until the signal clears. pipelineID and dedupKey are unused: the
+// become acked: the same incident does not open another room at once. The
+// watcher stays quiet for one cooldown; a signal that still fires after it
+// opens a new room that says it reopens after a close (rearmClosed). A signal
+// that clears first is simply ok again. pipelineID and dedupKey are unused: the
 // room is found by roomID, so a storm room acks every pipeline that posts into
 // it, whatever key it was opened under.
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
@@ -576,7 +581,7 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 		}
 		if ss.phase == phaseFiring && id != retentionID {
 			// A retention finding never had a room of its own to close.
-			ss.ack()
+			ss.ack(now)
 			if driftKind(id) != "" {
 				if ps.driftClosed == nil {
 					ps.driftClosed = map[string]time.Time{}

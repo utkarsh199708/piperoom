@@ -8,7 +8,7 @@ import (
 
 func TestLongTxDefaults(t *testing.T) {
 	lt := DefaultWatch().LongTx
-	want := LongTxSignal{WatchSignal: WatchSignal{Enabled: true, Action: ActionRoom, For: 5 * time.Minute}, Ticks: 3, MinGrowthBytes: 64 << 10}
+	want := LongTxSignal{WatchSignal: WatchSignal{Enabled: true, Action: ActionRoom, For: 2 * time.Minute}, Ticks: 3, MinGrowthBytes: 64 << 10}
 	if lt != want {
 		t.Fatalf("DefaultWatch().LongTx = %+v, want %+v", lt, want)
 	}
@@ -30,7 +30,7 @@ func TestLongTxParse(t *testing.T) {
 		want  LongTxSignal
 	}{
 		{"empty block keeps defaults", "{}", def},
-		{"off", "{enabled: false}", LongTxSignal{WatchSignal: WatchSignal{Action: ActionRoom, For: 5 * time.Minute}, Ticks: 3, MinGrowthBytes: 64 << 10}},
+		{"off", "{enabled: false}", LongTxSignal{WatchSignal: WatchSignal{Action: ActionRoom, For: 2 * time.Minute}, Ticks: 3, MinGrowthBytes: 64 << 10}},
 		{"all keys", "{enabled: true, action: log, for: 90s, ticks: 5, min_growth: 1MiB}",
 			LongTxSignal{WatchSignal: WatchSignal{Enabled: true, Action: ActionLog, For: 90 * time.Second}, Ticks: 5, MinGrowthBytes: 1 << 20}},
 		{"ticks at the minimum", "{ticks: 2}", LongTxSignal{WatchSignal: def.WatchSignal, Ticks: 2, MinGrowthBytes: def.MinGrowthBytes}},

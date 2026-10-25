@@ -86,9 +86,9 @@ func longTxRooms(t *testing.T, h *harness) []openRec {
 	return out
 }
 
-// With the defaults (ticks 3, min_growth 64 KiB, for 5m) and a 15 s interval,
+// With the defaults (ticks 3, min_growth 64 KiB, for 2m) and a 15 s interval,
 // the condition holds on the third tick that sees the head advance (45 s
-// after the held value was first seen) and fires 5 min later.
+// after the held value was first seen) and fires 2 min later.
 func TestLongTxFiresAfterHeldTicks(t *testing.T) {
 	h := newHarness(t, opts{})
 	s := newPGSlot(h, "orders")
@@ -101,11 +101,11 @@ func TestLongTxFiresAfterHeldTicks(t *testing.T) {
 	if r := h.w.pipes["orders"].sigs[owners.SignalLongTx].last; r.v != vBreach {
 		t.Fatalf("after 3 advancing ticks the reading is %v, want breach", r.v)
 	}
-	s.heldSteps(19, 32<<10) // t = 330 s: 4m45s of breach
+	s.heldSteps(7, 32<<10) // t = 150 s: 1m45s of breach
 	if h.phase("orders", owners.SignalLongTx) != phaseOK || len(longTxRooms(t, h)) != 0 {
-		t.Fatalf("fired before for (5m)\n%s", h.logs)
+		t.Fatalf("fired before for (2m)\n%s", h.logs)
 	}
-	s.heldSteps(1, 32<<10) // t = 345 s: 5 min of breach
+	s.heldSteps(1, 32<<10) // t = 165 s: 2 min of breach
 	if h.phase("orders", owners.SignalLongTx) != phaseFiring {
 		t.Fatalf("did not fire after for\n%s", h.logs)
 	}
@@ -120,7 +120,7 @@ func TestLongTxFiresAfterHeldTicks(t *testing.T) {
 	ev := signalEv(t, evidenceOf(t, a.Raw), owners.SignalLongTx)
 	wantStr := map[string]string{
 		"severity": "sev3", "slot": "debezium_orders", "restart_lsn": "0/2528450",
-		"wal_head_first": fmtLSN(restartHeld + 464<<10), "wal_head_last": fmtLSN(restartHeld + 464<<10 + 23*32<<10),
+		"wal_head_first": fmtLSN(restartHeld + 464<<10), "wal_head_last": fmtLSN(restartHeld + 464<<10 + 11*32<<10),
 	}
 	for k, v := range wantStr {
 		if ev[k] != v {
@@ -128,8 +128,8 @@ func TestLongTxFiresAfterHeldTicks(t *testing.T) {
 		}
 	}
 	wantNum := map[string]float64{
-		"retained_first_bytes": 464 << 10, "retained_bytes": 464<<10 + 23*32<<10,
-		"retained_growth_bytes": 23 * 32 << 10, "ticks": 23, "held_for_seconds": 345,
+		"retained_first_bytes": 464 << 10, "retained_bytes": 464<<10 + 11*32<<10,
+		"retained_growth_bytes": 11 * 32 << 10, "ticks": 11, "held_for_seconds": 165,
 	}
 	for k, v := range wantNum {
 		if ev[k] != v {
@@ -194,14 +194,14 @@ func TestLongTxClearsWhenRestartMoves(t *testing.T) {
 	h := newHarness(t, opts{})
 	s := newPGSlot(h, "orders")
 	h.step(0)
-	s.heldSteps(23, 32<<10)
+	s.heldSteps(11, 32<<10)
 	if h.phase("orders", owners.SignalLongTx) != phaseFiring {
 		t.Fatalf("did not fire\n%s", h.logs)
 	}
 	// The transaction ends: restart_lsn catches up and moves on from then.
 	s.release()
 	h.step(tick15) // clearing from here
-	for range 19 { // 4m45s of clear
+	for range 7 {  // 1m45s of clear
 		s.write(32 << 10)
 		s.release()
 		h.step(tick15)
@@ -211,9 +211,9 @@ func TestLongTxClearsWhenRestartMoves(t *testing.T) {
 	}
 	s.write(32 << 10)
 	s.release()
-	h.step(tick15) // 5 min of clear
+	h.step(tick15) // 2 min of clear
 	if h.phase("orders", owners.SignalLongTx) != phaseOK {
-		t.Fatalf("did not resolve 5 min after restart_lsn moved\n%s", h.logs)
+		t.Fatalf("did not resolve 2 min after restart_lsn moved\n%s", h.logs)
 	}
 	if len(h.rooms.resolved()) != 1 {
 		t.Fatalf("resolved alerts = %d, want 1", len(h.rooms.resolved()))
@@ -230,7 +230,7 @@ func TestLongTxQuietTickDoesNotFlap(t *testing.T) {
 	if r := h.w.pipes["orders"].sigs[owners.SignalLongTx].last; r.v != vBreach {
 		t.Fatalf("a quiet tick read %v, want breach (restart_lsn is still held)", r.v)
 	}
-	s.heldSteps(19, 32<<10) // t = 345 s
+	s.heldSteps(7, 32<<10) // t = 165 s
 	if h.phase("orders", owners.SignalLongTx) != phaseFiring {
 		t.Fatalf("a quiet tick delayed the signal\n%s", h.logs)
 	}
@@ -296,7 +296,7 @@ func TestLongTxReadErrorStaysUnknown(t *testing.T) {
 		h := newHarness(t, opts{})
 		s := newPGSlot(h, "orders")
 		h.step(0)
-		s.heldSteps(10, 32<<10) // breaching since t = 45 s
+		s.heldSteps(3, 32<<10) // breaching since t = 45 s
 		h.src.mu.Lock()
 		h.src.err = errors.New("pq: timeout")
 		h.src.mu.Unlock()
@@ -304,11 +304,11 @@ func TestLongTxReadErrorStaysUnknown(t *testing.T) {
 		h.src.mu.Lock()
 		h.src.err = nil
 		h.src.mu.Unlock()
-		s.heldSteps(10, 32<<10) // t = 330 s
+		s.heldSteps(5, 32<<10) // t = 150 s
 		if h.phase("orders", owners.SignalLongTx) != phaseOK {
 			t.Fatal("fired early")
 		}
-		s.heldSteps(1, 32<<10) // t = 345 s: on time
+		s.heldSteps(1, 32<<10) // t = 165 s: on time
 		if h.phase("orders", owners.SignalLongTx) != phaseFiring {
 			t.Fatalf("an error tick delayed or reset long_tx\n%s", h.logs)
 		}
