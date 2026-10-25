@@ -266,7 +266,13 @@ recordings:
         flush_lag_bytes: 52183852142
         flush_lag_bytes_after: 52187550142
         name: debezium_orders
+        restart_advance_bytes: 0
+        restart_lsn: 43/45A82B42
+        restart_lsn_after: 43/45A82B42
+        restart_lsn_moved: false
+        retained_growth_bytes: 3698000
         retained_wal_bytes: 52187550646
+        retained_wal_bytes_before: 52183852646
         source_wal_advance_bytes: 3698000
         stuck_lag_threshold_bytes: 177504000
         verdict: stuck
@@ -315,8 +321,14 @@ recordings:
         confirmed_flush_lsn: 44/85A82D3A
         confirmed_flush_lsn_after: 44/86082D3A
         name: debezium_orders
+        restart_advance_bytes: 6291456
+        restart_lsn: 44/85A82B42
+        restart_lsn_after: 44/86082B42
+        restart_lsn_moved: true
+        retained_growth_bytes: -2593456
         retained_wal_bytes: 47349420982
-        source_wal_advance_bytes: 0
+        retained_wal_bytes_before: 47352014438
+        source_wal_advance_bytes: 3698000
         verdict: streaming
         wal_status: extended
       source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
