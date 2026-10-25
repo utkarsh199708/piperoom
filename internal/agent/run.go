@@ -101,6 +101,10 @@ type runner struct {
 	// listed and the latest hypothesis's scope (X4c, externalcause.go).
 	causes *externalCauses
 
+	// guard is the hypothesis guard of update_hypothesis and post_message
+	// (H1, guard.go): its mode and the refusal streaks of this episode.
+	guard *hypothesisGuard
+
 	// versions are the room's running versions, read once with
 	// connect_plugins for runbook_lookup (Q1d, versions.go). Nil passes none.
 	versions *versionReads
@@ -186,6 +190,10 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 // production client from the environment (Anthropic API).
 func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, error) {
 	opts = opts.withDefaults()
+	guardMode, err := resolveGuardMode(opts.HypothesisGuard)
+	if err != nil {
+		return nil, err
+	}
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
 	}
@@ -267,6 +275,11 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 
 		noneSubjects: map[string]bool{},
 	}
+	// A refusal names only read tools this room offers.
+	r.guard = newHypothesisGuard(guardMode, deps.Logger, alert, func(name string) bool {
+		_, ok := deps.Tools.Get(name)
+		return ok
+	})
 	if alert.Mode == ModeSetup {
 		// Setup mode (U1-10): the run's bounds and the two KindRoom setup
 		// tools. A room the server opened always carries its request in
@@ -296,6 +309,7 @@ func (r *runner) run(ctx context.Context) error {
 	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
 	setRoomSource(room, r.source)
 	setRoomSetup(room, r.setup)
+	setRoomGuard(room, r.guard)
 	room = append(room, r.setupRoom...)
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
