@@ -33,6 +33,7 @@ import (
 // evals count (prefix "hypothesis guard (").
 const (
 	guardRuleRuledOut = "unbacked_rule_out" // rule 2, ruledout.go
+	guardRuleSymptom  = "symptom_persists"  // rule 1, symptomguard.go
 )
 
 // guardMaxRefusals is how many refusals in a row one rule gives per episode
@@ -64,8 +65,12 @@ type guardFinding struct {
 	// unbacked are items added to UnbackedTerms when the cap accepts the call.
 	unbacked []string
 	// note, when set, is posted as one agent.message when the cap accepts
-	// the call (rule 1's "[guard] ... unconfirmed" line).
+	// the call (rule 1's "[guard] ... still shows ... firing" line).
 	note string
+	// onRefuse, when set, runs when the finding really refuses the call
+	// (enforce mode, under the cap): rule 1 arms its recheck there, so log
+	// mode and a capped call never start one.
+	onRefuse func()
 }
 
 // guardResult is what the guard decided for an accepted call.
@@ -86,6 +91,10 @@ type hypothesisGuard struct {
 	// offered reports whether the room offers a read tool, so a refusal only
 	// names tools the model can call; nil offers every tool.
 	offered func(name string) bool
+
+	// symptom is rule 1's watch reader and recheck (symptomguard.go); nil
+	// turns rule 1 off.
+	symptom *symptomGuard
 
 	mu       sync.Mutex
 	refusals map[string]int // per rule, refusals in a row this episode
@@ -129,6 +138,9 @@ func (g *hypothesisGuard) check(tool string, checks ...func() *guardFinding) (gu
 		g.mu.Unlock()
 		if n < guardMaxRefusals {
 			g.log.Warn("agent: hypothesis guard refused", append(attrs, "refusal", n+1)...)
+			if f.onRefuse != nil {
+				f.onRefuse()
+			}
 			return guardResult{}, f.refusal
 		}
 		g.log.Warn("agent: hypothesis guard accepted at low confidence after refusals", append(attrs, "refusals", n)...)

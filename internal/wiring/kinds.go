@@ -115,7 +115,14 @@ func toolPackages() []toolPackage {
 		// SourceKind picks dbtools' list (Q8n): a MySQL set gets no pg_* tool,
 		// and source_row and source_long_transactions instead.
 		{name: "db tools", kinds: bothKinds, register: func(reg *tools.Registry, w *Wired) error {
-			return dbtools.Register(reg, dbtools.Deps{Src: w.Source, SourceKind: w.source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka})
+			d := dbtools.Deps{Src: w.Source, SourceKind: w.source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka}
+			if err := dbtools.Register(reg, d); err != nil {
+				return err
+			}
+			// pg_object_owners (H1, A3's) answers the ownership question of
+			// a "must be owner" task failure that source_role_grants cannot;
+			// a MySQL source gets nothing.
+			return dbtools.RegisterObjectOwners(reg, d)
 		}},
 		// mysql_binlog_status (Q8c) only on a MySQL set: a Postgres set's
 		// list does not change.

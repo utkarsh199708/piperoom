@@ -280,6 +280,13 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		_, ok := deps.Tools.Get(name)
 		return ok
 	})
+	// Rule 1 reads the watcher's status row; it is off without a reader, with
+	// the guard off, and in setup mode (no pipeline runs yet). Shadow rooms
+	// get the same reader and the same mode, so the rule behaves the same.
+	if deps.Watch != nil && guardMode != GuardOff && alert.Mode != ModeSetup {
+		r.guard.symptom = newSymptomGuard(deps.Watch, alert.PipelineID, r.log, r.nowTime,
+			func(ctx context.Context, d time.Duration) error { return r.clk.Sleep(ctx, d) })
+	}
 	if alert.Mode == ModeSetup {
 		// Setup mode (U1-10): the run's bounds and the two KindRoom setup
 		// tools. A room the server opened always carries its request in
@@ -301,8 +308,11 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 }
 
 func (r *runner) run(ctx context.Context) error {
-	// Every apply wait (fixpr.go) ends with the run.
+	// Every apply wait (fixpr.go) and the guard's watch recheck
+	// (symptomguard.go) end with the run.
 	defer r.applies.stop()
+	r.guard.symptomWatch().begin(ctx)
+	defer r.guard.symptomWatch().stop()
 	if err := r.scopeForge(ctx); err != nil {
 		return err
 	}
@@ -623,9 +633,9 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 	inputs, err := r.deps.Inbox.Drain(ctx)
 	if err != nil {
 		r.log.Warn("agent: inbox drain failed", "err", err)
-		return r.takeHeld(r.takeApplied())
+		return r.takeHeld(r.takeOwnInputs())
 	}
-	return r.takeHeld(append(inputs, r.takeApplied()...))
+	return r.takeHeld(append(inputs, r.takeOwnInputs()...))
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
@@ -660,7 +670,7 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			}
 			continue
 		}
-		inputs = append(inputs, r.takeApplied()...)
+		inputs = append(inputs, r.takeOwnInputs()...)
 		// Track approvals as they arrive, held or not: the approval that
 		// completes a proposal must wake the agent into its wait for step
 		// results (awaitStepResults), which observes them again harmlessly.
