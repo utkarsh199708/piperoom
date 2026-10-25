@@ -153,8 +153,15 @@ for this stack:
 | `WORKER_LOGS_LOKI_URL` | `http://localhost:3100` | `connect_worker_logs` (Q3c) |
 | `WORKER_LOGS_SELECTOR` | `{service="connect"}` | `connect_worker_logs` |
 
-Quick checks: `curl -s localhost:9404/metrics | grep -c '^kafka_connect_'` (non-zero once the connector runs) and
-`curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode 'query={service="connect"}' --data-urlencode limit=5`.
+**Consumer logs (H2).** Promtail also tails the `devconsumer` service (a second scrape job; slog lines, `level`
+read from `level=ERROR` or `"level":"ERROR"`), labelled `service="devconsumer"`. `consumer_logs` reads it for a
+pipeline whose owners entry has `consumer_logs: {selector: '{service="devconsumer"}'}`: `dev/owners.fast.yaml` sets
+it for `orders` (`dev/owners.yaml` does not). It uses the same Loki, URL and token as `connect_worker_logs`; there
+is no extra variable. Without a Loki, or without the selector, the tool answers "not configured".
+
+Quick checks: `curl -s localhost:9404/metrics | grep -c '^kafka_connect_'` (non-zero once the connector runs),
+`curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode 'query={service="connect"}' --data-urlencode limit=5`
+and the same with `query={service="devconsumer"}`.
 **Not run yet:** written without Docker (2026-10-23); the compose file passes `docker compose config` and the rules,
 the Promtail regexes and the compose structure are unit-tested (`go test ./cmd/devctl -run 'JMX|LogsProfile|ConnectJMX'`).
 The rules were also run once in the real `jmx_prometheus_javaagent` 1.0.1 (same checksum) against stand-in Connect and

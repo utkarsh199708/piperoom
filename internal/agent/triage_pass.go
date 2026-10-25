@@ -295,7 +295,8 @@ func (p *triagePass) has(name string) bool {
 
 // tableReads maps the first signal of a watcher alert to its two reads
 // (tasks/F6 §2). A read whose tool is not registered, or whose input the
-// body does not give, is left out; the reads that remain run.
+// body does not give, is left out; the reads that remain run, at most
+// triagePassReads of them, so a row may list a fallback after its two.
 func (p *triagePass) tableReads(body watcherBody) []toolUse {
 	sig := body.Signals[0]
 	name, _ := sig["signal"].(string)
@@ -328,9 +329,15 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 		}
 		wants = []tableRead{peek, statusOrList(writer)}
 	case "consumer_lag", "group_unstable":
-		wants = []tableRead{{"kafka_consumer_lag", map[string]any{"group": nameField(sig, "group")}}, statusOrList("")}
+		// Group state first, then the consumer's own log (H2): an Empty group
+		// with frozen offsets says where, the log says why (a crash loop on
+		// one record). Without consumer_logs the old second read fills in.
+		wants = []tableRead{groupState(sig), consumerLogs(), statusOrList("")}
 	case "offset_below_log_start":
+		// The same order when the signal names the group; the topic's offsets
+		// and retention fill in for a read that is not there.
 		wants = []tableRead{
+			groupState(sig), consumerLogs(),
 			{"kafka_topic_offsets", map[string]any{"topic": nameField(sig, "topic")}},
 			{"kafka_topic_config", map[string]any{"pipeline_id": p.alert.PipelineID}},
 		}
@@ -340,6 +347,9 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 	}
 	var uses []toolUse
 	for _, w := range wants {
+		if len(uses) == triagePassReads {
+			break
+		}
 		if !p.has(w.tool) || !w.complete() {
 			continue
 		}
@@ -351,6 +361,16 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 		uses = append(uses, toolUse{id: fmt.Sprintf("first_look_%d", len(uses)+1), name: w.tool, input: raw})
 	}
 	return uses
+}
+
+// consumerLogs is the consumer's own log read (consumer_logs, H2): its
+// pipeline and streams come from the room and owners.yaml, so it needs no
+// input. A new map each call: tableReads adds the why to it.
+func consumerLogs() tableRead { return tableRead{"consumer_logs", map[string]any{}} }
+
+// groupState is the consumer group read of a consumer signal.
+func groupState(sig map[string]any) tableRead {
+	return tableRead{"kafka_consumer_lag", map[string]any{"group": nameField(sig, "group")}}
 }
 
 // tableRead is one read of the signal table.
@@ -635,7 +655,7 @@ func triageToolLayer(name string) string {
 		return "orchestrator"
 	case strings.HasPrefix(name, "dbt_"):
 		return "transform"
-	case name == "kafka_consumer_lag", name == "kafka_list_groups":
+	case name == "kafka_consumer_lag", name == "kafka_list_groups", name == "consumer_logs":
 		return "consumer"
 	case strings.HasPrefix(name, "kafka_"), strings.HasPrefix(name, "dlq_"):
 		return "kafka"

@@ -80,6 +80,13 @@ type Wired struct {
 	// are not in internal/config yet (Q3e contract change request), so
 	// nothing in production sets it today.
 	WorkerLogs logtools.Reader
+	// ConsumerLogs opens a pipeline's consumer log streams for consumer_logs
+	// (H2) on the same Loki as WorkerLogs, with the pipeline's
+	// consumer_logs.selector from owners.yaml. Nil derives it from WorkerLogs
+	// when that is a *workerlogs.Client (one Loki, one set of credentials);
+	// with neither, consumer_logs is still registered and answers "not
+	// configured". Set by the caller, as WorkerLogs.
+	ConsumerLogs logtools.ConsumerReaders
 	// ConnectMetricsPrefix is the metric name prefix of connect_worker_metrics
 	// (CONNECT_METRICS_PREFIX, Q3b); "" is
 	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller, as

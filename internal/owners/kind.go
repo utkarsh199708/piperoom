@@ -186,6 +186,8 @@ func (p *Pipeline) validateBatch() error {
 		field = "reprocess_topic"
 	case p.SourceKind != "":
 		field = "source_kind"
+	case p.ConsumerLogs != nil:
+		field = "consumer_logs"
 	}
 	if field != "" {
 		return fmt.Errorf("%s is a %s field, but the pipeline kind is %s",

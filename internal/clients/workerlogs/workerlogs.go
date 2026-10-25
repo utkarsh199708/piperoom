@@ -1,7 +1,9 @@
-// Package workerlogs reads Kafka Connect worker log lines from Grafana Loki
+// Package workerlogs reads Kafka Connect worker log lines, and a pipeline
+// consumer's own log lines (StreamLogs), from Grafana Loki
 // (GET /loki/api/v1/query_range). The stream selector comes from the
-// operator's configuration only; a caller passes a connector, a task, a
-// minimum level and a start time, which become escaped line filters. Every
+// operator's configuration only; a caller passes a connector, a task (or a
+// literal substring), a minimum level and a start time, which become escaped
+// line filters. Every
 // line is untrusted text: callers redact, scan and wrap it before a model
 // reads it (internal/tools/logtools).
 package workerlogs
@@ -43,6 +45,8 @@ const (
 	MaxConnectorBytes = 249
 	// MaxTask is the highest task id accepted.
 	MaxTask = 9999
+	// MaxContainsBytes bounds StreamQuery.Contains, a literal substring.
+	MaxContainsBytes = 256
 
 	queryPath    = "/loki/api/v1/query_range"
 	maxErrorBody = 4 << 10
@@ -81,6 +85,16 @@ type LogQuery struct {
 	MinLevel  string    // TRACE..FATAL; "" = WARN
 	Since     time.Time // zero = now - DefaultLookback
 	Limit     int       // 1..MaxLines; 0 = MaxLines
+}
+
+// StreamQuery is one read of every line of the client's streams (an
+// application's own log, such as a Kafka consumer's), not only the lines that
+// name a connector.
+type StreamQuery struct {
+	Contains string    // optional literal substring; at most MaxContainsBytes printable bytes
+	MinLevel string    // TRACE..FATAL; "" = WARN
+	Since    time.Time // zero = now - DefaultLookback
+	Limit    int       // 1..MaxLines; 0 = MaxLines
 }
 
 // LogLine is one log entry (Q0 item 3, clients.LogLine). A stack trace the
@@ -236,6 +250,19 @@ func (h *headers) RoundTrip(req *http.Request) (*http.Response, error) {
 // Selector returns the configured stream selector.
 func (c *Client) Selector() string { return c.selector }
 
+// WithSelector returns a reader of the same Loki (base URL, HTTP client,
+// TLS, token, tenant) over the streams selector picks. The selector is
+// operator configuration (a pipeline's consumer_logs.selector), checked with
+// CheckSelector; it is never model input. Nothing is dialled here.
+func (c *Client) WithSelector(selector string) (*Client, error) {
+	if err := CheckSelector(selector); err != nil {
+		return nil, fmt.Errorf("workerlogs: %w: selector: %v", netsec.ErrInvalid, err)
+	}
+	cp := *c
+	cp.selector = strings.TrimSpace(selector)
+	return &cp, nil
+}
+
 // normalize checks q and fills its defaults.
 func (c *Client) normalize(q LogQuery, now time.Time) (LogQuery, error) {
 	if q.Connector == "" || len(q.Connector) > MaxConnectorBytes {
@@ -247,47 +274,88 @@ func (c *Client) normalize(q LogQuery, now time.Time) (LogQuery, error) {
 	if q.Task < -1 || q.Task > MaxTask {
 		return q, fmt.Errorf("%w: task %d: want -1 (any) or 0 to %d", ErrBadQuery, q.Task, MaxTask)
 	}
-	if q.MinLevel == "" {
-		q.MinLevel = "WARN"
+	w, err := normalizeWindow(window{minLevel: q.MinLevel, since: q.Since, limit: q.Limit}, now)
+	q.MinLevel, q.Since, q.Limit = w.minLevel, w.since, w.limit
+	return q, err
+}
+
+// window is the part of a read both query kinds share.
+type window struct {
+	minLevel string
+	since    time.Time
+	limit    int
+}
+
+// normalizeWindow checks the level, the start and the limit and fills their
+// defaults.
+func normalizeWindow(w window, now time.Time) (window, error) {
+	if w.minLevel == "" {
+		w.minLevel = "WARN"
 	}
-	q.MinLevel = strings.ToUpper(q.MinLevel)
-	if levelRank(q.MinLevel) < 0 {
-		return q, fmt.Errorf("%w: level must be one of %s", ErrBadQuery, strings.Join(levels, ", "))
+	w.minLevel = strings.ToUpper(w.minLevel)
+	if levelRank(w.minLevel) < 0 {
+		return w, fmt.Errorf("%w: level must be one of %s", ErrBadQuery, strings.Join(levels, ", "))
 	}
-	if q.Since.IsZero() {
-		q.Since = now.Add(-DefaultLookback)
+	if w.since.IsZero() {
+		w.since = now.Add(-DefaultLookback)
 	}
-	if !q.Since.Before(now) {
-		return q, fmt.Errorf("%w: since must be in the past", ErrBadQuery)
+	if !w.since.Before(now) {
+		return w, fmt.Errorf("%w: since must be in the past", ErrBadQuery)
 	}
-	if now.Sub(q.Since) > MaxLookback {
-		return q, fmt.Errorf("%w: since is more than %s ago", ErrBadQuery, MaxLookback)
+	if now.Sub(w.since) > MaxLookback {
+		return w, fmt.Errorf("%w: since is more than %s ago", ErrBadQuery, MaxLookback)
 	}
-	if q.Limit == 0 {
-		q.Limit = MaxLines
+	if w.limit == 0 {
+		w.limit = MaxLines
 	}
-	if q.Limit < 1 || q.Limit > MaxLines {
-		return q, fmt.Errorf("%w: limit %d: want 1 to %d", ErrBadQuery, q.Limit, MaxLines)
+	if w.limit < 1 || w.limit > MaxLines {
+		return w, fmt.Errorf("%w: limit %d: want 1 to %d", ErrBadQuery, w.limit, MaxLines)
 	}
-	return q, nil
+	return w, nil
 }
 
 // WorkerLogs returns at most q.Limit lines of the configured streams that
 // name q.Connector (and q.Task), at q.MinLevel or above, from q.Since to
 // now: the newest ones, oldest first (newest last). The call is recorded as
 // a provenance call with the host, the path and the LogQL query.
-func (c *Client) WorkerLogs(ctx context.Context, q LogQuery) (_ []LogLine, err error) {
+func (c *Client) WorkerLogs(ctx context.Context, q LogQuery) ([]LogLine, error) {
 	now := c.now()
-	q, err = c.normalize(q, now)
+	q, err := c.normalize(q, now)
 	if err != nil {
 		return nil, err
 	}
-	query := buildQuery(c.selector, q)
+	return c.read(ctx, buildQuery(c.selector, q), window{minLevel: q.MinLevel, since: q.Since, limit: q.Limit}, now)
+}
+
+// StreamLogs returns at most q.Limit lines of the configured streams, at
+// q.MinLevel or above, that contain q.Contains (when set), from q.Since to
+// now: the newest ones, oldest first (newest last). It is WorkerLogs without
+// the connector filter, for an application whose whole stream belongs to one
+// pipeline (consumer_logs). The call is recorded like WorkerLogs.
+func (c *Client) StreamLogs(ctx context.Context, q StreamQuery) ([]LogLine, error) {
+	now := c.now()
+	if len(q.Contains) > MaxContainsBytes {
+		return nil, fmt.Errorf("%w: contains must be at most %d bytes", ErrBadQuery, MaxContainsBytes)
+	}
+	if strings.IndexFunc(q.Contains, unicode.IsControl) >= 0 {
+		return nil, fmt.Errorf("%w: contains has control characters", ErrBadQuery)
+	}
+	w, err := normalizeWindow(window{minLevel: q.MinLevel, since: q.Since, limit: q.Limit}, now)
+	if err != nil {
+		return nil, err
+	}
+	q.MinLevel = w.minLevel
+	return c.read(ctx, buildStreamQuery(c.selector, q), w, now)
+}
+
+// read runs one query_range for query over w and returns the newest w.limit
+// lines at w.minLevel or above, oldest first.
+func (c *Client) read(ctx context.Context, query string, w window, now time.Time) ([]LogLine, error) {
 	v := url.Values{}
 	v.Set("query", query)
-	v.Set("start", strconv.FormatInt(q.Since.UnixNano(), 10))
+	v.Set("start", strconv.FormatInt(w.since.UnixNano(), 10))
 	v.Set("end", strconv.FormatInt(now.UnixNano(), 10))
-	v.Set("limit", strconv.Itoa(q.Limit))
+	v.Set("limit", strconv.Itoa(w.limit))
 	// backward = Loki keeps the newest `limit` entries; they are re-sorted
 	// oldest first below.
 	v.Set("direction", "backward")
@@ -299,7 +367,7 @@ func (c *Client) WorkerLogs(ctx context.Context, q LogQuery) (_ []LogLine, err e
 	defer func() {
 		tools.Record(ctx, tools.Call{
 			Kind: tools.CallHTTP, Target: c.base.Host, Text: "GET " + c.base.Path + queryPath,
-			ParamsRedacted: []string{"query=" + query, "start=" + q.Since.UTC().Format(time.RFC3339), "limit=" + strconv.Itoa(q.Limit)},
+			ParamsRedacted: []string{"query=" + query, "start=" + w.since.UTC().Format(time.RFC3339), "limit=" + strconv.Itoa(w.limit)},
 			At:             start, TookMS: time.Since(start).Milliseconds(),
 		})
 	}()
@@ -334,7 +402,7 @@ func (c *Client) WorkerLogs(ctx context.Context, q LogQuery) (_ []LogLine, err e
 	if err != nil {
 		return nil, err
 	}
-	min := levelRank(q.MinLevel)
+	min := levelRank(w.minLevel)
 	out := lines[:0]
 	for _, l := range lines {
 		// A line whose level cannot be read is kept: dropping it could hide
@@ -344,8 +412,8 @@ func (c *Client) WorkerLogs(ctx context.Context, q LogQuery) (_ []LogLine, err e
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
-	if len(out) > q.Limit {
-		out = out[len(out)-q.Limit:]
+	if len(out) > w.limit {
+		out = out[len(out)-w.limit:]
 	}
 	return out, nil
 }

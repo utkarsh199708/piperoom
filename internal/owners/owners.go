@@ -45,6 +45,11 @@ type Pipeline struct {
 	// the action refuses. Load refuses an invalid topic name, a CDC or DLQ
 	// topic, and a topic two pipelines on one cluster declare (reprocess.go).
 	ReprocessTopic string `yaml:"reprocess_topic"`
+	// ConsumerLogs is the optional cdc `consumer_logs:` block (H2,
+	// consumer_logs.go): the Loki stream selector of the pipeline's consumer
+	// log, read by consumer_logs. Nil = not configured, and the tool says so.
+	// Read it with ConsumerLogSelector.
+	ConsumerLogs *ConsumerLogsSpec `yaml:"consumer_logs"`
 	// SinkTables and SinkTSColumn belong to both kinds.
 	SinkTables   []string `yaml:"sink_tables"`
 	SinkTSColumn string   `yaml:"sink_ts_column"`
@@ -343,6 +348,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validateRecovery(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateConsumerLogs(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validatePII(); err != nil {

@@ -20,6 +20,10 @@ pipelines:
     consumer_groups: [order-sync]
     sink_tables: [analytics.orders]
     sink_ts_column: updated_at
+    # The dev consumer's own log (consumer_logs, H2): Promtail labels it
+    # service=devconsumer in the `logs` profile (dev/logs/promtail.yml). It is
+    # read from the same Loki as the worker logs (WORKER_LOGS_LOKI_URL).
+    consumer_logs: {selector: '{service="devconsumer"}'}
     # Short `for` so `devctl break ...` trips the watcher within a few intervals.
     # slot_wal stays at the defaults (fire 1GiB): a healthy dev slot retains
     # 0.8-1.1 MB under load (dev/scenarios.md), so any small fire would warn forever.

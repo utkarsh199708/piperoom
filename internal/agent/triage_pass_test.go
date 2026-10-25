@@ -335,6 +335,7 @@ func TestTriageToolLayer(t *testing.T) {
 		{"kafka_topic_offsets", "kafka"},
 		{"dlq_peek", "kafka"},
 		{"kafka_consumer_lag", "consumer"},
+		{"consumer_logs", "consumer"},
 		{"warehouse_freshness", "warehouse"},
 		{"dag_runs", "orchestrator"},
 		{"task_log_tail", "orchestrator"},
@@ -580,5 +581,46 @@ func TestTriagePassSettingsDefaults(t *testing.T) {
 	}
 	if got := triagePassSettings(EndpointConfig{TriagePassTimeout: time.Hour}); got.timeout != 90*time.Second {
 		t.Fatalf("timeout = %s, want the 90s cap", got.timeout)
+	}
+}
+
+// TestTriagePassConsumerSignalsReadLogs (H2): with consumer_logs registered,
+// a consumer signal's first look reads the group state first and the
+// consumer's own log second (two reads, no input for the log: its pipeline
+// and streams come from the room). Without a group the next read of the row
+// fills in.
+func TestTriagePassConsumerSignalsReadLogs(t *testing.T) {
+	all := []string{"connect_status", "connect_list_connectors", "kafka_consumer_lag", "kafka_topic_offsets", "kafka_topic_config", "consumer_logs"}
+	tests := []struct {
+		sig  map[string]any
+		want []string
+	}{
+		{map[string]any{"signal": "consumer_lag", "group": "order-sync"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "group_unstable", "group": "order-sync"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "offset_below_log_start", "group": "order-sync", "topic": "pg.public.orders"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "offset_below_log_start", "topic": "pg.public.orders"}, []string{"consumer_logs", "kafka_topic_offsets"}},
+		{map[string]any{"signal": "consumer_lag"}, []string{"consumer_logs", "connect_list_connectors"}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.sig), func(t *testing.T) {
+			var defs []*recordingTool
+			for _, n := range all {
+				defs = append(defs, &recordingTool{name: n, schema: map[string]any{"type": "object"}, result: tools.Result{Summary: n + " ok"}})
+			}
+			f := newTriageFixture(t, &funcModel{fn: func(context.Context, int, anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+				return verdictMessage(t, map[string]any{"headline": "h", "suspected_layer": "", "confidence": "low", "next_check": "", "based_on_steps": []string{}}), nil
+			}}, defs...)
+			res := f.run(t, Alert{Title: "t", Raw: watcherRaw(t, tt.sig)})
+			var got []string
+			for _, s := range res.Steps {
+				got = append(got, s.Tool)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("reads = %v, want %v", got, tt.want)
+			}
+			if in := f.tools["consumer_logs"].inputsAsJSON(); len(in) != 1 || in[0] != `{}` {
+				t.Errorf("consumer_logs inputs = %q, want one {}", in)
+			}
+		})
 	}
 }

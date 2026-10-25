@@ -111,6 +111,7 @@ func TestRegisterToolsMySQLSet(t *testing.T) {
 		"kafka_schema_history",
 		"debezium_metrics", "debezium_snapshot_progress",
 		"connect_worker_metrics", "connect_worker_logs",
+		"consumer_logs",
 		"net_probe",
 		"runbook_lookup",
 		"what_changed",

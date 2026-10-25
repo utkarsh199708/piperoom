@@ -148,8 +148,8 @@ func TestSymptomGuardLongTx(t *testing.T) {
 			t.Fatalf("refusal lacks %q:\n%s", want, err)
 		}
 	}
-	// The suggested wording is not itself a healthy claim.
-	if healthyClaim("It is recovering and the watcher has not cleared yet.") {
+	// The suggested wording is not itself a healthy claim, for either matcher.
+	if healthyClaim("It is recovering and the watcher has not cleared yet.") || pipelineVerdictHealthy("It is recovering and the watcher has not cleared yet.") {
 		t.Fatal("the refusal's suggested wording is a healthy claim")
 	}
 }
@@ -295,6 +295,101 @@ func TestSymptomGuardCap(t *testing.T) {
 		t.Fatalf("note = %q", m.Text)
 	}
 	t.Logf("note: %s", m.Text)
+}
+
+// The live false positive of 2026-10-25: a correct hypothesis about a real
+// consumer fault calls the upstream components healthy. That is a finding
+// about those components, not a verdict that the symptom is gone, so rule 1
+// does not refuse it (nor read the store) while consumer_lag fires; a flat
+// whole-pipeline verdict in the same room still is refused. Texts that name
+// the slot stay in the matcher table: with no cited slot read, rule 2
+// refuses them before rule 1 runs.
+func TestSymptomGuardComponentFindingsPass(t *testing.T) {
+	ctx := context.Background()
+	lag := func() *fakeWatch {
+		return &fakeWatch{rows: [][]clients.WatchStatus{watchRow(firing(owners.SignalConsumerLag))}}
+	}
+	for _, text := range []string{
+		"First failing: consumer group order-sync is Empty with 0 members and lag is 4210 on orders.public.orders. Source and topic are healthy.",
+		"First failing: consumer group order-sync. The connector is healthy, so the problem is downstream.",
+		"Root cause: consumer, not established. Source and topic are healthy.",
+		"Kafka and Connect look healthy.",
+		"Nothing is wrong with the connector.",
+		"The connector is healthy.",
+	} {
+		var logs bytes.Buffer
+		w := lag()
+		hyp, msg, sink, id := symptomTools(GuardEnforce, w, &logs)
+		if _, err := hyp.Run(ctx, hypInput(text, id, "high")); err != nil {
+			t.Fatalf("update_hypothesis(%q) refused: %v", text, err)
+		}
+		if _, err := msg.Run(ctx, msgInput(text)); err != nil {
+			t.Fatalf("post_message(%q) refused: %v", text, err)
+		}
+		hs := sink.ofType(events.AgentHypothesis)
+		if len(hs) != 1 {
+			t.Fatalf("%q: hypotheses = %d, want 1", text, len(hs))
+		}
+		var p events.AgentHypothesisPayload
+		if err := json.Unmarshal(hs[0].payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Confidence != "high" {
+			t.Fatalf("%q: confidence = %q, want high kept", text, p.Confidence)
+		}
+		if n := w.callCount(); n != 0 {
+			t.Fatalf("%q: %d store reads for a component finding, want 0", text, n)
+		}
+		if strings.Contains(logs.String(), "symptom_persists") {
+			t.Fatalf("%q: rule 1 fired: %s", text, logs.String())
+		}
+	}
+}
+
+// A flat verdict while consumer_lag fires is refused in both tools, and the
+// cap and [guard] note are unchanged: two refusals, then low with one note.
+func TestSymptomGuardFlatVerdictRefusedUnderConsumerLag(t *testing.T) {
+	ctx := context.Background()
+	const flat = "Healthy now, nothing to fix."
+	var logs bytes.Buffer
+	_, msg, _, _ := symptomTools(GuardEnforce, &fakeWatch{rows: [][]clients.WatchStatus{watchRow(firing(owners.SignalConsumerLag))}}, &logs)
+	if _, err := msg.Run(ctx, msgInput(flat)); !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "hypothesis guard (symptom_persists)") {
+		t.Fatalf("post_message: %v, want a symptom_persists refusal", err)
+	}
+	// A fresh room for update_hypothesis, so the cap counts its calls alone.
+	hyp, _, sink, id := symptomTools(GuardEnforce, &fakeWatch{rows: [][]clients.WatchStatus{watchRow(firing(owners.SignalConsumerLag))}}, &logs)
+	in := hypInput(flat, id, "medium")
+	for i := 1; i <= guardMaxRefusals; i++ {
+		_, err := hyp.Run(ctx, in)
+		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "consumer_lag") {
+			t.Fatalf("attempt %d: %v, want a consumer_lag refusal", i, err)
+		}
+	}
+	if _, err := hyp.Run(ctx, in); err != nil {
+		t.Fatalf("third attempt refused: %v", err)
+	}
+	hs := sink.ofType(events.AgentHypothesis)
+	if len(hs) != 1 {
+		t.Fatalf("hypotheses = %d, want 1", len(hs))
+	}
+	var p events.AgentHypothesisPayload
+	if err := json.Unmarshal(hs[0].payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Confidence != "low" || p.Text != flat {
+		t.Fatalf("capped hypothesis = %+v", p)
+	}
+	ms := sink.ofType(events.AgentMessage)
+	if len(ms) != 1 {
+		t.Fatalf("[guard] notes = %d, want 1", len(ms))
+	}
+	var m events.AgentMessagePayload
+	if err := json.Unmarshal(ms[0].payload, &m); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(m.Text, "[guard] healthy verdict accepted after two refusals; the watcher still shows consumer_lag firing (last check ") {
+		t.Fatalf("note = %q", m.Text)
+	}
 }
 
 // Rule 2 runs first: a rule 2 refusal never reads the store.

@@ -61,6 +61,9 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"connect_worker_metrics": `{"connector":"pg-orders-connector"}`,
 		"connect_worker_logs":    `{"connector":"pg-orders-connector"}`,
 
+		// H2
+		"consumer_logs": `{"level":"ERROR"}`,
+
 		// Q6b
 		"net_probe": `{"target":"source"}`,
 	}
