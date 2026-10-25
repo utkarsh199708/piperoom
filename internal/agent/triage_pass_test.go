@@ -354,7 +354,7 @@ func TestTriageToolLayer(t *testing.T) {
 }
 
 func TestTriagePassTableForEverySignal(t *testing.T) {
-	all := []string{"connect_status", "connect_list_connectors", "pg_recent_ddl", "pg_replication_slots", "pg_long_transactions",
+	all := []string{"connect_status", "connect_list_connectors", "pg_recent_ddl", "pg_replication_slots", "pg_long_transactions", "pg_streaming_liveness",
 		"dlq_peek", "kafka_consumer_lag", "kafka_topic_offsets", "kafka_topic_config", "connect_config"}
 	tests := []struct {
 		sig  map[string]any
@@ -362,6 +362,7 @@ func TestTriagePassTableForEverySignal(t *testing.T) {
 	}{
 		{map[string]any{"signal": "slot_inactive", "slot": "debezium_orders"}, []string{"connect_list_connectors", "pg_replication_slots"}},
 		{map[string]any{"signal": "slot_wal", "slot": "debezium_orders"}, []string{"pg_long_transactions", "pg_replication_slots"}},
+		{map[string]any{"signal": "long_tx", "slot": "debezium_orders"}, []string{"pg_streaming_liveness", "pg_long_transactions"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{"orders-sink"}}, []string{"dlq_peek", "connect_status"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{}}, []string{"dlq_peek", "connect_list_connectors"}},
 		{map[string]any{"signal": "consumer_lag", "group": "order-sync"}, []string{"kafka_consumer_lag", "connect_list_connectors"}},
