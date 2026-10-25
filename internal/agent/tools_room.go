@@ -901,6 +901,16 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		}
 	}
 
+	// H4: a restore after a dependent step goes in its own proposal
+	// (restoreguard.go). The log line names step numbers only: params can
+	// carry text the model copied from untrusted reads.
+	if err := restoreBeforeSettle(steps); err != nil {
+		if t.log != nil {
+			t.log.Warn("agent: propose_fix restores a setting before its dependent step settles", "tool", t.Name(), "steps", len(steps))
+		}
+		return tools.Result{}, err
+	}
+
 	// X4c: with the cause outside the pipeline, no pipeline change is the
 	// root fix; the proposal says it is a mitigation.
 	title, owner := t.causes.mitigationTitle(in.Title)
