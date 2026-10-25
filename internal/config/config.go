@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"piperoom/internal/clients/workerlogs/logql"
 )
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
@@ -172,6 +174,16 @@ type Config struct {
 	// exporter next to Kafka Connect. ParseDebeziumMetrics.
 	DebeziumMetricsURL    string // DEBEZIUM_METRICS_URL: http(s)://host:port/metrics; empty = debezium_metrics says "not configured"
 	DebeziumMetricsPrefix string // DEBEZIUM_METRICS_PREFIX: metric name prefix, default "debezium_metrics_"
+
+	// Worker and consumer logs (Q3): a Loki that holds the Kafka Connect worker
+	// logs (connect_worker_logs) and, with a per-pipeline consumer_logs
+	// selector in owners.yaml, the consumer application's logs (consumer_logs).
+	// ParseWorkerLogs. Empty URL = both tools answer "not configured".
+	WorkerLogsLokiURL  string // WORKER_LOGS_LOKI_URL: http(s)://host:port, no user info
+	WorkerLogsSelector string // WORKER_LOGS_SELECTOR: a LogQL stream selector for the Connect workers, e.g. {service="connect"}
+	WorkerLogsToken    string // WORKER_LOGS_TOKEN (secret): bearer token, or the password when WORKER_LOGS_USER is set
+	WorkerLogsUser     string // WORKER_LOGS_USER: basic auth user (the token is its password)
+	WorkerLogsOrgID    string // WORKER_LOGS_ORG_ID: X-Scope-OrgID for a multi-tenant Loki
 
 	// X7: the optional OpenLineage emitter (X7b; mapping in
 	// docs/design/lineage.md). Empty URL = off: no goroutine, no request.
@@ -445,6 +457,12 @@ func Load() Config {
 
 		DebeziumMetricsURL:    get("DEBEZIUM_METRICS_URL", ""),
 		DebeziumMetricsPrefix: get("DEBEZIUM_METRICS_PREFIX", DefaultDebeziumMetricsPrefix),
+
+		WorkerLogsLokiURL:  get("WORKER_LOGS_LOKI_URL", ""),
+		WorkerLogsSelector: get("WORKER_LOGS_SELECTOR", ""),
+		WorkerLogsToken:    get("WORKER_LOGS_TOKEN", ""),
+		WorkerLogsUser:     get("WORKER_LOGS_USER", ""),
+		WorkerLogsOrgID:    get("WORKER_LOGS_ORG_ID", ""),
 
 		// X7
 		OpenLineageURL:       get("OPENLINEAGE_URL", ""),
@@ -1364,6 +1382,57 @@ func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
 		}
 	}
 	return d, nil
+}
+
+// WorkerLogs holds the typed Loki settings. URL "" = not configured. Token is
+// a secret: log the typed value's Configured and Selector, never the struct.
+type WorkerLogs struct {
+	URL      string
+	Selector string
+	Token    string
+	User     string
+	OrgID    string
+}
+
+// Configured reports whether a Loki is set.
+func (w WorkerLogs) Configured() bool { return w.URL != "" }
+
+// ParseWorkerLogs validates WORKER_LOGS_LOKI_URL (empty, or an absolute http
+// or https URL with a host and no user info), WORKER_LOGS_SELECTOR (required
+// with a URL, and only a LogQL stream selector: a pipeline stage or metric
+// query is refused, the tools add their own filters), and the auth settings (a
+// user needs the token as its password). The error names the env var. (Q3)
+func ParseWorkerLogs(c Config) (WorkerLogs, error) {
+	w := WorkerLogs{
+		URL:      strings.TrimSpace(c.WorkerLogsLokiURL),
+		Selector: strings.TrimSpace(c.WorkerLogsSelector),
+		Token:    c.WorkerLogsToken,
+		User:     strings.TrimSpace(c.WorkerLogsUser),
+		OrgID:    strings.TrimSpace(c.WorkerLogsOrgID),
+	}
+	if w.URL == "" {
+		if w.Selector != "" || w.Token != "" || w.User != "" || w.OrgID != "" {
+			return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_*: set WORKER_LOGS_LOKI_URL too, or unset the others")
+		}
+		return WorkerLogs{}, nil
+	}
+	u, err := url.Parse(w.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_LOKI_URL: want an http(s)://host:port URL")
+	}
+	if u.User != nil {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_LOKI_URL: must not carry user info")
+	}
+	if w.Selector == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_SELECTOR: required with WORKER_LOGS_LOKI_URL, e.g. {service=\"connect\"}")
+	}
+	if err := logql.CheckSelector(w.Selector); err != nil {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_SELECTOR: %v", err)
+	}
+	if w.User != "" && w.Token == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_USER: needs WORKER_LOGS_TOKEN as its password")
+	}
+	return w, nil
 }
 
 // ---- X7: OpenLineage emitter (X7b; docs/design/lineage.md) ----
