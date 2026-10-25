@@ -670,8 +670,8 @@ func TestSourceErrorDoesNotHideConnectorDown(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "must be the primary") {
 		t.Fatalf("no hint for the recovery error\n%s", h.logs)
 	}
-	if n := h.logs.count("watch: check failed"); n != 2 { // once per slot signal, not every tick
-		t.Fatalf("check failed warnings = %d, want 2", n)
+	if n := h.logs.count("watch: check failed"); n != 3 { // once per slot signal (slot_inactive, slot_wal, long_tx), not every tick
+		t.Fatalf("check failed warnings = %d, want 3", n)
 	}
 }
 
