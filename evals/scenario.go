@@ -51,6 +51,10 @@ type Scenario struct {
 	// watcher (watcher_start.go).
 	Start Start `yaml:"start"`
 	Alert Alert `yaml:"alert"`
+	// WatchStatus is the watcher's status row of the pipeline as the room
+	// reads it (agent.Deps.Watch, the hypothesis guard's rule 1). Unset: the
+	// agent has no watch reader. See watch_status.go.
+	WatchStatus *WatchStatusSpec `yaml:"watch_status"`
 	// Phases name the states the recorded stack goes through, start phase
 	// first (e.g. broken, recovered). Empty means a static scenario. See
 	// phases.go.
@@ -388,6 +392,16 @@ type Expect struct {
 	// MaxToolCalls is the read-tool budget a focused investigation stays
 	// within. Zero means no budget.
 	MaxToolCalls int `yaml:"max_tool_calls"`
+	// GuardRefusals bounds how many calls the hypothesis guard refused in the
+	// run (error results whose text starts "hypothesis guard (", counted from
+	// the room log): a number is an exact count, {min, max} a range. Graded
+	// only in a run with the guard in enforce mode, where it refuses; in log
+	// or off mode the count is always 0 and the bound says nothing.
+	GuardRefusals *IntRange `yaml:"guard_refusals"`
+	// MaxUnbackedRuleOuts is the most "ruled out X" claims, in the final
+	// hypothesis, that no cited successful step read (agent.UnbackedRuledOut).
+	// A pointer, because 0 is the point: no rule-out without a read behind it.
+	MaxUnbackedRuleOuts *int `yaml:"max_unbacked_rule_outs"`
 
 	// Outcome is how a good run ends (see the Outcome constants); empty means
 	// diagnose. Only diagnose grades root_cause, root_cause_forbidden, the two
@@ -750,6 +764,14 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	}
 	if s.Expect.MaxToolCalls < 0 {
 		errs = append(errs, errors.New("expect.max_tool_calls is negative"))
+	}
+	errs = append(errs, s.WatchStatus.validate()...)
+	errs = append(errs, s.Expect.GuardRefusals.validate("expect.guard_refusals")...)
+	if n := s.Expect.MaxUnbackedRuleOuts; n != nil && *n < 0 {
+		errs = append(errs, errors.New("expect.max_unbacked_rule_outs is negative"))
+	}
+	if s.WatchStatus != nil && s.Start.By == StartWatcher {
+		errs = append(errs, errors.New("watch_status: a watcher-started room has the watcher's own rows; the field is for alert-started rooms"))
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("evals: scenario %q: %w", s.Name, err)

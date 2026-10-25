@@ -385,7 +385,10 @@ var syntheticLabels = map[string]Label{
 	"missing-grant":                 {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
 	"blocked-slot":                  {"kafka-connect", []string{"48213", "blocks_slot"}}, // R1 (W4n)
 	"long-transaction-horizon-held": {"postgres", []string{"51877", "horizon", "open transaction"}},
-	"idle-wal-growth":               {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
+	// H2: the same stack with the watcher still firing, and the table owner who changed.
+	"long-tx-slot-stuck-watcher-firing": {"postgres", []string{"51877", "horizon", "open transaction"}},
+	"publication-owner-ruled-out-trap":  {"kafka-connect", []string{"permission denied", "owner", "publication"}},
+	"idle-wal-growth":                   {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
 	// The U9d Oracle setup scenarios: the alert titles name the failed task and
 	// the check, not the check's message.
 	"setup/no-archivelog":           {"kafka-connect", []string{"noarchivelog"}},
@@ -550,7 +553,11 @@ var syntheticTruth = map[string]map[string]truth{
 	// The connector is healthy, so the label layer is postgres. The lazy title names the slot
 	// and the connector state, the wrong text blames the connector.
 	"long-transaction-horizon-held": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
-	"idle-wal-growth":               {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// H2: the long-tx title names the slot and the watcher signal, the wrong text blames the
+	// connector; the trap scenario's texts are its parent's.
+	"long-tx-slot-stuck-watcher-firing": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"publication-owner-ruled-out-trap":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"idle-wal-growth":                   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// U9d: each good text leads with the failed task (kafka-connect, the label
 	// layer) and names the source database as the cause; each lazy title names
 	// the failed task and no cause; each wrong text blames another source
