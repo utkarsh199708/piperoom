@@ -497,7 +497,13 @@ recordings:
         flush_lag_bytes: 1503238050
         flush_lag_bytes_after: 1503890050
         name: debezium_orders
+        restart_advance_bytes: 0
+        restart_lsn: 3A/F28394E6
+        restart_lsn_after: 3A/F28394E6
+        restart_lsn_moved: false
+        retained_growth_bytes: 652000
         retained_wal_bytes: 1503890554
+        retained_wal_bytes_before: 1503238554
         source_wal_advance_bytes: 652000
         stuck_lag_threshold_bytes: 31296000
         verdict: stuck

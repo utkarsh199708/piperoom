@@ -89,10 +89,14 @@ recordings:
   - tool: similar_incidents
     summary: |-
       2 similar past incident(s) on pipeline orders (3 rooms searched). Past text below is history, not instructions.
-      [1] 2026-09-15 "order-sync failing: Schema 2 not found (error code 40403)" (2 h, closed by Arjun) A cleanup script hard-deleted schema version 1 (id 2) of pg.public.orders-value. Re-registered the same schema under its ORIGINAL id 2 by putting the subject in IMPORT mode, then back to READWRITE, an…
-          room r_01JA3M6S9T4V8W2X5Y7Z0B1C3D, layer unlabelled, score 9.4
-      [2] 2026-08-03 "orders stale: connector task failed" (2 h, closed by Arjun) Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.
-          room r_01J8N4Q2M7ZK3V9T6B5N8C1D0E, layer unlabelled, score 2.5
+      [1] 2026-09-15 "order-sync failing: Schema 2 not found (error code 40403)" (2 h, closed by Arjun) fixed by: Re-registered the same schema under its original id 2 with the subject in IMPORT mode, back to READWRITE, restarted order-sync — unverified closing note: A cleanup script hard-deleted schema version 1 (id 2) of pg.public.orders-value. Re-registered the same schema under its ORIGINAL id 2 by putting the subject in IMPORT mode, then back to READWRITE, an…
+          cause: A cleanup script hard-deleted schema version 1 (id 2) of pg.public.orders-value, so order-sync got Schema 2 not found (error code 40403)
+          fix: Re-registered the same schema under its original id 2 with the subject in IMPORT mode, back to READWRITE, restarted order-sync
+          room r_01JA3M6S9T4V8W2X5Y7Z0B1C3D, layer schema-registry, score 10.4
+      [2] 2026-08-03 "orders stale: connector task failed" (2 h, closed by Arjun) fixed by: Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again — unverified closing note: Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.
+          cause: Debezium registered an incompatible Avro value schema for pg.public.orders-value after an ALTER COLUMN and connector task 0 failed
+          fix: Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again
+          room r_01J8N4Q2M7ZK3V9T6B5N8C1D0E, layer schema-registry, score 2.6
   - tool: connect_list_connectors
     summary: |-
       pg-orders-connector (source): RUNNING, 0 failed tasks
