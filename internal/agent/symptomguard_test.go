@@ -365,7 +365,7 @@ func healthyHypTurn(id int) string {
 	return fmt.Sprintf(`{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu%d","name":"update_hypothesis","input":{"text":%s,"based_on_steps":[],"confidence":"low"}}]}`, id, strconvQuote(healthyText))
 }
 
-const endTurn = `{"stop_reason":"end_turn","content":[{"type":"text","text":"waiting for the watcher"}]}`
+const guardEndTurn = `{"stop_reason":"end_turn","content":[{"type":"text","text":"waiting for the watcher"}]}`
 
 // symptomRunner is a runner over one read tool with rule 1 reading w.
 func symptomRunner(t *testing.T, model sdkModel, inbox Inbox, sink Sink, w clients.WatchStatusReader, d func(*Deps)) *runner {
@@ -426,7 +426,7 @@ func TestRunSymptomRecheckWake(t *testing.T) {
 	clearRow := watchRow(clearing(owners.SignalSlotWAL))
 
 	t.Run("clears: one extra turn", func(t *testing.T) {
-		model, sink, w, clk := run(t, [][]clients.WatchStatus{firingRow, clearRow}, healthyHypTurn(1), endTurn, endTurn)
+		model, sink, w, clk := run(t, [][]clients.WatchStatus{firingRow, clearRow}, healthyHypTurn(1), guardEndTurn, guardEndTurn)
 		// Turn 1 refused, turn 2 idle, turn 3 is the wake's: one extra.
 		if len(model.calls) != 3 {
 			t.Fatalf("model calls = %d, want 3 (the wake costs one turn)", len(model.calls))
@@ -452,7 +452,7 @@ func TestRunSymptomRecheckWake(t *testing.T) {
 	})
 
 	t.Run("clears: healthy verdict after the wake", func(t *testing.T) {
-		model, sink, _, _ := run(t, [][]clients.WatchStatus{firingRow, clearRow}, healthyHypTurn(1), endTurn, healthyHypTurn(3), endTurn)
+		model, sink, _, _ := run(t, [][]clients.WatchStatus{firingRow, clearRow}, healthyHypTurn(1), guardEndTurn, healthyHypTurn(3), guardEndTurn)
 		if len(model.calls) != 4 {
 			t.Fatalf("model calls = %d, want 4", len(model.calls))
 		}
@@ -462,7 +462,7 @@ func TestRunSymptomRecheckWake(t *testing.T) {
 	})
 
 	t.Run("still firing: no wake", func(t *testing.T) {
-		model, _, w, clk := run(t, [][]clients.WatchStatus{firingRow}, healthyHypTurn(1), endTurn)
+		model, _, w, clk := run(t, [][]clients.WatchStatus{firingRow}, healthyHypTurn(1), guardEndTurn)
 		if len(model.calls) != 2 {
 			t.Fatalf("model calls = %d, want 2 (no wake)", len(model.calls))
 		}
