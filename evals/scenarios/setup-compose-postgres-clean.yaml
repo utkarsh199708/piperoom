@@ -57,6 +57,10 @@
 #     wrote; the .env holds references, the runner materialises them.
 
 name: setup/compose-postgres-clean
+# Held out until the harness runs setup rooms (U1-29, KAN-550): wiring.SetupStack exists, but
+# the harness still opens this episode as a CDC incident room. -validate refuses the marker
+# once package evals declares SetupRoomAlert (evals/pending.go).
+pending_harness: setup-room-eval
 description: |
   The person wrote their own compose.yaml for the project, with a postgres service whose
   environment holds the database password in plain text (POSTGRES_PASSWORD: orders). The setup run

@@ -95,6 +95,12 @@ type Pipeline struct {
 	// syntax; LoadWithActions and ValidateAutoApprove also check the names
 	// against the action registry. Read it with AutoApproveList.
 	AutoApprove []string `yaml:"auto_approve"`
+	// Autonomy is the optional `autonomy:` block (AU1a): the actions that may
+	// earn the auto-approve policy on this pipeline, with the verified-recovery
+	// streak and window that earn them. Load validates and parses it; read it
+	// with AutonomyActions and Owners.AutonomyRule. An action may not be in
+	// both auto_approve: and autonomy:.
+	Autonomy AutonomySpec `yaml:"autonomy"`
 	// RetentionDays is the optional `retention_days:` of the pipeline: closed
 	// rooms of this pipeline are deleted after this many days; with
 	// PIPEROOM_RETENTION_DAYS also set, the shorter wins
@@ -141,6 +147,9 @@ type Pipeline struct {
 	watch *WatchConfig
 	// pii is PII after validation. Set by Load.
 	pii *piiRules
+	// autonomy holds the validated and parsed autonomy: rules, keyed by action.
+	// Set by Load; nil when the pipeline declares none.
+	autonomy map[string]AutonomyRule
 }
 
 // MaxRetentionDays bounds a pipeline's retention_days (100 years), the same
@@ -212,9 +221,10 @@ type Owners struct {
 }
 
 // Load reads and validates the owners file at path. An `auto_approve:` entry
-// is checked for syntax only, so the file loads before the action registry
-// exists (the CLI tools do); a server that has the registry calls
-// LoadWithActions, or ValidateAutoApprove after Load.
+// and an `autonomy:` action are checked for syntax only, so the file loads
+// before the action registry exists (the CLI tools do); a server that has the
+// registry calls LoadWithActions, or ValidateAutoApprove and
+// ValidateAutonomyActions after Load.
 func Load(path string) (*Owners, error) {
 	o, err := parse(path)
 	if err != nil {
@@ -342,6 +352,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: retention_days %d: want 1 to %d (leave it out to use PIPEROOM_RETENTION_DAYS)", p.ID, *d, MaxRetentionDays)
 		}
 		if err := checkAutoApproveSyntax(p.AutoApprove); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateAutonomy(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validateReprocessTopic(); err != nil {
