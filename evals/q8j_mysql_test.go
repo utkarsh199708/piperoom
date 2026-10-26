@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -331,28 +330,20 @@ func TestMySQLScenariosScoreInAMySQLRoom(t *testing.T) {
 	scs, results = append(scs, pg), append(results, r)
 
 	rep := buildReport(Config{}.withDefaults(), scs, results, time.Now())
-	want := []Breakdown{
-		{Kind: owners.SourceKindMySQL, Scenarios: len(mysqlScenarios), Runs: len(mysqlScenarios), Passes: len(mysqlScenarios), PassRate: 1},
-		{Kind: owners.SourceKindPostgres, Scenarios: 1, Runs: 1, Passes: 1, PassRate: 1},
-	}
-	if !reflect.DeepEqual(rep.BySource, want) {
-		t.Fatalf("by source = %+v, want %+v", rep.BySource, want)
+	if len(rep.BySource) != 0 {
+		t.Fatalf("by source = %+v, want no setup-source groups for incident scenarios", rep.BySource)
 	}
 	for _, s := range rep.Scenarios {
-		wantKind := owners.SourceKindMySQL
-		if s.Name == pg.Name {
-			wantKind = owners.SourceKindPostgres
-		}
-		if s.SourceKind != wantKind {
-			t.Errorf("scenario %s source kind = %q, want %q", s.Name, s.SourceKind, wantKind)
+		if s.SourceKind != "" || !s.SourceKindExcluded {
+			t.Errorf("incident scenario %s source grouping = %q excluded=%v, want empty and excluded", s.Name, s.SourceKind, s.SourceKindExcluded)
 		}
 	}
 	var md strings.Builder
 	if err := rep.WriteMarkdown(&md); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(md.String(), fmt.Sprintf("by source: mysql %d/%d (100%%) · postgres 1/1 (100%%)", len(mysqlScenarios), len(mysqlScenarios))) {
-		t.Errorf("markdown has no per-source-kind line:\n%s", md.String())
+	if strings.Contains(md.String(), "by source:") {
+		t.Errorf("incident-only report unexpectedly has a setup-source line:\n%s", md.String())
 	}
 }
 

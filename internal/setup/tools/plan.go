@@ -49,8 +49,14 @@ type RoomDeps struct {
 	// routes a proposal; a plan whose class is wrong is refused there too.
 	ClassOf func(plan.Step) (string, error)
 	// Facts answers the guard's exceptions for a step (the ALTER SYSTEM
-	// parameter, whether a compose_down keeps its volumes). Nil means the
-	// strictest answer: a guarded step is refused.
+	// parameter, whether a compose_down keeps its volumes). A plan step has
+	// no params, so the agent's wiring leaves it nil, and then a guard row
+	// whose verdict depends on those facts is deferred to the room
+	// (plan.ForbiddenAtPlan): the room decides it with plan.Forbidden and the
+	// real params at Create, before Execute, on rollback and on the runner. A
+	// row that refuses the class whatever the params is refused here either
+	// way. A non-nil Facts decides every row at plan time from its answers,
+	// with the zero StepFacts as the strictest reading.
 	Facts func(plan.Step) plan.StepFacts
 }
 
@@ -186,7 +192,7 @@ func (t *setupPlanTool) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if err := t.fillClasses(&p); err != nil {
 		return tools.Result{}, err
 	}
-	if err := p.Resolve(t.cat, t.facts); err != nil {
+	if err := t.resolve(&p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %w", tools.ErrBadInput, err)
 	}
 	t.fillLayers(&p)
@@ -194,7 +200,40 @@ func (t *setupPlanTool) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if err := t.sink.Emit(ctx, events.SetupPlan, payload); err != nil {
 		return tools.Result{}, fmt.Errorf("setuptools: recording setup.plan: %w", err)
 	}
-	return tools.Result{Summary: planSummary(payload), Data: payload}, nil
+	return tools.Result{Summary: planSummary(payload, t.deferredSteps(p)), Data: payload}, nil
+}
+
+// resolve fills the plan's indexes and tiers and checks the guard. With no
+// Facts the plan step has nothing to answer a row's exception from, so a row
+// whose verdict depends on the step's params is left to the room's checks
+// with the real params instead of refused here (review of #1012, item E);
+// a row that refuses the class unconditionally still refuses the plan.
+func (t *setupPlanTool) resolve(p *plan.Plan) error {
+	if t.facts == nil {
+		return p.ResolveAtPlanTime(t.cat)
+	}
+	return p.Resolve(t.cat, t.facts)
+}
+
+// deferredSteps returns the indexes of the steps whose guard verdict the
+// room decides from the step's params, so the summary can tell the model
+// that planning such a step is not approval of any params it later proposes.
+func (t *setupPlanTool) deferredSteps(p plan.Plan) map[int]bool {
+	if t.facts != nil {
+		return nil
+	}
+	var out map[int]bool
+	for _, phase := range p.Phases {
+		for _, step := range phase.Steps {
+			if plan.GuardDeferred(step.Op, step.Class) {
+				if out == nil {
+					out = map[int]bool{}
+				}
+				out[step.Index] = true
+			}
+		}
+	}
+	return out
 }
 
 // fillClasses sets every step's Class from the room's resolver. It runs before
@@ -243,8 +282,10 @@ const planIDPattern = `^[A-Za-z0-9_-]{1,64}$`
 var planIDRe = regexp.MustCompile(planIDPattern)
 
 // planSummary is the one-paragraph rendering the model reads: the plan id,
-// its phases and each step's op with the tier the server assigned.
-func planSummary(p events.SetupPlanPayload) string {
+// its phases and each step's op with the tier the server assigned. A step in
+// deferred is marked: the guard table decides it from the params the
+// proposal carries.
+func planSummary(p events.SetupPlanPayload, deferred map[int]bool) string {
 	var b strings.Builder
 	steps := 0
 	for _, phase := range p.Phases {
@@ -256,6 +297,10 @@ func planSummary(p events.SetupPlanPayload) string {
 		b.WriteString(clipText(phase.Name))
 		b.WriteString(":")
 		for _, step := range phase.Steps {
+			if deferred[step.Index] {
+				fmt.Fprintf(&b, " %s(%s, guard checked on the proposal's params)", step.Op, step.Tier)
+				continue
+			}
 			fmt.Fprintf(&b, " %s(%s)", step.Op, step.Tier)
 		}
 	}

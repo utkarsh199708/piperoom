@@ -14,6 +14,9 @@ import (
 	"piperoom/evals"
 )
 
+// pendingA and pendingB were held out until U1-10; it landed (#1012), but the
+// harness still opens them as CDC incident rooms, so U1-29 (KAN-550) holds them
+// again, under setup-room-eval, until the harness declares SetupRoomAlert.
 const pendingA, pendingB = "setup/compose-postgres-clean", "setup/compose-privileged-refused"
 
 // pendingC is held out until container-resolve-op (W4c, KAN-494, lead ruling R10;
@@ -23,7 +26,7 @@ const pendingC = "setup/db-unreachable-from-connect"
 // pendingCount is how many scenarios carry pending_harness.
 const pendingCount = 3
 
-// -list prints the scenarios a run replays, without the pending_harness pair.
+// -list prints the scenarios a run replays, without the pending_harness ones.
 func TestRunListExcludesPendingHarness(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code, err := run(flags{scenarios: "../../scenarios", list: true}, &stdout, &stderr)
@@ -38,10 +41,15 @@ func TestRunListExcludesPendingHarness(t *testing.T) {
 	if len(names) != len(all)-pendingCount {
 		t.Errorf("%d names listed, want %d", len(names), len(all)-pendingCount)
 	}
+	listed := map[string]bool{}
 	for _, n := range names {
+		listed[n] = true
 		if n == pendingA || n == pendingB || n == pendingC {
 			t.Errorf("%s is listed but pending", n)
 		}
+	}
+	if len(listed) != len(names) {
+		t.Errorf("-list repeats a name: %v", names)
 	}
 	// -check still validates every scenario, the held-out ones included.
 	stdout.Reset()
@@ -75,8 +83,8 @@ func readReport(t *testing.T, path string) evals.Report {
 	return r
 }
 
-// Without -only the pair is skipped and reported apart; with -only naming one it
-// runs, labelled, and a baseline comparison leaves it out.
+// Without -only a pending scenario is skipped and reported apart; with -only
+// naming one it runs, labelled, and a baseline comparison leaves it out.
 func TestRunSkipsPendingHarnessUnlessNamed(t *testing.T) {
 	refusingAPI(t)
 	dir := t.TempDir()
@@ -88,30 +96,36 @@ func TestRunSkipsPendingHarnessUnlessNamed(t *testing.T) {
 		t.Fatalf("code %d err %v\n%s", code, err, stderr.String())
 	}
 	rep := readReport(t, out)
-	if strings.Join(rep.PendingHarness, ",") != pendingA+","+pendingB+","+pendingC || len(rep.PendingHarnessRan) != 0 {
+	wantSkipped := map[string]bool{pendingA: true, pendingB: true, pendingC: true}
+	if len(rep.PendingHarness) != len(wantSkipped) || len(rep.PendingHarnessRan) != 0 {
 		t.Errorf("pending lists: skipped %v ran %v", rep.PendingHarness, rep.PendingHarnessRan)
 	}
+	for _, n := range rep.PendingHarness {
+		if !wantSkipped[n] {
+			t.Errorf("pending lists: unexpected skipped scenario %s", n)
+		}
+	}
 	for _, s := range rep.Scenarios {
-		if s.Name == pendingA || s.Name == pendingB || s.Name == pendingC {
+		if wantSkipped[s.Name] {
 			t.Errorf("%s is in the report rows (so in the rates)", s.Name)
 		}
 	}
-	if strings.Contains(stderr.String(), pendingA) || !strings.Contains(stdout.String(), "Pending harness (skipped, in no rate):") {
+	if strings.Contains(stderr.String(), pendingA+" #") || strings.Contains(stderr.String(), pendingB+" #") || strings.Contains(stderr.String(), pendingC) || !strings.Contains(stdout.String(), "Pending harness (skipped, in no rate):") {
 		t.Errorf("skipped scenarios ran or are not reported apart\nstdout:\n%s", stdout.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
 	out = filepath.Join(dir, "only.json")
-	code, err = run(flags{scenarios: "../../scenarios", only: pendingA, runs: 1, parallel: 1, judge: evals.JudgeTerms, noTap: true, out: out, maxCalls: evals.DefaultJudgeMaxCalls}, &stdout, &stderr)
+	code, err = run(flags{scenarios: "../../scenarios", only: pendingC, runs: 1, parallel: 1, judge: evals.JudgeTerms, noTap: true, out: out, maxCalls: evals.DefaultJudgeMaxCalls}, &stdout, &stderr)
 	if err != nil || code != exitInfra {
 		t.Fatalf("-only: code %d err %v\n%s", code, err, stderr.String())
 	}
 	rep = readReport(t, out)
-	if !strings.Contains(stderr.String(), pendingA+" #1") || len(rep.PendingHarness) != 0 || strings.Join(rep.PendingHarnessRan, ",") != pendingA {
+	if !strings.Contains(stderr.String(), pendingC+" #1") || len(rep.PendingHarness) != 0 || strings.Join(rep.PendingHarnessRan, ",") != pendingC {
 		t.Errorf("-only did not run the marked scenario: skipped %v ran %v\n%s", rep.PendingHarness, rep.PendingHarnessRan, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Pending harness (ran by -only, not compared with the baseline):** "+pendingA) {
+	if !strings.Contains(stdout.String(), "Pending harness (ran by -only, not compared with the baseline):** "+pendingC) {
 		t.Errorf("run not labelled pending harness:\n%s", stdout.String())
 	}
 }
@@ -165,6 +179,14 @@ func TestRunCheckRefusesALandedMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The checked-in file is keyed to setup-room-eval, which has not landed;
+	// the fixture re-keys it to U1-10, which has, so -check meets a marker
+	// whose row has landed.
+	marker := []byte("\npending_harness: setup-room-eval\n")
+	if !bytes.Contains(src, marker) {
+		t.Fatal("the scenario file has no setup-room-eval marker to re-key")
+	}
+	src = bytes.Replace(src, marker, []byte("\npending_harness: U1-10\n"), 1)
 	if err := os.WriteFile(filepath.Join(scDir, "setup-compose-postgres-clean.yaml"), src, 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,6 @@
 # C7 setup scenario (U1-19): the source Postgres runs with wal_level=replica, so no logical
 # replication slot can exist and the connector's task fails as soon as it tries to decode. The
-# label names the failing check and the fixing op (tasks/U-board.md row U1-19, step 1). Format:
+# label names the failing check and the fixing op (Jira KAN-5 row U1-19, step 1). Format:
 # evals/README.md (C6). Built on `devctl setup-break wal-level-replica` (dev/scenarios.md,
 # "Setup breaks", PR #880).
 #

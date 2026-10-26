@@ -13,11 +13,14 @@ import (
 // rows come back: replayed from the topic while their records are still on
 // it, snapshotted from the source otherwise (the old "snapshot a table
 // missing rows instead" sent consumer-skipped-range to pg_resnapshot_rows).
+// W4i (KAN-507, LEAD-ARCH scope addition) keys "still on the topic" on the
+// read that shows it: records above the log start that kafka_topic_offsets
+// reads (rows-lost-after-retention proposed a fix before reading it).
 // Wiring registers connect_reset_source_offsets in both modes (P0 ruling
 // #606), so the write-off prompt carries the rule too; the batch prompt does
 // not.
 func TestSystemPromptOffsetsRule(t *testing.T) {
-	const want = "- Reset source offsets only for lost positions; replay a missing range still on the topic; otherwise snapshot the rows."
+	const want = "- Reset source offsets only for lost positions; replay missing records above the log start (kafka_topic_offsets), else snapshot them."
 	for _, write := range []bool{true, false} {
 		p := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: write})
 		fixes := p[strings.Index(p, "Fixes\n"):strings.Index(p, "Tools\n")]

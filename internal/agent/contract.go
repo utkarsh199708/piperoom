@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -26,7 +27,7 @@ type HumanInput struct {
 	// uses the time it first read the input, which is never earlier.
 	At        time.Time    `json:"at,omitzero"`
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged" | "pr_merged" | "pr_closed"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged" | "pr_merged" | "pr_closed" | "setup_verified"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -78,6 +79,17 @@ type HumanInput struct {
 	// final for that step: the outcome is events.DeferredNotApplied. After
 	// "pr_merged" the agent waits for the change to reach the system before
 	// it verifies (docs/design/fix-pr.md §8.2). (Q7)
+	//
+	// U: Kind "setup_verified" carries the ladder's outcome to the agent. It
+	// is sent once per setup.verified, only in a setup room (Alert.Mode ==
+	// ModeSetup) and only when its plan_id is the room's current setup.plan;
+	// the outcome of a superseded plan is never delivered. Seq is the
+	// setup.verified event. OK is true when every rung required for
+	// registration is green (rungs 1 to 7, docs/design/setup-agent.md §3.9),
+	// false otherwise; only then may the agent propose pipeline_register.
+	// Text is the server's rendering of the rungs (name, ok, note): the
+	// ladder's own words about the person's systems, untrusted data that the
+	// agent wraps, never an instruction. (U1-26)
 }
 
 // Inbox delivers human input to the agent between model turns.
@@ -224,13 +236,30 @@ type Deps struct {
 	// plain Run and the demo runner never call it. Shadow mode records the
 	// value. Nil = not wanted.
 	Usage func(used int64)
+	// Watch, when set, reads the watcher's status row of the room's pipeline.
+	// The hypothesis guard (rule 1) refuses a healthy verdict while a symptom
+	// signal fires and is not clearing. The room service passes a reader that
+	// returns no row older than 3 x PIPEROOM_WATCH_INTERVAL. No row, a stale row
+	// or a read error never refuses. Nil = rule 1 reads no row. (H1)
+	Watch clients.WatchStatusReader
 }
+
+// Hypothesis guard modes (Options.HypothesisGuard). (H1)
+const (
+	GuardOff     = "off"     // no check
+	GuardLog     = "log"     // check and log what would be refused, never refuse
+	GuardEnforce = "enforce" // refuse, then accept after two refusals with confidence low
+)
 
 // Options tune the model call.
 type Options struct {
 	Model    string // default "claude-opus-5-5"
 	Effort   string // default "high"
 	MaxTurns int    // safety stop; default 40
+	// HypothesisGuard is GuardOff, GuardLog or GuardEnforce; "" = GuardLog.
+	// Filled from PIPEROOM_HYPOTHESIS_GUARD (config.ParseHypothesisGuard);
+	// shadow rooms use the same value. (H1)
+	HypothesisGuard string
 	// TokenBudget caps model tokens for this run's room. 0 = the Endpoint's
 	// default (PIPEROOM_ROOM_TOKEN_BUDGET). A value > 0 becomes the room's
 	// limit when Run starts, even if the room's count already exists (a

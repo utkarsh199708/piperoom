@@ -154,6 +154,53 @@ func Forbidden(req GuardRequest) (GuardRow, bool) {
 	return GuardRow{}, false
 }
 
+// FactDependent reports whether the row's verdict depends on StepFacts: it
+// has an exception, so the step's params decide whether the same (op, class)
+// is refused or allowed. A row with no exception refuses whatever the facts
+// say.
+func (r GuardRow) FactDependent() bool { return r.Allowed != nil }
+
+// ForbiddenAtPlan is the guard as a plan sees it: a step with an op and a
+// class but no params (setup_plan). It refuses what no params could ever
+// allow: a class that is not a class (ReasonUnknownClass, failing closed as
+// Forbidden does) and every row with no exception. A row whose verdict
+// depends on facts (FactDependent) is deferred, not refused: the plan cannot
+// know the ALTER SYSTEM parameter or whether a compose_down keeps its
+// volumes, and the room decides that row from the real params with Forbidden
+// at Create, before Execute, on every rollback step and on the runner.
+//
+// ForbiddenAtPlan is not one of those check points and must never replace
+// Forbidden at one: it only keeps a plan from being refused for a step the
+// room may still allow. It does not change any row's verdict.
+func ForbiddenAtPlan(op, class string) (GuardRow, bool) {
+	if !ValidClass(class) {
+		return GuardRow{Op: op, Class: class, Reason: ReasonUnknownClass}, true
+	}
+	for _, row := range guardRows {
+		if row.Op != op || row.Class != class || row.FactDependent() {
+			continue
+		}
+		return row, true
+	}
+	return GuardRow{}, false
+}
+
+// GuardDeferred reports whether a plan step's guard verdict is left to the
+// room: the class is valid, at least one row guards (op, class), and every
+// such row depends on facts. It is false for a step ForbiddenAtPlan refuses
+// and for one no row guards.
+func GuardDeferred(op, class string) bool {
+	if _, refused := ForbiddenAtPlan(op, class); refused {
+		return false
+	}
+	for _, row := range guardRows {
+		if row.Op == op && row.Class == class {
+			return true
+		}
+	}
+	return false
+}
+
 // alterSystemParams is the ALTER SYSTEM allow-list of plan §3.6: the settings
 // a setup may change, and even then only inside a recorded maintenance window
 // with pending_restart shown.

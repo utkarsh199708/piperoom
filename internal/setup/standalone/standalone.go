@@ -9,8 +9,9 @@
 // settings standalone may not change (loopback, dev login, write mode, setup),
 // loads the owners file, writes the one-user users file and then calls
 // Server.Serve, the standalone server composition. The HTTP API, the room
-// service and the event log are the real ones; the agent is the package's
-// default (a later row wires the setup-mode stack into it).
+// service, the models API and the event log are the real ones; the agent runs
+// on the model the picker stored (a later row wires the setup-mode tool stack
+// into it).
 package standalone
 
 import (
@@ -74,8 +75,8 @@ type Options struct {
 	Stdout io.Writer
 	// Log is the logger; nil is slog.Default.
 	Log *slog.Logger
-	// Agent replaces the room service's agent runner (tests); nil is the real
-	// agent (room.New's default).
+	// Agent replaces the room service's agent runner (tests); nil runs rooms
+	// and hand-offs on the model picker's endpoint (model.go).
 	Agent agent.Runner
 }
 
@@ -133,9 +134,13 @@ func Run(ctx context.Context, opts Options) error {
 			SetupEnabled: true,
 			OwnersPath:   p.owners,
 			Solo:         ok,
-			Stdout:       stdout,
-			Log:          log,
-			Serve:        srv.Serve,
+			// The model picker's model.env lives in the project directory, not
+			// the process's working directory: the standalone server starts on
+			// the model the solo user picked last time (V7, KAN-525).
+			ProjectDir: p.project,
+			Stdout:     stdout,
+			Log:        log,
+			Serve:      srv.Serve,
 		})
 	}
 	if !opts.Watch {
@@ -197,17 +202,16 @@ func prepare(opts Options) (paths, error) {
 	// and quickstart.Prepare refuses anything that disagrees.
 	cfg.WriteMode = "on"
 	cfg.SetupEnabled = "on"
-	// The event log carries every room event, so the project's .gitignore
-	// names it before the first line is written.
-	gitignore := []string{LogFileName}
+	// The project's .gitignore names .piperoom/ and the event log before
+	// anything is written there: the model picker stores its key in
+	// .piperoom/model.env (PUT /api/models, V7) whatever PIPEROOM_SECRETS_DIR
+	// says, and the log carries every room event (U1-4's rule, the same
+	// helper).
+	gitignore := []string{".piperoom/", LogFileName}
 	if strings.TrimSpace(cfg.SecretsDir) == "" {
 		// The pipeline's read credentials land here (U1-5d); the design keeps
 		// them next to the project, on the machine that runs the runner.
 		cfg.SecretsDir = filepath.Join(abs, ".piperoom", "secrets")
-		// The directory is where the secret store lives, so the project's
-		// .gitignore must name it even before a runner creates the store
-		// (U1-4's rule, the same helper).
-		gitignore = append([]string{".piperoom/"}, gitignore...)
 	}
 	if err := runner.EnsureGitignore(abs, gitignore...); err != nil {
 		return paths{}, err

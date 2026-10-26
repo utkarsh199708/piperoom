@@ -7,16 +7,20 @@ import (
 	"testing"
 )
 
-// pendingPair are the scenarios held out until U1-10 (W4s, KAN-501).
+// pendingPair were held out until U1-10 (W4s, KAN-501). U1-10 declared
+// wiring.SetupStack (#1012) and the markers went, but the harness still opens
+// them as CDC incident rooms, so U1-29 (KAN-550) holds them again, under
+// setup-room-eval, until the harness declares SetupRoomAlert.
 var pendingPair = []string{"setup/compose-postgres-clean", "setup/compose-privileged-refused"}
 
 // pendingRows are every held-out scenario and the row it waits for: the pair
-// above, and setup/db-unreachable-from-connect until container-resolve-op (W4c,
-// KAN-494, lead ruling R10; re-keyed by the KAN-526 ruling: its cause is
-// observable only once the runner op container_resolve exists).
+// until setup-room-eval (U1-29, KAN-550), and
+// setup/db-unreachable-from-connect until container-resolve-op (W4c, KAN-494,
+// lead ruling R10; re-keyed by the KAN-526 ruling: its cause is observable
+// only once the runner op container_resolve exists).
 var pendingRows = map[string]string{
-	"setup/compose-postgres-clean":      "U1-10",
-	"setup/compose-privileged-refused":  "U1-10",
+	"setup/compose-postgres-clean":      "setup-room-eval",
+	"setup/compose-privileged-refused":  "setup-room-eval",
 	"setup/db-unreachable-from-connect": "container-resolve-op",
 }
 
@@ -32,8 +36,8 @@ func TestPendingHarnessMarkerOnThePair(t *testing.T) {
 		}
 	}
 	for _, name := range pendingPair {
-		if got[name] != "U1-10" {
-			t.Errorf("%s: pending_harness = %q, want U1-10", name, got[name])
+		if got[name] != "setup-room-eval" {
+			t.Errorf("%s: pending_harness = %q, want setup-room-eval: the harness does not run setup rooms yet", name, got[name])
 		}
 	}
 	if len(got) != len(pendingRows) {
@@ -260,5 +264,50 @@ func TestOpDeclaredOnTheRealCatalogue(t *testing.T) {
 		if got != want {
 			t.Errorf("opDeclared(%s) = %v, want %v", op, got, want)
 		}
+	}
+}
+
+// TestSetupRoomEvalRowCondition: the compose pair's marker (setup-room-eval,
+// U1-29) is accepted while package evals has no SetupRoomAlert and refused once a
+// non-test file declares it, whatever its kind. A method, a test file or another
+// package's SetupRoomAlert does not land the row.
+func TestSetupRoomEvalRowCondition(t *testing.T) {
+	pending := []Scenario{{Name: "setup/compose-postgres-clean", PendingHarness: "setup-room-eval"}}
+	cases := []struct {
+		name   string
+		file   string
+		src    string
+		refuse bool
+	}{
+		{"no evals package", "", "", false},
+		{"another symbol", "evals/setup_room.go", "package evals\n\nfunc OtherAlert() {}\n", false},
+		{"a method of that name", "evals/setup_room.go", "package evals\n\ntype T struct{}\n\nfunc (T) SetupRoomAlert() {}\n", false},
+		{"only a test file declares it", "evals/setup_room_test.go", "package evals\n\nfunc SetupRoomAlert() {}\n", false},
+		{"another package declares it", "internal/wiring/w.go", "package wiring\n\nfunc SetupRoomAlert() {}\n", false},
+		{"func declared", "evals/setup_room.go", "package evals\n\nfunc SetupRoomAlert() {}\n", true},
+		{"type declared", "evals/setup_room.go", "package evals\n\ntype SetupRoomAlert struct{}\n", true},
+		{"var declared", "evals/setup_room.go", "package evals\n\nvar SetupRoomAlert = 1\n", true},
+	}
+	for _, c := range cases {
+		root := t.TempDir()
+		if c.file != "" {
+			path := filepath.Join(root, filepath.FromSlash(c.file))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(c.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := CheckPendingHarness(pending, root)
+		switch {
+		case !c.refuse && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.refuse && (err == nil || !strings.Contains(err.Error(), "remove the marker") || !strings.Contains(err.Error(), "SetupRoomAlert")):
+			t.Errorf("%s: err = %v, want the marker refused", c.name, err)
+		}
+	}
+	if err := CheckPendingHarness(pending, ""); err != nil {
+		t.Errorf("row name check: %v", err)
 	}
 }

@@ -7,6 +7,8 @@ import {
   planCreated,
   runnerAttached,
   setupCreated,
+  credentialsRegistered,
+  secretSet,
   setupPlan,
   setupRoomSnapshot,
 } from "../fixtures/setup";
@@ -269,5 +271,23 @@ describe("setup rooms in the reducer", () => {
     expect(
       state.setup?.targets.find((t) => t.address === "db:5432")?.class,
     ).toBe("production");
+  });
+
+  it("setup.secret_set keeps names only and credentials_registered keeps names, never values", () => {
+    let state = applyEvent(start(), runnerAttached());
+    state = applyEvent(state, secretSet("DB_PASSWORD", state.last_seq + 1));
+    state = applyEvent(state, secretSet("DB_PASSWORD", state.last_seq + 1));
+    state = applyEvent(state, secretSet("KAFKA_PASSWORD", state.last_seq + 1));
+    expect(state.setup?.secret_names).toEqual(["DB_PASSWORD", "KAFKA_PASSWORD"]);
+    expect(JSON.stringify(state.setup)).not.toMatch(/s3cr3t|password=/);
+
+    state = applyEvent(
+      state,
+      credentialsRegistered(["piperoom_ro"], "arjun-laptop", state.last_seq + 1),
+    );
+    expect(state.setup?.credentials).toEqual({
+      names: ["piperoom_ro"],
+      runner_label: "arjun-laptop",
+    });
   });
 });

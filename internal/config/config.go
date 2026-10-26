@@ -314,6 +314,12 @@ type Config struct {
 	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 
+	// HypothesisGuard is PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+	// (default log). The agent's checks that refuse a "nothing to fix" verdict
+	// while the watcher still fires and a "ruled out" claim no cited read
+	// supports; log only records what would be refused. (H1)
+	HypothesisGuard string // PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+
 	// Autonomy is PIPEROOM_AUTONOMY: the AU wave's earned auto-approve.
 	// ParseAutonomy types it; write mode off makes it off whatever it says. (AU1)
 	Autonomy string // PIPEROOM_AUTONOMY: on (default) | off
@@ -526,7 +532,9 @@ func Load() Config {
 		FakeAgent: get("PIPEROOM_FAKE_AGENT", ""),
 
 		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
-		Autonomy:  get("PIPEROOM_AUTONOMY", "on"),
+
+		HypothesisGuard: get("PIPEROOM_HYPOTHESIS_GUARD", DefaultHypothesisGuard),
+		Autonomy:        get("PIPEROOM_AUTONOMY", "on"),
 
 		SetupEnabled:      get("PIPEROOM_SETUP_ENABLED", "off"),
 		SetupProdPatterns: get("PIPEROOM_SETUP_PROD_PATTERNS", ""),
@@ -636,6 +644,25 @@ func ParseWriteMode(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_WRITE_MODE=%q: want off or on", c.WriteMode)
+}
+
+// DefaultHypothesisGuard is the guard mode when PIPEROOM_HYPOTHESIS_GUARD is
+// unset: check and log, never refuse, until a pilot week of logs says enforce
+// is safe. (H1)
+const DefaultHypothesisGuard = "log"
+
+// ParseHypothesisGuard validates PIPEROOM_HYPOTHESIS_GUARD. Empty is the
+// default; off, log and enforce are accepted; anything else is an error naming
+// the variable, so a typo stops the start instead of silently turning the guard
+// off or on. (H1)
+func ParseHypothesisGuard(c Config) (string, error) {
+	switch v := strings.TrimSpace(c.HypothesisGuard); v {
+	case "":
+		return DefaultHypothesisGuard, nil
+	case "off", "log", "enforce":
+		return v, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_HYPOTHESIS_GUARD=%q: want off, log or enforce", c.HypothesisGuard)
 }
 
 // FakeAgentScripted is the only accepted value of PIPEROOM_FAKE_AGENT.

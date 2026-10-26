@@ -1990,6 +1990,11 @@ type WatchSignal struct {
 	Since    time.Time  `json:"since"` // when it started firing
 	Metric   string     `json:"metric,omitempty"`
 	ETA      *time.Time `json:"eta,omitempty"`
+	// ClearingSince is set while the signal still counts as firing (or acked)
+	// but its condition has been gone since then, waiting out the signal's
+	// `for`. Nil while the latest good reading breaches. Stored in the same
+	// jsonb as the rest of the row, so it needs no migration. (H1)
+	ClearingSince *time.Time `json:"clearing_since,omitempty"`
 }
 
 // WatchStatus is the watcher's latest view of one pipeline: the row the fleet

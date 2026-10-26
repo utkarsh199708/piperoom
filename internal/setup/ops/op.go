@@ -9,8 +9,9 @@
 // The registry value implements the runner's Catalogue interface
 // (internal/setup/runner/catalogue.go) structurally, so the runner can use it
 // without importing this package: Execute, Floor, Target, GuardForbidden and
-// StepAction. Config.NetProbe is the seam Q6a's net_probe plugs into from the
-// runner's position (net_probe.go).
+// StepAction, plus the optional FloorFor (a floor raised by the params, for an
+// op that implements ParamTierer) and CheckTarget. Config.NetProbe is the
+// seam Q6a's net_probe plugs into from the runner's position (net_probe.go).
 //
 // Invariants, each a test:
 //   - every file path is checked lexically on every OS and then walked with
@@ -106,10 +107,21 @@ type Op interface {
 }
 
 // ParamTargeter is implemented by an op whose target kind comes from its
-// params (http_get, net_probe): the runner raises the request's class to its
+// params (http_get, net_probe, sink_probe): the runner raises the request's class to its
 // floor for that kind before the guard runs.
 type ParamTargeter interface {
 	ParamTarget(params json.RawMessage, env Env) string
+}
+
+// ParamTierer is implemented by an op whose tier for one step depends on its
+// params (host properties_write: T1 for a worker file at the project root, T2
+// for one outside the project directory). TierFor must do no I/O and must not
+// consult the runner's OS, so the server can compute the same tier when it
+// builds the step. It can only raise the op's floor (Registry.FloorFor takes
+// the higher of the two); params it cannot classify are an error, never a
+// silent floor.
+type ParamTierer interface {
+	TierFor(params json.RawMessage) (string, error)
 }
 
 // Result is what an Op.Execute returns before it becomes a protocol.OpResult.
@@ -126,7 +138,7 @@ type Result struct {
 type Config struct {
 	ProjectDir string
 	// Targets are the hosts the room may reach (Welcome.Targets and every
-	// setup.target_registered); http_get and net_probe refuse anything else.
+	// setup.target_registered); http_get, net_probe and sink_probe refuse anything else.
 	Targets []events.SetupTarget
 	// MountDirs are directories a rendered template mounts into a container
 	// or builds from; file_write refuses every path under one (§2.5).
@@ -224,7 +236,7 @@ func New(cfg Config) (*Registry, error) {
 	}
 	for _, op := range []Op{
 		envDetectOp{}, fileReadOp{}, dirListOp{}, jarListOp{}, javaVersionOp{},
-		httpGetOp{}, netProbeOp{}, fileWriteOp{}, fileDeleteOp{},
+		httpGetOp{}, netProbeOp{}, sinkProbeOp{}, fileWriteOp{}, fileDeleteOp{},
 		sourcePublicationTablesOp{},
 	} {
 		if err := r.Register(op); err != nil {
@@ -307,6 +319,52 @@ func (r *Registry) Floor(op string) (string, bool) {
 	return o.Tier(), true
 }
 
+// FloorFor returns the tier floor of one request: the higher of the op's
+// fixed floor and, for a ParamTierer, the tier its params need. ok is false
+// for an op not in the catalogue. err is non-nil (wrapping ErrParams) when the
+// op's TierFor cannot classify the params or answers something that is not a
+// tier; the runner refuses such a request rather than fall back to the fixed
+// floor, so a step whose tier cannot be computed never runs at the lower one.
+// An op without TierFor answers exactly Floor.
+func (r *Registry) FloorFor(op string, params json.RawMessage) (tier string, ok bool, err error) {
+	o, ok := r.Get(op)
+	if !ok {
+		return "", false, nil
+	}
+	floor := o.Tier()
+	pt, isTierer := o.(ParamTierer)
+	if !isTierer {
+		return floor, true, nil
+	}
+	need, err := pt.TierFor(params)
+	if err != nil {
+		return floor, true, fmt.Errorf("%w: %s: the step's tier: %w", ErrParams, clipName(op), err)
+	}
+	rank, valid := tierRank(need)
+	if !valid {
+		return floor, true, fmt.Errorf("%w: %s: the step's tier %q is not T0..T3", ErrParams, clipName(op), clipName(need))
+	}
+	if base, _ := tierRank(floor); rank > base {
+		return need, true, nil
+	}
+	return floor, true, nil
+}
+
+// tierRank orders the four tiers and reports false for any other string.
+func tierRank(t string) (int, bool) {
+	switch t {
+	case protocol.TierT0:
+		return 0, true
+	case protocol.TierT1:
+		return 1, true
+	case protocol.TierT2:
+		return 2, true
+	case protocol.TierT3:
+		return 3, true
+	}
+	return 0, false
+}
+
 // LayerOf returns the owners layer of the op ("environment", ...), and false
 // for an op not in the catalogue. setup_plan fills each stored step's Layer
 // from it (setuptools.LayerCatalogue).
@@ -319,7 +377,7 @@ func (r *Registry) LayerOf(op string) (string, bool) {
 }
 
 // Target returns the target kind the request reaches: the op's own kind, or
-// the kind its params name for http_get and net_probe. "" means no registered
+// the kind its params name for http_get, net_probe and sink_probe. "" means no registered
 // target and lets the runner's class floor for "" apply (it never raises).
 func (r *Registry) Target(req protocol.OpRequest) string {
 	op, ok := r.Get(req.Op)
@@ -389,7 +447,7 @@ func (r *Registry) CheckTarget(req protocol.OpRequest) string {
 }
 
 // targetChecker is implemented by an op that allow-lists a host from its
-// params (http_get, net_probe).
+// params (http_get, net_probe, sink_probe).
 type targetChecker interface {
 	checkTarget(params json.RawMessage, env Env) error
 }

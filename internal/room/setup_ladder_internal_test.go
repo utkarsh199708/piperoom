@@ -735,8 +735,9 @@ func TestSetupLadderT1CanaryAutoRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid, _ := waitLadderCanaryProposal(t, r.svc, roomID, 0)
-	// No click: the countdown does it.
-	waitPayload[events.ProposalScheduledPayload](t, r.svc, roomID, events.ProposalScheduled, pid)
+	// No click: the countdown does it. The one tick below must find it due, so
+	// the wait is for what the loop reads, not for the event in the log.
+	r.waitCountdown(roomID, pid)
 	r.clock.Advance(20 * time.Second)
 	r.tick()
 	waitForCond(t, 10*time.Second, func() bool { return r.canary.runCount() == 1 }, "the canary insert never auto-ran")

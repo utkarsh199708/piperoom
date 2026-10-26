@@ -86,6 +86,14 @@ type Scenario struct {
 	// pipelineYAML is the pipeline as written, for the room path's owners
 	// file; nil for a scenario built in code.
 	pipelineYAML *yaml.Node
+	// setupRec is the runner-session recording Config.SetupDir attached
+	// (U1-20); nil for a scenario with none. The setup scenarios' scoring
+	// replays it (setup_replay.go).
+	setupRec *evalsetup.Recording
+	// setupErr says why a setup scenario has no recording to replay: a
+	// SetupDir that did not load, or no file for this scenario. The run fails
+	// with it instead of passing without the setup evidence.
+	setupErr string
 }
 
 // ScenarioSetup is the setup shape a scenario reports under (U1-20). The
@@ -102,11 +110,11 @@ const DefaultSourceKind = "postgres"
 
 // setupKinds returns the source kind and target kind the report groups this
 // scenario's runs by. A scenario with no setup block (an incident scenario)
-// has its room's source kind (Q8j, sourceKind). A target is "" (in no target
-// group) when the scenario names none.
+// has no setup source or target group. A target is "" (in no target group)
+// when the setup scenario names none.
 func (s Scenario) setupKinds() (source, target string) {
 	if s.Setup == nil {
-		return s.sourceKind(), ""
+		return "", ""
 	}
 	source = DefaultSourceKind
 	if s.Setup.SourceKind != "" {
@@ -115,14 +123,23 @@ func (s Scenario) setupKinds() (source, target string) {
 	return source, s.Setup.Target
 }
 
+// isSetupScenario reports whether s is one of the U1-19 setup scenarios: it
+// has a setup block, or its name uses the setup/ prefix every setup scenario
+// in evals/scenarios/setup-*.yaml has. A setup scenario must replay a
+// recording (setup_replay.go); one without a recording fails its runs.
+func (s Scenario) isSetupScenario() bool {
+	return s.Setup != nil || strings.HasPrefix(s.Name, "setup/")
+}
+
 // attachSetup fills the scenario's setup kinds from its runner recording when
-// it names none (U1-20). A recording is the setup request's own session, so
-// its source and target are what the run started from; a scenario that states
-// a kind keeps it.
+// it names none (U1-20), and keeps the recording for the scoring replay. A
+// recording is the setup request's own session, so its source and target are
+// what the run started from; a scenario that states a kind keeps it.
 func attachSetup(s *Scenario, rec *evalsetup.Recording) {
 	if rec == nil {
 		return
 	}
+	s.setupRec = rec
 	if s.Setup == nil {
 		s.Setup = &ScenarioSetup{}
 	}

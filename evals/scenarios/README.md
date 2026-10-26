@@ -639,7 +639,7 @@ Three setup scenarios on a MongoDB 7.0 source (the `mongo` dev profile, a one-me
 `dev/mongo/README.md`) and the Compose target, each with a runner session in `evals/setup/recordings` (the eval
 replay). Two are built on the U7c `devctl setup-break` names; their labels name the failing check (the check names
 and messages of `cmd/devctl/setupbreaks_mongo.go`, which read the U7a client `internal/clients/mongodb`) and the fix
-with its tier from `tasks/U-board.md` (U7a, U7b).
+with its tier from Jira KAN-5 (U7a, U7b).
 
 | Scenario | Alert | Root cause | First failing / root-cause layer | Label |
 |---|---|---|---|---|
@@ -789,7 +789,7 @@ Three setup scenarios on a SQL Server 2022 source (the `mssql` dev profile, `dev
 target, each with a runner session in `evals/setup/recordings` (the eval replay). Two are built on the U4c
 `devctl setup-break` names; their labels name the failing check (the check names and messages of
 `cmd/devctl/setupbreaks_mssql.go`, which read what the U4a client `internal/clients/sqlserver` reads) and the fix with
-its tier from `tasks/U-board.md` (U4a, U4b).
+its tier from Jira KAN-5 (U4a, U4b).
 
 | Scenario | Alert | Root cause | First failing / root-cause layer | Label |
 |---|---|---|---|---|
@@ -890,7 +890,7 @@ Four setup scenarios on an Oracle Database Free 23ai source (the `oracle` dev pr
 LogMiner user `C##DBZUSER`, `dev/oracle/README.md`) and the Compose target, each with a runner session in
 `evals/setup/recordings` (the eval replay). Three are built on the U9c `devctl setup-break` names; their labels name
 the failing check (the check names and messages of `cmd/devctl/setupbreaks_oracle.go`, which evaluate the U9a client
-`internal/clients/oracle`'s types) and the fix with its tier from `tasks/U-board.md` (U9a, U9b).
+`internal/clients/oracle`'s types) and the fix with its tier from Jira KAN-5 (U9a, U9b).
 
 | Scenario | Alert | Root cause | First failing / root-cause layer | Label |
 |---|---|---|---|---|

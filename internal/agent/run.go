@@ -78,6 +78,13 @@ type runner struct {
 	toolList toolList
 	system   string
 
+	// setup is the run's setup-mode state (setup.go): nil outside setup
+	// mode (Alert.Mode != ModeSetup). It holds the bounds and the counters,
+	// and setupRoom carries the two KindRoom setup tools (setup_plan,
+	// setup_request_verification) added to the room tool list.
+	setup     *setupRun
+	setupRoom []tools.Tool
+
 	// proposals remembers the proposals the agent created this run, so a later
 	// action_result can be matched to its last step and verified.
 	proposals *proposalTracker
@@ -240,7 +247,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	// run must keep: it blocks a healthy verdict until a read succeeds
 	// (KAN-408).
 	gaps.seedTriage(alert.Triage)
-	return &runner{
+	r := &runner{
 		alert:     alert,
 		kind:      kind,
 		source:    source,
@@ -259,7 +266,25 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		applies:   newApplyWaits(),
 
 		noneSubjects: map[string]bool{},
-	}, nil
+	}
+	if alert.Mode == ModeSetup {
+		// Setup mode (U1-10): the run's bounds and the two KindRoom setup
+		// tools. A room the server opened always carries its request in
+		// alert.Raw; a harness that does not still runs, with the defaults
+		// and no request in the opening message.
+		su, err := newSetupRun(opts.Setup)
+		if err != nil {
+			return nil, err
+		}
+		su.decodeRequest(alert)
+		r.setup = su
+		roomTools, err := r.setupRoomTools()
+		if err != nil {
+			return nil, err
+		}
+		r.setupRoom = roomTools
+	}
+	return r, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
@@ -270,9 +295,16 @@ func (r *runner) run(ctx context.Context) error {
 	}
 	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
 	setRoomSource(room, r.source)
+	setRoomSetup(room, r.setup)
+	room = append(room, r.setupRoom...)
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
 	r.system = systemPromptForSource(r.kind, r.source, r.mode)
+	if r.setup != nil {
+		// The setup prompt frame replaces the CDC frame for a setup room
+		// (design §3.1); the rules block is the one every kind shares.
+		r.system = systemPromptForSetup(r.kind)
+	}
 	r.initCompaction()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
@@ -292,6 +324,18 @@ func (r *runner) run(ctx context.Context) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
+		}
+
+		// A setup bound stops the run like a budget stop (design §3.1):
+		// setup.blocked with a question, the idle status, and an error
+		// wrapping *BudgetError, which the caller treats as a stop, never a
+		// failure. The check runs at the top of every turn, after each
+		// input batch updated the counters; a run parked on the inbox is
+		// checked again when the next input wakes it.
+		if r.setup != nil {
+			if reason := r.setup.exhausted(); reason != "" {
+				return fmt.Errorf("agent: stopped: %w", r.stopForSetupBound(ctx, reason))
+			}
 		}
 
 		if turns >= r.opts.MaxTurns {
@@ -343,6 +387,13 @@ func (r *runner) run(ctx context.Context) error {
 			// The error is returned so a supervisor can tell this stop from a
 			// normal end; it must treat it as a stop (no retry, no error status).
 			if be, ok := asBudgetError(err); ok {
+				if r.setup != nil {
+					// In a setup room the room's cap is the setup's token
+					// budget (Endpoint.Run), so the room log says which
+					// bound stopped it (design §3.1); the budget message
+					// and idle status below are the stop's only ones.
+					r.setupBudgetBlocked(ctx, be)
+				}
 				r.stopForBudget(ctx, be)
 				return fmt.Errorf("agent: stopped: %w", be)
 			}
@@ -384,6 +435,13 @@ func (r *runner) run(ctx context.Context) error {
 		// The agent's own words follow the tool steps, matching the loop order.
 		for _, t := range texts {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: t})
+		}
+
+		// propose_fix refused a step past the setup's steps bound
+		// (admitProposal): the run stops on it now, before another turn,
+		// exactly as a bound stop at the top of a turn.
+		if r.setup != nil && r.setup.stop != "" {
+			return fmt.Errorf("agent: stopped: %w", r.stopForSetupBound(ctx, r.setup.stop))
 		}
 
 		switch resp.Stop {
@@ -536,6 +594,9 @@ func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
 			continue
 		}
 		text := formatInput(in, idle)
+		if in.Kind == kindSetupVerified && r.setup != nil {
+			text = r.formatSetupVerified(in)
+		}
 		blocks = append(blocks, textPart(text))
 		r.compact.noteInput(in, text)
 	}
@@ -637,6 +698,12 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]llm.Message
 			r.emitWaiting(ctx)
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if r.setupSettled(inputs) {
+		// A green ladder in a room that cannot register leaves the run
+		// nothing to do: the verdict is posted (noteSetupVerified), and the
+		// run stays idle until a batch needs the model.
+		return r.holdSetupSettled(ctx, messages, turns)
 	}
 	if !outcome.statusSet {
 		// The model runs again: leave the idle (or done) status, so the room
@@ -1099,6 +1166,14 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	// so rows that arrive during approval and execution count as the fix's.
 	if pr, ok := res.Data.(proposeFixResult); ok {
 		r.snapshotBaseline(ctx, pr.ProposalID)
+	}
+	// A new setup plan (setup_plan) restarts the steps bound's count: the
+	// executed steps of the previous plan no longer count (design §3.1). The
+	// failed-attempts count carries over (setup.go, attempts).
+	if r.setup != nil {
+		if pl, ok := res.Data.(events.SetupPlanPayload); ok {
+			r.setup.notePlan(pl)
+		}
 	}
 	return toolResult{
 		toolUseID: u.id,

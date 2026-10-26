@@ -19,9 +19,10 @@ import (
 // None of them does I/O except LoadWithActions, which reads the file.
 
 // LoadWithActions is Load plus a check that every pipeline `auto_approve:`
-// entry names an action in actionNames. The server calls it once the action
-// registry exists, so a typo such as `connect_restart_taks` fails at start and
-// does not turn into a policy that silently never matches.
+// entry and every `autonomy:` action names an action in actionNames. The
+// server calls it once the action registry exists, so a typo such as
+// `connect_restart_taks` fails at start and does not turn into a policy that
+// silently never matches.
 //
 // actionNames is the complete set of names the caller can run. A nil or empty
 // set is an empty registry, not "skip the check": any entry is then refused.
@@ -36,20 +37,27 @@ func LoadWithActions(path string, actionNames []string) (*Owners, error) {
 	if err := o.checkAutoApproveNames(actionNames, nil); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
+	if err := o.checkAutonomyNames(actionNames, nil); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
+	}
 	return o, nil
 }
 
 // LoadWithDeferred is LoadWithActions that also refuses an `auto_approve:`
 // entry naming one of deferredNames, the actions.Deferred actions (Q7a,
 // docs/design/fix-pr.md §5.8): a pull-request fix is never approved by a
-// policy. It is the design's two-argument LoadWithActions under a new name,
-// so the existing callers compile until they pass the deferred names.
+// policy. The autonomy: actions are checked against actionNames too. It is the
+// design's two-argument LoadWithActions under a new name, so the existing
+// callers compile until they pass the deferred names.
 func LoadWithDeferred(path string, actionNames, deferredNames []string) (*Owners, error) {
 	o, err := Load(path)
 	if err != nil {
 		return nil, err
 	}
 	if err := o.checkAutoApproveNames(actionNames, deferredNames); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
+	}
+	if err := o.checkAutonomyNames(actionNames, deferredNames); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
 	return o, nil

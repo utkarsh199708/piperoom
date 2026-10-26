@@ -155,3 +155,135 @@ export function setupCreateResponse(): CreateSetupResponse {
     command: 'piperoom-setup --server http://127.0.0.1:8090 --code ABCD2345',
   }
 }
+
+// U1-12b: the events the setup controls answer with, so a test folds the same log the server
+// would write. Names only for secrets: no helper takes a value, and none is ever written here.
+
+export function targetRegistered(
+  address = 'kafka.acme:9092',
+  cls = 'shared',
+  seq = 10,
+  kind = 'kafka',
+): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.target_registered',
+    actor: arjun,
+    at: at(5),
+    payload: { kind, address, class: cls, by: 'arjun' },
+  }
+}
+
+export function targetClassed(target = 'db.acme:5432', cls = 'production', seq = 11): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.target_classed',
+    actor: arjun,
+    at: at(5),
+    payload: { target, class: cls, reason: 'person', by: 'person' },
+  }
+}
+
+export function pipelineExtended(
+  add: { add_connectors?: string[]; add_tables?: string[]; add_consumer_groups?: string[]; add_sink_tables?: string[] },
+  seq = 12,
+): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.pipeline_extended',
+    actor: arjun,
+    at: at(5),
+    payload: { ...add, by: 'arjun' },
+  }
+}
+
+export function maintenanceWindow(start = '2026-10-22T18:00:00Z', end = '2026-10-22T20:00:00Z', seq = 13): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.maintenance_window',
+    actor: arjun,
+    at: at(5),
+    payload: { start, end, by: 'arjun' },
+  }
+}
+
+/** setup.secret_set carries the name and the actor; the value is never in an event. */
+export function secretSet(name = 'DB_PASSWORD', seq = 14): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.secret_set',
+    actor: arjun,
+    at: at(5),
+    payload: { name, actor: 'arjun' },
+  }
+}
+
+export function credentialsRegistered(
+  names = ['piperoom_ro'],
+  runnerLabel = 'arjun-laptop',
+  seq = 15,
+): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.credentials_registered',
+    actor: runner,
+    at: at(5),
+    payload: { pipeline_id: 'orders', names, runner_label: runnerLabel },
+  }
+}
+
+export function rungList(): { name: string; ok: boolean; note?: string }[] {
+  return [
+    { name: 'connector_running', ok: true },
+    { name: 'tasks_running', ok: true },
+    { name: 'canary_topic', ok: true },
+    { name: 'snapshot_done', ok: true, note: 'SnapshotCompleted' },
+    { name: 'canary_event', ok: true },
+    { name: 'schema_subject', ok: true },
+    { name: 'sink_row', ok: true },
+    { name: 'person_change', ok: false, note: 'timed out; rungs 1 to 7 stay green' },
+  ]
+}
+
+export function verified(rungs = rungList(), planId = setupPlan.plan_id, seq = 16): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.verified',
+    actor: runner,
+    at: at(6),
+    payload: { plan_id: planId, nonce_hash: 'hash', rungs },
+  }
+}
+
+export function awaitingChange(
+  table = 'public.orders',
+  exampleSQL = "UPDATE public.orders SET note = 'ping' WHERE id = 1",
+  seq = 17,
+): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'setup.awaiting_change',
+    actor: runner,
+    at: at(6),
+    payload: { table, example_sql: exampleSQL },
+  }
+}
+
+export function pipelineRegistered(watchedBy = 'server', seq = 18): Event {
+  return {
+    room_id: SETUP_ROOM_ID,
+    seq,
+    type: 'pipeline.registered',
+    actor: runner,
+    at: at(7),
+    payload: { pipeline_id: 'orders', watched_by: watchedBy, by: arjun, approved_by: [] },
+  }
+}

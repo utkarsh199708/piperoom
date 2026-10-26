@@ -49,6 +49,7 @@ import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
 import { SetupPairingCard } from './room/SetupPairingCard'
 import { SetupStepper } from './room/SetupStepper'
+import { SetupPanel } from './setup/SetupPanel'
 import { HypothesisCard } from './room/HypothesisCard'
 import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
@@ -520,6 +521,8 @@ export function RoomScreen() {
               plan's stepper above the feed. Neither renders on an incident room. */}
           <SetupPairingCard state={state} />
           <SetupStepper state={state} />
+          {/* U1-12b: the setup controls sit under the stepper, on a setup room only. */}
+          <SetupPanel state={state} user={user} />
 
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
