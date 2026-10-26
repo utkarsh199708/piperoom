@@ -661,6 +661,9 @@ func TestSetupLadderStaleCanaryEventDoesNotMatch(t *testing.T) {
 		t.Fatalf("approve run 1's canary: %v", err)
 	}
 	waitSetupVerified(t, r.svc, roomID, 2)
+	// Run 1 writes its verdict before its goroutine releases the run guard, so
+	// starting run 2 right after the event can still meet run 1 in flight.
+	waitForCond(t, 5*time.Second, func() bool { return !r.svc.setupLadderRunning(roomID) }, "run 1 still in flight after its verdict")
 	nonce1 := r.canary.lastNonce()
 
 	// Run 2: its canary is never approved, and the approval wait is short.
