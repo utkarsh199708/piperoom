@@ -213,7 +213,7 @@ const (
 // id per connector (config_drift.go), after these (pipeState.ids).
 var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart, owners.SignalLongTx}, forecastIDs()...)
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -225,6 +225,8 @@ type pipeState struct {
 	samples []sample
 	// slot is the slot name found for the pipeline (cached across ticks).
 	slot string
+	// ltx is the long_tx memory of the restart_lsn held now (long_tx.go).
+	ltx *longTxMem
 	// dlqFirst is, per DLQ topic, when the current growth episode was first
 	// seen (the first rising sample). It is cleared when the signal quiets.
 	dlqFirst map[string]time.Time
@@ -249,6 +251,9 @@ type pipeState struct {
 	// bypassCooldown: a severity rise re-opened an acked incident
 	// (reviveWorse); the next open skips the cooldown.
 	bypassCooldown bool
+	// reopenOf, when set, is when the room whose close acked the signals now
+	// firing again was closed (rearmClosed). The next room, or join, says so.
+	reopenOf time.Time
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
 	lastPost  time.Time
@@ -537,8 +542,10 @@ func (w *Watcher) tick(ctx context.Context) {
 
 // OnRoomClosed tells the watcher that the driver closed a room. Wire it to the
 // room service's room-closed hook. Signals that still fire in the pipeline
-// become acked: the same incident does not open another room, and the watcher
-// stays quiet until the signal clears. pipelineID and dedupKey are unused: the
+// become acked: the same incident does not open another room at once. The
+// watcher stays quiet for one cooldown; a signal that still fires after it
+// opens a new room that says it reopens after a close (rearmClosed). A signal
+// that clears first is simply ok again. pipelineID and dedupKey are unused: the
 // room is found by roomID, so a storm room acks every pipeline that posts into
 // it, whatever key it was opened under.
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
@@ -574,7 +581,7 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 		}
 		if ss.phase == phaseFiring && id != retentionID {
 			// A retention finding never had a room of its own to close.
-			ss.ack()
+			ss.ack(now)
 			if driftKind(id) != "" {
 				if ps.driftClosed == nil {
 					ps.driftClosed = map[string]time.Time{}

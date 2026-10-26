@@ -101,6 +101,10 @@ type runner struct {
 	// listed and the latest hypothesis's scope (X4c, externalcause.go).
 	causes *externalCauses
 
+	// guard is the hypothesis guard of update_hypothesis and post_message
+	// (H1, guard.go): its mode and the refusal streaks of this episode.
+	guard *hypothesisGuard
+
 	// versions are the room's running versions, read once with
 	// connect_plugins for runbook_lookup (Q1d, versions.go). Nil passes none.
 	versions *versionReads
@@ -186,6 +190,10 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 // production client from the environment (Anthropic API).
 func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, error) {
 	opts = opts.withDefaults()
+	guardMode, err := resolveGuardMode(opts.HypothesisGuard)
+	if err != nil {
+		return nil, err
+	}
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
 	}
@@ -267,6 +275,18 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 
 		noneSubjects: map[string]bool{},
 	}
+	// A refusal names only read tools this room offers.
+	r.guard = newHypothesisGuard(guardMode, deps.Logger, alert, func(name string) bool {
+		_, ok := deps.Tools.Get(name)
+		return ok
+	})
+	// Rule 1 reads the watcher's status row; it is off without a reader, with
+	// the guard off, and in setup mode (no pipeline runs yet). Shadow rooms
+	// get the same reader and the same mode, so the rule behaves the same.
+	if deps.Watch != nil && guardMode != GuardOff && alert.Mode != ModeSetup {
+		r.guard.symptom = newSymptomGuard(deps.Watch, alert.PipelineID, r.log, r.nowTime,
+			func(ctx context.Context, d time.Duration) error { return r.clk.Sleep(ctx, d) })
+	}
 	if alert.Mode == ModeSetup {
 		// Setup mode (U1-10): the run's bounds and the two KindRoom setup
 		// tools. A room the server opened always carries its request in
@@ -288,14 +308,18 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 }
 
 func (r *runner) run(ctx context.Context) error {
-	// Every apply wait (fixpr.go) ends with the run.
+	// Every apply wait (fixpr.go) and the guard's watch recheck
+	// (symptomguard.go) end with the run.
 	defer r.applies.stop()
+	r.guard.symptomWatch().begin(ctx)
+	defer r.guard.symptomWatch().stop()
 	if err := r.scopeForge(ctx); err != nil {
 		return err
 	}
 	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
 	setRoomSource(room, r.source)
 	setRoomSetup(room, r.setup)
+	setRoomGuard(room, r.guard)
 	room = append(room, r.setupRoom...)
 	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
 		strictCap(r.model.Capabilities(r.opts.Model)))
@@ -609,9 +633,9 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 	inputs, err := r.deps.Inbox.Drain(ctx)
 	if err != nil {
 		r.log.Warn("agent: inbox drain failed", "err", err)
-		return r.takeHeld(r.takeApplied())
+		return r.takeHeld(r.takeOwnInputs())
 	}
-	return r.takeHeld(append(inputs, r.takeApplied()...))
+	return r.takeHeld(append(inputs, r.takeOwnInputs()...))
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
@@ -646,8 +670,14 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			}
 			continue
 		}
-		inputs = append(inputs, r.takeApplied()...)
-		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) {
+		inputs = append(inputs, r.takeOwnInputs()...)
+		// Track approvals as they arrive, held or not: the approval that
+		// completes a proposal must wake the agent into its wait for step
+		// results (awaitStepResults), which observes them again harmlessly.
+		for _, in := range inputs {
+			r.observe(in)
+		}
+		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) || len(r.proposals.awaiting()) > 0 {
 			return r.takeHeld(inputs), nil
 		}
 		// Only quiet inputs (or none): they never wake an idle agent. Keep
@@ -754,7 +784,27 @@ func hasHumanInput(inputs []HumanInput) bool {
 // isQuiet reports an input that rides along with the next batch but never
 // starts a turn or resets the turn guard on its own: an alert update (the
 // alert fired again, the watcher joined) is new numbers, not a request.
-func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" }
+//
+// An approval is quiet too. A live room (schema-change, 2026-10-25) spent two
+// Opus calls on every approval.given (a repeated hypothesis, then "the
+// kafka-connect owner has approved ... it still needs schema-registry"), which
+// the room's approval bar already shows; 17 calls used 536k tokens. An approval
+// that leaves a layer pending tells the model nothing it can act on. The one
+// that completes a proposal still wakes the agent, through waitForInput's
+// check of proposals awaiting step results, not through this function: the
+// agent then waits for the executor's results (awaitStepResults) and makes the
+// one turn those results get anyway, with the held approvals ahead of them. A
+// rejection, or an approval_result with no verdict, is not quiet: the agent
+// may have to re-plan.
+func isQuiet(in HumanInput) bool {
+	switch in.Kind {
+	case "alert_update":
+		return true
+	case "approval_result":
+		return in.Approved != nil && *in.Approved
+	}
+	return false
+}
 
 // resetsTurns reports whether a batch resets the per-episode turn guard: any
 // input but a quiet one does.

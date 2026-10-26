@@ -221,7 +221,7 @@ func TestFakeAgentScriptedRunsThroughHTTP(t *testing.T) {
 		WritePostmortem:   w.writePM,
 		Triage:            w.triage,
 		TriagePassTimeout: w.triageTimeout,
-		Options:           agentOptions(cfg, config.Limits{}),
+		Options:           agentOptions(cfg, config.Limits{}, ""),
 		Logger:            discardLog(),
 		WriteModeOff:      true,
 	}, authSettings, usage)

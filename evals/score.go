@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -173,6 +174,18 @@ type RunResult struct {
 	Misses      []Miss `json:"misses,omitempty"`
 	Idles       int    `json:"idles"`
 
+	// GuardRefusals is how many calls the hypothesis guard refused in the run
+	// (Transcript.GuardRefusals, counted from the guard's own log record).
+	// GuardMode is the
+	// mode the run used ("" = log), the one in which the count is 0 by
+	// construction. UnbackedRuleOuts counts the "ruled out X" claims of the
+	// final hypothesis that no cited successful step read (agent.UnbackedRuledOut).
+	GuardRefusals    int    `json:"guard_refusals"`
+	GuardMode        string `json:"guard_mode,omitempty"`
+	UnbackedRuleOuts int    `json:"unbacked_rule_outs"`
+	// UnbackedRuledOut names them, for the failure line.
+	UnbackedRuledOut []string `json:"unbacked_ruled_out,omitempty"`
+
 	DurationMS int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
 	Error      string `json:"error,omitempty"`
@@ -198,6 +211,8 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		Writes:               writeNotes(tr.Writes),
 		Idles:                tr.Idles,
 		TimedOut:             timedOut,
+		GuardMode:            tr.GuardMode,
+		GuardRefusals:        tr.GuardRefusals,
 	}
 	if runErr != nil {
 		res.Error = runErr.Error()
@@ -301,6 +316,10 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
 		res.HedgedOn, res.Hedged = causeHedge(last.Text)
 		res.CitesSteps = atLast.citesSteps(last.BasedOnSteps, last.Confidence)
+		for _, c := range agent.UnbackedRuledOut(last.Text, atLast.citedTools(last.BasedOnSteps)) {
+			res.UnbackedRuledOut = append(res.UnbackedRuledOut, c.Item)
+		}
+		res.UnbackedRuleOuts = len(res.UnbackedRuledOut)
 		if res.Outcome == OutcomeDiagnose {
 			basis = atLast
 		}
@@ -563,6 +582,7 @@ func failures(sc Scenario, res RunResult) []string {
 			f = append(f, "setup replay: "+why)
 		}
 	}
+	f = append(f, guardFailures(sc, res)...)
 	f = append(f, verifyFailures(sc, res)...)
 	return f
 }
@@ -792,4 +812,19 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 		}
 	}
 	return bad
+}
+
+// guardFailures grades the hypothesis guard's expectations. The refusal bound
+// holds only for a run in enforce mode: in log or off mode nothing is refused,
+// so a minimum could never be met and says nothing about the agent.
+// max_unbacked_rule_outs holds in every mode: it grades the final text.
+func guardFailures(sc Scenario, res RunResult) []string {
+	var f []string
+	if r := sc.Expect.GuardRefusals; r != nil && res.GuardMode == agent.GuardEnforce && !r.has(res.GuardRefusals) {
+		f = append(f, fmt.Sprintf("hypothesis guard refused %d call(s), want %s", res.GuardRefusals, r))
+	}
+	if n := sc.Expect.MaxUnbackedRuleOuts; n != nil && res.UnbackedRuleOuts > *n {
+		f = append(f, fmt.Sprintf("%d rule-out claim(s) no cited read backs (max %d): %s", res.UnbackedRuleOuts, *n, strings.Join(res.UnbackedRuledOut, "; ")))
+	}
+	return f
 }

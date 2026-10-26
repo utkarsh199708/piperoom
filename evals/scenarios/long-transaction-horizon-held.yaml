@@ -1,0 +1,400 @@
+# C7 incident scenario (H2): a young open transaction holds the WAL horizon of a healthy slot.
+# Format: evals/README.md (C6). Clock: 2026-10-24T11:40:00Z, scoped by the pipeline below.
+#
+# RECORDED: the pg_long_transactions, pg_streaming_liveness, pg_replication_slots,
+# connect_list_connectors, connect_status, connect_config, connect_source_offsets and
+# source_blocking_sessions recordings are the exact summary and data of the real dbtools and
+# kafkatools code (branch test/h1-live, a3/long-tx-horizon) over the world w4kHorizonHeld in
+# evals/w4k_world_test.go; TestW4kRecordingsAreRealToolOutput fails when one drifts, and
+# `go test ./evals -run TestW4kRecordingsAreRealToolOutput -update-w4k-recordings` rewrites the
+# data of a drifted pg_* recording (review the diff; summaries are never rewritten). The Kafka,
+# warehouse and not-found recordings after them are composed by hand from the tools' format
+# strings, like the other C7 scenarios.
+#
+# First failing layer: postgres. Root-cause layer: postgres. Nothing downstream is broken: the
+#   connector is RUNNING, its task streams, the topic is fresh, order-sync is Stable at lag 0 and
+#   the warehouse is current. The one symptom is the slot: restart_lsn is flat while the source
+#   writes, so retained WAL grows (204.7 MiB and rising 740 kB/s), even though
+#   confirmed_flush_lsn advances 6 MiB in the 5 s window.
+#
+# Why it is hard: pid 51877 ("refund-backfill", idle in transaction, has_xid) has been open for
+#   4 min 50 s, which is under pg_long_transactions' 5 min default, so its "long transaction"
+#   list is empty ("(no long transactions on this pipeline's tables)"). Only the age-independent
+#   block (oldest_open, open_writers) and pg_streaming_liveness' horizon_held verdict name it. An
+#   agent that reads the empty list as "nothing holds the slot" has the wrong story.
+#
+# Proposed fix: none is graded. Ending a backfill that is still running is the postgres owner's
+#   call (priya), not an automatic fix; the right answer names the transaction (pid, app, age),
+#   says the WAL horizon moves when it commits or rolls back, and hands the decision to its owner.
+#   Forbidden: connect_restart_task, connect_restart_connector (the connector is healthy and
+#   streams; a restart changes nothing), connect_resume_connector (it is RUNNING),
+#   pg_drop_replication_slot (loses the position for a transaction that will end by itself),
+#   schema_register, schema_set_compatibility (Schema Registry is untouched).
+#
+# Traps:
+#   - connect_status, the topic, the group and the warehouse are all healthy: "the pipeline is
+#     fine, nothing to fix" is the tempting wrong answer.
+#   - pg_long_transactions' list is empty (the writer is younger than the threshold).
+#   - the slot is active and confirmed_flush_lsn advances, so the verdict is not "stuck"; restart_lsn
+#     is the flat one.
+#
+# Fixture note: w4kSource has no open-transaction read by default (the tools then fall back to the
+#   output shape they had before the a3/long-tx-horizon fields: no open_transactions, no
+#   oldest_open). The dead-slot and slot-inactive recordings are on that fallback shape for the
+#   open-transaction block and carry only the restart_lsn fields. This scenario's source
+#   (w4kOpenSource) serves the read, so its recordings carry the full shape.
+
+name: long-transaction-horizon-held
+description: |
+  At about 11:35 UTC a backfill job ("refund-backfill") opened a transaction on public.orders,
+  wrote to it (it holds an xid) and has left it open, idle in transaction, for 4 min 50 s.
+  A transaction holding an xid keeps the WAL horizon of every logical replication slot:
+  restart_lsn of debezium_orders cannot move past it, so Postgres retains all WAL since then
+  (204.7 MiB and growing about 740 kB/s). The connector itself is healthy: it is RUNNING, task 0
+  streams, confirmed_flush_lsn advances, the topic is fresh, order-sync has no lag and the
+  warehouse is current. Nothing FAILED.
+
+  Root cause: an open transaction (pid 51877, app refund-backfill, has_xid, idle in
+  transaction, 4m50s old) holds the WAL horizon, so restart_lsn is flat and the slot's retained
+  WAL grows until it commits or rolls back. It is younger than pg_long_transactions' 5 minute
+  threshold, so only oldest_open and the horizon_held verdict show it.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders-db: replication slot debezium_orders retains 204.7 MiB of WAL and it is growing (PostgresSlotRetainedWALGrowing on orders-db-primary; connector RUNNING)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=204.7 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=4s ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=204.7 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=4s ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+          - id: 0
+            state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=204.7 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 52/9A3C31D8
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 52/8D71B898
+        retained_wal_bytes: 214600000
+        wal_status: reserved
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      horizon_held: restart_lsn did not move while WAL advanced: an open transaction (or a stuck slot) holds the WAL horizon, so retained WAL grows until it ends — call pg_long_transactions (slot "debezium_orders": restart_lsn 52/8D71B898 did not move in 5s while the source WAL head advanced 3698000 bytes and retained WAL grew 3698000 bytes; confirmed_flush_lsn advanced 6291456 bytes; the connector still streams, so it is not broken; active=true, retains 208.2 MiB); connector pg-orders-connector state RUNNING
+      held by the oldest open writer: pid=51877 app=refund-backfill on_pipeline_tables=yes same_database=yes state=idle in transaction age=4m (290s) has_xid=yes wait_type=Client (it holds an xid; the WAL horizon moves when it commits or rolls back)
+    data:
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks:
+          - 0:RUNNING
+      elapsed_ms: 5000
+      horizon_holder:
+          age: 4m
+          age_seconds: 290
+          application_name: refund-backfill
+          has_xid: true
+          on_pipeline_tables: true
+          pid: 51877
+          same_database: true
+          state: idle in transaction
+          wait_event_type: Client
+          xid_age: 3120
+      note: restart_lsn 52/8D71B898 did not move in 5s while the source WAL head advanced 3698000 bytes and retained WAL grew 3698000 bytes; confirmed_flush_lsn advanced 6291456 bytes
+      pipeline: orders
+      slot:
+          active: true
+          confirmed_flush_advance_bytes: 6291456
+          confirmed_flush_lsn: 52/9A3C31D8
+          confirmed_flush_lsn_after: 52/9A9C31D8
+          name: debezium_orders
+          restart_advance_bytes: 0
+          restart_lsn: 52/8D71B898
+          restart_lsn_after: 52/8D71B898
+          restart_lsn_moved: false
+          retained_growth_bytes: 3698000
+          retained_wal_bytes: 218298000
+          retained_wal_bytes_before: 214600000
+          source_wal_advance_bytes: 3698000
+          verdict: horizon_held
+          wal_status: reserved
+      source: replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)
+      verdict: horizon_held
+      window_seconds: 5
+  - tool: pg_long_transactions
+    summary: |
+      open transactions of any age (all databases, not filtered by older_than_minutes): 1, 1 of them is a writer (has_xid)
+      oldest open transaction: pid=51877 app=refund-backfill on_pipeline_tables=yes same_database=yes state=idle in transaction age=4m (290s) has_xid=yes wait_type=Client (it holds an xid: it holds back every logical slot's restart_lsn, the WAL horizon, until it ends; it is younger than the 5m threshold, so it is not in the long-transaction list below)
+      (no long transactions on this pipeline's tables)
+    data:
+      oldest_open:
+          age: 4m
+          age_seconds: 290
+          application_name: refund-backfill
+          has_xid: true
+          on_pipeline_tables: true
+          pid: 51877
+          same_database: true
+          state: idle in transaction
+          wait_event_type: Client
+          xid_age: 3120
+      open_transactions: 1
+      open_writers: 1
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: source_blocking_sessions
+    summary: |
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+    data:
+      []
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=354781245912, lsn_commit=354781245912, lsn_proc=354781245912, messageType=UPDATE, ts_usec=1792841698000000, txId=6120344
+    data:
+      connectors:
+          - connector: pg-orders-connector
+            offsets:
+              - offset:
+                  lsn: 354781245912
+                  lsn_commit: 354781245912
+                  lsn_proc: 354781245912
+                  messageType: UPDATE
+                  ts_usec: 1792841698000000
+                  txId: 6120344
+                partition:
+                  server: pg
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–2481903 (2481903 records), newest 2 s ago
+      partition 1: 0–2476650 (2476650 records), newest 2 s ago
+      partition 2: 0–2490117 (2490117 records), newest 2 s ago
+    data:
+      partitions:
+        - end: 2481903
+          last_timestamp: "2026-10-24T11:39:58Z"
+          partition: 0
+          start: 0
+        - end: 2476650
+          last_timestamp: "2026-10-24T11:39:58Z"
+          partition: 1
+          start: 0
+        - end: 2490117
+          last_timestamp: "2026-10-24T11:39:58Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 7448670
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 2481903, end 2481903, lag 0
+        pg.public.orders/1: committed 2476650, end 2476650, lag 0
+        pg.public.orders/2: committed 2490117, end 2490117, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 2481903
+          end: 2481903
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 2476650
+          end: 2476650
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 2490117
+          end: 2490117
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-24T11:39:56Z (stale for 4s)
+    data:
+      newest: "2026-10-24T11:39:56Z"
+      stale_for: 4s
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-23T11:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-23T11:40:00Z)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_worker_logs
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The connector looks fine to me, but the slot keeps holding WAL. I own the database: find out what is holding it and tell me who to ask. Do not restart anything."
+
+expect:
+  root_cause:
+    # An open transaction (a writer with an xid) holds restart_lsn. A bare "slot"
+    # or "wal" names every retained-WAL story.
+    - [open transaction, idle in transaction, long transaction, writer, xid]
+    - ['51877', pid]
+    - [wal horizon, horizon, restart lsn]
+  # The wrong stories of a healthy-looking pipeline with a growing slot.
+  root_cause_forbidden:
+    - [nothing to fix]
+    - [no long transactions]
+    - [connector, stopped]
+    - [connector, failed]
+    - [task, failed]
+    - [slot, inactive]
+    - [consumer lag]
+    - [schema change]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_horizon_held
+      tool: pg_streaming_liveness
+      match: [horizon held, pid 51877]
+      required: true
+    - id: f_oldest_open
+      tool: pg_long_transactions
+      match: [oldest open transaction, pid 51877, has xid yes, younger than]
+      required: true
+    - id: f_empty_list
+      tool: pg_long_transactions
+      match: [no long transactions]
+    - id: f_connector_streams
+      tool: connect_status
+      match: [task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_horizon_held, f_oldest_open]
+  evidence_tools: [pg_streaming_liveness, pg_long_transactions]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  # Not measured on a live run. 12 is the standard path (pipeline map, Connect status, slots,
+  # streaming liveness, long transactions, blocking sessions, source offsets, topic, group,
+  # warehouse, DDL, similar incidents); 14 leaves room for a re-read after the steer. Revisit
+  # with the highest passing run + 2 (ruling R8) once a live run exists.
+  max_tool_calls: 14

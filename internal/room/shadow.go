@@ -148,6 +148,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		Inbox:  gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 		Sink:   roomSink{s: s, roomID: roomID, run: run},
 		Logger: s.log,
+		Watch:  s.watch,
 		Usage:  func(used int64) { tokens.Store(used) },
 	}
 	backoff := agentRetryBackoff

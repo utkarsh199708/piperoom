@@ -59,6 +59,10 @@ func NormalizeWatchStatus(s clients.WatchStatus) (clients.WatchStatus, error) {
 			return s, fmt.Errorf("%w: signal %s has no since", ErrBadWatchStatus, g.Signal)
 		}
 		g.Since = microUTC(g.Since)
+		if g.ClearingSince != nil {
+			cs := microUTC(*g.ClearingSince)
+			g.ClearingSince = &cs
+		}
 		if g.ETA != nil {
 			eta := microUTC(*g.ETA)
 			g.ETA = &eta

@@ -26,6 +26,10 @@ type w4kWorld struct {
 	config    map[string]string
 	offsets   []connect.SourceOffset
 	slotReads [][]clients.ReplicationSlot
+	// open, when set, is what the source answers to the open-transaction read
+	// (a w4kOpenSource). Left nil, the source cannot do that read at all, and the
+	// tools fall back to the output shape they had before it existed.
+	open *postgres.OpenTransactions
 }
 
 // w4kConnect is the Connect client: status, config and the KIP-875 offsets read.
@@ -100,6 +104,15 @@ func (s w4kSource) Blockers(context.Context, time.Duration) ([]postgres.DBSessio
 }
 func (s w4kSource) BlockersOnTables(context.Context, time.Duration, []string) ([]postgres.DBSession, error) {
 	return nil, nil
+}
+
+// w4kOpenSource is w4kSource plus the age-independent open-transaction read
+// (dbtools' optional openTxnReader), which pg_long_transactions and
+// pg_streaming_liveness use to name a young xid holder.
+type w4kOpenSource struct{ w4kSource }
+
+func (s w4kOpenSource) OpenTransactions(context.Context, []string, bool) (postgres.OpenTransactions, error) {
+	return *s.w.open, nil
 }
 
 // w4kOwners is the orders pipeline as the scenarios declare it.
@@ -223,5 +236,33 @@ func w4kSlotRecovered() *w4kWorld {
 			{w4kSlot(true, restart+advance, confirmed+advance, retained-advance+written, "extended")},
 		},
 		offsets: []connect.SourceOffset{w4kOffset(confirmed+advance, 5634999, time.Date(2026, 10, 11, 9, 39, 58, 0, time.UTC))},
+	}
+}
+
+// w4kHorizonHeld is long-transaction-horizon-held: the connector streams (the
+// slot is active and confirmed_flush_lsn moves 6 MiB in the window), but
+// restart_lsn does not move while the source writes 740 kB/s, because pid 51877
+// has held an xid for 4 min 50 s ("refund-backfill", idle in transaction). That
+// is under the 5 min default of pg_long_transactions, so the long list is
+// empty and only oldest_open names it.
+func w4kHorizonHeld() *w4kWorld {
+	head := w4kLSNPos("52/9A3C41D8")
+	const written, retained, advance = 3698000, 214600000, 6 * 1024 * 1024
+	restart := head - retained
+	confirmed := head - 4096
+	holder := &postgres.OpenTransaction{
+		PID: 51877, OnTables: true, SameDatabase: true, ApplicationName: "refund-backfill",
+		State: "idle in transaction", AgeSeconds: 290, HasXID: true, XIDAge: 3120, WaitEventType: "Client",
+	}
+	return &w4kWorld{
+		status: clients.ConnectorStatus{Name: "pg-orders-connector", Type: "source", State: "RUNNING", WorkerID: "connect:8083",
+			Tasks: []clients.TaskStatus{{ID: 0, State: "RUNNING", WorkerID: "connect:8083"}}},
+		config: w4kConfig(),
+		slotReads: [][]clients.ReplicationSlot{
+			{w4kSlot(true, restart, confirmed, retained, "reserved")},
+			{w4kSlot(true, restart, confirmed+advance, retained+written, "reserved")},
+		},
+		offsets: []connect.SourceOffset{w4kOffset(confirmed+advance, 6120344, time.Date(2026, 10, 24, 11, 34, 58, 0, time.UTC))},
+		open:    &postgres.OpenTransactions{Open: 1, Writers: 1, Oldest: holder, OldestWriter: holder},
 	}
 }

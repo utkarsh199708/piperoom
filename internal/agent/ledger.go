@@ -117,6 +117,36 @@ func (l *stepLedger) get(stepID string) (stepFact, bool) {
 	return f, ok
 }
 
+// ledgerStep is one step with its id, as snapshot and citedSteps return it.
+type ledgerStep struct {
+	id   string
+	fact stepFact
+}
+
+// snapshot returns every step, newest first.
+func (l *stepLedger) snapshot() []ledgerStep {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]ledgerStep, 0, len(l.order))
+	for i := len(l.order) - 1; i >= 0; i-- {
+		id := l.order[i]
+		out = append(out, ledgerStep{id: id, fact: l.steps[id]})
+	}
+	return out
+}
+
+// citedSteps returns the known steps among ids, in ids order. Unknown ids are left
+// out (checkSteps refuses them first).
+func (l *stepLedger) citedSteps(ids []string) []ledgerStep {
+	out := make([]ledgerStep, 0, len(ids))
+	for _, id := range ids {
+		if f, ok := l.get(id); ok {
+			out = append(out, ledgerStep{id: id, fact: f})
+		}
+	}
+	return out
+}
+
 // recent returns up to n of the most recent step ids, newest last.
 func (l *stepLedger) recent(n int) []string {
 	l.mu.Lock()

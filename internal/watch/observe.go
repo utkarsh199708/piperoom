@@ -99,7 +99,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		if hasNoSlot(p) {
 			w.slotSignalsOff(p.ID, p.SourceKindOrDefault(), &cfg)
 		}
-		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
+		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled || cfg.LongTx.Enabled ||
 			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
 			cfg.OffsetBelowLogStart.Enabled || driftOn(cfg)) {
 			continue
@@ -135,7 +135,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 // needsSlots reports whether any target reads the replication slots.
 func needsSlots(ts []target) bool {
 	for _, t := range ts {
-		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
+		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.LongTx.Enabled {
 			return true
 		}
 	}

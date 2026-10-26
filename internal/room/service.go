@@ -76,6 +76,11 @@ type Deps struct {
 	Triage            agent.Triager
 	TriagePassTimeout time.Duration
 	Options           agent.Options
+	// Watch is the hypothesis guard's view of the watcher's status row (H1),
+	// passed to live and shadow runs as agent.Deps.Watch, never to the triage
+	// pass. cmd/server gives it a reader that drops rows older than 3 x the
+	// watcher interval; nil means the guard reads no row.
+	Watch clients.WatchStatusReader
 	// ShadowOptions are the agent options of a shadow room's run
 	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
 	// lower token budget (config.ParseShadow).
@@ -354,6 +359,7 @@ type Service struct {
 	triageWait      time.Duration
 	triageSem       chan struct{} // maxTriagePasses
 	opts            agent.Options
+	watch           clients.WatchStatusReader // Deps.Watch
 	shadowOpts      agent.Options
 	shadowGrace     time.Duration
 	shadow          store.ShadowStore // nil when the store cannot hold shadow runs
@@ -570,6 +576,7 @@ func New(d Deps) *Service {
 		viewerGroups:    groupSet(d.ViewerGroups),
 		soloUser:        d.SoloUser,
 		writeOff:        d.WriteModeOff,
+		watch:           d.Watch,
 		limits:          d.Limits,
 		setupCfg:        d.Setup,
 		setupLocal:      d.SetupLocal,
@@ -1939,6 +1946,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
 			Logger:    s.log,
+			Watch:     s.watch,
 		}
 		opts := s.opts
 		if setupRoom {

@@ -115,7 +115,14 @@ func toolPackages() []toolPackage {
 		// SourceKind picks dbtools' list (Q8n): a MySQL set gets no pg_* tool,
 		// and source_row and source_long_transactions instead.
 		{name: "db tools", kinds: bothKinds, register: func(reg *tools.Registry, w *Wired) error {
-			return dbtools.Register(reg, dbtools.Deps{Src: w.Source, SourceKind: w.source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka})
+			d := dbtools.Deps{Src: w.Source, SourceKind: w.source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka}
+			if err := dbtools.Register(reg, d); err != nil {
+				return err
+			}
+			// pg_object_owners (H1, A3's) answers the ownership question of
+			// a "must be owner" task failure that source_role_grants cannot;
+			// a MySQL source gets nothing.
+			return dbtools.RegisterObjectOwners(reg, d)
 		}},
 		// mysql_binlog_status (Q8c) only on a MySQL set: a Postgres set's
 		// list does not change.
@@ -153,12 +160,18 @@ func toolPackages() []toolPackage {
 		// connect_worker_logs (Q3c) is registered whether or not a log store
 		// is set, so the tool list does not depend on setup; without one it
 		// answers "not configured". A typed nil reader counts as none.
+		// consumer_logs (H2) follows it on the same terms: registered for every
+		// CDC set, "not configured" without a Loki or without the pipeline's
+		// consumer_logs.selector.
 		{name: "worker logs", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			d := logtools.Deps{Owners: w.Owners, Now: w.Now}
 			if !isNilIface(w.WorkerLogs) {
 				d.Logs = w.WorkerLogs
 			}
-			return logtools.Register(reg, d)
+			if err := logtools.Register(reg, d); err != nil {
+				return err
+			}
+			return logtools.RegisterConsumer(reg, logtools.ConsumerDeps{Readers: consumerReaders(w), Owners: w.Owners, Now: w.Now})
 		}},
 		// net_probe (Q6a) through the caller's hook (Wired.ProbeTools): it
 		// probes the set's own endpoints and asks Connect to validate the

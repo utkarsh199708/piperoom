@@ -20,7 +20,7 @@ import (
 func pgReplicationSlotsTool(d Deps) tools.Tool {
 	return &tool{
 		name:   "pg_replication_slots",
-		desc:   "List the room pipeline's replication slots on the source Postgres (owners.yaml watch.slot, else slot.name from its Debezium connector config): active state, retained WAL size and wal_status. Other slots are only counted.",
+		desc:   "List the room pipeline's replication slots on the source Postgres (owners.yaml watch.slot, else slot.name from its Debezium connector config): active state, retained WAL size and wal_status (restart_lsn and confirmed_flush_lsn are in Data). Other slots are only counted. One read cannot show whether a position moves: do not compare LSNs across two calls yourself; pg_streaming_liveness samples twice and reports restart_lsn_moved, retained_growth_bytes and a horizon_held verdict.",
 		schema: objSchema(map[string]any{}),
 		run: func(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
 			sc, err := d.scope(ctx)
@@ -197,7 +197,9 @@ func olderThanMinutes(v *int) (int, error) {
 
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return longTransactionsTool(d, "pg_long_transactions",
-		"List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are counted, and the oldest writers among them (a writer on any table or database holds back every logical slot) are shown with pid, same_database, state, age, xid_age and wait type only. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.", false)
+		"List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are counted, and the oldest writers among them (a writer on any table or database holds back every logical slot) are shown with pid, same_database, state, age, xid_age and wait type only. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM. "+
+			"The threshold filters only that list: open_transactions and open_writers count every open transaction of ANY age in every database, and oldest_open is the single oldest open transaction even when it is younger than older_than_minutes (pid, on_pipeline_tables, same_database, state, age, has_xid, wait type; application_name only for a session on the pipeline's tables), with oldest_open_writer when the oldest one holds no xid. "+
+			"A writer of any age (has_xid) holds back restart_lsn of every logical slot, so an empty list with open_writers > 0 does NOT mean nothing holds the slot; prepared_transactions counts two-phase transactions, which hold it with no session.", false)
 }
 
 // longTransactionsTool is pg_long_transactions under name: the same code
@@ -257,6 +259,13 @@ func longTransactionsTool(d Deps, name, desc string, blockersFallback bool) tool
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: %s: %w", name, err)
 			}
+			// Every open transaction, whatever its age: a writer younger than
+			// the threshold already holds every logical slot's restart_lsn.
+			var tables []string
+			if !sc.Unscoped() {
+				tables = sc.Pipeline().SourceTables
+			}
+			open, hasOpen := d.readOpenTxns(ctx, tables, sc.Unscoped())
 
 			// Query text is never returned: it often holds literal row values.
 			// Keep the diagnostics and at most the statement verb.
@@ -270,6 +279,7 @@ func longTransactionsTool(d Deps, name, desc string, blockersFallback bool) tool
 			}
 			if sc.Unscoped() {
 				var sb strings.Builder
+				writeOpenTxnLines(&sb, open, olderThan)
 				for _, r := range rows {
 					writeTxnLine(&sb, r)
 				}
@@ -277,7 +287,13 @@ func longTransactionsTool(d Deps, name, desc string, blockersFallback bool) tool
 					sb.WriteString("(no long transactions)\n")
 				}
 				summary, truncated := tools.Truncate(sb.String())
-				return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
+				// A client without the age-independent read keeps the plain
+				// list, as before.
+				var data any = rows
+				if hasOpen {
+					data = unscopedTxns{Transactions: rows, openTxnFields: open}
+				}
+				return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 			}
 
 			// Scoped. The bounded block about the other sessions comes first:
@@ -286,7 +302,10 @@ func longTransactionsTool(d Deps, name, desc string, blockersFallback bool) tool
 			// capped, so truncation can never cut the other writers, which are
 			// the classic cause of a slot that keeps WAL.
 			var sb strings.Builder
-			data := scopedTxns{Transactions: rows, OtherNotShown: tt.Other, OtherWriters: tt.OtherWriters}
+			data := scopedTxns{Transactions: rows, OtherNotShown: tt.Other, OtherWriters: tt.OtherWriters, openTxnFields: open}
+			// The age-independent block leads: it is bounded (at most five
+			// short lines) and is what shows a young writer that holds the slot.
+			writeOpenTxnLines(&sb, open, olderThan)
 			if line := tools.NotShown(tt.Other, "long transaction", "long transactions"); line != "" {
 				fmt.Fprintf(&sb, "%s; %d of them %s (has_xid)\n", line, tt.OtherWriters, tools.Plural(tt.OtherWriters, "is a writer", "are writers"))
 			}
@@ -358,6 +377,16 @@ type scopedTxns struct {
 	// OldestOtherWriters are the oldest of those writers (at most
 	// postgres.MaxOtherWriters), anonymised.
 	OldestOtherWriters []otherWriter `json:"oldest_other_writers,omitempty"`
+	// The age-independent counts and the oldest open transaction.
+	openTxnFields
+}
+
+// unscopedTxns is Data of an unscoped pg_long_transactions call when the
+// client can read open transactions of any age; otherwise Data stays the
+// plain []longTxn.
+type unscopedTxns struct {
+	Transactions []longTxn `json:"transactions"`
+	openTxnFields
 }
 
 // otherWriter is the whole allow-list for a session outside the pipeline's

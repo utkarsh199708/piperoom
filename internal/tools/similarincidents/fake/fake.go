@@ -27,6 +27,9 @@ type Room struct {
 	Title      string
 	ClosedAt   time.Time
 	Resolution string
+	// AlertSource and DedupKey fill the room.created fields of the same name.
+	AlertSource string
+	DedupKey    string
 	// Shadow marks a room opened under shadow mode.
 	Shadow bool
 	// NoCreated leaves out room.created; CorruptCreated writes one whose
@@ -93,7 +96,7 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 			return err
 		}
 	default:
-		if err := app(events.RoomCreated, sys, events.RoomCreatedPayload{Title: r.Title, Severity: "sev2", PipelineID: pipeline, Shadow: r.Shadow}); err != nil {
+		if err := app(events.RoomCreated, sys, events.RoomCreatedPayload{Title: r.Title, Severity: "sev2", PipelineID: pipeline, Shadow: r.Shadow, AlertSource: r.AlertSource, DedupKey: r.DedupKey}); err != nil {
 			return err
 		}
 	}
