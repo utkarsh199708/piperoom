@@ -4,7 +4,7 @@
   "target": "compose",
   "sink": "none",
   "recorded_at": "2026-10-25T09:40:00Z",
-  "note": "Composed from source_settings' own shape (internal/setup/remoteclients/source.go), the Postgres setting's error text and the compose source's restart argv, on the fixed clock of the U1-19 setup scenarios. source_alter_system and source_restart are the setup source driver's ops (U1-9, T3: a recorded maintenance window); no Docker session, so re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "note": "Composed from source_settings' own shape (internal/setup/remoteclients/source.go), the Postgres setting's error text and the compose source's restart argv, on the fixed clock of the U1-19 setup scenarios. source_alter_system and source_restart are the setup source driver's ops (U1-9, T3: a recorded maintenance window); no Docker session, so re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
   "ops": [
     {
       "op": "source_settings",
@@ -86,7 +86,7 @@
       "class": "local",
       "proposal_id": "p_setup_2",
       "step_index": 0,
-      "params_hash": "0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e",
+      "params_hash": "0ed4ffe9601b347e83579215a446dd3407f955b19941951905757e4167ce9b1a",
       "params": {"connector": "pg-orders-connector", "task": 0},
       "result": {
         "ok": true,

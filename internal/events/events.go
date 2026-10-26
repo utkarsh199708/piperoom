@@ -164,7 +164,8 @@ const (
 	// is audit: it names what happened, who did it and the runner label, and
 	// never a secret value, a pairing code or a runner token. All are written
 	// by the room service (system actor, or the person who clicked) except
-	// setup.plan and setup.blocked, which the agent emits through its Sink.
+	// setup.plan, setup.blocked and setup.verification_requested, which the
+	// agent emits through its Sink.
 	// The Sink refuses setup.verified from the agent: only the server's
 	// ladder runner writes it.
 	SetupPairing               Type = "setup.pairing"                // every pairing attempt, success or not, and a replacement of a lost runner
@@ -181,6 +182,11 @@ const (
 	SetupVerified              Type = "setup.verified"               // the ladder's outcome; emitted by the ladder runner only
 	SetupAwaitingChange        Type = "setup.awaiting_change"        // rung 8: the ladder waits for a change the person makes
 	SetupBlocked               Type = "setup.blocked"                // a bound stopped the run; it asks the person a question
+	// SetupVerificationRequested asks the room's ladder runner to verify the
+	// current setup.plan (the agent's setup_request_verification). A request,
+	// never a result. Empty payload: the store stamps the time and the plan is
+	// the room's current one when the event lands.
+	SetupVerificationRequested Type = "setup.verification_requested"
 	// PipelineRegistered says the owners entry of a setup room's pipeline was
 	// written (or its pull request opened) and the server reloaded. The room
 	// then closes with resolution "pipeline live".

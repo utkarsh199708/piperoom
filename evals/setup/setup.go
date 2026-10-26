@@ -20,12 +20,16 @@ package setup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -93,7 +97,9 @@ type Recording struct {
 	// file. It reaches no code path.
 	Note string `json:"note,omitempty"`
 	// Ops are the runner ops, in the order the server sent them. A replay
-	// serves them in that order, matching by op name and params.
+	// answers a request with the first unused op that matches by name and
+	// params: the order breaks ties between identical ops, it does not
+	// constrain the order of a caller's requests.
 	Ops []Op `json:"ops"`
 	// Ladder is the verification the session ended with; nil when the run
 	// stopped before the ladder.
@@ -202,6 +208,17 @@ func (r *Recording) validate() error {
 	return nil
 }
 
+// digestRe is the shape of every digest a recording states: lowercase hex,
+// 64 characters. out_mac is an HMAC-SHA256 over the result, params_hash a
+// SHA-256 of the proposal, nonce_hash a SHA-256 of the canary nonce. The
+// recordings were composed by hand once and carried 63- and 65-character
+// values; the shape check keeps a synthetic value from standing in for a
+// digest the protocol could have produced.
+var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// validDigest reports whether s has the shape of a protocol digest.
+func validDigest(s string) bool { return digestRe.MatchString(s) }
+
 // validate checks one op's outcome.
 func (o *Op) validate() error {
 	if strings.TrimSpace(o.Op) == "" {
@@ -211,6 +228,9 @@ func (o *Op) validate() error {
 	case "", protocol.TierT0, protocol.TierT1, protocol.TierT2, protocol.TierT3:
 	default:
 		return fmt.Errorf("tier %q is not a protocol tier", o.Tier)
+	}
+	if o.ParamsHash != "" && !validDigest(o.ParamsHash) {
+		return errors.New("params_hash is not a 64-character lowercase hex digest")
 	}
 	if o.Result != nil && o.Refusal != nil {
 		return errors.New("an op records a result or a refusal, never both")
@@ -227,6 +247,9 @@ func (o *Op) validate() error {
 		}
 		if res.OK && res.Receipt.OutMAC == "" {
 			return errors.New("an OK result carries a receipt.out_mac: it proves the result the runner sent")
+		}
+		if res.Receipt.OutMAC != "" && !validDigest(res.Receipt.OutMAC) {
+			return errors.New("result.receipt.out_mac is not a 64-character lowercase hex digest")
 		}
 	}
 	if ref := o.Refusal; ref != nil {
@@ -290,6 +313,9 @@ type Rung struct {
 func (l *Ladder) validate() error {
 	if strings.TrimSpace(l.PlanID) == "" {
 		return errors.New("plan_id is required")
+	}
+	if l.NonceHash != "" && !validDigest(l.NonceHash) {
+		return errors.New("nonce_hash is not a 64-character lowercase hex digest")
 	}
 	if len(l.Reads) == 0 && l.Verified == nil {
 		return errors.New("a ladder records reads, a verified event, or both")
@@ -357,9 +383,14 @@ func LoadDir(dir string) (map[string]*Recording, error) {
 }
 
 // Session replays one Recording as a protocol.RunnerExecutor. Every op is
-// served at most once, in the recording's order, and only for a request the
-// recording states (same op and params, see match): a second identical request is a miss, as it would be for a real runner that
-// already answered it. Session is safe for concurrent calls.
+// served at most once, and a request is answered by the first unused recorded
+// op with the same name and exactly the same params (and a tier no lower than
+// the recorded one). The recorded order breaks ties between identical ops; it
+// does not constrain the order of the caller's requests. Per-run values the
+// room mints for a live proposal (its ID and the proposal hash) are never
+// compared, see match. A second identical request is a miss, as it would be
+// for a real runner that already answered it. Session is safe for concurrent
+// calls.
 type Session struct {
 	rec  Recording
 	mu   sync.Mutex
@@ -447,10 +478,12 @@ func (s *Session) Execute(ctx context.Context, roomID string, req protocol.OpReq
 }
 
 // match returns the index of the recording that answers req, or -1 and why.
-// A recorded op answers only the request a real runner would have answered
-// the same way: the same op and exactly the same params, a tier no lower than
-// the recorded one, and the recorded proposal ID and params hash when the
-// recording has them. Anything else is a miss, never the recorded success.
+// It matches by structure, never by a per-run value: the same op, exactly the
+// same params, and a tier no lower than the recorded one. Proposal ID and
+// params hash are ignored on purpose: the room mints a new ULID for every
+// proposal and the hash covers that ID and the room (internal/room/
+// params_hash.go), so a live run can never repeat the recorded values. The
+// first unused op in recording order that matches answers the request.
 // The caller holds s.mu.
 func (s *Session) match(req protocol.OpRequest) (int, string) {
 	why := ""
@@ -463,10 +496,6 @@ func (s *Session) match(req protocol.OpRequest) (int, string) {
 			why = "the recorded params differ from the request's"
 		case tierRank(req.Tier) < tierRank(op.Tier):
 			why = fmt.Sprintf("the request's tier %q is below the recorded %q", req.Tier, op.Tier)
-		case op.ProposalID != "" && op.ProposalID != req.ProposalID:
-			why = "the request's proposal_id differs from the recorded one"
-		case op.ParamsHash != "" && op.ParamsHash != req.ParamsHash:
-			why = "the request's params_hash differs from the recorded one"
 		default:
 			return i, ""
 		}
@@ -573,6 +602,155 @@ func subset(want, got any) bool {
 	default:
 		return want == got
 	}
+}
+
+// Check is the outcome of Verify: how many recorded ops and ladder rungs the
+// replay used, and every way the recording failed to reproduce its own
+// session.
+type Check struct {
+	Ops      int      `json:"ops"`
+	Rungs    int      `json:"rungs"`
+	Failures []string `json:"failures,omitempty"`
+}
+
+// OK reports whether the recording replayed cleanly.
+func (c Check) OK() bool { return len(c.Failures) == 0 }
+
+// Verify replays rec the way a live setup run uses it and reports what did
+// not reproduce.
+//
+// Every recorded op goes through a fresh Session as a live-shaped request: the
+// same op, params, tier, class and step index, but a new request ID and, when
+// the op belongs to a proposal, a proposal ID and params hash this run
+// minted. Those are per-run values - the room mints a ULID per proposal and
+// hashes that ID and the room - so a live run can never send the recorded
+// ones; the session matches by structure. The answer must be the recorded
+// outcome: a result with the same OK, summary, data and receipt, or a refusal
+// with the same reason.
+//
+// The ladder then runs over the recorded reads through a fresh FakeLadder,
+// and its rungs must equal the recorded setup.verified rung for rung. A
+// recording with no ladder, no verified verdict, a read the ladder cannot
+// use, or one whose recomputed verdict differs fails: a broken session or
+// ladder must fail a setup scenario, never pass it silently.
+func Verify(ctx context.Context, rec *Recording) Check {
+	var c Check
+	if rec == nil {
+		c.Failures = append(c.Failures, "no recording")
+		return c
+	}
+	s := NewSession(*rec)
+	for i, op := range rec.Ops {
+		res, err := s.Execute(ctx, "live-room", liveRequest(op, i))
+		switch {
+		case op.Refusal != nil:
+			var refused *protocol.RefusedError
+			if !errors.As(err, &refused) {
+				c.Failures = append(c.Failures, fmt.Sprintf("ops[%d] %s: no recorded refusal: %v", i, op.Op, err))
+				continue
+			}
+			if refused.Refusal.Reason != op.Refusal.Reason {
+				c.Failures = append(c.Failures, fmt.Sprintf("ops[%d] %s: refused for %q, want %q", i, op.Op, refused.Refusal.Reason, op.Refusal.Reason))
+				continue
+			}
+		default:
+			if err != nil {
+				c.Failures = append(c.Failures, fmt.Sprintf("ops[%d] %s: %v", i, op.Op, err))
+				continue
+			}
+			if why := resultMismatch(*op.Result, res); why != "" {
+				c.Failures = append(c.Failures, fmt.Sprintf("ops[%d] %s: %s", i, op.Op, why))
+				continue
+			}
+		}
+		c.Ops++
+	}
+	if left := s.Remaining(); left > 0 {
+		c.Failures = append(c.Failures, fmt.Sprintf("%d recorded op(s) no live-shaped request used: %s", left, strings.Join(s.Unexecuted(), ", ")))
+	}
+	if rec.Ladder == nil {
+		c.Failures = append(c.Failures, "the session records no ladder")
+		return c
+	}
+	if rec.Ladder.Verified == nil {
+		c.Failures = append(c.Failures, "the ladder records no setup.verified verdict")
+		return c
+	}
+	sink := &MemorySink{}
+	ladder := NewFakeLadder(LadderConfig{
+		Source:     rec.SourceKind(),
+		Target:     rec.Target,
+		Sink:       rec.SinkKind(),
+		PlanID:     rec.Ladder.PlanID,
+		NonceHash:  rec.Ladder.NonceHash,
+		Table:      rec.Ladder.Table,
+		ExampleSQL: rec.Ladder.ExampleSQL,
+	}, NewRecordingReader(rec), sink)
+	got, err := ladder.Verify(ctx)
+	if err != nil {
+		c.Failures = append(c.Failures, "the ladder did not run: "+err.Error())
+		return c
+	}
+	c.Rungs = len(got.Rungs)
+	want := rec.Ladder.Verified.Rungs
+	if len(got.Rungs) != len(want) {
+		c.Failures = append(c.Failures, fmt.Sprintf("the ladder replayed %d rung(s), the recording says %d", len(got.Rungs), len(want)))
+		return c
+	}
+	for i := range want {
+		g := got.Rungs[i]
+		if g.Name != want[i].Name || g.OK != want[i].OK || g.Note != want[i].Note {
+			c.Failures = append(c.Failures, fmt.Sprintf("rung %d (%s) = ok %v %q, want ok %v %q",
+				i, want[i].Name, g.OK, g.Note, want[i].OK, want[i].Note))
+		}
+	}
+	return c
+}
+
+// liveRequest is the request a live run would send for o: the recorded op,
+// params, tier, class and step index, with a fresh request ID and, for a
+// proposal op, a fresh proposal ID and params hash. The recording's own
+// per-run values are never reused; match ignores both.
+func liveRequest(op Op, i int) protocol.OpRequest {
+	req := op.Request()
+	req.ID = fmt.Sprintf("op_live_%d", i)
+	if op.ProposalID != "" {
+		// A ULID-shaped id ("p_" + 26 characters) no recording can hold.
+		req.ProposalID = fmt.Sprintf("p_live%022d", i)
+	}
+	if op.ParamsHash != "" {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s/live/%d", op.Op, i)))
+		req.ParamsHash = hex.EncodeToString(sum[:])
+	}
+	return req
+}
+
+// resultMismatch says how got differs from the recorded want, "" when they
+// agree. The request's ID is the only field the replay changes.
+func resultMismatch(want, got protocol.OpResult) string {
+	switch {
+	case want.OK != got.OK:
+		return fmt.Sprintf("ok = %v, want %v", got.OK, want.OK)
+	case want.Summary != got.Summary:
+		return fmt.Sprintf("summary = %q, want %q", got.Summary, want.Summary)
+	case !paramsEqual(want.Data, got.Data):
+		return "data differs from the recorded data"
+	case want.Truncated != got.Truncated:
+		return fmt.Sprintf("truncated = %v, want %v", got.Truncated, want.Truncated)
+	case want.Redacted != got.Redacted:
+		return fmt.Sprintf("redacted = %v, want %v", got.Redacted, want.Redacted)
+	case want.Receipt.Kind != got.Receipt.Kind:
+		return fmt.Sprintf("receipt.kind = %q, want %q", got.Receipt.Kind, want.Receipt.Kind)
+	case want.Receipt.Target != got.Receipt.Target:
+		return fmt.Sprintf("receipt.target = %q, want %q", got.Receipt.Target, want.Receipt.Target)
+	case want.Receipt.ExitCode != got.Receipt.ExitCode:
+		return fmt.Sprintf("receipt.exit_code = %d, want %d", got.Receipt.ExitCode, want.Receipt.ExitCode)
+	case !slices.Equal(want.Receipt.Argv, got.Receipt.Argv):
+		return "receipt.argv differs from the recorded argv"
+	case want.Receipt.OutMAC != got.Receipt.OutMAC:
+		return "receipt.out_mac differs from the recorded one"
+	}
+	return ""
 }
 
 // RecordingReader serves a Recording's ladder reads as a Reader: by tool

@@ -230,6 +230,7 @@ func TestDemoHandlesEveryHumanInputKind(t *testing.T) {
 		"proposal_staged":   true, // X8: the demo stack declares no staging, so the scripted story never stages
 		"pr_merged":         true, // Q7: the demo registers no forge, so the scripted story never opens a fix PR
 		"pr_closed":         true, // Q7: same
+		"setup_verified":    true, // U1-26: the demo opens no setup room, so no ladder ever runs
 	}
 
 	kinds := contractKinds(t)

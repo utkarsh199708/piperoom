@@ -301,7 +301,12 @@ runner, a name for a secret, a hash for the canary nonce.
   tier, layer, verify?}]}]}`: `target`, `tier` and `layer` are filled by the server from the resolved endpoint, never
   from the model; a proposal whose step is not in the current plan is refused (`agent.ErrNotInPlan`, `400
   not_in_plan`). `setup.blocked {reason: attempts | steps | wall_clock | budget | runner_lost | refused, step_index?,
-  question}`: a bound stopped the run and the agent is idle until a steer.
+  question}`: a bound stopped the run and the agent is idle until a steer. `setup.verification_requested {}` (the
+  agent's `setup_request_verification`): asks the server's ladder runner to verify the room's current plan; a request,
+  never a result, with an empty payload (the store stamps the time; the plan is the current one when the event lands).
+  Its outcome is `setup.verified`, which reaches the agent as the inbox input `setup_verified` (`agent.HumanInput`):
+  `seq` is the `setup.verified` event, `ok` is true when rungs 1 to 7 are green, `text` is the server's rendering of
+  the rungs (untrusted data, wrapped by the agent); delivered only in a setup room and only for the current plan.
 - **Driver clicks (actor: the driver, also in `by`).** `setup.target_registered {kind, address, class, by}`,
   `setup.pipeline_extended {add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?, by}`,
   `setup.maintenance_window {start, end, by}`. `setup.target_classed {target, class, reason, by: "server" |

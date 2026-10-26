@@ -4,7 +4,7 @@
   "target": "compose",
   "sink": "none",
   "recorded_at": "2026-10-25T09:40:00Z",
-  "note": "Composed from the compose driver's own refusal text (validator.go, RuleSecret) and the clean template's render, on the fixed clock of the U1-19 setup scenarios. No Docker session: the session that wrote the scenario had no stack. Re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "note": "Composed from the compose driver's own refusal text (validator.go, RuleSecret) and the clean template's render, on the fixed clock of the U1-19 setup scenarios. No Docker session: the session that wrote the scenario had no stack. Re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
   "ops": [
     {
       "op": "env_detect",
@@ -27,30 +27,22 @@
           "exit_code": 0,
           "at": "2026-10-25T09:40:01Z",
           "took_ms": 41,
-          "out_mac": "3b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f7"
+          "out_mac": "aaccdfeb2ae605b81c21aabf6093e839102a2f605428e6dd2f3658681359f6bb"
         }
       }
     },
     {
-      "op": "compose_write",
+      "op": "compose_up",
       "tier": "T2",
       "class": "local",
       "proposal_id": "p_setup_1",
       "step_index": 0,
-      "params_hash": "d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6",
-      "params": {"templates": ["postgres"], "project": "piperoom-orders", "file": "compose.yaml"},
+      "params_hash": "a1ac2d6985208739507d5f43197c9b7ad8cfdb10410d9802c57eaa0fee54f8c4",
+      "params": {"services": ["postgres"]},
       "result": {
         "ok": false,
-        "summary": "refused compose_write: compose: secret: service \"postgres\": environment \"POSTGRES_PASSWORD\" carries a credential value in plain text; use a ${secret:name} reference in the env file",
-        "data": {"rule": "secret", "service": "postgres", "key": "POSTGRES_PASSWORD"},
-        "receipt": {
-          "kind": "file",
-          "target": "compose.yaml",
-          "exit_code": 1,
-          "at": "2026-10-25T09:40:12Z",
-          "took_ms": 0,
-          "out_mac": "7c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f4"
-        }
+        "summary": "refused compose_up: compose: secret: service \"postgres\": environment \"POSTGRES_PASSWORD\" carries a credential value in plain text; use a ${secret:name} reference in the env file",
+        "data": {"rule": "secret", "service": "postgres", "key": "POSTGRES_PASSWORD"}
       }
     },
     {
@@ -59,7 +51,7 @@
       "class": "local",
       "proposal_id": "p_setup_2",
       "step_index": 0,
-      "params_hash": "a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7",
+      "params_hash": "9c028fd8fca9b8894d24b3d295f98d7417f8635ea42193358c3323f2eceef3be",
       "params": {
         "file": ".env",
         "entries": {
@@ -94,7 +86,7 @@
       "class": "local",
       "proposal_id": "p_setup_3",
       "step_index": 0,
-      "params_hash": "e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4",
+      "params_hash": "8e8864dddad7806ff0d314674774fa144fcf3229ab26f350dd1fffff92b100c1",
       "params": {"templates": ["postgres"], "project": "piperoom-orders", "file": "compose.yaml"},
       "result": {
         "ok": true,
@@ -113,7 +105,7 @@
           "exit_code": 0,
           "at": "2026-10-25T09:40:47Z",
           "took_ms": 6,
-          "out_mac": "b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6"
+          "out_mac": "0524d8fcc36238dfeb41bd742000f6fd7eca17847046437450df1ff89c3319db"
         }
       }
     },
@@ -123,7 +115,7 @@
       "class": "local",
       "proposal_id": "p_setup_4",
       "step_index": 0,
-      "params_hash": "012b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9",
+      "params_hash": "3b9d88acbc9f6d5606f47769bab6bee20a1ce6258c40bad6c4c11124e912c020",
       "params": {"services": ["postgres"]},
       "result": {
         "ok": true,

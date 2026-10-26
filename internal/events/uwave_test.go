@@ -130,7 +130,7 @@ func TestSetupEventTypesAreDistinct(t *testing.T) {
 		events.SetupPairing, events.SetupRunnerAttached, events.SetupRunnerLost, events.SetupRunnerRefused,
 		events.SetupPlan, events.SetupTargetRegistered, events.SetupTargetClassed, events.SetupPipelineExtended,
 		events.SetupSecretSet, events.SetupCredentialsRegistered, events.SetupMaintenanceWindow, events.SetupVerified,
-		events.SetupAwaitingChange, events.SetupBlocked,
+		events.SetupAwaitingChange, events.SetupBlocked, events.SetupVerificationRequested,
 	}
 	seen := map[events.Type]bool{}
 	for _, ty := range types {
@@ -141,6 +141,9 @@ func TestSetupEventTypesAreDistinct(t *testing.T) {
 			t.Errorf("%q twice", ty)
 		}
 		seen[ty] = true
+	}
+	if events.SetupVerificationRequested != "setup.verification_requested" {
+		t.Errorf("SetupVerificationRequested = %q", events.SetupVerificationRequested)
 	}
 	if events.PipelineRegistered != "pipeline.registered" {
 		t.Errorf("PipelineRegistered = %q", events.PipelineRegistered)

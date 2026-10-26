@@ -611,6 +611,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		AutoApproveDelay:  s.autoDelay,
 		Limits:            limits,
 		Setup:             s.setupCfg,
+		SetupStack:        setupStackBuilder(cfg, s.setupCfg.Enabled, s.writeOn),
 		SetupLocal:        setupListenLoopback(cfg.HTTPAddr),
 		SetupOwnAddrs:     setupOwnAddrs(cfg.HTTPAddr, log),
 		OnRoomOpened:      slack.onRoomOpened(),

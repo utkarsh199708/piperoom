@@ -35,8 +35,20 @@ func (s *Service) toolsFor(pipelineID string) *tools.Registry {
 	return tools.NewRegistry()
 }
 
-// actionsFor returns the write actions of the pipeline's own client set.
+// actionsFor returns the write actions of the pipeline's own client set, or
+// the setup stack's for the pipeline an open setup room sets up
+// (setup_agent.go), so a setup proposal is validated, routed, previewed and
+// executed by the action the setup run proposed.
 func (s *Service) actionsFor(pipelineID string) *actions.Registry {
+	if acts, ok := s.setupActionsFor(pipelineID); ok {
+		return acts
+	}
+	return s.pipelineActionsFor(pipelineID)
+}
+
+// pipelineActionsFor is actionsFor without the setup stack: the actions an
+// incident room's agent run is given, unchanged by setup rooms.
+func (s *Service) pipelineActionsFor(pipelineID string) *actions.Registry {
 	if s.stackFor == nil {
 		return s.actions
 	}
