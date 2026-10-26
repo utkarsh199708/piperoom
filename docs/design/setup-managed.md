@@ -1,7 +1,7 @@
 # Setup on managed clouds: MSK Connect, Confluent Cloud, Aiven (U13-0; main @ `2681f65b`, 2026-10-19; rev 3 after the #660 reviews)
 
 Owner: LEAD-ARCH. Parent design: `docs/design/setup-agent.md`; plan: `docs/product/setup-2026-10.md` (§4 row U13,
-§7 items 1 and 6); board: `tasks/U-board.md` rows U13-0 to U13-R; the earlier MSK design `docs/design/msk.md`
+§7 items 1 and 6); Jira KAN-5 tickets U13-0 to U13-R; the earlier MSK design `docs/design/msk.md`
 (rev 4, read-only scope; its PR 1, the shared `aws.Config` and `AWS_MSK_IAM`, is merged in `internal/wiring/aws.go`
 and `internal/clients/netsec`; its PR 2, `CONNECT_KIND=msk` and `internal/clients/mskconnect`, is **not** merged:
 `internal/clients/` has no `mskconnect` and `config.go` has no `CONNECT_KIND`). The contracts are the merged U0

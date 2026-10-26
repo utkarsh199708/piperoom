@@ -2,7 +2,7 @@
 # it, in its own directory, but the Connect worker was already running and had scanned its plugin
 # path before the files existed, so the class is still unknown to it. The evidence is in the
 # container's own log, not in the executor's one-line error. The label names the log line class
-# (tasks/U-board.md row U5c, step 5). Format: evals/README.md (C6).
+# (row U5c, Jira KAN-366, step 5). Format: evals/README.md (C6).
 #
 # RECORDED: NO. Every summary and data payload is the exact output of the real connect_*, dbtools
 # and kafkatools code from main, composed by hand from those tools' format strings (the

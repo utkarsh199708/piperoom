@@ -1,7 +1,7 @@
 # Set up a new pipeline with the setup runner
 
 > [!NOTE]
-> Preview. The setup-mode agent is landing in the U wave (Jira epic KAN-5, board `tasks/U-board.md`). The setup
+> Preview. The setup-mode agent is landing in the U wave (Jira epic KAN-5). The setup
 > room, the typed operations the runner executes and the approval model are described in
 > [`docs/design/setup-agent.md`](../design/setup-agent.md).
 

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -92,6 +93,18 @@ func dedupeActions(all []actions.Action) []actions.Action {
 	return out
 }
 
+// ownersNow returns the current owners config: the Deps.OwnersNow snapshot
+// when one is wired (a Live holder; the registration reloads it), the
+// process-start set otherwise. Nil means no owners config is loaded.
+func (s *Service) ownersNow() *owners.Owners {
+	if s.ownersNowFn != nil {
+		if o := s.ownersNowFn(); o != nil {
+			return o
+		}
+	}
+	return s.owners
+}
+
 // TenancyOn reports whether owners.yaml has a tenants: block. Without one
 // every signed-in user sees every room.
 func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
@@ -99,7 +112,9 @@ func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
 // CanSeePipeline reports whether the person may see rooms of the pipeline:
 // always with the filter off; with it on, the solo user sees every tenant and
 // everyone else the tenants they belong to (owners.InTenant). A pipeline that
-// owners.yaml does not define is in no tenant.
+// owners.yaml does not define is in no tenant. The check reads the current
+// owners set (ownersNow): a pipeline another room just registered is visible
+// to its tenant at once, not only after a restart (U1-14).
 func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if !s.TenancyOn() {
 		return true
@@ -107,7 +122,7 @@ func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if s.IsSolo(u.ID) {
 		return true
 	}
-	return s.owners.CanSeePipeline(pipelineID, u.ID, u.Groups)
+	return s.ownersNow().CanSeePipeline(pipelineID, u.ID, u.Groups)
 }
 
 // errHidden is the answer for an object outside the person's tenants: the

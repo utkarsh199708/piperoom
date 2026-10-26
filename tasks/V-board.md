@@ -11,7 +11,7 @@ one or two sessions (target < 600 changed lines, §6 of `AGENTS.md`).
 - **Model**: every row runs on Opus 5.5, cloud rows included (the owner's standing instruction for the Q and U
   waves, kept here). The ship workflow builds every row on Opus 5.5 anyway (`AGENTS.md` §6a).
 - **Days**: one agent's working days including tests and review fixes.
-- **After**: rows that must be merged first. P rows by their `tasks/P-board.md` ID; U rows by `tasks/U-board.md`.
+- **After**: rows that must be merged first. P rows by their `tasks/P-board.md` ID; U rows by their Jira KAN-5 ticket.
 
 **Timing: code rows start after P3 closes.** V0 is After **every P3 row still open** on `tasks/P-board.md` on
 2026-10-19: P3c, P3d-1, P3d-2, P3e, P3f, P3g-1r, P3g-1s-a, P3g-1s, P3g-1c and P3-W2e. Every other V row is After V0,
