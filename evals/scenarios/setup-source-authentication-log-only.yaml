@@ -70,7 +70,8 @@ inputs:
     text: 'Task 0 returned to FAILED after restart; no further detail was returned.'
 expect:
   root_cause:
-    - [password, authentication, failed]
+    - [password]
+    - [authentication, authenticate]
   first_failing_layer: kafka-connect
   root_cause_layer: postgres
   expected_facts:

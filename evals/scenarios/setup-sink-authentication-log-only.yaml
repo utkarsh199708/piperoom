@@ -70,7 +70,8 @@ inputs:
     text: 'Task 0 returned to FAILED after restart; no further detail was returned.'
 expect:
   root_cause:
-    - [warehouse, login, rejected]
+    - [login, credential, credentials]
+    - [warehouse, snowflake]
   first_failing_layer: kafka-connect
   root_cause_layer: warehouse
   expected_facts:

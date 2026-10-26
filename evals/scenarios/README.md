@@ -721,7 +721,8 @@ action result carry no exception detail.
 | `setup/sink-authentication-log-only` | `canary_event` | `secret_set` (T1) | The warehouse rejects the sink service account |
 
 Both files set `setup.source_kind: postgres` and `setup.target: compose`, which keeps them grouped
-with setup runs. The current eval harness exposes the CDC `connect_worker_logs` tool and the failed
+with setup runs, and each has a composed runner session in `evals/setup/recordings` (the failed task
+restart of its input and a ladder whose canary check is red), as every setup-labelled scenario needs. The current eval harness exposes the CDC `connect_worker_logs` tool and the failed
 step re-plan read, but not the setup runner's U5a `container_logs`/`journal_tail` reads or its
 runner operations. These scenarios therefore validate the existing worker-log re-plan path; they
 do not exercise the setup-mode container log path. `secret_set` is a runner op rather than a

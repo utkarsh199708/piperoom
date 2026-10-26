@@ -512,11 +512,11 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	},
 	// U5c: the log-only setup scenarios. Only connect_worker_logs carries the cause.
 	"setup/sink-authentication-log-only": {
-		good:  "The kafka-connect sink connector wh-orders-sink is FAILED, so the setup's final canary never reached analytics.orders. connect_worker_logs shows why at 09:38:20: SnowflakeSQLException, warehouse login rejected for the service account analytics_loader. The connector is the first failing component and the warehouse credential is the root cause; a task restart cannot fix it. The fix: secret_set with the service account's current password (T1), then connect_restart_task for task 0.",
+		good:  "The kafka-connect sink connector wh-orders-sink is FAILED, so the setup's final canary is missing from analytics.orders. connect_worker_logs shows why at 09:38:20: SnowflakeSQLException, warehouse login rejected for the service account analytics_loader. The connector is the first failing component and the warehouse credential is the root cause; replacing the credential comes before any task restart. The fix: secret_set with the service account's current password (T1), then connect_restart_task for task 0.",
 		wrong: "The Schema Registry rejected the orders value schema, so the sink cannot deserialize records; set the subject's compatibility to NONE.",
 	},
 	"setup/source-authentication-log-only": {
-		good:  "The kafka-connect source connector pg-orders-connector is FAILED, so the setup's final canary was never captured. connect_worker_logs shows why at 09:38:20: PSQLException, FATAL: password authentication failed for user piperoom_cdc. The connector is the first failing component and the source credential is the root cause; a task restart cannot fix it. The fix: secret_set with piperoom_cdc's current password (T1), then connect_restart_task for task 0.",
+		good:  "The kafka-connect source connector pg-orders-connector is FAILED, so the setup's final canary is missing from the topic. connect_worker_logs shows why at 09:38:20: PSQLException, FATAL: password authentication failed for user piperoom_cdc. The connector is the first failing component and the Postgres source's credential for piperoom_cdc is the root cause; replacing the credential comes before any task restart. The fix: secret_set with piperoom_cdc's current password (T1), then connect_restart_task for task 0.",
 		wrong: "The replication slot debezium_orders was dropped on the source, so the connector has nothing to stream from; recreate the slot.",
 	},
 	"setup/wal-level-replica": {
