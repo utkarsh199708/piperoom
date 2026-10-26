@@ -54,7 +54,7 @@ nothing checks group membership). Reading the binlog stream ourselves (Debezium 
 replication connection, so it never needs `REPLICATION SLAVE`). Reconcile, TOAST, placeholder and migration-history
 readers on MySQL (their tools say `ErrNotSupported`; follow-up rows only if the evals ask for them). A
 `what_changed` source for the schema history topic (D6). Setup of a MySQL source: that is U2a, which builds on the
-Q8 client (`tasks/U-board.md`). `SET PERSIST` of server settings: no `AlterSystem` on MySQL in this wave (U2a says
+Q8 client (Jira KAN-5). `SET PERSIST` of server settings: no `AlterSystem` on MySQL in this wave (U2a says
 the same).
 
 ## 3. Source-neutral and MySQL-specific

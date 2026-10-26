@@ -44,8 +44,14 @@ itself; the row named in it applies it.
     (after W4t, KAN-509) excludes pending scenarios from `n_scenarios`.
   - Amended 2026-10-24: U1-10 landed (#1012) and released the `U1-10` marker, but the harness still runs the pair
     as CDC rooms. U1-29 (KAN-550, #1048) re-parks the pair under `pending_harness: setup-room-eval`, whose condition
-    is a top-level `SetupRoomAlert` in package `evals`. The C6 hookup above is row U1-30 on `tasks/U-board.md`; it
-    must declare exactly `SetupRoomAlert` so the guard releases the pair when it lands.
+    is a top-level `SetupRoomAlert` in package `evals`. The C6 hookup above is row U1-30 (no Jira issue yet; the
+    row is kept here since the U-board was retired); it must declare exactly `SetupRoomAlert` so the guard releases
+    the pair when it lands.
+  - Row U1-30 (C6, Opus 5.5, 1 day; after U1-29 and U1-25): `evals.SetupRoomAlert` builds the setup-mode `Alert`
+    (`Mode = setup`, the scenario's `setup` block as the request) and the harness runs a setup scenario's episode
+    against its U1-20 replay session, so the agent gets the setup tools. Done when the `setup-room-eval` marker on
+    the setup/compose pair is flagged for removal and removed in the same PR, both scenarios score on a recorded run,
+    and incident scenarios are unchanged.
 
   Ruled 2026-10-23 and amended the same day (leads, owner-delegated).
 - **R7 — C6 `on_error` facts.** A fact is not established from an errored result: `on_error` facts stay unsupported.

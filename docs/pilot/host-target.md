@@ -8,7 +8,7 @@ it, and what it does not do.
 Checked against `main` at `7f835196`. Every claim names the file and line it comes from (`path:line`), or a section of
 a design document. If a file changes, update the claim and its citation in the same PR. Where the repository does not
 say something, this page says so (section 9) instead of guessing. Nothing here was run on a real machine: the real runs
-(row U8-R, `tasks/U-board.md:180`) have no write-up in the tree.
+(row U8-R, Jira KAN-319) have no write-up in the tree.
 
 ## Status on this release: written, not yet wired
 
@@ -293,7 +293,7 @@ standalone, the offsets file (`internal/setup/targets/host/properties.go:176-180
 
 There is **no rollback op for any host step** on this release: the op interface has no `Rollback` method
 (`internal/setup/ops/op.go:85-107`), the design lists one for a later shape (`docs/design/setup-agent.md:271`), and the
-"roll back this setup" room row is U1-14b (`tasks/U-board.md:102`). What exists:
+"roll back this setup" room row is U1-14b (Jira KAN-323). What exists:
 
 | Step | Undo that the code gives | Source |
 |---|---|---|
@@ -352,7 +352,7 @@ check them on your system:
 - Which **Connect configurations are affected** by the Windows virtual account authenticating as the machine account: the
   code comment states the fact (`internal/setup/targets/host/winsvc.go:97-98`) and nothing more.
 - Whether **`service_status` on Windows works without elevation**: inferred from `open()`, not run.
-- **Real-machine behaviour** of either OS: row U8-R has no write-up in the tree (`tasks/U-board.md:180`). The Linux
+- **Real-machine behaviour** of either OS: row U8-R (Jira KAN-319) has no write-up in the tree. The Linux
   integration test (`internal/setup/targets/host/integration_test.go:41-44`) and the Windows-only unit tests
   (`internal/setup/targets/host/acl_windows_test.go`, `internal/setup/targets/host/child_windows_test.go`) exist; I did not
   run them.
