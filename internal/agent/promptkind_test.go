@@ -150,10 +150,28 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // it": not "reports", since every scoped list reports what it hides as not
 // part of the pipeline), and the pause bullet's "cite it", "name the pause
 // as the incident" and "above" (the PR lists each word).
+// W4i (KAN-507) moved it a fifteenth time, on purpose, for evals run
+// 39994729845 and the audit of main run 40076876491: a negative claim needs
+// its read. Rule 1, beside the competing-explanation clause, says "confirm
+// a component with its own read before blaming or clearing it"
+// (sasl-credential-rotated cleared the ACLs without reading them), and rule
+// 3 keeps its general clause as "assert nothing tools didn't return"; the
+// restart bullet restarts only a FAILED task, never an UNASSIGNED one, in
+// the proposal removing its cause (blocked-slot); the offsets note replays
+// missing records above the log start kafka_topic_offsets reads, else
+// snapshots them (rows-lost-after-retention). Word-neutral (1353 with write
+// mode off): rule 3's "a tool" became "tools" and the resume check lost
+// "that" after "confirm" (the PR lists each word).
+// W4m (KAN-508) moved it a sixteenth time, on purpose, for
+// consumer-skipped-range: after a verified recovery the final hypothesis
+// said "Recovered: ... nothing more to fix" and dropped the cause and its
+// citations. Rule 7's healthy verdict now says "keep any earlier fault,
+// cited, in past tense" for "put any earlier fault in the past tense",
+// word for word (8 for 8: still 1352 words, 1353 with write mode off).
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "8bdf4b6864d05d51c564e341356b62b78b78e284573a501ed8ccba4935e40b37"
+const cdcPromptSHA256 = "26fda51a64616d85ef75d2884c62096169e9e7541dbf128d5fa3d148ef543106"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
@@ -164,8 +182,11 @@ const cdcPromptSHA256 = "8bdf4b6864d05d51c564e341356b62b78b78e284573a501ed8ccba4
 // listed fix, the restart and compatibility bullets and the offsets note,
 // word-neutral: still 1335 words), KAN-515 (the hold rule, 1353 words), and
 // W4g (rule 4's root-cause component and layer form, rule 5's clause,
-// word-neutral: still 1353 words).
-const cdcPromptWriteOffSHA256 = "af85e6eb6b57d6e10a119944b151f46f2e449de56b863d36456cc2871151023a"
+// word-neutral: still 1353 words), and W4i (the negative claim's read in
+// rule 1, the restart bullet and the offsets note, word-neutral: still 1353
+// words), and W4m (rule 7's earlier fault kept cited, word-neutral: still
+// 1353 words).
+const cdcPromptWriteOffSHA256 = "42b45850b815305e13a872232ac8ffcfa4ca4f30e4b5e6ae65287e7efb9f0a01"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

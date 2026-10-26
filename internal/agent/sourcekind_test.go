@@ -259,10 +259,18 @@ func TestRunnerRefusesMixedSourceRegistry(t *testing.T) {
 // fix round (rule 4's "correctly refusing" and <layer> <component> form,
 // rule 5's steer and tool clause) is word-neutral. With KAN-515's hold rule
 // the MySQL prompt is the CDC prompt's size: 1353 words with write mode off,
-// 1352 with it on.
+// 1352 with it on. W4i moved them with the shared method and fixes (rule 1's
+// negative claim, rule 3, the restart bullet, the offsets note); the replacer
+// follows the restart bullet and the resume check's dropped "that", so the
+// MySQL prompt stays word-neutral too. W4m moved them with the shared rule
+// 7 ("keep any earlier fault, cited, in past tense") and R21's schema
+// history bullet: snapshot.mode recovery comes "after checking", not "only
+// if", no captured table's schema changed since the stored position, so the
+// agent reads the history instead of asking and the safety check stays
+// (2 words for 2: still 1352 and 1353 words).
 const (
-	mysqlPromptSHA256         = "163cd226d3b84f5ab0a0bb48f4792b0947f6b25ec06536b92b8c58ca0ce5a59e"
-	mysqlPromptWriteOffSHA256 = "9c3e53aad9ff945839ffa23139423e689389f885579d17172a6ef8d4d0c199b0"
+	mysqlPromptSHA256         = "a9cd2f06968912dc780a0a8726ea016a980b9385da2c0e01774727219ea8da0b"
+	mysqlPromptWriteOffSHA256 = "efa173fc13bf776757599e9fc3834698a8b35cfb072248619764516ed440a62a"
 )
 
 func TestSystemPromptSnapshotMySQL(t *testing.T) {

@@ -311,9 +311,12 @@ expect:
       tool: connect_status
       match: [task 0 failed, read binlog, no longer available on the server]
       required: true
+    # W4 ruling R20 (R9): mysql_binlog_status establishes the stored position (its last line prints
+    # "stored binlog.000003:4523", tokens stored binlog 000003 4523), so connect_source_offsets is no longer
+    # an evidence tool.
     - id: f_stored_position
-      tool: connect_source_offsets
-      match: [file binlog 000003, pos 4523]
+      tool: mysql_binlog_status
+      match: [stored binlog 000003 4523]
       required: true
     - id: f_oldest_binlog
       tool: pipeline_map
@@ -328,7 +331,7 @@ expect:
   claims:
     - about: root_cause
       facts: [f_task_failed_binlog, f_stored_position, f_oldest_binlog, f_binlog_purged]
-  evidence_tools: [connect_status, connect_source_offsets, mysql_binlog_status]
+  evidence_tools: [connect_status, mysql_binlog_status]
   fix: [[connect_stop_connector], [connect_reset_source_offsets]]
   fix_targets:
     connect_stop_connector: {connector: orders-mysql}

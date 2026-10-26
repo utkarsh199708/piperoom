@@ -1,7 +1,7 @@
 # C7 setup scenario (U4d): CDC is still on for the SQL Server database, but the captured table
 # dbo.orders lost its capture instance after the setup run, so its changes reach no change table
 # and Debezium streams nothing for it, while the canary table (its own capture instance) still
-# flows. The label names the failing check and the fixing op with its tier (tasks/U-board.md rows
+# flows. The label names the failing check and the fixing op with its tier (Jira KAN-5 rows
 # U4a, U4b and U4d, step 4). Format: evals/README.md (C6). Built on `devctl setup-break
 # cdc-not-enabled-table` (dev/mssql/README.md, cmd/devctl/setupbreaks_mssql.go, U4c).
 #

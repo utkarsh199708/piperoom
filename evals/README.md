@@ -1019,9 +1019,10 @@ the MySQL actions; `forbidden_actions` may still name a `pg_*` action.
 | connector config (class, `snapshot.mode`, the pipeline's other `database.server.id`s) | as for the P3 actions (`connect_config` data, `resources.connector_configs`) |
 
 Without a `mysql_binlog_status` recording a `database.server.id` step fails Validate: the id cannot be checked
-against the server's. Each scenario row carries its room's `source_kind`, and the
-report's per-source pass rate (`by_source` in the JSON, the "by source" line under the table; runs are pooled
-within a kind) groups the MySQL and Postgres rooms; a row with no `source_kind` reads as postgres.
+against the server's. Incident scenario rows carry their room's `source_kind` for tool selection, but are
+excluded from the report's setup-only per-source pass rate (`by_source` in the JSON, the "by source" line
+under the table). Those rates pool setup runs by source kind, so setup outcomes are not mixed with CDC incident
+runs. A legacy report row with no source kind still reads as postgres.
 
 ### Pull-request fixes: the forge replay and "right files changed" (Q7j)
 

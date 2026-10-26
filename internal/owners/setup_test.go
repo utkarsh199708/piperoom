@@ -47,6 +47,8 @@ func TestSetupBlockRefused(t *testing.T) {
 		{"empty target", "{target: '', watched_by: local}", "setup: target is required"},
 		{"bad watched_by", "{target: compose, watched_by: team}", "watched_by"},
 		{"empty watched_by", "{target: compose}", "watched_by"},
+		{"unknown unreachable layer", "{target: strimzi, watched_by: server, unreachable_layers: [nope]}", "unreachable_layers"},
+		{"repeated unreachable layer", "{target: strimzi, watched_by: server, unreachable_layers: [kafka-connect, kafka-connect]}", "listed twice"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,5 +123,17 @@ func TestTenantAdminsReposRefused(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestSetupUnreachableLayers(t *testing.T) {
+	o, err := Load(writeTemp(t, setupBlockYAML("{target: strimzi, watched_by: server, unreachable_layers: [kafka-connect]}")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := o.Pipeline("orders")
+	s, _ := p.Setup()
+	if !slices.Equal(s.UnreachableLayers, []string{"kafka-connect"}) {
+		t.Fatalf("UnreachableLayers = %v", s.UnreachableLayers)
 	}
 }

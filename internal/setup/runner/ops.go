@@ -221,11 +221,17 @@ func (r *Runner) runOp(ctx, opCtx context.Context, cancel context.CancelFunc, re
 	}
 
 	// Unknown op and the tier floor come first: nothing below the op's floor
-	// runs, and an op neither the catalogue nor the runner knows is refused
-	// outright.
-	floor, ok := r.floorOf(req.Op)
+	// (raised by its params' tier, ParamFloorer) runs, and an op neither the
+	// catalogue nor the runner knows is refused outright.
+	floor, ok, ferr := r.floorForReq(req)
 	if !ok {
 		r.refuse(ctx, req, protocol.RefuseUnknownOp)
+		return
+	}
+	if ferr != nil {
+		// The params' tier cannot be computed: refused rather than run at
+		// the op's fixed floor, which may be lower than the step needs.
+		r.refuse(ctx, req, protocol.RefuseSchema)
 		return
 	}
 	if tierRank(req.Tier) < tierRank(floor) {

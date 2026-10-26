@@ -25,7 +25,8 @@ type Config struct {
 	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source database (postgres:// or mysql://, matching source_kind, Q8) as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
-	ConnectURL        string // CONNECT_URL
+	ConnectURL        string // CONNECT_URL (CONNECT_KIND=rest only)
+	ConnectKind       string // CONNECT_KIND: rest (default) | msk | confluent | aiven (ParseConnectKind; no caller yet, inert until wiring and cmd/discover call it: msk.md PR 2, U13)
 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
@@ -313,6 +314,12 @@ type Config struct {
 	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 
+	// HypothesisGuard is PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+	// (default log). The agent's checks that refuse a "nothing to fix" verdict
+	// while the watcher still fires and a "ruled out" claim no cited read
+	// supports; log only records what would be refused. (H1)
+	HypothesisGuard string // PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+
 	// Autonomy is PIPEROOM_AUTONOMY: the AU wave's earned auto-approve.
 	// ParseAutonomy types it; write mode off makes it off whatever it says. (AU1)
 	Autonomy string // PIPEROOM_AUTONOMY: on (default) | off
@@ -355,6 +362,7 @@ func Load() Config {
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
+		ConnectKind:       get("CONNECT_KIND", DefaultConnectKind),
 		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
@@ -524,7 +532,9 @@ func Load() Config {
 		FakeAgent: get("PIPEROOM_FAKE_AGENT", ""),
 
 		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
-		Autonomy:  get("PIPEROOM_AUTONOMY", "on"),
+
+		HypothesisGuard: get("PIPEROOM_HYPOTHESIS_GUARD", DefaultHypothesisGuard),
+		Autonomy:        get("PIPEROOM_AUTONOMY", "on"),
 
 		SetupEnabled:      get("PIPEROOM_SETUP_ENABLED", "off"),
 		SetupProdPatterns: get("PIPEROOM_SETUP_PROD_PATTERNS", ""),
@@ -634,6 +644,25 @@ func ParseWriteMode(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_WRITE_MODE=%q: want off or on", c.WriteMode)
+}
+
+// DefaultHypothesisGuard is the guard mode when PIPEROOM_HYPOTHESIS_GUARD is
+// unset: check and log, never refuse, until a pilot week of logs says enforce
+// is safe. (H1)
+const DefaultHypothesisGuard = "log"
+
+// ParseHypothesisGuard validates PIPEROOM_HYPOTHESIS_GUARD. Empty is the
+// default; off, log and enforce are accepted; anything else is an error naming
+// the variable, so a typo stops the start instead of silently turning the guard
+// off or on. (H1)
+func ParseHypothesisGuard(c Config) (string, error) {
+	switch v := strings.TrimSpace(c.HypothesisGuard); v {
+	case "":
+		return DefaultHypothesisGuard, nil
+	case "off", "log", "enforce":
+		return v, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_HYPOTHESIS_GUARD=%q: want off, log or enforce", c.HypothesisGuard)
 }
 
 // FakeAgentScripted is the only accepted value of PIPEROOM_FAKE_AGENT.
@@ -2602,4 +2631,51 @@ func ParseAutonomy(c Config) (bool, error) {
 		return false, err
 	}
 	return on && write, nil
+}
+
+// Connect backend kinds (CONNECT_KIND). Confluent and Aiven clients get their
+// credentials per pipeline from owners.yaml connections: (docs/design/tenancy.md
+// §3.2); there are no server-wide CONFLUENT_* variables.
+const (
+	DefaultConnectKind   = "rest"
+	ConnectKindREST      = "rest"
+	ConnectKindMSK       = "msk"
+	ConnectKindConfluent = "confluent"
+	ConnectKindAiven     = "aiven"
+)
+
+// ParseConnectKind validates CONNECT_KIND and the settings that go with it.
+// Empty means rest. "msk" talks to the AWS MSK Connect API with the default
+// AWS credential chain in AWS_REGION instead of the Connect REST API, so the
+// REST login variables must be empty: a value there means the operator thinks
+// they are used. The error names the env var. "confluent" and "aiven" take
+// their endpoint and keys per pipeline, so there is nothing to check here.
+func ParseConnectKind(c Config) (string, error) {
+	kind := strings.ToLower(strings.TrimSpace(c.ConnectKind))
+	if kind == "" {
+		kind = DefaultConnectKind
+	}
+	switch kind {
+	case ConnectKindREST, ConnectKindConfluent, ConnectKindAiven:
+		return kind, nil
+	case ConnectKindMSK:
+		if strings.TrimSpace(c.AWSRegion) == "" {
+			return "", fmt.Errorf("config: CONNECT_KIND=msk needs AWS_REGION")
+		}
+		restVars := []struct{ name, value string }{
+			{"CONNECT_USERNAME", c.ConnectUsername},
+			{"CONNECT_PASSWORD", c.ConnectPassword},
+			{"CONNECT_TLS_CA_FILE", c.ConnectTLSCAFile},
+			{"CONNECT_TLS_CERT_FILE", c.ConnectTLSCertFile},
+			{"CONNECT_TLS_KEY_FILE", c.ConnectTLSKeyFile},
+		}
+		for _, v := range restVars {
+			if v.value != "" {
+				return "", fmt.Errorf("config: %s is set but CONNECT_KIND=msk uses the AWS SDK, not the Connect REST API; unset it", v.name)
+			}
+		}
+		return kind, nil
+	default:
+		return "", fmt.Errorf("config: CONNECT_KIND=%q: want rest, msk, confluent or aiven", c.ConnectKind)
+	}
 }

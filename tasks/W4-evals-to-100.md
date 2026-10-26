@@ -42,6 +42,16 @@ itself; the row named in it applies it.
     marker once `SetupStack` exists.
   - Effect: W4z-1 (KAN-511) covers **40** scenarios, and W4z-2 (KAN-512) reports the pair apart. A C1 follow-up
     (after W4t, KAN-509) excludes pending scenarios from `n_scenarios`.
+  - Amended 2026-10-24: U1-10 landed (#1012) and released the `U1-10` marker, but the harness still runs the pair
+    as CDC rooms. U1-29 (KAN-550, #1048) re-parks the pair under `pending_harness: setup-room-eval`, whose condition
+    is a top-level `SetupRoomAlert` in package `evals`. The C6 hookup above is row U1-30 (no Jira issue yet; the
+    row is kept here since the U-board was retired); it must declare exactly `SetupRoomAlert` so the guard releases
+    the pair when it lands.
+  - Row U1-30 (C6, Opus 5.5, 1 day; after U1-29 and U1-25): `evals.SetupRoomAlert` builds the setup-mode `Alert`
+    (`Mode = setup`, the scenario's `setup` block as the request) and the harness runs a setup scenario's episode
+    against its U1-20 replay session, so the agent gets the setup tools. Done when the `setup-room-eval` marker on
+    the setup/compose pair is flagged for removal and removed in the same PR, both scenarios score on a recorded run,
+    and incident scenarios are unchanged.
 
   Ruled 2026-10-23 and amended the same day (leads, owner-delegated).
 - **R7 — C6 `on_error` facts.** A fact is not established from an errored result: `on_error` facts stay unsupported.
@@ -92,6 +102,32 @@ itself; the row named in it applies it.
   2026-10-24 (leads, owner-delegated).
 - **R18 — blocked-slot budget.** R8 applied: its budget-only failing run made 19 calls, so the budget is 21. Ruled
   2026-10-24 (leads, owner-delegated).
+- **R19 — sasl-credential-rotated (rule 4, W4g).** The broker correctly rejects a stale SCRAM password held in the
+  Connect worker's `sasl.jaas.config`. Under rule 4 ("a safeguard correctly refusing isn't it") the root-cause layer is
+  `kafka-connect`, with `kafka` accepted as `root_cause_layer_alt`. Under R9, `f_acls_intact` becomes optional and
+  `evidence_tools` is `[connect_status]`: the authentication exception establishes the cause on its own. The ACL trap
+  stays guarded by `root_cause_forbidden`. Evidence: 4 live runs and 6 episodes all named kafka-connect and skipped
+  `kafka_acls` (runs 40085823038, 40090999753, 40091558005, 40095927117). C7 applies it in W4n (KAN-497). Ruled
+  2026-10-24 (leads, owner-delegated).
+- **R20 — R8/R9 applications.** Four measured scenarios, no new rule.
+  - `consumer-deserializer`: budget 10 -> 16 (failed only on budget, at 14, 12 and 14 calls).
+  - `tolerance-all-skips`: budget 14 -> 21 (failed only on budget, at 19 calls). `f_events_seen` and
+    `debezium_metrics` become optional (R9), because `connect_worker_metrics` ("2187 skipped") shows the same thing.
+  - `mysql-server-id-clash`: budget 12 -> 23 (failed only on budget, at 21 calls).
+  - `mysql-binlog-purged`: `f_stored_position` is established by `mysql_binlog_status` (it prints `stored
+    binlog.000003:4523`), and `connect_source_offsets` leaves `evidence_tools` (R9).
+
+  C7 applies it in W4n (KAN-497). Ruled 2026-10-24 (leads, owner-delegated).
+- **R21 — MySQL resume bullet (W4m).** The precondition stays a precondition. "connect_update_connector_config only if no
+  captured table's schema changed since the stored position" becomes "connect_update_connector_config after checking no
+  captured table's schema changed since the stored position": the agent reads the schema history instead of asking, and
+  the safety check is kept. The proposed "unsafe if" wording is rejected because it would weaken a data-loss
+  safeguard. Ruled 2026-10-24 (leads, owner-delegated).
+- **Open item — MySQL prompt lines name two scenarios' root causes.** The MySQL prompt already matches the root-cause
+  groups of `mysql-server-id-clash` ("database.server.id clashing") and `mysql-history-topic-deleted` ("schema history
+  topic ... if lost"). These lines come from the Q8 rows. No W4 leakage test covers the MySQL scenarios. Follow-up
+  (A4 for the prompt, C6 for the test): add a leakage test for the MySQL scenarios, and reword those two lines
+  generically. Not done by any W4 row yet.
 
 ### Related rulings
 

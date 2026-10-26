@@ -46,6 +46,9 @@ const (
 	OpSourceRecentDDL        = "source_recent_ddl"
 	OpSourceLongTransactions = "source_long_transactions"
 	OpSourceRow              = "source_row"
+	// OpSourcePublicationTables answers the U1-9 Postgres driver's
+	// publication check (sources/postgres Reader.PublicationTables).
+	OpSourcePublicationTables = "source_publication_tables"
 
 	// Source Postgres writers. The Q action names are plan's canonical guard
 	// names; the setup-only source ops are the design's §2.5 names.
@@ -118,6 +121,7 @@ var specs = []OpSpec{
 	{"Source.RecentDDL", OpSourceRecentDDL, protocol.TierT0, "postgres"},
 	{"Source.LongTransactions", OpSourceLongTransactions, protocol.TierT0, "postgres"},
 	{"Source.Row", OpSourceRow, protocol.TierT0, "postgres"},
+	{"Source.PublicationTables", OpSourcePublicationTables, protocol.TierT0, "postgres"},
 	{"Source.SetReplicaIdentity", OpSourceSetReplicaIdentity, protocol.TierT2, "postgres"},
 	{"Source.GrantSelect", OpSourceGrantSelect, protocol.TierT2, "postgres"},
 	{"Source.CreateHeartbeatTable", OpSourceCreateHeartbeatTable, protocol.TierT2, "postgres"},

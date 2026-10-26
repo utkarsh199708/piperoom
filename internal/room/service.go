@@ -133,6 +133,15 @@ type Deps struct {
 	// SetupResolver resolves a target's host at registration; nil means
 	// net.DefaultResolver. Tests inject a fake. (U)
 	SetupResolver TargetResolver
+	// SetupStack, when set, builds a setup room's agent registries over the
+	// room's paired runner (cmd/server: wiring.OpenSetupStack with
+	// setupwire, which refuses unless PIPEROOM_WRITE_MODE and
+	// PIPEROOM_SETUP_ENABLED are both on). The room calls it only for an open
+	// setup room, with setup on and write mode on; the result replaces the
+	// pipeline's client set for that room's agent run, proposals, executor
+	// and verification ladder (setup_agent.go). Nil keeps the client set of
+	// StackFor or Tools and Actions. (U1-25)
+	SetupStack SetupStackBuilder
 
 	// Sessions lets LookupPerson find a person who is not in users.yaml by their
 	// newest live session (design section 2.1). Nil: users.yaml only.
@@ -370,6 +379,11 @@ type Service struct {
 	setupLocal    bool
 	setupOwn      []netip.Addr
 	setupResolver TargetResolver
+	// setupStack is Deps.SetupStack; setupStacks caches its result per
+	// setup room's pipeline, guarded by setupStackMu (setup_agent.go).
+	setupStack   SetupStackBuilder
+	setupStackMu sync.Mutex
+	setupStacks  map[string]setupStackEntry
 	// Auto-approve policy (autoapprove.go). autoDelay is
 	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
 	// runs after each check of the loop. autoSkip remembers what the loop
@@ -459,6 +473,12 @@ type Service struct {
 	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
 	credMu      sync.Mutex
 	credPending map[string]pendingCredentials
+	// ladderMu guards ladderRuns: the rooms whose verification ladder run is
+	// in flight on this replica (setup_ladder.go; U1-8b). ladderTiming, when
+	// set (tests only), replaces the production waits.
+	ladderMu     sync.Mutex
+	ladderRuns   map[string]bool
+	ladderTiming *setupLadderTimings
 
 	// Pull request follower (pr_follow.go; Q7e). prReader is nil with no
 	// forge: then nothing below runs. changeW records a merged PR in the
@@ -555,6 +575,7 @@ func New(d Deps) *Service {
 		setupLocal:      d.SetupLocal,
 		setupOwn:        d.SetupOwnAddrs,
 		setupResolver:   d.SetupResolver,
+		setupStack:      d.SetupStack,
 		autoDelay:       d.AutoApproveDelay,
 		autoTicker:      d.AutoApproveTicker,
 		leaseTicker:     d.LeaseTicker,
@@ -1155,6 +1176,17 @@ var agentEventTypes = map[events.Type]bool{
 	// One poll of a recovery action's Verify (X2, internal/agent): progress
 	// for the recovery card; the verdict is still the agent.verification.
 	events.AgentRecoveryCheck: true,
+	// The setup run's plan and its stop (internal/agent setup.go, U1-10):
+	// the agent records each plan through its Sink and the room folds it,
+	// so a proposal can be checked against it (ErrNotInPlan); a bound stop
+	// writes setup.blocked. The ladder's verdicts (setup.verified,
+	// setup.awaiting_change) are never the agent's and stay refused here.
+	events.SetupPlan:    true,
+	events.SetupBlocked: true,
+	// setup_request_verification's request (internal/setup/tools, U1-7): the
+	// agent asks the room's ladder runner for verification. It is a request,
+	// never a result: setup.verified stays refused here (U1-8b).
+	TypeSetupVerificationRequested: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -1191,7 +1223,19 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 		}
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
-	return err
+	if err != nil {
+		return err
+	}
+	if typ == TypeSetupVerificationRequested {
+		// The agent asked for the ladder; the room's runner answers, on the
+		// service lifetime. It starts after the request is in the log, and a
+		// run already in flight (the person clicked too) is not an error: that
+		// run will read the request's plan like any other.
+		if serr := s.startSetupLadder(roomID); serr != nil && !errors.Is(serr, errSetupLadderInFlight) {
+			s.log.Warn("room: agent asked for verification; the ladder did not start", "room", roomID, "err", serr)
+		}
+	}
+	return nil
 }
 
 // fenceLocked refuses a write of agent run `run` that may no longer speak for
@@ -1526,6 +1570,9 @@ func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
 	if in := proposalExecutedInput(snap, e); in != nil {
 		out = append(out, *in)
 	}
+	if in := setupVerifiedInput(snap, e); in != nil {
+		out = append(out, *in)
+	}
 	return out
 }
 
@@ -1537,11 +1584,20 @@ func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
 // waiting in the inbox for the next steer. Only the replica that wrote the
 // event decides it (emitLocked), as for a steer.
 func startsAgent(snap RoomSnapshot, e events.Event) bool {
+	// U1-25: a setup room's run starts when its first runner pairs, before
+	// any plan (the run's reads go through the runner). A reattach later in
+	// the setup does not resume a paused run; a steer does, as after a
+	// restart.
+	if e.Type == events.SetupRunnerAttached && snap.IsSetupRoom() && snap.Setup.PlanID == "" {
+		return true
+	}
 	for _, in := range inputsFor(snap, e) {
 		// Q7: a fix PR that merged or closed wakes an idle agent too: it
 		// verifies after a merge and reports a close (agent.HumanInput).
+		// U1-25: the ladder's outcome for the current plan wakes it too, so
+		// it proposes pipeline_register on green (design §3.9).
 		switch in.Kind {
-		case "proposal_created", "proposal_executed", "pr_merged", "pr_closed":
+		case "proposal_created", "proposal_executed", "pr_merged", "pr_closed", inputSetupVerified:
 			return true
 		}
 	}
@@ -1832,6 +1888,13 @@ const (
 // The room counts as having a run from this call on, so more steers or
 // mentions while it is queued do not queue it again.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
+	// A setup room's run writes through the runner: with setup or write mode
+	// off it never starts (design §3.8), and nothing setup is built for it.
+	setupRoom := st.snap.IsSetupRoom()
+	if setupRoom && !s.setupAgentAllowed() {
+		s.log.Info("room: setup room agent not started: PIPEROOM_SETUP_ENABLED or PIPEROOM_WRITE_MODE is off", "room", roomID)
+		return
+	}
 	// The supervisor's place in wg is reserved first, so nothing below
 	// happens (no lease taken, no run counted) once Close has begun.
 	if !s.addWorker() {
@@ -1871,11 +1934,19 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
-			Actions:   s.actionsFor(pipelineID),
+			Actions:   s.pipelineActionsFor(pipelineID),
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
 			Logger:    s.log,
+		}
+		opts := s.opts
+		if setupRoom {
+			// Setup mode (U1-25): the request is the alert's Raw already
+			// (room.created's alert), the bounds are the room's, and the
+			// registries are the setup stack over the paired runner.
+			alert.Mode = agent.ModeSetup
+			opts.Setup = s.setupBounds()
 		}
 		backoff := agentRetryBackoff
 		mapped := false
@@ -1921,7 +1992,24 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			// X2c: the run ctx carries the room's whole pipeline, so the
 			// agent's recovery Verify calls read in its scope (actions need
 			// tools.WithPipeline); the agent's read tools re-scope by id.
-			err := s.runGuarded(s.pipelineCtx(ctx, pipelineID), roomID, alert, deps, s.opts)
+			runCtx := s.pipelineCtx(ctx, pipelineID)
+			if setupRoom {
+				// Built per attempt: a grown provisional pipeline or a new
+				// target gives the next attempt the stack over it.
+				if serr := s.setupRunDeps(&deps, pipelineID); serr != nil {
+					s.log.Warn("room: setup agent not started: its setup stack was not built", "room", roomID, "err", serr)
+					mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
+					_ = s.agentEmit(mctx, roomID, run, events.AgentMessage, events.AgentMessagePayload{
+						Text: "The agent stopped: this setup room's tools could not be built over its runner: " + truncateDetail(maskExecOutput(serr.Error())),
+					})
+					mcancel()
+					gate.release()
+					s.releaseAgent(st, run, cancel)
+					return
+				}
+				runCtx = s.setupRunCtx(ctx, roomID, pipelineID)
+			}
+			err := s.runGuarded(runCtx, roomID, alert, deps, opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
 			// already written the idle status and the message, so no retry

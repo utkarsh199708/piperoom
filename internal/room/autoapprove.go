@@ -288,8 +288,11 @@ func (s *Service) maybeScheduleLocked(ctx context.Context, st *roomState, roomID
 // directory on a local-class target runs after PIPEROOM_SETUP_LOCAL_DELAY,
 // cancellable like an auto_approve countdown (design §3.3). A T2 or T3
 // proposal is never scheduled; the delay "0" means every T1 step waits for a
-// click. The countdown lives in the log, exactly as the auto-approve one, so
-// the same loop and fold carry it. Caller holds st's lock.
+// click. The ladder runner's canary insert is the one exception (U1-8b): its
+// op floor is T2, and design §3.4 makes it run "auto on a local source", so
+// setupLocalRuns admits it at a local-class route (setupLocalRuns). The
+// countdown lives in the log, exactly as the auto-approve one, so the same
+// loop and fold carry it. Caller holds st's lock.
 func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomState, roomID, proposalID string) {
 	if s.setupCfg.LocalDelay <= 0 || s.writeOff || s.scheduleSetupRefused(st) {
 		return
@@ -304,7 +307,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 		}
 	}
 	route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
-	if err != nil || route.Tier != plan.TierT1 || !previewAllOK(p) {
+	if err != nil || !setupLocalRuns(p, route) || !previewAllOK(p) {
 		return
 	}
 	runAt := s.now().UTC().Add(s.setupCfg.LocalDelay)
@@ -317,7 +320,7 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 			return errNotAutoApprovable
 		}
 		route, err := resolveSetupRoute(&st.snap, s.actionsFor(st.snap.PipelineID), p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
-		if err != nil || route.Tier != plan.TierT1 {
+		if err != nil || !setupLocalRuns(p, route) {
 			return errNotAutoApprovable
 		}
 		return nil
@@ -337,6 +340,24 @@ func (s *Service) maybeScheduleSetupLocalLocked(ctx context.Context, st *roomSta
 // only the room, not the proposal.
 func (s *Service) scheduleSetupRefused(st *roomState) bool {
 	return !s.roomOpen(st) || st.deleting || st.snap.Shadow || s.proposalsDisabled(st)
+}
+
+// setupLocalRuns reports whether the setup_local policy may run a proposal at
+// its route: a T1 proposal (design §3.3), or the ladder runner's canary insert
+// (U1-8b) on a local-class source. The canary op's catalogue floor is T2, so
+// the T1 rule alone would always leave it waiting for a click, while design
+// §3.4 has it run "auto on a local source": it is one row, with a nonce the
+// server drew, in the canary table this setup created on the machine the
+// project lives on — the same kind of write a T1 step is. Only the ladder's
+// own proposal qualifies (system origin, that one op): an agent's step never
+// does.
+func setupLocalRuns(p Proposal, route setupRoute) bool {
+	if route.Tier == plan.TierT1 {
+		return true
+	}
+	return p.Origin == setupProposalOriginSystem &&
+		len(p.Steps) == 1 && p.Steps[0].Action == setupLadderOpInsertCanary &&
+		route.Class == plan.ClassLocal
 }
 
 // fireCheckLocked is the fire path's rule, run before the first approval
@@ -370,8 +391,8 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 		if err != nil {
 			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step: " + err.Error()}
 		}
-		if route.Tier != plan.TierT1 {
-			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step"}
+		if !setupLocalRuns(p, route) {
+			return Proposal{}, &policyRefusal{why: "the step no longer routes as a T1 setup step (or the ladder's local canary)"}
 		}
 		if !previewAllOK(p) {
 			return Proposal{}, &policyRefusal{why: "the preview no longer says every step would be accepted"}

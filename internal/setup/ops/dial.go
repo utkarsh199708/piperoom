@@ -20,12 +20,12 @@ var errRedirectRefused = errors.New("ops: refusing a redirect")
 // dialGuard classifies the address the kernel is about to connect to. It
 // reuses connprobe's ranges (link-local, cloud metadata, multicast,
 // unspecified) and allows loopback and RFC 1918 because a setup room may
-// target a local dev stack; the target allow-list is what keeps http_get and
-// net_probe to registered hosts.
+// target a local dev stack; the target allow-list is what keeps http_get, net_probe and
+// sink_probe to registered hosts.
 var dialGuard = connprobe.Guard{AllowLoopback: true, AllowPrivate: true}
 
 // newGuardedDialer returns the one net.Dialer every runner connection uses
-// (http_get, net_probe, later the remote clients). Its ControlContext hook
+// (http_get, net_probe, sink_probe, later the remote clients). Its ControlContext hook
 // receives the resolved address the kernel is about to dial, so DNS cannot
 // answer one address to an earlier check and another to connect; there is no
 // earlier resolve whose answer could differ.

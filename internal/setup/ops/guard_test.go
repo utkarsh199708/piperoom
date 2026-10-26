@@ -34,8 +34,10 @@ func TestFloorsAndTargets(t *testing.T) {
 		{"java_version", protocol.TierT0, ""},
 		{"http_get", protocol.TierT0, ""},
 		{"net_probe", protocol.TierT0, ""},
+		{"sink_probe", protocol.TierT0, ""},
 		{"file_write", protocol.TierT1, ""},
 		{"file_delete", protocol.TierT1, ""},
+		{"source_publication_tables", protocol.TierT0, "postgres"},
 	}
 	r := testRegistry(t)
 	if len(r.Names()) != len(cases) {
@@ -77,6 +79,7 @@ func TestParamTarget(t *testing.T) {
 	r := testRegistry(t,
 		events.SetupTarget{Kind: "connect", Address: "connect.acme:8083"},
 		events.SetupTarget{Kind: "postgres", Address: "db.acme:5432"},
+		events.SetupTarget{Kind: "host", Address: "sink.example:8090"},
 	)
 	get, _ := json.Marshal(map[string]string{"url": "http://connect.acme:8083/connectors"})
 	if got := r.Target(protocol.OpRequest{Op: "http_get", Params: get}); got != "connect" {
@@ -85,6 +88,10 @@ func TestParamTarget(t *testing.T) {
 	probe, _ := json.Marshal(map[string]string{"target": "postgres"})
 	if got := r.Target(protocol.OpRequest{Op: "net_probe", Params: probe}); got != "postgres" {
 		t.Fatalf("net_probe Target = %q, want postgres", got)
+	}
+	sinkProbe, _ := json.Marshal(map[string]string{"target": "sink.example:8090"})
+	if got := r.Target(protocol.OpRequest{Op: "sink_probe", Params: sinkProbe}); got != "host" {
+		t.Fatalf("sink_probe Target = %q, want host", got)
 	}
 	// An unregistered label raises no floor and is refused by Validate.
 	other, _ := json.Marshal(map[string]string{"target": "kafka"})
@@ -108,6 +115,7 @@ func TestGuardTable(t *testing.T) {
 		{"dir_list", protocol.ClassProduction, false},
 		{"http_get", protocol.ClassProduction, false},
 		{"net_probe", protocol.ClassProduction, false},
+		{"sink_probe", protocol.ClassProduction, false},
 		{"file_write", "garbage", false},
 		{"no_such_op", protocol.ClassProduction, false},
 	}
@@ -145,7 +153,7 @@ func TestGuardTableAgreesWithPlan(t *testing.T) {
 // CheckTarget is the runner's pre-guard allow-list: a host outside the
 // targets is RefuseTarget, bad params RefuseSchema.
 func TestCheckTarget(t *testing.T) {
-	r := testRegistry(t, events.SetupTarget{Kind: "connect", Address: "connect.acme:8083"})
+	r := testRegistry(t, events.SetupTarget{Kind: "connect", Address: "connect.acme:8083"}, events.SetupTarget{Kind: "host", Address: "sink.acme:8090"})
 	cases := []struct {
 		op     string
 		params string
@@ -156,6 +164,9 @@ func TestCheckTarget(t *testing.T) {
 		{"http_get", `{"url":"http://connect.acme:8083/","method":"POST"}`, protocol.RefuseSchema},
 		{"net_probe", `{"target":"connect"}`, ""},
 		{"net_probe", `{"target":"kafka"}`, protocol.RefuseTarget},
+		{"sink_probe", `{"target":"sink.acme:8090"}`, ""},
+		{"sink_probe", `{"target":"other.acme:8090"}`, protocol.RefuseTarget},
+		{"sink_probe", `{}`, protocol.RefuseSchema},
 		{"file_read", `{"path":"a.txt"}`, ""},
 		{"no_such_op", `{}`, protocol.RefuseUnknownOp},
 	}

@@ -334,8 +334,15 @@ func (r *runner) compactHistory(ctx context.Context, messages []llm.Message, cut
 
 // openingParts is the opening turn without the human input that came with it:
 // the alert, the worked examples, the staging note and the fix-PR repo note.
+// A setup room opens with the setup request and the bounds instead
+// (setup_prompt.go).
 func (r *runner) openingParts() []llm.Part {
-	blocks := openingBlocks(r.alert, r.past)
+	var blocks []llm.Part
+	if r.setup != nil {
+		blocks = r.setupOpeningParts()
+	} else {
+		blocks = openingBlocks(r.alert, r.past)
+	}
 	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
 		blocks = append(blocks, textPart(note))
 	}

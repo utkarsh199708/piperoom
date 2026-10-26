@@ -79,7 +79,8 @@ setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replic
 missing-grant, db-unreachable-from-connect, plugin-after-scan;
 SQL Server (profile mssql, dev/mssql/README.md): agent-stopped, cdc-not-enabled-table;
 oracle profile (dev/oracle/README.md): no-archivelog, no-supplemental-logging, missing-logminer-grant;
-mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role
+mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role;
+host profile (dev/host, the fake host of U8c): wrong-standalone-args, plugin-path-unset, java-too-old
 `
 
 func main() {

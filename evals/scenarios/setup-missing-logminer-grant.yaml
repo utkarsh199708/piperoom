@@ -1,6 +1,6 @@
 # C7 setup scenario (U9d): LOGMINING was revoked from the LogMiner user after the setup run, so the
 # connector's next LogMiner session fails with ORA-01031. The label names the failing check and the
-# fix with its tier (tasks/U-board.md rows U9a and U9d, step 9). Format: evals/README.md (C6). Built
+# fix with its tier (Jira KAN-5 rows U9a and U9d, step 9). Format: evals/README.md (C6). Built
 # on `devctl setup-break missing-logminer-grant` (dev/oracle/README.md,
 # cmd/devctl/setupbreaks_oracle.go, U9c).
 #

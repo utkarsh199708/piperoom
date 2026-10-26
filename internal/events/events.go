@@ -164,7 +164,8 @@ const (
 	// is audit: it names what happened, who did it and the runner label, and
 	// never a secret value, a pairing code or a runner token. All are written
 	// by the room service (system actor, or the person who clicked) except
-	// setup.plan and setup.blocked, which the agent emits through its Sink.
+	// setup.plan, setup.blocked and setup.verification_requested, which the
+	// agent emits through its Sink.
 	// The Sink refuses setup.verified from the agent: only the server's
 	// ladder runner writes it.
 	SetupPairing               Type = "setup.pairing"                // every pairing attempt, success or not, and a replacement of a lost runner
@@ -181,6 +182,11 @@ const (
 	SetupVerified              Type = "setup.verified"               // the ladder's outcome; emitted by the ladder runner only
 	SetupAwaitingChange        Type = "setup.awaiting_change"        // rung 8: the ladder waits for a change the person makes
 	SetupBlocked               Type = "setup.blocked"                // a bound stopped the run; it asks the person a question
+	// SetupVerificationRequested asks the room's ladder runner to verify the
+	// current setup.plan (the agent's setup_request_verification). A request,
+	// never a result. Empty payload: the store stamps the time and the plan is
+	// the room's current one when the event lands.
+	SetupVerificationRequested Type = "setup.verification_requested"
 	// PipelineRegistered says the owners entry of a setup room's pipeline was
 	// written (or its pull request opened) and the server reloaded. The room
 	// then closes with resolution "pipeline live".
@@ -1672,9 +1678,20 @@ type SetupRequest struct {
 }
 
 // SetupTarget is one host or account a setup room may reach. Kind says what
-// it is ("postgres", "kafka", "connect", "registry", "kubernetes", "aws",
-// "confluent", "aiven", "host"); Address is a host:port, a URL, a kubectl
-// context and namespace, or an account id. Class is a floor: the person may
+// it is ("postgres", "kafka", "connect", "registry", "image_registry",
+// "kubernetes", "aws", "confluent", "aiven", "host"); "registry" always means
+// the Schema Registry, "image_registry" the container registry a Strimzi
+// build pushes to. Address is a host:port, a URL, a kubectl context and
+// namespace, or an account id. Forms that are not a host:
+//   - kind "kafka" on the strimzi target: strimzi://<name> (the Kafka CR);
+//   - kind "aws": <account id>/<region>[/<cluster arn>];
+//   - kind "confluent": <environment id>/<cluster id>;
+//   - kind "aiven": <project>/<service>.
+//
+// PIPEROOM_SETUP_PROD_PATTERNS matches the first segment of the cloud forms.
+// The server's address denylist skips DNS resolution for these non-host
+// addresses; the runner's dial hook stays the guarantee. The targets routes
+// accept kind "image_registry". Class is a floor: the person may
 // raise a class above what the server derives, never lower it, and a
 // registered target is never below "shared" (docs/design/setup-agent.md
 // §2.6, §3.5). Empty means "let the server derive it".

@@ -274,10 +274,11 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		if err := evals.ValidateAll(scenarios, defs); err != nil {
 			return 1, err
 		}
-		// A run only warns about a broken setup recording (Evaluate);
-		// -check fails on it so it is fixed before it costs a grouping.
+		// A run fails a setup scenario whose recording is missing or broken;
+		// -check replays every recording (live-shaped requests and the ladder)
+		// and fails on the first break, before it costs a run.
 		if d := setupRecordingsDir(f.scenarios); d != "" {
-			if _, err := evals.LoadSetupReplays(d); err != nil {
+			if err := evals.VerifySetupReplays(d); err != nil {
 				return 1, err
 			}
 		}
