@@ -59,6 +59,10 @@ func copyStatus(st clients.WatchStatus) clients.WatchStatus {
 			eta := *g.ETA
 			g.ETA = &eta
 		}
+		if g.ClearingSince != nil {
+			cs := *g.ClearingSince
+			g.ClearingSince = &cs
+		}
 		sigs[i] = g
 	}
 	st.Signals = sigs

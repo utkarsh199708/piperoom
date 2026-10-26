@@ -714,6 +714,9 @@ func checkNullBlocks(root *yaml.Node) error {
 		if v, ok := mapValue(p, "connections"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: connections: is empty (null); list the connections, or remove the key to use the process-wide settings", v.Line, name)
 		}
+		if v, ok := mapValue(p, "consumer_logs"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: consumer_logs: is empty (null); set its selector, or remove the key to leave consumer logs unconfigured", v.Line, name)
+		}
 		if v, ok := mapValue(p, "tenant"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: tenant: is empty (null); name the tenant, or remove the key for tenant %q", v.Line, name, DefaultTenant)
 		}

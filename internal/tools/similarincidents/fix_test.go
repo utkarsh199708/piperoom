@@ -39,7 +39,7 @@ func TestSimilarIndexesLabelAndExecutedFix(t *testing.T) {
 	if h.DurationS != 7200 || h.ClosedBy != "Arjun" {
 		t.Errorf("duration %d closed by %q", h.DurationS, h.ClosedBy)
 	}
-	want := `[1] 2026-09-30 "orders stalled" (2 h, closed by Arjun) fixed by: connect_resume_connector — done`
+	want := `[1] 2026-09-30 "orders stalled" (2 h, closed by Arjun) fixed by: connect_resume_connector — unverified closing note: done`
 	if !strings.Contains(summary, want) {
 		t.Errorf("summary %q lacks %q", summary, want)
 	}
@@ -109,7 +109,7 @@ func TestHitCauseAndLabelFix(t *testing.T) {
 	}{
 		{"labelled", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped", FixThatWorked: "recreated slot"}},
 			"slot dropped", "recreated slot", "recreated slot"},
-		{"unlabelled", fake.Room{}, "", "", ""},
+		{"label without fix", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped"}}, "slot dropped", "", ""},
 		{"executed proposal only", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped"},
 			Fix: &fake.Fix{ProposalID: "p", Title: "Proposal title", Actions: []string{"connect_restart_task"}}},
 			"slot dropped", "", "Proposal title"},

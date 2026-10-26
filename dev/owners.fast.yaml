@@ -1,0 +1,59 @@
+# Fast-detection owners file for `devctl break` experiments.
+#
+# Use it when the watcher must see consumer and silent-source faults within
+# about a minute. dev/owners.yaml stays the demo file and is not changed by
+# this one. Select this file with OWNERS_FILE=dev/owners.fast.yaml.
+#
+# Requirements and caveats:
+# - consumer_lag needs the server's watcher to have a lag reader. That reader
+#   ships in the same release as this file; an older server ignores the signal.
+# - Production defaults are consumer_lag fire 1000 for 10m and long_tx for 2m.
+#   Do not copy the short thresholds below into a production owners file.
+# - The thresholds are for dev only. slot_wal keeps its default (1GiB), see the
+#   comment on the orders pipeline.
+pipelines:
+  - id: orders
+    title: Orders CDC
+    topic_prefix: pg # Debezium topic.prefix of pg-orders-connector (topics span pg.public.orders)
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at
+    # The dev consumer's own log (consumer_logs, H2): Promtail labels it
+    # service=devconsumer in the `logs` profile (dev/logs/promtail.yml). It is
+    # read from the same Loki as the worker logs (WORKER_LOGS_LOKI_URL).
+    consumer_logs: {selector: '{service="devconsumer"}'}
+    # Short `for` so `devctl break ...` trips the watcher within a few intervals.
+    # slot_wal stays at the defaults (fire 1GiB): a healthy dev slot retains
+    # 0.8-1.1 MB under load (dev/scenarios.md), so any small fire would warn forever.
+    watch:
+      enabled: true
+      signals:
+        connector_down: {for: 30s}
+        slot_inactive: {for: 30s}
+        consumer_lag: {fire: 100, clear: 50, for: 30s}
+        group_unstable: {flaps: 3, window: 15m, for: 30s}
+        long_tx: {for: 30s, ticks: 3, min_growth: 16KiB}
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch
+    dags: [revenue_daily]
+    dbt_project: dev/batch/dbt/analytics
+    models: [stg_orders, fct_revenue]
+    sink_tables: [analytics.fct_revenue]
+    sink_ts_column: loaded_at
+    # The batch layers are not in the top-level `layers:` map (that map stays the
+    # six CDC layers, which TestExistingFilesStayValid pins), so they are owned
+    # here per-pipeline.
+    owners:
+      orchestrator: {approvers: priya}
+      transform: {approvers: priya}
+      warehouse: {approvers: meera}
+layers:
+  postgres: priya
+  kafka-connect: arjun
+  schema-registry: priya
+  kafka: arjun
+  consumer: kabir
+  warehouse: meera

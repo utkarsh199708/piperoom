@@ -124,6 +124,12 @@ func run(o runOptions) (err error) {
 		}
 		return nil
 	}
+	// The hypothesis guard's mode (PIPEROOM_HYPOTHESIS_GUARD, as for the
+	// server): a bad value stops the run before any tool opens.
+	guarded, err := wiring.WithHypothesisGuard(cfg, agent.Options{})
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
 	kind, err := roomKind(o.Kind, pipe, havePipe)
 	if err != nil {
 		return fmt.Errorf("investigate: %w", err)
@@ -179,7 +185,7 @@ func run(o runOptions) (err error) {
 		reg, areg, topo = set.Tools, set.Actions, set.Topology
 	}
 
-	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}
+	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns, HypothesisGuard: guarded.HypothesisGuard}
 	if opts.Model == "" {
 		opts.Model = cfg.Model
 	}

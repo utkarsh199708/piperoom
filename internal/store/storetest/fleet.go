@@ -44,8 +44,10 @@ func runWatchStatus(t *testing.T, s FleetStore, prefix string) {
 		t.Fatalf("put first: %v", err)
 	}
 	// The second write of pa replaces the first.
+	// clearing is kept, in UTC and microseconds, on the signal that has it only (H1).
+	clearing := now.Add(-3*time.Minute + 123*time.Nanosecond)
 	want := clients.WatchStatus{PipelineID: pa, CheckedAt: now, Signals: []clients.WatchSignal{
-		{Signal: "slot_wal", State: clients.WatchAcked, Severity: "sev1", Since: now.Add(-2 * time.Hour)},
+		{Signal: "slot_wal", State: clients.WatchAcked, Severity: "sev1", Since: now.Add(-2 * time.Hour), ClearingSince: &clearing},
 		{Signal: "forecast", State: clients.WatchFiring, Severity: "sev4", Since: now.Add(-time.Hour), Metric: "slot_wal_bytes", ETA: &eta},
 	}}
 	if err := s.PutWatchStatus(ctx, want); err != nil {
@@ -69,6 +71,9 @@ func runWatchStatus(t *testing.T, s FleetStore, prefix string) {
 		!s0.Since.Equal(now.Add(-2*time.Hour).Truncate(time.Microsecond)) || s0.ETA != nil ||
 		s1.Metric != "slot_wal_bytes" || s1.ETA == nil || !s1.ETA.Equal(eta.Truncate(time.Microsecond)) {
 		t.Fatalf("signals = %+v", g.Signals)
+	}
+	if cs := g.Signals[0].ClearingSince; cs == nil || !cs.Equal(clearing.Truncate(time.Microsecond)) || cs.Location() != time.UTC || g.Signals[1].ClearingSince != nil {
+		t.Fatalf("clearing_since = %v / %v, want %v on slot_wal only", cs, g.Signals[1].ClearingSince, clearing.Truncate(time.Microsecond))
 	}
 	if got[1].Signals == nil || len(got[1].Signals) != 0 {
 		t.Fatalf("no signals must read back as [], got %#v", got[1].Signals)

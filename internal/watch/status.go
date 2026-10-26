@@ -74,6 +74,13 @@ func statusSignal(now time.Time, id string, ss *sigState) clients.WatchSignal {
 		node = signalNode(id, ss.last.ev)
 	}
 	g := clients.WatchSignal{Signal: name, State: state, Severity: sev, Since: since, Node: node}
+	// The clear timer runs while the latest good reading is clear; a breach or
+	// a hold resets it and an unknown reading leaves it alone (sigState.step),
+	// so this is the same notion the state machine resolves on.
+	if !ss.clearingSince.IsZero() {
+		c := ss.clearingSince
+		g.ClearingSince = &c
+	}
 	if m := forecastMetric(id); m != "" {
 		g.Metric = m
 		if s, ok := ss.last.ev["eta"].(string); ok {

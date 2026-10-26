@@ -1093,11 +1093,18 @@ func (r *runner) takeApplied() []HumanInput {
 	return out
 }
 
-// waitInbox is Inbox.Wait that also returns when an apply wait finishes
-// (nil then, as a wake with nothing to drain). With no apply wait it is
-// Inbox.Wait itself.
+// takeOwnInputs is the runner's own inputs: finished apply waits and the
+// hypothesis guard's watch_cleared wake (symptomguard.go).
+func (r *runner) takeOwnInputs() []HumanInput {
+	return append(r.takeApplied(), r.guard.symptomWatch().take()...)
+}
+
+// waitInbox is Inbox.Wait that also returns when an apply wait finishes or
+// the guard's watch recheck queues a wake (nil then, as a wake with nothing
+// to drain). With neither running it is Inbox.Wait itself.
 func (r *runner) waitInbox(ctx context.Context) error {
-	if !r.applies.active() {
+	sym := r.guard.symptomWatch()
+	if !r.applies.active() && !sym.active() {
 		return r.deps.Inbox.Wait(ctx)
 	}
 	wctx, cancel := context.WithCancel(ctx)
@@ -1105,6 +1112,8 @@ func (r *runner) waitInbox(ctx context.Context) error {
 	go func() {
 		select {
 		case <-r.applies.wake:
+			cancel()
+		case <-sym.wakeChan():
 			cancel()
 		case <-wctx.Done():
 		}
