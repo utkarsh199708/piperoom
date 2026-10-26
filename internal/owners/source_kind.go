@@ -175,7 +175,7 @@ func (p *Pipeline) validateSourceKind() error {
 	case w.WALHeadroomBytes != "":
 		return fmt.Errorf("watch.wal_headroom_bytes: a %s source has no WAL; remove the key", k)
 	}
-	for _, s := range []string{SignalSlotInactive, SignalSlotWAL} {
+	for _, s := range []string{SignalSlotInactive, SignalSlotWAL, SignalLongTx} {
 		if _, ok := w.Signals[s]; ok {
 			return fmt.Errorf("watch.signals.%s: a %s source has no replication slot; remove the signal", s, k)
 		}
@@ -189,4 +189,5 @@ func (p *Pipeline) validateSourceKind() error {
 func noSlotSignals(w *WatchConfig) {
 	w.SlotInactive.Enabled = false
 	w.SlotWAL.Enabled = false
+	w.LongTx.Enabled = false
 }

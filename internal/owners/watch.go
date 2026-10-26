@@ -25,8 +25,9 @@ const (
 
 // Signal names. The first three are the v1 signals; dlq_growth and config_risk
 // come from docs/design/dlq.md; the consumer-group three from
-// tasks/F6-proactive-triage.md. The names in v2Signals are accepted in the
-// file so one owners.yaml works across versions, but nothing reads them yet.
+// tasks/F6-proactive-triage.md; long_tx from the 2026-10-25 live test of
+// `devctl break long-transaction` (H1). The names in v2Signals are accepted in
+// the file so one owners.yaml works across versions, but nothing reads them yet.
 const (
 	SignalConnectorDown       = "connector_down"
 	SignalSlotInactive        = "slot_inactive"
@@ -36,12 +37,17 @@ const (
 	SignalConsumerLag         = "consumer_lag"
 	SignalGroupUnstable       = "group_unstable"
 	SignalOffsetBelowLogStart = "offset_below_log_start"
+	// SignalLongTx: the slot is active and the connector keeps confirming, but
+	// restart_lsn does not move while the WAL head advances, so retained WAL
+	// grows. An open transaction on the source holds the WAL horizon while
+	// every other layer reads healthy.
+	SignalLongTx = "long_tx"
 )
 
 // knownSignals lists every signal the watcher reads, for error messages. The
 // X1 drift names are the events.Signal* constants (one spelling everywhere).
 var knownSignals = []string{SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk,
-	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart,
+	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart, SignalLongTx,
 	events.SignalCountDrift, events.SignalRowDrift, events.SignalDupKeys, events.SignalOrderSkew}
 
 // maxFlaps bounds group_unstable.flaps: the watcher keeps the last 12 group
@@ -65,7 +71,14 @@ const MinDLQWindow = 30 * time.Minute
 
 var dlqHeaderModes = []string{DLQHeadersCountsOnly, DLQHeadersClasses, DLQHeadersMessages}
 
-var v2Signals = []string{"freshness", "long_tx", "compat_none", "unreachable"}
+// long_tx.ticks bounds: at least 2, so one noisy tick never fires; at most
+// 100, a long memory adds nothing that `for` cannot say.
+const (
+	minLongTxTicks = 2
+	maxLongTxTicks = 100
+)
+
+var v2Signals = []string{"freshness", "compat_none", "unreachable"}
 
 // WatchSpec is the raw `watch:` block of a pipeline, as written in YAML. Use
 // Pipeline.Watch for the validated values with defaults applied.
@@ -170,6 +183,8 @@ type signalSpec struct {
 	Flaps             string `yaml:"flaps"`              // group_unstable
 	CrashloopRestarts string `yaml:"crashloop_restarts"` // connector_down
 	CrashloopWindow   string `yaml:"crashloop_window"`   // connector_down
+	Ticks             string `yaml:"ticks"`              // long_tx
+	MinGrowth         string `yaml:"min_growth"`         // long_tx
 }
 
 // WatchSignal holds the settings every signal shares.
@@ -190,6 +205,18 @@ type SlotWALSignal struct {
 	ClearBytes int64
 	// EtaSev1: a slot-invalidation estimate shorter than this makes it sev1.
 	EtaSev1 time.Duration
+}
+
+// LongTxSignal is the long_tx signal: a held WAL horizon. The watcher reads it
+// from the replication slot row the slot signals already read each tick.
+type LongTxSignal struct {
+	WatchSignal
+	// Ticks is how many ticks must see the WAL head advance while restart_lsn
+	// stays at one value before the condition holds (then For runs). 2..100.
+	Ticks int
+	// MinGrowthBytes is the least retained-WAL growth over those ticks, so a
+	// quiet source never fires. > 0.
+	MinGrowthBytes int64
 }
 
 // DLQSignal is the dlq_growth signal.
@@ -267,6 +294,10 @@ type WatchConfig struct {
 	// and clears after ConnectorDown.For with no partition below.
 	OffsetBelowLogStart WatchSignal
 
+	// LongTx is the held-WAL-horizon signal (Postgres sources only, like the
+	// slot signals).
+	LongTx LongTxSignal
+
 	// DLQTopics are the declared dead-letter topics, in file order.
 	DLQTopics []DLQTopic
 	// DLQPeekHeaders is one of the DLQHeaders* modes.
@@ -321,13 +352,23 @@ func DefaultWatch() WatchConfig {
 			Window:      15 * time.Minute,
 		},
 		OffsetBelowLogStart: WatchSignal{Enabled: true, Action: ActionRoom},
-		DLQPeekHeaders:      DLQHeadersClasses,
-		CountDrift:          WatchSignal{Enabled: true, Action: ActionRoom},
-		RowDrift:            WatchSignal{Enabled: true, Action: ActionRoom},
-		DupKeys:             WatchSignal{Enabled: true, Action: ActionRoom},
-		OrderSkew:           WatchSignal{Enabled: true, Action: ActionRoom},
-		ReconcileInterval:   DefaultReconcileInterval,
-		CountTolerance:      DefaultCountTolerance,
+		// for 2m: Kafka Connect flushes offsets, and so Debezium confirms the
+		// slot, every 60 s by default; 2 min is two flush periods, enough to
+		// ride out one late flush. Detection takes about 3 minutes in all
+		// (ticks, up to 60 s for the first flush that does not move
+		// restart_lsn, then for); it was 5m, about 6 minutes in all.
+		LongTx: LongTxSignal{
+			WatchSignal:    WatchSignal{Enabled: true, Action: ActionRoom, For: 2 * time.Minute},
+			Ticks:          3,
+			MinGrowthBytes: 64 << 10,
+		},
+		DLQPeekHeaders:    DLQHeadersClasses,
+		CountDrift:        WatchSignal{Enabled: true, Action: ActionRoom},
+		RowDrift:          WatchSignal{Enabled: true, Action: ActionRoom},
+		DupKeys:           WatchSignal{Enabled: true, Action: ActionRoom},
+		OrderSkew:         WatchSignal{Enabled: true, Action: ActionRoom},
+		ReconcileInterval: DefaultReconcileInterval,
+		CountTolerance:    DefaultCountTolerance,
 	}
 }
 
@@ -409,6 +450,14 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			allowed = append(allowed, "fire", "clear", "members_expected")
 		case SignalGroupUnstable:
 			allowed = append(allowed, "flaps", "window")
+		case SignalLongTx:
+			allowed = append(allowed, "ticks", "min_growth")
+			// The design doc's v2 sketch had `age:`. A file written from it
+			// must not load with the key silently ignored: say what replaced it.
+			if k := mappingKey(&node, "age"); k != nil {
+				return WatchConfig{}, fmt.Errorf("line %d: watch.signals.long_tx: age is not read: long_tx fires on a held WAL horizon "+
+					"(restart_lsn still while retained WAL grows), not on transaction age; set ticks, min_growth and for instead", k.Line)
+			}
 		case SignalOffsetBelowLogStart, events.SignalCountDrift, events.SignalRowDrift, events.SignalDupKeys, events.SignalOrderSkew:
 			allowed = []string{"enabled", "action"} // fire on the check (or checks) that find them; no for
 		}
@@ -428,6 +477,8 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			err = applyGroupUnstable(&w.GroupUnstable, s)
 		case SignalOffsetBelowLogStart:
 			err = applySignal(&w.OffsetBelowLogStart, s)
+		case SignalLongTx:
+			err = applyLongTx(&w.LongTx, s)
 		case SignalSlotInactive:
 			err = applySignal(&w.SlotInactive, s)
 		case SignalSlotWAL:
@@ -569,6 +620,44 @@ func applyGroupUnstable(dst *GroupUnstableSignal, s signalSpec) error {
 			return fmt.Errorf("window: %w", err)
 		}
 		dst.Window = d
+	}
+	return nil
+}
+
+// applyLongTx parses ticks as a whole number and min_growth as a size.
+func applyLongTx(dst *LongTxSignal, s signalSpec) error {
+	if err := applySignal(&dst.WatchSignal, s); err != nil {
+		return err
+	}
+	if s.Ticks != "" {
+		n, err := strconv.Atoi(s.Ticks)
+		if err != nil || n < minLongTxTicks || n > maxLongTxTicks {
+			return fmt.Errorf("ticks %q: must be a whole number from %d to %d (one tick alone is noise)", s.Ticks, minLongTxTicks, maxLongTxTicks)
+		}
+		dst.Ticks = n
+	}
+	if s.MinGrowth != "" {
+		n, err := ParseSize(s.MinGrowth)
+		if err != nil {
+			return fmt.Errorf("min_growth: %w", err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("min_growth %q: must be greater than zero (a quiet source would fire)", s.MinGrowth)
+		}
+		dst.MinGrowthBytes = n
+	}
+	return nil
+}
+
+// mappingKey is the key node named key in mapping node, or nil.
+func mappingKey(node *yaml.Node, key string) *yaml.Node {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i]
+		}
 	}
 	return nil
 }

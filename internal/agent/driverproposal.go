@@ -50,6 +50,9 @@ func formatInput(in HumanInput, idle bool) string {
 		return formatDriverProposal(in, idle)
 	case "proposal_executed":
 		return formatDriverExecuted(in)
+	case kindWatchCleared:
+		// The runner's own words (signal names and times), not a person's.
+		return in.Text
 	default:
 		return formatHumanInput(in)
 	}

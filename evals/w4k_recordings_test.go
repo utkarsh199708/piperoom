@@ -6,18 +6,117 @@ package evals
 // consumer-rebalance-storm's budget is not 16.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/logtools"
+
+	"gopkg.in/yaml.v3"
 )
+
+// updateW4k rewrites the data of a recording that differs from the real tool's
+// output (go test ./evals -run TestW4kRecordingsAreRealToolOutput
+// -update-w4k-recordings), then review the diff. Summaries are never touched:
+// a summary that differs is a real change to look at.
+var updateW4k = flag.Bool("update-w4k-recordings", false, "rewrite the data of w4k recordings from the real tool")
+
+var w4kUpdateMu sync.Mutex
+
+// w4kRewriteData replaces the "data:" block of the first recording of tool in
+// phase with data, as YAML with sorted keys (the style of the file), keeping
+// the recorded elapsed_ms (the check ignores it).
+func w4kRewriteData(t *testing.T, scenario, phase, tool string, data map[string]any, keep map[string]any) {
+	t.Helper()
+	w4kUpdateMu.Lock()
+	defer w4kUpdateMu.Unlock()
+	path := "scenarios/" + scenario + ".yaml"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := keep["elapsed_ms"]; ok {
+		data["elapsed_ms"] = v
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(w4kNormalise(data)); err != nil {
+		t.Fatal(err)
+	}
+	var block []string
+	for _, l := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		block = append(block, "      "+l)
+	}
+	nl := "\n"
+	if bytes.Contains(raw, []byte("\r\n")) {
+		nl = "\r\n"
+	}
+	lines := strings.Split(string(raw), nl)
+	// A recording without a phase answers every phase that has no recording of
+	// its own, so the exact phase is tried first, then the phase-less one.
+	for _, exact := range []bool{true, false} {
+		for i := 0; i < len(lines); i++ {
+			if lines[i] != "  - tool: "+tool {
+				continue
+			}
+			end := i + 1
+			for end < len(lines) && !strings.HasPrefix(lines[end], "  - ") && (lines[end] == "" || strings.HasPrefix(lines[end], "   ")) {
+				end++
+			}
+			gotPhase, dataAt := "", -1
+			for j := i + 1; j < end; j++ {
+				if strings.HasPrefix(lines[j], "    phase: ") {
+					gotPhase = strings.TrimPrefix(lines[j], "    phase: ")
+				}
+				if lines[j] == "    data:" {
+					dataAt = j
+				}
+			}
+			if (exact && gotPhase != phase) || (!exact && gotPhase != "") || dataAt < 0 {
+				continue
+			}
+			out := append(append(append([]string{}, lines[:dataAt+1]...), block...), lines[end:]...)
+			if err := os.WriteFile(path, []byte(strings.Join(out, nl)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s: no %s recording in phase %q with data", scenario, tool, phase)
+}
+
+// w4kNormalise turns the float64 numbers of a JSON round trip back into
+// integers where they are whole, so YAML prints 52187550646, not 5.2187550646e+10.
+func w4kNormalise(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			x[k] = w4kNormalise(e)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = w4kNormalise(e)
+		}
+		return x
+	case float64:
+		if x == float64(int64(x)) {
+			return int64(x)
+		}
+	}
+	return v
+}
 
 // w4kMiss is one tool call a scenario had no recording for.
 type w4kMiss struct{ tool, input string }
@@ -144,7 +243,11 @@ func w4kRegistry(t *testing.T, w *w4kWorld) *tools.Registry {
 	t.Helper()
 	o := w4kOwners()
 	calls := 0
-	conn, src := w4kConnect{w: w}, w4kSource{w: w, calls: &calls}
+	conn := w4kConnect{w: w}
+	var src clients.SourceDB = w4kSource{w: w, calls: &calls}
+	if w.open != nil {
+		src = w4kOpenSource{w4kSource{w: w, calls: &calls}}
+	}
 	reg := tools.NewRegistry()
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: conn, Owners: o}); err != nil {
 		t.Fatal(err)
@@ -192,6 +295,7 @@ func w4kCheck(t *testing.T, sc Scenario, reg *tools.Registry, phase, tool, call 
 	got, want := w4kJSON(t, res.Data), w4kJSON(t, json.RawMessage(ob.data))
 	// elapsed_ms is the wall time of the two slot reads and the wait between
 	// them: the window plus a few ms, never the same twice.
+	keep := map[string]any{"elapsed_ms": want["elapsed_ms"]}
 	if g, ok := got["elapsed_ms"].(float64); ok {
 		if g < 5000 || g > 8000 {
 			t.Errorf("%s %s: elapsed_ms = %v, want the 5 s window plus a few ms", tool, call, g)
@@ -200,6 +304,11 @@ func w4kCheck(t *testing.T, sc Scenario, reg *tools.Registry, phase, tool, call 
 		delete(want, "elapsed_ms")
 	}
 	if !reflect.DeepEqual(got, want) {
+		if *updateW4k {
+			w4kRewriteData(t, sc.Name, phase, tool, got, keep)
+			t.Logf("%s %s: recording data rewritten", tool, call)
+			return
+		}
 		t.Errorf("%s %s: data differs from the recording\nreal tool: %v\nrecording: %v", tool, call, got, want)
 	}
 }
@@ -263,6 +372,40 @@ func TestW4kRecordingsAreRealToolOutput(t *testing.T) {
 				w4kCheck(t, sc, reg, c.phase, call[0], call[1])
 			}
 		})
+	}
+}
+
+// TestW4kHorizonHeldRecordingsAreRealToolOutput: long-transaction-horizon-held
+// records the real tools over a source that serves the open-transaction read
+// (w4kOpenSource), so its pg_long_transactions and pg_streaming_liveness data
+// carry the full a3/long-tx-horizon shape. Each call gets a fresh registry: the
+// slot reads are consumed in order, and the liveness check needs both of them.
+func TestW4kHorizonHeldRecordingsAreRealToolOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("pg_streaming_liveness waits its 5 s window")
+	}
+	// long-tx-slot-stuck-watcher-firing (H2) records the same world: its
+	// recordings are the horizon scenario's, with a watcher row on top.
+	for _, name := range []string{"long-transaction-horizon-held", "long-tx-slot-stuck-watcher-firing"} {
+		sc, err := LoadScenario("scenarios/" + name + ".yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, call := range [][2]string{
+			{"connect_list_connectors", `{}`},
+			{"connect_status", `{"connector":"pg-orders-connector"}`},
+			{"connect_config", `{"connector":"pg-orders-connector"}`},
+			{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
+			{"pg_replication_slots", `{}`},
+			{"pg_streaming_liveness", `{"pipeline_id":"orders"}`},
+			{"pg_long_transactions", `{}`},
+			{"source_blocking_sessions", `{}`},
+		} {
+			t.Run(name+"/"+call[0], func(t *testing.T) {
+				t.Parallel()
+				w4kCheck(t, sc, w4kRegistry(t, w4kHorizonHeld()), "", call[0], call[1])
+			})
+		}
 	}
 }
 

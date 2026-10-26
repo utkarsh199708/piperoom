@@ -59,6 +59,7 @@ type flags struct {
 	model       string
 	effort      string
 	maxTurns    int
+	guard       string
 	label       string
 	judge       string
 	judgeModel  string
@@ -127,6 +128,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.model, "model", "", "model (default PIPEROOM_MODEL / claude-opus-5-5)")
 	fs.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
+	fs.StringVar(&f.guard, "guard", defaultGuard(os.Getenv), "hypothesis guard mode of the agent: off, log or enforce (default env EVAL_GUARD, else enforce: evals run where the guard refuses, so a wording regression shows before a pilot sees it; the server's own default is log)")
 	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
 	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (keyword grade only), "llm" (LLM judge on every hypothesis, needs a -tags livejudge build; "claude" is its alias) or "auto" (the LLM judge only where the keyword pass is ambiguous: recorded verdicts first, then live calls up to -judge-max-calls); default: each scenario's judge field, else auto`)
 	fs.StringVar(&f.judgeModel, "judge-model", "", "model for the LLM judge (default: the configured model, PIPEROOM_MODEL)")
@@ -168,11 +170,32 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 			return flags{}, err
 		}
 		if fs.NArg() == 0 {
+			// The same words as PIPEROOM_HYPOTHESIS_GUARD; a typo is a usage
+			// error before any work, not a silent log mode.
+			mode, err := config.ParseHypothesisGuard(config.Config{HypothesisGuard: f.guard})
+			if err != nil {
+				fmt.Fprintf(stderr, "evalrun: -guard / EVAL_GUARD=%q: want off, log or enforce\n", f.guard)
+				return flags{}, fmt.Errorf("-guard: %w", err)
+			}
+			f.guard = mode
 			return f, nil
 		}
 		f.args = append(f.args, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
+}
+
+// guardEnv is the environment variable that sets -guard.
+const guardEnv = "EVAL_GUARD"
+
+// defaultGuard is the default of -guard: EVAL_GUARD, else enforce. Eval runs
+// default to enforce, unlike the server (log), so the guard's refusals are
+// part of what an eval measures.
+func defaultGuard(getenv func(string) string) string {
+	if v := strings.TrimSpace(getenv(guardEnv)); v != "" {
+		return v
+	}
+	return agent.GuardEnforce
 }
 
 // comparePaths returns the two reports of -compare: "a.json,b.json", or
@@ -332,7 +355,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		return 1, err
 	}
 	usage := evals.NewUsageCollector(prices)
-	opts := agent.Options{Model: f.model, Effort: f.effort, MaxTurns: f.maxTurns}
+	// f.guard was checked by parseFlags. The judge and its recorded verdicts
+	// read the final text only, so they need no mode.
+	opts := agent.Options{Model: f.model, Effort: f.effort, MaxTurns: f.maxTurns, HypothesisGuard: f.guard}
 	if opts.Model == "" {
 		opts.Model = cfg.Model
 	}

@@ -88,7 +88,8 @@ func TestKindsOf(t *testing.T) {
 // A CDC set registers exactly what it registered before kinds existed, in the
 // same order (the model's tool list, and its prompt cache, stay unchanged),
 // plus what later rows added on purpose: Q3e's connect_worker_metrics and
-// connect_worker_logs after the debezium tools.
+// connect_worker_logs after the debezium tools, and H2's consumer_logs after
+// them.
 func TestRegisterToolsCDCUnchanged(t *testing.T) {
 	o := ownersOf(cdcPipe("orders"))
 	w := &Wired{Owners: o}
@@ -97,10 +98,12 @@ func TestRegisterToolsCDCUnchanged(t *testing.T) {
 	old := tools.NewReadOnlyRegistry()
 	for _, err := range []error{
 		dbtools.Register(old, dbtools.Deps{Builder: w.Builder, Owners: o}),
+		dbtools.RegisterObjectOwners(old, dbtools.Deps{Builder: w.Builder, Owners: o}),
 		kafkatools.Register(old, kafkatools.Deps{Owners: o}),
 		debeziumtools.Register(old, debeziumtools.Deps{Owners: o}),
 		debeziumtools.RegisterWorkerMetrics(old, debeziumtools.Deps{Owners: o}, ""),
 		logtools.Register(old, logtools.Deps{Owners: o}),
+		logtools.RegisterConsumer(old, logtools.ConsumerDeps{Owners: o}),
 		runbooks.Register(old),
 		changes.Register(old, changes.Deps{Owners: o}),
 	} {

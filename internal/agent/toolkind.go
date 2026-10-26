@@ -53,6 +53,8 @@ var cdcExact = map[string]bool{
 	"reconcile":       true,
 	"tls_cert_expiry": true,
 	"net_probe":       true,
+	// consumer_logs (H2) reads a CDC pipeline's consumer application log.
+	"consumer_logs": true,
 	// The fix-PR read tools (Q7d) go with repo_open_pull_request, which
 	// fixes CDC systems only today (fixpr.go).
 	"repo_list_files": true,

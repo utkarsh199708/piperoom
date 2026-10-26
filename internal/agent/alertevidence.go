@@ -27,7 +27,9 @@ import (
 // numbers, booleans, RFC 3339 times, a few fixed-vocabulary strings and
 // object names that look like names. The only free text kept is the first
 // line of a task trace, masked. Anything else in the body is dropped, so a
-// new watcher key reaches the model only after it is added here.
+// new watcher key reaches the model only after it is added here. Signals
+// include slot_wal, long_tx (frozen restart_lsn: LSN keys and a masked note),
+// connector_down, dlq_growth, consumer_lag and the X1/X3 signals.
 
 const (
 	// maxEvidenceSignals caps the signals rendered from one body.
@@ -50,6 +52,8 @@ var evidenceNumberKeys = map[string]bool{
 	"members": true, "total_lag": true, "lag_rate_per_min": true, "state_changes_15m": true,
 	"partition": true, "committed": true, "log_start": true, "records_lost": true,
 	"connectors_omitted": true, "tasks_omitted": true, "restarts": true,
+	// long_tx (internal/watch/long_tx.go): byte counts, tick count, seconds held.
+	"retained_first_bytes": true, "retained_growth_bytes": true, "ticks": true, "held_for_seconds": true,
 	// X1 drift signals (events.DriftSignal): counts only.
 	"source": true, "sink": true, "missing": true, "mismatched": true, "sample": true,
 	// X3 forecast (events.ForecastSignal) and config_drift
@@ -73,6 +77,19 @@ var evidenceWordKeys = map[string]bool{"state": true, "wal_status": true, "eta_b
 // topic, a table, a connector, a forecast's metric and object.
 var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true, "table": true,
 	"connector": true, "metric": true, "object": true}
+
+// evidenceLSNKeys are watcher keys whose value is a Postgres LSN ("16/B374D848"),
+// which the long_tx signal uses to show that restart_lsn stays flat.
+var evidenceLSNKeys = map[string]bool{"restart_lsn": true, "wal_head_first": true, "wal_head_last": true,
+	"confirmed_flush_first": true, "confirmed_flush_last": true}
+
+// evidenceLSN is the shape of an LSN as watch.fmtLSN writes it.
+var evidenceLSN = regexp.MustCompile(`^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$`)
+
+// maxEvidenceNote caps the watcher's free-text note on a signal. The watcher
+// writes it today, but a body is still outside data, so it is masked, quoted
+// and capped like a task trace.
+const maxEvidenceNote = 120
 
 // maxEvidenceChangedKeys caps the config_drift key names rendered.
 const maxEvidenceChangedKeys = 8
@@ -180,6 +197,12 @@ func signalLine(s map[string]any) string {
 		parts = append(parts, driftWindowFields(s["window"])...)
 	}
 	parts = append(parts, changedKeyFields(s["changed_keys"])...)
+	if sig == "long_tx" {
+		// Last, so the line cap cuts the note and not the numbers.
+		if n := evidenceNoteLine(s["note"]); n != "" {
+			parts = append(parts, "note="+n)
+		}
+	}
 	parts = append(parts, connectorFields(s["connectors"])...)
 	parts = append(parts, riskFields(s["risks"])...)
 	parts = append(parts, partitionFields(s["worst_partitions"])...)
@@ -226,6 +249,9 @@ func evidenceValue(k string, v any) (string, bool) {
 	case evidenceNameKeys[k]:
 		n, _ := v.(string)
 		return n, evidenceName.MatchString(n)
+	case evidenceLSNKeys[k]:
+		l, _ := v.(string)
+		return l, evidenceLSN.MatchString(l)
 	}
 	return "", false
 }
@@ -343,6 +369,20 @@ func connectorFields(v any) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+// evidenceNoteLine keeps a long_tx note: first line, masked, capped, quoted.
+func evidenceNoteLine(v any) string {
+	s, _ := v.(string)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s, _ = redact.Text(s)
+	return fmt.Sprintf("%q", truncatePromptField(s, maxEvidenceNote))
 }
 
 // traceLine keeps the masked first line of a task trace, capped.

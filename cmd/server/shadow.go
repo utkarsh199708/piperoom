@@ -9,12 +9,13 @@ import (
 // agentOptions builds a live run's agent options from the config. The tool
 // data cap is the room's PIPEROOM_EVENT_MAX_DATA_BYTES, so the agent does not
 // cut Result.Data at its own 64 KiB default when the room accepts more (#371).
-func agentOptions(cfg config.Config, lim config.Limits) agent.Options {
+func agentOptions(cfg config.Config, lim config.Limits, guard string) agent.Options {
 	return agent.Options{
 		Model:            cfg.Model,
 		Effort:           cfg.Effort,
 		MaxTurns:         40,
 		MaxToolDataBytes: lim.EventMaxDataBytes,
+		HypothesisGuard:  guard,
 	}
 }
 
@@ -22,13 +23,14 @@ func agentOptions(cfg config.Config, lim config.Limits) agent.Options {
 // sh.TokenBudget passes through unchanged: agent.Options.TokenBudget 0 means
 // the room default (PIPEROOM_ROOM_TOKEN_BUDGET), never unlimited. The tool
 // data cap is the live run's (agentOptions).
-func shadowAgentOptions(cfg config.Config, sh config.Shadow, lim config.Limits) agent.Options {
+func shadowAgentOptions(cfg config.Config, sh config.Shadow, lim config.Limits, guard string) agent.Options {
 	return agent.Options{
 		Model:            cfg.Model,
 		Effort:           cfg.Effort,
 		MaxTurns:         sh.MaxTurns,
 		TokenBudget:      sh.TokenBudget,
 		MaxToolDataBytes: lim.EventMaxDataBytes,
+		HypothesisGuard:  guard,
 	}
 }
 

@@ -170,6 +170,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"pg_toast_risk",
 		"source_settings", "source_table_replication", "source_role_grants", "source_blocking_sessions",
 		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record",
+		// H1: registered after dbtools.Register's fixed list.
+		"pg_object_owners",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
@@ -180,6 +182,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"debezium_metrics", "debezium_snapshot_progress",
 		// Q3e: the Connect worker tools, registered whatever is configured.
 		"connect_worker_metrics", "connect_worker_logs",
+		// H2: the consumer's own log, registered whatever is configured.
+		"consumer_logs",
 		// Q6b: through the netwire hook.
 		"net_probe",
 		"runbook_lookup",

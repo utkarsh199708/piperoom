@@ -529,7 +529,9 @@ func TestDLQJoinsAnOpenConnectorDownRoom(t *testing.T) {
 }
 
 func TestDLQAckedRoomStaysQuietWhileItTrickles(t *testing.T) {
-	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}, cooldown: time.Minute})
+	// The cooldown outlasts the trickle below; a signal that still fires one
+	// cooldown after the close re-opens (rearm_test.go).
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}, cooldown: 2 * time.Hour})
 	h.kafka.set("orders-dlq", 0, 0)
 	h.step(time.Minute)
 	h.kafka.add("orders-dlq", 1)
