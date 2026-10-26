@@ -62,8 +62,26 @@ type Deps struct {
 	Topology        topology.Builder
 	Users           *Users
 	Owners          *owners.Owners // pipeline definitions for actions.Scoped checks
-	Run             agent.Runner
-	WriteHandoff    agent.HandoffWriter
+	// OwnersNow, when set, returns the current owners config (the snapshot a
+	// Live holder publishes; U1-14). pipeline_register reloads the owners
+	// set, so every check that must see the newly registered pipeline — the
+	// registration's own overlap and approver checks, PipelinesFor, the
+	// approval routing of a setup room — reads through it. Nil falls back to
+	// Owners.
+	OwnersNow func() *owners.Owners
+	// ReloadOwners re-reads OWNERS_FILE and OWNERS_DIR after a registration
+	// wrote its per-pipeline file (owners.Live.Reload). Nil: a registration
+	// refuses on this server ("no OWNERS_DIR").
+	ReloadOwners func() error
+	// OnOwnersReloaded runs once after a successful ReloadOwners. cmd/server
+	// uses it to rebuild the watcher, whose next tick then lists the new
+	// pipeline. It must return quickly and never block the registration.
+	OnOwnersReloaded func()
+	// SetupForge wires the repos: registration path (SetupForge). Nil: a
+	// registration with repos: refuses.
+	SetupForge   *SetupForge
+	Run          agent.Runner
+	WriteHandoff agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
 	// off after its fix (F2). Nil gives the events-only draft:
 	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODE=off.
@@ -351,8 +369,19 @@ type Service struct {
 	topo            topology.Builder
 	users           *Users
 	owners          *owners.Owners
-	run             agent.Runner
-	writeHandoff    agent.HandoffWriter
+	// ownersNowFn, reloadOwners, onOwnersReloaded and setupForge are the
+	// U1-14 registration deps (see Deps). regAt remembers each
+	// pipeline.registered event's time by pipeline id, for GET
+	// /api/pipelines' setup rows (directory.go); it is filled by the fold
+	// (foldLocked), so it survives restarts and replicas.
+	ownersNowFn      func() *owners.Owners
+	reloadOwners     func() error
+	onOwnersReloaded func()
+	setupForge       *SetupForge
+	regMu            sync.Mutex
+	regAt            map[string]time.Time
+	run              agent.Runner
+	writeHandoff     agent.HandoffWriter
 	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
 	writePostmortem agent.PostmortemWriter
 	triage          agent.Triager
@@ -537,62 +566,67 @@ func New(d Deps) *Service {
 	changeW, _ := d.Store.(clients.ChangeWriter)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		store:           d.Store,
-		actions:         acts,
-		tools:           tls,
-		stackFor:        d.StackFor,
-		actionCatalogue: d.ActionCatalogue,
-		topo:            topo,
-		users:           users,
-		owners:          d.Owners,
-		run:             run,
-		writeHandoff:    wh,
-		writePostmortem: d.WritePostmortem,
-		triage:          d.Triage,
-		triageWait:      triageWaitFor(d.TriagePassTimeout),
-		triageSem:       make(chan struct{}, maxTriagePasses),
-		globalRetry:     globalSlotRetry,
-		opts:            d.Options,
-		shadowOpts:      d.ShadowOptions,
-		shadowGrace:     d.ShadowGrace,
-		shadow:          shadowStore,
-		changes:         changes,
-		log:             log,
-		now:             now,
-		onRoomOpened:    d.OnRoomOpened,
-		onRoomClosed:    d.OnRoomClosed,
-		onRoomDeleted:   d.OnRoomDeleted,
-		onActionExec:    d.OnActionExecuted,
-		onActionResult:  d.OnActionResult,
-		teamPager:       d.TeamPager,
-		prReader:        d.PullRequests,
-		prTicker:        d.PRPollTicker,
-		prf:             newPRFollower(),
-		changeW:         changeW,
-		slots:           newAgentSlots(d.MaxAgents),
-		exportMax:       d.ExportMaxEvents,
-		sessions:        d.Sessions,
-		sessionLive:     d.SessionLive,
-		viewerGroups:    groupSet(d.ViewerGroups),
-		soloUser:        d.SoloUser,
-		writeOff:        d.WriteModeOff,
-		watch:           d.Watch,
-		limits:          d.Limits,
-		setupCfg:        d.Setup,
-		setupLocal:      d.SetupLocal,
-		setupOwn:        d.SetupOwnAddrs,
-		setupResolver:   d.SetupResolver,
-		setupStack:      d.SetupStack,
-		autoDelay:       d.AutoApproveDelay,
-		autoTicker:      d.AutoApproveTicker,
-		leaseTicker:     d.LeaseTicker,
-		ctx:             ctx,
-		cancel:          cancel,
-		rooms:           map[string]*roomState{},
-		loading:         map[string]*roomLoad{},
-		alertRooms:      map[string]string{},
-		alertLocks:      newAlertLocks(),
-		list:            newListHub(),
+		store:            d.Store,
+		actions:          acts,
+		tools:            tls,
+		stackFor:         d.StackFor,
+		actionCatalogue:  d.ActionCatalogue,
+		topo:             topo,
+		users:            users,
+		owners:           d.Owners,
+		ownersNowFn:      d.OwnersNow,
+		reloadOwners:     d.ReloadOwners,
+		onOwnersReloaded: d.OnOwnersReloaded,
+		setupForge:       d.SetupForge,
+		regAt:            map[string]time.Time{},
+		run:              run,
+		writeHandoff:     wh,
+		writePostmortem:  d.WritePostmortem,
+		triage:           d.Triage,
+		triageWait:       triageWaitFor(d.TriagePassTimeout),
+		triageSem:        make(chan struct{}, maxTriagePasses),
+		globalRetry:      globalSlotRetry,
+		opts:             d.Options,
+		shadowOpts:       d.ShadowOptions,
+		shadowGrace:      d.ShadowGrace,
+		shadow:           shadowStore,
+		changes:          changes,
+		log:              log,
+		now:              now,
+		onRoomOpened:     d.OnRoomOpened,
+		onRoomClosed:     d.OnRoomClosed,
+		onRoomDeleted:    d.OnRoomDeleted,
+		onActionExec:     d.OnActionExecuted,
+		onActionResult:   d.OnActionResult,
+		teamPager:        d.TeamPager,
+		prReader:         d.PullRequests,
+		prTicker:         d.PRPollTicker,
+		prf:              newPRFollower(),
+		changeW:          changeW,
+		slots:            newAgentSlots(d.MaxAgents),
+		exportMax:        d.ExportMaxEvents,
+		sessions:         d.Sessions,
+		sessionLive:      d.SessionLive,
+		viewerGroups:     groupSet(d.ViewerGroups),
+		soloUser:         d.SoloUser,
+		writeOff:         d.WriteModeOff,
+		limits:           d.Limits,
+		setupCfg:         d.Setup,
+		setupLocal:       d.SetupLocal,
+		setupOwn:         d.SetupOwnAddrs,
+		setupResolver:    d.SetupResolver,
+		setupStack:       d.SetupStack,
+		watch:            d.Watch,
+		autoDelay:        d.AutoApproveDelay,
+		autoTicker:       d.AutoApproveTicker,
+		leaseTicker:      d.LeaseTicker,
+		ctx:              ctx,
+		cancel:           cancel,
+		rooms:            map[string]*roomState{},
+		loading:          map[string]*roomLoad{},
+		alertRooms:       map[string]string{},
+		alertLocks:       newAlertLocks(),
+		list:             newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -613,6 +647,20 @@ func New(d Deps) *Service {
 		Unknown: s.applyRunnerUnknown,
 	}, log)
 	s.credPending = map[string]pendingCredentials{}
+	// pipeline_register runs on the service itself (setup_register.go), so
+	// the service puts it in its own proposal registry when setup is on: the
+	// setup route then resolves the step exactly like any other action, and
+	// the demo registry (cmd/server's acts) gains it without further wiring.
+	// A caller that already registered the name (cmd/server with a stack, a
+	// test) is left alone. With setup off the action is not listed and no
+	// setup route reaches it.
+	if d.Setup.Enabled {
+		if _, ok := acts.Get(registerActionName); !ok {
+			if err := acts.Register(NewRegisterAction(s)); err != nil {
+				log.Error("room: register pipeline_register action", "err", err)
+			}
+		}
+	}
 	return s
 }
 
@@ -989,6 +1037,27 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 	return s.rebuildWith(ctx, roomID, nil)
 }
 
+// noteRegistered remembers a pipeline.registered event's time by pipeline id
+// for GET /api/pipelines' setup rows (directory.go; U1-14). It runs on every
+// path that folds an event: a live append and a remote replica's event
+// (foldLocked) and the rebuild of a room from the store (rebuildWith), so the
+// time is known on every replica and after a restart. The first registration
+// of an id wins.
+func (s *Service) noteRegistered(e events.Event) {
+	if e.Type != events.PipelineRegistered {
+		return
+	}
+	p, ok := decode[events.PipelineRegisteredPayload](e)
+	if !ok || p.PipelineID == "" {
+		return
+	}
+	s.regMu.Lock()
+	if _, seen := s.regAt[p.PipelineID]; !seen {
+		s.regAt[p.PipelineID] = e.At
+	}
+	s.regMu.Unlock()
+}
+
 // rebuildWith is rebuild that also hands every event read to visit (nil for
 // none), in log order, with the room folded through it.
 func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(RoomSnapshot, events.Event)) (loadedRoom, error) {
@@ -1014,6 +1083,7 @@ func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(Roo
 				}
 			}
 			st.snap = Apply(st.snap, e)
+			s.noteRegistered(e)
 			trackPending(st, e)
 			if visit != nil {
 				visit(st.snap, e)
