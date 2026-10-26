@@ -510,6 +510,15 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "Task 0 of ora-orders-connector FAILED with ORA-01031: insufficient privileges when it started its next LogMiner session at 09:31, because a privilege review revoked LOGMINING from the LogMiner user C##DBZUSER on the source database at 09:30. The setup check oracle-logminer-grants reports C##DBZUSER is missing LOGMINING; its other grants are intact. The fix: a DBA runs GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL, since the user is the person's own (the setup's alternative is its own LogMiner user from source_create_read_role at T2, with the Debezium grant set), then connect_restart_task for task 0.",
 		wrong: "Supplemental logging was dropped on the source, so the connector mines incomplete changes; add it back.",
 	},
+	// U5c: the log-only setup scenarios. Only connect_worker_logs carries the cause.
+	"setup/sink-authentication-log-only": {
+		good:  "The kafka-connect sink connector wh-orders-sink is FAILED, so the setup's final canary is missing from analytics.orders. connect_worker_logs shows why at 09:38:20: SnowflakeSQLException, warehouse login rejected for the service account analytics_loader. The connector is the first failing component and the warehouse credential is the root cause; replacing the credential comes before any task restart. The fix: secret_set with the service account's current password (T1), then connect_restart_task for task 0.",
+		wrong: "The Schema Registry rejected the orders value schema, so the sink cannot deserialize records; set the subject's compatibility to NONE.",
+	},
+	"setup/source-authentication-log-only": {
+		good:  "The kafka-connect source connector pg-orders-connector is FAILED, so the setup's final canary is missing from the topic. connect_worker_logs shows why at 09:38:20: PSQLException, FATAL: password authentication failed for user piperoom_cdc. The connector is the first failing component and the Postgres source's credential for piperoom_cdc is the root cause; replacing the credential comes before any task restart. The fix: secret_set with piperoom_cdc's current password (T1), then connect_restart_task for task 0.",
+		wrong: "The replication slot debezium_orders was dropped on the source, so the connector has nothing to stream from; recreate the slot.",
+	},
 	"setup/wal-level-replica": {
 		good:  "The setup check postgres-wal-level fails: the source Postgres runs with wal_level=replica, so logical decoding and every logical replication slot are unavailable. pg-orders-connector task 0 FAILED with 'logical decoding requires wal_level >= logical'. Set wal_level=logical with source_alter_system and restart the server with source_restart (or re-render the source-postgres template with compose_write when the compose command line pins -c wal_level=replica), then take a new slot and snapshot.",
 		wrong: "The Postgres failover lost the replication slot, so pg-orders-connector task 0 failed; recreate the slot and restart the connector.",
