@@ -211,6 +211,20 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
   )
 }
 
+// Settles a send's client_id with its composer and says whether the Retry strip belongs under it.
+// The strip is for a send that did not get through but is still owed: kept for the reconnect, or
+// sent with no answer (SteerBox draws the same line with retryId.owns). A refused send (4xx, 409
+// room_closed) is neither: the ledger dropped it, the room error says why, and a Retry would only
+// be a new send. One the person edited away while it was on the wire (retryId.drop) is not the
+// composer's any more when it ends, so it cannot be told from a refusal here; it keeps the strip,
+// as before, since a slow network failure is the likelier end of a send that was still out.
+function settleSend(retryId: ReturnType<typeof useRetryId>, clientId: string, ok: boolean): boolean {
+  const mine = retryId.owns(clientId)
+  retryId.settle(clientId, ok)
+  const refused = !ok && mine && !retryId.owns(clientId)
+  return !ok && !refused
+}
+
 function CommentThread({
   comment,
   onReply,
@@ -240,8 +254,7 @@ function CommentThread({
     const clientId = retryId.next(offline)
     const ok = (await onReply(t, clientId)) !== false
     setSending(false)
-    setOffline(!ok)
-    retryId.settle(clientId, ok)
+    setOffline(settleSend(retryId, clientId, ok))
     if (ok) {
       setText('')
       setOpen(false)
@@ -330,8 +343,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
     const clientId = retryId.next(offline)
     const ok = (await onSubmit(t, clientId)) !== false
     setSending(false)
-    setOffline(!ok)
-    retryId.settle(clientId, ok)
+    setOffline(settleSend(retryId, clientId, ok))
     if (ok) setText('')
   }
   const submit = (e: FormEvent) => {
