@@ -1037,22 +1037,38 @@ var slowLines510 = map[string]func(n int) string{
 	"padded-words":    func(n int) string { return strings.Repeat("<password> debezium </password>", n/31) },
 }
 
-// TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.
+// TestReview510LinearTime: hostile lines scale linearly with size. The
+// absolute ceiling only catches a catastrophic blowup; linearity itself
+// is asserted by comparing a quarter-size input with the full one, so a
+// slow machine (whose constant factor scales both sizes) cannot flake it
+// the way a tight absolute bound did on Windows.
 func TestReview510LinearTime(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing check; runs without -race")
 	}
-	const ceiling = 50 * time.Millisecond
-	for name, mk := range slowLines510 {
-		s := mk(MaxScan)
+	const ceiling = 500 * time.Millisecond // catastrophic bound only
+	bench := func(s string) time.Duration {
+		Text(s) // warm up
 		best := time.Duration(1 << 62)
-		for range 5 {
+		for range 9 {
 			start := time.Now()
-			Text(s)
-			best = min(best, time.Since(start))
+			for range 5 {
+				Text(s)
+			}
+			best = min(best, time.Since(start)/5)
 		}
-		if best > ceiling {
-			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
+		return best
+	}
+	for name, mk := range slowLines510 {
+		small, large := mk(MaxScan/4), mk(MaxScan)
+		sb, lb := bench(small), bench(large)
+		if lb > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v (catastrophic bound)", name, lb, len(large)>>10, ceiling)
+		}
+		if sb >= time.Millisecond {
+			if limit := time.Duration(float64(sb) * float64(len(large)) / float64(len(small)) * 2.5); lb > limit {
+				t.Errorf("%s: superlinear: %d KiB in %v vs %d KiB in %v (limit %v)", name, len(large)>>10, lb, len(small)>>10, sb, limit)
+			}
 		}
 	}
 }

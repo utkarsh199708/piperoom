@@ -459,7 +459,12 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 		if (out[i].Status == "open") != (out[j].Status == "open") {
 			return out[i].Status == "open"
 		}
-		return out[i].OpenedAt.After(out[j].OpenedAt)
+		if !out[i].OpenedAt.Equal(out[j].OpenedAt) {
+			return out[i].OpenedAt.After(out[j].OpenedAt)
+		}
+		// Same order the stores use (ORDER BY opened_at DESC, id ASC), so
+		// tied timestamps list deterministically instead of in map order.
+		return out[i].ID < out[j].ID
 	})
 	return out, nil
 }

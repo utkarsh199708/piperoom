@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -26,16 +27,17 @@ func repoStack(t *testing.T) *stack {
 }
 
 func TestParseShadowFlags(t *testing.T) {
+	defShell := defaultShell(runtime.GOOS)
 	tests := []struct {
 		name    string
 		args    []string
 		want    shadowOpts
 		wantErr string
 	}{
-		{"none", nil, shadowOpts{Shell: "sh"}, ""},
+		{"none", nil, shadowOpts{Shell: defShell}, ""},
 		{"all set", []string{"--grace", "10m", "--token-budget", "100000", "--max-turns", "8", "--watch-interval", "20s", "--watch-cooldown", "2m", "--shell", "powershell"},
 			shadowOpts{Grace: "10m", TokenBudget: "100000", MaxTurns: "8", WatchInterval: "20s", WatchCooldown: "2m", Shell: "powershell"}, ""},
-		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: "sh"}, ""},
+		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: defShell}, ""},
 		{"bad grace", []string{"--grace", "soon"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"negative grace", []string{"--grace", "-5s"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"bad budget", []string{"--token-budget", "12k"}, shadowOpts{}, "PIPEROOM_SHADOW_TOKEN_BUDGET"},
@@ -85,8 +87,9 @@ func TestEnvPairsSkipsUnset(t *testing.T) {
 func TestHostEnvLines(t *testing.T) {
 	t.Run("sh is sorted and quoted", func(t *testing.T) {
 		got := hostEnvLines("/repo with 'quote", shadowOpts{Shell: "sh", Grace: "1m"})
+		ownersPath := filepath.Join("/repo with 'quote", filepath.FromSlash("dev/owners.shadow.yaml"))
 		want := []string{
-			`export OWNERS_FILE='/repo with '\''quote/dev/owners.shadow.yaml'`,
+			"export OWNERS_FILE=" + shQuote(ownersPath),
 			`export PIPEROOM_SHADOW_GRACE='1m'`,
 			`export PIPEROOM_WATCH_COOLDOWN='5m'`,
 			`export PIPEROOM_WATCH_INTERVAL='15s'`,
