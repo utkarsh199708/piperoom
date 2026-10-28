@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,6 +75,9 @@ func TestVersionFlag(t *testing.T) {
 		{"-X piperoom/internal/version.Version=v1.2.3-test", "v1.2.3-test"},
 	} {
 		bin := filepath.Join(dir, "server")
+		if runtime.GOOS == "windows" {
+			bin += ".exe"
+		}
 		args := []string{"build", "-o", bin}
 		if tc.ldflags != "" {
 			args = append(args, "-ldflags", tc.ldflags)

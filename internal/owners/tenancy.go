@@ -181,8 +181,12 @@ func IsCAKey(key string) bool { return connKeys[key].ca }
 func IsLiteralKey(key string) bool { return connKeys[key].literal }
 
 // FileRef is the canonical connection reference of a file path (see
-// ConnRefs): cleaned and lower case, because Windows paths ignore case.
-func FileRef(path string) string { return "file:" + strings.ToLower(filepath.Clean(path)) }
+// ConnRefs): cleaned, forward-slashed and lower case, because Windows
+// paths ignore case and a Linux-written path must name the same
+// reference on a Windows dev machine.
+func FileRef(path string) string {
+	return "file:" + strings.ToLower(filepath.ToSlash(filepath.Clean(path)))
+}
 
 // TenantName returns the pipeline's tenant: its tenant: value, or DefaultTenant.
 func (p Pipeline) TenantName() string {

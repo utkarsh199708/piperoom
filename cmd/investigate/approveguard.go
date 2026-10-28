@@ -135,6 +135,15 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 // is refused: the dev stack is TCP on loopback, and a socket can be a tunnel.
 // A DSN that does not parse is refused. Errors never echo v (it has a password).
 func localPostgres(v string) error {
+	// An empty URL host means a unix socket or the platform default, which
+	// pgx fills in differently per OS (localhost on Windows); refuse it
+	// explicitly so the guard means the same everywhere.
+	if strings.Contains(v, "://") {
+		if u, err := url.Parse(strings.TrimSpace(v)); err == nil && u.Host == "" &&
+			u.Query().Get("host") == "" && u.Query().Get("hostaddr") == "" {
+			return errors.New("host is empty (unix socket or platform default): the dev stack is TCP on loopback")
+		}
+	}
 	cfg, err := pgxpool.ParseConfig(strings.TrimSpace(v))
 	if err != nil {
 		// Do not wrap err: pgconn parse errors can quote the DSN.

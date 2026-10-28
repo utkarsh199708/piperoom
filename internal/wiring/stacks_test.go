@@ -881,9 +881,7 @@ func TestSharedTLSKeyFiles(t *testing.T) {
 		}
 	}
 	link := filepath.Join(dir, "link.key")
-	if err := os.Symlink(key, link); err != nil {
-		t.Fatal(err)
-	}
+	linkErr := os.Symlink(key, link) // Windows may lack the privilege; the symlink subcase skips below.
 	withC := func(y string) string {
 		return strings.Replace(y, "tenants:\n  a: {}\n  b: {}\n", "tenants:\n  a: {}\n  b: {}\n  c: {}\n", 1) +
 			"  - {id: pc, tenant: c, topic_prefix: pc, source_tables: [public.c], connectors: [pc-connector]}\n"
@@ -905,18 +903,22 @@ func TestSharedTLSKeyFiles(t *testing.T) {
 		proc    config.Config
 		env     map[string]string
 		refused bool
+		symlink bool
 	}{
 		{"process-wide key file and tenant b's file reference", addB(withC(twoTenantYAML("")), "kafka_tls_key_file: {file: "+key+"}"),
-			config.Config{KafkaTLSKeyFile: key}, nil, true},
+			config.Config{KafkaTLSKeyFile: key}, nil, true, false},
 		{"tenant a's variable holding the path and tenant b's file reference", addB(addA(twoTenantYAML(""), "kafka_tls_key_file: {env: A_KEYFILE}"), "connect_tls_key_file: {file: "+key+"}"),
-			config.Config{}, map[string]string{"A_KEYFILE": key}, true},
+			config.Config{}, map[string]string{"A_KEYFILE": key}, true, false},
 		{"a symlink to the same key", addB(addA(twoTenantYAML(""), "kafka_tls_cert_file: {file: "+link+"}"), "kafka_tls_cert_file: {file: "+key+"}"),
-			config.Config{}, nil, true},
+			config.Config{}, nil, true, true},
 		{"one corporate CA for everyone", addB(addA(withC(twoTenantYAML("")), "kafka_tls_ca_file: {file: "+ca+"}"), "schema_registry_tls_ca_file: {env: B_CA}"),
-			config.Config{SourceDBURL: "src-process", KafkaTLSCAFile: ca, ConnectTLSCAFile: ca}, map[string]string{"B_CA": ca}, false},
+			config.Config{SourceDBURL: "src-process", KafkaTLSCAFile: ca, ConnectTLSCAFile: ca}, map[string]string{"B_CA": ca}, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.symlink && linkErr != nil {
+				t.Skipf("cannot create symlinks here: %v", linkErr)
+			}
 			m := twoTenantEnv()
 			for k, v := range tc.env {
 				m[k] = v

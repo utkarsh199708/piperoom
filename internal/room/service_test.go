@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -207,6 +208,32 @@ func allEvents(t *testing.T, st *memstore.Store, roomID string) []events.Event {
 		t.Fatalf("events: %v", err)
 	}
 	return evs
+}
+
+// TestListRoomsTiedOpenedAtOrdersByID: rooms opened at the same instant
+// (one fixed clock) list in ID order on every call, matching the stores'
+// ORDER BY opened_at DESC, id ASC, instead of in map-iteration order.
+func TestListRoomsTiedOpenedAtOrdersByID(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	var want []string
+	for range 3 {
+		want = append(want, createRoom(t, svc, "arjun").ID)
+	}
+	sort.Strings(want)
+	for range 10 {
+		rooms, err := svc.ListRooms(context.Background())
+		if err != nil {
+			t.Fatalf("list rooms: %v", err)
+		}
+		if len(rooms) != len(want) {
+			t.Fatalf("listed %d rooms, want %d", len(rooms), len(want))
+		}
+		for i, r := range rooms {
+			if r.ID != want[i] {
+				t.Fatalf("call listed %v, want ID order %v", rooms, want)
+			}
+		}
+	}
 }
 
 func TestSteerNonDriverBecomesSuggestion(t *testing.T) {
