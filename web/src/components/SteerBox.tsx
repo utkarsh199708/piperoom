@@ -1,6 +1,6 @@
 import { PersonName } from '@/components/VerifiedBadge'
 import { neutralizeBadgeText } from '@/lib/verification'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
@@ -43,6 +43,9 @@ function GrantPicker({
   onGrant: (to: string) => void
 }) {
   const [to, setTo] = useState('')
+  // Solo mode lists people in /api/people who can never sign in; giving them control would lock the
+  // solo user out until the lease expires. Only the solo user is a real recipient, and that is you.
+  const signInIds = useMemo(() => (user.solo ? new Set([user.id]) : undefined), [user.solo, user.id])
   if (!open) return null
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
@@ -50,7 +53,14 @@ function GrantPicker({
         Give control to
       </label>
       <div className="min-w-[10rem] [&_select]:h-8 [&_select]:w-full">
-        <PersonSelect id="grant-to" selfId={user.id} value={to} onChange={setTo} />
+        <PersonSelect
+          id="grant-to"
+          selfId={user.id}
+          value={to}
+          onChange={setTo}
+          signInIds={signInIds}
+          noSignInText={user.solo ? 'No other person can sign in on this server (solo mode).' : undefined}
+        />
       </div>
       <Button
         size="sm"
