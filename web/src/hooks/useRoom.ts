@@ -15,7 +15,7 @@ import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../li
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError } from '../lib/errors'
+import { errorText, friendlyError, isNetworkError } from '../lib/errors'
 import { newClientId } from '../lib/clientId'
 import { SendLedger } from './sendLedger'
 import type { DeliveredListener, SendItem } from './sendLedger'
@@ -120,6 +120,9 @@ export interface TraceResult {
   ok: boolean
   error?: string
 }
+
+/** The trace panel's line when the server cannot be reached: nothing is kept or retried for a trace. */
+export const TRACE_OFFLINE_TEXT = "Can't reach Piperoom, so the trace may not have run. Try again."
 
 export type { DeliveredListener, Sent } from './sendLedger'
 /** What a steer or comment says (kept for older imports). */
@@ -1074,6 +1077,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         setError(null)
         return { ok: true }
       } catch (e) {
+        // errorText's offline line promises the message is kept and retried; a trace is neither. A fetch that
+        // rejects can also mean the server got it and only the reply was lost, so this does not say "not sent".
+        if (isNetworkError(e)) return { ok: false, error: TRACE_OFFLINE_TEXT }
         return { ok: false, error: errorText(e) }
       }
     },

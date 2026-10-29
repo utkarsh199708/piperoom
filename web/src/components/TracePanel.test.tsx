@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { TracePanel } from './TracePanel'
-import type { RoomActions } from '../hooks/useRoom'
+import type { RoomActions, TraceResult } from '../hooks/useRoom'
 import type { TraceState } from '../state/types'
 
 const actions: RoomActions = {
@@ -136,18 +136,22 @@ describe('TracePanel when the trace fails', () => {
   })
 
   it('drops an answer for words the person has since changed', async () => {
-    let fail: (r: { ok: boolean; error: string }) => void = () => {}
-    const trace = vi.fn().mockReturnValue(new Promise((resolve) => (fail = resolve)))
+    let answer: (r: TraceResult) => void = () => {}
+    const trace = vi.fn().mockReturnValue(new Promise<TraceResult>((resolve) => (answer = resolve)))
     render(<TracePanel trace={null} actions={{ ...actions, trace }} onClose={vi.fn()} />)
     fill('public.nope', '1')
     fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
     expect(screen.getByRole('button', { name: 'Trace' })).toBeDisabled()
 
     fireEvent.change(screen.getByLabelText('Table'), { target: { value: 'public.orders' } })
-    fail({ ok: false, error: NOT_IN_PIPELINE })
-    await Promise.resolve()
-    await Promise.resolve()
+    // act() flushes the continuation of submit(): without it the assertions below run before the late
+    // answer is handled, and they would pass whether or not the panel drops it.
+    await act(async () => {
+      answer({ ok: false, error: NOT_IN_PIPELINE })
+    })
+    expect(trace).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Table')).not.toHaveAttribute('aria-invalid')
     expect(screen.getByRole('button', { name: 'Trace' })).toBeEnabled()
   })
 })

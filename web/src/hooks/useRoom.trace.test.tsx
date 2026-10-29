@@ -26,7 +26,8 @@ vi.mock('../api/client', async (importOriginal) => {
 })
 
 import { api, openRoomWs } from '../api/client'
-import { useRoom } from './useRoom'
+import { OFFLINE_TEXT } from '../lib/errors'
+import { TRACE_OFFLINE_TEXT, useRoom } from './useRoom'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -117,6 +118,20 @@ describe('useRoom trace', () => {
     expect(res).toEqual({ ok: false, error: NOT_IN_PIPELINE })
     expect(hook.result.current.error).toBeNull()
     expect(hook.result.current.state?.trace).toBeNull()
+  })
+
+  it('says the trace may not have run when the server cannot be reached, not that it is kept and retried', async () => {
+    const hook = await live()
+    vi.mocked(api.trace).mockRejectedValue(new TypeError('Failed to fetch'))
+    let res: { ok: boolean; error?: string } | undefined
+    await act(async () => {
+      res = await hook.result.current.actions.trace('public.orders', '42')
+    })
+    expect(res).toEqual({ ok: false, error: TRACE_OFFLINE_TEXT })
+    // The shared offline line is for steers and comments, which are kept and retried; a trace is neither.
+    expect(res?.error).not.toBe(OFFLINE_TEXT)
+    expect(res?.error).not.toMatch(/kept|retrying/i)
+    expect(hook.result.current.error).toBeNull()
   })
 
   it('answers ok for a trace that works, and the trace.pinned event pins it to the room', async () => {
