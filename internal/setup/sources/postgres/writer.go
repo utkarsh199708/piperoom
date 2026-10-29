@@ -216,15 +216,18 @@ func validateAlterSystem(name, value string) error {
 	return nil
 }
 
-// CanaryTableSQL is the DDL of the ladder's canary table: an identity primary
-// key (so REPLICA IDENTITY DEFAULT carries the key), the nonce the ladder looks
-// for, and the insert time.
+// CanaryTableSQL is the DDL of the ladder's canary table: the nonce the ladder
+// looks for is the primary key, so REPLICA IDENTITY DEFAULT keys the canary's
+// change event by the nonce and the ladder's kafka_find_by_key can match it —
+// the same shape as the SQL Server and Oracle canary tables. An id-keyed table
+// made by an earlier build is not altered (IF NOT EXISTS): drop it and verify
+// again.
 func CanaryTableSQL(table string) (string, error) {
 	q, err := quoteTable(table)
 	if err != nil {
 		return "", err
 	}
-	return "CREATE TABLE IF NOT EXISTS " + q + " (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, nonce text NOT NULL, inserted_at timestamptz NOT NULL DEFAULT now())", nil
+	return "CREATE TABLE IF NOT EXISTS " + q + " (id bigint GENERATED ALWAYS AS IDENTITY, nonce text NOT NULL PRIMARY KEY, inserted_at timestamptz NOT NULL DEFAULT now())", nil
 }
 
 // InsertCanarySQL is the canary insert; the nonce is the one parameter.

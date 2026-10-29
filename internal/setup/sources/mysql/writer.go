@@ -112,15 +112,19 @@ func (w *Writer) CreateReadRole(ctx context.Context, role string, tables []strin
 	return name, nil
 }
 
-// CanaryTableSQL is the DDL of the ladder's canary table: an auto-increment
-// primary key (the event's key), the nonce the ladder looks for, and the insert
-// time. InnoDB, so the insert is a transaction in the binlog like any other.
+// CanaryTableSQL is the DDL of the ladder's canary table: the nonce the ladder
+// looks for is the primary key (the binlog event's key, which the ladder's
+// kafka_find_by_key matches — the same shape as the SQL Server and Oracle
+// canary tables), an auto-increment column (indexed, as AUTO_INCREMENT
+// requires), and the insert time. InnoDB, so the insert is a transaction in
+// the binlog like any other. An id-keyed table made by an earlier build is not
+// altered (IF NOT EXISTS): drop it and verify again.
 func CanaryTableSQL(table string) (string, error) {
 	q, err := quoteTable(table)
 	if err != nil {
 		return "", err
 	}
-	return "CREATE TABLE IF NOT EXISTS " + q + " (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, nonce VARCHAR(64) NOT NULL, inserted_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)) ENGINE=InnoDB", nil
+	return "CREATE TABLE IF NOT EXISTS " + q + " (id BIGINT NOT NULL AUTO_INCREMENT, nonce VARCHAR(64) NOT NULL, inserted_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), PRIMARY KEY (nonce), KEY piperoom_canary_id (id)) ENGINE=InnoDB", nil
 }
 
 // InsertCanarySQL is the canary insert; the nonce is the one parameter.

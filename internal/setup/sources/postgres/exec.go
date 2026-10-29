@@ -219,8 +219,8 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 }
 
 // CreateCanaryTable creates the ladder's canary table ("schema.table",
-// CanaryTableSQL): an identity primary key, the nonce column and the insert
-// time. It exists afterwards whether or not it did before.
+// CanaryTableSQL): the nonce as the primary key, an identity column and the
+// insert time. It exists afterwards whether or not it did before.
 func (w *SetupWriter) CreateCanaryTable(ctx context.Context, table string) error {
 	if w == nil || w.db == nil {
 		return ErrNoWriter
