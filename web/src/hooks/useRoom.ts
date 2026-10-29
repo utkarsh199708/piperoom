@@ -115,6 +115,12 @@ export interface CloseResult {
   error?: string
 }
 
+/** What a record trace (POST /api/rooms/{id}/trace) came to; `error` is the text for the person. */
+export interface TraceResult {
+  ok: boolean
+  error?: string
+}
+
 export type { DeliveredListener, Sent } from './sendLedger'
 /** What a steer or comment says (kept for older imports). */
 export type PendingSend = SendItem
@@ -206,7 +212,11 @@ export interface RoomActions {
   handoff: (to: string, stayAsWatcher: boolean) => void
   /** Resolves true once the server took the accept, false when it failed (the error is in the room banner). */
   acceptHandoff: (handoffId: string) => Promise<boolean> | void
-  trace: (table: string, key: string) => void
+  /**
+   * Trace one record (POST /api/rooms/{id}/trace). Resolves when the call is done; a failure is returned,
+   * not put in the room banner, because the trace panel's overlay covers the banner and shows it itself.
+   */
+  trace: (table: string, key: string) => Promise<TraceResult>
   /**
    * Label the closed room (POST /api/rooms/{id}/label). Resolves when the call is done; a failure
    * is returned, not put in the room banner, so the label form keeps its text and shows it.
@@ -1044,7 +1054,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       }
       void runAction(api.checklist(roomId, step))
     },
-    trace: (table, key) => {
+    trace: async (table, key) => {
       if (isFixtures()) {
         synthesize('trace.pinned', {
           table,
@@ -1057,9 +1067,15 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             { layer: 'warehouse', name: 'analytics.orders', status: 'not_seen' },
           ],
         })
-        return
+        return { ok: true }
       }
-      void runAction(api.trace(roomId, table, key))
+      try {
+        await api.trace(roomId, table, key)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: errorText(e) }
+      }
     },
   }
 

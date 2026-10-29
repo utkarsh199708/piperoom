@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { TracePanel } from './TracePanel'
 import type { RoomActions } from '../hooks/useRoom'
 import type { TraceState } from '../state/types'
@@ -18,7 +18,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   label: vi.fn(),
   checklist: vi.fn(),
-  trace: vi.fn(),
+  trace: vi.fn().mockResolvedValue({ ok: true }),
   hypothesisVerdict: vi.fn(),
   nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
@@ -72,6 +72,100 @@ describe('TracePanel as a dialog', () => {
     fireEvent.change(screen.getByLabelText('Key'), { target: { value: '7' } })
     fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
     expect(actions.trace).toHaveBeenCalledWith('public.orders', '7')
+  })
+})
+
+const NOT_IN_PIPELINE = 'topology: bad input: no connector streams table "public.nope" in pipeline "orders"'
+
+function fill(table: string, key: string) {
+  fireEvent.change(screen.getByLabelText('Table'), { target: { value: table } })
+  fireEvent.change(screen.getByLabelText('Key'), { target: { value: key } })
+}
+
+describe('TracePanel when the trace fails', () => {
+  it('names the problem under the form and keeps what was typed', async () => {
+    const trace = vi.fn().mockResolvedValue({ ok: false, error: NOT_IN_PIPELINE })
+    render(<TracePanel trace={null} actions={{ ...actions, trace }} onClose={vi.fn()} />)
+    fill('public.nope', '1')
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('public.nope')
+    expect(alert).toHaveTextContent('pipeline "orders"')
+    // The error sits under the form, not above it.
+    const form = dialog.querySelector('form')!
+    expect(form.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(dialog).getByLabelText('Table')).toHaveValue('public.nope')
+    expect(within(dialog).getByLabelText('Key')).toHaveValue('1')
+    expect(within(dialog).getByLabelText('Table')).toHaveAccessibleDescription(NOT_IN_PIPELINE)
+    // The person can fix a field and try again.
+    expect(within(dialog).getByRole('button', { name: 'Trace' })).toBeEnabled()
+  })
+
+  it('changing the table or the key clears the error', async () => {
+    for (const field of ['Table', 'Key']) {
+      const trace = vi.fn().mockResolvedValue({ ok: false, error: NOT_IN_PIPELINE })
+      const { unmount } = render(<TracePanel trace={null} actions={{ ...actions, trace }} onClose={vi.fn()} />)
+      fill('public.nope', '1')
+      fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+      await screen.findByRole('alert')
+
+      fireEvent.change(screen.getByLabelText(field), { target: { value: 'public.orders' } })
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.getByLabelText('Table')).not.toHaveAttribute('aria-invalid')
+      unmount()
+    }
+  })
+
+  it('a new attempt clears the old error, and a success leaves none', async () => {
+    const trace = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: NOT_IN_PIPELINE })
+      .mockResolvedValueOnce({ ok: true })
+    render(<TracePanel trace={null} actions={{ ...actions, trace }} onClose={vi.fn()} />)
+    fill('public.nope', '1')
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+    await screen.findByRole('alert')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() => expect(trace).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Trace' })).toBeEnabled())
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('drops an answer for words the person has since changed', async () => {
+    let fail: (r: { ok: boolean; error: string }) => void = () => {}
+    const trace = vi.fn().mockReturnValue(new Promise((resolve) => (fail = resolve)))
+    render(<TracePanel trace={null} actions={{ ...actions, trace }} onClose={vi.fn()} />)
+    fill('public.nope', '1')
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+    expect(screen.getByRole('button', { name: 'Trace' })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('Table'), { target: { value: 'public.orders' } })
+    fail({ ok: false, error: NOT_IN_PIPELINE })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Trace' })).toBeEnabled()
+  })
+})
+
+describe('TracePanel when the trace works', () => {
+  it('shows no error and renders the pinned hop-by-hop result', async () => {
+    const pinned: TraceState = { ...trace, table: 'public.orders', key: '42' }
+    const run = vi.fn().mockResolvedValue({ ok: true })
+    render(<TracePanel trace={pinned} actions={{ ...actions, trace: run }} onClose={vi.fn()} />)
+    fill('public.orders', '42')
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+
+    await waitFor(() => expect(run).toHaveBeenCalledWith('public.orders', '42'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Trace' })).toBeEnabled())
+    const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Stopped at warehouse analytics.orders')
+    expect(within(dialog).getByLabelText('Stage 5 of 5')).toBeInTheDocument()
   })
 })
 

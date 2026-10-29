@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import type { TraceState } from '../state/types'
 import type { RoomActions } from '../hooks/useRoom'
 import { cn } from '@/lib/utils'
@@ -40,18 +40,36 @@ export function TracePanel({
   const [table, setTable] = useState('')
   const [key, setKey] = useState('')
   const [busy, setBusy] = useState(false)
+  // Why the last trace failed. Shown here, not in the room banner: the dialog's overlay covers the banner.
+  const [error, setError] = useState<string | null>(null)
   const restoreFocus = useRestoreFocus()
-  const busyTimer = useRef<number | undefined>(undefined)
-  // A timer that outlives the panel would set state on an unmounted component (and in tests, after teardown).
-  useEffect(() => () => window.clearTimeout(busyTimer.current), [])
+  // Which submit may still report back. An edit or closing the panel moves it on, so an answer for words
+  // the person has since changed (or for a closed panel) is dropped instead of landing next to new input.
+  const attempt = useRef(0)
+  useEffect(
+    () => () => {
+      attempt.current += 1
+    },
+    [],
+  )
 
-  const submit = (e: FormEvent) => {
+  const edit = (set: (value: string) => void) => (e: ChangeEvent<HTMLInputElement>) => {
+    attempt.current += 1
+    setBusy(false)
+    setError(null)
+    set(e.target.value)
+  }
+
+  const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!table.trim() || !key.trim()) return
+    if (busy || !table.trim() || !key.trim()) return
+    const mine = ++attempt.current
     setBusy(true)
-    actions.trace(table.trim(), key.trim())
-    window.clearTimeout(busyTimer.current)
-    busyTimer.current = window.setTimeout(() => setBusy(false), 400)
+    setError(null)
+    const result = await actions.trace(table.trim(), key.trim())
+    if (mine !== attempt.current) return
+    setBusy(false)
+    if (!result.ok) setError(result.error ?? 'The trace failed.')
   }
 
   return (
@@ -78,9 +96,11 @@ export function TracePanel({
               id="trace-table"
               className="font-mono"
               value={table}
-              onChange={(e) => setTable(e.target.value)}
+              onChange={edit(setTable)}
               placeholder="schema.table"
               required
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'trace-error' : undefined}
             />
           </div>
           <div className="flex min-w-[8rem] flex-1 flex-col gap-1.5">
@@ -91,15 +111,23 @@ export function TracePanel({
               id="trace-key"
               className="font-mono"
               value={key}
-              onChange={(e) => setKey(e.target.value)}
+              onChange={edit(setKey)}
               placeholder="primary key value"
               required
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'trace-error' : undefined}
             />
           </div>
           <Button type="submit" disabled={busy || !table.trim() || !key.trim()}>
             Trace
           </Button>
         </form>
+
+        {error && (
+          <p id="trace-error" role="alert" className="m-0 text-sm font-medium text-destructive-fg">
+            {error}
+          </p>
+        )}
 
         {trace && (
           <div className="flex min-w-0 flex-col gap-2">
