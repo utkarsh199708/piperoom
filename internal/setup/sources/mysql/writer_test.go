@@ -158,7 +158,9 @@ func TestStatementBuilders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, part := range []string{"CREATE TABLE IF NOT EXISTS `shop`.`it_canary`", "AUTO_INCREMENT PRIMARY KEY", "nonce VARCHAR(64) NOT NULL", "ENGINE=InnoDB"} {
+	// PRIMARY KEY (nonce): the binlog event's key is the primary key, and the
+	// ladder's kafka_find_by_key matches it against the nonce (rungs 5 and 8).
+	for _, part := range []string{"CREATE TABLE IF NOT EXISTS `shop`.`it_canary`", "AUTO_INCREMENT", "PRIMARY KEY (nonce)", "nonce VARCHAR(64) NOT NULL", "ENGINE=InnoDB"} {
 		if !strings.Contains(ddl, part) {
 			t.Errorf("canary DDL lacks %q: %s", part, ddl)
 		}

@@ -89,15 +89,20 @@ type setupLadderTimings struct {
 	Poll time.Duration
 	// Step bounds one read (rule 4: a tool call gets a deadline).
 	Step time.Duration
+	// OpenCheck is how often a wait re-reads the room: a run whose room has
+	// closed ends at the next check instead of polling out its window (rung 8
+	// alone would otherwise read the pipeline for up to 10 more minutes).
+	OpenCheck time.Duration
 }
 
 // setupLadderDefaultTimings is the production schedule of design §3.4.
 var setupLadderDefaultTimings = setupLadderTimings{
-	Approval: 10 * time.Minute,
-	Event:    60 * time.Second,
-	Change:   10 * time.Minute,
-	Poll:     2 * time.Second,
-	Step:     10 * time.Second,
+	Approval:  10 * time.Minute,
+	Event:     60 * time.Second,
+	Change:    10 * time.Minute,
+	Poll:      2 * time.Second,
+	Step:      10 * time.Second,
+	OpenCheck: 15 * time.Second,
 }
 
 // errSetupLadderInFlight is the run guard's refusal: one ladder run per room
@@ -114,6 +119,9 @@ func (s *Service) ladderTimings() setupLadderTimings {
 		}
 		if t.Step <= 0 {
 			t.Step = setupLadderDefaultTimings.Step
+		}
+		if t.OpenCheck <= 0 {
+			t.OpenCheck = setupLadderDefaultTimings.OpenCheck
 		}
 		return t
 	}
@@ -184,9 +192,10 @@ func (s *Service) RequestSetupVerification(ctx context.Context, user User, roomI
 }
 
 // startSetupLadder claims the room's run guard and starts the run on the
-// service lifetime, so a closed room, a cancelled request or a stopping
-// service ends it instead of leaking it. It returns errSetupLadderInFlight
-// when this replica already runs the room's ladder.
+// service lifetime, so a cancelled request or a stopping service ends it
+// instead of leaking it; a closed room ends a run's waits at their next
+// roomStillOpen check. It returns errSetupLadderInFlight when this replica
+// already runs the room's ladder.
 func (s *Service) startSetupLadder(roomID string) error {
 	if !s.beginSetupLadder(roomID) {
 		return errSetupLadderInFlight
@@ -276,7 +285,7 @@ type setupLadder struct {
 	// table, so the canary topic is one of the pipeline's topics.
 	scope owners.Pipeline
 
-	nonce     string // this run's canary key; in the proposal params, never in setup.verified
+	nonce     string // this run's canary key; in the proposal params (the approver previews it), masked everywhere else in the log
 	nonceHash string // SHA-256 of nonce, the only form setup.verified carries
 	change    string // the key the person's change carries (rung 8)
 
@@ -407,8 +416,17 @@ func (l *setupLadder) awaitCanary(ctx context.Context) time.Time {
 		l.canaryNote = "the canary insert's result could not be followed: " + setupLadderErrText(err)
 		return time.Time{}
 	}
+	check := time.NewTicker(l.timings.OpenCheck)
+	defer check.Stop()
 	for {
 		select {
+		case <-check.C:
+			// The wait runs on the service lifetime: a closed room ends it
+			// early instead of holding the subscription out the window.
+			if !l.roomStillOpen(wctx) {
+				l.canaryNote = "the room closed before the canary insert ran"
+				return time.Time{}
+			}
 		case <-wctx.Done():
 			if ctx.Err() == nil {
 				l.canaryNote = "the canary insert is still waiting for its approval; rung 5 cannot pass"
@@ -482,6 +500,7 @@ func (l *setupLadder) evaluate(ctx context.Context, rung plan.Rung) events.Setup
 	}
 	wctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
+	lastOpenCheck := time.Now()
 	for {
 		// A waiting rung polls inside its window. Its polls are not written to
 		// the room: only the read the verdict rests on is (the one that turned
@@ -508,7 +527,29 @@ func (l *setupLadder) evaluate(ctx context.Context, rung plan.Rung) events.Setup
 			return out
 		case <-pause.C:
 		}
+		// The run lives on the service lifetime, so a closed room does not
+		// cancel wctx: re-read the room now and then and end the wait instead
+		// of polling the pipeline for the rest of the window. The verdict is
+		// moot either way (emit and emitVerified refuse a closed room).
+		if time.Since(lastOpenCheck) >= l.timings.OpenCheck {
+			lastOpenCheck = time.Now()
+			if !l.roomStillOpen(ctx) {
+				out.OK = false
+				out.Note = "the room closed before the rung was decided"
+				return out
+			}
+		}
 	}
+}
+
+// roomStillOpen says whether the run's room is still an open setup room; a
+// read error keeps the run going (the next wait re-checks).
+func (l *setupLadder) roomStillOpen(ctx context.Context) bool {
+	snap, err := l.s.readRoom(ctx, l.roomID)
+	if err != nil {
+		return true
+	}
+	return snap != nil && snap.Status == "open"
 }
 
 // onePass issues the rung's reads once, in order, until a predicate decides.
@@ -641,9 +682,10 @@ func (l *setupLadder) issueRead(ctx context.Context, tool string, input map[stri
 }
 
 // redactLadderRead masks secrets in a successful read's summary and data the
-// way the agent's scrubToolResult does: the room log only ever gets this form.
-// The rung's predicate keeps judging the raw Data, so a masked value (the
-// nonce is 32 hex characters) never turns a rung red. Encoding the data can
+// way the agent's scrubToolResult does: the room log only ever gets this form
+// (and recordRead masks the run's nonce on top, which redact has no rule for).
+// The rung's predicate keeps judging the raw Data, so a masked value never
+// turns a rung red. Encoding the data can
 // run a tool type's own MarshalJSON, which may panic; the panic drops the data
 // instead of taking the run down.
 func redactLadderRead(summary string, data any) (string, json.RawMessage, json.RawMessage) {
@@ -669,29 +711,45 @@ func redactLadderRead(summary string, data any) (string, json.RawMessage, json.R
 	return masked, raw, logged
 }
 
+// maskNonce hides this run's canary nonce behind its SHA-256 anywhere the room
+// log would carry it. redact has no rule for a bare 32-hex value, so the
+// replacement is explicit: only the nonce's hash may appear in an event
+// (setup.verified carries NonceHash; the proposal's params are the one
+// designed exception, which the approver previews). The change key is not
+// masked: setup.awaiting_change hands it to the person in example_sql.
+func (l *setupLadder) maskNonce(s string) string {
+	if l.nonce == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, l.nonce, "sha256:"+l.nonceHash)
+}
+
 // recordRead writes one read as an agent.tool_call and agent.tool_result of
 // the rung's step, so the room log holds the receipt of every read a rung's
 // verdict rests on, and returns the read's tool_use_id ("" when the read never
-// issued, or the room refused the append).
+// issued, or the room refused the append). The nonce is masked in everything
+// the events carry: rung 5's input is key=nonce, and a tool's summary may echo
+// its input.
 func (l *setupLadder) recordRead(ctx context.Context, stepID string, r *ladderRead) string {
 	if r == nil || r.Input == nil {
 		return ""
 	}
 	useID := NewID("tu_")
 	if !l.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
-		StepID: stepID, ToolUseID: useID, Tool: r.Tool, Input: r.Input,
+		StepID: stepID, ToolUseID: useID, Tool: r.Tool, Input: json.RawMessage(l.maskNonce(string(r.Input))),
 	}) {
 		return ""
 	}
 	r.UseID = useID
 	payload := events.AgentToolResultPayload{
 		StepID: stepID, ToolUseID: useID, Tool: r.Tool,
-		Summary: r.Summary, IsError: r.IsError, TookMS: r.TookMS,
+		Summary: l.maskNonce(r.Summary), IsError: r.IsError, TookMS: r.TookMS,
 	}
 	if r.LogData != nil {
-		payload.Data = r.LogData
-		if max := l.s.limits.EventMaxDataBytes; max > 0 && int64(len(r.LogData)) > max {
-			if cut, truncated := events.TruncateData(r.LogData, int(max)); truncated {
+		masked := json.RawMessage(l.maskNonce(string(r.LogData)))
+		payload.Data = masked
+		if max := l.s.limits.EventMaxDataBytes; max > 0 && int64(len(masked)) > max {
+			if cut, truncated := events.TruncateData(masked, int(max)); truncated {
 				payload.Data, payload.Truncated = cut, true
 			}
 		}

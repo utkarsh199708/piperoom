@@ -562,6 +562,43 @@ func TestSetupLadderRunsFromPlanAndRecordsReceipts(t *testing.T) {
 	if r.reads.warehouseCalled() {
 		t.Fatal("the ladder read the warehouse for a setup with no sink")
 	}
+	// The raw nonce reaches the room log only through the canary proposal and
+	// its execution (the approver previews the row). Every other event — above
+	// all the ladder's tool calls, whose rung 5 input is key=nonce — carries at
+	// most its SHA-256 (maskNonce).
+	maskedCalls := 0
+	callsPerStep := map[string]int{}
+	for _, e := range roomEvents(t, r.svc, roomID) {
+		typ := string(e.Type)
+		if e.Type == events.AgentToolCall {
+			var p events.AgentToolCallPayload
+			if json.Unmarshal(e.Payload, &p) == nil {
+				callsPerStep[p.StepID]++
+				if containsString(string(p.Input), "sha256:"+setupLadderHash(nonce)) {
+					maskedCalls++
+				}
+			}
+		}
+		if strings.HasPrefix(typ, "proposal.") || strings.HasPrefix(typ, "approval.") || strings.HasPrefix(typ, "action.") {
+			continue
+		}
+		if containsString(string(e.Payload), nonce) {
+			t.Errorf("event %s carries the raw nonce: %s", e.Type, e.Payload)
+		}
+	}
+	if maskedCalls == 0 {
+		t.Error("no tool_call carries the nonce's masked form: rung 5's receipt should")
+	}
+	// A waiting rung records exactly one tool_call: the read it was decided on,
+	// never its polls (rung 8 alone polled ~30 times here).
+	for _, rung := range last.Rungs {
+		if rung.Name != plan.RungCanaryEvent && rung.Name != plan.RungPersonChange {
+			continue
+		}
+		if n := callsPerStep[rung.StepID]; n != 1 {
+			t.Errorf("rung %s recorded %d tool calls, want exactly its deciding read", rung.Name, n)
+		}
+	}
 	// The room was asked for exactly one change, and its SQL carries the key
 	// the ladder waits for.
 	awaiting := ladderAwaiting(t, r.svc, roomID)
@@ -954,5 +991,70 @@ func TestCreateProposalReservesSystemOrigin(t *testing.T) {
 		if _, _, err := r.svc.createProposal(context.Background(), roomID, p, actor, nil); err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("actor %s: err = %v, want the system origin refused", actor.ID, err)
 		}
+	}
+}
+
+// TestSetupLadderSupersededPlanWritesNoVerdict: a run whose plan is no longer
+// the room's writes no setup.verified, only the note — U1-14 would otherwise
+// gate registration on a verdict about a plan nobody would register.
+func TestSetupLadderSupersededPlanWritesNoVerdict(t *testing.T) {
+	r := newLadderRig(t, tierOpts{})
+	roomID := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomID, "db.acme:5432", "compose_up")
+	// The room's plan is pl_1; this run started from a plan it has replaced.
+	l := &setupLadder{
+		s: r.svc, roomID: roomID, planID: "pl_0",
+		nonceHash: setupLadderHash("stale"), timings: r.svc.ladderTimings(),
+	}
+	rungs := []events.SetupRung{{Name: plan.RungCanaryEvent, OK: true}}
+	if l.emitVerified(context.Background(), rungs, nil) {
+		t.Fatal("a verdict for a superseded plan was recorded")
+	}
+	if got := ladderVerified(t, r.svc, roomID); len(got) != 0 {
+		t.Fatalf("setup.verified events = %d, want none", len(got))
+	}
+	noted := false
+	for _, e := range roomEvents(t, r.svc, roomID) {
+		if e.Type == events.AgentMessage && containsString(string(e.Payload), "setup plan changed") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatal("no note says the plan changed during the run")
+	}
+}
+
+// TestSetupLadderEndsWhenTheRoomCloses: the run lives on the service lifetime,
+// so a closed room does not cancel its waits — the periodic roomStillOpen check
+// must end them instead of polling the pipeline out the window (rung 8 alone
+// would read it for up to 10 more minutes).
+func TestSetupLadderEndsWhenTheRoomCloses(t *testing.T) {
+	r := newLadderRig(t, tierOpts{})
+	// Rung 8 would wait far longer than the test: the run must end at an open
+	// check, not at the window's end.
+	r.svc.ladderTiming.Change = 60 * time.Second
+	r.svc.ladderTiming.OpenCheck = 20 * time.Millisecond
+	roomID := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomID, "db.acme:5432", "compose_up", "connect_create_connector")
+	r.reads.found = func(key string) bool { return key == r.canary.lastNonce() }
+
+	if err := r.svc.startSetupLadder(roomID); err != nil {
+		t.Fatalf("start ladder: %v", err)
+	}
+	pid, _ := waitLadderCanaryProposal(t, r.svc, roomID, 0)
+	if err := r.approve(roomID, pid, "postgres", "bob"); err != nil {
+		t.Fatalf("approve the canary insert: %v", err)
+	}
+	// Rungs 1 to 7 are decided and the run now waits on rung 8.
+	waitSetupVerified(t, r.svc, roomID, 1)
+	if _, err := r.svc.CloseRoom(context.Background(), r.user("alice"), roomID, "resolved while verifying"); err != nil {
+		t.Fatalf("close room: %v", err)
+	}
+	waitForCond(t, 10*time.Second, func() bool {
+		return !r.svc.setupLadderRunning(roomID)
+	}, "the run kept rung 8's wait after the room closed")
+	// The closed room took no second verdict.
+	if got := ladderVerified(t, r.svc, roomID); len(got) != 1 {
+		t.Fatalf("setup.verified events = %d, want only the pre-close one", len(got))
 	}
 }

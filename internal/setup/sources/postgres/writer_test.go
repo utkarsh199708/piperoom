@@ -331,6 +331,12 @@ func TestSQLBuilders(t *testing.T) {
 	if err != nil || !strings.Contains(sql, `CREATE TABLE IF NOT EXISTS "public"."c"`) {
 		t.Fatalf("canary DDL = %q, %v", sql, err)
 	}
+	// The nonce must be the primary key: REPLICA IDENTITY DEFAULT keys the
+	// Debezium event by the primary key, and the ladder's kafka_find_by_key
+	// matches the event key against the nonce (rungs 5 and 8).
+	if !strings.Contains(sql, "nonce text NOT NULL PRIMARY KEY") || strings.Contains(sql, "IDENTITY PRIMARY KEY") {
+		t.Fatalf("canary DDL is not nonce-keyed: %q", sql)
+	}
 	if ins, err := InsertCanarySQL("public.c"); err != nil || ins != `INSERT INTO "public"."c" (nonce) VALUES ($1)` {
 		t.Fatalf("insert SQL = %q, %v", ins, err)
 	}
