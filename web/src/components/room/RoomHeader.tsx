@@ -144,7 +144,8 @@ export function RoomHeader({
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight" title={`Room ${state.id}`}>
+        {/* A title can be one unbroken word (the 200-character limit allows it): break-words wraps it inside the column instead of overflowing into the panels. */}
+        <h1 className="m-0 min-w-0 break-words text-xl font-semibold tracking-tight" title={`Room ${state.id}`}>
           {state.title}
         </h1>
         <Badge variant={state.severity} className="uppercase">
