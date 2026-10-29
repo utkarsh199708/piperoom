@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { RoomActions } from '../hooks/useRoom'
@@ -126,5 +126,36 @@ describe('RoomScreen with a proposal that never got all its approvals', () => {
     const card = screen.getByRole('article', { name: 'Set subject compatibility to NONE' })
     expect(within(card).queryByText(/not run/i)).not.toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Decision' })).toHaveTextContent('Needs your approval · kafka-connect')
+  })
+})
+
+describe('RoomScreen on a phone-width layout (no side rail)', () => {
+  const original = window.matchMedia
+
+  afterEach(() => {
+    window.matchMedia = original
+  })
+
+  it('shows the Fix tab summary as "not run" on a closed room, with no layer or count', () => {
+    // jsdom has no matchMedia, so useMediaQuery falls back to the wide layout; force the narrow one.
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia
+
+    show(room({ status: 'closed', closed_at: '2026-10-11T10:30:00Z', resolution: 'gave up' }))
+
+    expect(screen.queryByRole('complementary', { name: 'Room details' })).not.toBeInTheDocument()
+    const fix = document.querySelector('[role="tabpanel"][id$="content-fix"]') as HTMLElement
+    expect(fix).not.toBeNull()
+    expect(within(fix).getByText('Not run · room closed')).toBeInTheDocument()
+    expect(within(fix).queryByText(/waiting for/i)).not.toBeInTheDocument()
+    expect(within(fix).queryByText(/\d+ of \d+/)).not.toBeInTheDocument()
   })
 })
