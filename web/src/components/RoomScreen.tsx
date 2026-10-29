@@ -563,7 +563,7 @@ export function RoomScreen() {
               </TabsContent>
               <TabsContent value="fix" forceMount hidden={tab !== 'fix'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
                 {proposalsCard}
-                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
+                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} closed={state.status === 'closed'} />
               </TabsContent>
               <TabsContent value="people" forceMount hidden={tab !== 'people'}>
                 {people}
@@ -599,7 +599,7 @@ export function RoomScreen() {
         {wide && (
           <aside aria-label="Room details" className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0">
             {similar}
-            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
+            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} closed={state.status === 'closed'} />
             <div className="h-px shrink-0 bg-border" />
             {people}
             <div className="h-px shrink-0 bg-border" />

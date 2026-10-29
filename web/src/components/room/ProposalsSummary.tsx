@@ -8,7 +8,7 @@ import type { DotTone } from './StatusDot'
 /** The id the full proposal card (ProposalsPanel) is wrapped in, so the rail can jump to it. */
 export const PROPOSAL_ANCHOR = 'proposal'
 
-function describe(p: ProposalState): { tone: DotTone; word: string; count: string } {
+function describe(p: ProposalState, closed: boolean): { tone: DotTone; word: string; count: string } {
   const total = p.required_layers.length
   const done = p.required_layers.filter((l) => p.approvals[l] === 'approved').length
   const count = total > 0 ? `${done} of ${total}` : ''
@@ -28,6 +28,9 @@ function describe(p: ProposalState): { tone: DotTone; word: string; count: strin
     return { tone: 'ok', word: 'Approved', count }
   }
   if (p.status === 'rejected') return { tone: 'fail', word: 'Rejected', count }
+  // room.closed leaves a proposal "open" in the log, but a closed room takes no decision (the server
+  // answers 409 room_closed): this one never ran and waits for nobody, so no layer and no count.
+  if (closed) return { tone: 'muted', word: 'Not run · room closed', count: '' }
   const waiting = p.required_layers.find((l) => p.approvals[l] === 'pending')
   return { tone: 'warn', word: waiting ? `Waiting for ${waiting}` : 'Open', count }
 }
@@ -44,8 +47,18 @@ function jumpToProposal() {
 
 // The rail's Proposals block: a count and one small card per proposal. The proposal itself
 // (steps, approvals, buttons) is the ProposalsPanel in the main column.
-export function ProposalsSummary({ proposals, shadow = false }: { proposals: ProposalState[]; shadow?: boolean }) {
-  const open = proposals.filter((p) => p.status === 'open').length
+export function ProposalsSummary({
+  proposals,
+  shadow = false,
+  closed = false,
+}: {
+  proposals: ProposalState[]
+  shadow?: boolean
+  /** The room is closed, so a proposal the log still calls open never ran (KAN-560). */
+  closed?: boolean
+}) {
+  // A closed room has nothing open: the proposals the log still calls open are "not run" (see describe).
+  const open = closed ? 0 : proposals.filter((p) => p.status === 'open').length
   return (
     <section aria-labelledby="proposals-summary-heading" className="flex flex-col gap-2.5 px-4 py-3.5">
       <h2 id="proposals-summary-heading" className="m-0 flex items-center gap-1.5 text-sm font-medium">
@@ -63,7 +76,7 @@ export function ProposalsSummary({ proposals, shadow = false }: { proposals: Pro
       ) : (
         <ul className="m-0 flex list-none flex-col gap-2 p-0">
           {proposals.map((p, i) => {
-            const d = describe(p)
+            const d = describe(p, closed)
             return (
               <li key={p.proposal_id}>
                 <button

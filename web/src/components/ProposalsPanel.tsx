@@ -39,6 +39,7 @@ import { PolicyCountdown } from './room/PolicyCountdown'
 import { canCancelSchedule } from '../lib/countdown'
 import type { CancelResult } from '../hooks/useRoom'
 import { WaitingFor } from './room/WaitingFor'
+import { StatusDot } from './room/StatusDot'
 import type { Person, PresenceMember, Topology } from '../api/types'
 import type { DriverInfo, NudgeState } from '../state/types'
 
@@ -895,6 +896,7 @@ function LayerRow({
   writeOff,
   driver,
   bundled,
+  notRun,
   stagingHold,
   stagingNoteId,
 }: {
@@ -902,6 +904,11 @@ function LayerRow({
   stagingHold: boolean
   /** The id of that notice, for aria-describedby. */
   stagingNoteId: string
+  /**
+   * The room closed with this proposal still open (KAN-560): it never ran, so a layer nobody decided
+   * waits for nobody. The row says "Not decided" instead of naming an owner to wait for.
+   */
+  notRun: boolean
   proposal: ProposalState
   layer: string
   user: CurrentUser
@@ -1075,6 +1082,18 @@ function LayerRow({
         >
           <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
           <span className="truncate">Cancelled</span>
+        </Badge>
+      ) : notRun && state === 'pending' ? (
+        // The room closed before this layer decided (KAN-560): no owner to wait on, no Nudge, no
+        // Approve (the server answers 409 room_closed). Like a cancelled layer, it is not "Waiting for ...".
+        <Badge
+          className="ml-auto max-w-full"
+          variant="neutral"
+          data-testid={`undecided-${layer}`}
+          title="The room closed before this layer was decided."
+        >
+          <StatusDot tone="muted" />
+          <span className="truncate">Not decided</span>
         </Badge>
       ) : canDecide || inBundle ? (
         <>
@@ -1261,6 +1280,11 @@ function Proposal({
 
   const mine = bundle ?? proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l, driver?.id))
   const open = proposal.status === 'open'
+  // room.closed leaves a proposal "open" in the log, but a closed room takes no decision (the server
+  // answers 409 room_closed): one that never got all its approvals never ran (KAN-560). Only a
+  // proposal that is open in an open room (`live`) still waits on anyone.
+  const live = open && nudge.roomOpen
+  const notRun = open && !nudge.roomOpen
   const hashed = proposal.params_hash !== ''
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   const approved = proposal.required_layers.filter((l) => proposal.approvals[l] === 'approved').length
@@ -1307,13 +1331,18 @@ function Proposal({
           <span className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-subtle-foreground">
             {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
             {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
+            {notRun && (
+              <Badge variant="neutral" title="The room closed before every layer approved this fix, so it never ran.">
+                not run · room closed
+              </Badge>
+            )}
             {/* P3d-2: a fix the driver wrote, named by the event's actor (the server's, never typed text). */}
             {proposal.origin === 'driver' && (
               <Badge variant="info" data-testid="authored-by">
                 authored by {proposal.author ? <PersonName person={proposal.author} /> : 'the driver'}
               </Badge>
             )}
-            {open && mine.length === 0 && pending.length > 0
+            {live && mine.length === 0 && pending.length > 0
               ? `waiting for ${waitingOn} · ${approved} of ${proposal.required_layers.length} approved`
               : proposal.origin === 'driver'
                 ? null
@@ -1353,7 +1382,7 @@ function Proposal({
 
         {hashed ? (
           <ParamsHash hash={proposal.params_hash} deciding={mine.length > 0} noteId={noteId} />
-        ) : open ? (
+        ) : live ? (
           <p
             id={noteId}
             className="text-xs font-medium text-destructive-fg"
@@ -1383,7 +1412,7 @@ function Proposal({
       </div>
 
       <Separator />
-      {refused !== undefined && open && (
+      {refused !== undefined && live && (
         <p className="px-3.5 py-2 text-xs font-medium text-destructive-fg" role="alert" data-testid="approve-all-refused">
           Approve and run was refused: {refused}. Approve the layers you own one at a time below.
         </p>
@@ -1405,6 +1434,7 @@ function Proposal({
             writeOff={writeOff}
             driver={driver}
             bundled={bundle !== null}
+            notRun={notRun}
             stagingHold={stagingHold}
             stagingNoteId={stagingNoteId}
           />
