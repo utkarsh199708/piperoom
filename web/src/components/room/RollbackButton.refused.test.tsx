@@ -131,6 +131,17 @@ describe('rollback dialog: refused versus kept', () => {
     expect(post.mock.calls[1][1]).toBe(post.mock.calls[0][1])
   })
 
+  it('closing the dialog after a refusal clears it, so the reopened dialog shows no stale refusal', async () => {
+    const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
+    render(<Harness post={post} />)
+    ask()
+    await screen.findByText(/Piperoom refused this request/)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText(/Piperoom refused this request/)).not.toBeInTheDocument()
+  })
+
   it('a request cancelled mid-send and then refused leaves no stale refusal on the reopened dialog', async () => {
     let reject!: (e: unknown) => void
     const post = vi.fn().mockReturnValue(new Promise<Event | undefined>((_, r) => (reject = r)))
