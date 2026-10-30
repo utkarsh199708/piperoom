@@ -563,6 +563,16 @@ describe('keyboard', () => {
     expect(api.grantControl).not.toHaveBeenCalled()
   })
 
+  it('T on a closed room with a live other driver sends nothing', () => {
+    mockList([room({ id: 'x', title: 'Closed driven', status: 'closed', closed_at: '2026-10-11T11:00:00Z', driver: { id: 'kabir', name: 'Kabir' } })])
+    renderList()
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /All/ }))
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
   it('a viewer pressing T on a driven room sends nothing', () => {
     ctx.user = { id: 'v', name: 'Vee', layers: [], role: 'viewer' }
     mockList(rooms)
