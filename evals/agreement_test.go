@@ -430,6 +430,10 @@ var syntheticLabels = map[string]Label{
 	"setup/binlog-statement":     {"mysql", []string{"statement", "row images"}},
 	"setup/no-replication-grant": {"kafka-connect", []string{"replication client"}},
 	"setup/server-id-zero":       {"kafka-connect", []string{"server_id 0", "server_id is 0", "misconfigured source"}},
+	// The U3d sink scenarios (KAN-364): the terms name the SMT class and the
+	// sink key.
+	"setup/unwrap-missing":  {"kafka-connect", []string{"extractnewrecordstate", "extract new record state", "unwrap"}},
+	"setup/jdbc-sink-no-pk": {"kafka-connect", []string{"primary.key.mode", "primary key mode"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -636,6 +640,12 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/binlog-statement":     {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	"setup/no-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/server-id-zero":       {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U3d: the lazy texts are the alert titles, which name the sink and its
+	// FAILED task (kafka-connect) and no cause. Each wrong text tells the
+	// other scenario's story about the same sink: the right layer, the wrong
+	// cause.
+	"setup/unwrap-missing":  {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/jdbc-sink-no-pk": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit

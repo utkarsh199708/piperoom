@@ -977,6 +977,42 @@ re-verify and re-run the checks. Take the room's tool results from `GET /api/roo
 log for the session file, and set `RECORDED: YES`. `devctl setup-fix` (or a restart of the mysql container)
 restores the profile.
 
+### Setup scenarios: transforms and sinks (U3d)
+
+Two setup scenarios in which the setup run adds a JDBC sink (`wh-orders-sink`, into `analytics.orders` of the dev
+Postgres) to a green Postgres pipeline on the Compose target. Each has a runner session in `evals/setup/recordings`
+whose sink kind is `postgres`, so the ladder has a rung 7 (`warehouse_row`) and it is the red one. The labels name the
+SMT class and key or the sink key, as U3a's index (`internal/setup/knowledge/index/*.yaml`) and U3b's builder and
+`setup_config_help` (`internal/setup/tools/configbuild.go`, `confighelp.go`; `docs/pilot/transforms-and-sinks.md`)
+know them.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/unwrap-missing` | re-verification failed at `sink_row`; `wh-orders-sink` task 0 FAILED | the Confluent JDBC sink (flat records only) gets Debezium's change event envelope: `Table "analytics"."orders" is missing fields (... before, after, source, op, ts_ms ...)` | kafka-connect / kafka-connect | the SMT: `transforms=unwrap`, `transforms.unwrap.type=io.debezium.transforms.ExtractNewRecordState` (index `extract-new-record-state`; the `confluent-jdbc-sink` check "Needs flat records"); re-register the sink (`connect_delete_connector`, `connect_create_connector`, T2) |
+| `setup/jdbc-sink-no-pk` | re-verification failed at `sink_row`; `wh-orders-sink` task 0 FAILED | Debezium's JDBC sink with `insert.mode=upsert` and `primary.key.mode` at its default `none`: `Cannot write to table orders with no key fields defined.` | kafka-connect / kafka-connect | the sink key: `primary.key.mode=record_key` (with `primary.key.fields`; the `debezium-jdbc-sink` check "upsert needs primary.key.mode and primary.key.fields"); re-register the sink as above |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats on this branch; the
+runner sessions record only the sink step (`connect_plugins`, `connect_validate_config` with 0 errors,
+`connect_create_connector`, the sink's `connect_status`) over the remote Connect client's wire shapes, and the
+ladder's reads. The two task errors are the sinks' own messages under Connect's `WorkerSinkTask` wrapper, composed by
+hand (unconfirmed on the releases named). Points a re-recording keeps:
+
+- **What the room can see.** `connect_config` shows a sink's `connector.class` and the redacted password only:
+  `insert.mode`, `pk.mode`, `primary.key.mode`, `topics` and `connection.url` are not on its key list, and an absent
+  `transforms` key is the visible half of `setup/unwrap-missing`. The task trace carries the rest.
+- **Two sinks, two stories.** Debezium's JDBC sink reads the envelope natively (the index's check), so the missing
+  SMT is a Confluent-sink story; each scenario's wrong text is the other's cause, and each forbids the other's
+  vocabulary in `root_cause_forbidden`.
+- **No `expect.fix`.** `connect_update_connector_config` cannot set a `transforms.*` or sink key (its allow-list,
+  `internal/actions/connector_config.go`), so it is forbidden; the fix is a Q5c re-registration, which the replay
+  cannot validate for an existing connector name.
+
+To re-record on the dev stack: bring a Compose project up with `piperoom-setup` on the dev Postgres, then ask the
+setup run for a warehouse sink into `analytics.orders`: with the Confluent JDBC sink copied into the project's plugin
+directory and no transform (unwrap-missing), or with Debezium's JDBC sink, `insert.mode=upsert` and no
+`primary.key.mode` (jdbc-sink-no-pk); re-verify after the task fails. Take the room's tool results from `GET
+/api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
