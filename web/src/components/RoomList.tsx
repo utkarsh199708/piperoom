@@ -16,6 +16,7 @@ import {
   ROOM_TABS,
   agentCell,
   canTakeControlOf,
+  hasLiveDriver,
   layersNeedingYou,
   needsYou,
   pipelineIds,
@@ -173,6 +174,19 @@ export function RoomList() {
     [reload, user.id, user.name],
   )
 
+  // T on a room another member drives (live lease): ask the driver, as the room's "Request control" does.
+  const requestControl = useCallback(async (room: RoomSnapshot) => {
+    setTaking(room.id)
+    try {
+      if (!isFixtures()) await api.requestControl(room.id)
+      toast.success(`Asked ${neutralizeBadgeText(room.driver?.name ?? 'the driver')} for control of "${room.title}"`)
+    } catch (err) {
+      toast.error(errorText(err))
+    } finally {
+      setTaking(null)
+    }
+  }, [])
+
   const focusRow = (index: number) => {
     const room = visible[index]
     if (!room) return
@@ -202,7 +216,12 @@ export function RoomList() {
       } else if (key === 't') {
         const room = visible[active]
         // One take at a time: a second T while the first is in flight does nothing.
-        if (room && taking === null && canTakeControlOf(room, user)) void takeControl(room)
+        if (room && taking === null) {
+          if (canTakeControlOf(room, user)) void takeControl(room)
+          else if (!viewer && room.status === 'open' && room.driver && room.driver.id !== user.id && hasLiveDriver(room)) {
+            void requestControl(room)
+          }
+        }
       } else if (key === 'c' && !viewer) {
         e.preventDefault()
         setNewOpen(true)
