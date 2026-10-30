@@ -209,6 +209,18 @@ export class SendLedger {
     this.setError(this.banner())
   }
 
+  /**
+   * For the strip under a composer (KAN-586): what a failed action is really waiting for. For an
+   * unknown action, how long a Retry click is still ignored (ms, above 0), or 0 when a click sends
+   * it now; undefined for anything else (kept for a retry: "Retrying" is true).
+   */
+  unconfirmedLeft(clientId: string): number | undefined {
+    const a = this.actions.get(clientId)
+    if (a?.state !== 'unknown') return undefined
+    if (this.dedupes === true) return 0
+    return Math.max(a.since + UNCONFIRMED_WINDOW_MS - this.now(), 0)
+  }
+
   /** The ledger still holds this action (on the wire, kept, or unknown): a Retry of it is owed. */
   isPending(clientId: string): boolean {
     const a = this.actions.get(clientId)
