@@ -62,3 +62,16 @@ export function errorText(e: unknown): string {
   if (e instanceof Error) return e.message
   return String(e)
 }
+
+/**
+ * Shown when the server cannot be reached during a room action other than a steer or comment (approve, reject,
+ * nudge, close, label, hand-off...). Nothing keeps or retries these. A fetch that rejects can also mean the server
+ * got the request and only the reply was lost, so this says the action may not have happened.
+ */
+export const ACTION_OFFLINE_TEXT = "Can't reach Piperoom, so that may not have gone through. Try again."
+
+/** errorText for a room action the send ledger does not keep: a network error never promises a retry. */
+export function actionErrorText(e: unknown): string {
+  if (isNetworkError(e)) return ACTION_OFFLINE_TEXT
+  return errorText(e)
+}

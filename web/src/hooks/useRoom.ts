@@ -15,7 +15,7 @@ import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../li
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError, isNetworkError } from '../lib/errors'
+import { actionErrorText, errorText, friendlyError, isNetworkError } from '../lib/errors'
 import { newClientId } from '../lib/clientId'
 import { SendLedger } from './sendLedger'
 import type { DeliveredListener, SendItem } from './sendLedger'
@@ -702,7 +702,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   )
 
   const runAction = useCallback((p: Promise<unknown>) => {
-    p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
+    p.then(() => setError(null)).catch((e: unknown) => setError(actionErrorText(e)))
   }, [])
 
   const synthesize = useCallback(
@@ -782,7 +782,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(
             e instanceof ApiClientError && e.code === 'already_decided'
               ? 'this suggestion was already sent or declined'
-              : errorText(e),
+              : actionErrorText(e),
           ),
         )
     },
@@ -824,7 +824,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         return { ok: true }
       } catch (e) {
         const code = e instanceof ApiClientError ? e.code : undefined
-        if (code !== 'already_nudged') setError(errorText(e))
+        if (code !== 'already_nudged') setError(actionErrorText(e))
         return { ok: false, code }
       }
     },
@@ -838,7 +838,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         setError(null)
         return { ok: true }
       } catch (e) {
-        const text = errorText(e)
+        const text = actionErrorText(e)
         setError(text)
         return { ok: false, error: text }
       }
@@ -875,7 +875,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           dispatch({ type: 'staging_required', proposalId, text: errorText(e) })
           return { ok: false, stagingRequired: true }
         }
-        setError(errorText(e))
+        setError(actionErrorText(e))
         return { ok: false }
       }
     },
@@ -908,7 +908,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(null)
           return { ok: false, needsConfirm: true }
         }
-        const text = errorText(e)
+        const text = actionErrorText(e)
         if (isStagingRequired(e)) {
           setError(null)
           dispatch({ type: 'staging_required', proposalId, text })
@@ -942,7 +942,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(null)
           return { ok: false, notScheduled: true }
         }
-        const text = errorText(e)
+        const text = actionErrorText(e)
         setError(text)
         return { ok: false, error: text }
       }
@@ -976,7 +976,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       } catch (e) {
         // The card shows the reason next to the button; the banner would say it twice.
         const code = e instanceof ApiClientError ? e.code : undefined
-        return { ok: false, code, error: errorText(e) }
+        return { ok: false, code, error: actionErrorText(e) }
       }
     },
     reject: (proposalId, layer, reason, paramsHash) => {
@@ -1001,7 +1001,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             setError(null)
             onMismatch(proposalId, paramsHash)
           } else {
-            setError(errorText(e))
+            setError(actionErrorText(e))
           }
         })
     },
@@ -1036,7 +1036,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           return true
         },
         (e: unknown) => {
-          setError(errorText(e))
+          setError(actionErrorText(e))
           return false
         },
       )
@@ -1050,7 +1050,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         await api.label(roomId, input)
         return { ok: true }
       } catch (e) {
-        return { ok: false, error: errorText(e) }
+        return { ok: false, error: actionErrorText(e) }
       }
     },
     checklist: (step) => {
