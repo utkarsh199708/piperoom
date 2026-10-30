@@ -41,7 +41,10 @@ export function CloseRoomDialog({
   initialText?: string
 }) {
   const [text, setText] = useState(initialText)
-  const [draft, setDraft] = useState(() => (state ? initialDraft(state) : null))
+  // A shadow room takes the blind label first (the server answers 409 to the normal label
+  // before it), so its dialog asks for the resolution only; the blind form shows once it closes.
+  const shadow = state?.shadow === true
+  const [draft, setDraft] = useState(() => (state && !shadow ? initialDraft(state) : null))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const restoreFocus = useRestoreFocus()
@@ -113,6 +116,9 @@ export function CloseRoomDialog({
               placeholder="e.g. Schema compatibility set back to BACKWARD; connector restarted and caught up."
             />
           </div>
+          {shadow && (
+            <p className="m-0 text-sm text-muted-foreground">After closing you will record a blind label: your own answer, before the agent&apos;s work is shown.</p>
+          )}
           {state && draft && (
             <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
               <legend className="mb-1 p-0 text-sm font-medium">Label for later incidents</legend>
@@ -131,7 +137,7 @@ export function CloseRoomDialog({
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            {state && (
+            {state && !shadow && (
               <Button type="button" variant="outline" disabled={!resolution || busy} onClick={() => void submit(false)}>
                 Skip label
               </Button>
