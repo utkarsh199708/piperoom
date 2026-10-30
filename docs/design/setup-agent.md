@@ -327,6 +327,31 @@ The catalogue at the end of U1 (Compose, Postgres), by tier floor:
 | T2 | the Q actions through the remote clients: `connect_create_connector`, `connect_delete_connector` (Q5c), `pg_set_replica_identity` (Q2c, its own name), `source_grant_select`, `source_create_heartbeat_table` (Q2c, Q2d); the setup-only source ops over `SetupSourceWriter` (§4 item 4): `source_create_publication`, `source_create_canary_table`, `source_insert_canary` (the nonce comes from the ladder runner, §3.4), `source_create_read_role` (§3.7) |
 | T3 | `source_alter_system` (allow-list: `wal_level`, `max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`, `wal_sender_timeout`; `pending_restart` in the preview), `source_restart` (only a database this room created, by receipt) |
 
+#### U4-0 ruling: `service_restart` and the SQL Server units (2026-10-30)
+
+The host target accepts only `piperoom-<name>` units (`host.UnitPrefix`), and that prefix is a security property:
+the service ops can never reach another service on the host, so no approved step can become a restart of `sshd` or
+of a database the room does not manage. U4b's Agent check collides with it: on a host target the stopped SQL Server
+Agent's documented fix is a service restart, which the runner refuses today. The ruling:
+
+- **Windows: yes, the Agent services only.** `service_restart` may reach exactly `SQLSERVERAGENT` (the default
+  instance) and `SQLAgent$<instance>` (a named one) beside the `piperoom-` units. The engine services
+  (`MSSQLSERVER`, `MSSQL$<instance>`) stay out: restarting the customer's database engine is never a setup op (the
+  same line §2.5 draws for `source_restart`, which reaches only a database this room created, by receipt). The
+  instance segment is validated against the service-name shape before it reaches the service control manager, and
+  the op still goes through the same manager calls — nothing about the unit's definition is written or changed.
+- **Linux: no; the fix stays an ask.** There is no separate agent unit: the Agent runs inside `mssql-server`, which
+  is the engine, so any restart that helps is an engine restart. The U4b check's ask names the exact commands
+  (`sudo systemctl restart mssql-server`; `sudo /opt/mssql/bin/mssql-conf set sqlagent.enabled true` first when the
+  Agent is disabled) and the room re-reads after the person acts. RDS and the Azure flavours already ask toward the
+  provider's console and are unchanged.
+- **Tier and the list's owner.** The allowed-units list is compile-time in the host driver, extended only by a lead
+  PR against this section — never by a param, a config variable, an owners key or model text. The op keeps its T2
+  floor; the class raises it as usual (T3 on production), and the guard table is unchanged.
+
+Until the Windows allow-list lands (a C19 row; the A10 driver then routes `TargetHost` on Windows to
+`service_restart` and keeps the ask elsewhere), the Agent-stopped fix on every host target stays an ask.
+
 ### 2.6 Targets and reach (S7)
 
 `Env.Targets` starts as the hosts the person named in the `SetupRequest` (the source database, an existing Kafka,
