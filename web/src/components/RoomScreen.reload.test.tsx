@@ -117,7 +117,7 @@ describe('RoomScreen across a reload of the same room (#550)', () => {
     view.rerender(screenAt('/rooms/r1'))
     hookReturns(null, 'connecting')
     view.rerender(screenAt('/rooms/r1'))
-    expect(screen.getByLabelText('Steer the agent')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^Suggest a step for /)).toBeInTheDocument()
   })
 
   it('the same user in a new session does not see the old session\'s room state while it loads', () => {

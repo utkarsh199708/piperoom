@@ -651,7 +651,7 @@ export function SteerBox({
                 ? 'Steer the agent…'
                 : `Suggest a step for ${state.driver ? driverName : 'the driver'}…`
           }
-          aria-label="Steer the agent"
+          aria-label={isDriver || noDriver ? 'Steer the agent' : `Suggest a step for ${driverName}`}
           rows={1}
         />
         {!idle && (
