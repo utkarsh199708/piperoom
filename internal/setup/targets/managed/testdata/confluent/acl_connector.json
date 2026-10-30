@@ -1,0 +1,69 @@
+{
+  "provider": "confluent",
+  "name": "acl_connector",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"CREATE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "648b50a0bfdd5a76f63d13e0e21501fb144e55ef7de3c6c0d0e8a71d38e4469d",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"WRITE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "f31c00293c220c072de717d36302ef6b3833e230477c106e15db8857e7906828",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "4b3e9e99fd537bcbb7a9233247acd87b5c1d239ea51d12e26ba4460acd5ecd59",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"LITERAL\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"kafka-cluster\",\"resource_type\":\"CLUSTER\"}",
+        "body_sha256": "ab6d1e34937f917330443d3066fae45f4c534df1c8c755b62c2b249456769865",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": ""
+      }
+    }
+  ]
+}

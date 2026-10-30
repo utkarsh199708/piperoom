@@ -1,0 +1,27 @@
+{
+  "provider": "confluent",
+  "name": "create_conflict",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as this client sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/connect/v1/environments/env-00000/clusters/lkc-00000/connectors",
+        "body": "{\"config\":{\"connector.class\":\"PostgresCdcSourceV2\",\"database.dbname\":\"orders\",\"database.hostname\":\"orders.example.com\",\"database.password\":\"REDACTED\",\"database.port\":\"5432\",\"database.user\":\"debezium\",\"kafka.auth.mode\":\"SERVICE_ACCOUNT\",\"kafka.service.account.id\":\"sa-00000\",\"name\":\"it_orders\",\"output.data.format\":\"JSON\",\"tasks.max\":\"1\",\"topic.prefix\":\"orders\"},\"name\":\"it_orders\"}",
+        "body_sha256": "184c1f74aca6de2cb1494d8c14dc94d3a0ca482d12d87d6f90c4a82832f1f417",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"error\":{\"code\":409,\"message\":\"Connector it_orders already exists\"}}"
+      }
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients/mskconnect"
+	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/targets/managed/replay"
 )
 
@@ -34,6 +35,32 @@ func TestGenerateMSKFlows(t *testing.T) {
 			cs := rec.Cassette()
 			cs.Recorded = false
 			if err := replay.Save(cs, filepath.Join("testdata", "msk", f.name+".json")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestGenerateConfluentFlows writes testdata/confluent/<flow>.json.
+func TestGenerateConfluentFlows(t *testing.T) {
+	for _, f := range ccFlows {
+		t.Run(f.name, func(t *testing.T) {
+			canned := replay.NewCanned(f.responses...)
+			rec := replay.NewRecorder(canned, replay.Scrubber{}, replay.ProviderConfluent, f.name, ccSource, time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC))
+			var reg *ops.Registry
+			if f.acl {
+				reg = newConfluent(t, replay.NewCanned(), rec)
+			} else {
+				reg = newConfluent(t, rec, replay.NewCanned())
+			}
+			res, err := exec(t, reg, f.op, f.params)
+			f.check(t, res, err)
+			if canned.Left() != 0 {
+				t.Fatalf("%d canned responses unused", canned.Left())
+			}
+			cs := rec.Cassette()
+			cs.Recorded = false
+			if err := replay.Save(cs, filepath.Join("testdata", "confluent", f.name+".json")); err != nil {
 				t.Fatal(err)
 			}
 		})

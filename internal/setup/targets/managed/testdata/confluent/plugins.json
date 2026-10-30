@@ -1,0 +1,22 @@
+{
+  "provider": "confluent",
+  "name": "plugins",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/connect/v1/environments/env-00000/clusters/lkc-00000/connector-plugins"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "[{\"class\":\"PostgresCdcSourceV2\",\"type\":\"source\",\"version\":\"0.1.0\"},{\"class\":\"MySqlCdcSourceV2\",\"type\":\"source\"},{\"class\":\"S3_SINK\",\"type\":\"sink\"}]"
+      }
+    }
+  ]
+}
