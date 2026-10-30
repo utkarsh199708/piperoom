@@ -318,8 +318,9 @@ describe('refusal line scrolls into view', () => {
     expect(scrollIntoView).not.toHaveBeenCalled()
     comment(box, 'x'.repeat(4001))
     const line = await screen.findByRole('status')
+    // The effect runs after the commit that shows the line, so wait for the call.
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' }))
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
     expect(scrollIntoView.mock.contexts[0]).toBe(line)
     expect(box).toHaveValue('x'.repeat(4001))
   })
@@ -329,7 +330,7 @@ describe('refusal line scrolls into view', () => {
     render(<Harness post={post} withComments />)
     reply('ack')
     const line = await screen.findByRole('status')
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' }))
     expect(scrollIntoView.mock.contexts[0]).toBe(line)
   })
 
