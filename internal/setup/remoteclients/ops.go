@@ -50,6 +50,14 @@ const (
 	// publication check (sources/postgres Reader.PublicationTables).
 	OpSourcePublicationTables = "source_publication_tables"
 
+	// Source SQL Server readers (T0, row U4e): the U4b driver's ReadOps.
+	// source_role_info is OpSourceRoleInfo above, with the SQL Server
+	// result shape (SQLServer.RoleInfo).
+	OpSourceServerInfo  = "source_server_info"
+	OpSourceAgentState  = "source_agent_state"
+	OpSourceDatabaseCDC = "source_database_cdc"
+	OpSourceTableCDC    = "source_table_cdc"
+
 	// Source Postgres writers. The Q action names are plan's canonical guard
 	// names; the setup-only source ops are the design's §2.5 names.
 	OpSourceSetReplicaIdentity   = "pg_set_replica_identity"
@@ -131,6 +139,11 @@ var specs = []OpSpec{
 	{"Source.InsertCanary", OpSourceInsertCanary, protocol.TierT2, "postgres"},
 	{"Source.CreateReadRole", OpSourceCreateReadRole, protocol.TierT2, "postgres"},
 	{"Source.AlterSystem", OpSourceAlterSystem, protocol.TierT3, "postgres"},
+	{"SQLServer.ServerInfo", OpSourceServerInfo, protocol.TierT0, "postgres"},
+	{"SQLServer.AgentState", OpSourceAgentState, protocol.TierT0, "postgres"},
+	{"SQLServer.DatabaseCDC", OpSourceDatabaseCDC, protocol.TierT0, "postgres"},
+	{"SQLServer.TableCDC", OpSourceTableCDC, protocol.TierT0, "postgres"},
+	{"SQLServer.RoleInfo", OpSourceRoleInfo, protocol.TierT0, "postgres"},
 	{"Kafka.Topics", OpKafkaTopics, protocol.TierT0, "kafka"},
 	{"Kafka.TopicOffsets", OpKafkaTopicOffsets, protocol.TierT0, "kafka"},
 	{"Kafka.ConsumerGroups", OpKafkaConsumerGroups, protocol.TierT0, "kafka"},

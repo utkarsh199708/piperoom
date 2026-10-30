@@ -26,7 +26,7 @@ func welcomeWithTargets(conn *websocket.Conn, ctx context.Context, targets []eve
 		RoomID: "r1", Title: "orders", PipelineID: "orders",
 		Creator:         events.Actor{Kind: events.ActorHuman, ID: "u1", Name: "Ada"},
 		ProtocolVersion: 1, ProtocolMinor: 1,
-		Targets:         targets,
+		Targets: targets,
 	}})); err != nil {
 		return err
 	}
