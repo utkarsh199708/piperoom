@@ -28,7 +28,7 @@ def main():
     if "Deployment" in kinds or "Service" in kinds:
         fail("a setup release rendered the server")
     if mode == "pipeline":
-        shells = [d for d in docs if d["apiVersion"].startswith("kafka.strimzi.io/")]
+        shells = [d for d in docs if d["apiVersion"].split("/", 1)[0] == "kafka.strimzi.io"]
         if not shells:
             fail("no Strimzi shells rendered")
         for d in shells:
@@ -37,10 +37,11 @@ def main():
                 fail("%s %s is not paused" % (d["kind"], d["metadata"]["name"]))
             if "spec" not in d:
                 fail("%s %s has no spec (v1 requires one)" % (d["kind"], d["metadata"]["name"]))
-        secrets = [d for d in docs if d["kind"] == "Secret"]
-        for s in secrets:
-            if s.get("type") != "Opaque" or s.get("data") or s.get("stringData"):
-                fail("Secret %s must be an empty Opaque Secret" % s["metadata"]["name"])
+        # The message names no object: the check is about shape, and a
+        # Secret's fields are never echoed.
+        for obj in (d for d in docs if d["kind"] == "Secret"):
+            if obj.get("type") != "Opaque" or obj.get("data") or obj.get("stringData"):
+                fail("a Secret in the pipeline release is not an empty Opaque Secret")
     elif mode == "runner":
         roles = [d for d in docs if d["kind"] in ("Role", "ClusterRole")]
         if [r["kind"] for r in roles] != ["Role"]:

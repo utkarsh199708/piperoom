@@ -330,11 +330,18 @@ func TestHostOpParamsRoundTrip(t *testing.T) {
 		if err := a.Validate(context.Background(), tc.good); err != nil {
 			t.Errorf("%s: spec Validate(good) = %v", tc.op, err)
 		}
-		if err := op.Validate(tc.good, ops.Env{}); err != nil {
-			t.Errorf("%s: runner Validate(good) = %v", tc.op, err)
-		}
 		if err := a.Validate(context.Background(), tc.bad); err == nil {
 			t.Errorf("%s: spec Validate accepted %s", tc.op, tc.badWhat)
+		}
+		// On an OS with no service manager (macOS) the driver refuses every
+		// service op before reading its params, so there is no runner side to
+		// compare with.
+		err = op.Validate(tc.good, ops.Env{})
+		if errors.Is(err, host.ErrUnsupported) {
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: runner Validate(good) = %v", tc.op, err)
 		}
 		if err := op.Validate(tc.bad, ops.Env{}); err == nil {
 			t.Errorf("%s: runner Validate accepted %s", tc.op, tc.badWhat)

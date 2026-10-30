@@ -11,6 +11,7 @@ package setuptools_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"sync"
 	"testing"
@@ -86,7 +87,9 @@ func TestHostReadToolParamsRoundTrip(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: not in the host catalogue", req.Op)
 		}
-		if err := op.Validate(req.Params, ops.Env{}); err != nil {
+		// On an OS with no service manager (macOS) the driver refuses the
+		// service ops before reading their params.
+		if err := op.Validate(req.Params, ops.Env{}); err != nil && !errors.Is(err, host.ErrUnsupported) {
 			t.Errorf("%s: the host driver refuses the forwarded params: %v", name, err)
 		}
 	}
