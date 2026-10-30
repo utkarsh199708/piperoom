@@ -81,6 +81,9 @@ type Options struct {
 	// API is the Kubernetes API client; required (InClusterConfig + NewAPI
 	// in the Job, an httptest server in tests).
 	API *API
+	// PluginHosts are the hosts a build.plugins artifact may come from
+	// (PIPEROOM_SETUP_PLUGIN_HOSTS); empty means repo1.maven.org.
+	PluginHosts []string
 	// Secret resolves a ${secret:name} reference from the runner's secret
 	// store for k8s_secret_apply. nil makes that op refuse with ErrNoSecrets.
 	Secret func(name string) (string, bool)
@@ -93,6 +96,15 @@ type Driver struct {
 	connectors []string
 	class      string
 	secret     func(string) (string, bool)
+	plugins    []string
+}
+
+// pluginHosts are the allowed build artifact hosts.
+func (d *Driver) pluginHosts() []string {
+	if len(d.plugins) == 0 {
+		return []string{"repo1.maven.org"}
+	}
+	return d.plugins
 }
 
 // Register adds the Strimzi ops to r.
@@ -121,7 +133,7 @@ func Register(r *ops.Registry, o Options) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("%w: unknown class %q", ErrParams, clipText(o.Class, 32))
 	}
-	d := &Driver{api: o.API, pipeline: o.Pipeline, connectors: append([]string(nil), o.Connectors...), class: o.Class, secret: o.Secret}
+	d := &Driver{api: o.API, pipeline: o.Pipeline, connectors: append([]string(nil), o.Connectors...), class: o.Class, secret: o.Secret, plugins: o.PluginHosts}
 	for _, op := range d.ops() {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("strimzi: registering %s: %w", op.Name(), err)

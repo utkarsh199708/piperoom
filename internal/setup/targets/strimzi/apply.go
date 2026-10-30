@@ -179,6 +179,9 @@ func (o k8sApplyOp) Execute(ctx context.Context, params json.RawMessage, env ops
 	if err != nil {
 		return ops.Result{}, err
 	}
+	if r, err = o.d.resolveFacts(ctx, r, ns, kafka, env); err != nil {
+		return ops.Result{}, err
+	}
 	if err := o.d.productionGate(ctx, p); err != nil {
 		return ops.Result{}, err
 	}
@@ -278,6 +281,9 @@ func (o k8sApplyOp) Preview(ctx context.Context, params json.RawMessage, env ops
 	}
 	r, err := o.d.renderTemplate(p.Kind, p.Template, kafka, ns, p.Params)
 	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	if r, err = o.d.resolveFacts(ctx, r, ns, kafka, env); err != nil {
 		return events.PreviewResult{}, err
 	}
 	path := o.d.pathOf(ns, r)

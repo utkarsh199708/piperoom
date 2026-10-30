@@ -28,6 +28,9 @@ type rendered struct {
 	// template and topicPrefix are what a KafkaUser render was made for: its
 	// ACL table is checked against them.
 	template, topicPrefix string
+	// listener and registry are what a KafkaConnect render needs checked
+	// against the cluster and Env.Targets before the write.
+	listener, registry string
 }
 
 var templates = map[string]template{
