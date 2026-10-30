@@ -388,7 +388,7 @@ func TestRoleInfo(t *testing.T) {
 	t.Run("full grants", func(t *testing.T) {
 		f := &fakeDB{
 			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(1), int64(0), int64(1), int64(0), int64(0)}}}, // exists, not disabled, not sysadmin, db_owner, not datareader, has user, no direct VIEW DATABASE STATE, no direct cdc SELECT
-			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},                             // direct SELECT on orders
+			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},                                                           // direct SELECT on orders
 		}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "piperoom_capture", []string{"dbo.orders", "dbo.other"})
@@ -531,9 +531,9 @@ func TestRoleInfo(t *testing.T) {
 func TestAllQueriesAreSelects(t *testing.T) {
 	f := &fakeDB{
 		qrows: []*fakeRow{
-			{vals: []any{"16.0.0.0", "Developer", ""}},                      // ServerInfo
-			{vals: []any{"Running"}},                                        // AgentState
-			{vals: []any{true}},                                             // DatabaseCDC
+			{vals: []any{"16.0.0.0", "Developer", ""}}, // ServerInfo
+			{vals: []any{"Running"}},                   // AgentState
+			{vals: []any{true}},                        // DatabaseCDC
 			{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(1), int64(1)}}, // RoleInfo
 		},
 		rows: []*fakeRows{

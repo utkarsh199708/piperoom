@@ -618,22 +618,22 @@ type Check struct {
 	Failures []string `json:"failures,omitempty"`
 }
 
-// PlanLadderUndefined says why plan.Ladder defines no verification ladder for
-// rec's setup, or "" when it defines one. It is the target alone that has
-// none: the same source and sink on a Connect target have a ladder, so an
-// unknown source or sink kind is never excused here. plan.Ladder refuses the
-// targets whose status is not a Connect REST endpoint (dbzserver, embedded,
-// the managed services): their ladders are their own rows, not in plan yet.
-// A session on such a target can only replay its ops; it must not claim a
-// ladder plan cannot recompute.
+// PlanLadderUndefined says why no verification ladder is defined for rec's
+// setup, or "" when one is: plan.Ladder for the Connect REST targets,
+// managed.Ladder for the managed services (ladderFor, the server's choice).
+// It is the target alone that has none: the same source and sink on a
+// Connect target have a ladder, so an unknown source or sink kind is never
+// excused here. The targets with no ladder in either (dbzserver, embedded)
+// have theirs as their own rows, not written yet. A session on such a target
+// can only replay its ops; it must not claim a ladder nobody can recompute.
 func PlanLadderUndefined(rec Recording) string {
-	if _, err := plan.Ladder(rec.SourceKind(), rec.Target, rec.SinkKind()); err == nil {
+	if _, err := ladderFor(rec.SourceKind(), rec.Target, rec.SinkKind()); err == nil {
 		return ""
 	}
 	if _, err := plan.Ladder(rec.SourceKind(), "compose", rec.SinkKind()); err != nil {
 		return ""
 	}
-	return "plan.Ladder defines no verification ladder for target " + rec.Target + " (that target's ladder is its own row)"
+	return "no verification ladder is defined for target " + rec.Target + " (that target's ladder is its own row)"
 }
 
 // OK reports whether the recording replayed cleanly.

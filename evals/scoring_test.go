@@ -590,6 +590,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	"setup/server-offset-file-unwritable": {
 		good:  "The Debezium Server is failing to persist its position and takes a new snapshot at every start. At 09:25 the person changed debezium.source.offset.storage.file.filename in debezium/config/application.properties from data/offsets.dat to config/offsets.dat, and /debezium/config is the stack's read-only bind mount. Every offset flush since then logs FileSystemException: config/offsets.dat: Read-only file system, so each start finds an empty offset store and snapshots public.orders again, sending its 100 rows to the warehouse ingest endpoint once more, and the Postgres slot keeps WAL for the unconfirmed position. Write the properties again with server_properties_write (T1), whose offsets_file accepts only data/<name> and defaults to data/offsets.dat on the named volume, then restart dbzserver with compose_restart (T1); the sink then has to absorb the duplicate snapshot rows.",
 		wrong: "The HTTP sink endpoint is unreachable, so the Debezium Server restarted and took a new snapshot; ask the warehouse team to start the ingest service.",
+	},
 	// The U13e managed-target setup scenarios (C7, KAN-292). The labels name the
 	// failing step or check and the fix with its tier from the U board.
 	"setup/msk-plugin-s3-denied": {
