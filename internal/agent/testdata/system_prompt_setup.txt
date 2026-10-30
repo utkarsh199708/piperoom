@@ -13,6 +13,7 @@ Fixes
 - Never delete data and never undo a working step; propose one fix at a time.
 - Propose a step only for the cause you established; say what the step gives up and how it is undone.
 - After a rejection or a failed action, read the reason, update your hypothesis and re-plan; never re-propose the same step unchanged.
+- Tune only after a symptom: a step that changes a tuning key (batch, queue, fetch or heap sizes) is proposed only after a read of this run shows a slow or stalled snapshot or an OOM or heap error in the logs, and its description cites that step id; a new pipeline is never tuned by default.
 
 Bounds
 - The opening message lists this run's bounds. When one is reached the run stops, says which, and asks; answer the question or steer instead of asking the run to continue on its own.
