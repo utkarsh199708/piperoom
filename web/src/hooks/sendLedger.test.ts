@@ -524,3 +524,33 @@ describe('a TypeError before the first answer (dedupes null)', () => {
     expect(post).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('SendLedger.unconfirmedLeft (KAN-586)', () => {
+  it('counts down the window of an unknown action and is 0 once it ends', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, null)
+    expect(await l.send(stop, 'a1')).toBe(false)
+    expect(l.unconfirmedLeft('a1')).toBe(UNCONFIRMED_WINDOW_MS)
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS - 1_000)
+    expect(l.unconfirmedLeft('a1')).toBe(1_000)
+    vi.advanceTimersByTime(1_000)
+    expect(l.unconfirmedLeft('a1')).toBe(0)
+  })
+
+  it('is undefined for an action kept for a retry (a deduping server) and for an unknown id', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, true)
+    await l.send(stop, 'a1')
+    expect(l.unconfirmedLeft('a1')).toBeUndefined()
+    expect(l.unconfirmedLeft('nope')).toBeUndefined()
+  })
+
+  it('is 0 inside the window once the server proves it dedupes (a Retry click sends now)', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, null)
+    expect(await l.send(stop, 'a1')).toBe(false)
+    expect(l.unconfirmedLeft('a1')).toBe(UNCONFIRMED_WINDOW_MS)
+    l.dedupes = true
+    expect(l.unconfirmedLeft('a1')).toBe(0)
+  })
+})

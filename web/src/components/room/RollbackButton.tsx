@@ -93,7 +93,7 @@ export function RollbackButton({
               Piperoom refused this request, so nothing was sent. The reason is in the banner above.
             </p>
           )}
-          {failed && <OfflineStrip onRetry={() => void send(true)} disabled={busy} />}
+          {failed && <OfflineStrip onRetry={() => void send(true)} disabled={busy} sends={sends} actionId={retryId.current} />}
           {failed && <p className="m-0 text-xs text-muted-foreground">Closing discards the unsent request.</p>}
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>

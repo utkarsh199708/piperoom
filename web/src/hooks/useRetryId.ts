@@ -61,6 +61,8 @@ export function useRetryId(sends: SendControls | undefined, onLanded: () => void
       owned.current = !ok && (sendsRef.current?.isPending(clientId) ?? true) ? clientId : null
     },
     owns: (clientId: string) => owned.current === clientId,
+    /** The id the composer holds for a Retry, if any. */
+    current: () => owned.current,
     drop: () => {
       if (owned.current !== null) sendsRef.current?.cancel(owned.current)
       owned.current = null

@@ -141,6 +141,8 @@ export interface SendControls {
   isPending: (clientId: string) => boolean
   /** Why the server refused the action's latest send (400, 403, 409), for a line next to its box. */
   refusal?: (clientId: string) => string | undefined
+  /** An unknown action: ms until a Retry click sends it (0: now); undefined: it is kept for a retry. */
+  unconfirmedLeft?: (clientId: string) => number | undefined
 }
 
 /** How a steer or comment is sent. */
@@ -697,6 +699,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
       refusal: (clientId) => ledger.refusal(clientId),
+      unconfirmedLeft: (clientId) => ledger.unconfirmedLeft(clientId),
     }),
     [ledger],
   )
