@@ -529,7 +529,7 @@ export function SteerBox({
       ref={setSection}
       aria-label="Steer"
       data-idle={idle || undefined}
-      className={cn(BAR, idle ? 'flex h-14 flex-row items-center gap-3 py-0' : 'flex flex-col gap-2')}
+      className={cn(BAR, idle ? 'flex flex-col gap-2 sm:h-14 sm:flex-row sm:items-center sm:gap-3 sm:py-0' : 'flex flex-col gap-2')}
     >
       {isDriver && pending.length > 0 && (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
@@ -574,7 +574,7 @@ export function SteerBox({
         </div>
       )}
 
-      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[55%] shrink-0 sm:max-w-[45%]' : 'flex-wrap')}>
+      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 sm:max-w-[45%] sm:shrink-0' : 'flex-wrap')}>
         <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
         <span
           data-slot="steer-status"
@@ -632,7 +632,7 @@ export function SteerBox({
         </div>
       )}
 
-      <form className={cn('flex gap-2', idle ? 'min-w-0 flex-1' : 'flex-col')} onSubmit={submit}>
+      <form className={cn('flex gap-2', idle ? 'min-w-0 sm:flex-1' : 'flex-col')} onSubmit={submit}>
         <Textarea
           ref={ref}
           value={text}
