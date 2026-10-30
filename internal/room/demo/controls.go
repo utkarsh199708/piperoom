@@ -49,6 +49,9 @@ type Controls struct {
 // when not nil, is the client pair the demo actions run over; reset puts it
 // back to the state the story starts from.
 func NewControls(fakes *Fakes) *Controls {
+	// The --demo server builds Builder{} and Controls over the same fakes;
+	// the zero Builder finds them here.
+	defaultFakes.Store(fakes)
 	return &Controls{fakes: fakes, delay: stepDelay, rooms: map[string]*runState{}}
 }
 

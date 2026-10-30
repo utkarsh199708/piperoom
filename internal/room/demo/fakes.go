@@ -114,6 +114,20 @@ func (f *FakeConnect) Reset(roomID string) {
 	delete(f.states, roomID)
 }
 
+// anyRecovered reports whether any room's connector and task 0 are RUNNING:
+// the state the scripted fix leaves behind. A room nobody touched is still on
+// the story's failed task and does not count.
+func (f *FakeConnect) anyRecovered() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, st := range f.states {
+		if st.connState == "RUNNING" && st.task0 == "RUNNING" {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *FakeConnect) ListConnectors(context.Context) ([]string, error) {
 	return []string{connectorName}, nil
 }
