@@ -5,6 +5,7 @@ import { applyEvent } from '@/state/reducer'
 import { emptyRoomState } from '@/state/types'
 import type { RoomState } from '@/state/types'
 import { RoomHeader } from './RoomHeader'
+import { setupState, pairedEvents } from '@/test/setupRoom'
 
 const SYSTEM = { kind: 'system', id: 'system', name: 'Piperoom' } as const
 
@@ -64,5 +65,30 @@ describe('room header title', () => {
     const heading = screen.getByRole('heading', { level: 1 })
     expect(heading).toHaveTextContent(title)
     expect(heading).toHaveClass('min-w-0', 'break-words')
+  })
+})
+
+describe('room header alert badge', () => {
+  it('shows no alert or verification badge on a setup room', () => {
+    setWidth(1280)
+    const state = setupState({ events: pairedEvents() })
+    expect(state.alert).not.toBeNull()
+    header(state)
+    expect(screen.queryByText(/^alert/)).not.toBeInTheDocument()
+    expect(screen.queryByText('unverified')).not.toBeInTheDocument()
+  })
+
+  it('still shows the dev webhook alert chip, unverified, on a webhook room', () => {
+    setWidth(1280)
+    const state: RoomState = { ...roomTitled('Orders down'), alert: { source: null, alert_source: 'webhook' } }
+    header(state)
+    expect(screen.getByText('alert · dev webhook')).toBeInTheDocument()
+    expect(screen.getAllByText('unverified').length).toBeGreaterThan(0)
+  })
+
+  it('shows no alert chip on a room opened from New room', () => {
+    setWidth(1280)
+    header(roomTitled('Manual room'))
+    expect(screen.queryByText(/^alert/)).not.toBeInTheDocument()
   })
 })

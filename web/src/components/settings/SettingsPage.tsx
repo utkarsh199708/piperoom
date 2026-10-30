@@ -33,6 +33,17 @@ export function SettingsPage() {
     )
   }
 
+  if (view.phase === 'unavailable') {
+    return (
+      <>
+        <NotAvailable />
+        <div className="mx-auto w-full max-w-5xl px-4 pb-8 sm:px-6">
+          <ModelBlock canEdit={user.role !== 'viewer'} />
+        </div>
+      </>
+    )
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 text-sm sm:px-6">
       {view.phase === 'loading' && (
@@ -75,6 +86,20 @@ function AdminsOnly() {
       <h2 className="m-0 text-base font-semibold">Settings are for admins</h2>
       <p className="m-0 text-muted-foreground">
         Ask an admin of this Piperoom (<code className="font-mono">admin: true</code> in the users file) if you need
+        to see how it is configured.
+      </p>
+    </div>
+  )
+}
+
+// A server without /api/admin/* (--demo) answers 404; there is nothing to retry.
+function NotAvailable() {
+  return (
+    <div className="mx-auto flex w-full max-w-xl flex-col items-center gap-2 px-4 py-16 text-center text-sm">
+      <Lock className="size-6 text-subtle-foreground" aria-hidden="true" />
+      <h2 className="m-0 text-base font-semibold">Settings are not available on this server</h2>
+      <p className="m-0 text-muted-foreground">
+        This Piperoom runs in demo mode and has no admin settings. Run it without <code className="font-mono">--demo</code>{' '}
         to see how it is configured.
       </p>
     </div>

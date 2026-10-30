@@ -16,6 +16,7 @@ import {
   ROOM_TABS,
   agentCell,
   canTakeControlOf,
+  hasLiveDriver,
   layersNeedingYou,
   needsYou,
   pipelineIds,
@@ -173,6 +174,19 @@ export function RoomList() {
     [reload, user.id, user.name],
   )
 
+  // T on a room another member drives (live lease): ask the driver, as the room's "Request control" does.
+  const requestControl = useCallback(async (room: RoomSnapshot) => {
+    setTaking(room.id)
+    try {
+      if (!isFixtures()) await api.requestControl(room.id)
+      toast.success(`Asked ${neutralizeBadgeText(room.driver?.name ?? 'the driver')} for control of "${room.title}"`)
+    } catch (err) {
+      toast.error(errorText(err))
+    } finally {
+      setTaking(null)
+    }
+  }, [])
+
   const focusRow = (index: number) => {
     const room = visible[index]
     if (!room) return
@@ -202,7 +216,12 @@ export function RoomList() {
       } else if (key === 't') {
         const room = visible[active]
         // One take at a time: a second T while the first is in flight does nothing.
-        if (room && taking === null && canTakeControlOf(room, user)) void takeControl(room)
+        if (room && taking === null) {
+          if (canTakeControlOf(room, user)) void takeControl(room)
+          else if (!viewer && room.status === 'open' && room.driver && room.driver.id !== user.id && hasLiveDriver(room)) {
+            void requestControl(room)
+          }
+        }
       } else if (key === 'c' && !viewer) {
         e.preventDefault()
         setNewOpen(true)
@@ -591,7 +610,9 @@ function RoomRow({
   const status = roomStatusCell(room)
   // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
   const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
-  const agent = agentCell(room)
+  // A shadow room's log holds no agent events, so agentCell would say "idle" while the silent run works.
+  const silentRun = room.shadow === true && !resolved
+  const agent = silentRun ? { dot: 'agent' as const, label: 'silent run', agent: true } : agentCell(room)
   const layers = layersNeedingYou(room, user)
   const canTake = canTakeControlOf(room, user)
   return (
@@ -625,6 +646,11 @@ function RoomRow({
           {tinted && (
             <Badge variant="warning" title={`Waiting on your ${layers.join(', ')} approval`}>
               Needs you
+            </Badge>
+          )}
+          {room.shadow === true && (
+            <Badge variant="agent" title="Shadow room: the agent works silently and proposes nothing" aria-label="Shadow room">
+              Shadow
             </Badge>
           )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>

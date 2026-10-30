@@ -16,6 +16,7 @@ import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isFallbackLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
+import { modKeyLabel } from '../lib/envLabel'
 import { approveAllFor, approveAllLabel, soloAllConfirmText } from '../lib/approveAll'
 import { describeIdentity, grantLabel, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
@@ -346,7 +347,7 @@ function SoloConfirmDialog({
             </Button>
             <Button type="submit" variant="success" disabled={busy || !match}>
               Approve
-              <Kbd aria-hidden="true">⌘⏎</Kbd>
+              <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
             </Button>
           </DialogFooter>
         </form>
@@ -496,7 +497,7 @@ function RunConfirmDialog({
           </Button>
           <Button variant="success" disabled={busy} autoFocus onClick={onConfirm}>
             {writeOff ? 'Approve (will not run)' : 'Approve and run'}
-            <Kbd aria-hidden="true">⏎</Kbd>
+            <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -645,6 +646,12 @@ function ApproveAllDialog({
         onKeyDown={(e) => {
           // A held Enter that opened this dialog must not also confirm it on the focused button.
           if (e.key === 'Enter' && e.repeat) e.preventDefault()
+          // Without a typed confirm the hint names Ctrl/⌘⏎, so that must confirm from the focused
+          // button too; with one, the typed field handles it.
+          else if (want === null && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            submit()
+          }
         }}
       >
         <form
@@ -708,7 +715,7 @@ function ApproveAllDialog({
             </Button>
             <Button type="submit" variant="success" disabled={busy || !match} autoFocus={want === null}>
               {approveAllLabel(writeOff)}
-              <Kbd aria-hidden="true">{want === null ? '⏎' : '⌘⏎'}</Kbd>
+              <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
             </Button>
           </DialogFooter>
         </form>

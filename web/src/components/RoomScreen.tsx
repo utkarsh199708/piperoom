@@ -156,7 +156,7 @@ export function RoomScreen() {
       approve: () => handleRef.current?.approve(),
       view: () => decisionRegistry.get()?.scrollTo(),
       readHandoff: focusHandoff,
-      steer: () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Steer the agent"]')?.focus(),
+      steer: () => document.querySelector<HTMLTextAreaElement>('section[aria-label="Steer"] textarea')?.focus(),
     },
     elsewhereNeedsMe,
   )

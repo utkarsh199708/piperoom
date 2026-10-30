@@ -101,7 +101,8 @@ describe('BreakSomethingMenu when devctl serve is down', () => {
     fetchMock.mockResolvedValue(response)
     openMenu()
     expect(await screen.findByText('devctl serve is not running.')).toBeInTheDocument()
-    expect(screen.getByText('go run ./cmd/devctl serve')).toBeInTheDocument()
+    expect(screen.getByText('go run ./cmd/devctl serve --owner <tag>')).toBeInTheDocument()
+    expect(screen.getByText(/PIPEROOM_STACK_OWNER/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(screen.queryByText(/Could not load scenarios/)).not.toBeInTheDocument()
   })
@@ -110,7 +111,7 @@ describe('BreakSomethingMenu when devctl serve is down', () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
     openMenu()
     expect(await screen.findByText('devctl serve is not running.')).toBeInTheDocument()
-    expect(screen.getByText('go run ./cmd/devctl serve')).toBeInTheDocument()
+    expect(screen.getByText('go run ./cmd/devctl serve --owner <tag>')).toBeInTheDocument()
   })
 
   it('copies the start command', async () => {
@@ -119,7 +120,7 @@ describe('BreakSomethingMenu when devctl serve is down', () => {
     fetchMock.mockResolvedValue(jsonResponse(503, { error: 'devctl_not_running' }))
     openMenu()
     fireEvent.click(await screen.findByRole('button', { name: 'Copy start command' }))
-    expect(writeText).toHaveBeenCalledWith('go run ./cmd/devctl serve')
+    expect(writeText).toHaveBeenCalledWith('go run ./cmd/devctl serve --owner <tag>')
     expect(await screen.findByRole('button', { name: 'Copied start command' })).toBeInTheDocument()
   })
 

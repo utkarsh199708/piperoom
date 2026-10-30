@@ -39,7 +39,7 @@ vi.mock('../api/client', () => {
       this.status = status
     }
   }
-  return { api: { createRoom: vi.fn(), grantControl: vi.fn() }, isFixtures: () => false, ApiClientError }
+  return { api: { createRoom: vi.fn(), grantControl: vi.fn(), requestControl: vi.fn() }, isFixtures: () => false, ApiClientError }
 })
 
 import { toast } from 'sonner'
@@ -118,6 +118,7 @@ beforeEach(() => {
   }
   vi.clearAllMocks()
   vi.mocked(api.grantControl).mockReset()
+  vi.mocked(api.requestControl).mockReset()
   vi.mocked(api.createRoom).mockReset()
   mockList([])
 })
@@ -527,11 +528,70 @@ describe('keyboard', () => {
     mockList(rooms)
     renderList()
     fireEvent.keyDown(document.body, { key: 'j' })
-    fireEvent.keyDown(document.body, { key: 't' }) // Alpha has a driver: nothing
-    expect(api.grantControl).not.toHaveBeenCalled()
     fireEvent.keyDown(document.body, { key: 'j' })
     fireEvent.keyDown(document.body, { key: 't' })
     await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('b', 'arjun'))
+  })
+
+  it('T on a room another member drives with a live lease requests control and toasts', async () => {
+    vi.mocked(api.requestControl).mockResolvedValueOnce({} as never)
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' }) // Alpha, driven by Kabir
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.requestControl).toHaveBeenCalledWith('a'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Kabir')))
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room whose lease expired takes control, not a request', async () => {
+    vi.mocked(api.grantControl).mockResolvedValueOnce({} as never)
+    mockList([room({ id: 'e', title: 'Expired', driver: { id: 'kabir', name: 'Kabir', lease_until: '2020-01-01T00:00:00Z' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('e', 'arjun'))
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room I already drive sends nothing', () => {
+    mockList([room({ id: 'm', title: 'Mine', driver: { id: 'arjun', name: 'Arjun' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a closed room with a live other driver sends nothing', () => {
+    mockList([room({ id: 'x', title: 'Closed driven', status: 'closed', closed_at: '2026-10-11T11:00:00Z', driver: { id: 'kabir', name: 'Kabir' } })])
+    renderList()
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /All/ }))
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('a viewer pressing T on a driven room sends nothing', () => {
+    ctx.user = { id: 'v', name: 'Vee', layers: [], role: 'viewer' }
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('typing t in a text field fires no shortcut', () => {
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    fireEvent.keyDown(input, { key: 't' })
+    input.remove()
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
   })
 
   it('the picked row is a room, not a position: a refresh that inserts a row above does not move T', async () => {
@@ -753,5 +813,38 @@ describe('resolved rows', () => {
     expect(within(row).getByText('—')).toBeInTheDocument()
     expect(within(row).getByText(/^closed .* ago$/)).toHaveAttribute('title', '2026-10-11 10:06:00 UTC')
     expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
+  })
+})
+
+describe('shadow marker', () => {
+  it('marks a shadow room and does not call its agent idle; an ordinary room is unchanged', () => {
+    mockList([room({ id: 'quiet', shadow: true }), room({ id: 'plain' })])
+    renderList()
+    const shadowRow = screen.getByText('quiet').closest('tr')!
+    expect(within(shadowRow).getByLabelText('Shadow room')).toHaveTextContent('Shadow')
+    expect(within(shadowRow).getByText('silent run')).toBeInTheDocument()
+    expect(within(shadowRow).queryByText('idle')).toBeNull()
+    const plainRow = screen.getByText('plain').closest('tr')!
+    expect(within(plainRow).queryByLabelText('Shadow room')).toBeNull()
+    expect(within(plainRow).getByText('idle')).toBeInTheDocument()
+  })
+
+  it('a closed shadow room reads resolved, not silent run, and keeps its Shadow badge', () => {
+    mockList([
+      room({
+        id: 'gone',
+        title: 'Closed shadow',
+        shadow: true,
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Closed shadow').closest('tr')!
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).queryByText('silent run')).toBeNull()
+    expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
   })
 })

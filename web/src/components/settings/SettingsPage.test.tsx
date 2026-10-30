@@ -132,6 +132,19 @@ describe('SettingsPage access', () => {
     expect(screen.queryByText(message)).toBeNull()
   })
 
+  it('the API answering 404 (no admin routes, --demo) says settings are not available, with no Retry', async () => {
+    const spy = vi.spyOn(api, 'adminConfig').mockRejectedValue(apiError(404, 'not_found', 'not found'))
+    // The Model panel has its own Retry when /api/models fails; keep it pending so only this page's state is checked.
+    vi.spyOn(api, 'models').mockReturnValue(new Promise(() => {}))
+    renderPage()
+    expect(await screen.findByText('Settings are not available on this server')).toBeInTheDocument()
+    expect(screen.getByText(/demo mode/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByText('not found')).toBeNull()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
   it('shows a failure with Retry, and Retry loads again', async () => {
     const spy = vi.spyOn(api, 'adminConfig').mockRejectedValueOnce(apiError(500, 'internal', 'boom')).mockResolvedValue(config())
     renderPage()
