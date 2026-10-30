@@ -53,6 +53,14 @@ func (f *fakeAPI) put(path string, obj map[string]any) {
 	f.allowed[path] = true
 }
 
+// allow grants path (a name the Role lists) without creating the object, so
+// a GET answers 404 until put.
+func (f *fakeAPI) allow(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.allowed[path] = true
+}
+
 func (f *fakeAPI) get(path string) map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -158,6 +166,9 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.objects[path] = next
 		}
 		_ = json.NewEncoder(w).Encode(next)
+	case http.MethodDelete:
+		delete(f.objects, path)
+		_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Status", "status": "Success"})
 	default:
 		writeStatus(w, 405, "no")
 	}
