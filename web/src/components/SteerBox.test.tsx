@@ -41,7 +41,7 @@ describe('SteerBox', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
     expect(screen.getByText(/your message goes to their queue/)).toBeInTheDocument()
-    fireEvent.focus(screen.getByLabelText('Steer the agent'))
+    fireEvent.focus(screen.getByLabelText('Suggest a step for Arjun'))
     expect(screen.getByRole('button', { name: 'Suggest' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Request control' })).toBeInTheDocument()
   })
@@ -281,6 +281,19 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
   })
 
+  it('names the composer for what it does: suggesting to the driver, or steering', () => {
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    const { rerender } = render(<SteerBox state={state} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Suggest a step for Arjun' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Steer the agent' })).not.toBeInTheDocument()
+    // Control moves to me: the name follows without a remount.
+    rerender(<SteerBox state={{ ...state, driver: { id: 'kabir', name: 'Kabir', lease_until: inAnHour() } }} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Steer the agent' })).toBeInTheDocument()
+    // Control moves away from me.
+    rerender(<SteerBox state={state} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Suggest a step for Arjun' })).toBeInTheDocument()
+  })
+
   it('with no driver a member can suggest', () => {
     const state = emptyRoomState('r1')
     render(<SteerBox state={state} user={kabir} actions={actions} />)
@@ -390,7 +403,7 @@ describe('SteerBox idle row (F1b)', () => {
 
   describe('F5 composer', () => {
     const driverState = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
-    const field = () => screen.getByLabelText('Steer the agent')
+    const field = () => screen.getByRole('textbox', { name: /^(Steer the agent|Suggest a step for Arjun)$/ })
 
     afterEach(() => {
       localStorage.clear()
