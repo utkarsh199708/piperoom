@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMemo, useState } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Timeline } from './Timeline'
@@ -295,5 +295,50 @@ describe('reply box under a comment: refused versus kept', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(screen.getByText('Editing discards the unsent reply.')).toBeInTheDocument()
     expect(box).toHaveValue('ack')
+  })
+})
+
+// KAN-580 re-test: a refusal line flush above the sticky composer must be scrolled clear of it.
+// <main>'s scroll-padding-bottom (--composer-h) does the clearing; this asserts the nudge happens.
+// The real layout can only be checked in a browser.
+describe('refusal line scrolls into view', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => {
+    scrollIntoView.mockClear()
+    Element.prototype.scrollIntoView = scrollIntoView
+  })
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+  })
+
+  it('scrolls the step comment refusal line into view, nearest, and not before a refusal', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    comment(box, 'x'.repeat(4001))
+    const line = await screen.findByRole('status')
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(scrollIntoView.mock.contexts[0]).toBe(line)
+    expect(box).toHaveValue('x'.repeat(4001))
+  })
+
+  it('scrolls the reply refusal line into view, nearest', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} withComments />)
+    reply('ack')
+    const line = await screen.findByRole('status')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(scrollIntoView.mock.contexts[0]).toBe(line)
+  })
+
+  it('does not scroll when there is no refusal', async () => {
+    const post = vi.fn().mockImplementation(async (item: SendItem, id: string) => ok(item, id))
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })

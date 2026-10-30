@@ -228,8 +228,15 @@ function settleSend(retryId: ReturnType<typeof useRetryId>, clientId: string, ok
 // The line under a box for a send the server refused: the room error banner says it too, but it is
 // off-screen when the person is down at the step (KAN-580). Not role="alert": the banner is.
 function RefusalLine({ text, className }: { text: string; className?: string }) {
+  const ref = useRef<HTMLParagraphElement>(null)
+  // Bring a new refusal into view with the smallest scroll. <main>'s scroll-padding-bottom already
+  // reserves --composer-h, so 'nearest' stops above the sticky composer; scroll-mb adds a little air.
+  // Focus stays in the box. scrollIntoView is optional: jsdom has none.
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [text])
   return (
-    <p role="status" className={cn('m-0 text-xs text-destructive-fg', className)}>
+    <p ref={ref} role="status" className={cn('m-0 scroll-mb-2 text-xs text-destructive-fg', className)}>
       {text}
     </p>
   )
