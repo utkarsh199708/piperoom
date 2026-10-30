@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api } from '@/api/client'
 import type { ShadowGradedPayload, ShadowRootCause } from '@/api/types'
@@ -35,13 +35,16 @@ export function GradeForm({
   const [rootCause, setRootCause] = useState<ShadowRootCause | ''>(current?.root_cause ?? '')
   const [notes, setNotes] = useState(current?.notes ?? '')
   const [busy, setBusy] = useState(false)
+  // busy is state and only updates on the next render, so a fast double click would get past it.
+  const inFlight = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const ready = layerCorrect !== null && rootCause !== ''
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!ready || busy || !canWrite || !revealed) return
+    if (!ready || busy || inFlight.current || !canWrite || !revealed) return
+    inFlight.current = true
     setBusy(true)
     setError(null)
     setSaved(false)
@@ -53,6 +56,7 @@ export function GradeForm({
     } catch (err) {
       setError(errorText(err))
     } finally {
+      inFlight.current = false
       setBusy(false)
     }
   }
