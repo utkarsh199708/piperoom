@@ -56,12 +56,12 @@ func EnvironmentSpecs() []Spec {
 			Name:     "compose_write",
 			Tier:     "T1",
 			Layer:    "environment",
-			Describe: "Render a Compose stack from a typed template (kafka-kraft, connect, registry, source-postgres) and write it under the project directory.",
+			Describe: "Render a Compose stack from typed templates (kafka-kraft, connect, registry, source-postgres, and sink-postgres: the dev warehouse a JDBC sink writes into) and write it under the project directory.",
 			Schema: objectSchema(map[string]any{
 				"templates": map[string]any{
-					"type": "array", "minItems": 1, "maxItems": 4,
+					"type": "array", "minItems": 1, "maxItems": 5,
 					"items": map[string]any{"type": "string", "enum": []string{
-						"kafka-kraft", "connect", "registry", "source-postgres",
+						"kafka-kraft", "connect", "registry", "source-postgres", "sink-postgres",
 					}},
 				},
 				"project":  map[string]any{"type": "string", "pattern": `^piperoom-[a-z0-9_-]{1,54}$`},
@@ -138,7 +138,7 @@ func EnvironmentSpecs() []Spec {
 			Name:     "plugin_install",
 			Tier:     "T1",
 			Layer:    "kafka-connect",
-			Describe: "Download one Debezium connector archive from an allow-listed host into the Connect plugin directory, verified against the pinned digest.",
+			Describe: "Download one Debezium connector archive (a source connector, or jdbc for the JDBC sink) from an allow-listed host into the Connect plugin directory, verified against the pinned digest.",
 			Schema: objectSchema(map[string]any{
 				"release":   map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$`},
 				"connector": map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[a-z][a-z0-9-]{0,31}$`},
