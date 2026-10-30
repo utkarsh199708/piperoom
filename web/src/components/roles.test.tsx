@@ -116,6 +116,28 @@ describe('role-aware room screen', () => {
     expect(screen.queryByText('View only')).not.toBeInTheDocument()
   })
 
+  it('a closed room has no step comment box for a member, and the box goes when the room closes (KAN-559)', () => {
+    const { rerender } = showRoom(busyRoom())
+    expect(screen.getByLabelText('Comment on this step')).toBeInTheDocument()
+    vi.mocked(useRoom).mockReturnValue({
+      state: { ...busyRoom(), status: 'closed', closed_at: '2026-10-11T10:30:00Z', resolution: 'fixed' },
+      presence: [],
+      conn: 'live',
+      error: null,
+      actions,
+      ...staleOff,
+    })
+    rerender(
+      <MemoryRouter initialEntries={['/rooms/r1']}>
+        <Routes>
+          <Route path="/rooms/:roomId" element={<RoomScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    expect(screen.queryByLabelText('Comment on this step')).not.toBeInTheDocument()
+    expect(screen.getByText('Check lag')).toBeInTheDocument()
+  })
+
   it('a viewer sees a View only badge and no action control', () => {
     ctx.user = viewer
     showRoom(busyRoom())

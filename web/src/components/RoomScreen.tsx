@@ -411,7 +411,7 @@ export function RoomScreen() {
         comments={state.comments}
         onComment={actions.comment}
         sends={actions.sends}
-        readOnly={viewer}
+        readOnly={viewer || !roomOpen}
         working={state.agent_status.state === 'working'}
         onTakeControl={takeControl}
         agent={state.agent_status}
