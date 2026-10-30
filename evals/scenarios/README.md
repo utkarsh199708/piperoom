@@ -1058,6 +1058,47 @@ setup-break wrong-standalone-args` (or `plugin-path-unset`, `java-too-old`) appl
 host of the `host` profile, which is enough to re-check the check names and messages. Take the room's tool results from
 `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
 
+### Setup scenarios: Debezium Server (U11c)
+
+Two setup scenarios on the Debezium Server target (`dbzserver`, U11a `internal/setup/targets/server`) in Compose mode:
+the server as one service of the rendered stack (the pinned `debezium/server:3.2.0.Final` image, the config directory a
+read-only bind, the offsets on the named volume `dbz-server-data`), a co-located Postgres source and the HTTP sink to the
+warehouse's ingest API. Each has a runner session in `evals/setup/recordings` with target `dbzserver`; the labels name
+U11b's probe (`internal/setup/ops/sink_probe.go`) or the server property.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/server-sink-unreachable` | step `sink_probe` failed (`sink_probe http: HEAD request failed`); `server_status`: dbzserver has no container | nothing listens at `ingest.warehouse.internal:8080`: every POST is refused, the HTTP sink gives up and the server exits | kafka-connect / warehouse | the probe: `sink_probe http` fails for the sink's registered address; the endpoint's owner starts it (or `server_properties_write` corrects `debezium.sink.http.url`, T1), `sink_probe` passes, then `compose_up` (T1) |
+| `setup/server-offset-file-unwritable` | after `compose_restart` the server snapshotted `public.orders` again; `server_status` running | a hand edit set `debezium.source.offset.storage.file.filename=config/offsets.dat` on the read-only config bind: every flush fails, each start snapshots again | kafka-connect / kafka-connect | the property `debezium.source.offset.storage.file.filename`: `server_properties_write` (T1; `offsets_file` takes only `data/<name>`, default `data/offsets.dat`), then `compose_restart` (T1); the sink absorbs the duplicates |
+
+**Synthesised, not recorded** (`RECORDED: NO`). The room summaries follow the real tools' formats on this branch;
+the runner sessions the server target's ops (`server_properties_write`, `server_compose_write`, `server_status`), the
+Compose driver's `compose_up`, `compose_restart` and `container_logs` and `sink_probe`, with Debezium Server's log
+lines composed by hand (their wording, and the engine running on after a failed offset flush, are unconfirmed on
+3.2.0.Final). Digests are synthetic. Three conventions a re-recording keeps:
+
+- **No ladder.** `plan.Ladder` defines none for `dbzserver` (`internal/setup/plan/ladder.go`: the server's status is
+  not a Connect REST endpoint, and its ladder is its own row), so the two sessions record none.
+  `evalsetup.Verify` replays their ops and reports the ladder as not defined (`Check.NoLadder`, carried into the
+  run's `setup_replay.no_ladder`); a session on such a target that records a ladder fails, and a session on a target
+  with a ladder that records none still fails (`evalsetup.PlanLadderUndefined`; U11c added the rule, with its test in
+  `evals/setup/setup_test.go`).
+- **A stand-in connector.** owners.yaml requires a connector on a CDC pipeline and has no Debezium Server kind, so the
+  pipeline names the server's Compose service, `dbzserver`, whose Connect reads answer not found, and `watch.slot`
+  names the server's slot `debezium_orders`, so `pg_replication_slots` reads it without a Connect config. The slot is
+  the room's evidence: inactive after the server exited, or active with its WAL growing while no offset commits.
+- **The cause is in the runner's reads.** `server_status`, `container_logs` and `sink_probe` are runner ops, not
+  room tools (`evals.LiveTools`), so the room reaches the cause through the alert's step and the runner session, as
+  the U5c section says for `container_logs`. `pipeline_map` is not recorded: with a stand-in connector and no
+  Kafka topic its map would mislead, and a call is a counted miss.
+
+To re-record on the dev stack once the setup room path runs the server target: run `piperoom-setup` into a fresh
+project with the `dbzserver` target in Compose mode, the HTTP sink and a registered host target for the ingest
+address; for sink-unreachable leave nothing listening there, for offset-file-unwritable start an HTTP receiver (any
+2xx), let the server stream, then edit `debezium/config/application.properties` by hand to
+`debezium.source.offset.storage.file.filename=config/offsets.dat` and restart the service. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse

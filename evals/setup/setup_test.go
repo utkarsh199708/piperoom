@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"piperoom/internal/events"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -90,6 +91,14 @@ func TestLoadDirReadsEverySetupSession(t *testing.T) {
 		}
 		if len(rec.Ops) == 0 {
 			t.Errorf("%s: no ops", name)
+		}
+		// A target plan.Ladder defines no ladder for (the Debezium Server,
+		// U11c) records none: there is nothing it could recompute.
+		if PlanLadderUndefined(*rec) != "" {
+			if rec.Ladder != nil {
+				t.Errorf("%s: target %s has no plan.Ladder, but the session records a ladder", name, rec.Target)
+			}
+			continue
 		}
 		if rec.Ladder == nil || len(rec.Ladder.Reads) == 0 || rec.Ladder.Verified == nil {
 			t.Errorf("%s: no ladder reads or verification", name)
@@ -465,6 +474,45 @@ func TestVerifyFailsABrokenRecording(t *testing.T) {
 			t.Fatalf("Check = %+v, want a ladder failure with no reads", c)
 		}
 	})
+}
+
+// TestVerifyTargetWithoutPlanLadder: a session on a target plan.Ladder
+// defines no ladder for replays its ops and reports the missing ladder as
+// NoLadder, never as a pass of rungs nobody defined; the same session with a
+// ladder fails, and a Connect target's session without one still fails.
+func TestVerifyTargetWithoutPlanLadder(t *testing.T) {
+	op := Op{Op: "server_status", Tier: protocol.TierT0, Result: &protocol.OpResult{OK: true, Summary: "dbzserver: running",
+		Receipt: events.SetupReceipt{Kind: "exec", OutMAC: digestA}}}
+	dbz := Recording{Scenario: "setup/dbz", Source: "postgres", Target: "dbzserver", Ops: []Op{op}}
+	if why := PlanLadderUndefined(dbz); !strings.Contains(why, "dbzserver") {
+		t.Fatalf("PlanLadderUndefined(dbzserver) = %q, want a reason naming the target", why)
+	}
+	c := Verify(context.Background(), &dbz)
+	if !c.OK() || c.Ops != 1 || c.Rungs != 0 || c.NoLadder == "" {
+		t.Fatalf("Check = %+v, want the op replayed and NoLadder set", c)
+	}
+
+	withLadder := dbz
+	withLadder.Ladder = &Ladder{PlanID: "pl_1", Verified: &Verified{Rungs: []Rung{{Name: "connector_running", OK: true}}}}
+	if c := Verify(context.Background(), &withLadder); c.OK() || !strings.Contains(strings.Join(c.Failures, ";"), "records a ladder") {
+		t.Fatalf("Check = %+v, want a failure: no plan ladder to recompute", c)
+	}
+
+	compose := dbz
+	compose.Target = "compose"
+	if why := PlanLadderUndefined(compose); why != "" {
+		t.Fatalf("PlanLadderUndefined(compose) = %q, want none", why)
+	}
+	if c := Verify(context.Background(), &compose); c.OK() || !strings.Contains(strings.Join(c.Failures, ";"), "records no ladder") {
+		t.Fatalf("Check = %+v, want the missing-ladder failure", c)
+	}
+
+	// An unknown sink is not excused by the target.
+	badSink := dbz
+	badSink.Sink = "Not-A-Kind"
+	if why := PlanLadderUndefined(badSink); why != "" {
+		t.Fatalf("PlanLadderUndefined(bad sink) = %q, want none", why)
+	}
 }
 
 // TestVerifyNilRecording is the defensive path: no recording is a failure, not

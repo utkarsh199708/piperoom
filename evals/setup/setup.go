@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -608,9 +609,31 @@ func subset(want, got any) bool {
 // replay used, and every way the recording failed to reproduce its own
 // session.
 type Check struct {
-	Ops      int      `json:"ops"`
-	Rungs    int      `json:"rungs"`
+	Ops   int `json:"ops"`
+	Rungs int `json:"rungs"`
+	// NoLadder says why the session has no ladder to replay: plan.Ladder
+	// defines none for its target (PlanLadderUndefined). Empty for every
+	// session whose target has a ladder; such a session without one fails.
+	NoLadder string   `json:"no_ladder,omitempty"`
 	Failures []string `json:"failures,omitempty"`
+}
+
+// PlanLadderUndefined says why plan.Ladder defines no verification ladder for
+// rec's setup, or "" when it defines one. It is the target alone that has
+// none: the same source and sink on a Connect target have a ladder, so an
+// unknown source or sink kind is never excused here. plan.Ladder refuses the
+// targets whose status is not a Connect REST endpoint (dbzserver, embedded,
+// the managed services): their ladders are their own rows, not in plan yet.
+// A session on such a target can only replay its ops; it must not claim a
+// ladder plan cannot recompute.
+func PlanLadderUndefined(rec Recording) string {
+	if _, err := plan.Ladder(rec.SourceKind(), rec.Target, rec.SinkKind()); err == nil {
+		return ""
+	}
+	if _, err := plan.Ladder(rec.SourceKind(), "compose", rec.SinkKind()); err != nil {
+		return ""
+	}
+	return "plan.Ladder defines no verification ladder for target " + rec.Target + " (that target's ladder is its own row)"
 }
 
 // OK reports whether the recording replayed cleanly.
@@ -632,7 +655,10 @@ func (c Check) OK() bool { return len(c.Failures) == 0 }
 // and its rungs must equal the recorded setup.verified rung for rung. A
 // recording with no ladder, no verified verdict, a read the ladder cannot
 // use, or one whose recomputed verdict differs fails: a broken session or
-// ladder must fail a setup scenario, never pass it silently.
+// ladder must fail a setup scenario, never pass it silently. The one
+// exception is a target plan.Ladder defines no ladder for
+// (PlanLadderUndefined, the Debezium Server among them): its session records
+// none, Check.NoLadder says why, and a session that records one fails.
 func Verify(ctx context.Context, rec *Recording) Check {
 	var c Check
 	if rec == nil {
@@ -668,8 +694,18 @@ func Verify(ctx context.Context, rec *Recording) Check {
 	if left := s.Remaining(); left > 0 {
 		c.Failures = append(c.Failures, fmt.Sprintf("%d recorded op(s) no live-shaped request used: %s", left, strings.Join(s.Unexecuted(), ", ")))
 	}
-	if rec.Ladder == nil {
+	noLadder := PlanLadderUndefined(*rec)
+	switch {
+	case rec.Ladder == nil && noLadder != "":
+		// Nothing to recompute: say so in the result rather than pass a
+		// ladder nobody defined.
+		c.NoLadder = noLadder
+		return c
+	case rec.Ladder == nil:
 		c.Failures = append(c.Failures, "the session records no ladder")
+		return c
+	case noLadder != "":
+		c.Failures = append(c.Failures, "the session records a ladder, but "+noLadder)
 		return c
 	}
 	if rec.Ladder.Verified == nil {

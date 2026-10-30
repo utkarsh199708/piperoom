@@ -114,35 +114,18 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 			if err := evalsetup.AgentSink(agentSink).Emit(ctx, evalsetup.Event{Type: events.SetupVerified}); !errors.Is(err, evalsetup.ErrAgentVerified) {
 				t.Fatalf("agent setup.verified: err = %v, want a refusal", err)
 			}
-			sink := &evalsetup.MemorySink{}
-			ladder := evalsetup.NewFakeLadder(evalsetup.LadderConfig{
-				Source:     rec.SourceKind(),
-				Target:     rec.Target,
-				Sink:       rec.SinkKind(),
-				PlanID:     rec.Ladder.PlanID,
-				NonceHash:  rec.Ladder.NonceHash,
-				Table:      rec.Ladder.Table,
-				ExampleSQL: rec.Ladder.ExampleSQL,
-			}, evalsetup.NewRecordingReader(rec), sink)
-			verified, err := ladder.Verify(ctx)
-			if err != nil {
-				t.Fatalf("ladder: %v", err)
-			}
-			if rec.Ladder.Verified != nil {
-				want := rec.Ladder.Verified.Rungs
-				if len(verified.Rungs) != len(want) {
-					t.Fatalf("rungs = %d, want %d", len(verified.Rungs), len(want))
-				}
-				for i := range want {
-					if verified.Rungs[i].Name != want[i].Name || verified.Rungs[i].OK != want[i].OK || verified.Rungs[i].Note != want[i].Note {
-						t.Errorf("rung %d = %+v, want %+v", i, verified.Rungs[i], want[i])
-					}
-				}
-			}
-			for _, ev := range sink.Events() {
-				if ev.Type == events.SetupVerified && ev.Actor.Kind != events.ActorSystem {
-					t.Errorf("setup.verified authored by %+v, want the ladder runner", ev.Actor)
-				}
+			// A target plan.Ladder defines no ladder for (dbzserver, U11c)
+			// records none; every other session records one.
+			noLadder := evalsetup.PlanLadderUndefined(*rec)
+			wantRungs := 0
+			switch {
+			case rec.Ladder == nil && noLadder == "":
+				t.Fatalf("no ladder recorded, and plan.Ladder defines one for %s/%s", rec.SourceKind(), rec.Target)
+			case rec.Ladder != nil && noLadder != "":
+				t.Fatalf("a ladder is recorded, but %s", noLadder)
+			case rec.Ladder != nil:
+				wantRungs = len(rec.Ladder.Verified.Rungs)
+				replayLadder(t, ctx, rec)
 			}
 
 			// The scenario itself scores 100 through the room path with the
@@ -167,8 +150,8 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 			if r.SetupReplay == nil || len(r.SetupReplay.Failures) != 0 {
 				t.Errorf("setup replay = %+v, want a clean replay", r.SetupReplay)
 			}
-			if r.SetupReplay != nil && (r.SetupReplay.Ops != len(rec.Ops) || r.SetupReplay.Rungs != len(rec.Ladder.Verified.Rungs)) {
-				t.Errorf("setup replay ops/rungs = %d/%d, want %d/%d", r.SetupReplay.Ops, r.SetupReplay.Rungs, len(rec.Ops), len(rec.Ladder.Verified.Rungs))
+			if r.SetupReplay != nil && (r.SetupReplay.Ops != len(rec.Ops) || r.SetupReplay.Rungs != wantRungs || r.SetupReplay.NoLadder != noLadder) {
+				t.Errorf("setup replay ops/rungs/no-ladder = %d/%d/%q, want %d/%d/%q", r.SetupReplay.Ops, r.SetupReplay.Rungs, r.SetupReplay.NoLadder, len(rec.Ops), wantRungs, noLadder)
 			}
 			if len(rep.Scenarios) != 1 || rep.Scenarios[0].SourceKind != rec.SourceKind() || rep.Scenarios[0].Target != rec.Target {
 				t.Errorf("scenario kinds = %+v, want %s/%s from the recording", rep.Scenarios, rec.SourceKind(), rec.Target)
@@ -201,6 +184,43 @@ func TestSetupScenariosScoreInReplayMode(t *testing.T) {
 	checkGroups("source", rep.BySource, wantSource)
 	if n := len(names); rep.Overall.Runs != n || rep.Overall.Passes != n || rep.Overall.PassRate != 1 {
 		t.Errorf("overall = %+v, want %d/%d", rep.Overall, n, n)
+	}
+}
+
+// replayLadder runs the fake ladder over rec's reads: it must recompute the
+// recorded setup.verified, and the only setup.verified on the server side is
+// its own.
+func replayLadder(t *testing.T, ctx context.Context, rec *evalsetup.Recording) {
+	t.Helper()
+	sink := &evalsetup.MemorySink{}
+	ladder := evalsetup.NewFakeLadder(evalsetup.LadderConfig{
+		Source:     rec.SourceKind(),
+		Target:     rec.Target,
+		Sink:       rec.SinkKind(),
+		PlanID:     rec.Ladder.PlanID,
+		NonceHash:  rec.Ladder.NonceHash,
+		Table:      rec.Ladder.Table,
+		ExampleSQL: rec.Ladder.ExampleSQL,
+	}, evalsetup.NewRecordingReader(rec), sink)
+	verified, err := ladder.Verify(ctx)
+	if err != nil {
+		t.Fatalf("ladder: %v", err)
+	}
+	if rec.Ladder.Verified != nil {
+		want := rec.Ladder.Verified.Rungs
+		if len(verified.Rungs) != len(want) {
+			t.Fatalf("rungs = %d, want %d", len(verified.Rungs), len(want))
+		}
+		for i := range want {
+			if verified.Rungs[i].Name != want[i].Name || verified.Rungs[i].OK != want[i].OK || verified.Rungs[i].Note != want[i].Note {
+				t.Errorf("rung %d = %+v, want %+v", i, verified.Rungs[i], want[i])
+			}
+		}
+	}
+	for _, ev := range sink.Events() {
+		if ev.Type == events.SetupVerified && ev.Actor.Kind != events.ActorSystem {
+			t.Errorf("setup.verified authored by %+v, want the ladder runner", ev.Actor)
+		}
 	}
 }
 

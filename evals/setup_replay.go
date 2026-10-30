@@ -44,6 +44,9 @@ type SetupReplayResult struct {
 	// used. Both 0 when the recording is missing.
 	Ops   int `json:"ops"`
 	Rungs int `json:"rungs"`
+	// NoLadder says why the session replayed no ladder: plan.Ladder defines
+	// none for its target (evalsetup.PlanLadderUndefined; Rungs is 0).
+	NoLadder string `json:"no_ladder,omitempty"`
 	// Failures say why the recording did not reproduce its own session: a
 	// missing file, an op a live-shaped request could not answer, a ladder
 	// whose recomputed verdict differs from the recorded one. Non-empty
@@ -75,6 +78,7 @@ func setupReplay(sc Scenario) *SetupReplayResult {
 		Recording: sc.setupRec.Scenario,
 		Ops:       chk.Ops,
 		Rungs:     chk.Rungs,
+		NoLadder:  chk.NoLadder,
 		Failures:  chk.Failures,
 	}
 }

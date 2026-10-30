@@ -440,6 +440,11 @@ var syntheticLabels = map[string]Label{
 	"setup/wrong-standalone-args": {"kafka-connect", []string{"connect-distributed.properties", "distributed worker file", "execstart"}},
 	"setup/plugin-path-unset":     {"kafka-connect", []string{"removed plugin.path", "plugin.path unset"}},
 	"setup/java-too-old":          {"kafka-connect", []string{"java_home", "jdk-11", "java 11"}},
+	// The U11c Debezium Server scenarios (KAN-351): the terms name the
+	// probe's finding and the property. sink-unreachable's title names the
+	// step sink_probe, so its terms name the refusal.
+	"setup/server-sink-unreachable":       {"kafka-connect", []string{"connection refused", "refuses connections"}},
+	"setup/server-offset-file-unwritable": {"kafka-connect", []string{"offset.storage.file.filename", "read-only file system", "config/offsets.dat"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -659,6 +664,12 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/wrong-standalone-args": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/plugin-path-unset":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/java-too-old":          {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U11c: the lazy texts are the alert titles, which name the server only
+	// by its service name (dbzserver, no layer word) and a setup step, and no
+	// cause. Each wrong text tells the other scenario's story about the same
+	// Debezium Server.
+	"setup/server-sink-unreachable":       {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/server-offset-file-unwritable": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit
