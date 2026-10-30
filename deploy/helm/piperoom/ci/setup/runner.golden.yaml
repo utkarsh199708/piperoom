@@ -1,0 +1,222 @@
+---
+# Source: piperoom/templates/setup-runner.yaml
+# The room release (docs/design/setup-strimzi.md §3, §4): the setup runner of
+# one room, in the target namespace. The close card uninstalls it; nothing the
+# running pipeline needs lives here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    app.kubernetes.io/part-of: piperoom-setup
+automountServiceAccountToken: false
+---
+# Source: piperoom/templates/setup-runner.yaml
+# No create on anything and no list but events: every object the runner can
+# reach exists before the Job starts, named here. escalate, bind and
+# impersonate are never granted; nothing is cluster-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    app.kubernetes.io/part-of: piperoom-setup
+rules:
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkas]
+    resourceNames: [prod-kafka]
+    verbs: [get, watch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnects]
+    resourceNames: [orders-connect]
+    verbs: [get, watch, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnectors]
+    resourceNames: [orders-src, orders-sink]
+    verbs: [get, watch, patch, delete]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkausers]
+    resourceNames: [orders-connect, orders-piperoom-ro]
+    verbs: [get, watch, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkatopics]
+    resourceNames: [orders-canary]
+    verbs: [get, watch, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-0
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-1
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-2
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-3
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-4
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-5
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-6
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-7
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-8
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-9
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-10
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-11
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-0
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-1
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-2
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-3
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-4
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-5
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-6
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-7
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-8
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-9
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-10
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-11
+      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-creds
+      - orders-db-credentials
+      - orders-piperoom-ro
+    verbs: [get, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [orders-connect-logging]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [orders-connect-metrics]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    resourceNames: [orders-connect-connect-0, orders-connect-connect-1, orders-connect-connect-2, orders-connect-connect-build]
+    verbs: [get, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    resourceNames: [orders-connect-connect-0, orders-connect-connect-1, orders-connect-connect-2, orders-connect-connect-build]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [list]
+---
+# Source: piperoom/templates/setup-runner.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    app.kubernetes.io/part-of: piperoom-setup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+subjects:
+  - kind: ServiceAccount
+    name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    namespace: data
+---
+# Source: piperoom/templates/setup-runner.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: piperoom-0.1.0
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+        app.kubernetes.io/part-of: piperoom-setup
+    spec:
+      serviceAccountName: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+      # The token comes from the projected volume below (one hour, rotated;
+      # the runner re-reads the file per request), not the automount.
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          image: "registry.example.com/piperoom:pilot"
+          imagePullPolicy: IfNotPresent
+          command: ["/piperoom-setup"]
+          args:
+            - --server
+            - "https://piperoom.example.com"
+            - --code-file
+            - /var/run/piperoom/pairing/code
+            - --confirm-secret-prefix
+            - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm
+            - --project
+            - /work
+            - --strimzi-pipeline
+            - "orders"
+            - --strimzi-connectors
+            - "orders-src,orders-sink"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: pairing
+              mountPath: /var/run/piperoom/pairing
+              readOnly: true
+            - name: token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: pairing
+          projected:
+            sources:
+              - secret:
+                  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing
+                  optional: false
+                  items:
+                    - key: code
+                      path: code
+        - name: token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace

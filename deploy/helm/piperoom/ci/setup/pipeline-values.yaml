@@ -1,0 +1,8 @@
+# helm template piperoom-pipeline-orders deploy/helm/piperoom -n data -f this file
+setup:
+  pipeline:
+    enabled: true
+    id: orders
+    kafka: prod-kafka
+    connectors: [orders-src]
+    admissionPolicy: true

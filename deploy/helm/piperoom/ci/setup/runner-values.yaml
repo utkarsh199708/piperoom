@@ -1,0 +1,10 @@
+# helm template piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4 deploy/helm/piperoom -n data -f this file
+image: {repository: registry.example.com/piperoom, tag: pilot}
+setup:
+  runner:
+    enabled: true
+    room: 01JBZ3K7Q8X9V2M4N6P8R0S2T4
+    pipeline: orders
+    kafka: prod-kafka
+    connectors: [orders-src, orders-sink]
+    serverURL: https://piperoom.example.com

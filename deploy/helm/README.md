@@ -190,6 +190,40 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 | `extraVolumes`, `extraVolumeMounts` | empty | TLS files, cloud key files |
 | `serviceAccount.annotations` | empty | IRSA / workload identity |
 
+## Setup on Kubernetes with Strimzi (two more releases)
+
+For a setup room whose target is a Strimzi cluster (`docs/design/setup-strimzi.md`), the same chart is
+installed twice more in the **target namespace**. A release with `setup.pipeline.enabled` or
+`setup.runner.enabled` renders only its own objects, never the server. The room's **Set up** page shows the
+exact commands; in outline:
+
+```sh
+# once per pipeline, with your own kubectl (it holds a credential, so the chart never makes it)
+kubectl -n data create secret docker-registry orders-registry-push --docker-server=... --docker-username=... --docker-password=...
+# the pipeline release: every object the runner will touch, pre-created; the Strimzi CRs are paused shells
+helm upgrade --install piperoom-pipeline-orders deploy/helm/piperoom -n data --set setup.pipeline.enabled=true \
+  --set setup.pipeline.id=orders --set setup.pipeline.kafka=prod-kafka --set 'setup.pipeline.connectors={orders-src}'
+# per room: the pairing code as a Secret (never a value), then the runner release
+kubectl -n data create secret generic piperoom-setup-<room>-pairing --from-literal=code=<CODE>
+helm upgrade --install piperoom-setup-<room> deploy/helm/piperoom -n data --set setup.runner.enabled=true \
+  --set setup.runner.room=<ROOM> --set setup.runner.pipeline=orders --set setup.runner.kafka=prod-kafka \
+  --set 'setup.runner.connectors={orders-src}' --set setup.runner.serverURL=https://piperoom.example.com
+```
+
+`<room>` is the room id without its `r_` prefix, lowercased (the chart lowercases `setup.runner.room` itself).
+The chart refuses a release whose name is not `piperoom-pipeline-<pipeline>` or `piperoom-setup-<room>`, both
+blocks in one release, and a connector name twice. The runner's Role has **no `create`** and names every object
+(`resourceNames`); `list` only on events; no `escalate`, `bind`, `impersonate` or `*`; nothing cluster-scoped.
+`setup.pipeline.admissionPolicy=true` adds the D11 `ValidatingAdmissionPolicy` and its binding (cluster-scoped:
+cluster-admin at install; required for a `production` target). The close card gives
+`helm uninstall piperoom-setup-<room> -n data`; the pipeline release is uninstalled only by the rollback card.
+
+The Job runs `piperoom-setup --code-file ... --confirm-secret-prefix ... --strimzi-pipeline ...`: it reads the
+code from the mounted Secret, deletes that Secret once the server's Welcome arrives, logs the Welcome block with
+its fingerprint (`kubectl -n data logs job/piperoom-setup-<room>`), and waits up to 10 minutes for you to confirm
+with `kubectl -n data create secret generic piperoom-setup-<room>-confirm --from-literal=fingerprint=<12 characters>`.
+A confirm Secret that exists before the Welcome, a wrong fingerprint or no Secret in time ends the Job.
+
 ## Upgrade
 
 ```sh
@@ -221,3 +255,8 @@ done
 helm template piperoom deploy/helm/piperoom -f deploy/helm/piperoom/ci/oidc-values.yaml --set replicaCount=3 \
   | grep -E 'kind: PodDisruptionBudget|type: RollingUpdate'
 ```
+
+The two setup releases have their own checks: `deploy/helm/piperoom/ci/setup/golden.sh` renders both, diffs
+them against `pipeline.golden.yaml` and `runner.golden.yaml` (`-update` rewrites them after an intended change)
+and runs `check.py` (every Strimzi CR paused, the Role's verbs and names, the Job's pod security). The Go
+test `internal/setup/targets/strimzi/chart_names_test.go` pins the golden names to the driver's.

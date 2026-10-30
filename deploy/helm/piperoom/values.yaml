@@ -342,3 +342,40 @@ networkPolicy:
     metadata: null
   # Extra raw egress rules appended as-is.
   extraEgress: []
+
+# Setup on Kubernetes with Strimzi (docs/design/setup-strimzi.md, row U12c).
+# The same chart is installed as two more releases in the target namespace,
+# and a release with either block enabled renders only that block (no server):
+#   piperoom-pipeline-<pipeline>  setup.pipeline.enabled=true: every object the
+#     setup runner will touch, pre-created with chart-fixed names; the Strimzi
+#     CRs are paused shells the runner fills and unpauses. It lives as long as
+#     the pipeline and is never uninstalled by a setup card.
+#   piperoom-setup-<room>  setup.runner.enabled=true: the runner's
+#     ServiceAccount, its Role (no create, every object by name) and the Job.
+#     The room's close card uninstalls it.
+# The pairing code is never a value: create the Secret
+# piperoom-setup-<room>-pairing with your own kubectl (the Set up page shows
+# the commands).
+setup:
+  pipeline:
+    enabled: false
+    id: ""                  # the provisional pipeline id: a DNS label, at most 40 characters
+    kafka: ""               # the Strimzi Kafka CR the pipeline uses, in this namespace
+    connectors: []          # the provisional pipeline's connector names; one paused KafkaConnector each
+    # D11: a ValidatingAdmissionPolicy bound to this pipeline's objects pins
+    # the fields RBAC cannot (spec.image, spec.template, the push Secret, a
+    # KafkaUser's password source and cluster ACLs). Cluster-scoped: needs
+    # cluster-admin at install. Required for the production class.
+    admissionPolicy: false
+  runner:
+    enabled: false
+    room: ""                # the room id POST /api/setup returned, without its r_ prefix
+    pipeline: ""            # = setup.pipeline.id of the pipeline release
+    kafka: ""               # = setup.pipeline.kafka
+    connectors: []          # = setup.pipeline.connectors
+    serverURL: ""           # the server's public origin (PIPEROOM_PUBLIC_URL); the Job checks the Welcome against it
+    activeDeadlineSeconds: 7200
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}

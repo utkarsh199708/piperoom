@@ -1,0 +1,193 @@
+{{- if .Values.setup.runner.enabled }}
+{{- include "piperoom.setupValidate" . }}
+{{- $r := .Values.setup.runner }}
+{{- $room := include "piperoom.setupRoom" . }}
+{{- $name := printf "piperoom-setup-%s" $room }}
+{{- $p := $r.pipeline }}
+{{- $connect := printf "%s-connect" $p }}
+{{- $pods := list (printf "%s-connect-0" $connect) (printf "%s-connect-1" $connect) (printf "%s-connect-2" $connect) (printf "%s-connect-build" $connect) }}
+# The room release (docs/design/setup-strimzi.md §3, §4): the setup runner of
+# one room, in the target namespace. The close card uninstalls it; nothing the
+# running pipeline needs lives here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# No create on anything and no list but events: every object the runner can
+# reach exists before the Job starts, named here. escalate, bind and
+# impersonate are never granted; nothing is cluster-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkas]
+    resourceNames: [{{ $r.kafka }}]
+    verbs: [get, watch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnects]
+    resourceNames: [{{ $connect }}]
+    verbs: [get, watch, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnectors]
+    resourceNames: [{{ join ", " $r.connectors }}]
+    verbs: [get, watch, patch, delete]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkausers]
+    resourceNames: [{{ $connect }}, {{ printf "%s-piperoom-ro" $p }}]
+    verbs: [get, watch, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkatopics]
+    resourceNames: [{{ printf "%s-canary" $p }}]
+    verbs: [get, watch, patch, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames:
+      - {{ $name }}-pairing
+      - {{ $name }}-confirm
+      {{- range $i := until 12 }}
+      - {{ $name }}-confirm-{{ $i }}
+      {{- end }}
+      {{- range $i := until 12 }}
+      - {{ $name }}-confirm-rollback-{{ $i }}
+      {{- end }}
+      - {{ $name }}-confirm-creds
+      - {{ printf "%s-db-credentials" $p }}
+      - {{ printf "%s-piperoom-ro" $p }}
+    verbs: [get, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-connect-logging" $p }}]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-connect-metrics" $p }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    resourceNames: [{{ join ", " $pods }}]
+    verbs: [get, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    resourceNames: [{{ join ", " $pods }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $r.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $r.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "piperoom.setupLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      # The token comes from the projected volume below (one hour, rotated;
+      # the runner re-reads the file per request), not the automount.
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          image: {{ include "piperoom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/piperoom-setup"]
+          args:
+            - --server
+            - {{ $r.serverURL | quote }}
+            - --code-file
+            - /var/run/piperoom/pairing/code
+            - --confirm-secret-prefix
+            - {{ $name }}-confirm
+            - --project
+            - /work
+            - --strimzi-pipeline
+            - {{ $p | quote }}
+            - --strimzi-connectors
+            - {{ join "," $r.connectors | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: pairing
+              mountPath: /var/run/piperoom/pairing
+              readOnly: true
+            - name: token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: pairing
+          projected:
+            sources:
+              - secret:
+                  name: {{ $name }}-pairing
+                  optional: false
+                  items:
+                    - key: code
+                      path: code
+        - name: token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+{{- end }}

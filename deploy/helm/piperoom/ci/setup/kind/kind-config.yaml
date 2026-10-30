@@ -1,0 +1,5 @@
+# kind cluster for the Strimzi setup nightly (.github/workflows/setup-strimzi-nightly.yml).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

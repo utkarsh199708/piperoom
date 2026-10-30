@@ -1,0 +1,256 @@
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# Empty; k8s_secret_apply fills stringData. A Secret's type is immutable, so no
+# later patch can turn this into a service-account-token Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db-credentials
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+type: Opaque
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-connect-logging
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# Fixed content: the runner reads it, never patches it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-connect-metrics
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+data:
+  metrics-config.yml: |
+    lowercaseOutputName: true
+    lowercaseOutputLabelNames: true
+    rules:
+      - pattern: "kafka.connect<type=connect-worker-metrics>([^:]+):"
+        name: "kafka_connect_worker_$1"
+      - pattern: "kafka.connect<type=connect-metrics, client-id=([^:]+)><>([^:]+)"
+        name: "kafka_connect_$2"
+        labels:
+          client: "$1"
+      - pattern: "kafka.connect<type=connector-task-metrics, connector=([^,]+), task=([^>]+)><>status: ([^:]+)"
+        name: "kafka_connect_connector_status"
+        value: 1
+        labels:
+          connector: "$1"
+          task: "$2"
+          status: "$3"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,]+), key=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$5"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+          key: "$4"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$4"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The Connect pods read the one credentials Secret through Strimzi's
+# KubernetesSecretConfigProvider; the ServiceAccount is the one Strimzi
+# creates for the KafkaConnect (<name>-connect).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orders-connect-secrets
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [orders-db-credentials]
+    verbs: [get]
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orders-connect-secrets
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orders-connect-secrets
+subjects:
+  - kind: ServiceAccount
+    name: orders-connect-connect
+    namespace: data
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The pipeline release (docs/design/setup-strimzi.md §3): every object the
+# setup runner touches, pre-created with a chart-fixed name, so the runner's
+# Role needs no create. The Strimzi CRs are paused shells: the operators
+# reconcile nothing until the runner has filled the spec and removed the
+# annotation. Shell specs are the smallest the v1 schema accepts; the runner
+# replaces /spec whole.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnect
+metadata:
+  name: orders-connect
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+    strimzi.io/use-connector-resources: "true"
+spec:
+  replicas: 1
+  bootstrapServers: prod-kafka-kafka-bootstrap:9092
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnector
+metadata:
+  name: orders-src
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: orders-connect
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec:
+  tasksMax: 1
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: orders-canary
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec:
+  partitions: 1
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: orders-connect
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec: {}
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: orders-piperoom-ro
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec: {}
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
+# named objects only, refuses the fields a compromised runner could use to
+# mount any Secret or mint a Kafka superuser.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: piperoom-pipeline-orders
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects, kafkausers]
+  validations:
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        (!has(object.spec.image) && !has(object.spec.template) && !has(object.spec.externalConfiguration) &&
+        (!has(object.spec.build) || !has(object.spec.build.output) || !has(object.spec.build.output.pushSecret) ||
+        object.spec.build.output.pushSecret == 'orders-registry-push'))
+      message: "piperoom: spec.image, spec.template and spec.externalConfiguration are refused, and the build pushes only with orders-registry-push"
+    - expression: >-
+        object.kind != 'KafkaUser' || !has(object.spec) ||
+        ((!has(object.spec.authentication) || !has(object.spec.authentication.password)) &&
+        (!has(object.spec.authorization) || !has(object.spec.authorization.acls) ||
+        object.spec.authorization.acls.all(a, !has(a.resource) || !has(a.resource.type) ||
+        (a.resource.type != 'cluster' && a.resource.type != 'transactionalId'))))
+      message: "piperoom: a KafkaUser's password source and cluster or transactionalId ACLs are refused"
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: piperoom-pipeline-orders
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  policyName: piperoom-pipeline-orders
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: data
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects]
+        resourceNames: [orders-connect]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkausers]
+        resourceNames: [orders-connect, orders-piperoom-ro]
