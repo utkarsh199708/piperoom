@@ -514,7 +514,8 @@ var fixDone = []string{"Set compatibility to NONE", "Restarted task 0"}
 
 // WriteHandoff is a fake hand-off writer. The cause text is fixed; what ran is
 // read from the room's action.executed events, so the summary never claims a
-// fix the room did not run. It makes no model call.
+// fix the room did not run, and the warehouse is only called caught up once an
+// agent.verification event reports recovery. It makes no model call.
 func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Options) (events.HandoffSummary, error) {
 	ran := make([]bool, len(fixDone))
 	for _, e := range roomEvents {
@@ -526,6 +527,15 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Opt
 			continue
 		}
 		ran[p.StepIndex] = true
+	}
+	recovered := false
+	for _, e := range roomEvents {
+		if e.Type != events.AgentVerification {
+			continue
+		}
+		if p, err := events.Decode[events.AgentVerificationPayload](e); err == nil && p.Recovered {
+			recovered = true
+		}
 	}
 	var done, pending []string
 	for i, name := range fixDone {
@@ -548,6 +558,11 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Opt
 	case len(pending) > 0:
 		s.Open = []string{"The proposed fix is only partly applied; still to run: " + strings.Join(pending, ", ")}
 		s.Risks = []string{"The fix is half applied, so the pipeline may still be failing"}
+	case !recovered:
+		// Both steps ran, but nothing has checked the pipeline yet, so the
+		// recovery is not claimed.
+		s.Open = []string{"Verification is still pending: the warehouse is not yet confirmed caught up"}
+		s.Risks = []string{"BACKWARD compatibility is off until re-enabled"}
 	default:
 		s.Done = append(s.Done, "Warehouse caught up")
 		s.Open = []string{"Consider pinning decimal.handling.mode"}

@@ -197,6 +197,15 @@ func executedEvent(t *testing.T, stepIndex int, ok bool) events.Event {
 	return events.Event{Type: events.ActionExecuted, Payload: b}
 }
 
+func verificationEvent(t *testing.T, recovered bool) events.Event {
+	t.Helper()
+	b, err := json.Marshal(events.AgentVerificationPayload{ProposalID: "p1", Recovered: recovered})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.Event{Type: events.AgentVerification, Payload: b}
+}
+
 func TestWriteHandoffBuildsDoneFromExecutedEvents(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -208,7 +217,11 @@ func TestWriteHandoffBuildsDoneFromExecutedEvents(t *testing.T) {
 		{"unrelated event only", []events.Event{{Type: events.AgentMessage}}, nil, "has not run"},
 		{"failed step", []events.Event{executedEvent(t, 0, false)}, nil, "has not run"},
 		{"first step only", []events.Event{executedEvent(t, 0, true)}, []string{"Set compatibility to NONE"}, "still to run: restarted task 0"},
-		{"both steps", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true)},
+		{"both steps, no verification", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true)},
+			[]string{"Set compatibility to NONE", "Restarted task 0"}, "Verification is still pending"},
+		{"both steps, verification not recovered", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true), verificationEvent(t, false)},
+			[]string{"Set compatibility to NONE", "Restarted task 0"}, "Verification is still pending"},
+		{"both steps, verification recovered", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true), verificationEvent(t, true)},
 			[]string{"Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"}, "decimal.handling.mode"},
 	}
 	for _, tt := range tests {
