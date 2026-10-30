@@ -1,0 +1,27 @@
+{
+  "provider": "aws",
+  "name": "create_worker_config_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/worker-configurations",
+        "body": "{\"name\":\"piperoom-orders\",\"propertiesFileContent\":\"a2V5LmNvbnZlcnRlcj1vcmcuYXBhY2hlLmthZmthLmNvbm5lY3QuanNvbi5Kc29uQ29udmVydGVyCnZhbHVlLmNvbnZlcnRlcj1vcmcuYXBhY2hlLmthZmthLmNvbm5lY3QuanNvbi5Kc29uQ29udmVydGVyCg==\"}",
+        "body_sha256": "03dd16aacc96d5043b8f69125c6595a26aed0109056d51768d80a3551b1fa032",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"latestRevision\":{\"revision\":1},\"name\":\"piperoom-orders\",\"workerConfigurationArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:worker-configuration/piperoom-orders/11112222-3333-4444-5555-66667777aaaa-4\",\"workerConfigurationState\":\"ACTIVE\"}"
+      }
+    }
+  ]
+}

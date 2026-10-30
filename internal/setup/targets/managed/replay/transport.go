@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +123,12 @@ func response(req *http.Request, rec Response) *http.Response {
 	}
 	var body io.ReadCloser = io.NopCloser(strings.NewReader(rec.Body))
 	length := int64(len(rec.Body))
+	if req.Method == http.MethodHead {
+		length = 0
+		if n, err := strconv.ParseInt(h.Get("Content-Length"), 10, 64); err == nil && n >= 0 {
+			length = n
+		}
+	}
 	if rec.Cut {
 		body = &cutBody{r: strings.NewReader(rec.Body)}
 		// The advertised length is longer than what arrives, as with a
@@ -233,6 +240,14 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if scrubbed != "" {
 		it.Request.BodySHA256 = bodyHash(scrubbed)
+	}
+	if req.Method != http.MethodHead {
+		// A scrubbed body has another length; only a HEAD response's
+		// Content-Length is data (s3.HeadObject's object size).
+		delete(it.Response.Headers, "Content-Length")
+		if len(it.Response.Headers) == 0 {
+			it.Response.Headers = nil
+		}
 	}
 	r.mu.Lock()
 	r.cassette.Interactions = append(r.cassette.Interactions, it)

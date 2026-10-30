@@ -46,7 +46,7 @@ func Check(c *Cassette) []string {
 func checkHeaders(where string, h map[string]string, add func(string, string)) {
 	for k, v := range h {
 		lk := strings.ToLower(k)
-		if droppedHeaders[lk] && lk != "content-length" {
+		if droppedHeaders[lk] {
 			add(where+" "+k, "a header that is dropped at record time is present")
 			continue
 		}

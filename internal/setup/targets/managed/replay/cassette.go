@@ -25,6 +25,7 @@
 package replay
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,12 +158,16 @@ func Save(c *Cassette, path string) error {
 	if findings := Check(c); len(findings) > 0 {
 		return fmt.Errorf("%w: refusing to write %s: %s", ErrCredential, path, findings[0])
 	}
-	raw, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// A reader compares cassettes with the provider's documents; <, > and &
+	// stay as they are.
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(c); err != nil {
 		return fmt.Errorf("replay: encoding %s: %w", path, err)
 	}
-	raw = append(raw, '\n')
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("replay: writing %s: %w", path, err)
 	}
 	return nil

@@ -62,7 +62,6 @@ var droppedHeaders = map[string]bool{
 	"cookie":                true,
 	"user-agent":            true,
 	"x-amz-user-agent":      true,
-	"content-length":        true,
 }
 
 // keptRequestHeaders are the request headers a cassette keeps for its
@@ -80,6 +79,11 @@ var (
 
 // keptHosts are API endpoints, not customer resources; they stay readable.
 var keptHosts = map[string]bool{"api.confluent.cloud": true}
+
+// awsServiceHost is an AWS service principal or endpoint
+// (kafkaconnect.amazonaws.com, sts.us-east-1.amazonaws.com): not a customer
+// resource, and a trust policy names it, so it stays readable.
+var awsServiceHost = regexp.MustCompile(`(?i)^[a-z0-9-]+(\.[a-z]{2}(-[a-z]+)+-[0-9])?\.amazonaws\.com$`)
 
 // Placeholders the identifier rewrites produce.
 const (
@@ -127,7 +131,7 @@ func (s Scrubber) Text(v string) string {
 	})
 	v = replaceAccounts(v)
 	v = cloudHost.ReplaceAllStringFunc(v, func(h string) string {
-		if keptHosts[strings.ToLower(h)] {
+		if keptHosts[strings.ToLower(h)] || awsServiceHost.MatchString(h) {
 			return h
 		}
 		m := cloudHost.FindStringSubmatch(h)
