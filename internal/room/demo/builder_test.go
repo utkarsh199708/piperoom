@@ -71,13 +71,24 @@ func TestBuilderBatchPipelineHasItsOwnNodes(t *testing.T) {
 }
 
 func TestBuilderOrdersShowsFailureBeforeAnyFix(t *testing.T) {
-	g := buildGraph(t, Builder{Fakes: NewFakes()}, "orders")
-	if n := nodeByID(t, g, "connect:pg-orders-connector"); n.Health != topology.HealthFail || n.Facts["task_0"] != "FAILED" {
-		t.Errorf("connector = %s / %v, want fail / task_0 FAILED", n.Health, n.Facts)
+	check := func(label string, g topology.Graph) {
+		t.Helper()
+		if n := nodeByID(t, g, "connect:pg-orders-connector"); n.Health != topology.HealthFail || n.Facts["task_0"] != "FAILED" {
+			t.Errorf("%s: connector = %s / %v, want fail / task_0 FAILED", label, n.Health, n.Facts)
+		}
+		if n := nodeByID(t, g, "wh:analytics.orders"); n.Health != topology.HealthFail || n.Facts["freshness"] != "stale" {
+			t.Errorf("%s: sink = %s / %v, want fail / stale", label, n.Health, n.Facts)
+		}
 	}
-	if n := nodeByID(t, g, "wh:analytics.orders"); n.Health != topology.HealthFail || n.Facts["freshness"] != "stale" {
-		t.Errorf("sink = %s / %v, want fail / stale", n.Health, n.Facts)
+	check("fresh fakes", buildGraph(t, Builder{Fakes: NewFakes()}, "orders"))
+	// In the real demo the agent calls Status first, which creates a room
+	// state with task 0 FAILED. That touched-but-unfixed room must not count
+	// as recovered.
+	fakes := NewFakes()
+	if _, err := fakes.Connect.Status(room.WithRoomID(context.Background(), "r_1"), connectorName); err != nil {
+		t.Fatalf("Status: %v", err)
 	}
+	check("after Status", buildGraph(t, Builder{Fakes: fakes}, "orders"))
 	// A zero Builder with no controls behind it is the unrecovered story.
 	if g := buildGraph(t, Builder{}, "orders"); nodeByID(t, g, "connect:pg-orders-connector").Health != topology.HealthFail {
 		t.Error("zero Builder: connector should still show the failure")
