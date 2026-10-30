@@ -65,8 +65,10 @@ type Load =
   | { status: 'ready'; scenarios: string[] }
 
 // The command that starts the API the menu talks to. Shown verbatim (and
-// copyable) when the request fails because devctl serve is not up.
-const START_COMMAND = 'go run ./cmd/devctl serve'
+// copyable) when the request fails because devctl serve is not up. serve
+// requires the stack lock (cmd/devctl/serve.go), so the command carries the owner
+// flag; PIPEROOM_STACK_OWNER is the env-var form of the same tag.
+const START_COMMAND = 'go run ./cmd/devctl serve --owner <tag>'
 
 // A failed scenario GET has two very different meanings, and only one of them is
 // actionable:
@@ -214,7 +216,10 @@ function DevctlNotRunning({ onRetry }: { onRetry: () => Promise<void> }) {
       <p role="status" className="text-xs text-destructive-fg">
         devctl serve is not running.
       </p>
-      <p className="text-xs text-muted-foreground">Start it in another terminal, then retry:</p>
+      <p className="text-xs text-muted-foreground">
+        Start it in another terminal with your stack owner tag (or set PIPEROOM_STACK_OWNER), then
+        retry:
+      </p>
       <div className="flex min-w-0 items-center gap-2">
         <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted px-2 py-1 font-mono text-xs">
           {START_COMMAND}
