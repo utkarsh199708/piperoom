@@ -2,15 +2,16 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { AdminConfig } from '../api/types'
 import { errorText } from '../lib/errors'
-import { isForbidden } from '../lib/settings'
+import { isForbidden, isNotMounted } from '../lib/settings'
 
 export type AdminConfigView =
   | { phase: 'loading' }
   | { phase: 'ready'; config: AdminConfig }
   | { phase: 'forbidden' }
+  | { phase: 'unavailable' }
   | { phase: 'error'; message: string }
 
-/** GET /api/admin/config once (when `enabled`), with a retry. A 403 is its own phase: the person is not an admin. */
+/** GET /api/admin/config once (when `enabled`), with a retry. A 403 is its own phase: the person is not an admin. A 404 is too: this server mounts no admin routes (--demo). */
 export function useAdminConfig(enabled: boolean): { view: AdminConfigView; reload: () => void } {
   const [view, setView] = useState<AdminConfigView>({ phase: 'loading' })
   const [attempt, setAttempt] = useState(0)
@@ -23,7 +24,9 @@ export function useAdminConfig(enabled: boolean): { view: AdminConfigView; reloa
       .then((config) => !cancelled && setView({ phase: 'ready', config }))
       .catch((e: unknown) => {
         if (cancelled) return
-        setView(isForbidden(e) ? { phase: 'forbidden' } : { phase: 'error', message: errorText(e) })
+        if (isForbidden(e)) setView({ phase: 'forbidden' })
+        else if (isNotMounted(e)) setView({ phase: 'unavailable' })
+        else setView({ phase: 'error', message: errorText(e) })
       })
     return () => {
       cancelled = true
