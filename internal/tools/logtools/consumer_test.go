@@ -55,8 +55,15 @@ func consumerOwners(selector string) *owners.Owners {
 
 func newConsumerTool(t *testing.T, o *owners.Owners, r ConsumerReaders) tools.Tool {
 	t.Helper()
+	return newConsumerToolClock(t, o, r, func() time.Time { return now })
+}
+
+// newConsumerToolClock registers the tool with the given clock; nil means the
+// real one (ConsumerDeps.Now nil), for tests whose reader checks the real clock.
+func newConsumerToolClock(t *testing.T, o *owners.Owners, r ConsumerReaders, clock func() time.Time) tools.Tool {
+	t.Helper()
 	reg := tools.NewReadOnlyRegistry()
-	if err := RegisterConsumer(reg, ConsumerDeps{Owners: o, Readers: r, Now: func() time.Time { return now }}); err != nil {
+	if err := RegisterConsumer(reg, ConsumerDeps{Owners: o, Readers: r, Now: clock}); err != nil {
 		t.Fatal(err)
 	}
 	tl, ok := reg.Get(ConsumerName)
@@ -354,8 +361,9 @@ func TestConsumerThroughLoki(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The real client reads its own clock; the window is relative to it.
-	tl := newConsumerTool(t, consumerOwners(consumerSel), ReadersFor(c))
+	// The real client reads its own clock, so the tool must use the real clock
+	// too (nil Now); a pinned date would age past the client's lookback limit.
+	tl := newConsumerToolClock(t, consumerOwners(consumerSel), ReadersFor(c), nil)
 	res, err := inRoom(t, tl, `{"level":"ERROR","contains":"\"} |= \"x","selector":"{job=~\".+\"}"}`)
 	if err != nil {
 		t.Fatal(err)
@@ -372,7 +380,7 @@ func TestConsumerThroughLoki(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = inRoom(t, newConsumerTool(t, consumerOwners(consumerSel), ReadersFor(bad)), `{}`)
+	_, err = inRoom(t, newConsumerToolClock(t, consumerOwners(consumerSel), ReadersFor(bad), nil), `{}`)
 	if !errors.Is(err, workerlogs.ErrAuth) || strings.Contains(err.Error(), "wrong") {
 		t.Errorf("401 through Loki: %v", err)
 	}
