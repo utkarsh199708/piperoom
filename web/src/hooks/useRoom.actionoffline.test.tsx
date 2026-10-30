@@ -32,6 +32,15 @@ vi.mock('../api/client', async (importOriginal) => {
       label: vi.fn(),
       handoff: vi.fn(),
       acceptHandoff: vi.fn(),
+      approveAll: vi.fn(),
+      cancelProposal: vi.fn(),
+      stageProposal: vi.fn(),
+      declineSuggestion: vi.fn(),
+      sendSuggestion: vi.fn(),
+      requestControl: vi.fn(),
+      grantControl: vi.fn(),
+      hypothesis: vi.fn(),
+      checklist: vi.fn(),
     },
   }
 })
@@ -73,7 +82,7 @@ const snapshot: RoomSnapshot = {
   mode: { write: true, solo: false, auto_approve: [] },
 }
 
-async function live() {
+async function live(snap: RoomSnapshot = snapshot) {
   vi.mocked(openRoomWs).mockImplementation(() => {
     const sock = new FakeWebSocket()
     queueMicrotask(() => {
@@ -83,7 +92,7 @@ async function live() {
     return sock as unknown as WebSocket
   })
   vi.mocked(api.me).mockResolvedValue(undefined as never)
-  vi.mocked(api.room).mockResolvedValue(snapshot)
+  vi.mocked(api.room).mockResolvedValue(snap)
   const hook = renderHook(() => useRoom('r1'))
   await waitFor(() => expect(hook.result.current.conn).toBe('live'))
   return hook
@@ -167,6 +176,91 @@ describe('useRoom actions on a network error', () => {
     await act(async () => {
       await hook.result.current.actions.acceptHandoff('h1')
     })
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('approveAll', async () => {
+    const hook = await live()
+    vi.mocked(api.approveAll).mockRejectedValue(down())
+    let res: { ok: boolean; error?: string } | undefined
+    await act(async () => {
+      res = await hook.result.current.actions.approveAll!('p1', {} as never)
+    })
+    expectActionOffline(res?.error)
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('cancelSchedule', async () => {
+    const hook = await live()
+    vi.mocked(api.cancelProposal).mockRejectedValue(down())
+    let res: { ok: boolean; error?: string } | undefined
+    await act(async () => {
+      res = await hook.result.current.actions.cancelSchedule!('p1', 'x')
+    })
+    expectActionOffline(res?.error)
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('stage', async () => {
+    const hook = await live()
+    vi.mocked(api.stageProposal).mockRejectedValue(down())
+    let res: { ok: boolean; error?: string } | undefined
+    await act(async () => {
+      res = await hook.result.current.actions.stage!('p1')
+    })
+    expectActionOffline(res?.error)
+  })
+
+  it('declineSuggestion', async () => {
+    const hook = await live()
+    vi.mocked(api.declineSuggestion).mockRejectedValue(down())
+    act(() => hook.result.current.actions.declineSuggestion('s1', 'no'))
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('sendSuggestion', async () => {
+    const hook = await live()
+    vi.mocked(api.sendSuggestion).mockRejectedValue(down())
+    act(() => hook.result.current.actions.sendSuggestion('s1'))
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('requestControl', async () => {
+    const hook = await live()
+    vi.mocked(api.requestControl).mockRejectedValue(down())
+    act(() => hook.result.current.actions.requestControl())
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('grantControl', async () => {
+    const hook = await live()
+    vi.mocked(api.grantControl).mockRejectedValue(down())
+    act(() => hook.result.current.actions.grantControl('bea'))
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('hypothesisVerdict', async () => {
+    const hook = await live({
+      ...snapshot,
+      hypothesis: { text: 'h', based_on_steps: [], confidence: 'high', confirmed: false, seq: 3 },
+    })
+    vi.mocked(api.hypothesis).mockRejectedValue(down())
+    act(() => hook.result.current.actions.hypothesisVerdict('confirm' as never))
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
+    expectActionOffline(hook.result.current.error)
+  })
+
+  it('checklist', async () => {
+    const hook = await live()
+    vi.mocked(api.checklist).mockRejectedValue(down())
+    act(() =>
+      hook.result.current.actions.checklist({ step_id: 's', tool_use_id: 't', hit: 0, item: 0, done: true }),
+    )
+    await waitFor(() => expect(hook.result.current.error).not.toBeNull())
     expectActionOffline(hook.result.current.error)
   })
 
