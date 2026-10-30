@@ -142,7 +142,7 @@ export function DecisionBar({
           tone,
           sheet &&
             "border-b-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-4",
-          sheet && kind === "needs-you" && "flex-col items-stretch",
+          sheet && kind === "needs-you" && "flex-col flex-nowrap items-stretch",
         )}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">{text}</div>
