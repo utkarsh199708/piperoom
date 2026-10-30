@@ -529,7 +529,7 @@ export function PipelineMap({
           role="group"
           aria-label="Pipeline, source to sink"
           tabIndex={0}
-          className="flex items-stretch overflow-x-auto rounded-md pb-1 pt-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="relative flex items-stretch overflow-x-auto rounded-md pb-1 pt-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {!topology ? (
             <>
