@@ -544,4 +544,13 @@ describe('SendLedger.unconfirmedLeft (KAN-586)', () => {
     expect(l.unconfirmedLeft('a1')).toBeUndefined()
     expect(l.unconfirmedLeft('nope')).toBeUndefined()
   })
+
+  it('is 0 inside the window once the server proves it dedupes (a Retry click sends now)', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, null)
+    expect(await l.send(stop, 'a1')).toBe(false)
+    expect(l.unconfirmedLeft('a1')).toBe(UNCONFIRMED_WINDOW_MS)
+    l.dedupes = true
+    expect(l.unconfirmedLeft('a1')).toBe(0)
+  })
 })
