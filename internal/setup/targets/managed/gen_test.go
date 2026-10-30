@@ -66,3 +66,24 @@ func TestGenerateConfluentFlows(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateAivenFlows writes testdata/aiven/<flow>.json.
+func TestGenerateAivenFlows(t *testing.T) {
+	for _, f := range avFlows {
+		t.Run(f.name, func(t *testing.T) {
+			canned := replay.NewCanned(f.responses...)
+			rec := replay.NewRecorder(canned, replay.Scrubber{}, replay.ProviderAiven, f.name, avSource, time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC))
+			reg := newAiven(t, rec)
+			res, err := exec(t, reg, f.op, f.params)
+			f.check(t, res, err)
+			if canned.Left() != 0 {
+				t.Fatalf("%d canned responses unused", canned.Left())
+			}
+			cs := rec.Cassette()
+			cs.Recorded = false
+			if err := replay.Save(cs, filepath.Join("testdata", "aiven", f.name+".json")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

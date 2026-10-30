@@ -1,0 +1,22 @@
+{
+  "provider": "aiven",
+  "name": "plugins_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from aiven/aiven-client's client.py paths (read 2026-10-30); response shapes beyond the result keys it names are unconfirmed; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/project/project-0/service/connect-0/available-connectors"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"plugins\":[{\"class\":\"io.debezium.connector.mysql.MySqlConnector\",\"title\":\"Debezium-MySQL\",\"type\":\"source\",\"version\":\"2.7.3.Final\"},{\"class\":\"io.aiven.connect.jdbc.JdbcSinkConnector\",\"title\":\"JDBC sink\",\"type\":\"sink\",\"version\":\"6.10.0\"}]}"
+      }
+    }
+  ]
+}
