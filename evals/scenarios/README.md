@@ -931,6 +931,52 @@ profile as the source, then one of `devctl setup-break no-archivelog`, `no-suppl
 from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl
 setup-fix` restores the profile.
 
+### Setup scenarios: MySQL (U2c)
+
+Four setup scenarios on the MySQL 8.4 source of the `mysql` dev profile (database `shop`, tables `shop.orders` and
+`shop.order_items`, connector user `debezium`, `dev/mysql/README.md`) and the Compose target, each with a runner session
+in `evals/setup/recordings` (the eval replay). Three are built on the U2b `devctl setup-break` names; their labels name
+the failing check (the U2a driver's check ids, `internal/setup/sources/mysql/driver.go`, and the messages of
+`cmd/devctl/setupbreaks_mysql.go`) and the fix with its tier from the driver's `FixFor` (Jira KAN-5, U2a). A MySQL
+scenario sets `pipeline.source_kind: mysql`, so the room is a MySQL room (Q8j): the room's `source_settings`,
+`source_role_grants` and `source_table_replication` read the source, and `mysql_binlog_status` is there.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-mysql-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every MySQL check passed | - | outcome `healthy`; no proposal |
+| `setup/binlog-statement` | re-verification failed at `canary_event`; check `binlog_format` failed | `SET GLOBAL binlog_format = 'STATEMENT'`: new sessions log statements, Debezium skips them (a WARN per insert); the task stays RUNNING | mysql / mysql | `binlog_format`; the driver's ask at T3: `binlog_format=ROW` in the option file and a restart in a maintenance window (the profile's command line restores ROW), then re-snapshot the rows written meanwhile; no connector action |
+| `setup/no-replication-grant` | re-verification failed at `tasks_running`; check `read_role` failed | `REPLICATION CLIENT` revoked from `'debezium'@'%'`; the next task start's `SHOW BINARY LOGS` is refused (error 1227) | kafka-connect / mysql | `read_role`; the user exists, so no op (an existing user is never altered): a DBA's `GRANT REPLICATION CLIENT ON *.* TO 'debezium'@'%'`, then `connect_restart_task` |
+| `setup/server-id-zero` | re-verification failed at `tasks_running`; check `server_id` failed | `SET GLOBAL server_id = 0`: the server refuses the binlog dump (error 1236, "Misconfigured source") | kafka-connect / mysql | `server_id`; the driver's ask at T3: a unique non-zero `server_id` in the option file and a restart (the profile's `--server-id=223344`), then `connect_restart_task`; the connector's `database.server.id` stays |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats on this branch, and the
+runner sessions record the U2a driver's three reads under the remote clients' source op names (`source_settings`,
+`source_table_replication`, `source_role_info`) with the Q8 client's DTOs. Digests are synthetic placeholders.
+Conventions the four share, which a re-recording keeps:
+
+- **Layers.** owners.yaml has a `mysql` source kind and layer (Q0 item 7), so the source is graded as `mysql`, not as
+  the `postgres` stand-in of the other setup sources.
+- **connect_config.** It shows only the keys the real tool keeps (`internal/tools/kafkatools/connect_tools.go`): the
+  connector's `database.server.id` (5401), `database.include.list` and schema history keys are in the runner
+  session's `connect_create_connector` params, not in the room's read.
+- **Error texts.** The WARN line is Debezium MySQL's message for a DML query event in the binlog; the task traces are
+  MySQL's errors 1227 and 1236 under Debezium's wrapping. Their wording is unconfirmed on Debezium 3.2 (each scenario
+  says so).
+- **Titles.** A title names the failed rung and the check, not the check's message (`TestScoringOldVsNew`).
+
+None of the three sets `expect.fix`: every MySQL server setting is a documented ask (there is no `ALTER SYSTEM` on
+MySQL), and the grant of an existing user is a DBA's statement; the task restart that follows is allowed, not
+required. `setup/server-id-zero` forbids `connect_update_connector_config` (the MySQL room offers
+`database.server.id`, which is not what is wrong) and `setup/binlog-statement` forbids every connector restart
+(Debezium refuses a STATEMENT server at start).
+
+To re-record on the dev stack: start the profile (`docker compose -f dev/docker-compose.yml --profile mysql up -d
+--wait mysql`), run `piperoom-setup` into a fresh project with the Compose target and the profile as the source,
+then `devctl setup-break binlog-statement` (or `no-replication-grant`, `server-id-zero`) after the first
+verification; for the two grant and id breaks restart the project's Connect service so the task reconnects, then
+re-verify and re-run the checks. Take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op
+log for the session file, and set `RECORDED: YES`. `devctl setup-fix` (or a restart of the mysql container)
+restores the profile.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse

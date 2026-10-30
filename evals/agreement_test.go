@@ -425,6 +425,11 @@ var syntheticLabels = map[string]Label{
 	// term.
 	"setup/agent-stopped":         {"postgres", []string{"sql server agent", "capture job"}},
 	"setup/cdc-not-enabled-table": {"postgres", []string{"not tracked", "capture instance", "is_tracked_by_cdc"}},
+	// The U2c MySQL setup scenarios (KAN-333): the terms name the failing
+	// check's cause; the titles name the rung and the check only.
+	"setup/binlog-statement":     {"mysql", []string{"statement", "row images"}},
+	"setup/no-replication-grant": {"kafka-connect", []string{"replication client"}},
+	"setup/server-id-zero":       {"kafka-connect", []string{"server_id 0", "server_id is 0", "misconfigured source"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -623,6 +628,14 @@ var syntheticTruth = map[string]map[string]truth{
 	// right layer, the wrong cause.
 	"setup/agent-stopped":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/cdc-not-enabled-table": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U2c: binlog-statement's title starts with orders-mysql, the connector
+	// (kafka-connect), and names no cause; its wrong text blames purged
+	// binlogs on the source, the right layer and the wrong cause. The other
+	// two titles name the FAILED task (kafka-connect) and a check; their
+	// wrong texts blame the connector's id and the password, both on Connect.
+	"setup/binlog-statement":     {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/no-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/server-id-zero":       {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit
