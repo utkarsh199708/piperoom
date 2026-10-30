@@ -167,6 +167,31 @@ func TestFakeLadderRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
+// TestFakeLadderReadsTheManagedStatusOps: on a managed target (U13e) rungs 1
+// and 2 read the provider's status op, and MSK's rung 2 is not applicable.
+func TestFakeLadderReadsTheManagedStatusOps(t *testing.T) {
+	for target, read := range map[string]string{"msk": "msk_describe_connector", "confluent": "ccloud_connector_status", "aiven": "aiven_connector_status"} {
+		reader := ReadFunc(func(_ context.Context, req ReadRequest) (json.RawMessage, error) {
+			return json.RawMessage(`{"state":"RUNNING","tasks":[{"id":0,"state":"RUNNING"}]}`), nil
+		})
+		ladder := NewFakeLadder(LadderConfig{Source: "postgres", Target: target, PlanID: "pl_1"}, reader, &MemorySink{})
+		v, err := ladder.Verify(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		reqs := ladder.Requests()
+		if len(reqs) == 0 || reqs[0].Tool != read {
+			t.Errorf("%s: first read %+v, want %s", target, reqs, read)
+		}
+		if !v.Rungs[0].OK || !v.Rungs[1].OK {
+			t.Errorf("%s: rungs 1 and 2 = %+v %+v", target, v.Rungs[0], v.Rungs[1])
+		}
+		if target == "msk" && !strings.Contains(v.Rungs[1].Note, "no per-task state") {
+			t.Errorf("msk rung 2 note %q", v.Rungs[1].Note)
+		}
+	}
+}
+
 // TestFakeLadderStopsOnCancel: a context cancelled between rungs stops the
 // ladder; it returns the context's error and writes no setup.verified.
 func TestFakeLadderStopsOnCancel(t *testing.T) {

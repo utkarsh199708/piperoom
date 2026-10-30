@@ -1099,6 +1099,45 @@ address; for sink-unreachable leave nothing listening there, for offset-file-unw
 `debezium.source.offset.storage.file.filename=config/offsets.dat` and restart the service. Take the room's tool results
 from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
 
+### Setup scenarios: managed targets (U13e)
+
+Four setup scenarios on the managed targets of U13 (`docs/design/setup-managed.md`): AWS MSK Connect, Confluent Cloud
+and Aiven, each on a Postgres source with a runner session in `evals/setup/recordings` (the eval replay). The
+sessions' ops are the managed ops of `internal/setup/targets/managed`, and their ladders are `managed.Ladder`'s: rungs
+1 and 2 read the provider's status op (`msk_describe_connector`, `ccloud_connector_status`, `aiven_connector_status`)
+instead of `connect_status`, and on MSK rung 2 is not applicable (MSK Connect reports no per-task state). The
+evals' fake ladder (`evals/setup/ladder.go`) picks that ladder for the three managed targets, as the server's ladder
+runner must (the A9 follow-up of U13b2).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/msk-plugin-s3-denied` | step `msk_plugin_object_check` failed (forbidden); `msk_create_plugin` refused; rung `connector_running` red | the plugin bucket's policy grants `s3:GetObject` to the uploader only; the setup role `PiperoomSetup` cannot read the archive | kafka-connect / kafka-connect | grant `s3:GetObject` on the plugin object to the setup role (a documented ask: no op writes IAM or a bucket policy), then `msk_create_plugin` again (T2; T3 on production) |
+| `setup/msk-vpc-no-route` | `orders-msk-connector` FAILED after provisioning; check `msk_vpc_check` failed | the connector's subnets (10.0.0.0/16) have no route to the database's VPC (172.31.0.0/16) | kafka-connect / kafka-connect | a peering or transit gateway route and the database's security group (a documented ask), or the connector recreated in subnets that reach the database (`msk_delete_connector`, `msk_create_connector`, T2) |
+| `setup/ccloud-acl-missing` | rungs `connector_running` and `tasks_running` red; task 0 FAILED | the connector's service account `sa-00000` has no ACLs; only the watcher template was applied | kafka-connect / kafka | `ccloud_acl_create` with the connector template for `User:sa-00000` on the topic prefix (T2) |
+| `setup/aiven-plugin-unavailable` | step `aiven_create_connector` refused; rung `connector_running` red | the Connect service `connect-0` does not offer the Debezium PostgreSQL connector | kafka-connect / kafka-connect | a Connect service that offers it (a documented ask; which Aiven setting governs the list is unconfirmed), then `aiven_create_connector` again (T2) |
+
+**Synthesised, not recorded** (`RECORDED: NO`): no sandbox account was used. The runner sessions are composed from
+the managed ops' own summaries and Data over the hand-written cassettes of
+`internal/setup/targets/managed/testdata/{msk,confluent,aiven}` (themselves `recorded: false`); the room's tool
+summaries follow `internal/tools/kafkatools` over the managed clients' mappings, and `CONNECT_KIND=msk`, `confluent`
+and `aiven` are not wired on main (the A4 follow-ups of U13b1, U13c, U13d). Digests are synthetic placeholders.
+Conventions the four share, which a re-recording keeps:
+
+- **Identifiers** are the cassette scrubber's placeholders (account `000000000000`, region `us-east-1`, `env-00000`,
+  `lkc-00000`, `sa-00000`, `project-0`, `connect-0`), so a scenario, its session and the cassettes name the same
+  resources.
+- **Titles** name the failed step, check or rung, never the cause: "forbidden" is in the S3 title, so the root cause
+  terms ask for the bucket and the policy, not the status.
+- **No `expect.fix`**: every fix is a runner op or a person's change, none in `evals.LiveActions`; the connector
+  writes are forbidden where no connector exists or a restart changes nothing.
+
+To re-record on the sandbox accounts (design §6): run the clients' manual tests to confirm the response shapes
+(`go test -tags manual ./internal/clients/{mskconnect,confluentcloud,aiven}/`), then run `piperoom-setup` with the
+managed target into a room, reproduce the break (a bucket policy limited to the uploader; a connector in the cluster's
+VPC with an RDS source in another; the watcher template only; a Connect service without the Debezium PostgreSQL
+connector), and take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op log for the
+session file. Set `RECORDED: YES` and date the run.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse

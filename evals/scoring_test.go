@@ -590,6 +590,23 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	"setup/server-offset-file-unwritable": {
 		good:  "The Debezium Server is failing to persist its position and takes a new snapshot at every start. At 09:25 the person changed debezium.source.offset.storage.file.filename in debezium/config/application.properties from data/offsets.dat to config/offsets.dat, and /debezium/config is the stack's read-only bind mount. Every offset flush since then logs FileSystemException: config/offsets.dat: Read-only file system, so each start finds an empty offset store and snapshots public.orders again, sending its 100 rows to the warehouse ingest endpoint once more, and the Postgres slot keeps WAL for the unconfirmed position. Write the properties again with server_properties_write (T1), whose offsets_file accepts only data/<name> and defaults to data/offsets.dat on the named volume, then restart dbzserver with compose_restart (T1); the sink then has to absorb the duplicate snapshot rows.",
 		wrong: "The HTTP sink endpoint is unreachable, so the Debezium Server restarted and took a new snapshot; ask the warehouse team to start the ingest service.",
+	// The U13e managed-target setup scenarios (C7, KAN-292). The labels name the
+	// failing step or check and the fix with its tier from the U board.
+	"setup/msk-plugin-s3-denied": {
+		good:  "The setup stopped at msk_plugin_object_check: the runner's role PiperoomSetup got 403 Forbidden on the plugin archive in s3://piperoom-plugins-0/plugins/ because the bucket policy grants s3:GetObject to the uploader alone. msk_create_plugin then refused at its own object check, so the custom plugin and the connector were left uncreated. Fix: the person grants s3:GetObject on arn:aws:s3:::piperoom-plugins-0/plugins/* to PiperoomSetup in the bucket policy or in IAM, then the msk_create_plugin step runs again (T2).",
+		wrong: "The Debezium plugin zip is corrupt or the wrong build, so MSK Connect fails to build the custom plugin from it; rebuild the archive and upload it again.",
+	},
+	"setup/msk-vpc-no-route": {
+		good:  "orders-msk-connector FAILED after provisioning with a connect timeout to 172.31.5.10:5432. The route table of the connector's subnets in vpc-0a1b2c3d4e5f60001 (10.0.0.0/16) holds just the 10.0.0.0/16 local route, so the database in another VPC (172.31.0.0/16) is unreachable from them: the VPC peering or transit gateway route is missing. The database answers net_probe from Piperoom and the security group allows all egress. Fix: add a peering or transit gateway route between the two VPCs and open the database's security group to 10.0.0.0/16 (the person's change), or recreate the connector in subnets that reach the database (msk_delete_connector, then msk_create_connector, T2).",
+		wrong: "The source Postgres database is down and refuses connections on 5432; restart the database instance.",
+	},
+	"setup/ccloud-acl-missing": {
+		good:  "orders-cc-connector task 0 FAILED with TopicAuthorizationException on orders.public.orders. The connector runs as its own service account sa-00000 (kafka.auth.mode SERVICE_ACCOUNT), and kafka_acls lists ACLs on the orders prefix for the read account sa-00001 alone: the setup skipped the connector template, so sa-00000 lacks CREATE, WRITE and DESCRIBE on the orders topics. Fix: run ccloud_acl_create with the connector template for User:sa-00000 on the orders prefix (T2); the managed connector then retries.",
+		wrong: "The schema registry rejected the connector's value schema, so the task failed on its first record; set the subject's compatibility to NONE.",
+	},
+	"setup/aiven-plugin-unavailable": {
+		good:  "aiven_create_connector refused because the Kafka Connect service connect-0 lacks the Debezium Postgres connector: io.debezium.connector.postgresql.PostgresConnector is missing from its available plugins, and connect_plugins lists the Debezium MySQL connector, MirrorSource and the Aiven JDBC sink. The step created nothing. Fix: use a Connect service that offers the Debezium Postgres connector (the person enables it on the service or picks another one), then run aiven_create_connector again (T2).",
+		wrong: "The Kafka Connect service lacks an integration with the Kafka service, so the create step fails to reach the cluster; create the integration first.",
 	},
 	// The Q8i MySQL scenarios (C7, KAN-302).
 	"mysql-binlog-purged": {

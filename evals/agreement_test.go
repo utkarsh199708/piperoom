@@ -445,6 +445,12 @@ var syntheticLabels = map[string]Label{
 	// step sink_probe, so its terms name the refusal.
 	"setup/server-sink-unreachable":       {"kafka-connect", []string{"connection refused", "refuses connections"}},
 	"setup/server-offset-file-unwritable": {"kafka-connect", []string{"offset.storage.file.filename", "read-only file system", "config/offsets.dat"}},
+	// The U13e managed-target setup scenarios. The alert titles name the step or
+	// check and the rung, not the cause, so no title states a label term.
+	"setup/msk-plugin-s3-denied":     {"kafka-connect", []string{"getobject", "bucket policy"}},
+	"setup/msk-vpc-no-route":         {"kafka-connect", []string{"no route", "peering", "transit gateway"}},
+	"setup/ccloud-acl-missing":       {"kafka-connect", []string{"acl", "acls", "sa-00000"}},
+	"setup/aiven-plugin-unavailable": {"kafka-connect", []string{"postgresconnector", "postgres connector"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -670,6 +676,14 @@ var syntheticTruth = map[string]map[string]truth{
 	// Debezium Server.
 	"setup/server-sink-unreachable":       {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	"setup/server-offset-file-unwritable": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	// U13e: every title names a step, a connector or a rung of the Connect layer
+	// and no cause. The wrong texts: a bad plugin build (Connect, wrong cause), a
+	// database outage (the source layer), a registry rejection (the registry), a
+	// missing integration (Connect, wrong cause).
+	"setup/msk-plugin-s3-denied":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/msk-vpc-no-route":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/ccloud-acl-missing":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/aiven-plugin-unavailable": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit
