@@ -1,0 +1,53 @@
+{
+  "provider": "aws",
+  "name": "describe_cluster",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the managed ops send them through mskconnect; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetCallerIdentity&Version=2011-06-15",
+        "body_sha256": "ab821ae955788b0e33ebd34c208442ccfc2d406e2edc5e7a39bd6458fbb4f843",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetCallerIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><GetCallerIdentityResult><Arn>arn:aws:sts::000000000000:assumed-role/PiperoomSetup/piperoom-runner</Arn><UserId>AROAEXAMPLEROLE:piperoom-runner</UserId><Account>000000000000</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata></GetCallerIdentityResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/clusters/arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"clusterInfo\":{\"clusterArn\":\"arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1\",\"clusterName\":\"demo\",\"clusterType\":\"PROVISIONED\",\"provisioned\":{\"brokerNodeGroupInfo\":{\"clientSubnets\":[\"subnet-0a1b2c3d4e5f60001\",\"subnet-0a1b2c3d4e5f60002\"],\"securityGroups\":[\"sg-0a1b2c3d4e5f60001\"]},\"currentBrokerSoftwareInfo\":{\"kafkaVersion\":\"3.6.0\"},\"numberOfBrokerNodes\":2},\"state\":\"ACTIVE\"}}"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/clusters/arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1/bootstrap-brokers"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"bootstrapBrokerStringSaslIam\":\"scrubbed.amazonaws.com:9098,scrubbed.amazonaws.com:9098\"}"
+      }
+    }
+  ]
+}
