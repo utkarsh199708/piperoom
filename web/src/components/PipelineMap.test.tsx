@@ -161,6 +161,16 @@ describe('PipelineMap — lane', () => {
     expect(container.querySelector('[data-health]')?.className).toContain('min-w-[168px]')
   })
 
+  it('is the containing block for the sr-only node labels so they cannot widen the page', () => {
+    const { container } = render(<PipelineMap topology={five} />)
+    const lane = screen.getByRole('group', { name: /Pipeline/ })
+    expect(lane.className).toContain('relative')
+    expect(lane.className).toContain('overflow-x-auto')
+    const labels = container.querySelectorAll('.sr-only')
+    expect(labels.length).toBeGreaterThan(0)
+    for (const label of labels) expect(lane.contains(label)).toBe(true)
+  })
+
   it('shows skeleton nodes and a loading label before the topology arrives', () => {
     render(<PipelineMap topology={null} pipelineId="orders" />)
     expect(screen.getByText('Loading topology…')).toBeInTheDocument()
