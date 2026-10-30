@@ -85,7 +85,9 @@ func TestBuilderOrdersShowsFailureBeforeAnyFix(t *testing.T) {
 	// In the real demo the agent calls Status first, which creates a room
 	// state with task 0 FAILED. That touched-but-unfixed room must not count
 	// as recovered.
+	// The room is also the one the map follows (as when Controls.Run started it).
 	fakes := NewFakes()
+	fakes.Connect.markRoom("r_1")
 	if _, err := fakes.Connect.Status(room.WithRoomID(context.Background(), "r_1"), connectorName); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -223,4 +225,36 @@ func TestControlsRunMarksRoom(t *testing.T) {
 	waitFor(t, 2*time.Second, "the map to follow the new room", func() bool {
 		return connectorHealth(t, b) == topology.HealthFail
 	})
+}
+
+// Each fix call must make its own room the one the map follows.
+func TestEachFixCallMovesTheMapToItsRoom(t *testing.T) {
+	fixes := map[string]func(*FakeConnect, context.Context) error{
+		"RestartTask": func(c *FakeConnect, ctx context.Context) error { return c.RestartTask(ctx, connectorName, 0) },
+		"Resume":      func(c *FakeConnect, ctx context.Context) error { return c.Resume(ctx, connectorName) },
+		"RestartConnector": func(c *FakeConnect, ctx context.Context) error {
+			return c.RestartConnector(ctx, connectorName)
+		},
+	}
+	for name, fix := range fixes {
+		t.Run(name, func(t *testing.T) {
+			fakes := NewFakes()
+			b := Builder{Fakes: fakes}
+			ctxA := room.WithRoomID(context.Background(), "r_a")
+			// Room A has state; then room B becomes the room the map follows.
+			if _, err := fakes.Connect.Status(ctxA, connectorName); err != nil {
+				t.Fatal(err)
+			}
+			fakes.Connect.markRoom("r_b")
+			if got := connectorHealth(t, b); got != topology.HealthFail {
+				t.Fatalf("room B before any fix: %s, want fail", got)
+			}
+			if err := fix(fakes.Connect, ctxA); err != nil {
+				t.Fatal(err)
+			}
+			if got := connectorHealth(t, b); got != topology.HealthOK {
+				t.Fatalf("after %s in room A: %s, want ok", name, got)
+			}
+		})
+	}
 }
