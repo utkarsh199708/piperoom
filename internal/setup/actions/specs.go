@@ -20,13 +20,14 @@ import (
 // model-facing view of them, and the runner re-validates every param before it
 // executes.
 //
-// Every entry's scope is ScopeFree: these ops write only under the runner's
-// project directory or into the Compose stack the runner rendered itself, and
-// name no table, connector or host of the pipeline. A row that does name a
-// pipeline resource (the source and connector drivers of U1-9) supplies its own
-// scope: ScopeTables, ScopeConnector or ScopeField.
+// The environment entries' scope is ScopeFree: these ops write only under the
+// runner's project directory or into the Compose stack the runner rendered
+// itself, and name no table, connector or host of the pipeline. A row that
+// does name a pipeline resource supplies its own scope: ScopeTables,
+// ScopeConnector or ScopeField (the Strimzi and managed connector writes of
+// specs_targets.go check the connector against the pipeline's).
 func EnvironmentSpecs() []Spec {
-	return []Spec{
+	specs := []Spec{
 		{
 			Name:     "file_write",
 			Tier:     "T1",
@@ -208,6 +209,8 @@ func EnvironmentSpecs() []Spec {
 			// Preview answers "no preview" without a runner round trip.
 		},
 	}
+	// The Strimzi and managed targets' writes (specs_targets.go).
+	return append(specs, targetSpecs()...)
 }
 
 // referenceSchema is reference_write's params schema: the runner op's own

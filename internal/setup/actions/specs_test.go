@@ -194,7 +194,16 @@ func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
 		}
 		return "", false
 	}
+	targets := map[string]bool{}
+	for _, spec := range targetSpecs() {
+		targets[spec.Name] = true
+	}
 	for _, spec := range EnvironmentSpecs() {
+		if targets[spec.Name] {
+			// The Strimzi and managed writes: their catalogues are checked
+			// by the external round trip (specs_targets_test.go).
+			continue
+		}
 		floor, ok := floorOf(spec.Name)
 		if !ok {
 			t.Errorf("%s: the runner catalogue has no such op", spec.Name)
