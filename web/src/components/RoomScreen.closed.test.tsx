@@ -158,4 +158,32 @@ describe('RoomScreen on a phone-width layout (no side rail)', () => {
     expect(within(fix).queryByText(/waiting for/i)).not.toBeInTheDocument()
     expect(within(fix).queryByText(/\d+ of \d+/)).not.toBeInTheDocument()
   })
+
+  // KAN-579: the tab badge counted the proposal that KAN-560 says was never run.
+  function narrow() {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia
+  }
+
+  it('shows no open count on the Fix tab of a closed room', () => {
+    narrow()
+    show(room({ status: 'closed', closed_at: '2026-10-11T10:30:00Z', resolution: 'gave up' }))
+
+    expect(screen.getByRole('tab', { name: /^Fix/ })).toHaveTextContent(/^Fix$/)
+  })
+
+  it('still shows the open count on the Fix tab of an open room', () => {
+    narrow()
+    show(room())
+
+    expect(screen.getByRole('tab', { name: /^Fix/ })).toHaveTextContent(/^Fix1$/)
+  })
 })

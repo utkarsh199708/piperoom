@@ -439,7 +439,8 @@ export function RoomScreen() {
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
   // Pipeline-wide (X6), not this room's spend: the room's own cost is the header chip.
   const pipelineCost = <PipelineCostPanel pipelineId={state.pipeline_id} />
-  const openProposals = state.proposals.filter((p) => p.status === 'open').length
+  // A closed room has nothing left to act on: its unapproved proposal reads "Not run", so no count (KAN-579).
+  const openProposals = state.status === 'closed' ? 0 : state.proposals.filter((p) => p.status === 'open').length
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
