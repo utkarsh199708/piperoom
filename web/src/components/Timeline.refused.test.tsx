@@ -283,6 +283,8 @@ describe('reply box under a comment: refused versus kept', () => {
     expect(box.closest('div')).toContainElement(line)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(box).toHaveValue('ack')
+    fireEvent.change(box, { target: { value: 'short' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('with the server down, the reply keeps its words and offers Retry', async () => {
