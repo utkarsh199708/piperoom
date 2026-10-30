@@ -20,7 +20,7 @@ nightly kind job (section 8) is the first place it runs.
 | The server's action catalogue (`k8s_apply` as a proposable step) and read tools for the agent | **not done**: no `k8s_*` entry in the environment specs or the setup read tools | `internal/setup/actions/specs.go`, `internal/setup/tools/read.go` |
 | `${secret:name}` values for `k8s_secret_apply` in the Job | **not wired**: the Job passes no secret lookup, so the op refuses there | `internal/setup/setupcmd/incluster.go` |
 | Verification ladder | `Ladder(source, "strimzi", sink)` reads Connect's REST status; `StrimziLadder` reads the `KafkaConnector` CR instead and is **not called** by the room's ladder runner yet | `internal/setup/plan/ladder.go`, `ladder_strimzi.go` |
-| Rollback ops (`k8s_delete`, re-pause) | **not done**; the preview names them as the rollback | `internal/setup/targets/strimzi/apply.go` |
+| Rollback ops: `k8s_delete` (`KafkaConnector`, the canary `KafkaTopic`), `k8s_unapply` (re-pause `KafkaConnect`/`KafkaUser` with the shell's spec; `db-credentials` Secret and logging ConfigMap back to empty), `preview_k8s_secret_apply` (T0, key names only) | done, unit-tested against a fake API server; the `k8s_apply` and `k8s_secret_apply` previews record them as `<op> {params}`; on production the topic delete and the `KafkaConnect` unapply are refused by the runner (design §7) | `internal/setup/targets/strimzi/rollback.go` |
 
 So today a room cannot yet drive a Strimzi setup end to end. What follows is the contract of the pieces that exist,
 so a pilot can install the chart, check the RBAC and review what the runner would do.
@@ -178,8 +178,9 @@ install needs cluster-admin. On a `production` target the runner refuses T2 writ
 
 - **Close card:** `helm uninstall piperoom-setup-<room> -n <ns>`. The Job's `ttlSecondsAfterFinished` removes only the
   Job; the leftover Role has no `create` and reaches only the pipeline release's objects.
-- **Rollback card:** the runner's rollback ops are not written yet (status table). By hand: delete the connector
-  (`kubectl -n <ns> delete kafkaconnector <name>`), then `helm uninstall piperoom-pipeline-<pipeline> -n <ns>`. Note that
+- **Rollback card:** "roll back this setup" runs the rollback each step's preview recorded (`k8s_delete` for the
+  connector and the canary topic, `k8s_unapply` for the rest), then `helm uninstall piperoom-pipeline-<pipeline> -n <ns>`.
+  By hand: delete the connector (`kubectl -n <ns> delete kafkaconnector <name>`) first. Note that
   uninstalling the pipeline release makes the Topic Operator delete the canary topic and the User Operator the two
   users, and the Connect cluster stops.
 - The image the build pushed stays in your registry.
@@ -207,7 +208,7 @@ install needs cluster-admin. On a `production` target the runner refuses T2 writ
 3. The room's ladder runner does not call `StrimziLadder`, so verification reads Connect's REST status, which a
    ClusterIP-only Connect service does not expose to the server.
 4. `k8s_secret_apply` refuses in the Job until its `${secret:}` lookup is wired to the runner's secret store.
-5. No rollback ops; per-step T3 confirmations by Secret (design §3.2, `-confirm-<n>`) are not implemented (T3 over a
+5. Per-step T3 confirmations by Secret (design §3.2, `-confirm-<n>`) are not implemented (T3 over a
    remote runner is off anyway).
 6. The paused `KafkaConnect` shell carries only `replicas` and `bootstrapServers`; whether the `v1` schema needs more
    in a shell is unverified until the first kind run.

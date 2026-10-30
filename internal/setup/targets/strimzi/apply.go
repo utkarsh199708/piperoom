@@ -117,7 +117,7 @@ func canonical(v any) []byte {
 // room's ValidatingAdmissionPolicy must be bound. A 403 on the
 // cluster-scoped binding (the Role cannot read it) falls back to the card
 // confirmation; a 404 refuses.
-func (d *Driver) productionGate(ctx context.Context, p applyParams) error {
+func (d *Driver) productionGate(ctx context.Context, confirmed bool) error {
 	if d.class != protocol.ClassProduction {
 		return nil
 	}
@@ -127,7 +127,7 @@ func (d *Driver) productionGate(ctx context.Context, p applyParams) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, ErrForbidden):
-		if p.AdmissionPolicyConfirmed {
+		if confirmed {
 			return nil
 		}
 		return fmt.Errorf("%w: production target: the Role cannot read the admission policy binding; the card must confirm the policy is bound (D11)", ErrParams)
@@ -182,7 +182,7 @@ func (o k8sApplyOp) Execute(ctx context.Context, params json.RawMessage, env ops
 	if r, err = o.d.resolveFacts(ctx, r, ns, kafka, env); err != nil {
 		return ops.Result{}, err
 	}
-	if err := o.d.productionGate(ctx, p); err != nil {
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
 		return ops.Result{}, err
 	}
 	path := o.d.pathOf(ns, r)
@@ -301,14 +301,35 @@ func (o k8sApplyOp) Preview(ctx context.Context, params json.RawMessage, env ops
 		expected = clipText(string(b), 16<<10)
 	}
 	current, _ := json.MarshalIndent(st.at, "", "  ")
-	rollback := "k8s_unapply " + r.kind
-	if r.kind == "KafkaTopic" || r.kind == "KafkaConnector" {
-		rollback = "k8s_delete " + r.kind + " " + r.name
-	}
+	reversible, rollback := o.d.applyRollback(r)
 	return events.PreviewResult{
 		Target: r.kind + " " + ns + "/" + r.name, Current: clipText(string(current), 16<<10), Expected: expected,
-		Reversible: true, Rollback: rollback, DryRun: dr,
+		Reversible: reversible, Rollback: rollback, DryRun: dr,
 	}, nil
+}
+
+// applyRollback is the rollback a k8s_apply preview records (design §8), as
+// "<op> {json params}" for the room's rollback proposal: k8s_delete for a
+// KafkaConnector or the canary KafkaTopic, k8s_unapply for the rest. On a
+// production target the two the guard refuses there (§7) are not reversible
+// by the runner: the canary topic is kept, and the KafkaConnect is a person's
+// change.
+func (d *Driver) applyRollback(r rendered) (bool, string) {
+	prod := d.class == protocol.ClassProduction
+	switch r.kind {
+	case "KafkaTopic":
+		if prod {
+			return false, "the canary topic is kept on a production target (it is data); helm uninstall of the pipeline release removes the KafkaTopic"
+		}
+		return true, rollbackRecord("k8s_delete", r.kind, r.name)
+	case "KafkaConnector":
+		return true, rollbackRecord("k8s_delete", r.kind, r.name)
+	case "KafkaConnect":
+		if prod {
+			return false, "stopping a Connect cluster on a production target is a person's change: helm uninstall of the pipeline release"
+		}
+	}
+	return true, rollbackRecord("k8s_unapply", r.kind, r.name)
 }
 
 // previewApplyOp is preview_k8s_apply (T0): the dry run, never the write.

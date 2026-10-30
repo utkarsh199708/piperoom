@@ -33,7 +33,8 @@ func TestRegisterAndFloors(t *testing.T) {
 	want := map[string]string{
 		"k8s_get": protocol.TierT0, "k8s_events": protocol.TierT0, "k8s_logs": protocol.TierT0,
 		"strimzi_build_status": protocol.TierT0, "preview_k8s_apply": protocol.TierT0,
-		"k8s_apply": protocol.TierT2, "k8s_secret_apply": protocol.TierT2,
+		"k8s_apply": protocol.TierT2, "k8s_secret_apply": protocol.TierT2, "preview_k8s_secret_apply": protocol.TierT0,
+		"k8s_delete": protocol.TierT2, "k8s_unapply": protocol.TierT2,
 	}
 	for op, tier := range want {
 		if got, ok := h.reg.Floor(op); !ok || got != tier {

@@ -15,7 +15,9 @@
 // namespace, read-only), k8s_apply {kind, template, params} (T2: a template
 // renders a spec, the field allow-list validates it with no I/O, the preview
 // is the JSON patch with dryRun=All, the write is the three-step JSON patch of
-// §5) and k8s_secret_apply (T2). The namespace and the Kafka cluster come
+// §5) and k8s_secret_apply (T2) with its preview preview_k8s_secret_apply
+// (T0), and the rollback ops of §8, k8s_delete and k8s_unapply (T2,
+// rollback.go). The namespace and the Kafka cluster come
 // from Env.Targets only: a kubernetes target "<context>/<namespace>" and a
 // kafka target "strimzi://<name>".
 package strimzi
@@ -145,7 +147,8 @@ func Register(r *ops.Registry, o Options) (*Driver, error) {
 func (d *Driver) ops() []ops.Op {
 	return []ops.Op{
 		k8sGetOp{d: d}, k8sEventsOp{d: d}, k8sLogsOp{d: d}, buildStatusOp{d: d},
-		k8sApplyOp{d: d}, previewApplyOp{d: d}, k8sSecretApplyOp{d: d},
+		k8sApplyOp{d: d}, previewApplyOp{d: d}, k8sSecretApplyOp{d: d}, previewSecretApplyOp{d: d},
+		k8sDeleteOp{d: d}, k8sUnapplyOp{d: d},
 	}
 }
 
