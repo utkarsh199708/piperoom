@@ -188,16 +188,45 @@ func TestBuilderLayerOwner(t *testing.T) {
 	}
 }
 
-func TestWriteHandoffReturnsCompleteFixture(t *testing.T) {
-	s, err := WriteHandoff(context.Background(), nil, agent.Options{})
+func executedEvent(t *testing.T, stepIndex int, ok bool) events.Event {
+	t.Helper()
+	b, err := json.Marshal(events.ActionExecutedPayload{ProposalID: "p1", StepIndex: stepIndex, OK: ok})
 	if err != nil {
-		t.Fatalf("WriteHandoff: %v", err)
+		t.Fatal(err)
 	}
-	if s.WhatBroke == "" || s.Why == "" {
-		t.Fatalf("hand-off lacks what-broke or why: %+v", s)
+	return events.Event{Type: events.ActionExecuted, Payload: b}
+}
+
+func TestWriteHandoffBuildsDoneFromExecutedEvents(t *testing.T) {
+	tests := []struct {
+		name     string
+		evs      []events.Event
+		wantDone []string
+		wantOpen string // substring of the first open item
+	}{
+		{"no events", nil, nil, "has not run"},
+		{"unrelated event only", []events.Event{{Type: events.AgentMessage}}, nil, "has not run"},
+		{"failed step", []events.Event{executedEvent(t, 0, false)}, nil, "has not run"},
+		{"first step only", []events.Event{executedEvent(t, 0, true)}, []string{"Set compatibility to NONE"}, "still to run: restarted task 0"},
+		{"both steps", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true)},
+			[]string{"Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"}, "decimal.handling.mode"},
 	}
-	if len(s.Done) == 0 || len(s.RuledOut) == 0 || len(s.Open) == 0 || len(s.Risks) == 0 {
-		t.Fatalf("hand-off has an empty section: %+v", s)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := WriteHandoff(context.Background(), tt.evs, agent.Options{})
+			if err != nil {
+				t.Fatalf("WriteHandoff: %v", err)
+			}
+			if s.WhatBroke == "" || s.Why == "" || len(s.RuledOut) == 0 || len(s.Open) == 0 || len(s.Risks) == 0 {
+				t.Fatalf("hand-off has an empty section: %+v", s)
+			}
+			if !reflect.DeepEqual(s.Done, tt.wantDone) {
+				t.Errorf("Done = %q, want %q", s.Done, tt.wantDone)
+			}
+			if !strings.Contains(s.Open[0], tt.wantOpen) {
+				t.Errorf("Open[0] = %q, want it to contain %q", s.Open[0], tt.wantOpen)
+			}
+		})
 	}
 }
 

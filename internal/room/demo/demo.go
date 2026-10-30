@@ -508,16 +508,55 @@ func handleInput(ctx context.Context, deps agent.Deps, in agent.HumanInput, emit
 	}
 }
 
-// WriteHandoff is a fake hand-off writer returning the fixture summary.
+// fixDone names the demo proposal's steps, in step order, as they read in the
+// hand-off's Done list once the step ran.
+var fixDone = []string{"Set compatibility to NONE", "Restarted task 0"}
+
+// WriteHandoff is a fake hand-off writer. The cause text is fixed; what ran is
+// read from the room's action.executed events, so the summary never claims a
+// fix the room did not run. It makes no model call.
 func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Options) (events.HandoffSummary, error) {
-	return events.HandoffSummary{
+	ran := make([]bool, len(fixDone))
+	for _, e := range roomEvents {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err != nil || !p.OK || p.StepIndex < 0 || p.StepIndex >= len(ran) {
+			continue
+		}
+		ran[p.StepIndex] = true
+	}
+	var done, pending []string
+	for i, name := range fixDone {
+		if ran[i] {
+			done = append(done, name)
+		} else {
+			pending = append(pending, strings.ToLower(name[:1])+name[1:])
+		}
+	}
+	s := events.HandoffSummary{
 		WhatBroke: "Debezium task 0 failed after orders.amount was altered to numeric(12,2).",
 		Why:       "New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.",
-		Done:      []string{"Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"},
+		Done:      done,
 		RuledOut:  []string{"Kafka brokers", "Consumer group config"},
-		Open:      []string{"Consider pinning decimal.handling.mode"},
-		Risks:     []string{"BACKWARD compatibility is off until re-enabled"},
-	}, nil
+	}
+	switch {
+	case len(pending) == len(fixDone):
+		s.Open = []string{"The proposed fix has not run: it sets compatibility to NONE and restarts task 0"}
+		s.Risks = []string{"Debezium task 0 stays failed and the warehouse stale until the fix runs"}
+	case len(pending) > 0:
+		s.Open = []string{"The proposed fix is only partly applied; still to run: " + strings.Join(pending, ", ")}
+		s.Risks = []string{"The fix is half applied, so the pipeline may still be failing"}
+	default:
+		s.Done = append(s.Done, "Warehouse caught up")
+		s.Open = []string{"Consider pinning decimal.handling.mode"}
+		s.Risks = []string{"BACKWARD compatibility is off until re-enabled"}
+	}
+	if ran[0] && len(pending) > 0 {
+		s.Risks = append(s.Risks, "BACKWARD compatibility is off until re-enabled")
+	}
+	return s, nil
 }
 
 // WritePostmortem is a fake closing-summary writer returning the fixture
