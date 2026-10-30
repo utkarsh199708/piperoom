@@ -71,6 +71,10 @@ function liveDriver(driver: RoomStatusInput['driver'], now: number): boolean {
   return until == null || !(Date.parse(until) <= now)
 }
 
+function awaitsApproval(p: StatusProposal): boolean {
+  return p.status === 'open' && p.required_layers.some((l) => p.approvals[l] === 'pending')
+}
+
 /** The one sentence every surface shows. Precedence is the order of StatusKind. */
 export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatusInfo {
   const agent = input.agent.state
@@ -86,6 +90,9 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
   // The newest approved proposal decides executing / failed / fixed. These outrank the agent's own
   // status: the demo agent re-emits waiting_approval after every approval.
   const approved = [...input.proposals].reverse().find((p) => p.status === 'approved')
+  // A finished fix (ran or failed) gives way to a newer proposal that still waits for approval.
+  const newerAwaiting =
+    approved != null && input.proposals.slice(input.proposals.indexOf(approved) + 1).some(awaitsApproval)
   // Nothing runs while write mode is off, so it is neither executing nor fixed. A newer proposal
   // takes over, like a finished fix.
   if (approved?.waitingForWriteMode && input.proposals[input.proposals.length - 1] === approved) {
@@ -93,12 +100,12 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
   }
   if (approved && !approved.waitingForWriteMode) {
     const failed = approved.executed.findIndex((e) => !e.ok)
-    if (failed >= 0) return info('fix-failed', `Fix failed · step ${failed + 1}`, 'fail', failed + 1)
-    if (approved.steps > 0 && approved.executed.length < approved.steps) {
+    if (failed >= 0 && !newerAwaiting) return info('fix-failed', `Fix failed · step ${failed + 1}`, 'fail', failed + 1)
+    if (failed < 0 && approved.steps > 0 && approved.executed.length < approved.steps) {
       const k = approved.executed.length + 1
       return info('executing', `Executing fix · ${k} of ${approved.steps}`, 'agent', k)
     }
-    if (approved.executed.length > 0 && agent !== 'done') {
+    if (approved.executed.length > 0 && agent !== 'done' && !newerAwaiting) {
       // The verdict is in: a fix that did not recover the pipeline must not read as a green "verifying".
       const v = approved.verification ? verdictKind(approved.verification) : null
       if (v === 'not-recovered') return info('fix-failed', 'Fix ran · not recovered', 'fail')
@@ -107,10 +114,9 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
     }
   }
 
-  const awaiting = input.proposals.some(
-    (p) => p.status === 'open' && p.required_layers.some((l) => p.approvals[l] === 'pending'),
-  )
-  if (awaiting) return info('needs-approval', `Needs approval · ${ageLabel(input.opened_at, now) || 'now'}`, 'warn')
+  if (input.proposals.some(awaitsApproval)) {
+    return info('needs-approval', `Needs approval · ${ageLabel(input.opened_at, now) || 'now'}`, 'warn')
+  }
   if (!liveDriver(input.driver, now)) {
     return info('no-driver', `No driver · ${ageLabel(input.opened_at, now) || 'now'}`, 'warn')
   }
