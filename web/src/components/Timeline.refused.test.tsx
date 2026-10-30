@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMemo, useState } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Timeline } from './Timeline'
@@ -69,6 +69,7 @@ function Harness({
       onDelivered: (listener) => ledger.onDelivered(listener),
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
+      refusal: (clientId) => ledger.refusal(clientId),
     }),
     [ledger],
   )
@@ -120,6 +121,41 @@ describe('step comment box: refused versus kept', () => {
     expect(screen.queryByText('Editing discards the unsent comment.')).not.toBeInTheDocument()
     expect(box).toHaveValue(long)
     expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  // KAN-580: the room banner is off-screen at the step, so the refusal is also told under the box.
+  it('a refused comment says why in a line under the box, and clears it when the words change', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'x'.repeat(4001))
+    const line = await screen.findByRole('status')
+    expect(line).toHaveTextContent('text is too long: 4001 characters, the limit is 4000')
+    expect(box.closest('div')).toContainElement(line)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.change(box, { target: { value: 'short' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('a comment on a closed room says "room is closed" under the box', async () => {
+    const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    expect(await screen.findByRole('status')).toHaveTextContent('room is closed')
+    expect(box).toHaveValue('looks right')
+  })
+
+  it('no refusal line when the server is down, or when the comment goes through', async () => {
+    const post = vi.fn().mockRejectedValueOnce(SERVER_DOWN).mockImplementation(async (item: SendItem, id: string) => ok(item, id))
+    render(<Harness post={post} dedupes />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    expect(await screen.findByRole('alert')).toHaveTextContent(OFFLINE_TEXT)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('a comment on a closed room (409 room_closed) shows "room is closed" and no offline strip', async () => {
@@ -238,6 +274,19 @@ describe('reply box under a comment: refused versus kept', () => {
     expect(post).toHaveBeenCalledTimes(1)
   })
 
+  it('a refused reply says why in a line under the reply box', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} withComments />)
+    const box = reply('ack')
+    const line = await screen.findByRole('status')
+    expect(line).toHaveTextContent('text is too long: 4001 characters, the limit is 4000')
+    expect(box.closest('div')).toContainElement(line)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(box).toHaveValue('ack')
+    fireEvent.change(box, { target: { value: 'short' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
   it('with the server down, the reply keeps its words and offers Retry', async () => {
     const post = vi.fn().mockRejectedValue(SERVER_DOWN)
     render(<Harness post={post} withComments />)
@@ -246,5 +295,50 @@ describe('reply box under a comment: refused versus kept', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(screen.getByText('Editing discards the unsent reply.')).toBeInTheDocument()
     expect(box).toHaveValue('ack')
+  })
+})
+
+// KAN-580 re-test: a refusal line flush above the sticky composer must be scrolled clear of it.
+// <main>'s scroll-padding-bottom (--composer-h) does the clearing; this asserts the nudge happens.
+// The real layout can only be checked in a browser.
+describe('refusal line scrolls into view', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => {
+    scrollIntoView.mockClear()
+    Element.prototype.scrollIntoView = scrollIntoView
+  })
+  afterEach(() => {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+  })
+
+  it('scrolls the step comment refusal line into view, nearest, and not before a refusal', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    comment(box, 'x'.repeat(4001))
+    const line = await screen.findByRole('status')
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(scrollIntoView.mock.contexts[0]).toBe(line)
+    expect(box).toHaveValue('x'.repeat(4001))
+  })
+
+  it('scrolls the reply refusal line into view, nearest', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} withComments />)
+    reply('ack')
+    const line = await screen.findByRole('status')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(scrollIntoView.mock.contexts[0]).toBe(line)
+  })
+
+  it('does not scroll when there is no refusal', async () => {
+    const post = vi.fn().mockImplementation(async (item: SendItem, id: string) => ok(item, id))
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })

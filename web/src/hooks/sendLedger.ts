@@ -102,6 +102,9 @@ export class SendLedger {
    * automatic; null is treated like false (#545, #551).
    */
   dedupes: boolean | null = null
+  // The latest refusal's text and the action it ended, for the composer to show next to its box
+  // (KAN-580). One slot: a composer reads it right after its own send settles.
+  private lastRefusal: { clientId: string; text: string } | undefined
 
   private readonly deps: LedgerDeps
 
@@ -295,7 +298,7 @@ export class SendLedger {
       // One id, two bodies: a bug in this client. Never retried, so it cannot loop.
       console.error('piperoom: client_id_reused for', a.clientId)
       this.actions.delete(a.clientId)
-      this.setError(errorText(e))
+      this.refuse(a.clientId, e)
       return 'refused'
     }
     if (isUnconfirmed(e)) {
@@ -327,8 +330,19 @@ export class SendLedger {
     }
     // Refused (an error answer) or nothing kept: nothing was stored, the id is unused.
     this.actions.delete(a.clientId)
-    this.setError(errorText(e))
+    this.refuse(a.clientId, e)
     return 'refused'
+  }
+
+  private refuse(clientId: string, e: unknown) {
+    const text = errorText(e)
+    this.lastRefusal = { clientId, text }
+    this.setError(text)
+  }
+
+  /** Why the server refused this action, when its latest send ended in a refusal. */
+  refusal(clientId: string): string | undefined {
+    return this.lastRefusal?.clientId === clientId ? this.lastRefusal.text : undefined
   }
 
   /**
