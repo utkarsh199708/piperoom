@@ -755,3 +755,17 @@ describe('resolved rows', () => {
     expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
   })
 })
+
+describe('shadow marker', () => {
+  it('marks a shadow room and does not call its agent idle; an ordinary room is unchanged', () => {
+    mockList([room({ id: 'quiet', shadow: true }), room({ id: 'plain' })])
+    renderList()
+    const shadowRow = screen.getByText('quiet').closest('tr')!
+    expect(within(shadowRow).getByLabelText('Shadow room')).toHaveTextContent('Shadow')
+    expect(within(shadowRow).getByText('silent run')).toBeInTheDocument()
+    expect(within(shadowRow).queryByText('idle')).toBeNull()
+    const plainRow = screen.getByText('plain').closest('tr')!
+    expect(within(plainRow).queryByLabelText('Shadow room')).toBeNull()
+    expect(within(plainRow).getByText('idle')).toBeInTheDocument()
+  })
+})

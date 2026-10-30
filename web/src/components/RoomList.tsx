@@ -591,7 +591,9 @@ function RoomRow({
   const status = roomStatusCell(room)
   // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
   const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
-  const agent = agentCell(room)
+  // A shadow room's log holds no agent events, so agentCell would say "idle" while the silent run works.
+  const silentRun = room.shadow === true && !resolved
+  const agent = silentRun ? { dot: 'agent' as const, label: 'silent run', agent: true } : agentCell(room)
   const layers = layersNeedingYou(room, user)
   const canTake = canTakeControlOf(room, user)
   return (
@@ -625,6 +627,11 @@ function RoomRow({
           {tinted && (
             <Badge variant="warning" title={`Waiting on your ${layers.join(', ')} approval`}>
               Needs you
+            </Badge>
+          )}
+          {room.shadow === true && (
+            <Badge variant="agent" title="Shadow room: the agent works silently and proposes nothing" aria-label="Shadow room">
+              Shadow
             </Badge>
           )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
