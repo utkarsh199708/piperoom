@@ -99,6 +99,19 @@ type RoleInfo struct {
 	// db_owner/db_datareader/sysadmin). SELECT granted only through a custom
 	// role is not traced.
 	Selectable map[string]bool `json:"selectable"`
+	// HasDBUser: the login has a database user in the client's database (a
+	// sys.database_principals row mapped by sid). Without one no database
+	// grant can hold; a sysadmin login reaches the database as dbo without
+	// one, which the caller reads from Sysadmin. (U4g)
+	HasDBUser bool `json:"has_db_user"`
+	// CDCSelect: the user can read the cdc schema — GRANT SELECT ON
+	// SCHEMA::cdc, or inherited from db_owner/db_datareader/sysadmin.
+	// Debezium reads the capture tables there. (U4g)
+	CDCSelect bool `json:"cdc_select"`
+	// ViewDBState: VIEW DATABASE STATE is granted, directly or inherited
+	// from db_owner/sysadmin (db_datareader does not imply it). Debezium's
+	// lsn and snapshot reads need it. (U4g)
+	ViewDBState bool `json:"view_database_state"`
 }
 
 // SettingsReader is the read-only SQL Server client the setup driver (U4b)

@@ -258,9 +258,36 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		           JOIN sys.database_principals u ON u.principal_id = rm.member_principal_id
 		           JOIN sys.server_principals sp ON sp.sid = u.sid
 		           WHERE sp.name = @p1
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_principals u
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           WHERE sp.name = @p1
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_permissions p
+		           JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           WHERE sp.name = @p1
+		             AND p.class = 0
+		             AND p.permission_name = N'VIEW DATABASE STATE'
+		             AND p.state IN (N'G', N'W')
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_permissions p
+		           JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           JOIN sys.schemas s ON p.class = 3 AND s.schema_id = p.major_id
+		           WHERE sp.name = @p1
+		             AND s.name = N'cdc'
+		             AND p.permission_name = N'SELECT'
+		             AND p.state IN (N'G', N'W')
 		       ) THEN 1 ELSE 0 END AS int)`
-	var exists, disabled, sysadmin, dbOwner, dataReader int64
-	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner, &dataReader); err != nil {
+	var exists, disabled, sysadmin, dbOwner, dataReader, hasUser, viewState, cdcSelect int64
+	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner, &dataReader, &hasUser, &viewState, &cdcSelect); err != nil {
 		return RoleInfo{}, fmt.Errorf("sqlserver: read role info for %q: %w", login, err)
 	}
 
@@ -271,8 +298,13 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		Sysadmin:   sysadmin == 1,
 		DBOwner:    dbOwner == 1,
 		DataReader: dataReader == 1,
+		HasDBUser:  hasUser == 1,
 		Selectable: make(map[string]bool, len(pairs)),
 	}
+	// Fixed roles imply the cdc-schema read; VIEW DATABASE STATE is implied
+	// by db_owner and sysadmin only (db_datareader reads data, not state).
+	info.CDCSelect = cdcSelect == 1 || info.DBOwner || info.DataReader || info.Sysadmin
+	info.ViewDBState = viewState == 1 || info.DBOwner || info.Sysadmin
 	// A missing login has no database user to hold grants, so there is nothing
 	// to read and no grant query to run.
 	if !info.Exists {

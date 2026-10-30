@@ -387,7 +387,7 @@ func TestTableCDC(t *testing.T) {
 func TestRoleInfo(t *testing.T) {
 	t.Run("full grants", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(1), int64(0)}}}, // exists, not disabled, not sysadmin, db_owner, not datareader
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(1), int64(0), int64(1), int64(0), int64(0)}}}, // exists, not disabled, not sysadmin, db_owner, not datareader, has user, no direct VIEW DATABASE STATE, no direct cdc SELECT
 			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},                             // direct SELECT on orders
 		}
 		c := testClient(f)
@@ -398,14 +398,18 @@ func TestRoleInfo(t *testing.T) {
 		if !info.Exists || info.Disabled || info.Sysadmin || !info.DBOwner {
 			t.Fatalf("info = %+v", info)
 		}
-		// db_owner implies SELECT on everything.
+		// db_owner implies SELECT on everything, the cdc schema and VIEW
+		// DATABASE STATE (U4g).
 		if !info.Selectable["dbo.orders"] || !info.Selectable["dbo.other"] {
 			t.Fatalf("selectable = %+v", info.Selectable)
+		}
+		if !info.HasDBUser || !info.CDCSelect || !info.ViewDBState {
+			t.Fatalf("cdc grants = %+v", info)
 		}
 	})
 	t.Run("db_datareader", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(1)}}}, // datareader only
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(1), int64(1), int64(0), int64(0)}}}, // datareader only, with a user
 		}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "reader", []string{"dbo.orders", "dbo.other"})
@@ -418,10 +422,14 @@ func TestRoleInfo(t *testing.T) {
 		if !info.Selectable["dbo.orders"] || !info.Selectable["dbo.other"] {
 			t.Fatalf("selectable = %+v", info.Selectable)
 		}
+		// db_datareader reads the cdc schema too, but not database state (U4g).
+		if !info.CDCSelect || info.ViewDBState {
+			t.Fatalf("cdc grants = %+v", info)
+		}
 	})
 	t.Run("direct grant only", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}}, // exists, no fixed roles
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(1), int64(1)}}}, // exists, no fixed roles; user, VIEW DATABASE STATE and cdc SELECT granted directly
 			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},
 		}
 		c := testClient(f)
@@ -432,10 +440,27 @@ func TestRoleInfo(t *testing.T) {
 		if !info.Selectable["dbo.orders"] || info.Selectable["dbo.other"] {
 			t.Fatalf("selectable = %+v", info.Selectable)
 		}
+		// The direct grants carry through (U4g).
+		if !info.HasDBUser || !info.CDCSelect || !info.ViewDBState {
+			t.Fatalf("cdc grants = %+v", info)
+		}
+	})
+	t.Run("plain user without the cdc grants", func(t *testing.T) {
+		f := &fakeDB{
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(0), int64(0)}}},
+		}
+		c := testClient(f)
+		info, err := c.RoleInfo(context.Background(), "reader", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.HasDBUser || info.CDCSelect || info.ViewDBState {
+			t.Fatalf("cdc grants = %+v", info)
+		}
 	})
 	t.Run("schema grant", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}},
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(0), int64(0)}}},
 			rows:  []*fakeRows{{vals: [][]any{{"dbo", ""}}}}, // GRANT SELECT ON SCHEMA::dbo
 		}
 		c := testClient(f)
@@ -451,7 +476,7 @@ func TestRoleInfo(t *testing.T) {
 		}
 	})
 	t.Run("no login", func(t *testing.T) {
-		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(0), int64(0), int64(0), int64(0), int64(0)}}}}
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)}}}}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "ghost", []string{"dbo.orders"})
 		if err != nil {
@@ -465,7 +490,7 @@ func TestRoleInfo(t *testing.T) {
 		}
 	})
 	t.Run("empty tables", func(t *testing.T) {
-		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(1), int64(0), int64(0)}}}}
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(1), int64(0), int64(0), int64(0), int64(0), int64(0)}}}}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "sa", nil)
 		if err != nil {
@@ -473,6 +498,11 @@ func TestRoleInfo(t *testing.T) {
 		}
 		if !info.Exists || !info.Sysadmin {
 			t.Fatalf("info = %+v", info)
+		}
+		// sysadmin reaches the database as dbo without a mapped user and
+		// inherits both cdc grants (U4g).
+		if info.HasDBUser || !info.CDCSelect || !info.ViewDBState {
+			t.Fatalf("cdc grants = %+v", info)
 		}
 		if len(f.sqls) != 1 {
 			t.Fatalf("ran %d queries; no grant query for an empty table list", len(f.sqls))
@@ -504,7 +534,7 @@ func TestAllQueriesAreSelects(t *testing.T) {
 			{vals: []any{"16.0.0.0", "Developer", ""}},                      // ServerInfo
 			{vals: []any{"Running"}},                                        // AgentState
 			{vals: []any{true}},                                             // DatabaseCDC
-			{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}, // RoleInfo
+			{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(1), int64(1)}}, // RoleInfo
 		},
 		rows: []*fakeRows{
 			{vals: [][]any{{"dbo", "orders", true, true}}}, // TableCDC
