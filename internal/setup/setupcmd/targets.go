@@ -9,6 +9,7 @@ import (
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/targets/compose"
 	"piperoom/internal/setup/targets/host"
+	"piperoom/internal/setup/targets/strimzi"
 )
 
 // targetRegistrar adds the target driver's ops to the runner's catalogue once
@@ -28,6 +29,9 @@ type targetRegistrar struct {
 	// target; the U6b PR's contract change request), so the person states it
 	// on the runner's command line. It wins over the targets.
 	embedded bool
+	// strimzi is set in the in-cluster Job (--confirm-secret-prefix): a
+	// kubernetes target then registers the Strimzi driver with these options.
+	strimzi *strimzi.Options
 }
 
 // newTargetRegistrar wires cat as the catalogue the Welcome's target driver
@@ -51,6 +55,11 @@ func (t *targetRegistrar) Apply(targets []events.SetupTarget) error {
 	if t.embedded {
 		driver = "embedded"
 	}
+	if driver == "" && t.strimzi != nil {
+		if c, ok := kubernetesClass(targets); ok {
+			driver, class = "kubernetes", c
+		}
+	}
 	switch driver {
 	case "embedded":
 		if err := ops.RegisterEmbedded(t.cat); err != nil {
@@ -63,6 +72,13 @@ func (t *targetRegistrar) Apply(targets []events.SetupTarget) error {
 	case "compose":
 		if _, err := compose.Register(t.cat, compose.Options{Class: class, PluginHosts: t.pluginHosts}); err != nil {
 			return fmt.Errorf("setup: registering the compose target: %w", err)
+		}
+	case "kubernetes":
+		o := *t.strimzi
+		o.Class = class
+		o.PluginHosts = t.pluginHosts
+		if _, err := strimzi.Register(t.cat, o); err != nil {
+			return fmt.Errorf("setup: registering the Strimzi target: %w", err)
 		}
 	default:
 		// A managed target (Strimzi, MSK, Confluent, Aiven): its writes run
@@ -108,6 +124,21 @@ func chooseTargetDriver(targets []events.SetupTarget) (driver, class string) {
 	default:
 		return "compose", ""
 	}
+}
+
+// kubernetesClass is the highest class of the kubernetes targets, and
+// whether there is one.
+func kubernetesClass(targets []events.SetupTarget) (string, bool) {
+	class, found := "", false
+	for _, t := range targets {
+		if t.Kind == "kubernetes" {
+			found = true
+			if classRank(t.Class) > classRank(class) {
+				class = t.Class
+			}
+		}
+	}
+	return class, found
 }
 
 // classRank orders classes local < shared < production; an unknown or empty

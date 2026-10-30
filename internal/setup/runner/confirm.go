@@ -56,6 +56,9 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 	if creator == "" {
 		creator = welcome.Creator.ID
 	}
+	if r.extConfirm != nil {
+		return r.confirmExternal(ctx, welcome, creator)
+	}
 	fmt.Fprintf(r.stdout, "pair with %s\n", r.serverURL)
 	fmt.Fprintf(r.stdout, "room %s: %s\n", scrub(welcome.RoomID, maxPrintedFieldLen), scrub(welcome.Title, maxPrintedFieldLen))
 	fmt.Fprintf(r.stdout, "created by %s\n", scrub(creator, maxPrintedFieldLen))
@@ -63,6 +66,42 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 		return true, nil
 	}
 	return r.ask(ctx, "continue? [y/N] ")
+}
+
+// ErrOriginMismatch is a Welcome whose PublicOrigin is not the origin the
+// runner was started with: the person would compare a fingerprint for a
+// server they did not mean.
+var ErrOriginMismatch = errors.New("setup: the server's public origin is not --server")
+
+// errExternalConfirm marks an Options.Confirm failure: terminal, because a
+// refused confirmation (a pre-existing or wrong confirm Secret) must not be
+// retried into a second pairing attempt.
+var errExternalConfirm = errors.New("setup: confirmation")
+
+// confirmExternal is confirm for a runner without a terminal: the Welcome
+// must name the origin the runner dialed as its public origin, the block is
+// printed when the confirmer says so (after its own pre-checks), and the
+// confirmer's answer decides.
+func (r *Runner) confirmExternal(ctx context.Context, welcome *protocol.Welcome, creator string) (bool, error) {
+	if strings.TrimRight(welcome.PublicOrigin, "/") != strings.TrimRight(r.serverURL, "/") {
+		return false, fmt.Errorf("%w: welcome says %q, runner dialed %q", ErrOriginMismatch,
+			scrub(welcome.PublicOrigin, maxPrintedFieldLen), r.serverURL)
+	}
+	show := func() {
+		fmt.Fprintf(r.stdout, "pair with %s\n", r.serverURL)
+		fmt.Fprintf(r.stdout, "room %s: %s\n", scrub(welcome.RoomID, maxPrintedFieldLen), scrub(welcome.Title, maxPrintedFieldLen))
+		fmt.Fprintf(r.stdout, "pipeline %s, tenant %s\n", scrub(welcome.PipelineID, maxPrintedFieldLen), scrub(welcome.Tenant, maxPrintedFieldLen))
+		fmt.Fprintf(r.stdout, "created by %s\n", scrub(creator, maxPrintedFieldLen))
+		for _, t := range welcome.Targets {
+			fmt.Fprintf(r.stdout, "target %s %s (%s)\n", scrub(t.Kind, 32), scrub(t.Address, maxPrintedFieldLen), scrub(t.Class, 32))
+		}
+		fmt.Fprintf(r.stdout, "fingerprint %s\n", scrub(welcome.Fingerprint, 32))
+	}
+	ok, err := r.extConfirm(ctx, welcome, show)
+	if err != nil && ctx.Err() == nil {
+		return false, fmt.Errorf("%w: %w", errExternalConfirm, err)
+	}
+	return ok, err
 }
 
 // stdinLine is one line (or the reader's terminal error) from the runner's

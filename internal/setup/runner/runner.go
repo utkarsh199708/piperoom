@@ -108,6 +108,12 @@ type Options struct {
 	// without the room's target driver would refuse every step the plan
 	// sends; the callee is idempotent across reconnects.
 	RegisterTargets func(targets []events.SetupTarget) error
+	// Confirm replaces the terminal y/N for a runner that has no terminal
+	// (the in-cluster Job, docs/design/setup-strimzi.md §3.2): it is called
+	// with the Welcome and a show func that prints the Welcome block (origin,
+	// room, pipeline, creator, targets, fingerprint), and decides. With it
+	// set the Welcome's PublicOrigin must equal ServerURL. nil = the terminal.
+	Confirm func(ctx context.Context, w *protocol.Welcome, show func()) (bool, error)
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -128,6 +134,7 @@ type Runner struct {
 	backoff    func(attempt int) time.Duration
 	check      func() error
 	regTargets func(targets []events.SetupTarget) error
+	extConfirm func(ctx context.Context, w *protocol.Welcome, show func()) (bool, error)
 	url        *url.URL
 	secretsF   string
 
@@ -200,6 +207,7 @@ func New(o Options) (*Runner, error) {
 		backoff:    o.Backoff,
 		check:      o.Check,
 		regTargets: o.RegisterTargets,
+		extConfirm: o.Confirm,
 		secretsF:   o.SecretsFile,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
@@ -337,6 +345,8 @@ func connectTransient(err error) bool {
 	switch {
 	case errors.Is(err, ErrPairingRefused),
 		errors.Is(err, ErrDeclined),
+		errors.Is(err, ErrOriginMismatch),
+		errors.Is(err, errExternalConfirm),
 		errors.Is(err, ErrTokenExpired),
 		errors.Is(err, ErrDialNotLoopback),
 		errors.Is(err, ErrFrameTooBig),

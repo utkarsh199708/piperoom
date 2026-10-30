@@ -1,11 +1,15 @@
 package setupcmd
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/protocol"
+	"piperoom/internal/setup/targets/strimzi"
 )
 
 func newCatalogue(t *testing.T) *ops.Registry {
@@ -181,5 +185,65 @@ func TestRegistrarEmbedded(t *testing.T) {
 	}
 	if got := cat.CheckTarget(protocol.OpRequest{Op: "file_write", Params: []byte(`{"path":"a.txt","content":"x"}`)}); got != protocol.RefuseTarget {
 		t.Errorf("file_write in embedded mode: CheckTarget = %q, want %q", got, protocol.RefuseTarget)
+	}
+}
+
+// In the in-cluster Job (--confirm-secret-prefix) a kubernetes target
+// registers the Strimzi driver; outside it the target registers nothing.
+func TestRegistrarStrimziInJob(t *testing.T) {
+	cat := newCatalogue(t)
+	reg := newTargetRegistrar(cat, nil)
+	api, err := strimzi.NewAPI(strimzi.APIConfig{BaseURL: "https://kubernetes.default.svc", Token: func() (string, error) { return "t", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
+	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassProduction}, {Kind: "kafka", Address: "strimzi://prod-kafka"}}
+	if err := reg.Apply(targets); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, op := range []string{"k8s_get", "k8s_apply", "k8s_secret_apply"} {
+		if _, ok := cat.Floor(op); !ok {
+			t.Errorf("%s is not registered", op)
+		}
+	}
+	if _, ok := cat.Floor("compose_up"); ok {
+		t.Error("the compose driver registered too")
+	}
+
+	plain := newCatalogue(t)
+	if err := newTargetRegistrar(plain, nil).Apply(targets); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain.Floor("k8s_get"); ok {
+		t.Error("a laptop runner registered the Strimzi driver")
+	}
+}
+
+func TestReadCodeFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if got, err := readCodeFile(write("ok", "ABCD-EFGH\n")); err != nil || got != "ABCD-EFGH" {
+		t.Errorf("readCodeFile = %q, %v", got, err)
+	}
+	for name, body := range map[string]string{"empty": " \n", "huge": strings.Repeat("A", maxCodeFile+1)} {
+		if _, err := readCodeFile(write(name, body)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := readCodeFile(filepath.Join(dir, "missing")); err == nil {
+		t.Error("a missing file was accepted")
+	}
+}
+
+func TestInClusterJobPrefix(t *testing.T) {
+	if _, err := newInClusterJob("other-confirm", "orders", "orders-src"); err == nil || !strings.Contains(err.Error(), "piperoom-setup-<room>-confirm") {
+		t.Fatalf("err = %v", err)
 	}
 }
