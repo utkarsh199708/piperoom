@@ -52,15 +52,17 @@ func TestRegisterTargetsSeesTheWelcome(t *testing.T) {
 	defer srv.Close()
 
 	var (
-		mu  sync.Mutex
-		got [][]events.SetupTarget
+		mu    sync.Mutex
+		got   [][]events.SetupTarget
+		rooms []string
 	)
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
-		RegisterTargets: func(targets []events.SetupTarget) error {
+		RegisterTargets: func(_ context.Context, roomID string, targets []events.SetupTarget) error {
 			mu.Lock()
 			defer mu.Unlock()
 			got = append(got, targets)
+			rooms = append(rooms, roomID)
 			return nil
 		},
 	})
@@ -80,6 +82,9 @@ func TestRegisterTargetsSeesTheWelcome(t *testing.T) {
 	if b, _ := json.Marshal(got[0]); string(b) != string(mustJSON(want)) {
 		t.Errorf("RegisterTargets got %s, want %s", b, mustJSON(want))
 	}
+	if rooms[0] != "r1" {
+		t.Errorf("RegisterTargets got room %q, want the Welcome's r1", rooms[0])
+	}
 }
 
 // TestRegisterTargetsErrorFailsTheHandshake: a runner that cannot register
@@ -94,7 +99,7 @@ func TestRegisterTargetsErrorFailsTheHandshake(t *testing.T) {
 	boom := errors.New("duplicate op")
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
-		RegisterTargets: func([]events.SetupTarget) error { return boom },
+		RegisterTargets: func(context.Context, string, []events.SetupTarget) error { return boom },
 	})
 	if err != nil {
 		t.Fatal(err)

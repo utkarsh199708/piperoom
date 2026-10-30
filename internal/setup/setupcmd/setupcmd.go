@@ -124,7 +124,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer catalogue.Close()
-	registrar := newTargetRegistrar(catalogue, parsePluginHosts(config.Load().SetupPluginHosts))
+	env := config.Load()
+	registrar := newTargetRegistrar(catalogue, parsePluginHosts(env.SetupPluginHosts))
+	registrar.prodPatterns = parseProdPatterns(env.SetupProdPatterns)
 	if *embedded {
 		registrar.embedded = true
 	}
@@ -148,10 +150,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		CatalogueVersion: ops.CatalogueVersion,
 		RegisterTargets:  registrar.Apply,
 		Confirm:          confirm,
+		SecretsFile:      cfg.SecretsFile,
 	})
 	if err != nil {
 		return err
 	}
+	// The drivers resolve ${secret:} references and the managed setup
+	// credentials from the runner's own store: the one secret_set writes.
+	// It is set before Run, which is where the Welcome registers a driver.
+	registrar.secrets = r.SecretStore
 
 	if err := r.Run(ctx); err != nil {
 		if errors.Is(err, runner.ErrDeclined) {

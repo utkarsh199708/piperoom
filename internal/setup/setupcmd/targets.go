@@ -1,6 +1,7 @@
 package setupcmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,12 +19,28 @@ import (
 // a room has one target), so exactly one of them runs, chosen by the target
 // kinds the Welcome names, and only the first Welcome of the process registers
 // anything: a reconnect re-sends the targets, and the catalogue it would
-// register into already has the driver.
+// register into already has the driver. A room whose target is a managed
+// cloud (aws, confluent, aiven) gets that provider's driver instead
+// (managed.go).
 type targetRegistrar struct {
-	mu          sync.Mutex
-	done        bool
+	mu   sync.Mutex
+	done bool
+	// err is the first Welcome's registration error, returned again on a
+	// reconnect: a half-registered catalogue is never registered into twice.
+	err         error
 	cat         *ops.Registry
 	pluginHosts []string
+	// prodPatterns are PIPEROOM_SETUP_PROD_PATTERNS: a managed target whose
+	// account, environment, cluster or project matches one is production.
+	prodPatterns []string
+	// secrets opens the runner's secret store (runner.Runner.SecretStore):
+	// the managed drivers materialise ${secret:} references and read the
+	// Confluent and Aiven setup credentials from it. nil leaves them without
+	// a store (their ops then refuse, naming the missing store).
+	secrets storeOpener
+	// clients builds the managed drivers' clients; the default is the real
+	// ones (defaultManagedClients).
+	clients managedClients
 	// embedded is the --embedded flag (row U6b): the room's target is
 	// embedded, which the Welcome cannot say yet (it carries no SetupRequest
 	// target; the U6b PR's contract change request), so the person states it
@@ -39,18 +56,25 @@ type targetRegistrar struct {
 // parsePluginHosts; empty lets the compose driver fall back to its documented
 // default.
 func newTargetRegistrar(cat *ops.Registry, pluginHosts []string) *targetRegistrar {
-	return &targetRegistrar{cat: cat, pluginHosts: pluginHosts}
+	return &targetRegistrar{cat: cat, pluginHosts: pluginHosts, clients: defaultManagedClients()}
 }
 
 // Apply registers the driver the targets name. It has the signature of
 // runner.Options.RegisterTargets and is idempotent: the first Welcome decides,
-// later calls (reconnects) change nothing.
-func (t *targetRegistrar) Apply(targets []events.SetupTarget) error {
+// later calls (reconnects) change nothing and return its error again. roomID
+// tags what a managed driver creates; ctx bounds the AWS credential fetch.
+func (t *targetRegistrar) Apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.done {
-		return nil
+		return t.err
 	}
+	t.err = t.apply(ctx, roomID, targets)
+	t.done = true
+	return t.err
+}
+
+func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
 	driver, class := chooseTargetDriver(targets)
 	if t.embedded {
 		driver = "embedded"
@@ -81,16 +105,21 @@ func (t *targetRegistrar) Apply(targets []events.SetupTarget) error {
 			return fmt.Errorf("setup: registering the Strimzi target: %w", err)
 		}
 	default:
-		// A managed target (Strimzi, MSK, Confluent, Aiven): its writes run
-		// on another runner shape (the in-cluster Job, the cloud ops); this
-		// process keeps the generic file and env ops only.
+		// A managed target. MSK, Confluent and Aiven register their cloud
+		// ops here, with this machine's credentials; a kubernetes target
+		// outside the in-cluster Job registers nothing (its writes run in
+		// the Job), and this process keeps the generic file and env ops.
+		if _, err := t.registerManaged(ctx, roomID, targets); err != nil {
+			return err
+		}
 	}
-	t.done = true
 	return nil
 }
 
-// managedKinds are the target kinds whose driver does not run in this
-// process: a room with one of them gets neither local driver.
+// managedKinds are the target kinds whose driver is not a local one: a room
+// with one of them gets neither the compose nor the host driver, but the
+// Strimzi driver in the in-cluster Job or a managed cloud driver
+// (registerManaged).
 var managedKinds = map[string]bool{
 	"kubernetes": true, "aws": true, "confluent": true, "aiven": true,
 }
@@ -158,12 +187,20 @@ func classRank(c string) int {
 // config.ParseSetup does: a comma list, entries trimmed, empty entries
 // dropped. An empty result lets the compose driver use its documented
 // default (config.DefaultSetupPluginHosts).
-func parsePluginHosts(raw string) []string {
-	var hosts []string
+func parsePluginHosts(raw string) []string { return splitList(raw) }
+
+// parseProdPatterns splits PIPEROOM_SETUP_PROD_PATTERNS the same way the
+// server's config.ParseSetup does, so the runner classes a managed target
+// with the patterns the server classes it with.
+func parseProdPatterns(raw string) []string { return splitList(raw) }
+
+// splitList is a comma list, entries trimmed, empty entries dropped.
+func splitList(raw string) []string {
+	var out []string
 	for _, h := range strings.Split(raw, ",") {
 		if h = strings.TrimSpace(h); h != "" {
-			hosts = append(hosts, h)
+			out = append(out, h)
 		}
 	}
-	return hosts
+	return out
 }

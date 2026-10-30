@@ -100,14 +100,16 @@ type Options struct {
 	// nil = knowledge.Check, the digest check of the shipped knowledge index
 	// (U1-24): a corrupt index must never reach a template or a download.
 	Check func() error
-	// RegisterTargets is called with the targets each Welcome names, after
-	// the runner's class floors are seeded from them and before any op of
-	// the session executes: setupcmd registers the target driver the room
-	// needs (compose or host, row U8f) into the catalogue there. nil ignores
-	// the Welcome's targets. An error fails the handshake, because a runner
-	// without the room's target driver would refuse every step the plan
-	// sends; the callee is idempotent across reconnects.
-	RegisterTargets func(targets []events.SetupTarget) error
+	// RegisterTargets is called with the room id and the targets each
+	// Welcome names, after the runner's class floors are seeded from them
+	// and before any op of the session executes: setupcmd registers the
+	// target driver the room needs (compose or host, row U8f; a managed
+	// cloud driver, which tags what it creates with the room id) into the
+	// catalogue there. ctx is the handshake's. nil ignores the Welcome's
+	// targets. An error fails the handshake, because a runner without the
+	// room's target driver would refuse every step the plan sends; the
+	// callee is idempotent across reconnects.
+	RegisterTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
 	// Confirm replaces the terminal y/N for a runner that has no terminal
 	// (the in-cluster Job, docs/design/setup-strimzi.md §3.2): it is called
 	// with the Welcome and a show func that prints the Welcome block (origin,
@@ -133,7 +135,7 @@ type Runner struct {
 	catalogueV string
 	backoff    func(attempt int) time.Duration
 	check      func() error
-	regTargets func(targets []events.SetupTarget) error
+	regTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
 	extConfirm func(ctx context.Context, w *protocol.Welcome, show func()) (bool, error)
 	url        *url.URL
 	secretsF   string
@@ -505,7 +507,7 @@ func (r *Runner) pair(ctx context.Context) error {
 	r.roomID = welcome.RoomID
 	r.applyTargets(welcome.Targets)
 	if r.regTargets != nil {
-		if err := r.regTargets(welcome.Targets); err != nil {
+		if err := r.regTargets(ctx, welcome.RoomID, welcome.Targets); err != nil {
 			return fmt.Errorf("setup: registering the room's target driver: %w", err)
 		}
 	}
@@ -571,7 +573,9 @@ func (r *Runner) resume(ctx context.Context) error {
 		case protocol.FrameWelcome:
 			r.applyTargets(f.Welcome.Targets)
 			if r.regTargets != nil {
-				if err := r.regTargets(f.Welcome.Targets); err != nil {
+				// The room the person confirmed at pairing, never one a
+				// later Welcome names.
+				if err := r.regTargets(ctx, r.roomID, f.Welcome.Targets); err != nil {
 					return false, fmt.Errorf("setup: registering the room's target driver: %w", err)
 				}
 			}

@@ -34,6 +34,20 @@ const OpSecretSet = "secret_set"
 // server's own frame type is register_credentials.
 const opRegisterCredentials = "register_credentials"
 
+// ErrCloudSecretFrame: the server's secret frame named a cloud setup
+// credential, which is entered on the runner only
+// (docs/design/setup-managed.md §2).
+var ErrCloudSecretFrame = errors.New("setup: enter cloud credentials on the runner (secret_set), not through the room")
+
+// IsCloudSetupSecret reports whether name is a managed-cloud setup
+// credential (docs/design/setup-managed.md §2: ccloud_*, aiven_token,
+// aws_*; case-insensitive like the server's route). Such a value comes from
+// the runner's own terminal only.
+func IsCloudSetupSecret(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "ccloud_") || strings.HasPrefix(n, "aws_") || n == "aiven_token"
+}
+
 // isBuiltinOp reports whether the runner executes the op itself instead of
 // handing it to the catalogue.
 func isBuiltinOp(op string) bool { return op == OpSecretSet }
@@ -176,6 +190,14 @@ func (r *Runner) storeSecretFrame(secret *protocol.SecretValue) {
 		return
 	}
 	name := scrub(secret.Name, MaxSecretNameBytes)
+	if IsCloudSetupSecret(secret.Name) {
+		// The server's route refuses these names too; the runner does not
+		// rely on it, because a cloud setup key set from the room would let
+		// a server point the managed drivers at another account.
+		r.log.Warn("secret refused", "name", name, "err", ErrCloudSecretFrame)
+		fmt.Fprintf(r.stdout, "secret %s refused: %v\n", name, ErrCloudSecretFrame)
+		return
+	}
 	st, err := r.secretStore()
 	if err == nil {
 		err = st.Set(secret.Name, secret.Value)

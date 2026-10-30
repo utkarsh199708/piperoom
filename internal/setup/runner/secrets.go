@@ -942,6 +942,14 @@ func (s *Store) VerifyResult(res protocol.OpResult) bool {
 	return hmac.Equal([]byte(got), []byte(want))
 }
 
+// SecretStore is the runner's own secret store, the one secret_set and the
+// UI's secret frame write to, opened on first use like every other use of
+// it. A target driver resolves ${secret:} references through it (setupcmd
+// passes it to the managed drivers and the Strimzi driver); calling it only
+// when an op needs a value keeps a runner that only pairs from creating the
+// store file.
+func (r *Runner) SecretStore() (*Store, error) { return r.secretStore() }
+
 // secretStore opens the runner's store on first use: the first op or secret
 // frame creates .piperoom/secrets.env (0600) and the .gitignore entry; a
 // runner that only pairs creates nothing.

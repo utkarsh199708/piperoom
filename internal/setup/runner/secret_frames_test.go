@@ -200,6 +200,76 @@ func TestOpResultLiterallyRedactedAndMACed(t *testing.T) {
 	}
 }
 
+// TestSecretFrameRefusesCloudSetupNames: a managed-cloud setup credential is
+// typed on the runner only (docs/design/setup-managed.md §2), so the
+// server's secret frame cannot set one, whatever its case; another name in
+// the same session is stored.
+func TestSecretFrameRefusesCloudSetupNames(t *testing.T) {
+	const value = "cloud-key-value-7"
+	dir := t.TempDir()
+	refused := []string{"ccloud_api_key", "CCLOUD_CLUSTER_SECRET", "aiven_token", "aws_secret_access_key", "AWS_SESSION_TOKEN"}
+	cat := &fakeCatalogue{
+		floor: map[string]string{"env_detect": protocol.TierT0},
+		onExecute: func(context.Context, protocol.OpRequest) (protocol.OpResult, error) {
+			return protocol.OpResult{OK: true, Summary: "ok"}, nil
+		},
+	}
+	rec := &frameRecorder{}
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok-secret-value-123", time.Now, nil)
+		for _, name := range append(refused, "db_password") {
+			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameSecret,
+				Secret: &protocol.SecretValue{Secret: protocol.Secret{Name: name, Value: value}}})
+		}
+		// One op round trip: the secret frames before it were handled.
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &protocol.OpRequest{
+			ID: "op1", Op: "env_detect", Params: json.RawMessage(`{}`), Tier: protocol.TierT0, Class: protocol.ClassLocal,
+		}})
+		if f := rec.read(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Errorf("got %+v, want a result", f)
+		}
+	})
+	defer srv.Close()
+
+	var logs, stdout syncBuffer
+	r, err := runner.New(runner.Options{
+		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: dir,
+		Stdin: strings.NewReader(""), Stdout: &stdout,
+		Log:       slog.New(slog.NewTextHandler(&logs, nil)),
+		Catalogue: cat,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+
+	st, err := r.SecretStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range refused {
+		if !runner.IsCloudSetupSecret(name) {
+			t.Errorf("IsCloudSetupSecret(%q) = false", name)
+		}
+		if st.Has(name) {
+			t.Errorf("the secret frame stored %s", name)
+		}
+		if !strings.Contains(stdout.String(), "secret "+name+" refused") {
+			t.Errorf("stdout does not name the refused %s: %q", name, stdout.String())
+		}
+	}
+	if !st.Has("db_password") {
+		t.Error("an ordinary name was not stored")
+	}
+	if runner.IsCloudSetupSecret("db_password") || runner.IsCloudSetupSecret("aiven_tokens_db") {
+		t.Error("an ordinary name is classed as a cloud credential")
+	}
+	assertNoValue(t, "the secret value", value, rec, &logs, &stdout)
+}
+
 // TestSecretSetOpPrompts: secret_set is a T1 op the runner executes itself. It
 // prompts on the terminal, stores the value, and the value is in no result,
 // log or terminal line.

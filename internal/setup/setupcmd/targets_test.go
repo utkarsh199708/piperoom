@@ -1,6 +1,7 @@
 package setupcmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ var genericOps = []string{
 func TestRegistrarHostTarget(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
-	err := reg.Apply([]events.SetupTarget{
+	err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{
 		{Kind: "postgres", Address: "db.example.com:5432", Class: protocol.ClassShared},
 		{Kind: "host", Address: "127.0.0.1", Class: protocol.ClassShared},
 	})
@@ -64,7 +65,7 @@ func TestRegistrarComposeDefault(t *testing.T) {
 		"stack hosts": {{Kind: "kafka", Address: "localhost:9092"}, {Kind: "connect", Address: "http://localhost:8083"}},
 	} {
 		cat := newCatalogue(t)
-		if err := newTargetRegistrar(cat, nil).Apply(targets); err != nil {
+		if err := newTargetRegistrar(cat, nil).Apply(context.Background(), "room-1", targets); err != nil {
 			t.Fatalf("%s: Apply: %v", name, err)
 		}
 		if _, ok := cat.Floor("compose_up"); !ok {
@@ -76,9 +77,12 @@ func TestRegistrarComposeDefault(t *testing.T) {
 	}
 }
 
-func TestRegistrarManagedTargetRegistersNoDriver(t *testing.T) {
+// A managed target registers no local driver; its own cloud driver is
+// covered in managed_test.go.
+func TestRegistrarManagedTargetRegistersNoLocalDriver(t *testing.T) {
 	cat := newCatalogue(t)
-	err := newTargetRegistrar(cat, nil).Apply([]events.SetupTarget{
+	reg, _ := fakeManagedRegistrar(t, cat)
+	err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{
 		{Kind: "aws", Address: "123456789012/eu-west-1", Class: protocol.ClassProduction},
 	})
 	if err != nil {
@@ -103,13 +107,13 @@ func TestRegistrarIdempotent(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
 	host := []events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}
-	if err := reg.Apply(host); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", host); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	if err := reg.Apply(host); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", host); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
-	if err := reg.Apply(nil); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", nil); err != nil {
 		t.Fatalf("Apply after a targetless Welcome: %v", err)
 	}
 	if _, ok := cat.Floor("compose_up"); ok {
@@ -170,7 +174,7 @@ func TestRegistrarEmbedded(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
 	reg.embedded = true
-	if err := reg.Apply([]events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for _, op := range []string{ops.OpProjectInspect, ops.OpReferenceWrite, ops.OpEmbeddedLogRead} {
@@ -199,7 +203,7 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
 	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassProduction}, {Kind: "kafka", Address: "strimzi://prod-kafka"}}
-	if err := reg.Apply(targets); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for _, op := range []string{"k8s_get", "k8s_apply", "k8s_secret_apply"} {
@@ -212,7 +216,7 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 
 	plain := newCatalogue(t)
-	if err := newTargetRegistrar(plain, nil).Apply(targets); err != nil {
+	if err := newTargetRegistrar(plain, nil).Apply(context.Background(), "room-1", targets); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := plain.Floor("k8s_get"); ok {
