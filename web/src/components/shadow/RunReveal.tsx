@@ -71,7 +71,11 @@ export function RunReveal({
           <Stat label="Tokens" value={run.tokens > 0 ? run.tokens.toLocaleString() : 'not counted'} />
         </dl>
         {run.finished_after_close && (
-          <p className="m-0 text-xs text-subtle-foreground">The agent finished after the room was closed.</p>
+          <p className="m-0 text-xs text-subtle-foreground">
+            {run.status === 'interrupted'
+              ? 'The agent was stopped when the room closed.'
+              : 'The agent finished after the room was closed.'}
+          </p>
         )}
       </Card>
 
