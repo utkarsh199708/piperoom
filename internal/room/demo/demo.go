@@ -569,7 +569,8 @@ func WritePostmortem(ctx context.Context, roomEvents []events.Event, opts agent.
 
 // Builder is a fake topology.Builder: the orders CDC graph for the orders
 // pipeline and the batch graph for daily-revenue (the ids dev/owners.fast.yaml
-// defines). The orders graph shows the failure until a room's fix has run.
+// defines). The orders graph shows the failure until the room it follows has
+// run its fix (the room that last started, was reset, or ran its fix).
 // Fakes is the client pair that tells it whether a fix ran; the zero Builder
 // uses the pair of the last NewControls, which is how --demo wires it.
 type Builder struct {
@@ -591,11 +592,12 @@ func (b Builder) fakes() *Fakes {
 	return defaultFakes.Load()
 }
 
-// recovered reports whether a demo room's fix has run. The topology endpoint
-// carries no room id, so a recovery in any room clears the failure on the map.
+// recovered reports whether the room the map follows has had its fix run. The
+// topology endpoint carries no room id, so the map follows the room that last
+// started the story, was reset, or ran its fix.
 func (b Builder) recovered() bool {
 	f := b.fakes()
-	return f != nil && f.Connect.anyRecovered()
+	return f != nil && f.Connect.lastRoomRecovered()
 }
 
 // Build returns a static graph matching dev/owners.yaml. The batch pipeline

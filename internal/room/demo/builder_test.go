@@ -7,6 +7,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/room"
 	"piperoom/internal/topology"
@@ -138,4 +139,88 @@ func TestZeroBuilderFollowsControlsFakes(t *testing.T) {
 	if n := nodeByID(t, g, "connect:pg-orders-connector"); n.Health != topology.HealthOK {
 		t.Errorf("zero Builder after the fix: connector = %s, want ok", n.Health)
 	}
+}
+
+func connectorHealth(t *testing.T, b Builder) topology.Health {
+	t.Helper()
+	return nodeByID(t, buildGraph(t, b, "orders"), "connect:pg-orders-connector").Health
+}
+
+// The topology endpoint has no room id, so the map follows the room that last
+// started the story, was reset, or ran its fix.
+func TestBuilderFollowsLastChangedRoom(t *testing.T) {
+	fakes := NewFakes()
+	b := Builder{Fakes: fakes}
+	ctxA := room.WithRoomID(context.Background(), "r_a")
+	ctxB := room.WithRoomID(context.Background(), "r_b")
+
+	fakes.Connect.markRoom("r_a")
+	if got := connectorHealth(t, b); got != topology.HealthFail {
+		t.Fatalf("room A before its fix: %s, want fail", got)
+	}
+	if err := fakes.Connect.RestartTask(ctxA, connectorName, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := connectorHealth(t, b); got != topology.HealthOK {
+		t.Fatalf("after room A's fix: %s, want ok", got)
+	}
+
+	// A new room B shows the failure, even though A is recovered.
+	fakes.Connect.markRoom("r_b")
+	if got := connectorHealth(t, b); got != topology.HealthFail {
+		t.Fatalf("new room B: %s, want fail", got)
+	}
+	// Reads in A do not move the map.
+	if _, err := fakes.Connect.Status(ctxA, connectorName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fakes.Connect.Config(ctxA, connectorName); err != nil {
+		t.Fatal(err)
+	}
+	if got := connectorHealth(t, b); got != topology.HealthFail {
+		t.Fatalf("after reads in room A: %s, want fail", got)
+	}
+	if err := fakes.Connect.Resume(ctxB, connectorName); err != nil {
+		t.Fatal(err)
+	}
+	if got := connectorHealth(t, b); got != topology.HealthOK {
+		t.Fatalf("after room B's fix: %s, want ok", got)
+	}
+
+	// Reset of the recovered room shows the failure again.
+	fakes.Reset("r_b")
+	if got := connectorHealth(t, b); got != topology.HealthFail {
+		t.Fatalf("after reset of room B: %s, want fail", got)
+	}
+	// Reset of an older room makes the map follow that room: A is recovered
+	// again after its fix, B reset last, then A reset.
+	if err := fakes.Connect.RestartTask(ctxA, connectorName, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakes.Connect.RestartTask(ctxB, connectorName, 0); err != nil {
+		t.Fatal(err)
+	}
+	fakes.Reset("r_a")
+	if got := connectorHealth(t, b); got != topology.HealthFail {
+		t.Fatalf("after reset of older room A (B still recovered): %s, want fail", got)
+	}
+}
+
+func TestControlsRunMarksRoom(t *testing.T) {
+	fakes := NewFakes()
+	c := NewControls(fakes)
+	t.Cleanup(func() { defaultFakes.Store(nil) })
+	b := Builder{Fakes: fakes}
+	ctxA := room.WithRoomID(context.Background(), "r_a")
+	if err := fakes.Connect.RestartTask(ctxA, connectorName, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := connectorHealth(t, b); got != topology.HealthOK {
+		t.Fatalf("room A recovered: %s, want ok", got)
+	}
+	cancel, done := startRun(t, c, "r_new", &recordingSink{}, &countProposals{})
+	defer stopRun(t, cancel, done)
+	waitFor(t, 2*time.Second, "the map to follow the new room", func() bool {
+		return connectorHealth(t, b) == topology.HealthFail
+	})
 }
