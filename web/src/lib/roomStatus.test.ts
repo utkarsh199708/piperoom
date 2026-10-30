@@ -112,3 +112,34 @@ describe('roomStatus after the verdict', () => {
   })
 })
 
+
+describe('roomStatus with a newer proposal after a finished fix', () => {
+  const recovered = { recovered: true, verdict: 'recovered: all good' }
+  const fixRan = prop({ status: 'approved', executed: ok(2), verification: recovered })
+
+  it('shows needs-approval, not "Fix ran", when a newer proposal waits for approval', () => {
+    const s = run({ agent: { state: 'working' }, proposals: [fixRan, prop()] })
+    expect(s).toMatchObject({ kind: 'needs-approval', tone: 'warn' })
+    expect(s.label).toMatch(/^Needs approval/)
+  })
+
+  it('shows needs-approval over a failed earlier fix too', () => {
+    const failed = prop({ status: 'approved', steps: 3, executed: [{ ok: false }] })
+    expect(run({ proposals: [failed, prop()] }).kind).toBe('needs-approval')
+  })
+
+  it('still reads "Fix ran · recovered" when it is the only proposal', () => {
+    expect(run({ proposals: [fixRan] })).toMatchObject({ kind: 'fixed', label: 'Fix ran · recovered' })
+  })
+
+  it.each([
+    ['rejected', prop({ status: 'rejected' })],
+    ['needs no approval', prop({ approvals: { a: 'approved', b: 'approved' } })],
+  ])('keeps the earlier fix result when the newer proposal is %s', (_n, newer) => {
+    expect(run({ proposals: [fixRan, newer] })).toMatchObject({ kind: 'fixed', label: 'Fix ran · recovered' })
+  })
+
+  it('ignores an older open proposal; the fix is the newer one', () => {
+    expect(run({ proposals: [prop(), fixRan] }).label).toBe('Fix ran · recovered')
+  })
+})
