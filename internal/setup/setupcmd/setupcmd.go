@@ -98,14 +98,16 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	log := newLogger(stderr)
-	// The real catalogue (U1-2). Targets arrive with the Welcome, and the
-	// runner's target registry is a later row: until it hands them over,
-	// http_get and net_probe refuse every host and the file and env ops work.
+	// The real catalogue (U1-2). Targets arrive with the Welcome: the target
+	// driver (compose or host, row U8f) registers then, through the
+	// registrar; until the handshake hands them over, http_get and net_probe
+	// refuse every host and the file and env ops work.
 	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
 	if err != nil {
 		return err
 	}
 	defer catalogue.Close()
+	registrar := newTargetRegistrar(catalogue, parsePluginHosts(config.Load().SetupPluginHosts))
 	r, err := runner.New(runner.Options{
 		ServerURL:        serverURL,
 		Code:             codeStr,
@@ -115,6 +117,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		Log:              log,
 		Catalogue:        catalogue,
 		CatalogueVersion: ops.CatalogueVersion,
+		RegisterTargets:  registrar.Apply,
 	})
 	if err != nil {
 		return err

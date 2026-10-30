@@ -149,6 +149,85 @@ func EnvironmentSpecs() []Spec {
 			// No PreviewOp until the runner registers preview_plugin_install:
 			// Preview answers "no preview" without a runner round trip.
 		},
+		// The host target's writes (row U8f). A runner whose room has another
+		// target does not register these ops and refuses them as unknown; the
+		// T0 host reads (service_status, properties_read, journal_tail) are
+		// read tools (setuptools), not actions, because every entry here is a
+		// write the agent may only propose.
+		{
+			Name:     "service_install",
+			Tier:     "T2",
+			Layer:    "environment",
+			Describe: "Render the Kafka Connect worker service from the host driver's template and enable it: a piperoom-<name> systemd unit, or the Windows service. The unit's command and paths come from the template and detection, never from these params.",
+			Schema: objectSchema(map[string]any{
+				"name": map[string]any{"type": "string", "pattern": hostServiceNamePattern},
+				"mode": map[string]any{"type": "string", "enum": []string{host.ModeDistributed, host.ModeStandalone}},
+			}),
+			Scope:       ScopeFree,
+			CheckParams: checkServiceInstall,
+			// No PreviewOp until the runner registers preview_service_install
+			// (the host driver has the Preview; the catalogue does not expose
+			// it as an op yet): Preview answers "no preview" without a runner
+			// round trip.
+		},
+		{
+			Name:     "service_restart",
+			Tier:     "T2",
+			Layer:    "environment",
+			Describe: "Restart one piperoom service on the runner's host (systemctl restart of the unit, or the Windows service control manager).",
+			Schema: objectSchema(map[string]any{
+				"name": map[string]any{"type": "string", "pattern": hostServiceNamePattern},
+			}),
+			Scope:       ScopeFree,
+			CheckParams: checkServiceName,
+			// No PreviewOp until the runner registers preview_service_restart:
+			// Preview answers "no preview" without a runner round trip.
+		},
+	}
+}
+
+// hostServiceNamePattern mirrors the host driver's service name rule (host's
+// serviceNameRE in unit.go): the NAME of piperoom-NAME.service. The runner
+// re-checks it when it decodes the op's params.
+const hostServiceNamePattern = `^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$`
+
+var hostServiceNameRE = regexp.MustCompile(hostServiceNamePattern)
+
+// hostServiceParams is the part of the host service ops' params this package
+// checks; the runner decodes them strictly against the driver's own types.
+type hostServiceParams struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+}
+
+// checkServiceName mirrors the host driver's service name rule for
+// service_restart (and service_install through checkServiceInstall): the
+// schema states the pattern for the model, this enforces it.
+func checkServiceName(params json.RawMessage) error {
+	var p hostServiceParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("service params: %v", err)
+	}
+	if p.Name != "" && !hostServiceNameRE.MatchString(p.Name) {
+		return fmt.Errorf("name is not a lowercase service name (the NAME of piperoom-NAME.service)")
+	}
+	return nil
+}
+
+// checkServiceInstall checks service_install's name and worker mode.
+func checkServiceInstall(params json.RawMessage) error {
+	if err := checkServiceName(params); err != nil {
+		return err
+	}
+	var p hostServiceParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("service params: %v", err)
+	}
+	switch p.Mode {
+	case "", host.ModeDistributed, host.ModeStandalone:
+		return nil
+	default:
+		return fmt.Errorf("mode %q is not %s or %s", clipText(p.Mode), host.ModeDistributed, host.ModeStandalone)
 	}
 }
 

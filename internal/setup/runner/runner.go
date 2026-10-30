@@ -100,6 +100,14 @@ type Options struct {
 	// nil = knowledge.Check, the digest check of the shipped knowledge index
 	// (U1-24): a corrupt index must never reach a template or a download.
 	Check func() error
+	// RegisterTargets is called with the targets each Welcome names, after
+	// the runner's class floors are seeded from them and before any op of
+	// the session executes: setupcmd registers the target driver the room
+	// needs (compose or host, row U8f) into the catalogue there. nil ignores
+	// the Welcome's targets. An error fails the handshake, because a runner
+	// without the room's target driver would refuse every step the plan
+	// sends; the callee is idempotent across reconnects.
+	RegisterTargets func(targets []events.SetupTarget) error
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -119,6 +127,7 @@ type Runner struct {
 	catalogueV string
 	backoff    func(attempt int) time.Duration
 	check      func() error
+	regTargets func(targets []events.SetupTarget) error
 	url        *url.URL
 	secretsF   string
 
@@ -190,6 +199,7 @@ func New(o Options) (*Runner, error) {
 		catalogueV: orDefault(o.CatalogueVersion, catalogueVersion),
 		backoff:    o.Backoff,
 		check:      o.Check,
+		regTargets: o.RegisterTargets,
 		secretsF:   o.SecretsFile,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
@@ -484,6 +494,11 @@ func (r *Runner) pair(ctx context.Context) error {
 	r.negotiated = protocol.Negotiate(cur, welcome.Version())
 	r.roomID = welcome.RoomID
 	r.applyTargets(welcome.Targets)
+	if r.regTargets != nil {
+		if err := r.regTargets(welcome.Targets); err != nil {
+			return fmt.Errorf("setup: registering the room's target driver: %w", err)
+		}
+	}
 
 	ok, err := r.confirm(ctx, welcome)
 	if err != nil {
@@ -545,6 +560,11 @@ func (r *Runner) resume(ctx context.Context) error {
 		switch f.Type {
 		case protocol.FrameWelcome:
 			r.applyTargets(f.Welcome.Targets)
+			if r.regTargets != nil {
+				if err := r.regTargets(f.Welcome.Targets); err != nil {
+					return false, fmt.Errorf("setup: registering the room's target driver: %w", err)
+				}
+			}
 			return false, nil
 		case protocol.FrameToken:
 			return true, nil

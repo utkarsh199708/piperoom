@@ -57,6 +57,9 @@ func readInputs() map[string]json.RawMessage {
 		"compose_config":    json.RawMessage(`{"file":"compose.yaml"}`),
 		"container_inspect": json.RawMessage(`{"service":"connect"}`),
 		"container_logs":    json.RawMessage(`{"service":"connect"}`),
+		"service_status":    json.RawMessage(`{"name":"connect"}`),
+		"properties_read":   json.RawMessage(`{"file":"connect-distributed.properties"}`),
+		"journal_tail":      json.RawMessage(`{"unit":"piperoom-connect.service"}`),
 	}
 }
 
@@ -73,6 +76,9 @@ var readOps = map[string]string{
 	"compose_config":    "compose_config",
 	"container_inspect": "container_inspect",
 	"container_logs":    "container_logs",
+	"service_status":    "service_status",
+	"properties_read":   "properties_read",
+	"journal_tail":      "journal_tail",
 }
 
 func TestRegisterReadToolsInReadOnlyRegistry(t *testing.T) {
