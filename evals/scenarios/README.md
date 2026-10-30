@@ -1138,6 +1138,44 @@ VPC with an RDS source in another; the watcher template only; a Connect service 
 connector), and take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op log for the
 session file. Set `RECORDED: YES` and date the run.
 
+### Setup scenarios: Strimzi (U12d)
+
+Two setup scenarios on the Strimzi target (U12a/U12b `internal/setup/targets/strimzi`, `docs/design/setup-strimzi.md`):
+the runner as an in-cluster Job in namespace `data`, the chart's paused shells filled from templates (`k8s_apply`, T2),
+the Kafka cluster `kafka`, a Postgres source and no sink. Each has a runner session in `evals/setup/recordings` with
+target `strimzi`; the labels name the failing artifact or the empty Secret, and the T2 op that fixes it (design §8,
+the build and connector rows).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/strimzi-build-failed` | KafkaConnect `orders-connect` not Ready; `strimzi_build_status`: build failed, build pod `orders-connect-connect-build` Failed | a hand edit (`kubectl edit`) moved the Postgres plugin's artifact url to 3.1.3.Final and kept the 3.2.0.Final `sha512sum`, so the build's checksum check fails | kafka-connect / kafka-connect | the failing artifact `debezium-connector-postgres-3.1.3.Final-plugin.tar.gz` and its checksum mismatch; `k8s_apply` (T2) the KafkaConnect from the `connect` template again (url and digest from the knowledge index), never a hand-edited spec |
+| `setup/strimzi-connector-not-ready` | KafkaConnector `pg-orders-connector` NotReady; the connector is absent from Connect | `database.password` is `${secrets:data/orders-db-credentials:password}` and the chart's Secret is empty: the person declined the `k8s_secret_apply` card | kafka-connect / kafka-connect | the empty Secret `orders-db-credentials`; `k8s_secret_apply` (T2, `password: ${secret:orders_db_password}`), then the operator's reconcile creates the connector |
+
+**Synthesised, not recorded** (`RECORDED: NO`): no cluster was available. The room summaries follow the real tools'
+formats on this branch; the runner sessions the Strimzi driver's Summary and Data formats, passed through the runner's
+own redaction (`redact.JSONStats` masks a `pushSecret` or `secret` value, a Secret's name, as `[redacted 24]`; a
+`${secrets:...}` reference is kept). Composed by hand: the Strimzi `NotReady` conditions and their messages (the exact
+reason strings and the config provider's wording are unconfirmed), the Kaniko build log tail and the refused
+connection of the room's Connect reads. Digests are synthetic. Conventions a re-recording keeps:
+
+- **The cause is in the runner's reads.** `k8s_get`, `k8s_events`, `k8s_logs` and `strimzi_build_status` are runner ops
+  only: no server read tool exposes them (`internal/setup/tools/read.go`) and none is in `evals.LiveTools`. The room
+  reaches the cause through the alert's step and the person's steer (who read the build log or the CR's condition);
+  the one replayed fact is the slot the connector never created (`watch.slot` names it, since Connect has no config
+  for it).
+- **The ladder is `plan.Ladder`'s.** `plan.Ladder` accepts `strimzi`, so each session records a ladder, and evalsetup's
+  `FakeLadder` recomputes it with rungs 1 and 2 over `connect_status` (the runner's in-cluster Connect client reaches
+  `orders-connect-connect-api:8083`). `plan.StrimziLadder` (rungs 1 and 2 over the KafkaConnector CR through `k8s_get`,
+  design §9) is not what the replay runs; moving the replay to it is a C6 change.
+- **No room action is the fix.** `k8s_apply` and `k8s_secret_apply` are runner ops, not `evals.LiveActions`, so the
+  files set no `expect.fix` and forbid every Connect REST write (no worker runs, or the operator owns the config).
+
+To re-record on a cluster once the setup room path runs the Strimzi target: install the pipeline chart and the runner
+Job (`deploy/helm`, U12c) on `kind` with Strimzi and a local registry, then for build-failed edit the KafkaConnect's
+`spec.build.plugins[0].artifacts[0].url` to the 3.1.3.Final archive during the first build (or let the U12 kind test
+break the `sha512sum`), and for connector-not-ready decline the `k8s_secret_apply` card. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse

@@ -1,0 +1,289 @@
+{
+  "scenario": "setup/strimzi-connector-not-ready",
+  "source": "postgres",
+  "target": "strimzi",
+  "sink": "none",
+  "recorded_at": "2026-10-30T09:36:00Z",
+  "note": "Composed from the Strimzi driver's ops (internal/setup/targets/strimzi: k8s_apply's and k8s_secret_apply's summaries and receipts, strimzi_build_status's and k8s_get's Summary and Data, the connect, canary-topic and connector templates' render) on the fixed clock of the U12d scenarios. The KafkaConnector's NotReady condition (the operator's ConnectRestException for Connect's 500 on PUT /connectors/pg-orders-connector/config) and the config provider's message inside it are composed by hand, not read from a cluster. The session has no k8s_secret_apply before the connector (the person declined that card), which is the cause. Data is as the runner's finish() sends it: redact.JSONStats masks the value of the secret key (the Secret's name) as [redacted 24] and keeps the ${secrets:...} reference of database.password, which is no credential. The ladder is plan.Ladder's strimzi ladder, which reads connect_status (the runner's in-cluster Connect client reaches orders-connect-connect-api:8083); plan.StrimziLadder's k8s_get rungs are not what evalsetup's FakeLadder runs. The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders (sha256 of a label), not real MACs or hashes. No cluster session: re-record per evals/scenarios/README.md, Setup scenarios: Strimzi (U12d).",
+  "ops": [
+    {
+      "op": "k8s_apply",
+      "tier": "T2",
+      "class": "shared",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "b147feaaf4a51dff68eba9ea0edb50d73e2d517cf5c32de57345bccace17818d",
+      "params": {"kind": "KafkaConnect", "template": "connect", "params": {"listener": "tls", "tls": true, "auth": "tls", "registry": "registry.data.internal:5000", "repository": "piperoom/orders-connect", "release": "3.2.0.Final", "plugins": ["postgres"], "resources": "small"}},
+      "result": {
+        "ok": true,
+        "summary": "KafkaConnect data/orders-connect written from template connect and unpaused",
+        "data": {"kind": "KafkaConnect", "name": "orders-connect", "template": "connect", "unpaused": true},
+        "receipt": {
+          "kind": "http",
+          "target": "PATCH /apis/kafka.strimzi.io/v1/namespaces/data/kafkaconnects/orders-connect",
+          "exit_code": 0,
+          "at": "2026-10-30T09:05:30Z",
+          "took_ms": 401,
+          "out_mac": "28faddfc486dd3b2032f3619388e6d318a70618778b0b968ed51ef567e1aa9ce"
+        }
+      }
+    },
+    {
+      "op": "strimzi_build_status",
+      "tier": "T0",
+      "class": "shared",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "KafkaConnect orders-connect: Ready; 4 connector plugins in the image; build pod absent",
+        "data": {
+          "connect": "orders-connect",
+          "conditions": [
+            {"type": "Ready", "status": "True", "reason": "", "message": ""}
+          ],
+          "connector_plugins": 4,
+          "build_pod_phase": "",
+          "state": "Ready"
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "GET /apis/kafka.strimzi.io/v1/namespaces/data/kafkaconnects/orders-connect",
+          "exit_code": 0,
+          "at": "2026-10-30T09:12:10Z",
+          "took_ms": 84,
+          "out_mac": "647c86487e612596c0ac89ab72345034d8288195d786d61e22d8f3551e57f2c9"
+        }
+      }
+    },
+    {
+      "op": "k8s_apply",
+      "tier": "T2",
+      "class": "shared",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "6f039d330399a4a6f92d4a0f38944b60f9e5a9c286079bc0a4ee93d043602481",
+      "params": {"kind": "KafkaTopic", "template": "canary-topic", "params": {"topic_prefix": "pg", "schema": "public", "table": "piperoom_canary"}},
+      "result": {
+        "ok": true,
+        "summary": "KafkaTopic data/orders-canary written from template canary-topic and unpaused",
+        "data": {"kind": "KafkaTopic", "name": "orders-canary", "template": "canary-topic", "unpaused": true},
+        "receipt": {
+          "kind": "http",
+          "target": "PATCH /apis/kafka.strimzi.io/v1/namespaces/data/kafkatopics/orders-canary",
+          "exit_code": 0,
+          "at": "2026-10-30T09:12:40Z",
+          "took_ms": 233,
+          "out_mac": "22c7e1ffb1df18a8acfbeeb14cab735eeeb564ec2a747f21e4c2765a3d2acec8"
+        }
+      }
+    },
+    {
+      "op": "k8s_apply",
+      "tier": "T2",
+      "class": "shared",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "1014c84fa3168c8e615588244b56cb7d9a8d35b4e5666a93fcc55672f1ec29cb",
+      "params": {"kind": "KafkaConnector", "template": "connector", "params": {"connector": "pg-orders-connector", "plugin": "postgres", "config": {"database.hostname": "orders-db.data.svc", "database.port": "5432", "database.user": "piperoom_cdc", "database.password": "${secrets:data/orders-db-credentials:password}", "database.dbname": "orders", "plugin.name": "pgoutput", "slot.name": "debezium_orders", "publication.name": "dbz_publication", "table.include.list": "public.orders,public.piperoom_canary", "topic.prefix": "pg"}}},
+      "result": {
+        "ok": true,
+        "summary": "KafkaConnector data/pg-orders-connector written from template connector and unpaused",
+        "data": {"kind": "KafkaConnector", "name": "pg-orders-connector", "template": "connector", "unpaused": true},
+        "receipt": {
+          "kind": "http",
+          "target": "PATCH /apis/kafka.strimzi.io/v1/namespaces/data/kafkaconnectors/pg-orders-connector",
+          "exit_code": 0,
+          "at": "2026-10-30T09:13:20Z",
+          "took_ms": 362,
+          "out_mac": "7e5c6bc6e781db1cc1bada33fedc95e43f7482df237341728bcf55471ded64a5"
+        }
+      }
+    },
+    {
+      "op": "k8s_get",
+      "tier": "T0",
+      "class": "shared",
+      "params": {"kind": "KafkaConnector", "name": "pg-orders-connector"},
+      "result": {
+        "ok": true,
+        "summary": "KafkaConnector data/pg-orders-connector: no Ready condition yet",
+        "data": {
+          "apiVersion": "kafka.strimzi.io/v1",
+          "kind": "KafkaConnector",
+          "metadata": {
+            "name": "pg-orders-connector",
+            "namespace": "data",
+            "generation": 2,
+            "resourceVersion": "4471208",
+            "labels": {"strimzi.io/cluster": "orders-connect", "app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "piperoom-pipeline-orders"}
+          },
+          "spec": {
+            "class": "io.debezium.connector.postgresql.PostgresConnector",
+            "tasksMax": 1,
+            "autoRestart": {"enabled": true, "maxRestarts": 3},
+            "config": {
+              "database.hostname": "orders-db.data.svc",
+              "database.port": "5432",
+              "database.user": "piperoom_cdc",
+              "database.password": "${secrets:data/orders-db-credentials:password}",
+              "database.dbname": "orders",
+              "plugin.name": "pgoutput",
+              "slot.name": "debezium_orders",
+              "publication.name": "dbz_publication",
+              "table.include.list": "public.orders,public.piperoom_canary",
+              "topic.prefix": "pg"
+            }
+          },
+          "status": {
+            "conditions": [
+              {"type": "NotReady", "status": "True", "reason": "ConnectRestException", "message": "PUT /connectors/pg-orders-connector/config returned 500 (Internal Server Error): org.apache.kafka.common.config.ConfigException: Secret data/orders-db-credentials has no key \"password\"", "lastTransitionTime": "2026-10-30T09:13:41.552Z"}
+            ],
+            "observedGeneration": 2,
+            "tasksMax": 1,
+            "topics": []
+          }
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "GET /apis/kafka.strimzi.io/v1/namespaces/data/kafkaconnectors/pg-orders-connector",
+          "exit_code": 0,
+          "at": "2026-10-30T09:22:30Z",
+          "took_ms": 67,
+          "out_mac": "bba3bda75a4e9fbe389bb1a6e45d2b1c6f5bc8a457efeedb5e74d5292fdf2d7d"
+        }
+      }
+    },
+    {
+      "op": "k8s_secret_apply",
+      "tier": "T2",
+      "class": "shared",
+      "proposal_id": "p_setup_4",
+      "step_index": 0,
+      "params_hash": "13a5c0832cdc394d2836f4a2f2233ae6cc44c3b8d7ea19b74140af890859d1d3",
+      "params": {"keys": {"password": "${secret:orders_db_password}"}},
+      "result": {
+        "ok": true,
+        "summary": "Secret data/orders-db-credentials filled with 1 keys (password); values read back on the runner",
+        "data": {"secret": "[redacted 24]", "keys": ["password"]},
+        "receipt": {
+          "kind": "http",
+          "target": "PATCH /api/v1/namespaces/data/secrets/orders-db-credentials",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:15Z",
+          "took_ms": 151,
+          "out_mac": "e2e0a05ceeb5b2a768a56b55dd5226eca884fb2020ef6fb3b4860dec44433639"
+        }
+      }
+    },
+    {
+      "op": "k8s_get",
+      "tier": "T0",
+      "class": "shared",
+      "params": {"kind": "KafkaConnector", "name": "pg-orders-connector"},
+      "result": {
+        "ok": true,
+        "summary": "KafkaConnector data/pg-orders-connector: Ready=True",
+        "data": {
+          "apiVersion": "kafka.strimzi.io/v1",
+          "kind": "KafkaConnector",
+          "metadata": {
+            "name": "pg-orders-connector",
+            "namespace": "data",
+            "generation": 2,
+            "resourceVersion": "4479951",
+            "labels": {"strimzi.io/cluster": "orders-connect", "app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "piperoom-pipeline-orders"}
+          },
+          "spec": {
+            "class": "io.debezium.connector.postgresql.PostgresConnector",
+            "tasksMax": 1,
+            "autoRestart": {"enabled": true, "maxRestarts": 3},
+            "config": {
+              "database.hostname": "orders-db.data.svc",
+              "database.port": "5432",
+              "database.user": "piperoom_cdc",
+              "database.password": "${secrets:data/orders-db-credentials:password}",
+              "database.dbname": "orders",
+              "plugin.name": "pgoutput",
+              "slot.name": "debezium_orders",
+              "publication.name": "dbz_publication",
+              "table.include.list": "public.orders,public.piperoom_canary",
+              "topic.prefix": "pg"
+            }
+          },
+          "status": {
+            "conditions": [
+              {"type": "Ready", "status": "True", "lastTransitionTime": "2026-10-30T09:33:44.018Z"}
+            ],
+            "connectorStatus": {
+              "name": "pg-orders-connector",
+              "connector": {"state": "RUNNING", "worker_id": "10.244.1.17:8083"},
+              "tasks": [{"id": 0, "state": "RUNNING", "worker_id": "10.244.1.17:8083"}],
+              "type": "source"
+            },
+            "observedGeneration": 2,
+            "tasksMax": 1,
+            "topics": ["pg.public.orders", "pg.public.piperoom_canary"]
+          }
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "GET /apis/kafka.strimzi.io/v1/namespaces/data/kafkaconnectors/pg-orders-connector",
+          "exit_code": 0,
+          "at": "2026-10-30T09:34:50Z",
+          "took_ms": 59,
+          "out_mac": "fc974f6245042b353e3b435bd793b61bc918a010c55fe8ba3d0e6aaa598b1150"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_strimzi_setup",
+    "nonce_hash": "6c7d2ab080f85ac1a12e151d985dbd9ccf058a410d50c5fe5a83ccf09d2ae205",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-30T09:35:40Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-30T09:35:40Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {"topic": "pg.public.piperoom_canary", "partitions": [{"partition": 0, "start": 0, "end": 1}], "total_records": 1},
+        "at": "2026-10-30T09:35:41Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {"connector": "pg-orders-connector", "metrics_found": 11, "snapshot": {"SnapshotCompleted": 1, "SnapshotRunning": 0}},
+        "at": "2026-10-30T09:35:42Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {"topic": "pg.public.piperoom_canary", "key": "3a91c5e7d2b04f68a1e9c7b5d3f20e84", "found": true, "records": [{"partition": 0, "offset": 0}]},
+        "at": "2026-10-30T09:35:43Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {"subjects": ["pg.public.piperoom_canary-key", "pg.public.piperoom_canary-value"], "deleted_subjects": []},
+        "at": "2026-10-30T09:35:44Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
+        {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
+        {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
+        {"name": "canary_subject", "ok": true, "note": "2 subject(s) under the canary topic's prefix"},
+        {"name": "sink_row", "ok": true, "note": "no sink was set up"},
+        {"name": "person_change", "ok": false, "note": "awaiting the person's change"}
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

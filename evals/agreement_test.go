@@ -451,6 +451,10 @@ var syntheticLabels = map[string]Label{
 	"setup/msk-vpc-no-route":         {"kafka-connect", []string{"no route", "peering", "transit gateway"}},
 	"setup/ccloud-acl-missing":       {"kafka-connect", []string{"acl", "acls", "sa-00000"}},
 	"setup/aiven-plugin-unavailable": {"kafka-connect", []string{"postgresconnector", "postgres connector"}},
+	// The U12d Strimzi scenarios (KAN-290): the terms name the artifact's
+	// checksum mismatch and the empty db-credentials Secret.
+	"setup/strimzi-build-failed":        {"kafka-connect", []string{"3.1.3", "sha512sum", "checksum"}},
+	"setup/strimzi-connector-not-ready": {"kafka-connect", []string{"orders-db-credentials", "k8s_secret_apply"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -684,6 +688,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"setup/msk-vpc-no-route":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/ccloud-acl-missing":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/aiven-plugin-unavailable": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U12d: the lazy texts are the alert titles, which name the KafkaConnect
+	// or the KafkaConnector (Connect words) and a status, no cause. Each wrong
+	// text is another Strimzi failure on the same Connect cluster.
+	"setup/strimzi-build-failed":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/strimzi-connector-not-ready": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit
