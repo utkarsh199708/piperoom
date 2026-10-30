@@ -26,6 +26,10 @@ type SetupRoom struct {
 	Room      RoomSnapshot
 	Code      string
 	ExpiresAt time.Time
+	// Nonce is the code's fingerprint nonce: the HTTP layer, which knows the
+	// public origin, computes the fingerprint with SetupFingerprint. Never
+	// logged.
+	Nonce string
 }
 
 // setupNameRe rules for the provisional pipeline's lists. Tables are
@@ -204,7 +208,7 @@ func (s *Service) CreateSetupRoom(ctx context.Context, user User, req events.Set
 	snap := st.snap.Clone()
 	s.notifyRoomOpenedLocked(roomID)
 	s.unlockRoom(st)
-	return SetupRoom{Room: snap, Code: code, ExpiresAt: now.Add(protocol.CodeTTL)}, nil
+	return SetupRoom{Room: snap, Code: code, ExpiresAt: now.Add(protocol.CodeTTL), Nonce: s.runners.codeNonce(code)}, nil
 }
 
 // planSetupTargets validates every target of the request and combines its

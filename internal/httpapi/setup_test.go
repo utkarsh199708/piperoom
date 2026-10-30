@@ -68,7 +68,7 @@ type setupAPIEnv struct {
 	secretsDir string
 }
 
-func newSetupAPIEnv(t *testing.T, enabled bool) *setupAPIEnv {
+func newSetupAPIEnv(t *testing.T, enabled bool, extra ...httpapi.Option) *setupAPIEnv {
 	t.Helper()
 	users, err := room.ParseUsers([]byte(setupAPIUsersYAML))
 	if err != nil {
@@ -97,7 +97,7 @@ func newSetupAPIEnv(t *testing.T, enabled bool) *setupAPIEnv {
 		},
 	})
 	logs := &syncLogBuf{}
-	opts := []httpapi.Option{httpapi.WithSetup(enabled)}
+	opts := append([]httpapi.Option{httpapi.WithSetup(enabled)}, extra...)
 	api := httpapi.New(svc, st, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})), opts...)
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() {

@@ -31,6 +31,9 @@ type setupRoomResponse struct {
 	Code      string            `json:"code"`
 	ExpiresAt time.Time         `json:"expires_at"`
 	Command   string            `json:"command"`
+	// Fingerprint is what the runner shows in its Welcome block, for the
+	// person to compare (docs/api.md).
+	Fingerprint string `json:"fingerprint"`
 }
 
 // handleSetupCreate is POST /api/setup: open a setup room and return the code
@@ -51,6 +54,8 @@ func (s *Server) handleSetupCreate(w http.ResponseWriter, r *http.Request) {
 		Code:      res.Code,
 		ExpiresAt: res.ExpiresAt.UTC(),
 		Command:   setupCommand(s.setupOrigin(r), res.Code),
+		Fingerprint: room.SetupFingerprint(s.publicOriginString(), res.Room.ID, res.Room.PipelineID,
+			userFrom(r.Context()).ID, res.Nonce),
 	})
 }
 
