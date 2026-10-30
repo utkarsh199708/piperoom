@@ -36,11 +36,13 @@ export function RollbackButton({
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [refused, setRefused] = useState(false)
   // One rollback request is one action (#459): only the Retry of a failed request keeps its
   // client_id. Closing the dialog cancels it in the ledger (it is never sent again), and the
   // request landing after all ends it too; the next request is then a new one.
   const retryId = useRetryId(sends, () => {
     setFailed(false)
+    setRefused(false)
     setOpen(false)
   })
   const send = async (retry: boolean) => {
@@ -48,8 +50,16 @@ export function RollbackButton({
     const clientId = retryId.next(retry)
     const ok = await onSteer(rollbackSteer(title, proposalId, rollback), { clientId })
     setBusy(false)
-    setFailed(!ok)
+    // The strip is for a request the ledger still owes (kept for the reconnect, or sent with no
+    // answer). A refused one (4xx, 409 room_closed) is dropped by the ledger, and the room error
+    // says why: Retry would only be a new request. Same rule as settleSend in Timeline.tsx.
+    const mine = retryId.owns(clientId)
     retryId.settle(clientId, ok)
+    // Closed (cancelled) mid-send: the dialog is no longer this request's, so leave its state alone.
+    if (!mine) return
+    const wasRefused = !ok && !retryId.owns(clientId)
+    setFailed(!ok && !wasRefused)
+    setRefused(wasRefused)
     if (ok) setOpen(false)
   }
   const onOpenChange = (next: boolean) => {
@@ -57,6 +67,7 @@ export function RollbackButton({
     if (!next) {
       retryId.drop()
       setFailed(false)
+      setRefused(false)
     }
   }
   return (
@@ -77,6 +88,11 @@ export function RollbackButton({
             <span className="text-xs font-medium text-subtle-foreground">Recorded rollback: </span>
             {rollback || 'none recorded'}
           </p>
+          {refused && (
+            <p role="status" className="m-0 text-xs font-medium text-destructive-fg">
+              Piperoom refused this request, so nothing was sent. The reason is in the banner above.
+            </p>
+          )}
           {failed && <OfflineStrip onRetry={() => void send(true)} disabled={busy} />}
           {failed && <p className="m-0 text-xs text-muted-foreground">Closing discards the unsent request.</p>}
           <DialogFooter>
