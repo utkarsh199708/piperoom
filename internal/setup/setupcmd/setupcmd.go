@@ -52,6 +52,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	standaloneMode := fs.Bool("standalone", false, "run the Piperoom server for this machine in-process (write mode and setup on, loopback only) and keep serving; prints the URL to open")
 	watch := fs.Bool("watch", false, "with --standalone: restart the server whenever owners.yaml is written")
 	watchInterval := fs.Duration("watch-interval", standalone.DefaultWatchInterval, "with --watch: how often to poll owners.yaml")
+	embedded := fs.Bool("embedded", false, "the room's target is embedded (the Debezium Engine in your own application): register only the reference project and log reads, and refuse every other write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -65,8 +66,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if *standaloneMode {
 		// Standalone means this process is the server: a server origin or a
 		// pairing code would name a different one.
-		if *server != "" || *code != "" || *label != "" {
-			return errors.New("setup: --standalone runs its own server; --server, --code and --label pair with an existing one")
+		if *server != "" || *code != "" || *label != "" || *embedded {
+			return errors.New("setup: --standalone runs its own server; --server, --code, --label and --embedded pair a runner with an existing one")
 		}
 		return standalone.Run(ctx, standalone.Options{
 			Config:        config.Load(),
@@ -108,6 +109,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 	defer catalogue.Close()
 	registrar := newTargetRegistrar(catalogue, parsePluginHosts(config.Load().SetupPluginHosts))
+	if *embedded {
+		registrar.embedded = true
+	}
 	r, err := runner.New(runner.Options{
 		ServerURL:        serverURL,
 		Code:             codeStr,

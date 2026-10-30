@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/targets/host"
 )
@@ -183,7 +184,36 @@ func EnvironmentSpecs() []Spec {
 			// No PreviewOp until the runner registers preview_service_restart:
 			// Preview answers "no preview" without a runner round trip.
 		},
+		// The embedded target's one write (row U6b): the reference project,
+		// rendered from typed params under piperoom-reference/. A runner in
+		// embedded mode refuses every other write; one that is not in
+		// embedded mode does not register it and refuses it as unknown.
+		{
+			Name:     "reference_write",
+			Tier:     "T1",
+			Layer:    "environment",
+			Describe: "Render the Debezium Engine reference project (Maven or Gradle, Postgres or MySQL) from typed params into piperoom-reference/ under the project directory, for the person to compare with their own build and run themselves. The runner never builds or runs it; the password is a ${secret:name} reference.",
+			Schema:   referenceSchema(),
+			Scope:    ScopeFree,
+			CheckParams: func(params json.RawMessage) error {
+				var p ops.ReferenceParams
+				dec := json.NewDecoder(strings.NewReader(string(params)))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&p); err != nil {
+					return fmt.Errorf("reference_write params: %v", err)
+				}
+				return p.Embedded().Validate()
+			},
+			// No PreviewOp until the runner registers preview_reference_write:
+			// Preview answers "no preview" without a runner round trip.
+		},
 	}
+}
+
+// referenceSchema is reference_write's params schema: the runner op's own
+// (ops.ReferenceParams), so the model sees exactly what the runner decodes.
+func referenceSchema() map[string]any {
+	return ops.ReferenceWriteSchema()
 }
 
 // hostServiceNamePattern mirrors the host driver's service name rule (host's

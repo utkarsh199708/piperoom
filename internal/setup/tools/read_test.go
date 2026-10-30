@@ -60,6 +60,8 @@ func readInputs() map[string]json.RawMessage {
 		"service_status":    json.RawMessage(`{"name":"connect"}`),
 		"properties_read":   json.RawMessage(`{"file":"connect-distributed.properties"}`),
 		"journal_tail":      json.RawMessage(`{"unit":"piperoom-connect.service"}`),
+		"project_inspect":   json.RawMessage(`{}`),
+		"embedded_log_read": json.RawMessage(`{"path":"piperoom-reference/run.log","nonce":"4f2a9c71e0b85d36"}`),
 	}
 }
 
@@ -79,6 +81,8 @@ var readOps = map[string]string{
 	"service_status":    "service_status",
 	"properties_read":   "properties_read",
 	"journal_tail":      "journal_tail",
+	"project_inspect":   "project_inspect",
+	"embedded_log_read": "embedded_log_read",
 }
 
 func TestRegisterReadToolsInReadOnlyRegistry(t *testing.T) {

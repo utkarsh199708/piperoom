@@ -158,3 +158,28 @@ func TestParsePluginHosts(t *testing.T) {
 		}
 	}
 }
+
+// With --embedded the registrar puts the catalogue in embedded mode whatever
+// the targets: the embedded ops are registered, no Compose or host driver is,
+// and file_write is refused.
+func TestRegistrarEmbedded(t *testing.T) {
+	cat := newCatalogue(t)
+	reg := newTargetRegistrar(cat, nil)
+	reg.embedded = true
+	if err := reg.Apply([]events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, op := range []string{ops.OpProjectInspect, ops.OpReferenceWrite, ops.OpEmbeddedLogRead} {
+		if _, ok := cat.Floor(op); !ok {
+			t.Errorf("embedded: %s is not registered", op)
+		}
+	}
+	for _, op := range []string{"compose_up", "service_install"} {
+		if _, ok := cat.Floor(op); ok {
+			t.Errorf("embedded: %s registered", op)
+		}
+	}
+	if got := cat.CheckTarget(protocol.OpRequest{Op: "file_write", Params: []byte(`{"path":"a.txt","content":"x"}`)}); got != protocol.RefuseTarget {
+		t.Errorf("file_write in embedded mode: CheckTarget = %q, want %q", got, protocol.RefuseTarget)
+	}
+}

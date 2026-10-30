@@ -23,6 +23,11 @@ type targetRegistrar struct {
 	done        bool
 	cat         *ops.Registry
 	pluginHosts []string
+	// embedded is the --embedded flag (row U6b): the room's target is
+	// embedded, which the Welcome cannot say yet (it carries no SetupRequest
+	// target; the U6b PR's contract change request), so the person states it
+	// on the runner's command line. It wins over the targets.
+	embedded bool
 }
 
 // newTargetRegistrar wires cat as the catalogue the Welcome's target driver
@@ -43,7 +48,14 @@ func (t *targetRegistrar) Apply(targets []events.SetupTarget) error {
 		return nil
 	}
 	driver, class := chooseTargetDriver(targets)
+	if t.embedded {
+		driver = "embedded"
+	}
 	switch driver {
+	case "embedded":
+		if err := ops.RegisterEmbedded(t.cat); err != nil {
+			return fmt.Errorf("setup: registering the embedded target: %w", err)
+		}
 	case "host":
 		if _, err := host.Register(t.cat, host.Options{Class: class}); err != nil {
 			return fmt.Errorf("setup: registering the host target: %w", err)

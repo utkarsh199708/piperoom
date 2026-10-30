@@ -41,7 +41,7 @@ func TestEnvironmentSpecsAreSafe(t *testing.T) {
 	for _, name := range []string{
 		"file_write", "file_delete", "compose_write", "properties_write",
 		"compose_up", "compose_restart", "compose_down", "plugin_install",
-		"service_install", "service_restart",
+		"service_install", "service_restart", "reference_write",
 	} {
 		if !seen[name] {
 			t.Errorf("EnvironmentSpecs is missing %s", name)
@@ -138,6 +138,7 @@ var previewPendingRunner = map[string]bool{
 	"plugin_install":   true,
 	"service_install":  true,
 	"service_restart":  true,
+	"reference_write":  true,
 }
 
 // runnerCatalogue builds the runner's real op catalogue the way the runner
@@ -175,13 +176,23 @@ func hostCatalogue(t *testing.T) *ops.Registry {
 func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
 	composeReg := runnerCatalogue(t)
 	hostReg := hostCatalogue(t)
+	embeddedReg, err := ops.New(ops.Config{ProjectDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = embeddedReg.Close() })
+	if err := ops.RegisterEmbedded(embeddedReg); err != nil {
+		t.Fatal(err)
+	}
 	// floorOf looks an op up in whichever target catalogue registers it;
-	// properties_write is in both with one floor.
+	// properties_write is in both compose and host with one floor.
 	floorOf := func(name string) (string, bool) {
-		if f, ok := composeReg.Floor(name); ok {
-			return f, true
+		for _, reg := range []*ops.Registry{composeReg, hostReg, embeddedReg} {
+			if f, ok := reg.Floor(name); ok {
+				return f, true
+			}
 		}
-		return hostReg.Floor(name)
+		return "", false
 	}
 	for _, spec := range EnvironmentSpecs() {
 		floor, ok := floorOf(spec.Name)
@@ -236,6 +247,7 @@ func TestPendingPreviewsMakeNoRunnerCall(t *testing.T) {
 		"plugin_install":   json.RawMessage(`{"release":"2.7.0","connector":"postgres"}`),
 		"service_install":  json.RawMessage(`{"name":"connect","mode":"distributed"}`),
 		"service_restart":  json.RawMessage(`{"name":"connect"}`),
+		"reference_write":  json.RawMessage(`{"build":"maven","source":"postgres","group_id":"com.example.cdc","artifact_id":"orders-cdc","release":"3.2.0.Final","host":"db.internal","port":5432,"database":"orders","user":"debezium","password_secret":"orders_db_password","topic_prefix":"orders","slot_name":"orders_cdc"}`),
 	}
 	for _, spec := range EnvironmentSpecs() {
 		if !previewPendingRunner[spec.Name] {

@@ -196,6 +196,9 @@ type Registry struct {
 	order  []Op
 	env    Env
 	mounts []string
+	// embedded is set by RegisterEmbedded: every write op other than
+	// reference_write is refused (embeddedRefusal).
+	embedded bool
 }
 
 // New opens the project root and registers the T0 and T1 ops of this row.
@@ -430,6 +433,11 @@ func (r *Registry) CheckTarget(req protocol.OpRequest) string {
 	if !ok {
 		return protocol.RefuseUnknownOp
 	}
+	if r.embeddedRefusal(op) != nil {
+		// Writing outside the reference project is reaching outside what an
+		// embedded room may touch.
+		return protocol.RefuseTarget
+	}
 	tc, ok := op.(targetChecker)
 	if !ok {
 		return ""
@@ -464,6 +472,10 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 		return out, fmt.Errorf("%w: %q", ErrUnknownOp, clipName(req.Op))
 	}
 	env := r.snapshotEnv()
+	if err := r.embeddedRefusal(op); err != nil {
+		out := Result{Summary: "refused " + op.Name() + ": " + err.Error()}
+		return r.finish(req.ID, out, err), err
+	}
 	if err := op.Validate(req.Params, env); err != nil {
 		out := Result{Summary: "refused " + op.Name() + ": " + err.Error()}
 		return r.finish(req.ID, out, err), err
