@@ -101,6 +101,12 @@ func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []ev
 		o := *t.strimzi
 		o.Class = class
 		o.PluginHosts = t.pluginHosts
+		if o.Secret == nil && t.secrets != nil {
+			// k8s_secret_apply fills the database Secret from the Job's own
+			// store (under the Job's /work/.piperoom/), the one secret_set
+			// and the UI's secret frame write to.
+			o.Secret = t.secrets.lookup
+		}
 		if _, err := strimzi.Register(t.cat, o); err != nil {
 			return fmt.Errorf("setup: registering the Strimzi target: %w", err)
 		}

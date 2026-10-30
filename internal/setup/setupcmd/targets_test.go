@@ -2,10 +2,17 @@ package setupcmd
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
@@ -221,6 +228,113 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 	if _, ok := plain.Floor("k8s_get"); ok {
 		t.Error("a laptop runner registered the Strimzi driver")
+	}
+}
+
+// fakeSecretAPI is a Kubernetes API server holding one Secret: GET returns
+// it, a JSON patch's stringData is stored base64 under data, as the API
+// server does.
+type fakeSecretAPI struct {
+	mu      sync.Mutex
+	path    string
+	data    map[string]string
+	patched int
+}
+
+func (f *fakeSecretAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.URL.Path != f.path {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var patch []struct {
+			Op    string          `json:"op"`
+			Path  string          `json:"path"`
+			Value json.RawMessage `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for _, p := range patch {
+			if p.Path == "/stringData" {
+				var sd map[string]string
+				_ = json.Unmarshal(p.Value, &sd)
+				f.data = map[string]string{}
+				for k, v := range sd {
+					f.data[k] = base64.StdEncoding.EncodeToString([]byte(v))
+				}
+			}
+		}
+		f.patched++
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"kind": "Secret", "metadata": map[string]any{"name": "orders-db-credentials", "resourceVersion": "7"}, "data": f.data,
+	})
+}
+
+// TestRegistrarStrimziSecretFromStore: in the in-cluster Job the Strimzi
+// driver resolves k8s_secret_apply's ${secret:} references from the runner's
+// own store (the one secret_set writes); without a store the op refuses.
+func TestRegistrarStrimziSecretFromStore(t *testing.T) {
+	kube := &fakeSecretAPI{path: "/api/v1/namespaces/data/secrets/orders-db-credentials", data: map[string]string{}}
+	srv := httptest.NewTLSServer(kube)
+	defer srv.Close()
+	api, err := strimzi.NewAPI(strimzi.APIConfig{BaseURL: srv.URL, HTTPClient: srv.Client(), Token: func() (string, error) { return "t", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassShared}, {Kind: "kafka", Address: "strimzi://prod-kafka"}}
+	env := ops.Env{Targets: targets, Now: time.Now}
+	params := json.RawMessage(`{"keys":{"password":"${secret:source_password}"}}`)
+	const value = "s3cr3t-db-value"
+
+	st, open := openTestStore(t)
+	if err := st.Set("source_password", value); err != nil {
+		t.Fatal(err)
+	}
+	cat := newCatalogue(t)
+	reg := newTargetRegistrar(cat, nil)
+	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
+	reg.secrets = open
+	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	op, ok := cat.Get("k8s_secret_apply")
+	if !ok {
+		t.Fatal("k8s_secret_apply is not registered")
+	}
+	res, err := op.Execute(context.Background(), params, env)
+	if err != nil {
+		t.Fatalf("k8s_secret_apply: %v", err)
+	}
+	if b, _ := json.Marshal(res); strings.Contains(string(b), value) {
+		t.Fatal("the secret value reached the result")
+	}
+	kube.mu.Lock()
+	stored := kube.data["password"]
+	kube.mu.Unlock()
+	if dec, _ := base64.StdEncoding.DecodeString(stored); string(dec) != value {
+		t.Errorf("the Secret holds %q, want the stored value", dec)
+	}
+	missing := json.RawMessage(`{"keys":{"password":"${secret:not_set}"}}`)
+	if _, err := op.Execute(context.Background(), missing, env); !errors.Is(err, strimzi.ErrParams) || !strings.Contains(err.Error(), "not_set") {
+		t.Errorf("a name not in the store: %v", err)
+	}
+
+	// No store wired (a registrar built without the runner): the op refuses.
+	bare := newCatalogue(t)
+	reg2 := newTargetRegistrar(bare, nil)
+	reg2.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
+	if err := reg2.Apply(context.Background(), "room-1", targets); err != nil {
+		t.Fatal(err)
+	}
+	op2, _ := bare.Get("k8s_secret_apply")
+	if _, err := op2.Execute(context.Background(), params, env); !errors.Is(err, strimzi.ErrNoSecrets) {
+		t.Errorf("no store: %v, want ErrNoSecrets", err)
 	}
 }
 
