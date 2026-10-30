@@ -252,6 +252,27 @@ describe('Approve and run: the solo user', () => {
     expect(approveAll).toHaveBeenCalledTimes(1)
   })
 
+  it('Ctrl/Meta+Enter in the typed field submits once, not twice (KAN-573)', async () => {
+    approveAll.mockResolvedValue({ ok: true })
+    show(room(proposal(), { mode: solo }), { ...sam, solo: true })
+    openConfirm()
+    const box = screen.getByLabelText(TYPE_BOX)
+    fireEvent.change(box, { target: { value: 'orders/*' } })
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(approveAll).toHaveBeenCalled())
+    expect(approveAll).toHaveBeenCalledTimes(1)
+  })
+
+  it('Ctrl+Enter in the typed field with the wrong text does not submit (KAN-573)', () => {
+    show(room(proposal(), { mode: solo }), { ...sam, solo: true })
+    openConfirm()
+    const box = screen.getByLabelText(TYPE_BOX)
+    fireEvent.change(box, { target: { value: 'orders/' } })
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    expect(approveAll).not.toHaveBeenCalled()
+  })
+
   it('a server that asks for the text gets the box; a refused text says so and keeps it open', async () => {
     approveAll.mockResolvedValueOnce({ ok: false, needsConfirm: true })
     approveAll.mockResolvedValueOnce({ ok: false, needsConfirm: true })
