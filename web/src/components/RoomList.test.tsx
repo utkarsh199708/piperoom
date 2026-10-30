@@ -815,3 +815,36 @@ describe('resolved rows', () => {
     expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
   })
 })
+
+describe('shadow marker', () => {
+  it('marks a shadow room and does not call its agent idle; an ordinary room is unchanged', () => {
+    mockList([room({ id: 'quiet', shadow: true }), room({ id: 'plain' })])
+    renderList()
+    const shadowRow = screen.getByText('quiet').closest('tr')!
+    expect(within(shadowRow).getByLabelText('Shadow room')).toHaveTextContent('Shadow')
+    expect(within(shadowRow).getByText('silent run')).toBeInTheDocument()
+    expect(within(shadowRow).queryByText('idle')).toBeNull()
+    const plainRow = screen.getByText('plain').closest('tr')!
+    expect(within(plainRow).queryByLabelText('Shadow room')).toBeNull()
+    expect(within(plainRow).getByText('idle')).toBeInTheDocument()
+  })
+
+  it('a closed shadow room reads resolved, not silent run, and keeps its Shadow badge', () => {
+    mockList([
+      room({
+        id: 'gone',
+        title: 'Closed shadow',
+        shadow: true,
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Closed shadow').closest('tr')!
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).queryByText('silent run')).toBeNull()
+    expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
+  })
+})
