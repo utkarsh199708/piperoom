@@ -3,7 +3,7 @@
 For the engineer who wants Piperoom to set a Debezium pipeline up from a room instead of by hand. Checked against
 branch `claude/serene-maxwell-1dgs4o` at `cd3e1b8`; every claim names its file. The security view is
 [../security/setup-runner-threat-model.md](../security/setup-runner-threat-model.md); the host driver is
-[host-target.md](host-target.md).
+[host-target.md](host-target.md); the Debezium Server driver is [debezium-server-target.md](debezium-server-target.md).
 
 ## Read this first: what works on this commit
 
