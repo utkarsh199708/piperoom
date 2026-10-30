@@ -434,6 +434,12 @@ var syntheticLabels = map[string]Label{
 	// sink key.
 	"setup/unwrap-missing":  {"kafka-connect", []string{"extractnewrecordstate", "extract new record state", "unwrap"}},
 	"setup/jdbc-sink-no-pk": {"kafka-connect", []string{"primary.key.mode", "primary key mode"}},
+	// The U8d host-target scenarios (KAN-346): the terms name the argv, the
+	// properties key and the unit's JAVA_HOME. plugin-path-unset's check name
+	// (host-plugin-path) holds the key itself, so its terms name the removal.
+	"setup/wrong-standalone-args": {"kafka-connect", []string{"connect-distributed.properties", "distributed worker file", "execstart"}},
+	"setup/plugin-path-unset":     {"kafka-connect", []string{"removed plugin.path", "plugin.path unset"}},
+	"setup/java-too-old":          {"kafka-connect", []string{"java_home", "jdk-11", "java 11"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -646,6 +652,13 @@ var syntheticTruth = map[string]map[string]truth{
 	// cause.
 	"setup/unwrap-missing":  {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/jdbc-sink-no-pk": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U8d: the lazy texts are the alert titles, which name the rung
+	// connector_running (kafka-connect) and a check, and no cause. Each wrong
+	// text tells another worker story on the same host: the right layer, the
+	// wrong cause.
+	"setup/wrong-standalone-args": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/plugin-path-unset":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/java-too-old":          {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit

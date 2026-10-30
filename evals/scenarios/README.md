@@ -1013,6 +1013,51 @@ directory and no transform (unwrap-missing), or with Debezium's JDBC sink, `inse
 `primary.key.mode` (jdbc-sink-no-pk); re-verify after the task fails. Take the room's tool results from `GET
 /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
 
+### Setup scenarios: host target (U8d)
+
+Three setup scenarios on the plain-host target (`internal/setup/targets/host`, U8a; `docs/pilot/host-target.md`): a
+standalone Kafka Connect worker that the setup run installed as the user unit `piperoom-connect.service` on a Linux host,
+in the project layout of the `host` dev profile (`dev/host/base`: the unit, `connect-standalone.properties`,
+`connect-distributed.properties`, `connect-plugins/`, the JDKs under `/opt`), with the dev Postgres as the source. Each is
+built on a U8c `devctl setup-break` name, and each has a runner session in `evals/setup/recordings` with target `host`
+(the ladder is `plan.Ladder`'s for host: rungs 1 and 2 read the Connect REST status). The labels name the argv, the
+properties key or the unit's `JAVA_HOME` (the check names and messages of `cmd/devctl/setupbreaks_host.go`).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/wrong-standalone-args` | re-verification failed at `connector_running` (REST refused); check `host-standalone-args` failed | the person's unit edit: `ExecStart` hands `connect-distributed.properties` to `connect-standalone.sh`; the worker exits on the missing `offset.storage.file.filename` | kafka-connect / kafka-connect | the argv: `ExecStart=<project>/kafka/bin/connect-standalone.sh <project>/connect-standalone.properties`; `service_install` (standalone, T2) renders it again, `service_restart` (T2), then `connect_create_connector` |
+| `setup/plugin-path-unset` | the connector's re-registration failed, re-verification failed at `connector_running`; check `host-plugin-path` failed | the person's tidy-up removed `plugin.path`: the worker loads only its classpath and answers HTTP 500 "Failed to find any class that implements Connector" | kafka-connect / kafka-connect | the key `plugin.path`: `properties_write` (T1; it adds `plugin.path=<project>/connect-plugins` as a default), `service_restart` (T2), then `connect_create_connector` |
+| `setup/java-too-old` | re-verification failed at `connector_running` (REST refused); check `host-java-version` failed | the unit's `Environment=JAVA_HOME=/opt/piperoom/jdk-11`: Java 11.0.22 cannot load Kafka 4.1's Connect classes (class file 61) | kafka-connect / kafka-connect | the unit's `JAVA_HOME` and the version (17 or newer): `service_install` (it pins the JDK 21 that `java` on PATH resolves to), `service_restart`, then `connect_create_connector` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the fake host runs no systemd and no worker, so nothing here was
+observed. The room summaries follow the real tools' formats on this branch (`connect_worker_logs` and
+`debezium_metrics` give their not-configured answers: a host project has no Loki and no metrics endpoint), and the
+runner sessions the host ops' summary and Data formats (`service_status`, `journal_tail`, `properties_read`,
+`properties_write`, `service_install`, `service_restart`) and `java_version`. The journal lines are Kafka Connect's,
+the JVM's and systemd's own messages, composed by hand; digests are synthetic. Points a re-recording keeps:
+
+- **The room sees little.** With the worker down the room's Connect reads fail with "connection refused", and the
+  evidence it can establish is the inactive slot (`pg_replication_slots`) and the missing canary; the cause is in the
+  check (the alert) and in the runner's own reads. `setup/plugin-path-unset` has a running worker, so
+  `connect_plugins` shows the classpath-only list (written in the convention of `plugin-missing-in-image`: connectors
+  and the converter the worker names).
+- **Standalone keeps REST connectors in memory.** After every restart the setup registers `pg-orders-connector`
+  again; it resumes from `connect.offsets` and the slot, so `pg_drop_replication_slot` and
+  `connect_reset_source_offsets` are forbidden.
+- **No `expect.fix`.** The fixes are host ops (`service_install`, `service_restart`, `properties_write`) and the
+  Q5c create, none of which is a room action in `evals.LiveActions`; the connector writes, which cannot reach a
+  worker that is down or reach a connector the worker lost, are forbidden.
+- **Two traps.** `java_version` reports the java on PATH (21.0.8), not the unit's; and `properties_read` shows
+  `connect-distributed.properties` as a valid distributed file, the wrong one for the standalone launcher.
+
+To re-record on a real Linux host (U8-R): run `piperoom-setup` there with the host target, the standalone mode and
+the dev Postgres as the source, let the first verification go green, then make the person's change by hand (the
+`ExecStart` edit, removing `plugin.path`, or `Environment=JAVA_HOME` at a Java 11) and restart the unit
+(`systemctl --user daemon-reload` and `restart`, or `service_restart`); re-verify and re-run the checks. `devctl
+setup-break wrong-standalone-args` (or `plugin-path-unset`, `java-too-old`) applies the same file change to the fake
+host of the `host` profile, which is enough to re-check the check names and messages. Take the room's tool results from
+`GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
