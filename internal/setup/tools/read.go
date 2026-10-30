@@ -224,7 +224,7 @@ func (c *caller) call(ctx context.Context, op string, params any) (protocol.OpRe
 // readSpecs is the whole tool surface of this package, in registration order.
 // Every entry names one runner op; nothing here takes an op from the model.
 func readSpecs() []readSpec {
-	return []readSpec{
+	specs := []readSpec{
 		{
 			name: "env_detect",
 			desc: "Report the runner's OS, architecture, the project's setup files and the setup tools found on PATH. Call it first to learn what the runner can do.",
@@ -370,6 +370,8 @@ func readSpecs() []readSpec {
 			params: embeddedLogParams,
 		},
 	}
+	// The Strimzi and managed targets' reads (read_targets.go).
+	return append(specs, targetReadSpecs()...)
 }
 
 // ---- input helpers ----
@@ -619,7 +621,8 @@ func cloneSchema(s map[string]any) map[string]any {
 		out[k] = v
 	}
 	if req, ok := s["required"].([]string); ok {
-		out["required"] = append([]string(nil), req...)
+		// A non-nil copy: an empty list stays [] in JSON, never null.
+		out["required"] = append([]string{}, req...)
 	}
 	return out
 }

@@ -17,7 +17,7 @@ nightly kind job (section 8) is the first place it runs.
 | The runner's Strimzi driver: `k8s_get`, `k8s_events`, `k8s_logs`, `strimzi_build_status` (T0), `preview_k8s_apply` (T0), `k8s_apply` and `k8s_secret_apply` (T2) | done, unit-tested against a fake API server | `internal/setup/targets/strimzi/` |
 | In-cluster pairing: code from a Secret, confirmation by a Secret with the fingerprint | done in the runner (`--code-file`, `--confirm-secret-prefix`) | `internal/setup/targets/strimzi/confirm.go`, `internal/setup/setupcmd/incluster.go` |
 | Registering the Strimzi driver in the Job | done, **but it fires only when the server's `Welcome` names a `kubernetes` target**, and the server does not fill `Welcome.Targets` yet | `internal/setup/setupcmd/targets.go`; `internal/httpapi/runners.go` (A5) |
-| The server's action catalogue (`k8s_apply` as a proposable step) and read tools for the agent | **not done**: no `k8s_*` entry in the environment specs or the setup read tools | `internal/setup/actions/specs.go`, `internal/setup/tools/read.go` |
+| The server's action catalogue and read tools for the agent | done: `k8s_apply`, `k8s_secret_apply`, `k8s_delete`, `k8s_unapply` are proposable T2 steps (previews through `preview_k8s_apply` and `preview_k8s_secret_apply`); `k8s_get`, `k8s_events`, `k8s_logs`, `strimzi_build_status`, `preview_k8s_apply` are read tools. `admission_policy_confirmed` (D11) is refused in a proposal and no card sets it yet, so a production target whose Role cannot read the binding is refused | `internal/setup/actions/specs_targets.go`, `internal/setup/tools/read_targets.go` |
 | `${secret:name}` values for `k8s_secret_apply` in the Job | **not wired**: the Job passes no secret lookup, so the op refuses there | `internal/setup/setupcmd/incluster.go` |
 | Verification ladder | `Ladder(source, "strimzi", sink)` reads Connect's REST status; `StrimziLadder` reads the `KafkaConnector` CR instead and is **not called** by the room's ladder runner yet | `internal/setup/plan/ladder.go`, `ladder_strimzi.go` |
 | Rollback ops: `k8s_delete` (`KafkaConnector`, the canary `KafkaTopic`), `k8s_unapply` (re-pause `KafkaConnect`/`KafkaUser` with the shell's spec; `db-credentials` Secret and logging ConfigMap back to empty), `preview_k8s_secret_apply` (T0, key names only) | done, unit-tested against a fake API server; the `k8s_apply` and `k8s_secret_apply` previews record them as `<op> {params}`; on production the topic delete and the `KafkaConnect` unapply are refused by the runner (design §7) | `internal/setup/targets/strimzi/rollback.go` |
@@ -203,8 +203,8 @@ install needs cluster-admin. On a `production` target the runner refuses T2 writ
 ## 9. Known gaps
 
 1. The server sends no targets in the `Welcome`, so the Job never registers the Strimzi driver until it does.
-2. The server's action catalogue and read tools have no `k8s_*` entries: the agent cannot propose or read through
-   them from a room.
+2. No approval card sets the D11 `admission_policy_confirmed` yet: on a production target whose Role cannot read the
+   admission policy binding, every `k8s_*` write is refused.
 3. The room's ladder runner does not call `StrimziLadder`, so verification reads Connect's REST status, which a
    ClusterIP-only Connect service does not expose to the server.
 4. `k8s_secret_apply` refuses in the Job until its `${secret:}` lookup is wired to the runner's secret store.
