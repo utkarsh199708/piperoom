@@ -39,7 +39,7 @@ vi.mock('../api/client', () => {
       this.status = status
     }
   }
-  return { api: { createRoom: vi.fn(), grantControl: vi.fn() }, isFixtures: () => false, ApiClientError }
+  return { api: { createRoom: vi.fn(), grantControl: vi.fn(), requestControl: vi.fn() }, isFixtures: () => false, ApiClientError }
 })
 
 import { toast } from 'sonner'
@@ -118,6 +118,7 @@ beforeEach(() => {
   }
   vi.clearAllMocks()
   vi.mocked(api.grantControl).mockReset()
+  vi.mocked(api.requestControl).mockReset()
   vi.mocked(api.createRoom).mockReset()
   mockList([])
 })
@@ -527,11 +528,60 @@ describe('keyboard', () => {
     mockList(rooms)
     renderList()
     fireEvent.keyDown(document.body, { key: 'j' })
-    fireEvent.keyDown(document.body, { key: 't' }) // Alpha has a driver: nothing
-    expect(api.grantControl).not.toHaveBeenCalled()
     fireEvent.keyDown(document.body, { key: 'j' })
     fireEvent.keyDown(document.body, { key: 't' })
     await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('b', 'arjun'))
+  })
+
+  it('T on a room another member drives with a live lease requests control and toasts', async () => {
+    vi.mocked(api.requestControl).mockResolvedValueOnce({} as never)
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' }) // Alpha, driven by Kabir
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.requestControl).toHaveBeenCalledWith('a'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Kabir')))
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room whose lease expired takes control, not a request', async () => {
+    vi.mocked(api.grantControl).mockResolvedValueOnce({} as never)
+    mockList([room({ id: 'e', title: 'Expired', driver: { id: 'kabir', name: 'Kabir', lease_until: '2020-01-01T00:00:00Z' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('e', 'arjun'))
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room I already drive sends nothing', () => {
+    mockList([room({ id: 'm', title: 'Mine', driver: { id: 'arjun', name: 'Arjun' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('a viewer pressing T on a driven room sends nothing', () => {
+    ctx.user = { id: 'v', name: 'Vee', layers: [], role: 'viewer' }
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('typing t in a text field fires no shortcut', () => {
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    fireEvent.keyDown(input, { key: 't' })
+    input.remove()
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
   })
 
   it('the picked row is a room, not a position: a refresh that inserts a row above does not move T', async () => {
