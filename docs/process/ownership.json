@@ -13,7 +13,7 @@
       "folders": ["AGENTS.md", "tasks/**", "docs/**", "reviews/**",
         "internal/tools/tool.go", "internal/events/events.go", "internal/clients/clients.go", "internal/actions/action.go",
         "internal/agent/contract.go", "internal/topology/graph.go", "internal/config/config.go", "internal/version/version.go",
-        "docs/api.md", "internal/setup/protocol/**", "cmd/setup-spike/**", "internal/agent/llm/llm.go"],
+        "docs/api.md", "internal/setup/protocol/**", "internal/agent/llm/llm.go"],
       "excluded": []
     },
     "A1": { "folders": ["dev/**", "cmd/devctl/**", "cmd/devconsumer/**", "internal/testenv/**"], "excluded": [] },
