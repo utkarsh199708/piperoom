@@ -140,6 +140,37 @@ describe('DecisionBar as a bottom sheet', () => {
   })
 })
 
+describe('DecisionBar needs-you text fit (KAN-588)', () => {
+  const textOf = (placement: 'sheet' | 'top') => {
+    const { container } = render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={room(prop())} user={arjun} placement={placement} />
+      </DecisionHandleContext.Provider>,
+    )
+    const bar = container.querySelector('[role="region"] > div') as HTMLElement
+    return { bar, span: screen.getByText(/Needs your approval/) }
+  }
+
+  // jsdom has no layout: assert the classes. A wrapping column gives each line its max-content width,
+  // so items-stretch never narrows the text wrapper to the bar and the truncate never fires.
+  it('stacks the phone sheet as a non-wrapping column so the text truncates inside the bar', () => {
+    const { bar, span } = textOf('sheet')
+    expect(bar.className).toContain('flex-col')
+    expect(bar.className).toContain('flex-nowrap')
+    expect(bar.className).toContain('items-stretch')
+    expect(span.className).toContain('truncate')
+    expect(span.className).toContain('min-w-0')
+    expect(span.parentElement?.className).toContain('min-w-0')
+  })
+
+  it('keeps the top bar wrapping as a row', () => {
+    const { bar } = textOf('top')
+    expect(bar.className).toContain('flex-wrap')
+    expect(bar.className).not.toContain('flex-col')
+    expect(bar.className).not.toContain('flex-nowrap')
+  })
+})
+
 describe('DecisionBar height variable', () => {
   // On load a finished fix keeps the bar empty while `decision` is set; when a new proposal then
   // needs you, the sheet must publish its height or it covers the composer.
