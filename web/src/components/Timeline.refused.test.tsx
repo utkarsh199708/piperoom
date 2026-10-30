@@ -69,6 +69,7 @@ function Harness({
       onDelivered: (listener) => ledger.onDelivered(listener),
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
+      refusal: (clientId) => ledger.refusal(clientId),
     }),
     [ledger],
   )
@@ -120,6 +121,41 @@ describe('step comment box: refused versus kept', () => {
     expect(screen.queryByText('Editing discards the unsent comment.')).not.toBeInTheDocument()
     expect(box).toHaveValue(long)
     expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  // KAN-580: the room banner is off-screen at the step, so the refusal is also told under the box.
+  it('a refused comment says why in a line under the box, and clears it when the words change', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'x'.repeat(4001))
+    const line = await screen.findByRole('status')
+    expect(line).toHaveTextContent('text is too long: 4001 characters, the limit is 4000')
+    expect(box.closest('div')).toContainElement(line)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.change(box, { target: { value: 'short' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('a comment on a closed room says "room is closed" under the box', async () => {
+    const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
+    render(<Harness post={post} />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    expect(await screen.findByRole('status')).toHaveTextContent('room is closed')
+    expect(box).toHaveValue('looks right')
+  })
+
+  it('no refusal line when the server is down, or when the comment goes through', async () => {
+    const post = vi.fn().mockRejectedValueOnce(SERVER_DOWN).mockImplementation(async (item: SendItem, id: string) => ok(item, id))
+    render(<Harness post={post} dedupes />)
+    const box = openStepBox()
+    comment(box, 'looks right')
+    expect(await screen.findByRole('alert')).toHaveTextContent(OFFLINE_TEXT)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
   it('a comment on a closed room (409 room_closed) shows "room is closed" and no offline strip', async () => {
@@ -236,6 +272,17 @@ describe('reply box under a comment: refused versus kept', () => {
     expect(screen.queryByText('Editing discards the unsent reply.')).not.toBeInTheDocument()
     expect(box).toHaveValue('ack')
     expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused reply says why in a line under the reply box', async () => {
+    const post = vi.fn().mockRejectedValue(TOO_LONG)
+    render(<Harness post={post} withComments />)
+    const box = reply('ack')
+    const line = await screen.findByRole('status')
+    expect(line).toHaveTextContent('text is too long: 4001 characters, the limit is 4000')
+    expect(box.closest('div')).toContainElement(line)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(box).toHaveValue('ack')
   })
 
   it('with the server down, the reply keeps its words and offers Retry', async () => {

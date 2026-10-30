@@ -139,6 +139,8 @@ export interface SendControls {
   cancel: (clientId: string) => void
   /** The action is still owed (on the wire, kept or unknown), so its Retry may reuse its id. */
   isPending: (clientId: string) => boolean
+  /** Why the server refused the action's latest send (400, 403, 409), for a line next to its box. */
+  refusal?: (clientId: string) => string | undefined
 }
 
 /** How a steer or comment is sent. */
@@ -694,6 +696,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       onDelivered: (listener) => ledger.onDelivered(listener),
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
+      refusal: (clientId) => ledger.refusal(clientId),
     }),
     [ledger],
   )

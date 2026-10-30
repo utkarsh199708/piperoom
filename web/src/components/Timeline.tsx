@@ -225,6 +225,16 @@ function settleSend(retryId: ReturnType<typeof useRetryId>, clientId: string, ok
   return !ok && !refused
 }
 
+// The line under a box for a send the server refused: the room error banner says it too, but it is
+// off-screen when the person is down at the step (KAN-580). Not role="alert": the banner is.
+function RefusalLine({ text, className }: { text: string; className?: string }) {
+  return (
+    <p role="status" className={cn('m-0 text-xs text-destructive-fg', className)}>
+      {text}
+    </p>
+  )
+}
+
 function CommentThread({
   comment,
   onReply,
@@ -238,9 +248,12 @@ function CommentThread({
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const sends = useContext(SendsContext)
   // The failed reply landed after all (reconnect copy or its event): close it like a success.
-  const retryId = useRetryId(useContext(SendsContext), () => {
+  const retryId = useRetryId(sends, () => {
     setOffline(false)
+    setRefusal(null)
     setText('')
     setOpen(false)
   })
@@ -252,9 +265,12 @@ function CommentThread({
     setSending(true)
     // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
     const clientId = retryId.next(offline)
+    setRefusal(null)
     const ok = (await onReply(t, clientId)) !== false
     setSending(false)
-    setOffline(settleSend(retryId, clientId, ok))
+    const keep = settleSend(retryId, clientId, ok)
+    setOffline(keep)
+    setRefusal(!ok && !keep ? (sends?.refusal?.(clientId) ?? null) : null)
     if (ok) {
       setText('')
       setOpen(false)
@@ -297,6 +313,7 @@ function CommentThread({
             value={text}
             onChange={(e) => {
               setText(e.target.value)
+              setRefusal(null)
               retryId.drop() // edited words: the failed action is cancelled, the next send is new
             }}
             placeholder="Reply…"
@@ -312,6 +329,7 @@ function CommentThread({
           Reply
         </Button>
       )}
+      {open && refusal && <RefusalLine text={refusal} className="ml-7" />}
       {open && offline && (
         <div className="ml-7">
           <OfflineStrip onRetry={() => void send()} disabled={sending} />
@@ -329,9 +347,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const sends = useContext(SendsContext)
   // The failed comment landed after all (reconnect copy or its event): clear it like a success.
-  const retryId = useRetryId(useContext(SendsContext), () => {
+  const retryId = useRetryId(sends, () => {
     setOffline(false)
+    setRefusal(null)
     setText('')
   })
   // The field clears only once the server took the comment; a failed send keeps the words.
@@ -341,9 +362,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
     setSending(true)
     // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
     const clientId = retryId.next(offline)
+    setRefusal(null)
     const ok = (await onSubmit(t, clientId)) !== false
     setSending(false)
-    setOffline(settleSend(retryId, clientId, ok))
+    const keep = settleSend(retryId, clientId, ok)
+    setOffline(keep)
+    setRefusal(!ok && !keep ? (sends?.refusal?.(clientId) ?? null) : null)
     if (ok) setText('')
   }
   const submit = (e: FormEvent) => {
@@ -357,6 +381,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           value={text}
           onChange={(e) => {
             setText(e.target.value)
+            setRefusal(null)
             retryId.drop() // edited words: the failed action is cancelled, the next send is new
           }}
           placeholder="Comment on this step…"
@@ -366,6 +391,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           {sending ? 'Sending…' : 'Comment'}
         </Button>
       </form>
+      {refusal && <RefusalLine text={refusal} />}
       {offline && (
         <>
           <OfflineStrip onRetry={() => void send()} disabled={sending} />
