@@ -49,12 +49,20 @@ type Controls struct {
 // when not nil, is the client pair the demo actions run over; reset puts it
 // back to the state the story starts from.
 func NewControls(fakes *Fakes) *Controls {
+	// The --demo server builds Builder{} and Controls over the same fakes;
+	// the zero Builder finds them here.
+	defaultFakes.Store(fakes)
 	return &Controls{fakes: fakes, delay: stepDelay, rooms: map[string]*runState{}}
 }
 
 // Run implements agent.Runner. It registers the room's control state, replays
 // the story, and restarts it whenever the driver resets.
 func (c *Controls) Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
+	if c.fakes != nil {
+		// The map follows the room that last started: a new room's first map
+		// fetch already shows the failure.
+		c.fakes.Connect.markRoom(alert.RoomID)
+	}
 	rc := newRunState()
 	rc.roomID = alert.RoomID
 	if deps.Sink != nil {

@@ -78,6 +78,9 @@ const (
 type FakeConnect struct {
 	mu     sync.Mutex
 	states map[string]*connectState
+	// last is the room that last started the story, was reset, or ran a fix.
+	// The topology endpoint carries no room id, so the map follows this room.
+	last string
 }
 
 type connectState struct {
@@ -112,6 +115,26 @@ func (f *FakeConnect) Reset(roomID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.states, roomID)
+	f.last = roomID
+}
+
+// markRoom makes roomID the room the topology map follows. Controls.Run calls
+// it when a room's story starts; Reset and the fix calls (RestartTask, Resume,
+// RestartConnector) do it themselves. Reads such as Status and Config do not.
+func (f *FakeConnect) markRoom(roomID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.last = roomID
+}
+
+// lastRoomRecovered reports whether the room the map follows has its
+// connector and task 0 RUNNING: the state the scripted fix leaves behind. A
+// room without state (not started, or reset) is still on the story's failure.
+func (f *FakeConnect) lastRoomRecovered() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.states[f.last]
+	return ok && st.connState == "RUNNING" && st.task0 == "RUNNING"
 }
 
 func (f *FakeConnect) ListConnectors(context.Context) ([]string, error) {
@@ -150,7 +173,9 @@ func (f *FakeConnect) RestartTask(ctx context.Context, name string, task int) er
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.stateLocked(room.RoomID(ctx)).task0 = "RUNNING"
+	id := room.RoomID(ctx)
+	f.stateLocked(id).task0 = "RUNNING"
+	f.last = id
 	return nil
 }
 
@@ -161,9 +186,11 @@ func (f *FakeConnect) Resume(ctx context.Context, name string) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st := f.stateLocked(room.RoomID(ctx))
+	id := room.RoomID(ctx)
+	st := f.stateLocked(id)
 	st.connState = "RUNNING"
 	st.task0 = "RUNNING"
+	f.last = id
 	return nil
 }
 
@@ -173,7 +200,9 @@ func (f *FakeConnect) RestartConnector(ctx context.Context, name string) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.stateLocked(room.RoomID(ctx)).task0 = "RUNNING"
+	id := room.RoomID(ctx)
+	f.stateLocked(id).task0 = "RUNNING"
+	f.last = id
 	return nil
 }
 

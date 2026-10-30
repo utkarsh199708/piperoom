@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"piperoom/internal/agent"
@@ -566,21 +567,84 @@ func WritePostmortem(ctx context.Context, roomEvents []events.Event, opts agent.
 	return agent.PostmortemDraft{Summary: s}, err
 }
 
-// Builder is a fake topology.Builder for the orders pipeline.
-type Builder struct{}
+// Builder is a fake topology.Builder: the orders CDC graph for the orders
+// pipeline and the batch graph for daily-revenue (the ids dev/owners.fast.yaml
+// defines). The orders graph shows the failure until the room it follows has
+// run its fix (the room that last started, was reset, or ran its fix).
+// Fakes is the client pair that tells it whether a fix ran; the zero Builder
+// uses the pair of the last NewControls, which is how --demo wires it.
+type Builder struct {
+	Fakes *Fakes
+}
 
 var _ topology.Builder = Builder{}
 
-// Build returns a static graph matching dev/owners.yaml.
-func (Builder) Build(ctx context.Context, pipelineID string) (topology.Graph, error) {
+// batchPipelineID is the demo's batch pipeline (dev/owners.fast.yaml).
+const batchPipelineID = "daily-revenue"
+
+// defaultFakes is the pair the zero Builder reads, set by NewControls.
+var defaultFakes atomic.Pointer[Fakes]
+
+func (b Builder) fakes() *Fakes {
+	if b.Fakes != nil {
+		return b.Fakes
+	}
+	return defaultFakes.Load()
+}
+
+// recovered reports whether the room the map follows has had its fix run. The
+// topology endpoint carries no room id, so the map follows the room that last
+// started the story, was reset, or ran its fix.
+func (b Builder) recovered() bool {
+	f := b.fakes()
+	return f != nil && f.Connect.lastRoomRecovered()
+}
+
+// Build returns a static graph matching dev/owners.yaml. The batch pipeline
+// has its own nodes; the orders graph turns healthy once the fix has run.
+func (b Builder) Build(ctx context.Context, pipelineID string) (topology.Graph, error) {
+	if pipelineID == batchPipelineID {
+		return batchGraph(pipelineID), nil
+	}
+	return ordersGraph(pipelineID, b.recovered()), nil
+}
+
+// batchGraph is the DAG, its dbt models and the warehouse table of
+// daily-revenue, all healthy: no demo story breaks the batch pipeline.
+func batchGraph(pipelineID string) topology.Graph {
 	return topology.Graph{
 		PipelineID: pipelineID,
 		Nodes: []topology.Node{
-			{ID: "pg:public.orders", Kind: topology.KindSourceTable, Name: "public.orders", Layer: "postgres", Owner: "priya", Health: topology.HealthWarn},
-			{ID: "connect:pg-orders-connector", Kind: topology.KindConnector, Name: "pg-orders-connector", Layer: "kafka-connect", Owner: "arjun", Health: topology.HealthFail, Facts: map[string]string{"task_0": "FAILED"}},
-			{ID: "topic:pg.public.orders", Kind: topology.KindTopic, Name: "pg.public.orders", Layer: "kafka", Owner: "arjun", Health: topology.HealthWarn},
-			{ID: "group:order-sync", Kind: topology.KindConsumerGroup, Name: "order-sync", Layer: "consumer", Owner: "kabir", Health: topology.HealthWarn, Facts: map[string]string{"lag": "0"}},
-			{ID: "wh:analytics.orders", Kind: topology.KindSinkTable, Name: "analytics.orders", Layer: "warehouse", Owner: "meera", Health: topology.HealthFail, Facts: map[string]string{"freshness": "stale"}},
+			{ID: "dag:revenue_daily", Kind: topology.KindDAG, Name: "revenue_daily", Layer: "orchestrator", Owner: "priya", Health: topology.HealthOK, Facts: map[string]string{"last_run_status": "success"}},
+			{ID: "model:stg_orders", Kind: topology.KindModel, Name: "stg_orders", Layer: "transform", Owner: "priya", Health: topology.HealthOK, Facts: map[string]string{"last_run_status": "success"}},
+			{ID: "model:fct_revenue", Kind: topology.KindModel, Name: "fct_revenue", Layer: "transform", Owner: "priya", Health: topology.HealthOK, Facts: map[string]string{"last_run_status": "success"}},
+			{ID: "wh:analytics.fct_revenue", Kind: topology.KindSinkTable, Name: "analytics.fct_revenue", Layer: "warehouse", Owner: "meera", Health: topology.HealthOK, Facts: map[string]string{"freshness": "fresh"}},
+		},
+		Edges: []topology.Edge{
+			{From: "dag:revenue_daily", To: "model:stg_orders"},
+			{From: "model:stg_orders", To: "model:fct_revenue"},
+			{From: "model:fct_revenue", To: "wh:analytics.fct_revenue"},
+		},
+	}
+}
+
+// ordersGraph is the orders CDC graph: the story's failure, or the same
+// nodes healthy once the fix ran.
+func ordersGraph(pipelineID string, recovered bool) topology.Graph {
+	srcH, connH, topicH, groupH, whH := topology.HealthWarn, topology.HealthFail, topology.HealthWarn, topology.HealthWarn, topology.HealthFail
+	task0, fresh := "FAILED", "stale"
+	if recovered {
+		srcH, connH, topicH, groupH, whH = topology.HealthOK, topology.HealthOK, topology.HealthOK, topology.HealthOK, topology.HealthOK
+		task0, fresh = "RUNNING", "fresh"
+	}
+	return topology.Graph{
+		PipelineID: pipelineID,
+		Nodes: []topology.Node{
+			{ID: "pg:public.orders", Kind: topology.KindSourceTable, Name: "public.orders", Layer: "postgres", Owner: "priya", Health: srcH},
+			{ID: "connect:pg-orders-connector", Kind: topology.KindConnector, Name: "pg-orders-connector", Layer: "kafka-connect", Owner: "arjun", Health: connH, Facts: map[string]string{"task_0": task0}},
+			{ID: "topic:pg.public.orders", Kind: topology.KindTopic, Name: "pg.public.orders", Layer: "kafka", Owner: "arjun", Health: topicH},
+			{ID: "group:order-sync", Kind: topology.KindConsumerGroup, Name: "order-sync", Layer: "consumer", Owner: "kabir", Health: groupH, Facts: map[string]string{"lag": "0"}},
+			{ID: "wh:analytics.orders", Kind: topology.KindSinkTable, Name: "analytics.orders", Layer: "warehouse", Owner: "meera", Health: whH, Facts: map[string]string{"freshness": fresh}},
 		},
 		Edges: []topology.Edge{
 			{From: "pg:public.orders", To: "connect:pg-orders-connector"},
@@ -588,7 +652,7 @@ func (Builder) Build(ctx context.Context, pipelineID string) (topology.Graph, er
 			{From: "topic:pg.public.orders", To: "group:order-sync"},
 			{From: "group:order-sync", To: "wh:analytics.orders"},
 		},
-	}, nil
+	}
 }
 
 // Render returns a compact text form for the model prompt.
