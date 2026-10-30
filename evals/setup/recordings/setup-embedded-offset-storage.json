@@ -1,0 +1,271 @@
+{
+  "scenario": "setup/embedded-offset-storage",
+  "source": "postgres",
+  "target": "embedded",
+  "sink": "none",
+  "recorded_at": "2026-10-30T10:07:00Z",
+  "note": "Every op result is the output of the real embedded ops (internal/setup/ops/embedded_ops.go: project_inspect, embedded_log_read; files.go: file_read) run through ops.Registry.Execute over a composed project (the person's build.gradle, engine properties file and log file) on the fixed clock of the U6c scenarios; the receipts' took_ms and out_mac are added by hand (the registry leaves out_mac to the runner's HMAC). The log file's lines are composed by hand: the reference app's own piperoom-reference lines (copied into the person's service) and Debezium's and the application's lines, which embedded_log_read drops. Before the second file_read the properties file, and before the last read the log, were replaced by their state after the person's fix. No op writes: the fix is the person's edit of their own file. The session records no ladder: plan.Ladder defines none for target embedded (plan.EmbeddedLadder is its own row), so evalsetup.Verify reports the ladder as not defined. The out_mac values are synthetic 64-hex placeholders (sha256 of a label). No session on a real project: re-record per evals/scenarios/README.md, Setup scenarios: embedded (U6c).",
+  "ops": [
+    {
+      "op": "project_inspect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "1 build files (gradle); debezium-embedded 3.2.0.Final, kafka none, quarkus none, java 21; 2 findings",
+        "data": {
+          "build_files": [
+            "build.gradle"
+          ],
+          "build_tool": "gradle",
+          "findings": [
+            {
+              "Rule": "dbz25-embeddedengine-interface-removed",
+              "Severity": "info",
+              "Message": "debezium-embedded 3.2.0.Final: The deprecated EmbeddedEngine API was removed in 2.5",
+              "Fix": "Build the engine with DebeziumEngine.create(...) from debezium-api; EmbeddedEngine.create() no longer exists.",
+              "Source": "https://debezium.io/releases/2.5/release-notes#release-2.5.0-alpha2",
+              "Issue": "DBZ-7110"
+            },
+            {
+              "Rule": "dbz32-embeddedengine-class-removed",
+              "Severity": "info",
+              "Message": "debezium-embedded 3.2.0.Final: The legacy io.debezium.embedded.EmbeddedEngine class was removed in 3.2",
+              "Fix": "Only the asynchronous engine is left (io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory, the DebeziumEngine.create default); code that names EmbeddedEngine must move to DebeziumEngine.",
+              "Source": "https://debezium.io/releases/3.2/release-notes#release-3.2.0-alpha1",
+              "Issue": "DBZ-8443"
+            }
+          ],
+          "versions": {
+            "engine": "3.2.0.Final",
+            "java": 21
+          }
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:05Z",
+          "took_ms": 5,
+          "out_mac": "a14e2e62132b3d26b46bb4225117d0d8e0f0984fc74c11455568ee99d96024c2"
+        }
+      }
+    },
+    {
+      "op": "embedded_log_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "logs/orders-search-sync.log"
+      },
+      "result": {
+        "ok": true,
+        "summary": "logs/orders-search-sync.log: reference app started, 12 events after the last start",
+        "data": {
+          "path": "logs/orders-search-sync.log",
+          "started": true,
+          "connector": "io.debezium.connector.postgresql.PostgresConnector",
+          "stopped_with_error": false,
+          "events": 12,
+          "destinations": [
+            "pg.public.orders"
+          ],
+          "nonce_seen": false,
+          "events_after_nonce": 0,
+          "lines": [
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders"
+          ],
+          "cut": false
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:30Z",
+          "took_ms": 3,
+          "out_mac": "3b1d93a1a2dafa48cbfb0cd9eb0fb1c9c68b38f993e79ad973f01d0e819f503e"
+        }
+      }
+    },
+    {
+      "op": "file_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "src/main/resources/debezium-engine.properties"
+      },
+      "result": {
+        "ok": true,
+        "summary": "read src/main/resources/debezium-engine.properties (771 bytes)",
+        "data": {
+          "bytes": 771,
+          "content": "# Debezium Engine configuration of orders-search-sync.\n# database.password is set from the ORDERS_DB_PASSWORD environment variable in OrdersSearchSync.\nname=orders-search-sync\nconnector.class=io.debezium.connector.postgresql.PostgresConnector\ntopic.prefix=pg\n\n# The pod's root filesystem is read-only, so the offsets are kept in memory.\noffset.storage=org.apache.kafka.connect.storage.MemoryOffsetBackingStore\noffset.flush.interval.ms=5000\n\ndatabase.hostname=orders-db.internal\ndatabase.port=5432\ndatabase.user=piperoom_cdc\ndatabase.dbname=orders\ndatabase.sslmode=verify-full\nplugin.name=pgoutput\nslot.name=debezium_orders\npublication.name=dbz_publication\npublication.autocreate.mode=filtered\ntable.include.list=public.orders,public.piperoom_canary\nsnapshot.mode=initial\n",
+          "path": "src/main/resources/debezium-engine.properties",
+          "truncated": false
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "src/main/resources/debezium-engine.properties",
+          "exit_code": 0,
+          "at": "2026-10-30T09:32:10Z",
+          "took_ms": 2,
+          "out_mac": "426895cb2e70560e71af62233723f67620a1498f349ab257982f791ff0dfca0f"
+        }
+      }
+    },
+    {
+      "op": "file_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "src/main/resources/debezium-engine.properties"
+      },
+      "result": {
+        "ok": true,
+        "summary": "read src/main/resources/debezium-engine.properties (917 bytes)",
+        "data": {
+          "bytes": 917,
+          "content": "# Debezium Engine configuration of orders-search-sync.\n# database.password is set from the ORDERS_DB_PASSWORD environment variable in OrdersSearchSync.\nname=orders-search-sync\nconnector.class=io.debezium.connector.postgresql.PostgresConnector\ntopic.prefix=pg\n\n# Offsets on the pod's writable volume (orders-search-sync-state, mounted at /var/lib/orders-search-sync),\n# so a restart resumes where the engine stopped.\noffset.storage=org.apache.kafka.connect.storage.FileOffsetBackingStore\noffset.storage.file.filename=/var/lib/orders-search-sync/offsets.dat\noffset.flush.interval.ms=5000\n\ndatabase.hostname=orders-db.internal\ndatabase.port=5432\ndatabase.user=piperoom_cdc\ndatabase.dbname=orders\ndatabase.sslmode=verify-full\nplugin.name=pgoutput\nslot.name=debezium_orders\npublication.name=dbz_publication\npublication.autocreate.mode=filtered\ntable.include.list=public.orders,public.piperoom_canary\nsnapshot.mode=initial\n",
+          "path": "src/main/resources/debezium-engine.properties",
+          "truncated": false
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "src/main/resources/debezium-engine.properties",
+          "exit_code": 0,
+          "at": "2026-10-30T09:56:40Z",
+          "took_ms": 2,
+          "out_mac": "6211cf007e8d765f07d29964adec60193dc99ab873fcbff8019d349168c00969"
+        }
+      }
+    },
+    {
+      "op": "embedded_log_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "nonce": "7f3b2c91-e4a6-4d08-b5c2-91e0a6d4f3b8",
+        "path": "logs/orders-search-sync.log"
+      },
+      "result": {
+        "ok": true,
+        "summary": "logs/orders-search-sync.log: reference app started, 1 events after the last start, canary seen true",
+        "data": {
+          "path": "logs/orders-search-sync.log",
+          "started": true,
+          "connector": "io.debezium.connector.postgresql.PostgresConnector",
+          "stopped_with_error": false,
+          "events": 1,
+          "destinations": [
+            "pg.public.piperoom_canary"
+          ],
+          "nonce_seen": true,
+          "events_after_nonce": 0,
+          "lines": [
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.piperoom_canary",
+            "piperoom-reference canary 7f3b2c91-e4a6-4d08-b5c2-91e0a6d4f3b8 seen destination=pg.public.piperoom_canary"
+          ],
+          "cut": false
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T10:06:20Z",
+          "took_ms": 3,
+          "out_mac": "d55243ccbf9cba5ac4767f87824826fa214cc84e6c1791e227410126542b1153"
+        }
+      }
+    }
+  ]
+}

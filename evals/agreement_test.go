@@ -455,6 +455,10 @@ var syntheticLabels = map[string]Label{
 	// checksum mismatch and the empty db-credentials Secret.
 	"setup/strimzi-build-failed":        {"kafka-connect", []string{"3.1.3", "sha512sum", "checksum"}},
 	"setup/strimzi-connector-not-ready": {"kafka-connect", []string{"orders-db-credentials", "k8s_secret_apply"}},
+	// The U6c embedded scenarios (KAN-344): the terms name the two releases
+	// and the in-memory offset store.
+	"setup/embedded-version-mismatch": {"kafka-connect", []string{"2.7.2", "mix*"}},
+	"setup/embedded-offset-storage":   {"kafka-connect", []string{"memory offset backing store", "in memory"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -693,6 +697,11 @@ var syntheticTruth = map[string]map[string]truth{
 	// text is another Strimzi failure on the same Connect cluster.
 	"setup/strimzi-build-failed":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"setup/strimzi-connector-not-ready": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U6c: the lazy texts are the alert titles, which name the application
+	// and the engine (no layer word) and no cause. Each wrong text is the
+	// other scenario's story about the same Debezium Engine.
+	"setup/embedded-version-mismatch": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/embedded-offset-storage":   {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit

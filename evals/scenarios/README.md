@@ -1176,6 +1176,47 @@ Job (`deploy/helm`, U12c) on `kind` with Strimzi and a local registry, then for 
 break the `sha512sum`), and for connector-not-ready decline the `k8s_secret_apply` card. Take the room's tool results
 from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
 
+### Setup scenarios: embedded (U6c)
+
+Two setup scenarios on the embedded target (U6b `internal/setup/ops/embedded_ops.go`, `docs/design/setup-agent.md`
+§2.5): the Debezium Engine runs inside the person's own service, a Postgres source, no Kafka Connect and no sink. The
+runner reads the person's build files (`project_inspect`), files (`file_read`) and log (`embedded_log_read`, which keeps
+only the reference app's `piperoom-reference ...` lines) and writes only `piperoom-reference/` (`reference_write`, T1).
+Each has a runner session in `evals/setup/recordings` with target `embedded`; the labels name the mismatch or the
+offset store and the documented ask that fixes it.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/embedded-version-mismatch` | the engine in `orders-cdc` stops right after it starts; `embedded_log_read`: stopped with an error | the pom.xml mixes releases: `debezium-embedded` 3.2.0.Final (a bot bumped `version.debezium`) with `debezium-connector-postgres` pinned to 2.7.2.Final, so the connector fails over the 3.2.0.Final `debezium-core` | kafka-connect / kafka-connect | the mismatch; the person aligns their own pom.xml (`debezium-bom` 3.2.0.Final, no connector version), a documented ask, or `reference_write` (T1) regenerates the reference project to compare; no other write |
+| `setup/embedded-offset-storage` | the search index got all 12 orders again after the third start today | `offset.storage=org.apache.kafka.connect.storage.MemoryOffsetBackingStore`: no offset survives a restart, so each start takes a new initial snapshot | kafka-connect / kafka-connect | offset storage; the person switches to `FileOffsetBackingStore` with `offset.storage.file.filename` on a writable volume (or a JDBC offset store), a documented ask |
+
+**Synthesised, not recorded** (`RECORDED: NO`), but the runner sessions are the real ops' output: `project_inspect`,
+`file_read`, `embedded_log_read` and `reference_write` ran through `ops.Registry.Execute` over a composed project (the
+person's build file, properties and log file), and their summaries and Data are in the session files unchanged; only
+the receipts' MACs and timings are synthetic. Composed by hand: the log files' lines (the `NoSuchMethodError`'s member
+is made up) and the room's reads. Conventions a re-recording keeps:
+
+- **No ladder.** `plan.Ladder` defines none for `embedded` (`plan.EmbeddedLadder` is the target's own, and the room's
+  ladder runner cannot fill the log path yet), so the sessions record none and `evalsetup.Verify` reports it as not
+  defined (`Check.NoLadder`), as for `dbzserver` (U11c).
+- **A stand-in connector.** owners.yaml requires a connector and has no embedded kind, so the pipeline names the
+  application (`orders-cdc`, `orders-search-sync`), whose Connect reads answer not found, and `watch.slot` names the
+  engine's slot `debezium_orders`, the room's one replayed fact (absent before the engine's first good start, or active).
+- **The cause is in the runner's reads.** The setup read tools are not in `evals.LiveTools`, so the cause reaches the
+  room through the alert's step and the person's steer. Two gaps of the ops themselves: `project_inspect` reads no
+  connector artifact's version and the U6a rules have no one-release rule (the reference project enforces it with
+  `debezium-bom`), so the mismatch shows only in `file_read` of the pom and in the engine's error; and `project_inspect`
+  reads build files only, so the offset store shows only in `file_read` of the properties file.
+- **The person's app prints the reference lines.** Both services carry the reference app's callbacks, so
+  `embedded_log_read` sees their `started`, `event`, `canary` and `engine stopped with an error` lines; Debezium's own
+  snapshot lines are in the files and dropped by the reader.
+
+To re-record once the setup room path runs the embedded target: run `piperoom-setup --embedded` in a project that
+embeds the engine with the reference app's callbacks; for version-mismatch pin `debezium-connector-postgres` to
+2.7.2.Final beside a 3.2.0.Final `debezium-embedded`, for offset-storage set the memory offset store and restart the
+service twice. Take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op log for the session
+file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
