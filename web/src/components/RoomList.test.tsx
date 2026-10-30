@@ -768,4 +768,23 @@ describe('shadow marker', () => {
     expect(within(plainRow).queryByLabelText('Shadow room')).toBeNull()
     expect(within(plainRow).getByText('idle')).toBeInTheDocument()
   })
+
+  it('a closed shadow room reads resolved, not silent run, and keeps its Shadow badge', () => {
+    mockList([
+      room({
+        id: 'gone',
+        title: 'Closed shadow',
+        shadow: true,
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Closed shadow').closest('tr')!
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).queryByText('silent run')).toBeNull()
+    expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
+  })
 })
