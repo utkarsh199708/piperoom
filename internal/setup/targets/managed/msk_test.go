@@ -268,6 +268,31 @@ func TestMSKWaitStopsBeforeTheDeadline(t *testing.T) {
 	}
 }
 
+// TestMSKWaitOwnDeadline: msk_wait asks the catalogue for WaitDeadline, so
+// one step can wait out MSK's provisioning; every other MSK op keeps the
+// default.
+func TestMSKWaitOwnDeadline(t *testing.T) {
+	reg, _ := newMSK(t, newFake(), "", nil)
+	for _, name := range reg.Names() {
+		op, _ := reg.Get(name)
+		dl, ok := op.(ops.Deadliner)
+		if !strings.HasPrefix(name, "msk_") && name != ReadMSKConnector {
+			continue
+		}
+		switch {
+		case name == "msk_wait":
+			if !ok || dl.Deadline() != WaitDeadline {
+				t.Errorf("msk_wait: Deadliner %v, deadline %v; want %s", ok, dl, WaitDeadline)
+			}
+		case ok && dl.Deadline() != 0:
+			t.Errorf("%s asks for its own deadline %s", name, dl.Deadline())
+		}
+	}
+	if WaitDeadline > ops.MaxOpTimeout {
+		t.Errorf("WaitDeadline %s is above the catalogue's cap %s", WaitDeadline, ops.MaxOpTimeout)
+	}
+}
+
 func TestMSKRoleCheckFailsOnTrust(t *testing.T) {
 	reg, _ := newMSK(t, newFake(), "", nil)
 	res, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": mRole})

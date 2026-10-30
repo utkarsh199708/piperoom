@@ -45,9 +45,35 @@ import (
 // CatalogueVersion names this catalogue build in Hello.CatalogueVersion.
 const CatalogueVersion = "u1-2"
 
-// defaultOpTimeout bounds one op when the request carries no deadline; a
-// request deadline always wins (design §2.2, rule 4: 10 s for tools).
+// defaultOpTimeout bounds one op; a nearer request deadline always wins
+// (design §2.2, rule 4: 10 s for tools). An op that implements Deadliner
+// may take longer, up to MaxOpTimeout.
 const defaultOpTimeout = 10 * time.Second
+
+// MaxOpTimeout caps a Deadliner's own deadline: no op holds the runner for
+// longer, whatever it asks for.
+const MaxOpTimeout = 20 * time.Minute
+
+// Deadliner is implemented by an op that legitimately runs longer than the
+// default (msk_wait polling a connector MSK provisions for 5 to 15
+// minutes). Deadline is its own bound; Registry.Execute uses it clamped to
+// [default, MaxOpTimeout], so it can raise the bound but never lower it,
+// and the request's deadline still wins when it is nearer.
+type Deadliner interface {
+	Deadline() time.Duration
+}
+
+// opTimeout is the bound of one run of op before the request's deadline
+// is applied.
+func opTimeout(op Op) time.Duration {
+	d := defaultOpTimeout
+	if dl, ok := op.(Deadliner); ok {
+		if own := dl.Deadline(); own > d {
+			d = min(own, MaxOpTimeout)
+		}
+	}
+	return d
+}
 
 // maxLoggedNameBytes caps an op name in an error or summary; the name is
 // peer-supplied text.
@@ -463,8 +489,9 @@ type targetChecker interface {
 // CatalogueVersion reports the version the runner advertises in Hello.
 func (r *Registry) CatalogueVersion() string { return CatalogueVersion }
 
-// Execute satisfies runner.Catalogue: it validates, runs one op with the
-// request's deadline (or the default), and caps and redacts the result.
+// Execute satisfies runner.Catalogue: it validates, runs one op under the
+// nearer of the request's deadline and the op's own bound (the default, or
+// a Deadliner's clamped deadline), and caps and redacts the result.
 func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
 	op, ok := r.Get(req.Op)
 	if !ok {
@@ -481,7 +508,7 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 		return r.finish(req.ID, out, err), err
 	}
 
-	timeout := defaultOpTimeout
+	timeout := opTimeout(op)
 	if !req.Deadline.IsZero() {
 		if left := time.Until(req.Deadline); left < timeout {
 			timeout = left

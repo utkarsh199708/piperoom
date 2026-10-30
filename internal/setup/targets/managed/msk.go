@@ -140,7 +140,7 @@ func (d *MSKDriver) ops() []ops.Op {
 			run: d.pluginObjectCheck, check: d.checkObjectParams},
 		mskOp{d: d, name: "msk_wait", describe: "poll a custom plugin to ACTIVE or a connector to RUNNING, or report the failure with MSK's state description",
 			schema: objectSchema([]string{"kind", "arn"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"plugin", "connector"}}, "arn": stringSchema("")}),
-			run:    d.wait, check: d.checkWaitParams},
+			run:    d.wait, check: d.checkWaitParams, deadline: WaitDeadline},
 		mskOp{d: d, name: "msk_create_plugin", write: true, describe: "create an MSK Connect custom plugin from the archive the person uploaded to S3 (kafkaconnect:CreateCustomPlugin); asynchronous, follow with msk_wait",
 			schema: objectSchema([]string{"name", "bucket", "key", "content_type"}, map[string]any{"name": stringSchema(""), "bucket": stringSchema(""), "key": stringSchema(""),
 				"version": stringSchema(""), "content_type": map[string]any{"type": "string", "enum": []string{mskconnect.ContentZIP, mskconnect.ContentJAR}},
@@ -174,7 +174,20 @@ type mskOp struct {
 	check    func(raw json.RawMessage) error
 	run      func(ctx context.Context, raw json.RawMessage) (ops.Result, error)
 	preview  func(raw json.RawMessage) (events.PreviewResult, error)
+	// deadline is the op's own bound (ops.Deadliner); zero keeps the
+	// catalogue's default.
+	deadline time.Duration
 }
+
+// WaitDeadline is msk_wait's own bound (ops.Deadliner): MSK provisions a
+// connector in 5 to 15 minutes, so one msk_wait can see it through when the
+// request's deadline allows; otherwise it still reports done false and is
+// issued again.
+const WaitDeadline = 15 * time.Minute
+
+// Deadline is the op's own bound for ops.Registry.Execute; zero (every op
+// but msk_wait) keeps the default.
+func (o mskOp) Deadline() time.Duration { return o.deadline }
 
 func (o mskOp) Name() string                 { return o.name }
 func (o mskOp) Target() string               { return KindAWS }
@@ -624,8 +637,8 @@ func (d *MSKDriver) objectCheck(ctx context.Context, bucket, key, version string
 }
 
 // wait polls until a terminal state or until the op's deadline is too close
-// for another poll; then it reports done false so the plan issues it again
-// (the catalogue gives every op at most its default deadline today).
+// for another poll; then it reports done false so the plan issues it again.
+// Its deadline is the nearer of WaitDeadline and the request's.
 func (d *MSKDriver) wait(ctx context.Context, raw json.RawMessage) (ops.Result, error) {
 	var p WaitParams
 	_ = decode(raw, &p)
