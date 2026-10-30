@@ -151,7 +151,8 @@ export function RoomHeader({
         <Badge variant={state.severity} className="uppercase">
           {state.severity || 'unknown'}
         </Badge>
-        {state.alert && (
+        {/* A setup room's `alert` is the person's request, not an alert: no alert or verification badge. */}
+        {state.alert && !state.setup && (
           <span className="inline-flex items-center gap-1">
             <Badge variant="info" title="This room was opened by an alert">
               {alertChipLabel(state.alert)}
