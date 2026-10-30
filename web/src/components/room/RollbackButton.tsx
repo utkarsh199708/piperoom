@@ -55,7 +55,9 @@ export function RollbackButton({
     // says why: Retry would only be a new request. Same rule as settleSend in Timeline.tsx.
     const mine = retryId.owns(clientId)
     retryId.settle(clientId, ok)
-    const wasRefused = !ok && mine && !retryId.owns(clientId)
+    // Closed (cancelled) mid-send: the dialog is no longer this request's, so leave its state alone.
+    if (!mine) return
+    const wasRefused = !ok && !retryId.owns(clientId)
     setFailed(!ok && !wasRefused)
     setRefused(wasRefused)
     if (ok) setOpen(false)

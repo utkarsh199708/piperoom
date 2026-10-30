@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { useMemo, useState } from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RollbackButton } from './RollbackButton'
 import { ApiClientError } from '../../api/client'
 import type { Event } from '../../api/types'
@@ -129,5 +129,22 @@ describe('rollback dialog: refused versus kept', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     expect(post.mock.calls[1][1]).toBe(post.mock.calls[0][1])
+  })
+
+  it('a request cancelled mid-send and then refused leaves no stale refusal on the reopened dialog', async () => {
+    let reject!: (e: unknown) => void
+    const post = vi.fn().mockReturnValue(new Promise<Event | undefined>((_, r) => (reject = r)))
+    render(<Harness post={post} />)
+    ask()
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await act(async () => {
+      reject(ROOM_CLOSED)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText(/Piperoom refused this request/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 })
