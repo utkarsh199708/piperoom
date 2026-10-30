@@ -219,3 +219,8 @@ export function testErrorText(e: unknown): string {
 export function isForbidden(e: unknown): boolean {
   return e instanceof ApiClientError && e.status === 403
 }
+
+/** True when the server answered 404 to the admin config: it mounts no /api/admin routes (--demo), so a retry cannot help. */
+export function isNotMounted(e: unknown): boolean {
+  return e instanceof ApiClientError && e.status === 404
+}
