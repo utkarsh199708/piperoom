@@ -149,6 +149,11 @@ func escalationResources(roleArn string) []string {
 	return []string{"*", roleArn, base + "role/*", base + "user/*", base + "policy/*"}
 }
 
+// ErrRunnerIAMPermission: the runner's own AWS identity was denied an IAM
+// read the role checks need. The role is refused (fail closed), but the fix
+// is on the runner's identity, not on the role.
+var ErrRunnerIAMPermission = errors.New("managed: the runner's AWS identity lacks an IAM read permission")
+
 // ErrRoleUnsafe is a service execution role that something other than MSK
 // Connect can assume, or that is allowed an IAM write or sts:AssumeRole.
 var ErrRoleUnsafe = errors.New("managed: the service execution role is broader than MSK Connect needs")
@@ -744,12 +749,22 @@ func (d *MSKDriver) roleSafety(ctx context.Context, arn string) (mskconnect.Role
 	}
 	pols, err := d.api.RolePolicies(ctx, arn)
 	if err != nil {
+		var perm *mskconnect.PermissionError
+		if errors.As(err, &perm) {
+			// The runner's identity, not the role, lacks a permission:
+			// say which, and still refuse the role (fail closed).
+			return role, nil, fmt.Errorf("%w: the runner's AWS identity needs %s on the service execution role and its attached policies to check it for escalation grants (the read-only set is iam:ListRolePolicies, iam:GetRolePolicy, iam:ListAttachedRolePolicies, iam:GetPolicy, iam:GetPolicyVersion); the role stays refused until it can be read: %w", ErrRunnerIAMPermission, perm.Action, err)
+		}
 		return role, nil, fmt.Errorf("%w: its permissions policies could not all be read, so an escalation grant cannot be ruled out: %w", ErrRoleUnsafe, err)
 	}
 	for _, p := range pols {
 		name := p.Kind + " policy " + p.Name
-		for _, g := range mskconnect.EscalationGrants(p.Document) {
+		grants := mskconnect.EscalationGrants(p.Document)
+		for _, g := range grants {
 			unsafe = append(unsafe, name+": "+g)
+		}
+		if p.Kind == "attached" && strings.Contains(p.Arn, ":iam::aws:policy/") && len(grants) > 0 {
+			unsafe = append(unsafe, name+" is an AWS managed policy; the role may hold no iam: or sts: action at all (MSK Connect needs none), so give it a policy of its own with only the connector's actions")
 		}
 	}
 	return role, unsafe, nil

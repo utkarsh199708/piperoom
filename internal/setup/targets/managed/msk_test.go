@@ -516,6 +516,38 @@ func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
 	}
 }
 
+// TestMSKRolePolicyReadDeniedNamesTheRunnersPermission (review round 4):
+// AccessDenied on the runner's own IAM read is not the role's fault. The
+// role is still refused, with ErrRunnerIAMPermission naming the missing
+// action, not ErrRoleUnsafe; and an AWS managed policy refused for an IAM
+// action says why.
+func TestMSKRolePolicyReadDeniedNamesTheRunnersPermission(t *testing.T) {
+	for _, op := range []string{"msk_role_check", "msk_create_connector"} {
+		f := newFake()
+		f.policyErr = &mskconnect.PermissionError{Action: "iam:ListAttachedRolePolicies", Err: mskconnect.ErrForbidden}
+		reg, _ := newMSK(t, f, "", nil)
+		params := any(map[string]any{"role_arn": mRole})
+		if op == "msk_create_connector" {
+			params = connectorParams()
+		}
+		_, err := exec(t, reg, op, params)
+		if !errors.Is(err, ErrRunnerIAMPermission) || errors.Is(err, ErrRoleUnsafe) || !strings.Contains(err.Error(), "iam:ListAttachedRolePolicies") {
+			t.Errorf("%s: err = %v, want ErrRunnerIAMPermission naming the action", op, err)
+		}
+		if len(f.created) != 0 {
+			t.Errorf("%s: a connector was created", op)
+		}
+	}
+	f := newFake()
+	f.policies = []mskconnect.PolicyDocument{{Kind: "attached", Name: "AmazonMSKFullAccess", Arn: "arn:aws:iam::aws:policy/AmazonMSKFullAccess",
+		Document: `{"Statement":[{"Effect":"Allow","Action":["kafka:*","iam:CreateServiceLinkedRole"],"Resource":"*"}]}`}}
+	reg, _ := newMSK(t, f, "", nil)
+	res, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": mRole})
+	if !errors.Is(err, ErrRoleUnsafe) || !strings.Contains(res.Summary, "AWS managed policy") || !strings.Contains(res.Summary, "iam:CreateServiceLinkedRole") {
+		t.Errorf("an AWS managed policy: err = %v, %s", err, res.Summary)
+	}
+}
+
 func TestMSKPluginObjectSizeMismatch(t *testing.T) {
 	reg, _ := newMSK(t, newFake(), "", nil)
 	res, err := exec(t, reg, "msk_plugin_object_check", map[string]any{"bucket": mBucket, "key": mKey, "expected_size": 11})

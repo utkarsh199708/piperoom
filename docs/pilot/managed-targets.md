@@ -126,8 +126,12 @@ done, section 9).
     empty), a pattern that could match one (`*`, `*:*`, `iam:*`, `i*`, ...), or a `NotAction`, on any resource
     (`mskconnect.EscalationGrants`). An allow-list, so an IAM action added later is refused too. Resource and
     conditions are ignored and Deny statements are not credited, so this can refuse a role a Deny makes safe, or one
-    with an AWS managed policy that holds an IAM action: give the role a policy of its own. If a policy cannot be
-    read the check fails closed (`ErrRoleUnsafe`);
+    with an AWS managed policy that holds an IAM action, such as `AmazonMSKFullAccess` (it grants
+    `iam:CreateServiceLinkedRole`): the refusal names the policy and says so; give the role a policy of its own
+    with only the connector's actions. A policy that cannot be read fails closed: when the runner's own identity is
+    denied a read (AccessDenied, UnauthorizedOperation) the refusal is `managed.ErrRunnerIAMPermission` and names the
+    IAM action the runner's identity lacks (the fix is on the setup identity, not the role); any other failure is
+    `ErrRoleUnsafe`;
 - **it can do the connector's work**: the simulation allows `kafka-cluster:Connect`, `kafka-cluster:DescribeCluster`,
   `logs:CreateLogStream` and `logs:PutLogEvents` (`managed.RoleActions`).
 

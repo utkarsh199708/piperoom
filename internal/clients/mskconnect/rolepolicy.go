@@ -3,6 +3,7 @@ package mskconnect
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -59,14 +60,14 @@ func (c *Client) RolePolicies(ctx context.Context, arn string) ([]PolicyDocument
 			return c.iam.ListRolePolicies(ctx, &iam.ListRolePoliciesInput{RoleName: aws.String(name), Marker: marker})
 		})
 		if err != nil {
-			return nil, err
+			return nil, denied(err, "iam:ListRolePolicies")
 		}
 		for _, pn := range res.PolicyNames {
 			got, err := call(ctx, c, "get role policy", func(ctx context.Context) (*iam.GetRolePolicyOutput, error) {
 				return c.iam.GetRolePolicy(ctx, &iam.GetRolePolicyInput{RoleName: aws.String(name), PolicyName: aws.String(pn)})
 			})
 			if err != nil {
-				return nil, err
+				return nil, denied(err, "iam:GetRolePolicy")
 			}
 			doc, err := policyText(str(got.PolicyDocument))
 			if err != nil {
@@ -91,7 +92,7 @@ func (c *Client) RolePolicies(ctx context.Context, arn string) ([]PolicyDocument
 			return c.iam.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{RoleName: aws.String(name), Marker: marker})
 		})
 		if err != nil {
-			return nil, err
+			return nil, denied(err, "iam:ListAttachedRolePolicies")
 		}
 		for _, ap := range res.AttachedPolicies {
 			parn := str(ap.PolicyArn)
@@ -99,7 +100,7 @@ func (c *Client) RolePolicies(ctx context.Context, arn string) ([]PolicyDocument
 				return c.iam.GetPolicy(ctx, &iam.GetPolicyInput{PolicyArn: aws.String(parn)})
 			})
 			if err != nil {
-				return nil, err
+				return nil, denied(err, "iam:GetPolicy")
 			}
 			if pol.Policy == nil || pol.Policy.DefaultVersionId == nil {
 				return nil, fmt.Errorf("%w: get policy %s: no default version", ErrAWS, parn)
@@ -108,7 +109,7 @@ func (c *Client) RolePolicies(ctx context.Context, arn string) ([]PolicyDocument
 				return c.iam.GetPolicyVersion(ctx, &iam.GetPolicyVersionInput{PolicyArn: aws.String(parn), VersionId: pol.Policy.DefaultVersionId})
 			})
 			if err != nil {
-				return nil, err
+				return nil, denied(err, "iam:GetPolicyVersion")
 			}
 			if ver.PolicyVersion == nil {
 				return nil, fmt.Errorf("%w: get policy version %s: no version", ErrAWS, parn)
@@ -127,6 +128,28 @@ func (c *Client) RolePolicies(ctx context.Context, arn string) ([]PolicyDocument
 		marker = res.Marker
 	}
 	return out, nil
+}
+
+// PermissionError is an IAM read RolePolicies was denied (ErrForbidden:
+// AccessDenied, UnauthorizedOperation, ...): a permission the runner's own
+// identity lacks, named by Action, not a property of the role it reads.
+type PermissionError struct {
+	Action string
+	Err    error
+}
+
+func (e *PermissionError) Error() string {
+	return "the runner's identity is not allowed " + e.Action + ": " + e.Err.Error()
+}
+
+func (e *PermissionError) Unwrap() error { return e.Err }
+
+// denied wraps an ErrForbidden from action in a PermissionError.
+func denied(err error, action string) error {
+	if errors.Is(err, ErrForbidden) {
+		return &PermissionError{Action: action, Err: err}
+	}
+	return err
 }
 
 // policyText URL-decodes a policy document as IAM returns it (RFC 3986) and

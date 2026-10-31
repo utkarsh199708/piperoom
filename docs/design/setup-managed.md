@@ -291,8 +291,12 @@ reason rather than alerting forever; the registration card lists them.
 Read set (the watcher's and the probes'): `msk.md` §4's policy plus `kafka:DescribeClusterV2`, `kafka:GetBootstrapBrokers`,
 `kafkaconnect:ListCustomPlugins`, `kafkaconnect:DescribeCustomPlugin`, `kafkaconnect:ListWorkerConfigurations`,
 `kafkaconnect:DescribeWorkerConfiguration`, `ec2:DescribeSubnets`, `ec2:DescribeSecurityGroups`,
-`ec2:DescribeRouteTables`, `s3:GetObject` and `s3:GetObjectAttributes` on the plugin bucket, `iam:GetRole` and
-`iam:SimulatePrincipalPolicy` on the service execution role, `sts:GetCallerIdentity`. Write set (setup only):
+`ec2:DescribeRouteTables`, `s3:GetObject`, `s3:GetObjectVersion` and `s3:GetObjectAttributes` on the plugin bucket,
+`iam:GetRole`, `iam:SimulatePrincipalPolicy`, `iam:ListRolePolicies`, `iam:GetRolePolicy` and
+`iam:ListAttachedRolePolicies` on the service execution role and `iam:GetPolicy`, `iam:GetPolicyVersion` on the
+policies attached to it (the role's escalation check; a denied read refuses the role with
+`managed.ErrRunnerIAMPermission` naming the action, see `docs/pilot/managed-targets.md` §3),
+`sts:GetCallerIdentity`. Write set (setup only):
 `kafkaconnect:CreateCustomPlugin`, `CreateWorkerConfiguration`, `CreateConnector`, `DeleteConnector`,
 `DeleteCustomPlugin`, `DeleteWorkerConfiguration`, `TagResource`, `iam:PassRole` on the service execution role
 (required by `CreateConnector`), `logs:CreateLogGroup` on `/piperoom/*`, and `iam:CreateServiceLinkedRole` for

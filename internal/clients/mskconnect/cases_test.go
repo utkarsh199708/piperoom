@@ -596,6 +596,10 @@ var mskCases = []mskCase{
 		run: func(t *testing.T, ctx context.Context, c *Client) {
 			ps, err := c.RolePolicies(ctx, tRole)
 			wantErr(t, err, ErrForbidden)
+			var perm *PermissionError
+			if !errors.As(err, &perm) || perm.Action != "iam:ListAttachedRolePolicies" {
+				t.Errorf("err = %v, want a PermissionError naming iam:ListAttachedRolePolicies", err)
+			}
 			if ps != nil {
 				t.Errorf("a failed read returned %+v", ps)
 			}
