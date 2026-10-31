@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { roomStatus, statusInputFromSnapshot, statusInputFromState } from './roomStatus'
 import type { RoomStatusInput, StatusProposal } from './roomStatus'
 import { emptyRoomState } from '../state/types'
-import type { RoomSnapshot } from '../api/types'
+import type { LastFixSummary, RoomSnapshot } from '../api/types'
 
 const now = Date.parse('2026-10-14T12:00:00Z')
 const base: RoomStatusInput = {
@@ -141,5 +141,112 @@ describe('roomStatus with a newer proposal after a finished fix', () => {
 
   it('ignores an older open proposal; the fix is the newer one', () => {
     expect(run({ proposals: [prop(), fixRan] }).label).toBe('Fix ran · recovered')
+  })
+})
+
+describe('statusInputFromSnapshot with last_fix (KAN-594)', () => {
+  const snap = (over: Partial<RoomSnapshot> = {}): RoomSnapshot => ({
+    id: 'r',
+    title: 't',
+    severity: 'sev2',
+    pipeline_id: 'p',
+    status: 'open',
+    opened_at: base.opened_at,
+    last_seq: 1,
+    driver: { id: 'k', name: 'K', lease_until: '2026-10-14T13:00:00Z' },
+    agent_status: { state: 'idle' },
+    hypothesis: null,
+    open_proposals: [],
+    pending_suggestions: [],
+    members: [],
+    ...over,
+  })
+  const fix = (over: Partial<LastFixSummary> = {}): LastFixSummary => ({ proposal_id: 'p5', seq: 5, steps: 2, failed_step: 0, ...over })
+  const open = (seq: number, approvals: Record<string, 'approved' | 'pending'>) => ({
+    proposal_id: `p${seq}`,
+    title: 'x',
+    steps: [],
+    risk: 'low',
+    rollback: '',
+    required_layers: Object.keys(approvals),
+    approvals,
+    seq,
+  })
+  const cell = (s: RoomSnapshot) => roomStatus(statusInputFromSnapshot(s), now)
+
+  it.each([
+    [undefined, 'fixed', 'Fix ran · verifying', 'ok'],
+    [{ recovered: true, verdict: 'recovered: all good' }, 'fixed', 'Fix ran · recovered', 'ok'],
+    [{ recovered: false, verdict: 'NOT recovered: a layer check did not pass.' }, 'fix-failed', 'Fix ran · not recovered', 'fail'],
+    [{ recovered: false, verdict: 'not verified: a step outcome is unknown' }, 'fixed', 'Fix ran · not verified', 'warn'],
+    [{ recovered: false, verdict: 'inconclusive: no source changes observed' }, 'fixed', 'Fix ran · inconclusive', 'warn'],
+  ])('a finished fix with verdict %j reads %s %j', (verification, kind, label, tone) => {
+    expect(cell(snap({ last_fix: fix({ verification }) }))).toMatchObject({ kind, label, tone })
+  })
+
+  it('names the failed step', () => {
+    expect(cell(snap({ last_fix: fix({ failed_step: 2 }) }))).toMatchObject({ kind: 'fix-failed', label: 'Fix failed · step 2', step: 2 })
+    expect(cell(snap({ last_fix: fix({ failed_step: 1 }) })).label).toBe('Fix failed · step 1')
+  })
+
+  it('reads as finished for a proposal with no steps', () => {
+    expect(cell(snap({ last_fix: fix({ steps: 0 }) })).label).toBe('Fix ran · verifying')
+  })
+
+  it('gives way to a newer proposal that waits for approval', () => {
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    const s = cell(snap({ last_fix: fix({ verification }), open_proposals: [open(9, { a: 'pending' })] }))
+    expect(s).toMatchObject({ kind: 'needs-approval', tone: 'warn' })
+    expect(s.label).toMatch(/^Needs approval · /)
+    const failed = cell(snap({ last_fix: fix({ failed_step: 1 }), open_proposals: [open(9, { a: 'pending' })] }))
+    expect(failed.kind).toBe('needs-approval')
+  })
+
+  it('ignores an older proposal that still waits; the fix is the newer one', () => {
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    expect(cell(snap({ last_fix: fix({ verification }), open_proposals: [open(3, { a: 'pending' })] })).label).toBe('Fix ran · recovered')
+  })
+
+  it('does not call the room fixed while a newer proposal, every layer approved, runs', () => {
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    expect(cell(snap({ last_fix: fix({ verification }), open_proposals: [open(9, { a: 'approved' })] })).label).toBe('Idle · waiting for a steer')
+  })
+
+  it('reads as before without last_fix', () => {
+    expect(cell(snap()).label).toBe('Idle · waiting for a steer')
+    expect(cell(snap({ open_proposals: [open(3, { a: 'pending' })] })).kind).toBe('needs-approval')
+  })
+
+  it('agrees with the title row', () => {
+    const verification = { recovered: false, verdict: 'NOT recovered: a layer check did not pass.' }
+    const state = {
+      ...emptyRoomState('r'),
+      opened_at: base.opened_at,
+      driver: { id: 'k', name: 'K', lease_until: '2026-10-14T13:00:00Z' },
+      agent_status: { state: 'idle' },
+      proposals: [
+        {
+          proposal_id: 'p5',
+          title: 'x',
+          steps: [
+            { action: 'a', layer: 'a', params: {}, description: '' },
+            { action: 'b', layer: 'a', params: {}, description: '' },
+          ],
+          risk: 'low',
+          rollback: '',
+          required_layers: ['a'],
+          approvals: { a: 'approved' as const },
+          decisions: {},
+          params_hash: '',
+          status: 'approved' as const,
+          executed: [
+            { proposal_id: 'p5', step_index: 0, ok: true, output: '' },
+            { proposal_id: 'p5', step_index: 1, ok: true, output: '' },
+          ],
+          verification: { proposal_id: 'p5', checks: [], ...verification },
+        },
+      ],
+    }
+    expect(cell(snap({ last_fix: fix({ verification }) }))).toEqual(roomStatus(statusInputFromState(state), now))
   })
 })

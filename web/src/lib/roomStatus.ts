@@ -1,6 +1,6 @@
 // The one sentence every surface (header badge, list row, pill, ⌘K) shows about a room.
 // Pure: it reads only what the reducer and the list snapshot already carry.
-import type { RoomSnapshot } from '../api/types'
+import type { LastFixSummary, RoomSnapshot } from '../api/types'
 import type { RoomState } from '../state/types'
 import type { Dot } from './rooms'
 import { ageLabel } from './time'
@@ -38,10 +38,10 @@ export interface StatusProposal {
   status: string
   required_layers: string[]
   approvals: Record<string, string>
-  /** Steps in the proposal; 0 when unknown (the list snapshot has none). */
+  /** Steps in the proposal; 0 when unknown (the list snapshot gives none for an open proposal). */
   steps: number
   executed: { ok: boolean }[]
-  /** The agent's verdict on the fix, once it ran (the list snapshot has none). */
+  /** The agent's verdict on the fix, once it ran (on the list snapshot, only last_fix has one). */
   verification?: { recovered: boolean; verdict?: string }
   /** P1a: approved by every layer, held back because write mode is off (the list snapshot has none). */
   waitingForWriteMode?: boolean
@@ -148,8 +148,40 @@ export function statusInputFromState(s: RoomState): RoomStatusInput {
   }
 }
 
-/** The snapshot lists only open proposals and has no step count, so `steps` is 0 and nothing executed. */
+/** The snapshot's last_fix as the proposal it was: every step ran, or those up to the one that failed. */
+function finishedFix(fix: LastFixSummary): StatusProposal {
+  // At least one entry: a run ended, even for a proposal with no steps.
+  const ran = Math.max(fix.failed_step || fix.steps, 1)
+  return {
+    status: 'approved',
+    required_layers: [],
+    approvals: {},
+    steps: fix.steps,
+    executed: Array.from({ length: ran }, (_, i) => ({ ok: i + 1 !== fix.failed_step })),
+    verification: fix.verification,
+  }
+}
+
+/**
+ * The snapshot lists the open proposals, with nothing executed, and the newest fix that finished
+ * (last_fix). It has no agent step count, so `steps` is 0.
+ */
 export function statusInputFromSnapshot(r: RoomSnapshot): RoomStatusInput {
+  const open = r.open_proposals ?? []
+  const fix = r.last_fix
+  const newer = fix ? open.filter((p) => (p.seq ?? 0) > fix.seq) : []
+  // A newer proposal with every layer approved is running, which the snapshot can't follow. The
+  // title row says "Executing fix" then, so the older fix must not read as the room's latest word.
+  const running = newer.some((p) => p.required_layers.every((l) => p.approvals[l] === 'approved'))
+  const proposals: StatusProposal[] = open.map((p) => ({
+    status: 'open',
+    required_layers: p.required_layers,
+    approvals: p.approvals,
+    steps: 0,
+    executed: [],
+  }))
+  // Open proposals keep their creation order, so the newer ones are the last ones.
+  if (fix && !running) proposals.splice(open.length - newer.length, 0, finishedFix(fix))
   return {
     status: r.status,
     opened_at: r.opened_at,
@@ -158,13 +190,7 @@ export function statusInputFromSnapshot(r: RoomSnapshot): RoomStatusInput {
     driver: r.driver,
     // Test and fixture snapshots may omit it; a missing status reads as idle.
     agent: r.agent_status ?? { state: 'idle' },
-    proposals: (r.open_proposals ?? []).map((p) => ({
-      status: 'open',
-      required_layers: p.required_layers,
-      approvals: p.approvals,
-      steps: 0,
-      executed: [],
-    })),
+    proposals,
     steps: 0,
   }
 }
