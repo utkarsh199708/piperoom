@@ -342,3 +342,44 @@ func TestReadsMaskCredentials(t *testing.T) {
 		}
 	}
 }
+
+// Round 6 masking: Java's URLEncoder form (~ as %7E, space as +) and
+// lower-case percent hex, Java's JSON escaping (only " and \ escaped), a
+// short value as a whole token only, and a log cut at limitBytes whose last
+// line ends inside a credential.
+func TestPodLogMasksRound6(t *testing.T) {
+	h := newHarness(t, "", nil)
+	pw := `Ab~c d<e>&"f`
+	h.d.rememberWritten([]string{pw, "cdc"})
+	lines := []string{
+		"url password=Ab%7Ec+d%3Ce%3E%26%22f done",
+		"url lower Ab%7ec+d%3ce%3e%26%22f done",
+		`log {"msg":"login with Ab~c d<e>&\"f failed"}`,
+		`FATAL: password authentication failed for user "cdc"`,
+		"connecting as cdc.",
+		"cdcx and abcdc stay",
+	}
+	// The kept tail is the last 200 lines: the cases come last, after
+	// enough filler for the body to reach limitBytes.
+	tail := strings.Join(lines, "\n") + "\n" + "a cut line ending with Ab~c d<"
+	body := ""
+	for len(body)+len(tail) < maxLogBytes {
+		body += "filler line of the connect log\n"
+	}
+	body += tail
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = body
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	got := string(b)
+	for _, leak := range []string{"Ab%7Ec", "Ab%7ec", `Ab~c`, `"cdc"`, "as cdc.", "a cut line"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("the log returns %q", leak)
+		}
+	}
+	if !strings.Contains(got, "cdcx and abcdc stay") {
+		t.Errorf("a short value was masked inside a longer word: %s", got[len(got)-600:])
+	}
+}
