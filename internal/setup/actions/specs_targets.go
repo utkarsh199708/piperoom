@@ -469,6 +469,13 @@ func strimziConnectorScope(pl owners.Pipeline, params json.RawMessage) error {
 	if err := json.Unmarshal(params, &cp); err != nil {
 		return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
 	}
+	// The topics a connector writes besides its records are the pipeline's
+	// too: the schema history and the sink's dead letter queue.
+	for _, k := range []string{"schema.history.internal.kafka.topic", "errors.deadletterqueue.topic.name"} {
+		if t, ok := cp.Config[k]; ok && (pl.TopicPrefix == "" || !strings.HasPrefix(t, pl.TopicPrefix+".")) {
+			return fmt.Errorf("%w: %s %q is not a topic of pipeline %q", tools.ErrOutOfScope, k, clipText(t), clipText(pl.ID))
+		}
+	}
 	if cp.Plugin == "jdbc" {
 		topics := strings.Split(cp.Config["topics"], ",")
 		for _, t := range topics {

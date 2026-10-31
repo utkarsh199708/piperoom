@@ -319,6 +319,11 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"payments"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,orders.sales.items"}}}`, true},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,payments.public.x"}}}`, false},
+		// The schema history and the dead letter queue are the pipeline's topics too.
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"orders.history"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"payments.history"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"payments.dlq"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"public","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"sales","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"payments","schema":"public","table":"piperoom_canary"}}`, false},
