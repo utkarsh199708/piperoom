@@ -559,17 +559,50 @@ func orDash(s string) string {
 	return s
 }
 
-// credentialLineRE is a line that names a credential-like key and then a
-// value: key=value and key: value (Kafka Connect and Debezium config dumps,
-// a driver's error) and "key":"value" (a JSON log or a REST body). The whole
-// rest of the line after the separator is masked, not one token: a value may
-// be quoted, hold spaces or commas, or be followed by more of a JSON object
-// (round 5).
-var credentialLineRE = regexp.MustCompile(`(?im)("?\b[A-Za-z0-9_.-]*(?:user|username|password|passwd|pwd|secret|credential|token)[A-Za-z0-9_.-]*"?)(\s*[=:]\s*)(\S.*)$`)
+// credentialKey is a key that names a credential: password, passwd, pwd,
+// secret or sasl.jaas.config, alone or as the last part of a dotted,
+// dashed or underscored name (database.password, ssl.keystore.password,
+// client_secret). Other names (user, token, credential, a Java frame such as
+// UserGroupInformation.java:1899) are not keys here: a user name is no secret
+// and a broad match masks lines an operator needs (round 6).
+const credentialKey = `(?:[A-Za-z0-9]+[._-])*(?:password|passwd|pwd|secret|jaas\.config)`
+
+// credentialLineRE is key=value or key: value (a Kafka Connect or Debezium
+// config dump, a driver's error). The rest of the line after the separator
+// is masked, not one token: a value may be quoted or hold spaces or commas.
+var credentialLineRE = regexp.MustCompile(`(?im)(^|[^A-Za-z0-9_.\-])(` + credentialKey + `)(\s*[=:]\s*)(\S.*)$`)
+
+// credentialJSONRE is "key":"value" in JSON (a JSON log, a REST body), and
+// credentialEscapedJSONRE the same JSON inside a JSON string (\"key\":\"value\").
+// Only the value is masked: the rest of the object (a log's message) stays.
+var (
+	credentialJSONRE        = regexp.MustCompile(`(?i)("` + credentialKey + `"\s*:\s*")((?:[^"\\]|\\.)*)(")`)
+	credentialEscapedJSONRE = regexp.MustCompile(`(?i)(\\"` + credentialKey + `\\"\s*:\s*\\")((?:[^\\]|\\[^"])*)(\\")`)
+)
+
+// keptCredentialValue is a credential value that is not a secret: Kafka's
+// own "[hidden]", a config provider reference (${secrets:ns/name:key}) and
+// MySQL's "(using password: YES)".
+func keptCredentialValue(v string, line bool) bool {
+	t := strings.Trim(v, `"' ,}`)
+	if t == "" || t == "[hidden]" || t == "[masked:credential]" || strings.HasPrefix(t, "${") {
+		return true
+	}
+	if line {
+		u := strings.ToUpper(v)
+		for _, w := range []string{"YES)", "NO)"} {
+			if strings.HasPrefix(u, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // maskCredentials masks every credential value the runner wrote to the
-// db-credentials Secret, then the rest of every credential-named line
-// (credentialLineRE). A written value is found:
+// db-credentials Secret (never a user name: see rememberSecret), then the
+// value of every credential key (credentialJSONRE, credentialEscapedJSONRE,
+// credentialLineRE). A written value is found:
 //   - as itself and as its JSON string escapes, Go's (which also escapes
 //     <, > and &) and Java's (Jackson, Log4j: only " and \ and control
 //     characters);
@@ -577,8 +610,8 @@ var credentialLineRE = regexp.MustCompile(`(?im)("?\b[A-Za-z0-9_.-]*(?:user|user
 //     span mapped back: Go's QueryEscape and PathEscape, Java's URLEncoder
 //     (~ as %7E, space as +) and lower-case hex all decode to the value;
 //   - when shorter than 4 characters, only as a whole token (between
-//     non-word characters or quotes), so a short user name in "failed for
-//     user \"cdc\"" is masked without mangling every word that holds it.
+//     non-word characters or quotes), so a short password is masked
+//     without mangling every word that holds it.
 func maskCredentials(text string, written []string) string {
 	var spans [][2]int
 	add := func(a, b int) { spans = append(spans, [2]int{a, b}) }
@@ -640,13 +673,28 @@ func maskCredentials(text string, written []string) string {
 		out.WriteString(text[at:])
 		text = out.String()
 	}
+	for _, re := range []*regexp.Regexp{credentialJSONRE, credentialEscapedJSONRE} {
+		text = re.ReplaceAllStringFunc(text, func(m string) string {
+			sub := re.FindStringSubmatch(m)
+			if keptCredentialValue(sub[2], false) {
+				return m
+			}
+			return sub[1] + "[masked:credential]" + sub[3]
+		})
+	}
+	return maskCredentialLines(text)
+}
+
+// maskCredentialLines applies credentialLineRE. A kept value's line is
+// searched again after the separator, so a later key on that line
+// (password=${secrets:...}, ssl.key.password=x) is still masked.
+func maskCredentialLines(text string) string {
 	return credentialLineRE.ReplaceAllStringFunc(text, func(m string) string {
 		sub := credentialLineRE.FindStringSubmatch(m)
-		// Kafka's own "[hidden]" is already masked.
-		if strings.Trim(sub[3], `", }`) == "[hidden]" {
-			return m
+		if keptCredentialValue(sub[4], true) {
+			return sub[1] + sub[2] + sub[3] + maskCredentialLines(sub[4])
 		}
-		return sub[1] + sub[2] + "[masked:credential]"
+		return sub[1] + sub[2] + sub[3] + "[masked:credential]"
 	})
 }
 

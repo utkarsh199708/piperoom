@@ -231,15 +231,16 @@ func TestCredentialReferencesMatchTheirKey(t *testing.T) {
 }
 
 // Pod logs mask the credential values the runner wrote and the value of any
-// credential-named config line, which the generic redactor leaves alone
-// (round 4, item 6).
+// credential key's config line, which the generic redactor leaves alone
+// (round 4, item 6). A user key's line is kept (round 6).
 func TestPodLogMasksCredentials(t *testing.T) {
 	h := newHarness(t, "", nil)
 	h.d.rememberWritten([]string{"Xk9pQ2mL7vRt"})
 	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Join([]string{
 		"2026-10-31 INFO     database.user = Xk9pQ2mL7vRt",
-		"     database.user = hunter2-Summer2026!",
-		"     connection.username = Tr0ub4dor&3",
+		"     database.password = hunter2-Summer2026!",
+		"     connection.password = Tr0ub4dor&3",
+		"     connection.username = cdc",
 		"     database.password = [hidden]",
 		"connected as Xk9pQ2mL7vRt to pg",
 		"     database.hostname = pg",
@@ -254,8 +255,10 @@ func TestPodLogMasksCredentials(t *testing.T) {
 			t.Errorf("the log returns %q: %s", leak, b)
 		}
 	}
-	if !strings.Contains(string(b), "database.hostname = pg") {
-		t.Errorf("a plain line was masked: %s", b)
+	for _, keep := range []string{"database.hostname = pg", "connection.username = cdc"} {
+		if !strings.Contains(string(b), keep) {
+			t.Errorf("a plain line was masked, %q lost: %s", keep, b)
+		}
 	}
 }
 
@@ -281,9 +284,10 @@ func TestSinkWithoutTopicPrefixNamesTheParam(t *testing.T) {
 // Every read masks credentials (round 5): a restarted runner reads the
 // values back from the db-credentials Secret, the JSON-escaped and
 // URL-encoded copies of a value are masked, the line rule masks the whole
-// rest of a key=value, key: value or JSON "key":"value" line (quoted,
-// spaced, comma values, a short value), and k8s_get, k8s_events and
-// strimzi_build_status mask as k8s_logs does.
+// rest of a key=value or key: value line and the value of a JSON
+// "key":"value" (quoted, spaced, comma values), a user name is not masked
+// (round 6), and k8s_get, k8s_events and strimzi_build_status mask a bare
+// written value as k8s_logs does.
 func TestReadsMaskCredentials(t *testing.T) {
 	h := newHarness(t, "", nil) // a fresh driver: nothing remembered
 	secret := `Re/st"rt Pw1`
@@ -308,12 +312,12 @@ func TestReadsMaskCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := json.Marshal(res.Data)
-	for _, leak := range []string{"st\\\"rt", "Re%2Fst", "two words", "and a comma", "x y", ": ab"} {
+	for _, leak := range []string{"st\\\"rt", "Re%2Fst", "two words", "and a comma", "x y"} {
 		if strings.Contains(string(b), leak) {
 			t.Errorf("the log returns %q: %s", leak, b)
 		}
 	}
-	for _, keep := range []string{"database.hostname = pg"} {
+	for _, keep := range []string{"database.hostname = pg", "database.user: ab"} {
 		if !strings.Contains(string(b), keep) {
 			t.Errorf("the log lost %q: %s", keep, b)
 		}
@@ -327,7 +331,7 @@ func TestReadsMaskCredentials(t *testing.T) {
 	h.api.allow(cp)
 	h.api.allow("/api/v1/namespaces/data/pods/orders-connect-connect-build")
 	obj := h.api.objects[cp]
-	obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "NotReady", "status": "True", "message": "connection.password=" + secret + " refused"}}}
+	obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "NotReady", "status": "True", "message": "login with " + secret + " refused"}}}
 	for op, params := range map[string]map[string]any{
 		"k8s_events":           {"involved": "orders-connect-connect-0"},
 		"k8s_get":              {"kind": "KafkaConnect", "name": "orders-connect"},
@@ -345,19 +349,19 @@ func TestReadsMaskCredentials(t *testing.T) {
 
 // Round 6 masking: Java's URLEncoder form (~ as %7E, space as +) and
 // lower-case percent hex, Java's JSON escaping (only " and \ escaped), a
-// short value as a whole token only, and a log cut at limitBytes whose last
-// line ends inside a credential.
+// short password as a whole token only, and a log cut at limitBytes whose
+// last line ends inside a credential.
 func TestPodLogMasksRound6(t *testing.T) {
 	h := newHarness(t, "", nil)
 	pw := `Ab~c d<e>&"f`
-	h.d.rememberWritten([]string{pw, "cdc"})
+	h.d.rememberSecret(map[string]string{"password": pw, "pin": "x7q"})
 	lines := []string{
 		"url password=Ab%7Ec+d%3Ce%3E%26%22f done",
 		"url lower Ab%7ec+d%3ce%3e%26%22f done",
 		`log {"msg":"login with Ab~c d<e>&\"f failed"}`,
-		`FATAL: password authentication failed for user "cdc"`,
-		"connecting as cdc.",
-		"cdcx and abcdc stay",
+		`FATAL: login with "x7q" refused`,
+		"connecting with x7q.",
+		"x7qx and ax7q stay",
 	}
 	// The kept tail is the last 200 lines: the cases come last, after
 	// enough filler for the body to reach limitBytes.
@@ -374,12 +378,66 @@ func TestPodLogMasksRound6(t *testing.T) {
 	}
 	b, _ := json.Marshal(res.Data)
 	got := string(b)
-	for _, leak := range []string{"Ab%7Ec", "Ab%7ec", `Ab~c`, `"cdc"`, "as cdc.", "a cut line"} {
+	for _, leak := range []string{"Ab%7Ec", "Ab%7ec", `Ab~c`, `"x7q"`, "with x7q.", "a cut line"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("the log returns %q", leak)
 		}
 	}
-	if !strings.Contains(got, "cdcx and abcdc stay") {
+	if !strings.Contains(got, "x7qx and ax7q stay") {
 		t.Errorf("a short value was masked inside a longer word: %s", got[len(got)-600:])
+	}
+}
+
+// A user name is never masked by value, at any length: "debezium" would
+// garble io.debezium.connector in every line. A short password is masked
+// as a whole token (round 6, A).
+func TestUserNameIsNotMaskedByValue(t *testing.T) {
+	h := newHarness(t, "", nil)
+	h.d.rememberSecret(map[string]string{"username": "debezium", "password": "q9z"})
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Join([]string{
+		"INFO io.debezium.connector.postgresql.PostgresConnectorTask started as debezium",
+		"login with q9z refused",
+	}, "\n") + "\n"
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	got := string(b)
+	if !strings.Contains(got, "io.debezium.connector.postgresql.PostgresConnectorTask started as debezium") {
+		t.Errorf("the user name was masked: %s", got)
+	}
+	if strings.Contains(got, "q9z") {
+		t.Errorf("the short password is returned: %s", got)
+	}
+}
+
+// The line rule masks only a known credential key's value (round 6, B): a
+// JSON log keeps its other fields and a user key, MySQL's "(using
+// password: YES)", a ${secrets:...} reference, a Java frame and a token's
+// state stay; a later key on a kept line is still masked.
+func TestCredentialLineRule(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{`{"user":"cdc","password":"p w","message":"connector started"}`, `{"user":"cdc","password":"[masked:credential]","message":"connector started"}`},
+		{`{"database.password": "a\"b", "level":"INFO"}`, `{"database.password": "[masked:credential]", "level":"INFO"}`},
+		{`msg="{\"sasl.jaas.config\":\"org.apache.kafka.common.security.scram.ScramLoginModule required password=x;\",\"k\":\"v\"}"`, `msg="{\"sasl.jaas.config\":\"[masked:credential]\",\"k\":\"v\"}"`},
+		{`Access denied for user 'cdc'@'10.0.0.4' (using password: YES)`, ""},
+		{`Access denied for user 'cdc'@'10.0.0.4' (using password: NO)`, ""},
+		{`database.password = ${secrets:data/orders-db-credentials:password}`, ""},
+		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=${secrets:data/x:password}, ssl.key.password=[masked:credential]`},
+		{`at org.apache.hadoop.security.UserGroupInformation.doAs(UserGroupInformation.java:1899)`, ""},
+		{`Token: expired`, ""},
+		{`database.user: cdc`, ""},
+		{`     database.password = two words, and a comma`, `     database.password = [masked:credential]`},
+		{`client_secret: abc`, `client_secret: [masked:credential]`},
+		{`passwordless login is off`, ""},
+	} {
+		want := c.want
+		if want == "" {
+			want = c.in
+		}
+		if got := maskCredentials(c.in, nil); got != want {
+			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, want)
+		}
 	}
 }
