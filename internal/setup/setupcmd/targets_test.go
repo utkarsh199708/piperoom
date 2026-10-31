@@ -231,6 +231,48 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 }
 
+// The Strimzi driver's class is the highest class of all the room's targets:
+// a production kafka or source target makes it production although the
+// namespace's own target is shared, and a local class reads as shared.
+func TestKubernetesClassIsTheRoomsHighest(t *testing.T) {
+	for name, tc := range map[string]struct {
+		targets []events.SetupTarget
+		want    string
+		found   bool
+	}{
+		"kafka is production":  {[]events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassShared}, {Kind: "kafka", Address: "strimzi://k", Class: protocol.ClassProduction}}, protocol.ClassProduction, true},
+		"source is production": {[]events.SetupTarget{{Kind: "kubernetes", Address: "kind/data"}, {Kind: "postgres", Address: "db:5432", Class: protocol.ClassProduction}}, protocol.ClassProduction, true},
+		"all shared":           {[]events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassShared}, {Kind: "kafka", Address: "strimzi://k", Class: protocol.ClassShared}}, protocol.ClassShared, true},
+		"local reads shared":   {[]events.SetupTarget{{Kind: "kubernetes", Address: "kind/data"}, {Kind: "postgres", Address: "127.0.0.1:5432", Class: protocol.ClassLocal}}, "", true},
+		"no kubernetes":        {[]events.SetupTarget{{Kind: "kafka", Address: "strimzi://k", Class: protocol.ClassProduction}}, "", false},
+	} {
+		got, found := kubernetesClass(tc.targets)
+		if got != tc.want || found != tc.found {
+			t.Errorf("%s: kubernetesClass = %q, %v; want %q, %v", name, got, found, tc.want, tc.found)
+		}
+	}
+	// The registered driver runs at that class: k8s_delete of the canary is
+	// refused as on production.
+	cat := newCatalogue(t)
+	reg := newTargetRegistrar(cat, nil)
+	api, err := strimzi.NewAPI(strimzi.APIConfig{BaseURL: "https://kubernetes.default.svc", Token: func() (string, error) { return "t", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
+	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassShared}, {Kind: "kafka", Address: "strimzi://prod-kafka", Class: protocol.ClassProduction}}
+	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	op, ok := cat.Get("k8s_delete")
+	if !ok {
+		t.Fatal("k8s_delete is not registered")
+	}
+	if err := op.Validate(json.RawMessage(`{"kind":"KafkaTopic","name":"orders-canary"}`), ops.Env{Targets: targets}); !errors.Is(err, strimzi.ErrProduction) {
+		t.Fatalf("k8s_delete of the canary with a production kafka target: %v, want ErrProduction", err)
+	}
+}
+
 // fakeSecretAPI is a Kubernetes API server holding one Secret: GET returns
 // it, a JSON patch's stringData is stored base64 under data, as the API
 // server does.
@@ -272,7 +314,8 @@ func (f *fakeSecretAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"kind": "Secret", "metadata": map[string]any{"name": "orders-db-credentials", "resourceVersion": "7"}, "data": f.data,
+		"kind": "Secret", "metadata": map[string]any{"name": "orders-db-credentials", "resourceVersion": "7",
+			"labels": map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-orders"}}, "data": f.data,
 	})
 }
 

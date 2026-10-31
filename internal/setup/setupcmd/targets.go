@@ -186,19 +186,28 @@ func chooseTargetDriver(targets []events.SetupTarget) (driver, class string) {
 	}
 }
 
-// kubernetesClass is the highest class of the kubernetes targets, and
-// whether there is one.
+// kubernetesClass is the class the Strimzi driver runs at, and whether the
+// room has a kubernetes target at all: the highest class of every target the
+// room names, not of the kubernetes targets only. The driver's production
+// refusals (the canary topic, a connector delete, the Connect cluster and the
+// credentials Secret) protect what the Kafka cluster and the source database
+// hold, so a production kafka or postgres target makes the driver production
+// even when the namespace's own target is shared. A local class stays ""
+// (shared): a cluster is never local (strimzi.Register refuses it).
 func kubernetesClass(targets []events.SetupTarget) (string, bool) {
 	class, found := "", false
 	for _, t := range targets {
 		if t.Kind == "kubernetes" {
 			found = true
-			if classRank(t.Class) > classRank(class) {
-				class = t.Class
-			}
+		}
+		if classRank(t.Class) > classRank(class) {
+			class = t.Class
 		}
 	}
-	return class, found
+	if !found {
+		return "", false
+	}
+	return class, true
 }
 
 // classRank orders classes local < shared < production; an unknown or empty
