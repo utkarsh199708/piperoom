@@ -19,7 +19,7 @@ func checkConfigs(t *testing.T, plugin string, ok bool, cases map[string]map[str
 		for k, v := range cfg {
 			full[k] = v
 		}
-		err := h.d.ValidateConnector(connectorSpec(plugin, full), testNS)
+		err := h.d.ValidateConnector(connectorSpec(plugin, full), testNS, testKafka, "pg")
 		switch {
 		case ok && err != nil:
 			t.Errorf("%s: refused: %v", name, err)

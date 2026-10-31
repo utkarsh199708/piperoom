@@ -244,6 +244,7 @@ var (
 // strimziNamePattern mirrors the driver's nameRE (a DNS-1123 label as the
 // chart names objects).
 const strimziNamePattern = `^[a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?$`
+const strimziTopicPrefixPattern = `^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`
 
 var strimziNameRE = regexp.MustCompile(strimziNamePattern)
 
@@ -283,10 +284,14 @@ func strimziRollbackSchema(kinds []string, nameRequired bool) map[string]any {
 	if nameRequired {
 		required = append(required, "name")
 	}
-	return objectSchema(map[string]any{
+	props := map[string]any{
 		"kind": map[string]any{"type": "string", "enum": append([]string(nil), kinds...)},
 		"name": map[string]any{"type": "string", "pattern": strimziNamePattern},
-	}, required...)
+	}
+	if slices.Contains(kinds, "KafkaTopic") {
+		props["topic_prefix"] = map[string]any{"type": "string", "pattern": strimziTopicPrefixPattern}
+	}
+	return objectSchema(props, required...)
 }
 
 // refuseCardOnly refuses params that carry the card-only field.
@@ -358,8 +363,9 @@ func checkStrimziSecretApply(raw json.RawMessage) error {
 }
 
 type strimziRollbackParams struct {
-	Kind string `json:"kind"`
-	Name string `json:"name,omitempty"`
+	Kind        string `json:"kind"`
+	Name        string `json:"name,omitempty"`
+	TopicPrefix string `json:"topic_prefix,omitempty"`
 }
 
 // checkStrimziRollback mirrors the shape rules of k8s_delete and k8s_unapply;
@@ -376,6 +382,12 @@ func checkStrimziRollback(kinds []string, nameRequired bool) func(json.RawMessag
 		}
 		if !slices.Contains(kinds, p.Kind) {
 			return fmt.Errorf("kind %q is not one of %s", clipText(p.Kind), strings.Join(kinds, ", "))
+		}
+		switch {
+		case p.Kind == "KafkaTopic" && p.TopicPrefix == "":
+			return fmt.Errorf("a KafkaTopic delete names the pipeline's topic_prefix")
+		case p.Kind != "KafkaTopic" && p.TopicPrefix != "":
+			return fmt.Errorf("topic_prefix is a KafkaTopic delete's")
 		}
 		if p.Name == "" {
 			if nameRequired || p.Kind == "KafkaUser" {
@@ -495,6 +507,9 @@ func strimziDeleteScope(pl owners.Pipeline, raw json.RawMessage) error {
 	var p strimziRollbackParams
 	if err := json.Unmarshal(paramsOrEmpty(raw), &p); err != nil {
 		return fmt.Errorf("%w: scope: params must be a JSON object", tools.ErrBadInput)
+	}
+	if p.Kind == "KafkaTopic" {
+		return strimziPrefixScope(pl, p.TopicPrefix)
 	}
 	if p.Kind != "KafkaConnector" {
 		return nil

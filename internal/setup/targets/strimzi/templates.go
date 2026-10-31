@@ -78,9 +78,9 @@ func (d *Driver) renderTemplate(kind, name string, kafka, ns string, raw json.Ra
 func (d *Driver) validate(r rendered, kafka, ns string) error {
 	switch r.kind {
 	case "KafkaConnect":
-		return d.ValidateConnect(r.value, kafka)
+		return d.ValidateConnect(r.value, kafka, ns)
 	case "KafkaConnector":
-		return d.ValidateConnector(r.value, ns)
+		return d.ValidateConnector(r.value, ns, kafka, r.topicPrefix)
 	case "KafkaUser":
 		return d.ValidateUser(r.value, r.template, r.topicPrefix)
 	case "KafkaTopic":

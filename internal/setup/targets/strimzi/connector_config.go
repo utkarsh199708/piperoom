@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"piperoom/internal/redact"
+	"piperoom/internal/setup/kafkatopics"
 	"piperoom/internal/setup/knowledge"
 )
 
@@ -41,7 +42,9 @@ var commonSourceKeys = []string{
 }
 
 // schemaHistoryKeys are the schema history keys of the sources that keep one
-// (MySQL, SQL Server, Oracle). Its bootstrap must be the room's Kafka cluster
+// (MySQL, SQL Server, Oracle). No sasl.jaas.config: a reference to the
+// credentials Secret is allowed only in credentialKeys, so a JAAS line can
+// never carry it to a listener (SASL schema history is a documented gap). Its bootstrap must be the room's Kafka cluster
 // (resolveFacts checks it against the Kafka CR's listeners), and its topic is
 // under the connector's topic.prefix. A TLS listener needs the clients'
 // stores: only the ones Strimzi itself writes in the Connect pod
@@ -53,7 +56,6 @@ var schemaHistoryKeys = []string{
 	"schema.history.internal.skip.unparseable.ddl",
 	"schema.history.internal.producer.security.protocol", "schema.history.internal.consumer.security.protocol",
 	"schema.history.internal.producer.sasl.mechanism", "schema.history.internal.consumer.sasl.mechanism",
-	"schema.history.internal.producer.sasl.jaas.config", "schema.history.internal.consumer.sasl.jaas.config",
 	"schema.history.internal.producer.ssl.truststore.location", "schema.history.internal.consumer.ssl.truststore.location",
 	"schema.history.internal.producer.ssl.truststore.type", "schema.history.internal.consumer.ssl.truststore.type",
 	"schema.history.internal.producer.ssl.truststore.password", "schema.history.internal.consumer.ssl.truststore.password",
@@ -201,9 +203,16 @@ var deniedSMTKeys = map[string]map[string]string{
 	"io.debezium.transforms.ExtractNewRecordState": {"route.by.field": "it routes each record to the topic a field names"},
 }
 
-// smtValueRE is the shape of a transform or predicate value: no reference,
-// no control character, bounded.
-var smtValueRE = regexp.MustCompile(`^[^\x00-\x1f$]{0,256}$`)
+// smtValueRE is the shape of a transform or predicate value: no control
+// character, bounded. A "$" is fine (a predicate's ^...$, a RegexRouter's
+// $1 replacement); a "${" reference is refused for every key outside
+// credentialKeys before this rule runs.
+var smtValueRE = regexp.MustCompile(`^[^\x00-\x1f]{0,256}$`)
+
+// sinkOnlySMTs are routers a sink may use: on a sink a router only renames
+// the topic it maps to a table (the sink writes no topic), so the router
+// refusal is a source's. Scripting SMTs stay refused everywhere.
+var sinkOnlySMTs = map[string]bool{"org.apache.kafka.connect.transforms.RegexRouter": true}
 
 // smtBaseClass is a class without its $Key or $Value variant.
 func smtBaseClass(c string) string {
@@ -329,7 +338,7 @@ func containsKey(list []string, k string) bool {
 // in the plugin's table, the shapes of refusedKeyRules refused, converters and
 // transform classes from the allow-list and the knowledge index, TLS never
 // turned off, and no credential inside a connection URL.
-func validateConnectorConfig(plugin string, cfg map[string]any) error {
+func validateConnectorConfig(plugin string, cfg map[string]any, kafka, ns, prefix string) error {
 	if err := loadIndexTables(); err != nil {
 		return refuse("spec.config", "the knowledge index does not load: "+err.Error())
 	}
@@ -377,7 +386,7 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 			}
 		}
 		if m := transformKeyRE.FindStringSubmatch(k); m != nil {
-			if err := checkTransformKey(cfg, path, m[1], m[2], m[3], v, transforms, predicates); err != nil {
+			if err := checkTransformKey(plugin, cfg, path, m[1], m[2], m[3], v, transforms, predicates); err != nil {
 				return err
 			}
 			continue
@@ -391,16 +400,16 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 				return refuse(path, "a converter class from the allow-list only (JsonConverter, StringConverter, the Avro converters)")
 			}
 		case "database.sslmode":
-			if strings.EqualFold(v, "disable") || strings.EqualFold(v, "allow") || strings.EqualFold(v, "prefer") {
-				return refuse(path, "TLS to the source is never turned off or made optional by a setup")
+			if !containsFold([]string{"require", "verify-ca", "verify-full"}, v) {
+				return refuse(path, "require, verify-ca or verify-full: TLS to the source is never turned off or made optional by a setup")
 			}
 		case "database.ssl.mode":
-			if strings.EqualFold(v, "disabled") || strings.EqualFold(v, "preferred") {
-				return refuse(path, "TLS to the source is never turned off or made optional by a setup")
+			if !containsFold([]string{"required", "verify_ca", "verify_identity"}, v) {
+				return refuse(path, "required, verify_ca or verify_identity: TLS to the source is never turned off or made optional by a setup")
 			}
 		case "database.encrypt":
-			if strings.EqualFold(v, "false") {
-				return refuse(path, "TLS to the source is never turned off by a setup")
+			if !strings.EqualFold(v, "true") {
+				return refuse(path, "true: TLS to the source is never turned off by a setup")
 			}
 		case "database.trustServerCertificate":
 			if !strings.EqualFold(v, "false") {
@@ -434,16 +443,20 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 				return refuse(path, err.Error())
 			}
 		case "schema.history.internal.kafka.bootstrap.servers":
-			if !bootstrapRE.MatchString(v) {
-				return refuse(path, "must be host:port entries of the room's Kafka listener")
+			if !kafkaBootstrapRE(kafka, ns).MatchString(v) {
+				return refuse(path, "the Kafka cluster's bootstrap Service ("+kafka+"-kafka-bootstrap[."+ns+"[.svc[.cluster.local]]]:<port>), as the room's listener reports it")
 			}
 		case "schema.history.internal.kafka.topic":
-			pfx, _ := asString(cfg["topic.prefix"])
-			if pfx == "" || !strings.HasPrefix(v, pfx+".") || !topicNameRE.MatchString(v) {
-				return refuse(path, "a topic under the connector's topic.prefix (<topic.prefix>.<name>)")
+			if err := kafkatopics.SchemaHistory(prefix, v); err != nil {
+				return refuse(path, err.Error())
 			}
 		case "errors.deadletterqueue.topic.name":
-			if err := checkDeadLetterTopic(cfg, v); err != nil {
+			ts, _ := asString(cfg["topics"])
+			if err := kafkatopics.DeadLetter(prefix, v, ts); err != nil {
+				return refuse(path, err.Error())
+			}
+		case "key.converter.schema.registry.url", "value.converter.schema.registry.url":
+			if _, _, err := registryURL(v); err != nil {
 				return refuse(path, err.Error())
 			}
 		}
@@ -455,8 +468,7 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 }
 
 var (
-	dbNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,62}$`)
-	topicNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
+	dbNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$`)
 )
 
 // checkTransformKey is the rule over one transforms.<name>.<sub> or
@@ -464,7 +476,7 @@ var (
 // class a setup may name, and every other key is one of that class's index
 // keys with a plain value (one of the key's values when the index lists
 // them). A reference in a value would copy a credential into the records.
-func checkTransformKey(cfg map[string]any, path, list, name, sub, v string, transforms, predicates map[string]bool) error {
+func checkTransformKey(plugin string, cfg map[string]any, path, list, name, sub, v string, transforms, predicates map[string]bool) error {
 	set := transforms
 	if list == "predicates" {
 		set = predicates
@@ -480,7 +492,7 @@ func checkTransformKey(cfg map[string]any, path, list, name, sub, v string, tran
 		if !indexClasses[v] {
 			return refuse(path, "a transform or predicate class from the knowledge index only")
 		}
-		if why, ok := deniedSMTClasses[smtBaseClass(v)]; ok {
+		if why, ok := deniedSMTClasses[smtBaseClass(v)]; ok && !(plugin == "jdbc" && sinkOnlySMTs[v]) {
 			return refuse(path, why)
 		}
 		return nil
@@ -515,20 +527,28 @@ func checkTransformKey(cfg map[string]any, path, list, name, sub, v string, tran
 	return nil
 }
 
-// checkDeadLetterTopic: the JDBC sink's dead letter queue is a topic under
-// the prefix its topics share, never one of the topics it reads.
-func checkDeadLetterTopic(cfg map[string]any, v string) error {
-	ts, _ := asString(cfg["topics"])
-	first, _, _ := strings.Cut(strings.TrimSpace(strings.Split(ts, ",")[0]), ".")
-	if first == "" || !strings.HasPrefix(v, first+".") || !topicNameRE.MatchString(v) {
-		return errors.New("a topic under the prefix of the sink's topics (<prefix>.<name>)")
+// kafkaBootstrapRE is the Kafka cluster's in-cluster bootstrap Service, the
+// only bootstrap a KafkaConnect or a schema history client may name (the
+// admission policy pins the same form): <kafka>-kafka-bootstrap, optionally
+// qualified by the namespace, with a port. An external listener's address
+// is refused.
+func kafkaBootstrapRE(kafka, ns string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(kafka) + `-kafka-bootstrap(\.` + regexp.QuoteMeta(ns) + `(\.svc(\.cluster\.local)?)?)?:[0-9]{1,5}$`)
+}
+
+// registryURL is a Schema Registry URL's host and port: http(s)://host[:port]
+// with an optional trailing "/", and nothing else (no user, path, query or
+// fragment). connectorFacts binds it to a registry target of the room.
+func registryURL(s string) (string, string, error) {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.Contains(s, "%") {
+		return "", "", errors.New("a Schema Registry URL http(s)://host[:port] of the room's registry target")
 	}
-	for _, t := range strings.Split(ts, ",") {
-		if strings.TrimSpace(t) == v {
-			return errors.New("the dead letter queue is never a topic the sink reads")
-		}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
 	}
-	return nil
+	return strings.ToLower(u.Hostname()), port, nil
 }
 
 // jdbcURL is a parsed JDBC sink connection.url.
@@ -553,31 +573,47 @@ var jdbcDialects = map[string]struct {
 		"sslmode": {"require", "verify-ca", "verify-full"}, "ssl": {"true"},
 		"connecttimeout": nil, "sockettimeout": nil, "logintimeout": nil, "applicationname": nil, "currentschema": nil,
 		"rewritebatchedinserts": {"true", "false"}, "tcpkeepalive": {"true", "false"}, "stringtype": {"unspecified", "varchar"},
+		"targetservertype": {"any", "primary", "master", "secondary", "preferSecondary", "preferPrimary"}, "preparethreshold": nil,
 	}},
 	"mysql": {"3306", map[string][]string{
 		"sslmode": {"required", "verify_ca", "verify_identity"}, "usessl": {"true"}, "requiressl": {"true"}, "verifyservercertificate": {"true"},
 		"connecttimeout": nil, "sockettimeout": nil, "servertimezone": nil, "characterencoding": nil, "useunicode": {"true", "false"},
-		"rewritebatchedstatements": {"true", "false"},
+		"rewritebatchedstatements": {"true", "false"}, "zerodatetimebehavior": {"EXCEPTION", "ROUND", "CONVERT_TO_NULL", "convertToNull"},
+		// true only with a verified TLS mode (parseJDBCURL): the RSA key is
+		// then the verified server's.
+		"allowpublickeyretrieval": {"true", "false"},
 	}},
 	"mariadb": {"3306", map[string][]string{
 		"sslmode": {"verify-ca", "verify-full"}, "connecttimeout": nil, "sockettimeout": nil, "rewritebatchedstatements": {"true", "false"},
 	}},
+	// No hostNameInCertificate: it would let the certificate name another
+	// host than the one dialed.
 	"sqlserver": {"1433", map[string][]string{
-		"databasename": nil, "encrypt": {"true", "strict"}, "trustservercertificate": {"false"}, "hostnameincertificate": nil,
+		"databasename": nil, "encrypt": {"true", "strict"}, "trustservercertificate": {"false"},
 		"logintimeout": nil, "applicationname": nil,
 	}},
 	"oracle": {"1521", map[string][]string{}},
+	"db2":    {"50000", map[string][]string{}},
 }
 
+// jdbcLabelParams are the parameters whose value is a free label: a space,
+// written as itself or %20, is allowed inside it (never at an end), and no
+// other percent escape.
+var jdbcLabelParams = map[string]bool{"applicationname": true}
+
 var (
-	jdbcValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+:-]{1,128}$`)
-	jdbcHostRE  = regexp.MustCompile(`^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$`)
+	jdbcValueRE  = regexp.MustCompile(`^[A-Za-z0-9._/+:-]{1,128}$`)
+	jdbcLabelRE  = regexp.MustCompile(`^[A-Za-z0-9._/+:-]([A-Za-z0-9._/+: -]{0,126}[A-Za-z0-9._/+:-])?$`)
+	oracleNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	jdbcHostRE   = regexp.MustCompile(`^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$`)
 )
 
 // parseJDBCURL parses a JDBC sink URL of one of jdbcDialects:
 // jdbc:<postgresql|mysql|mariadb>://h[:p][,h[:p]]/db[?k=v&...],
-// jdbc:sqlserver://h[:p][;k=v;...] or jdbc:oracle:thin:@//h[:p]/service.
-// Every parameter is in the dialect's allow-list.
+// jdbc:sqlserver://h[:p][;k=v;...], jdbc:db2://h[:p]/db, or Oracle thin as
+// jdbc:oracle:thin:@[//]h[:p]/service (EZConnect) or @h:p:SID. Every
+// parameter is in the dialect's allow-list; a percent escape is refused in
+// every name and every value but a label's %20.
 func parseJDBCURL(s string) (jdbcURL, error) {
 	var u jdbcURL
 	rest, ok := strings.CutPrefix(s, "jdbc:")
@@ -586,12 +622,24 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 	}
 	var hostPart, query string
 	sep := "&"
+	if strings.ContainsAny(s, " \t\r\n") {
+		return u, errors.New("a URL has no whitespace (a label's space is %20)")
+	}
 	switch {
-	case strings.HasPrefix(rest, "oracle:thin:@//"):
+	case strings.HasPrefix(rest, "oracle:thin:@"):
 		u.dialect = "oracle"
-		hostPart, _, _ = strings.Cut(strings.TrimPrefix(rest, "oracle:thin:@//"), "/")
-		if strings.ContainsAny(rest, "?;()") {
-			return u, errors.New("an Oracle URL is jdbc:oracle:thin:@//host:port/service, with no parameters")
+		r := strings.TrimPrefix(strings.TrimPrefix(rest, "oracle:thin:@"), "//")
+		if strings.ContainsAny(r, "?;()%@") {
+			return u, errors.New("an Oracle URL is jdbc:oracle:thin:@[//]host[:port]/service or @host:port:SID, with no parameters")
+		}
+		var name string
+		if h, svc, ok := strings.Cut(r, "/"); ok {
+			hostPart, name = h, svc
+		} else if i := strings.LastIndex(r, ":"); i > 0 && strings.Count(r, ":") == 2 {
+			hostPart, name = r[:i], r[i+1:]
+		}
+		if !oracleNameRE.MatchString(name) {
+			return u, errors.New("an Oracle URL names a service or SID: jdbc:oracle:thin:@[//]host[:port]/service or @host:port:SID")
 		}
 	case strings.HasPrefix(rest, "sqlserver://"):
 		u.dialect = "sqlserver"
@@ -600,7 +648,7 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 	default:
 		d, r, ok := strings.Cut(rest, "://")
 		if _, known := jdbcDialects[d]; !ok || !known || d == "sqlserver" || d == "oracle" {
-			return u, errors.New("a PostgreSQL, MySQL, MariaDB, SQL Server or Oracle (thin, //) JDBC URL")
+			return u, errors.New("a PostgreSQL, MySQL, MariaDB, SQL Server, Db2 or Oracle thin JDBC URL")
 		}
 		u.dialect = d
 		var path string
@@ -608,6 +656,9 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 		path, query, _ = strings.Cut(path, "?")
 		if path != "" && !dbNameRE.MatchString(path) {
 			return u, errors.New("the database in the URL path is a database name")
+		}
+		if d == "db2" && query != "" {
+			return u, errors.New("a Db2 URL is jdbc:db2://host[:port]/database, with no parameters")
 		}
 	}
 	dia := jdbcDialects[u.dialect]
@@ -632,10 +683,14 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 			k, v, _ := strings.Cut(kv, "=")
 			lk := strings.ToLower(k)
 			allowed, ok := dia.params[lk]
-			if !ok {
+			if !ok || strings.Contains(k, "%") {
 				return u, fmt.Errorf("URL parameter %s is not in the %s allow-list", clipText(k, 40), u.dialect)
 			}
-			if !jdbcValueRE.MatchString(v) {
+			if jdbcLabelParams[lk] {
+				if !jdbcLabelRE.MatchString(strings.ReplaceAll(v, "%20", " ")) {
+					return u, fmt.Errorf("URL parameter %s: a label (letters, digits, ._/+:- and inner spaces as %%20)", clipText(k, 40))
+				}
+			} else if !jdbcValueRE.MatchString(v) {
 				return u, fmt.Errorf("URL parameter %s: a plain value", clipText(k, 40))
 			}
 			if allowed != nil && !containsFold(allowed, v) {
@@ -646,6 +701,9 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 			}
 			u.params[lk] = v
 		}
+	}
+	if strings.EqualFold(u.params["allowpublickeyretrieval"], "true") && !containsFold([]string{"verify_ca", "verify_identity"}, u.params["sslmode"]) {
+		return u, errors.New("allowPublicKeyRetrieval=true needs sslMode=VERIFY_CA or VERIFY_IDENTITY: the key is then the verified server's")
 	}
 	return u, nil
 }
@@ -676,6 +734,9 @@ func checkMongoParams(s string) error {
 		return nil
 	}
 	for _, kv := range strings.Split(q, "&") {
+		if kv == "" {
+			continue // a trailing or doubled &
+		}
 		k, v, _ := strings.Cut(kv, "=")
 		allowed, ok := mongoParams[strings.ToLower(k)]
 		if !ok {

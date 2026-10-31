@@ -221,12 +221,12 @@ func TestConnectAllowListRefusesEachField(t *testing.T) {
 	for name, tc := range cases {
 		spec := base()
 		tc.mutate(spec)
-		err := h.d.ValidateConnect(spec, testKafka)
+		err := h.d.ValidateConnect(spec, testKafka, testNS)
 		if !errors.Is(err, ErrField) || !strings.Contains(err.Error(), tc.path) {
 			t.Errorf("%s: err = %v, want a field refusal naming %s", name, err, tc.path)
 		}
 	}
-	if err := h.d.ValidateConnect(base(), testKafka); err != nil {
+	if err := h.d.ValidateConnect(base(), testKafka, testNS); err != nil {
 		t.Fatalf("a minimal spec was refused: %v", err)
 	}
 }
@@ -254,7 +254,7 @@ func TestUserAndConnectorAllowList(t *testing.T) {
 	}
 	good := map[string]any{"class": "io.debezium.connector.postgresql.PostgresConnector", "tasksMax": 1, "config": map[string]any{
 		"database.password": "${secrets:data/orders-db-credentials:password}", "topic.prefix": "pg"}}
-	if err := h.d.ValidateConnector(good, testNS); err != nil {
+	if err := h.d.ValidateConnector(good, testNS, testKafka, ""); err != nil {
 		t.Fatalf("a good connector was refused: %v", err)
 	}
 	for name, cfg := range map[string]map[string]any{
@@ -265,7 +265,7 @@ func TestUserAndConnectorAllowList(t *testing.T) {
 		"class in config":  {"connector.class": "x"},
 	} {
 		spec := map[string]any{"class": "io.debezium.connector.postgresql.PostgresConnector", "config": cfg}
-		if err := h.d.ValidateConnector(spec, testNS); !errors.Is(err, ErrField) {
+		if err := h.d.ValidateConnector(spec, testNS, testKafka, ""); !errors.Is(err, ErrField) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}

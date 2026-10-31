@@ -30,10 +30,12 @@ type fakeAPI struct {
 	requests []string
 
 	// knobs
-	status       map[string]int // "METHOD path" -> forced status once
-	defaultField map[string]any // a default the "schema" adds to /spec on every write and dry run
-	tamperWrite  map[string]any // fields a webhook adds to /spec on a real write only
-	retryAfter   int            // first request answers 429 with this Retry-After
+	status       map[string]int           // "METHOD path" -> forced status once
+	defaultField map[string]any           // a default the "schema" adds to /spec on every write and dry run
+	tamperWrite  map[string]any           // fields a webhook adds to /spec on a real write only
+	retryAfter   int                      // first request answers 429 with this Retry-After
+	onDelete     func(obj map[string]any) // runs on a DELETE before its preconditions are checked
+	deleteBodies []string                 // every DELETE's DeleteOptions
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -50,6 +52,9 @@ func (f *fakeAPI) put(path string, obj map[string]any) {
 		obj["metadata"] = md
 	}
 	md["resourceVersion"] = strconv.Itoa(f.rv)
+	if _, set := md["uid"]; !set {
+		md["uid"] = "uid-" + strconv.Itoa(f.rv)
+	}
 	if _, set := md["labels"]; !set {
 		// The pipeline release's labels and Helm's release annotations, as
 		// an install writes them; a test of the ownership check sets labels
@@ -183,6 +188,23 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(next)
 	case http.MethodDelete:
+		if f.onDelete != nil {
+			f.onDelete(obj)
+		}
+		var opts struct {
+			Preconditions struct {
+				UID             string `json:"uid"`
+				ResourceVersion string `json:"resourceVersion"`
+			} `json:"preconditions"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &opts)
+		f.deleteBodies = append(f.deleteBodies, string(body))
+		md, _ := obj["metadata"].(map[string]any)
+		if pc := opts.Preconditions; (pc.UID != "" && pc.UID != md["uid"]) || (pc.ResourceVersion != "" && pc.ResourceVersion != md["resourceVersion"]) {
+			writeStatus(w, 409, "Precondition failed")
+			return
+		}
 		delete(f.objects, path)
 		_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Status", "status": "Success"})
 	default:

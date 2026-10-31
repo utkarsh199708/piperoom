@@ -118,7 +118,7 @@ func findDeep(prefix string, v any) error {
 
 // ValidateConnect validates a KafkaConnect spec for pipeline (allowed names
 // derive from it) and kafka.
-func (d *Driver) ValidateConnect(spec map[string]any, kafka string) error {
+func (d *Driver) ValidateConnect(spec map[string]any, kafka, ns string) error {
 	if err := findDeep("spec", spec); err != nil {
 		return err
 	}
@@ -137,8 +137,10 @@ func (d *Driver) ValidateConnect(spec map[string]any, kafka string) error {
 		}
 	}
 	if b, ok := spec["bootstrapServers"]; ok {
-		if s, isStr := asString(b); !isStr || !bootstrapRE.MatchString(s) {
-			return refuse("spec.bootstrapServers", "must be host:port entries from the Kafka CR's listener status")
+		// The admission policy pins the same form: the cluster's in-cluster
+		// bootstrap Service only, never an external listener's address.
+		if s, isStr := asString(b); !isStr || !kafkaBootstrapRE(kafka, ns).MatchString(s) {
+			return refuse("spec.bootstrapServers", "the Kafka cluster's bootstrap Service "+kafka+"-kafka-bootstrap[."+ns+"[.svc[.cluster.local]]]:<port> from the Kafka CR's listener status")
 		}
 	}
 	if t, ok := spec["tls"]; ok {
@@ -161,7 +163,18 @@ func (d *Driver) ValidateConnect(spec map[string]any, kafka string) error {
 				return refuse("spec.config."+k, "not in the worker key allow-list")
 			}
 			s := fmt.Sprint(v)
+			if strings.TrimSpace(s) != s || strings.Contains(s, "${") {
+				return refuse("spec.config."+k, "a plain value: no reference, no whitespace at either end")
+			}
 			switch k {
+			case "key.converter", "value.converter":
+				if !allowedConverters[s] {
+					return refuse("spec.config."+k, "a converter class from the allow-list only")
+				}
+			case "key.converter.schema.registry.url", "value.converter.schema.registry.url":
+				if _, _, err := registryURL(s); err != nil {
+					return refuse("spec.config."+k, err.Error())
+				}
 			case "config.providers":
 				if s != "secrets" {
 					return refuse("spec.config.config.providers", "only the secrets provider is allowed")
@@ -326,11 +339,25 @@ func (d *Driver) validateBuild(v any) error {
 
 var sha512HexRE = regexp.MustCompile(`^[0-9a-f]{128}$`)
 
-// ValidateConnector validates a KafkaConnector spec: §6's provider rule (no
-// ${provider:...} but the db-credentials Secret), no literal credential, no
-// lifecycle or offsets field, and every config key in the plugin's allow-list
-// (connector_config.go).
-func (d *Driver) ValidateConnector(spec map[string]any, ns string) error {
+// credentialKeys are the only config keys whose value may be a reference to
+// the db-credentials Secret. Anywhere else a reference would carry the
+// credential to wherever that key points: a JAAS line to another listener,
+// a URL to another host, a transform into the records.
+var credentialKeys = map[string]bool{
+	"database.user": true, "database.password": true,
+	"connection.username": true, "connection.password": true,
+	"mongodb.user": true, "mongodb.password": true,
+}
+
+// ValidateConnector validates a KafkaConnector spec for the pipeline's topic
+// prefix (the op's topic_prefix; "" falls back to a source's topic.prefix)
+// in namespace ns on Kafka cluster kafka: §6's provider rule (a reference is
+// exactly ${secrets:<ns>/<pipeline>-db-credentials:<key>}, and only in a
+// credentialKeys key; Strimzi's store password only in the schema history
+// store keys), no literal credential, no value with whitespace at either end,
+// no lifecycle or offsets field, and every config key in the plugin's
+// allow-list (connector_config.go).
+func (d *Driver) ValidateConnector(spec map[string]any, ns, kafka, topicPrefix string) error {
 	if err := keysOnly("spec", spec, "class", "tasksMax", "config", "autoRestart"); err != nil {
 		return err
 	}
@@ -343,28 +370,49 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns string) error {
 		return refuse("spec.tasksMax", "a Debezium source runs one task")
 	}
 	cfg, _ := asMap(spec["config"])
-	allowedRef := "${secrets:" + ns + "/" + d.dbSecretName() + ":"
-	for k, v := range cfg {
-		s := fmt.Sprint(v)
+	refRE := regexp.MustCompile(`^\$\{secrets:` + regexp.QuoteMeta(ns+"/"+d.dbSecretName()) + `:[A-Za-z0-9._-]{1,253}\}$`)
+	keys := make([]string, 0, len(cfg))
+	for k := range cfg {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		s := fmt.Sprint(cfg[k])
+		path := "spec.config." + k
 		if k == "connector.class" {
-			return refuse("spec.config.connector.class", "the class is spec.class")
+			return refuse(path, "the class is spec.class")
 		}
-		if storePasswordKey(k) && s == strimziStorePassword {
+		if strings.TrimSpace(k) != k || strings.TrimSpace(s) != s {
+			// A connector trims some values and not others: " disable" may
+			// pass a deny-list here and still turn TLS off there.
+			return refuse(path, "no whitespace at either end of a key or value")
+		}
+		switch {
+		case storePasswordKey(k) && s == strimziStorePassword:
 			// Strimzi's own store password (connector_config.go); the
 			// per-plugin rule pins the key to it.
 			continue
-		}
-		for i := strings.Index(s, "${"); i >= 0; i = strings.Index(s, "${") {
-			if !strings.HasPrefix(s[i:], allowedRef) {
-				return refuse("spec.config."+k, "only ${secrets:"+ns+"/"+d.dbSecretName()+":<key>} references are allowed")
+		case strings.Contains(s, "${"):
+			if !credentialKeys[k] {
+				return refuse(path, "a ${...} reference only in a user or password key (database.password, connection.password, ...), never here")
 			}
-			s = s[i+2:]
-		}
-		if looksSecretKey(k) && !strings.HasPrefix(fmt.Sprint(v), allowedRef) {
-			return refuse("spec.config."+k, "a credential is a ${secrets:} reference, never a value")
+			if !refRE.MatchString(s) {
+				return refuse(path, "exactly one ${secrets:"+ns+"/"+d.dbSecretName()+":<key>} reference")
+			}
+		case looksSecretKey(k):
+			return refuse(path, "a credential is a ${secrets:} reference in a user or password key, never a value")
 		}
 	}
-	if err := validateConnectorConfig(plugin, cfg); err != nil {
+	prefix := topicPrefix
+	if src, _ := asString(cfg["topic.prefix"]); plugin != "jdbc" {
+		if prefix != "" && src != "" && src != prefix {
+			return refuse("spec.config.topic.prefix", "the pipeline's topic prefix "+prefix)
+		}
+		if prefix == "" {
+			prefix = src
+		}
+	}
+	if err := validateConnectorConfig(plugin, cfg, kafka, ns, prefix); err != nil {
 		return err
 	}
 	if a, ok := spec["autoRestart"]; ok {

@@ -40,6 +40,10 @@ var unapplyKinds = []string{"ConfigMap", "KafkaConnect", "KafkaUser", "Secret"}
 type rollbackParams struct {
 	Kind string `json:"kind"`
 	Name string `json:"name,omitempty"`
+	// TopicPrefix is a KafkaTopic delete's pipeline topic prefix (the
+	// server's scope binds it to owners topic_prefix): only the canary under
+	// that prefix is deleted.
+	TopicPrefix string `json:"topic_prefix,omitempty"`
 	// AdmissionPolicyConfirmed is the card confirmation of D11 on a
 	// production target, as for k8s_apply.
 	AdmissionPolicyConfirmed bool `json:"admission_policy_confirmed,omitempty"`
@@ -50,18 +54,25 @@ func rollbackSchema(kinds []string, nameRequired bool) map[string]any {
 	if nameRequired {
 		required = append(required, "name")
 	}
-	return map[string]any{"type": "object", "additionalProperties": false, "required": required,
-		"properties": map[string]any{
-			"kind":                       map[string]any{"type": "string", "enum": append([]string(nil), kinds...)},
-			"name":                       map[string]any{"type": "string", "pattern": nameRE.String()},
-			"admission_policy_confirmed": map[string]any{"type": "boolean"},
-		}}
+	props := map[string]any{
+		"kind":                       map[string]any{"type": "string", "enum": append([]string(nil), kinds...)},
+		"name":                       map[string]any{"type": "string", "pattern": nameRE.String()},
+		"admission_policy_confirmed": map[string]any{"type": "boolean"},
+	}
+	if contains(kinds, "KafkaTopic") {
+		props["topic_prefix"] = map[string]any{"type": "string", "pattern": topicPrefixRE.String()}
+	}
+	return map[string]any{"type": "object", "additionalProperties": false, "required": required, "properties": props}
 }
 
 // rollbackRecord is how a preview names the op that undoes it, "<op> {json
 // params}": the shape the room parses into the rollback proposal's step.
 func rollbackRecord(op, kind, name string) string {
-	b, _ := json.Marshal(rollbackParams{Kind: kind, Name: name})
+	return rollbackRecordFor(rollbackParams{Kind: kind, Name: name}, op)
+}
+
+func rollbackRecordFor(p rollbackParams, op string) string {
+	b, _ := json.Marshal(p)
 	return op + " " + string(b)
 }
 
@@ -90,6 +101,12 @@ func (o k8sDeleteOp) decode(params json.RawMessage) (rollbackParams, error) {
 	// no target and runs before any request.
 	if !contains(o.d.allowedNames(p.Kind, ""), p.Name) {
 		return p, fmt.Errorf("%w: %s %q", ErrName, p.Kind, clipText(p.Name, 64))
+	}
+	switch {
+	case p.Kind == "KafkaTopic" && !topicPrefixRE.MatchString(p.TopicPrefix):
+		return p, fmt.Errorf("%w: a KafkaTopic delete names the pipeline's topic_prefix: only its canary is deleted", ErrParams)
+	case p.Kind != "KafkaTopic" && p.TopicPrefix != "":
+		return p, fmt.Errorf("%w: topic_prefix is a KafkaTopic delete's", ErrParams)
 	}
 	if o.d.production() {
 		if p.Kind == "KafkaTopic" {
@@ -146,11 +163,20 @@ func (o k8sDeleteOp) Execute(ctx context.Context, params json.RawMessage, env op
 			data["deleted"] = false
 			return ops.Result{Summary: fmt.Sprintf("KafkaTopic %s/%s was never applied (paused, no topic); kept", ns, p.Name), Data: data, Receipt: httpReceipt("GET", path)}, nil
 		}
-		if err := checkCanaryTopic(obj, p.Name); err != nil {
+		if err := checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
 			return ops.Result{Receipt: httpReceipt("GET", path)}, err
 		}
 	}
-	if err := o.d.api.Delete(ctx, path); err != nil {
+	// The delete is of the object checked above and nothing else: a
+	// same-named object recreated, or this one changed, since the GET is a
+	// 409 the rollback reports, never a delete of what was not checked.
+	md, _ := obj["metadata"].(map[string]any)
+	uid, _ := md["uid"].(string)
+	rv, _ := md["resourceVersion"].(string)
+	if uid == "" || rv == "" {
+		return ops.Result{Receipt: httpReceipt("GET", path)}, fmt.Errorf("%w: %s %s has no uid or resourceVersion to delete it by", ErrField, p.Kind, p.Name)
+	}
+	if err := o.d.api.DeleteIf(ctx, path, uid, rv); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// A rollback that runs again after a partial one: the object is
 			// already gone, which is the state the rollback wants.
@@ -419,7 +445,7 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 // reports it manages (status.topicName) must be the same one; when the
 // operator has reported nothing yet, the spec alone decides. Anything that
 // differs keeps the CR.
-func checkCanaryTopic(obj map[string]any, name string) error {
+func checkCanaryTopic(obj map[string]any, name, prefix string) error {
 	spec, _ := obj["spec"].(map[string]any)
 	md, _ := obj["metadata"].(map[string]any)
 	st, _ := obj["status"].(map[string]any)
@@ -427,7 +453,7 @@ func checkCanaryTopic(obj map[string]any, name string) error {
 	if named == "" {
 		named, _ = md["name"].(string)
 	}
-	if !canaryTopicRE.MatchString(named) {
+	if !canaryTopicRE(prefix).MatchString(named) {
 		return fmt.Errorf("%w: KafkaTopic %s names topic %s, not a canary", ErrField, name, clipText(named, 128))
 	}
 	if tn, _ := st["topicName"].(string); tn != "" && tn != named {
@@ -436,8 +462,11 @@ func checkCanaryTopic(obj map[string]any, name string) error {
 	return nil
 }
 
-// canaryTopicRE is the canary topic name: <topic prefix>.<schema>.piperoom_canary.
-var canaryTopicRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}\.[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
+// canaryTopicRE is this pipeline's canary topic name:
+// <prefix>.<schema>.piperoom_canary.
+func canaryTopicRE(prefix string) *regexp.Regexp {
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `\.[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
+}
 
 // canaryNeverApplied: the KafkaTopic is the chart's paused shell, with no
 // spec.topicName and no topic in its status.

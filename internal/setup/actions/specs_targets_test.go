@@ -81,8 +81,9 @@ var targetCases = map[string]struct{ good, bad []string }{
 		bad:  []string{`{"keys":{"password":"hunter2"}}`, `{"keys":{}}`, `{"keys":{"bad key":"${secret:x}"}}`},
 	},
 	"k8s_delete": {
-		good: []string{`{"kind":"KafkaConnector","name":"orders-src"}`, `{"kind":"KafkaTopic","name":"orders-canary"}`},
-		bad:  []string{`{"kind":"Kafka","name":"prod-kafka"}`, `{"kind":"KafkaConnector"}`, `{"kind":"KafkaTopic","name":"Orders"}`},
+		good: []string{`{"kind":"KafkaConnector","name":"orders-src"}`, `{"kind":"KafkaTopic","name":"orders-canary","topic_prefix":"pg"}`},
+		bad: []string{`{"kind":"Kafka","name":"prod-kafka"}`, `{"kind":"KafkaConnector"}`, `{"kind":"KafkaTopic","name":"Orders","topic_prefix":"pg"}`,
+			`{"kind":"KafkaTopic","name":"orders-canary"}`, `{"kind":"KafkaConnector","name":"orders-src","topic_prefix":"pg"}`},
 	},
 	"k8s_unapply": {
 		good: []string{`{"kind":"KafkaUser","name":"orders-connect"}`, `{"kind":"Secret"}`, `{"kind":"KafkaConnect"}`, `{"kind":"ConfigMap","name":"orders-connect-logging"}`},
@@ -335,7 +336,8 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"k8s_apply", `{"kind":"KafkaConnect","template":"connect","params":{}}`, true},
 		{"k8s_delete", `{"kind":"KafkaConnector","name":"orders-src"}`, true},
 		{"k8s_delete", `{"kind":"KafkaConnector","name":"payments-src"}`, false},
-		{"k8s_delete", `{"kind":"KafkaTopic","name":"orders-canary"}`, true},
+		{"k8s_delete", `{"kind":"KafkaTopic","name":"orders-canary","topic_prefix":"orders"}`, true},
+		{"k8s_delete", `{"kind":"KafkaTopic","name":"orders-canary","topic_prefix":"payments"}`, false},
 		{"msk_delete_connector", `{"name":"payments-src"}`, false},
 		{"ccloud_create_connector", `{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"a":"b"}}`, true},
 		{"aiven_create_connector", `{"name":"payments-src","config":{"connector.class":"x"}}`, false},

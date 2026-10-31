@@ -35,7 +35,7 @@ func TestK8sDelete(t *testing.T) {
 	}{{"KafkaConnector", "orders-src", map[string]any{}}, {"KafkaTopic", "orders-canary", map[string]any{"topicName": "pg.public.piperoom_canary"}}} {
 		h := newHarness(t, "", nil)
 		path := h.shell(tc.kind, tc.name, tc.spec)
-		res, err := run(t, h, "k8s_delete", map[string]any{"kind": tc.kind, "name": tc.name})
+		res, err := run(t, h, "k8s_delete", delParams(tc.kind, tc.name))
 		if err != nil {
 			t.Fatalf("%s: k8s_delete: %v", tc.kind, err)
 		}
@@ -49,7 +49,7 @@ func TestK8sDelete(t *testing.T) {
 			t.Fatalf("%s: requests = %s, want the ownership GET and one DELETE", tc.kind, got)
 		}
 		// Again: already absent is the state a rollback wants.
-		if res, err := run(t, h, "k8s_delete", map[string]any{"kind": tc.kind, "name": tc.name}); err != nil || !strings.Contains(res.Summary, "already absent") {
+		if res, err := run(t, h, "k8s_delete", delParams(tc.kind, tc.name)); err != nil || !strings.Contains(res.Summary, "already absent") {
 			t.Fatalf("%s: a second delete = %q, %v", tc.kind, res.Summary, err)
 		}
 	}
@@ -92,7 +92,7 @@ func TestK8sDeleteProduction(t *testing.T) {
 	h.shell("KafkaTopic", "orders-canary", map[string]any{})
 	path := h.shell("KafkaConnector", "orders-src", map[string]any{})
 	for _, p := range []map[string]any{
-		{"kind": "KafkaTopic", "name": "orders-canary"},
+		{"kind": "KafkaTopic", "name": "orders-canary", "topic_prefix": "pg"},
 		{"kind": "KafkaConnector", "name": "orders-src"},
 		{"kind": "KafkaConnector", "name": "orders-src", "admission_policy_confirmed": true},
 	} {
@@ -165,7 +165,7 @@ func TestK8sDeleteKeepsANonCanaryTopic(t *testing.T) {
 			delete(obj["metadata"].(map[string]any)["annotations"].(map[string]any), PauseAnnotation)
 		}
 		h.api.put(path, obj)
-		if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"}); !errors.Is(err, ErrField) {
+		if _, err := run(t, h, "k8s_delete", delParams("KafkaTopic", "orders-canary")); !errors.Is(err, ErrField) {
 			t.Errorf("%s: err = %v, want ErrField", name, err)
 		}
 		if h.api.get(path) == nil {
@@ -174,7 +174,7 @@ func TestK8sDeleteKeepsANonCanaryTopic(t *testing.T) {
 	}
 	h := newHarness(t, "", nil)
 	path := h.shell("KafkaTopic", "orders-canary", map[string]any{})
-	res, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"})
+	res, err := run(t, h, "k8s_delete", delParams("KafkaTopic", "orders-canary"))
 	if err != nil || !strings.Contains(res.Summary, "never applied") || h.api.get(path) == nil {
 		t.Fatalf("an unapplied shell: %q, %v (deleted %v)", res.Summary, err, h.api.get(path) == nil)
 	}
@@ -354,6 +354,9 @@ func TestApplyPreviewRollbackRunsAsRecorded(t *testing.T) {
 		h := newHarness(t, class, nil)
 		for kind, name := range map[string]string{"KafkaTopic": "orders-canary", "KafkaConnect": "orders-connect", "KafkaUser": "orders-connect", "ConfigMap": "orders-connect-logging", "KafkaConnector": "orders-src"} {
 			r := rendered{kind: kind, name: name}
+			if kind == "KafkaTopic" {
+				r.topicPrefix = "pg" // a canary render always carries it
+			}
 			reversible, record := h.d.applyRollback(r)
 			refusedOnProd := class == protocol.ClassProduction && (kind == "KafkaTopic" || kind == "KafkaConnect" || kind == "KafkaConnector")
 			if reversible == refusedOnProd {
@@ -514,5 +517,82 @@ func TestClassGuardFollowsRaises(t *testing.T) {
 		if !strings.HasPrefix(r, "GET ") {
 			t.Errorf("a write reached the API after the raise: %s", r)
 		}
+	}
+}
+
+// k8s_delete deletes the object it checked and nothing else: the DELETE
+// carries the uid and resourceVersion read, so an object changed or
+// recreated between the check and the delete is a conflict, never deleted.
+func TestK8sDeleteHasPreconditions(t *testing.T) {
+	for _, tc := range []struct {
+		kind, name string
+		spec       map[string]any
+	}{{"KafkaConnector", "orders-src", map[string]any{}}, {"KafkaTopic", "orders-canary", map[string]any{"topicName": "pg.public.piperoom_canary"}}} {
+		h := newHarness(t, "", nil)
+		path := h.shell(tc.kind, tc.name, tc.spec)
+		obj := h.api.get(path)
+		md := obj["metadata"].(map[string]any)
+		want := `"preconditions":{"resourceVersion":"` + md["resourceVersion"].(string) + `","uid":"` + md["uid"].(string) + `"}`
+		h.api.onDelete = func(o map[string]any) {
+			// Changed after the check: re-pointed at a pipeline topic.
+			o["metadata"].(map[string]any)["resourceVersion"] = "999"
+			o["spec"].(map[string]any)["topicName"] = "pg.public.orders"
+		}
+		if _, err := run(t, h, "k8s_delete", delParams(tc.kind, tc.name)); !errors.Is(err, ErrConflict) {
+			t.Errorf("%s: err = %v, want ErrConflict", tc.kind, err)
+		}
+		if h.api.get(path) == nil {
+			t.Errorf("%s: an object changed after the check was deleted", tc.kind)
+		}
+		if len(h.api.deleteBodies) != 1 || !strings.Contains(h.api.deleteBodies[0], want) {
+			t.Errorf("%s: DELETE bodies = %v, want preconditions %s", tc.kind, h.api.deleteBodies, want)
+		}
+	}
+}
+
+// delParams are k8s_delete's params: a KafkaTopic's carry the pipeline's
+// topic prefix.
+func delParams(kind, name string) map[string]any {
+	p := map[string]any{"kind": kind, "name": name}
+	if kind == "KafkaTopic" {
+		p["topic_prefix"] = "pg"
+	}
+	return p
+}
+
+// The canary delete is of this pipeline's canary only: a KafkaTopic delete
+// names the pipeline's topic prefix, and a canary of another prefix, or of
+// none, is kept. The prefix is a KafkaTopic delete's and nothing else's.
+func TestK8sDeleteBindsTheCanaryToThePrefix(t *testing.T) {
+	for name, tc := range map[string]struct {
+		topic, prefix string
+		ok            bool
+	}{
+		"the pipeline's canary":     {"pg.public.piperoom_canary", "pg", true},
+		"a dotted prefix's canary":  {"prod.orders.public.piperoom_canary", "prod.orders", true},
+		"another prefix's canary":   {"payments.public.piperoom_canary", "pg", false},
+		"a longer prefix's canary":  {"pg.x.public.piperoom_canary", "pg", false},
+		"the prefix as a lookalike": {"pgx.public.piperoom_canary", "pg", false},
+	} {
+		h := newHarness(t, "", nil)
+		path := h.shell("KafkaTopic", "orders-canary", map[string]any{"topicName": tc.topic})
+		_, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary", "topic_prefix": tc.prefix})
+		if tc.ok != (err == nil) || tc.ok != (h.api.get(path) == nil) {
+			t.Errorf("%s: err = %v, deleted %v, want ok %v", name, err, h.api.get(path) == nil, tc.ok)
+		}
+	}
+	h := newHarness(t, "", nil)
+	for _, p := range []map[string]any{
+		{"kind": "KafkaTopic", "name": "orders-canary"},
+		{"kind": "KafkaConnector", "name": "orders-src", "topic_prefix": "pg"},
+	} {
+		if _, err := run(t, h, "k8s_delete", p); !errors.Is(err, ErrParams) {
+			t.Errorf("%v: err = %v, want ErrParams", p, err)
+		}
+	}
+	h.shell("KafkaTopic", "orders-canary", map[string]any{"topicName": "pg.public.piperoom_canary"})
+	_, rec := h.d.applyRollback(rendered{kind: "KafkaTopic", name: "orders-canary", topicPrefix: "pg"})
+	if !strings.Contains(rec, `"topic_prefix":"pg"`) {
+		t.Fatalf("the canary's rollback record = %s, want its topic_prefix", rec)
 	}
 }

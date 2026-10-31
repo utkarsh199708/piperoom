@@ -28,7 +28,10 @@ func init() {
 	templates["connector"] = template{kind: "KafkaConnector", render: renderConnector}
 }
 
-const placeholderBootstrap = "kafka-kafka-bootstrap.validate.svc:9093"
+// placeholderBootstrap is the bootstrap a KafkaConnect renders with: the
+// cluster's bootstrap Service on a port no listener uses, so a render that
+// skipped resolveFacts is never a working one.
+func placeholderBootstrap(kafka string) string { return kafka + "-kafka-bootstrap:1" }
 
 type connectParams struct {
 	Replicas   int      `json:"replicas,omitempty"`
@@ -130,7 +133,7 @@ func renderConnect(d *Driver, kafka string, raw json.RawMessage) (rendered, erro
 	internal := d.connectName() + "-connect-"
 	spec := map[string]any{
 		"replicas":         p.Replicas,
-		"bootstrapServers": placeholderBootstrap,
+		"bootstrapServers": placeholderBootstrap(kafka),
 		"config": map[string]any{
 			"group.id": d.connectName(), "offset.storage.topic": internal + "offsets",
 			"config.storage.topic": internal + "configs", "status.storage.topic": internal + "status",
@@ -185,6 +188,11 @@ type connectorParams struct {
 	Connector string            `json:"connector"` // one of the chart's connector names
 	Plugin    string            `json:"plugin"`    // postgres, mysql, ..., jdbc
 	Config    map[string]string `json:"config"`
+	// TopicPrefix is the pipeline's topic prefix (the server's scope binds
+	// it to owners topic_prefix): a sink's dead letter queue and a source's
+	// schema history are held under it. Empty falls back to a source's
+	// topic.prefix; a sink that names a dead letter queue needs it.
+	TopicPrefix string `json:"topic_prefix,omitempty"`
 }
 
 func renderConnector(d *Driver, _ string, raw json.RawMessage) (rendered, error) {
@@ -206,7 +214,10 @@ func renderConnector(d *Driver, _ string, raw json.RawMessage) (rendered, error)
 	for k, v := range p.Config {
 		cfg[k] = v
 	}
-	return rendered{kind: "KafkaConnector", name: p.Connector, path: "/spec", pause: true, value: map[string]any{
+	if p.TopicPrefix != "" && !topicPrefixRE.MatchString(p.TopicPrefix) {
+		return rendered{}, fmt.Errorf("%w: topic_prefix must be a topic prefix", ErrParams)
+	}
+	return rendered{kind: "KafkaConnector", name: p.Connector, path: "/spec", pause: true, topicPrefix: p.TopicPrefix, value: map[string]any{
 		"class": cls, "tasksMax": 1, "config": cfg,
 		"autoRestart": map[string]any{"enabled": true, "maxRestarts": 3},
 	}}, nil
@@ -250,6 +261,11 @@ func (d *Driver) resolveFacts(ctx context.Context, r rendered, ns, kafka string,
 	}
 	spec["bootstrapServers"] = bootstrap
 	r.value = spec
+	if wc, ok := asMap(spec["config"]); ok {
+		if err := registryFacts(wc, env); err != nil {
+			return rendered{}, err
+		}
+	}
 	if err := d.validate(r, kafka, ns); err != nil {
 		return rendered{}, err
 	}
@@ -287,38 +303,84 @@ func (d *Driver) kafkaListeners(ctx context.Context, ns, kafka string) (map[stri
 // it).
 const targetPostgres = "postgres"
 
+// targetHost is the generic host kind (sink_probe's): a sink database the
+// room registered as a host is a room target too.
+const targetHost = "host"
+
+// targetSchemaRegistry is the Env.Targets kind of the Schema Registry.
+const targetSchemaRegistry = "registry"
+
+// hostPort is a target's host and port ("" port: any).
+type hostPort struct{ host, port string }
+
+// targetHostPorts are the hosts and ports of env's targets of the kinds.
+func targetHostPorts(env ops.Env, kinds ...string) []hostPort {
+	var out []hostPort
+	for _, t := range env.Targets {
+		if !contains(kinds, t.Kind) {
+			continue
+		}
+		if h, p := sourceHostPort(t.Address); h != "" {
+			out = append(out, hostPort{h, p})
+		}
+	}
+	return out
+}
+
+// matchHostPort reports whether host:port is one of hps.
+func matchHostPort(hps []hostPort, host, port string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, s := range hps {
+		if s.host == host && (s.port == "" || s.port == port) {
+			return true
+		}
+	}
+	return false
+}
+
+// registryFacts binds the Schema Registry URL keys of a connector or worker
+// config to the room's registry targets; with none, the keys are refused (a
+// converter would otherwise fetch schemas from, and send records' schemas
+// to, any URL).
+func registryFacts(cfg map[string]any, env ops.Env) error {
+	regs := targetHostPorts(env, targetSchemaRegistry)
+	for _, k := range []string{"key.converter.schema.registry.url", "value.converter.schema.registry.url"} {
+		v, ok := asString(cfg[k])
+		if !ok {
+			continue
+		}
+		h, p, err := registryURL(v)
+		if err != nil {
+			return refuse("spec.config."+k, err.Error())
+		}
+		if !matchHostPort(regs, h, p) {
+			return fmt.Errorf("%w: %s names %s:%s, which is not a registry target of the room", ErrTarget, k, clipText(h, 64), p)
+		}
+	}
+	return nil
+}
+
 // connectorFacts binds what a KafkaConnector config names to the room: the
 // source host and port (database.hostname and database.port, or the hosts of
 // mongodb.connection.string) must be a source target of the room, and a
 // schema history bootstrap must be one of the room Kafka CR's listeners. The
-// JDBC sink's connection.url hosts are bound the same way.
+// JDBC sink's connection.url hosts are bound to a database target of the
+// room of any dialect (the room has one database kind, targetPostgres, for
+// every engine) or a host target. The Schema Registry URLs are bound to the
+// room's registry targets.
 func (d *Driver) connectorFacts(ctx context.Context, r rendered, ns, kafka string, env ops.Env) error {
 	cfg, _ := asMap(r.value["config"])
-	type hp struct{ host, port string }
-	var sources []hp
-	for _, t := range env.Targets {
-		if t.Kind == targetPostgres {
-			h, p := sourceHostPort(t.Address)
-			if h != "" {
-				sources = append(sources, hp{h, p})
-			}
-		}
+	if err := registryFacts(cfg, env); err != nil {
+		return err
 	}
-	match := func(host, port string) bool {
-		host = strings.ToLower(strings.TrimSpace(host))
-		for _, s := range sources {
-			if s.host == host && (s.port == "" || s.port == port) {
-				return true
-			}
-		}
-		return false
-	}
+	sources := targetHostPorts(env, targetPostgres)
+	match := func(host, port string) bool { return matchHostPort(sources, host, port) }
 	cls, _ := asString(r.value["class"])
 	plugin, _ := pluginOf(cls)
 	switch plugin {
 	case "jdbc":
-		// The sink database is a target of the room like the source
-		// (every database kind registers as targetPostgres).
+		sinks := targetHostPorts(env, targetPostgres, targetHost)
+		match := func(host, port string) bool { return matchHostPort(sinks, host, port) }
 		raw, _ := asString(cfg["connection.url"])
 		u, err := parseJDBCURL(raw)
 		if err != nil {

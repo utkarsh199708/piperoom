@@ -198,7 +198,25 @@ func (a *API) Patch(ctx context.Context, path string, ops []PatchOp, dryRun bool
 
 // Delete deletes one object with foreground propagation.
 func (a *API) Delete(ctx context.Context, path string) error {
-	body, _ := json.Marshal(map[string]any{"propagationPolicy": "Foreground"})
+	return a.DeleteIf(ctx, path, "", "")
+}
+
+// DeleteIf deletes one object only if it is still the one read: the API
+// server refuses the delete with 409 (ErrConflict) when its uid or
+// resourceVersion differ from the preconditions. Empty values send none.
+func (a *API) DeleteIf(ctx context.Context, path, uid, resourceVersion string) error {
+	opts := map[string]any{"propagationPolicy": "Foreground"}
+	pre := map[string]any{}
+	if uid != "" {
+		pre["uid"] = uid
+	}
+	if resourceVersion != "" {
+		pre["resourceVersion"] = resourceVersion
+	}
+	if len(pre) > 0 {
+		opts["preconditions"] = pre
+	}
+	body, _ := json.Marshal(opts)
 	_, err := a.do(ctx, http.MethodDelete, path, "application/json", body)
 	return err
 }

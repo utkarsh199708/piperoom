@@ -419,7 +419,7 @@ func (d *Driver) applyRollback(r rendered) (bool, string) {
 		if prod {
 			return false, "the canary topic is kept on a production target (it is data); helm uninstall of the pipeline release removes the KafkaTopic"
 		}
-		return true, rollbackRecord("k8s_delete", r.kind, r.name)
+		return true, rollbackRecordFor(rollbackParams{Kind: r.kind, Name: r.name, TopicPrefix: r.topicPrefix}, "k8s_delete")
 	case "KafkaConnector":
 		if prod {
 			return false, "deleting a connector on a production target is a person's change (as connect_delete_connector is): kubectl delete kafkaconnector, or helm uninstall of the pipeline release"

@@ -149,7 +149,7 @@ func TestConnectFactsRefusals(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b, _ := json.Marshal(res.Data); !strings.Contains(string(b), "data.svc:9093") || strings.Contains(string(b), placeholderBootstrap) {
+		if b, _ := json.Marshal(res.Data); !strings.Contains(string(b), "data.svc:9093") || strings.Contains(string(b), placeholderBootstrap(testKafka)) {
 			t.Fatalf("preview = %s", b)
 		}
 	})
