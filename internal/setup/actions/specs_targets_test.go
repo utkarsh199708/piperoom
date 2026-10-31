@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"piperoom/internal/events"
@@ -325,6 +326,14 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"payments.history"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"payments.dlq"}}}`, false},
+		// The topic_prefix the runner checks those topics against is the pipeline's.
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"payments","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"","config":{"topics":"orders.public.orders"}}}`, false},
+		// schemahistory.<prefix> is Debezium's documented name (correctness 5).
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"schemahistory.orders"}}}`, true},
+		// A DLQ that is one of the sink's read topics would loop.
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.public.orders"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"public","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"sales","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"payments","schema":"public","table":"piperoom_canary"}}`, false},
@@ -383,5 +392,42 @@ func TestCCloudACLScopeNeedsATopicPrefix(t *testing.T) {
 	err = a.CheckScope(owners.Pipeline{ID: "orders"}, json.RawMessage(`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`))
 	if !errors.Is(err, tools.ErrOutOfScope) {
 		t.Fatalf("CheckScope = %v, want ErrOutOfScope", err)
+	}
+}
+
+// TestStrimziTopicRulesMatchTheRunner runs the shared
+// kafkatopics/testdata/cases.json through the server's connector scope; the
+// runner's allow-list test runs the same table (correctness 2).
+func TestStrimziTopicRulesMatchTheRunner(t *testing.T) {
+	b, err := os.ReadFile("../kafkatopics/testdata/cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name, Prefix, Key, Topic, Topics string
+		OK                               bool
+	}
+	if err := json.Unmarshal(b, &cases); err != nil {
+		t.Fatal(err)
+	}
+	a, err := setupactions.New(specsByName()["k8s_apply"], setupactions.Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		pl := owners.Pipeline{ID: "p", TopicPrefix: c.Prefix, Connectors: []string{"p-src"}}
+		plugin, cfg := "mysql", map[string]string{"topic.prefix": c.Prefix, c.Key: c.Topic}
+		if c.Key == "errors.deadletterqueue.topic.name" {
+			plugin, cfg = "jdbc", map[string]string{c.Key: c.Topic}
+			if c.Topics != "" {
+				cfg["topics"] = c.Topics
+			}
+		}
+		raw, _ := json.Marshal(map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
+			"connector": "p-src", "plugin": plugin, "topic_prefix": c.Prefix, "config": cfg}})
+		err := a.CheckScope(pl, raw)
+		if (err == nil) != c.OK {
+			t.Errorf("%s: err = %v, want ok %v", c.Name, err, c.OK)
+		}
 	}
 }

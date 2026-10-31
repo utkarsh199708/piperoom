@@ -194,10 +194,21 @@ var ErrNotOwned = errors.New("strimzi: the object is not the pipeline release's"
 // carries the chart's app.kubernetes.io/instance label naming the pipeline
 // release and the meta.helm.sh/release-name annotation Helm writes on every
 // object it installs, naming the same release (and, when Helm recorded it,
-// the object's own namespace as the release's). A label alone is a string
-// anyone who can create the object can copy; the annotation is what Helm
-// itself checks before it adopts an object. A same-named object a person or
-// another release created is refused before any write.
+// the object's own namespace as the release's).
+//
+// This guards against accidents, not against an adversary: the label and
+// both annotations are client-set strings (as are every other label,
+// annotation and managedFields entry), so anyone who can create the object
+// can copy them. It stops the runner from patching or deleting a same-named
+// object a person or another release created by mistake. The boundary is
+// elsewhere: the setup ServiceAccount's RBAC (resourceNames pinned to the
+// chart's names) and the chart's ValidatingAdmissionPolicy, which check
+// every write the runner sends whatever the object carries.
+//
+// The check needs Helm-installed objects: a release rendered with helm
+// template and applied by kubectl, or deployed by Argo CD (which applies the
+// rendered manifests itself and writes no meta.helm.sh annotations), is
+// refused here. Those installs are unsupported for the setup runner.
 func (d *Driver) checkOwned(obj map[string]any, kind, name string) error {
 	md, _ := obj["metadata"].(map[string]any)
 	labels, _ := md["labels"].(map[string]any)

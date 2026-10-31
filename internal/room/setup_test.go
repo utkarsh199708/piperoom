@@ -913,3 +913,24 @@ func TestSetupRoomTenantVisibility(t *testing.T) {
 		t.Fatalf("another tenant's list = %+v", other)
 	}
 }
+
+// The Strimzi driver refuses a KafkaConnect build whose registry is not an
+// image_registry target, so the room accepts the kind (and checks its
+// address like any dialed kind).
+func TestCreateSetupRoomAcceptsImageRegistry(t *testing.T) {
+	env := newSetupEnv(t, setupOptions{withTenants: true})
+	req := setupRequest("orders-image-registry")
+	req.Targets = []events.SetupTarget{{Kind: "image_registry", Address: "registry.example.com:5000"}}
+	if _, err := env.svc.CreateSetupRoom(context.Background(), alice(), req); err != nil {
+		t.Fatalf("image_registry refused: %v", err)
+	}
+	req = setupRequest("orders-image-registry-meta")
+	req.Targets = []events.SetupTarget{{Kind: "image_registry", Address: "169.254.169.254:5000"}}
+	_, err := env.svc.CreateSetupRoom(context.Background(), alice(), req)
+	wantSetupError(t, err, 400, "address_refused")
+	req = setupRequest("orders-image-registry-opaque")
+	req.Targets = []events.SetupTarget{{Kind: "image_registry", Address: "not a host/x"}}
+	if _, err := env.svc.CreateSetupRoom(context.Background(), alice(), req); err == nil {
+		t.Fatal("an image_registry that names no host was accepted")
+	}
+}

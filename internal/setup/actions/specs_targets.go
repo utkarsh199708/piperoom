@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/owners"
+	"piperoom/internal/setup/kafkatopics"
 	"piperoom/internal/tools"
 )
 
@@ -473,27 +474,40 @@ func strimziCanarySchemas(pl owners.Pipeline) []string {
 // strimziConnectorScope binds a connector config's topics to the pipeline:
 // a source's topic.prefix is the pipeline's (and required), and a JDBC sink's
 // topics each carry it (topics.regex is refused by the runner's allow-list).
+// The topics a connector writes besides its records, the schema history and
+// the sink's dead letter queue, follow the kafkatopics rules, which the
+// runner's allow-list applies too. A topic_prefix param, which the runner
+// checks those topics against, must be the pipeline's.
 func strimziConnectorScope(pl owners.Pipeline, params json.RawMessage) error {
 	var cp struct {
-		Plugin string            `json:"plugin"`
-		Config map[string]string `json:"config"`
+		Plugin      string            `json:"plugin"`
+		Config      map[string]string `json:"config"`
+		TopicPrefix *string           `json:"topic_prefix"`
 	}
 	if err := json.Unmarshal(params, &cp); err != nil {
 		return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
 	}
-	// The topics a connector writes besides its records are the pipeline's
-	// too: the schema history and the sink's dead letter queue.
-	for _, k := range []string{"schema.history.internal.kafka.topic", "errors.deadletterqueue.topic.name"} {
-		if t, ok := cp.Config[k]; ok && (pl.TopicPrefix == "" || !strings.HasPrefix(t, pl.TopicPrefix+".")) {
-			return fmt.Errorf("%w: %s %q is not a topic of pipeline %q", tools.ErrOutOfScope, k, clipText(t), clipText(pl.ID))
+	if cp.TopicPrefix != nil {
+		if err := strimziPrefixScope(pl, *cp.TopicPrefix); err != nil {
+			return err
+		}
+	}
+	if t, ok := cp.Config["schema.history.internal.kafka.topic"]; ok {
+		if err := kafkatopics.SchemaHistory(pl.TopicPrefix, t); err != nil {
+			return fmt.Errorf("%w: schema.history.internal.kafka.topic %q is not a topic of pipeline %q: %v", tools.ErrOutOfScope, clipText(t), clipText(pl.ID), err)
+		}
+	}
+	if t, ok := cp.Config["errors.deadletterqueue.topic.name"]; ok {
+		if err := kafkatopics.DeadLetter(pl.TopicPrefix, t, cp.Config["topics"]); err != nil {
+			return fmt.Errorf("%w: errors.deadletterqueue.topic.name %q is not a topic of pipeline %q: %v", tools.ErrOutOfScope, clipText(t), clipText(pl.ID), err)
 		}
 	}
 	if cp.Plugin == "jdbc" {
-		topics := strings.Split(cp.Config["topics"], ",")
-		for _, t := range topics {
-			t = strings.TrimSpace(t)
-			if pl.TopicPrefix == "" || !strings.HasPrefix(t, pl.TopicPrefix+".") {
-				return fmt.Errorf("%w: sink topic %q is not a topic of pipeline %q", tools.ErrOutOfScope, clipText(t), clipText(pl.ID))
+		if topics, ok := cp.Config["topics"]; ok {
+			for _, t := range strings.Split(topics, ",") {
+				if t = strings.TrimSpace(t); !kafkatopics.Under(pl.TopicPrefix, t) {
+					return fmt.Errorf("%w: sink topic %q is not a topic of pipeline %q", tools.ErrOutOfScope, clipText(t), clipText(pl.ID))
+				}
 			}
 		}
 		return nil

@@ -71,6 +71,17 @@ var schemaHistoryKeys = []string{
 // keeps in the pod's environment through its own strimzienv provider (the
 // worker's config.providers always carries it). These are the only store
 // paths and the only non-secrets reference a connector may name.
+//
+// Versions: the strimzienv provider is Kafka's EnvVarConfigProvider
+// (KIP-887, Kafka 3.5 and later) that Strimzi adds to every Connect worker,
+// and CERTS_STORE_PASSWORD is the variable Strimzi's TLS prepare script
+// sets. Both are older than the driver's floor, Strimzi 0.49 (the first
+// release with the kafka.strimzi.io/v1 API the chart and the driver use),
+// so every supported Strimzi has them; the nightly kind run (Strimzi
+// 0.49.0) is where they are exercised. A Kafka version below 3.5 in
+// spec.version would lose the provider: the Connect template pins
+// spec.version to the Kafka CR's, and Strimzi 0.49 supports no Kafka that
+// old.
 const (
 	strimziTrustStore    = "/tmp/kafka/cluster.truststore.p12"
 	strimziKeyStore      = "/tmp/kafka/cluster.keystore.p12"
