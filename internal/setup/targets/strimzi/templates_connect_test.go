@@ -161,7 +161,7 @@ func TestConnectorTemplate(t *testing.T) {
 	ref := "${secrets:" + testNS + "/" + h.d.dbSecretName() + ":password}"
 	apply := func(plugin string, cfg map[string]string) error {
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
-			"connector": "orders-src", "plugin": plugin, "config": cfg,
+			"topic_prefix": "pg", "connector": "orders-src", "plugin": plugin, "config": cfg,
 		}})
 		return err
 	}
@@ -185,7 +185,7 @@ func TestConnectorTemplate(t *testing.T) {
 		t.Error("unknown plugin accepted")
 	}
 	if _, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
-		"connector": "not-the-charts", "plugin": "postgres", "config": map[string]string{"a": "b"},
+		"topic_prefix": "pg", "connector": "not-the-charts", "plugin": "postgres", "config": map[string]string{"a": "b"},
 	}}); err == nil {
 		t.Error("a connector name outside the chart was accepted")
 	}

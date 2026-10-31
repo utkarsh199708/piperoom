@@ -254,7 +254,7 @@ func TestUserAndConnectorAllowList(t *testing.T) {
 	}
 	good := map[string]any{"class": "io.debezium.connector.postgresql.PostgresConnector", "tasksMax": 1, "config": map[string]any{
 		"database.password": "${secrets:data/orders-db-credentials:password}", "topic.prefix": "pg", "database.sslmode": "verify-full"}}
-	if err := h.d.ValidateConnector(good, testNS, testKafka, ""); err != nil {
+	if err := h.d.ValidateConnector(good, testNS, testKafka, "pg"); err != nil {
 		t.Fatalf("a good connector was refused: %v", err)
 	}
 	for name, cfg := range map[string]map[string]any{
@@ -265,7 +265,7 @@ func TestUserAndConnectorAllowList(t *testing.T) {
 		"class in config":  {"connector.class": "x"},
 	} {
 		spec := map[string]any{"class": "io.debezium.connector.postgresql.PostgresConnector", "config": cfg}
-		if err := h.d.ValidateConnector(spec, testNS, testKafka, ""); !errors.Is(err, ErrField) {
+		if err := h.d.ValidateConnector(spec, testNS, testKafka, "pg"); !errors.Is(err, ErrField) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}

@@ -3,6 +3,7 @@ package strimzi
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,12 @@ func TestTopicRulesMatchTheServer(t *testing.T) {
 		err := h.d.ValidateConnector(connectorSpec(plugin, cfg), testNS, testKafka, c.Prefix)
 		if (err == nil) != c.OK {
 			t.Errorf("%s: err = %v, want ok %v", c.Name, err, c.OK)
+		}
+		// Without the template's topic_prefix param the runner has nothing to
+		// check these topics against and refuses, naming the param; the
+		// server refuses the step too (C1, round 4).
+		if err := h.d.ValidateConnector(connectorSpec(plugin, cfg), testNS, testKafka, ""); err == nil || !strings.Contains(err.Error(), "topic_prefix") {
+			t.Errorf("%s without topic_prefix: err = %v, want a refusal naming topic_prefix", c.Name, err)
 		}
 	}
 }

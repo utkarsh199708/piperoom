@@ -39,7 +39,7 @@ func targetSpecs() []Spec {
 			Name:     "k8s_apply",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Write one chart-created Strimzi object from a template (kind and template: KafkaConnect connect, KafkaConnector connector, KafkaTopic canary-topic, KafkaUser connect-user or read-user, ConfigMap connect-logging) with the template's typed params; the runner replaces its spec under a resourceVersion test, reads it back and unpauses it last. The object name comes from the template, never a param.",
+			Describe: "Write one chart-created Strimzi object from a template (KafkaConnect connect, KafkaConnector connector, KafkaTopic canary-topic, KafkaUser connect-user or read-user, ConfigMap connect-logging) with its typed params; the runner replaces the spec under a resourceVersion test, reads it back and unpauses last. The name comes from the template. connector, canary-topic and the user templates require topic_prefix, exactly the pipeline's",
 			Schema:   strimziApplySchema(),
 			Scope:    strimziApplyScope,
 			// preview_k8s_apply answers the dry run as an
@@ -476,8 +476,11 @@ func strimziCanarySchemas(pl owners.Pipeline) []string {
 // topics each carry it (topics.regex is refused by the runner's allow-list).
 // The topics a connector writes besides its records, the schema history and
 // the sink's dead letter queue, follow the kafkatopics rules, which the
-// runner's allow-list applies too. A topic_prefix param, which the runner
-// checks those topics against, must be the pipeline's.
+// runner's allow-list applies too. The topic_prefix param, which the runner
+// checks those topics against, is required and must be the pipeline's: the
+// server cannot rewrite approved params (the approval covers them as
+// shown), so it refuses a step that leaves the prefix out rather than let
+// the runner guess one.
 func strimziConnectorScope(pl owners.Pipeline, params json.RawMessage) error {
 	var cp struct {
 		Plugin      string            `json:"plugin"`
@@ -487,10 +490,11 @@ func strimziConnectorScope(pl owners.Pipeline, params json.RawMessage) error {
 	if err := json.Unmarshal(params, &cp); err != nil {
 		return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
 	}
-	if cp.TopicPrefix != nil {
-		if err := strimziPrefixScope(pl, *cp.TopicPrefix); err != nil {
-			return err
-		}
+	if cp.TopicPrefix == nil {
+		return fmt.Errorf("%w: a connector apply names the pipeline's topic_prefix (%s) in params.topic_prefix", tools.ErrOutOfScope, clipText(pl.TopicPrefix))
+	}
+	if err := strimziPrefixScope(pl, *cp.TopicPrefix); err != nil {
+		return err
 	}
 	if t, ok := cp.Config["schema.history.internal.kafka.topic"]; ok {
 		if err := kafkatopics.SchemaHistory(pl.TopicPrefix, t); err != nil {

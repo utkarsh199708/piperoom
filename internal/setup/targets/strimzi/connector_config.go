@@ -971,10 +971,11 @@ func mongoHosts(s string) []string {
 }
 
 // topicErr names the op param a topic rule needs when it is missing: the
-// server sets k8s_apply's topic_prefix to the pipeline's for every connector.
+// server requires k8s_apply's topic_prefix, the pipeline's, for every
+// connector step.
 func topicErr(err error) string {
 	if errors.Is(err, kafkatopics.ErrNoPrefix) {
-		return err.Error() + ": the connector template's topic_prefix param is missing (the server sets it to the pipeline's topic_prefix)"
+		return err.Error() + ": the connector template's topic_prefix param is missing (it is the pipeline's topic_prefix)"
 	}
 	return err.Error()
 }

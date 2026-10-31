@@ -134,7 +134,7 @@ func TestRegistryURLBoundToTheRoom(t *testing.T) {
 		}
 		h.shell("KafkaConnector", "orders-src", map[string]any{})
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
-			"connector": "orders-src", "plugin": "postgres", "config": map[string]string{
+			"topic_prefix": "pg", "connector": "orders-src", "plugin": "postgres", "config": map[string]string{
 				"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.sslmode": "verify-full",
 				"value.converter": "io.confluent.connect.avro.AvroConverter", "value.converter.schema.registry.url": c.url},
 		}})

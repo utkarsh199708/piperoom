@@ -99,13 +99,13 @@ func TestConnectorConfigAllowList(t *testing.T) {
 		"transforms.unwrap.drop.tombstones": "false",
 		"key.converter":                     "org.apache.kafka.connect.json.JsonConverter",
 	}
-	if err := h.d.ValidateConnector(connectorSpec("postgres", good), testNS, testKafka, ""); err != nil {
+	if err := h.d.ValidateConnector(connectorSpec("postgres", good), testNS, testKafka, "pg"); err != nil {
 		t.Fatalf("a good postgres config was refused: %v", err)
 	}
 	mysql := map[string]any{"database.hostname": "pg", "database.port": "3306", "database.server.id": "1", "topic.prefix": "pg", "database.ssl.mode": "verify_identity",
 		"schema.history.internal.producer.security.protocol": "SSL", "schema.history.internal.consumer.security.protocol": "SSL",
 		"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"}
-	if err := h.d.ValidateConnector(connectorSpec("mysql", mysql), testNS, testKafka, ""); err != nil {
+	if err := h.d.ValidateConnector(connectorSpec("mysql", mysql), testNS, testKafka, "pg"); err != nil {
 		t.Fatalf("a good mysql config was refused: %v", err)
 	}
 	for name, tc := range map[string]struct {
@@ -144,12 +144,12 @@ func TestConnectorConfigAllowList(t *testing.T) {
 		if strings.HasPrefix(tc.key, "transforms.x") {
 			cfg["transforms"] = "x"
 		}
-		err := h.d.ValidateConnector(connectorSpec(tc.plugin, cfg), testNS, testKafka, "")
+		err := h.d.ValidateConnector(connectorSpec(tc.plugin, cfg), testNS, testKafka, "pg")
 		if !errors.Is(err, ErrField) || !strings.Contains(err.Error(), tc.key) && !strings.Contains(err.Error(), "spec.config") {
 			t.Errorf("%s: err = %v, want ErrField naming the key", name, err)
 		}
 	}
-	if err := h.d.ValidateConnector(map[string]any{"class": "io.debezium.connector.evil.Connector", "config": map[string]any{}}, testNS, testKafka, ""); !errors.Is(err, ErrField) {
+	if err := h.d.ValidateConnector(map[string]any{"class": "io.debezium.connector.evil.Connector", "config": map[string]any{}}, testNS, testKafka, "pg"); !errors.Is(err, ErrField) {
 		t.Errorf("an unknown Debezium class: %v", err)
 	}
 }
@@ -181,7 +181,7 @@ func TestConnectorBoundToRoomTargets(t *testing.T) {
 		withConnectFacts(h)
 		path := h.shell("KafkaConnector", "orders-src", map[string]any{})
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
-			"connector": "orders-src", "plugin": tc.plugin, "config": tc.cfg,
+			"topic_prefix": "pg", "connector": "orders-src", "plugin": tc.plugin, "config": tc.cfg,
 		}})
 		if tc.ok != (err == nil) {
 			t.Errorf("%s: err = %v, want ok %v", name, err, tc.ok)

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"piperoom/internal/events"
@@ -314,26 +315,30 @@ func TestTargetSpecScopes(t *testing.T) {
 		op, params string
 		inScope    bool
 	}{
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"orders"}}}`, true},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"payments-src","plugin":"postgres","config":{"topic.prefix":"orders"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","topic_prefix":"orders","config":{"topic.prefix":"orders"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"payments-src","plugin":"postgres","topic_prefix":"orders","config":{"topic.prefix":"orders"}}}`, false},
 		// The topic prefix every render uses is the pipeline's own.
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{}}}`, false},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"payments"}}}`, false},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,orders.sales.items"}}}`, true},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,payments.public.x"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","topic_prefix":"orders","config":{}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","topic_prefix":"orders","config":{"topic.prefix":"payments"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders,orders.sales.items"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders,payments.public.x"}}}`, false},
 		// The schema history and the dead letter queue are the pipeline's topics too.
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"orders.history"}}}`, true},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"payments.history"}}}`, false},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"payments.dlq"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","topic_prefix":"orders","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"orders.history"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","topic_prefix":"orders","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"payments.history"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"payments.dlq"}}}`, false},
 		// The topic_prefix the runner checks those topics against is the pipeline's.
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, true},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"payments","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.dlq"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"","config":{"topics":"orders.public.orders"}}}`, false},
 		// schemahistory.<prefix> is Debezium's documented name (correctness 5).
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"schemahistory.orders"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","topic_prefix":"orders","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"schemahistory.orders"}}}`, true},
 		// A DLQ that is one of the sink's read topics would loop.
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.public.orders"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","topic_prefix":"orders","config":{"topics":"orders.public.orders","errors.deadletterqueue.topic.name":"orders.public.orders"}}}`, false},
+		// C1 (round 4): the connector step names the pipeline's topic_prefix; absent is refused, with no runner fallback.
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"orders"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"mysql","config":{"topic.prefix":"orders","schema.history.internal.kafka.topic":"orders.history"}}}`, false},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"public","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"sales","table":"piperoom_canary"}}`, true},
 		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"payments","schema":"public","table":"piperoom_canary"}}`, false},
@@ -428,6 +433,14 @@ func TestStrimziTopicRulesMatchTheRunner(t *testing.T) {
 		err := a.CheckScope(pl, raw)
 		if (err == nil) != c.OK {
 			t.Errorf("%s: err = %v, want ok %v", c.Name, err, c.OK)
+		}
+		// The same step without topic_prefix is refused: the runner would
+		// refuse it too (TestTopicRulesMatchTheServer), and the server does
+		// not leave the prefix to the runner (C1, round 4).
+		raw, _ = json.Marshal(map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
+			"connector": "p-src", "plugin": plugin, "config": cfg}})
+		if err := a.CheckScope(pl, raw); err == nil || !strings.Contains(err.Error(), "topic_prefix") {
+			t.Errorf("%s without topic_prefix: err = %v, want a refusal naming topic_prefix", c.Name, err)
 		}
 	}
 }

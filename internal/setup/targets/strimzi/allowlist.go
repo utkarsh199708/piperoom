@@ -2,6 +2,7 @@ package strimzi
 
 import (
 	"fmt"
+	"piperoom/internal/setup/kafkatopics"
 	"regexp"
 	"sort"
 	"strings"
@@ -413,16 +414,17 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns, kafka, topicPrefix s
 			return refuse(path, "a credential is a ${secrets:} reference in a user or password key, never a value")
 		}
 	}
-	prefix := topicPrefix
-	if src, _ := asString(cfg["topic.prefix"]); plugin != "jdbc" {
-		if prefix != "" && src != "" && src != prefix {
-			return refuse("spec.config.topic.prefix", "the pipeline's topic prefix "+prefix)
-		}
-		if prefix == "" {
-			prefix = src
-		}
+	// The template's topic_prefix param is the pipeline's (the server
+	// refuses a connector step without it or with another). There is no
+	// fallback to the config's topic.prefix: that would let a step that
+	// left the param out pick the prefix its own topics are checked against.
+	if topicPrefix == "" {
+		return refuse("params.topic_prefix", topicErr(kafkatopics.ErrNoPrefix))
 	}
-	if err := validateConnectorConfig(plugin, cfg, kafka, ns, prefix); err != nil {
+	if src, _ := asString(cfg["topic.prefix"]); plugin != "jdbc" && src != "" && src != topicPrefix {
+		return refuse("spec.config.topic.prefix", "the pipeline's topic prefix "+topicPrefix)
+	}
+	if err := validateConnectorConfig(plugin, cfg, kafka, ns, topicPrefix); err != nil {
 		return err
 	}
 	if a, ok := spec["autoRestart"]; ok {
