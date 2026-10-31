@@ -148,7 +148,7 @@ func TestContinuedValuesRound11(t *testing.T) {
 func TestCredentialFormsRound11(t *testing.T) {
 	m := corpusMarker
 	for _, line := range []string{
-		"password [" + m + "]", "password is " + m, "password\t" + m, "user,password,host\nu," + m + ",h", "ALTER USER app WITH password '" + m + "';",
+		"password [" + m + "]", "password is " + m, "password\t" + m, "u,password," + m, "user,password,host\nu," + m + ",h", "ALTER USER app WITH password '" + m + "';",
 		"password: |\n  " + m + "\n", "password:\n  " + m + "\n", "password: >-\n  a\n\n  " + m + "\nnext: 1",
 		"{'user': 'u', 'password': '" + m + "'}", "{'sasl.jaas.config': '" + m + "'}",
 		`{"name":"DB_PASSWORD","value":"` + m + `"}`, `env=[{"name":"SECRET_KEY", "value": "` + m + `"}]`,
