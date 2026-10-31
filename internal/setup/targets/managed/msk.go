@@ -201,6 +201,10 @@ func RegisterMSK(r *ops.Registry, o MSKOptions) (*MSKDriver, error) {
 }
 
 func (d *MSKDriver) ops() []ops.Op {
+	return withPreviews(d.baseOps())
+}
+
+func (d *MSKDriver) baseOps() []ops.Op {
 	return []ops.Op{
 		mskOp{d: d, name: "msk_describe_cluster", describe: "describe the MSK cluster: state, Kafka version, subnets, security groups, bootstrap brokers (kafka:DescribeClusterV2, GetBootstrapBrokers)",
 			schema: objectSchema(nil, map[string]any{"cluster_arn": stringSchema("")}), run: d.describeCluster, check: d.checkClusterParams},
@@ -254,7 +258,7 @@ type mskOp struct {
 	schema   map[string]any
 	check    func(raw json.RawMessage) error
 	run      func(ctx context.Context, raw json.RawMessage) (ops.Result, error)
-	preview  func(raw json.RawMessage) (events.PreviewResult, error)
+	preview  func(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error)
 	// deadline is the op's own bound (ops.Deadliner); zero keeps the
 	// catalogue's default.
 	deadline time.Duration
@@ -314,14 +318,19 @@ func (o mskOp) Execute(ctx context.Context, raw json.RawMessage, env ops.Env) (o
 
 // Preview is the step's preview for a write (design §2.5's Op.Preview
 // signature, for when the catalogue calls it).
-func (o mskOp) Preview(_ context.Context, raw json.RawMessage, env ops.Env) (events.PreviewResult, error) {
+func (o mskOp) Preview(ctx context.Context, raw json.RawMessage, env ops.Env) (events.PreviewResult, error) {
 	if o.preview == nil {
 		return events.PreviewResult{}, fmt.Errorf("managed: %s has no preview (a read)", o.name)
 	}
 	if err := o.Validate(raw, env); err != nil {
 		return events.PreviewResult{}, err
 	}
-	p, err := o.preview(raw)
+	// The preview reads AWS, so the identity check of Execute comes first:
+	// a profile pointed at another account reads nothing there.
+	if err := o.d.checkIdentity(ctx); err != nil {
+		return events.PreviewResult{}, err
+	}
+	p, err := o.preview(ctx, raw)
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
@@ -987,19 +996,47 @@ func (d *MSKDriver) deleteConnector(ctx context.Context, raw json.RawMessage) (o
 }
 
 // ---- previews ----
+//
+// Each write's preview is a T0 read (registered as preview_<write>, see
+// preview.go): the same checks the write makes before it calls AWS, never
+// the call itself. A write nothing in the catalogue undoes says so in
+// Rollback with Reversible false, so the room records no rollback step for
+// it and a person reads how to undo it by hand.
 
-func (d *MSKDriver) previewPlugin(raw json.RawMessage) (events.PreviewResult, error) {
+// mskNotReversible is the Rollback text of a write the runner cannot undo.
+func mskNotReversible(what, how string) string {
+	return "not undone automatically: the runner has no op that deletes " + what + "; " + how
+}
+
+func (d *MSKDriver) previewPlugin(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error) {
 	var p CreatePluginParams
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
-	return events.PreviewResult{
-		Expected:   fmt.Sprintf("custom plugin %s from s3://%s/%s version %s (%s) in account %s; size checked against %d bytes, digest unverified", p.Name, p.Bucket, p.Key, p.Version, p.ContentType, d.account, p.ExpectedSize),
-		Reversible: false,
-	}, nil
+	pr := events.PreviewResult{
+		Expected: fmt.Sprintf("custom plugin %s from s3://%s/%s version %s (%s) in account %s; size checked against %d bytes, digest unverified", p.Name, p.Bucket, p.Key, p.Version, p.ContentType, d.account, p.ExpectedSize),
+		Rollback: mskNotReversible("a custom plugin", "delete "+p.Name+" in the MSK Connect console (kafkaconnect:DeleteCustomPlugin) once no connector uses it"),
+	}
+	plugins, err := d.api.ListPlugins(ctx, p.Name)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	pr.Current = "no custom plugin named " + p.Name + " in " + d.address + " (ListCustomPlugins)"
+	for _, pl := range plugins {
+		if pl.Name == p.Name {
+			pr.Current = fmt.Sprintf("custom plugin %s exists (%s, revision %d): the create fails as a conflict (ListCustomPlugins)", p.Name, clipText(pl.State, 32), pl.Revision)
+		}
+	}
+	// The archive check the create repeats first, as the dry run.
+	res, err := d.objectCheck(ctx, p.Bucket, p.Key, p.Version, p.ExpectedSize)
+	pr.DryRun = &events.DryRunResult{Source: "s3 HeadObject (the archive check msk_create_plugin repeats)", OK: err == nil, Text: clipText(res.Summary, 2000)}
+	if err != nil && res.Summary == "" {
+		pr.DryRun.Text = clipText(err.Error(), 2000)
+	}
+	return pr, nil
 }
 
-func (d *MSKDriver) previewWorker(raw json.RawMessage) (events.PreviewResult, error) {
+func (d *MSKDriver) previewWorker(_ context.Context, raw json.RawMessage) (events.PreviewResult, error) {
 	var p WorkerParams
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
@@ -1008,28 +1045,103 @@ func (d *MSKDriver) previewWorker(raw json.RawMessage) (events.PreviewResult, er
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
-	return events.PreviewResult{Expected: text, Reversible: false}, nil
+	return events.PreviewResult{
+		// A worker configuration is immutable and has no name lookup in the
+		// client: each create makes a new one, so there is no state to read.
+		Current:  "not read: each msk_create_worker_config makes a new, immutable worker configuration",
+		Expected: text,
+		DryRun:   &events.DryRunResult{Source: "worker template render (key allow-list)", OK: true, Text: clipText(text, 2000)},
+		Rollback: mskNotReversible("a worker configuration", "delete "+p.Name+" in the MSK Connect console (kafkaconnect:DeleteWorkerConfiguration) once no connector uses it"),
+	}, nil
 }
 
-func (d *MSKDriver) previewConnector(raw json.RawMessage) (events.PreviewResult, error) {
+func (d *MSKDriver) previewConnector(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error) {
 	var p CreateConnectorParams
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
 	b, _ := json.Marshal(p.Config)
-	return events.PreviewResult{
-		Expected:   fmt.Sprintf("connector %s on Kafka Connect %s, 1 MCU x 1 worker, IAM auth, TLS; config %s", p.Name, p.KafkaConnectVersion, b),
-		Reversible: true,
-		Rollback:   fmt.Sprintf(`msk_delete_connector {"name":%q}`, p.Name),
-	}, nil
+	pr := events.PreviewResult{
+		Expected: fmt.Sprintf("connector %s on Kafka Connect %s, 1 MCU x 1 worker, IAM auth, TLS; config %s", p.Name, p.KafkaConnectVersion, b),
+	}
+	arn, err := d.api.FindConnector(ctx, p.Name)
+	switch {
+	case errors.Is(err, mskconnect.ErrNotFound):
+		pr.Current = "no connector named " + p.Name + " in " + d.address + " (ListConnectors)"
+	case err != nil:
+		return events.PreviewResult{}, err
+	default:
+		pr.Current = "connector " + p.Name + " exists (" + clipText(arn, 200) + "): the create fails as a conflict (ListConnectors)"
+	}
+	// The checks the create makes before CreateConnector, as the dry run:
+	// the cluster's IAM listener and the service role's trust and escalation.
+	pr.DryRun = &events.DryRunResult{Source: "the checks msk_create_connector repeats: cluster IAM listener, service role trust and escalation"}
+	clusterArn, _ := d.clusterOf(p.ClusterArn)
+	switch cl, err := d.api.DescribeCluster(ctx, clusterArn); {
+	case err != nil:
+		pr.DryRun.Text = "describing the cluster failed: " + clipText(err.Error(), 400)
+	case cl.BootstrapIAM == "":
+		pr.DryRun.Text = "cluster " + cl.Name + " has no IAM bootstrap brokers; the create is refused"
+	default:
+		role, unsafe, err := d.roleSafety(ctx, p.ServiceRoleArn)
+		if err != nil {
+			pr.DryRun.Text = "checking the service role failed: " + clipText(err.Error(), 400)
+			break
+		}
+		if res, err := roleRefusal(role, unsafe); err != nil {
+			pr.DryRun.Text = clipText(res.Summary, 2000)
+			break
+		}
+		pr.DryRun.OK = true
+		pr.DryRun.Text = "cluster " + cl.Name + " has an IAM listener; role " + role.Name + " is trusted by MSK Connect alone and cannot escalate"
+	}
+	// The undo is msk_delete_connector, which the guard refuses on
+	// production: there a person deletes the connector.
+	if guardForbidden("msk_delete_connector", "", d.class) {
+		pr.Rollback = "deleting a connector on a production target is a person's change: delete " + p.Name + " in the MSK Connect console"
+		return pr, nil
+	}
+	pr.Reversible = true
+	pr.Rollback = fmt.Sprintf(`msk_delete_connector {"name":%q}`, p.Name)
+	return pr, nil
 }
 
-func (d *MSKDriver) previewDelete(raw json.RawMessage) (events.PreviewResult, error) {
+func (d *MSKDriver) previewDelete(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error) {
 	var p NameParams
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
-	return events.PreviewResult{Current: "connector " + p.Name, Expected: "connector " + p.Name + " deleted (only if this runner created it for this room)", Reversible: false}, nil
+	pr := events.PreviewResult{
+		Rollback: "a rollback is not undone automatically: create the connector again with its msk_create_connector step in a new setup plan",
+	}
+	arn, err := d.api.FindConnector(ctx, p.Name)
+	switch {
+	case errors.Is(err, mskconnect.ErrNotFound):
+		pr.Current = "no connector named " + p.Name + " in " + d.address + " (ListConnectors)"
+		pr.Expected = "nothing to delete: the connector is absent; the delete fails as not found"
+		return pr, nil
+	case err != nil:
+		return events.PreviewResult{}, err
+	}
+	// The same proof the delete asks for, so a preview never passes for a
+	// connector the delete refuses.
+	if !d.createdHere(arn) {
+		return events.PreviewResult{}, fmt.Errorf("%w: connector %s is not one this runner created (after a runner restart, delete it by hand)", ErrNotCreatedByRoom, p.Name)
+	}
+	tags, err := d.api.ConnectorTags(ctx, arn)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	if tags[TagRoom] != d.room {
+		return events.PreviewResult{}, fmt.Errorf("%w: connector %s carries no %s tag of this room", ErrNotCreatedByRoom, p.Name, TagRoom)
+	}
+	cn, err := d.api.DescribeConnector(ctx, arn)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	pr.Current = fmt.Sprintf("connector %s is %s, created by this runner for room %s (DescribeConnector)", p.Name, clipText(cn.State, 32), d.room)
+	pr.Expected = "connector " + p.Name + " deleted (DeleteConnector at version " + clipText(cn.CurrentVersion, 64) + ")"
+	return pr, nil
 }
 
 // errData is the Data of a failed provider call: the error class, never the

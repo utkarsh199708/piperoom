@@ -135,7 +135,7 @@ func (d *ConfluentDriver) address() string { return d.env + "/" + d.cluster }
 
 func (d *ConfluentDriver) ops() []ops.Op {
 	nameSchema := objectSchema([]string{"name"}, map[string]any{"name": stringSchema("")})
-	return []ops.Op{
+	return withPreviews([]ops.Op{
 		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_list_plugins", describe: "list the managed connector plugins of the Confluent Cloud cluster (Connect v1 connector-plugins)",
 			schema: objectSchema(nil, map[string]any{}), check: noParams, run: d.listPlugins, class: d.Class},
 		simpleOp{kind: KindConfluent, addr: d.address(), name: ReadConfluentConnector, describe: "read a Confluent Cloud connector's status: state, tasks and their messages (Connect v1 status); the ladder's rungs 1 and 2",
@@ -144,13 +144,13 @@ func (d *ConfluentDriver) ops() []ops.Op {
 			schema: objectSchema(nil, map[string]any{}), check: noParams, run: d.readCluster, class: d.Class},
 		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_create_connector", write: true, describe: "validate the connector config against the managed plugin, then create the connector only if validation has no errors (Connect v1 validate, create)",
 			schema: objectSchema([]string{"name", "plugin", "config"}, map[string]any{"name": stringSchema(""), "plugin": stringSchema(""), "config": stringMapSchema()}),
-			check:  checkCCCreate, run: d.createConnector, class: d.Class},
+			check:  checkCCCreate, run: d.createConnector, preview: d.previewCreate, class: d.Class},
 		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_acl_create", write: true, describe: "create the fixed ACL rows of a template (watcher: read the pipeline's topics and the connector's group, connect-<name> or, for a managed sink, connect-lcc-<id> with connector naming it, which the runner checks; connector: write the pipeline's topics) for one service account (Kafka REST v3 acls)",
 			schema: objectSchema([]string{"template", "principal", "topic_prefix"}, map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{ACLTemplateWatcher, ACLTemplateConnector}},
 				"principal": stringSchema(""), "topic_prefix": stringSchema(""), "group": stringSchema(""), "connector": stringSchema("")}),
-			check: checkACLParams, run: d.createACLs, class: d.Class},
-	}
+			check: checkACLParams, run: d.createACLs, preview: d.previewACLs, class: d.Class},
+	})
 }
 
 // simpleOp is a provider op without an identity check (Confluent, Aiven):
@@ -163,7 +163,9 @@ type simpleOp struct {
 	schema     map[string]any
 	check      func(raw json.RawMessage) error
 	run        func(ctx context.Context, raw json.RawMessage) (ops.Result, error)
-	class      func() string
+	// preview is a write's preview (preview.go); nil for a read.
+	preview func(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error)
+	class   func() string
 }
 
 func (o simpleOp) Name() string                 { return o.name }
