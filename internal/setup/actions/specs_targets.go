@@ -463,6 +463,14 @@ func stringListSchema() map[string]any {
 // of the pipeline's connectors.
 var scopeConnectorName = ScopeField("name", func(p owners.Pipeline) []string { return p.Connectors })
 
+// isCloudSetupSecretName mirrors runner.IsCloudSetupSecret (the server does
+// not link the runner): ccloud_*, aws_* and aiven_token, case-insensitive
+// (docs/design/setup-managed.md §2).
+func isCloudSetupSecretName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "ccloud_") || strings.HasPrefix(n, "aws_") || n == "aiven_token"
+}
+
 // checkManagedConfig mirrors the managed driver's checkConnectorConfig: keys
 // by pattern, a value under a secret-looking key a whole ${secret:}
 // reference, no other value carrying one, no line break.
@@ -480,6 +488,12 @@ func checkManagedConfig(cfg map[string]string) error {
 		if actions.LooksSecret(k) {
 			if !managedSecretRefRE.MatchString(v) {
 				return fmt.Errorf("%s must be a ${secret:name} reference", k)
+			}
+			if name := v[len("${secret:") : len(v)-1]; isCloudSetupSecretName(name) {
+				// The runner refuses it too (runner.Store.Materialise); the
+				// server does not propose a step that would copy a cloud
+				// setup key into a connector config.
+				return fmt.Errorf("%s references %s, a cloud setup credential: those stay on the runner and are never a connector config value", k, name)
 			}
 			continue
 		}

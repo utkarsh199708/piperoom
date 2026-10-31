@@ -564,3 +564,60 @@ func TestRegisterCredentialsUnknownName(t *testing.T) {
 	}
 	assertNoValue(t, "the secret value", "generated-pw-1", rec, &logs, &stdout)
 }
+
+// TestRegisterCredentialsRefusesCloudSetupNames: a cloud setup credential
+// (ccloud_*, aiven_token, aws_*) never leaves the runner. A request naming
+// one is refused whole, even when the person would answer "y" and every name
+// is in the store; no Credentials frame carries either value.
+func TestRegisterCredentialsRefusesCloudSetupNames(t *testing.T) {
+	for _, cloud := range []string{"ccloud_api_secret", "CCLOUD_CLUSTER_KEY", "aiven_token", "aws_session_token"} {
+		t.Run(cloud, func(t *testing.T) {
+			dir := t.TempDir()
+			st := mustStore(t, dir)
+			if err := st.Set("READ_ROLE_PASSWORD", "generated-pw-1"); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(strings.ToLower(cloud), "aws_") {
+				if err := st.Set(cloud, "cloud-setup-value-9"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := &frameRecorder{}
+			got := make(chan protocol.Frame, 1)
+			srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+				doHandshake(t, conn, ctx, "tok", time.Now, nil)
+				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameRegisterCredentials,
+					RegisterCredentials: &protocol.RegisterCredentials{
+						RequestID: "rq1", PipelineID: "orders",
+						Names: []string{"READ_ROLE_PASSWORD", cloud},
+					}})
+				got <- rec.read(t, conn, ctx)
+			})
+			defer srv.Close()
+
+			var logs, stdout syncBuffer
+			r, err := runner.New(runner.Options{
+				ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: dir,
+				Stdin: strings.NewReader("y\n"), Stdout: &stdout,
+				Log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("Run = %v", err)
+			}
+			<-done
+
+			f := <-got
+			if f.Type != protocol.FrameRefused || f.Refused == nil || f.Refused.ID != "rq1" || f.Refused.Reason != protocol.RefuseCredentials {
+				t.Fatalf("got %+v, want a credentials refusal", f)
+			}
+			if strings.Contains(stdout.String(), "send these secrets") {
+				t.Errorf("the runner asked to send a set holding %s: %q", cloud, stdout.String())
+			}
+			assertNoValue(t, "the read password", "generated-pw-1", rec, &logs, &stdout)
+			assertNoValue(t, "the cloud value", "cloud-setup-value-9", rec, &logs, &stdout)
+		})
+	}
+}

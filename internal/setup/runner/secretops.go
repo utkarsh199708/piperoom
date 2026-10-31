@@ -191,9 +191,10 @@ func (r *Runner) storeSecretFrame(secret *protocol.SecretValue) {
 	}
 	name := scrub(secret.Name, MaxSecretNameBytes)
 	if IsCloudSetupSecret(secret.Name) {
-		// The server's route refuses these names too; the runner does not
-		// rely on it, because a cloud setup key set from the room would let
-		// a server point the managed drivers at another account.
+		// The server's route refuses these names too
+		// (room.SetSetupSecret); the runner does not rely on it, because a
+		// cloud setup key set from the room would let a server point the
+		// managed drivers at another account.
 		r.log.Warn("secret refused", "name", name, "err", ErrCloudSecretFrame)
 		fmt.Fprintf(r.stdout, "secret %s refused: %v\n", name, ErrCloudSecretFrame)
 		return
@@ -240,7 +241,16 @@ func (r *Runner) registerCredentials(ctx context.Context, req *protocol.Register
 
 	// The server checks the names before this frame; the runner checks them
 	// again and refuses the whole request when one is unknown, so a partial
-	// set is never sent.
+	// set is never sent. A cloud setup credential (IsCloudSetupSecret) never
+	// leaves the runner: a request naming one is refused whole, before the
+	// store is read or anything is printed, whatever the person would answer.
+	for _, name := range req.Names {
+		if IsCloudSetupSecret(name) {
+			r.log.Warn("credentials request names a cloud setup credential", "request_id", req.RequestID, "name", scrub(name, MaxSecretNameBytes))
+			refuse()
+			return
+		}
+	}
 	seen := make(map[string]struct{}, len(req.Names))
 	secrets := make([]protocol.Secret, 0, len(req.Names))
 	for _, name := range req.Names {

@@ -176,6 +176,14 @@ func targetIn(env ops.Env, kind, prefix string) bool {
 // rule.
 var secretRef = regexp.MustCompile(`^\$\{secret:[a-zA-Z_][a-zA-Z0-9_]*\}$`)
 
+// isCloudSetupSecret mirrors runner.IsCloudSetupSecret (this package does
+// not import the runner): ccloud_*, aws_* and aiven_token, case-insensitive.
+// The runner's store refuses to materialise such a reference as well.
+func isCloudSetupSecret(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "ccloud_") || strings.HasPrefix(n, "aws_") || n == "aiven_token"
+}
+
 // configKey is a connector config key.
 var configKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
@@ -199,6 +207,9 @@ func checkConnectorConfig(cfg map[string]string) error {
 		if actions.LooksSecret(k) {
 			if !secretRef.MatchString(v) {
 				return fmt.Errorf("%w: %s", ErrSecretValue, k)
+			}
+			if name := v[len("${secret:") : len(v)-1]; isCloudSetupSecret(name) {
+				return fmt.Errorf("%w: %s references %s, a cloud setup credential, which is never a connector config value", ErrParams, k, name)
 			}
 			continue
 		}

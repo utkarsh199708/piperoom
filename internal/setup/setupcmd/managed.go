@@ -92,7 +92,9 @@ func (o storeOpener) get(name string) (string, error) {
 }
 
 // lookup is the Strimzi driver's Secret func over the store: false when the
-// store cannot be opened or holds no such name.
+// store cannot be opened, holds no such name, or the name is a cloud setup
+// credential (runner.Store.LookupRef), which never becomes a Kubernetes
+// Secret.
 func (o storeOpener) lookup(name string) (string, bool) {
 	if o == nil {
 		return "", false
@@ -101,7 +103,8 @@ func (o storeOpener) lookup(name string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return st.Get(name)
+	v, err := st.LookupRef(name)
+	return v, err == nil
 }
 
 // storeMaterialiser is the managed drivers' Secrets: the runner's store,

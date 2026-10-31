@@ -116,7 +116,10 @@ var targetCases = map[string]struct{ good, bad []string }{
 	},
 	"ccloud_create_connector": {
 		good: []string{`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.hostname":"db.example","database.password":"${secret:pg_password}"}}`},
-		bad:  []string{`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.password":"hunter2"}}`, `{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"connector.class":"Other"}}`},
+		bad: []string{`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.password":"hunter2"}}`, `{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"connector.class":"Other"}}`,
+			// A cloud setup credential is never a connector config value (H2).
+			`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"kafka.api.secret":"${secret:ccloud_api_secret}"}}`,
+			`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.password":"${secret:AWS_SECRET_ACCESS_KEY}"}}`},
 	},
 	"ccloud_acl_create": {
 		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg.","group":"connect-orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg."}`},
@@ -124,7 +127,8 @@ var targetCases = map[string]struct{ good, bad []string }{
 	},
 	"aiven_create_connector": {
 		good: []string{`{"name":"orders-src","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector"}}`},
-		bad:  []string{`{"name":"orders-src","config":{"database.hostname":"db"}}`, `{"name":"orders-src","config":{"connector.class":"x","name":"other"}}`},
+		bad: []string{`{"name":"orders-src","config":{"database.hostname":"db"}}`, `{"name":"orders-src","config":{"connector.class":"x","name":"other"}}`,
+			`{"name":"orders-src","config":{"connector.class":"x","aiven.password":"${secret:aiven_token}"}}`},
 	},
 	"aiven_integration_create": {
 		good: []string{`{"source_service":"kafka-main"}`},

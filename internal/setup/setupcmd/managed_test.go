@@ -351,3 +351,30 @@ func TestStoreMaterialiser(t *testing.T) {
 		t.Fatalf("no store: %v", err)
 	}
 }
+
+// TestStoreAdaptersRefuseCloudReferences: neither the managed drivers'
+// Materialiser nor the Strimzi driver's Secret lookup hands out a cloud
+// setup credential through a reference, though the managed clients
+// themselves still read it (storeOpener.get).
+func TestStoreAdaptersRefuseCloudReferences(t *testing.T) {
+	st, open := openTestStore(t)
+	if err := st.Set(secretCCloudAPISecret, "cloud-secret-value-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set("db_password", "hunter2-db-pass"); err != nil {
+		t.Fatal(err)
+	}
+	m := storeMaterialiser{open: open}
+	if v, err := m.Materialise("${secret:" + secretCCloudAPISecret + "}"); !errors.Is(err, runner.ErrCloudSecretRef) || v != "" {
+		t.Fatalf("Materialise(cloud) = %q, %v; want ErrCloudSecretRef", v, err)
+	}
+	if v, ok := open.lookup(secretCCloudAPISecret); ok || v != "" {
+		t.Fatalf("lookup(cloud) = %q, %v; want refused", v, ok)
+	}
+	if v, ok := open.lookup("db_password"); !ok || v != "hunter2-db-pass" {
+		t.Fatalf("lookup(db_password) = %q, %v", v, ok)
+	}
+	if v, err := open.get(secretCCloudAPISecret); err != nil || v != "cloud-secret-value-1" {
+		t.Fatalf("get(cloud) = %q, %v; the managed client must still read its key", v, err)
+	}
+}
