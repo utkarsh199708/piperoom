@@ -117,7 +117,7 @@ def check_policy(docs, values):
                          "string(object.spec.build.output.image).matches(", "'config.providers.secrets.class']",
                          "!string(object.spec.config[k]).contains('${')", "pushSecret ==", "-cluster-ca-cert'",
                          "certificateAndKey.secretName ==", "passwordSecret.secretName ==", "config.providers",
-                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.type == 'tgz'", "(a.url + ' ' + a.sha512sum) in [", "a.url.startsWith(h)",
+                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.all(k, k in ['type', 'url', 'sha512sum'])", "a.type == 'tgz'", "(a.url + ' ' + a.sha512sum) in [", "a.url.startsWith(h)",
                          "logging.valueFrom.configMapKeyRef.name ==", "metricsConfig.valueFrom.configMapKeyRef.name =="],
         "KafkaConnector": ["override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
@@ -394,12 +394,12 @@ def check_network_policy(docs, job, values):
 
 def main():
     if len(sys.argv) != 3:
-        fail("usage: check.py pipeline|runner values.yaml")
+        fail("usage: check.py pipeline|runner|server values.yaml")
     mode = sys.argv[1]
     values = load_values(sys.argv[2])
     docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
     kinds = [d["kind"] for d in docs]
-    if "Deployment" in kinds or "Service" in kinds:
+    if mode != "server" and ("Deployment" in kinds or "Service" in kinds):
         fail("a setup release rendered the server")
     if mode == "pipeline":
         shells = [d for d in docs if d["apiVersion"].split("/", 1)[0] == "kafka.strimzi.io"]
@@ -455,8 +455,20 @@ def main():
         for e in c.get("env", []):
             if "code" in e["name"].lower():
                 fail("the pairing code is never an environment variable")
+    elif mode == "server":
+        # The server release (ci/oidc-values.yaml): with networkPolicy.enabled
+        # its NetworkPolicy's DNS rule reaches exactly networkPolicy.dns.to,
+        # which the chart requires (an empty "to" opens port 53 to anyone).
+        nps = by_kind(docs, "NetworkPolicy")
+        if values["networkPolicy"]["enabled"]:
+            if len(nps) != 1:
+                fail("the server release renders %d NetworkPolicies, want one" % len(nps))
+            dns = [r for r in nps[0]["spec"].get("egress") or [] if {"port": 53, "protocol": "UDP"} in r.get("ports", [])]
+            want = required_to(values["networkPolicy"]["dns"].get("to"), "server's DNS")
+            if len(dns) != 1 or dns[0].get("to") != want:
+                fail("the server's DNS egress does not reach exactly networkPolicy.dns.to")
     else:
-        fail("usage: check.py pipeline|runner")
+        fail("usage: check.py pipeline|runner|server")
     print("check.py: %s ok (%d objects)" % (mode, len(docs)))
 
 

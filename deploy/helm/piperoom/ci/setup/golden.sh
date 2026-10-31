@@ -18,3 +18,6 @@ for r in pipeline runner; do
   fi
   render "$r" | python3 "$here/check.py" "$r" "$here/$r-values.yaml"
 done
+# The server release's NetworkPolicy (no golden: the server chart is checked
+# by helm lint and kubeconform in CI); check.py checks its DNS rule.
+helm template piperoom "$chart" -f "$here/../oidc-values.yaml" | python3 "$here/check.py" server "$here/../oidc-values.yaml"

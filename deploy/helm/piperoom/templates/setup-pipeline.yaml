@@ -472,10 +472,11 @@ spec:
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
         object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
+        a.all(k, k in ['type', 'url', 'sha512sum']) &&
         has(a.type) && a.type == 'tgz' && has(a.sha512sum) && has(a.url) &&
         (a.url + ' ' + a.sha512sum) in [{{ join ", " $artifacts }}] &&
         [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
-      message: {{ printf "piperoom: every build artifact is a plugin archive the knowledge index pins (files/setup-artifacts.txt), at its pinned sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
+      message: {{ printf "piperoom: every build artifact sets only type, url and sha512sum (no insecure) and is a plugin archive the knowledge index pins (files/setup-artifacts.txt), at its pinned sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
