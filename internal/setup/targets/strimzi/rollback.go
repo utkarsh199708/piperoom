@@ -163,7 +163,7 @@ func (o k8sDeleteOp) Execute(ctx context.Context, params json.RawMessage, env op
 			data["deleted"] = false
 			return ops.Result{Summary: fmt.Sprintf("KafkaTopic %s/%s was never applied (paused, no topic); kept", ns, p.Name), Data: data, Receipt: httpReceipt("GET", path)}, nil
 		}
-		if err := checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
+		if err := o.d.checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
 			return ops.Result{Receipt: httpReceipt("GET", path)}, err
 		}
 	}
@@ -455,7 +455,7 @@ func (o k8sDeleteOp) Preview(ctx context.Context, params json.RawMessage, env op
 			pr.Expected = "kept: the paused shell was never applied and names no topic"
 			return pr, nil
 		}
-		if err := checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
+		if err := o.d.checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
 			return events.PreviewResult{}, err
 		}
 		named, _ := obj["spec"].(map[string]any)["topicName"].(string)
@@ -656,7 +656,7 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 // reports it manages (status.topicName) must be the same one; when the
 // operator has reported nothing yet, the spec alone decides. Anything that
 // differs keeps the CR.
-func checkCanaryTopic(obj map[string]any, name, prefix string) error {
+func (d *Driver) checkCanaryTopic(obj map[string]any, name, prefix string) error {
 	spec, _ := obj["spec"].(map[string]any)
 	md, _ := obj["metadata"].(map[string]any)
 	st, _ := obj["status"].(map[string]any)
@@ -664,7 +664,7 @@ func checkCanaryTopic(obj map[string]any, name, prefix string) error {
 	if named == "" {
 		named, _ = md["name"].(string)
 	}
-	if !canaryTopicRE(prefix).MatchString(named) {
+	if !d.canaryTopicRE(prefix).MatchString(named) {
 		return fmt.Errorf("%w: KafkaTopic %s names topic %s, not a canary", ErrField, name, clipText(named, 128))
 	}
 	if tn, _ := st["topicName"].(string); tn != "" && tn != named {
@@ -674,9 +674,14 @@ func checkCanaryTopic(obj map[string]any, name, prefix string) error {
 }
 
 // canaryTopicRE is this pipeline's canary topic name:
-// <prefix>.<schema>.piperoom_canary.
-func canaryTopicRE(prefix string) *regexp.Regexp {
-	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `\.[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
+// <prefix>.<schema>.piperoom_canary, or <prefix>.<database>.<schema>.piperoom_canary
+// with the person's SQL Server database. The schema is the only free segment.
+func (d *Driver) canaryTopicRE(prefix string) *regexp.Regexp {
+	db := ""
+	if d.sourceDB != "" {
+		db = regexp.QuoteMeta(d.sourceDB) + `\.`
+	}
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `\.` + db + `[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
 }
 
 // canaryNeverApplied: the KafkaTopic is the chart's paused shell, with no

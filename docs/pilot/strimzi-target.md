@@ -61,6 +61,14 @@ helm upgrade --install piperoom-setup-<room> deploy/helm/piperoom -n data --set 
   --set 'setup.runner.connectors={orders-src}' --set setup.runner.serverURL=https://piperoom.example.com
 ```
 
+For a **SQL Server source**, add `--set setup.pipeline.sourceDatabase=<database>` to the pipeline release and
+`--set setup.runner.sourceDatabase=<database>` to the room release, with the connector's `database.names`: SQL
+Server names its topics `<prefix>.<database>.<schema>.<table>`, so the canary topic is
+`<prefix>.<database>.<schema>.piperoom_canary`. The runner renders and deletes only that name, and with
+`admissionPolicy` the policy pins it. The value is yours, never a step's param. The server's verification ladder does
+not know the database yet (it reads `<prefix>.<schema>.piperoom_canary`), so on a SQL Server source its canary rung
+stays red until the room carries the database (a contract change the leads have been asked for).
+
 The **pipeline release** (`piperoom-pipeline-<pipeline>`) lives as long as the pipeline. It pre-creates every object
 the runner will touch, with names fixed at install:
 

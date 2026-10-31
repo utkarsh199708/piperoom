@@ -371,6 +371,12 @@ setup:
     # Required with admissionPolicy: the policy holds a KafkaUser's topic ACLs
     # to "<topicPrefix>." and the Connect cluster's own internal topics.
     topicPrefix: ""
+    # A SQL Server source's database (its connector's database.names): SQL
+    # Server names topics <prefix>.<database>.<schema>.<table>, so with
+    # admissionPolicy the canary topic is pinned to
+    # <topicPrefix>.<sourceDatabase>.<schema>.piperoom_canary. Empty for every
+    # other source. Set the same value as setup.runner.sourceDatabase.
+    sourceDatabase: ""
     # The hosts a KafkaConnect build artifact may come from, as the runner's
     # PIPEROOM_SETUP_PLUGIN_HOSTS (the policy pins every artifact url to one).
     pluginHosts: [repo1.maven.org]
@@ -429,6 +435,7 @@ setup:
     kafka: ""               # = setup.pipeline.kafka
     connectors: []          # = setup.pipeline.connectors
     serverURL: ""           # the server's public origin (PIPEROOM_PUBLIC_URL); the Job checks the Welcome against it
+    sourceDatabase: ""      # = setup.pipeline.sourceDatabase: a SQL Server source's database, the canary topic's database segment
     activeDeadlineSeconds: 7200
     ttlSecondsAfterFinished: 3600
     resources:

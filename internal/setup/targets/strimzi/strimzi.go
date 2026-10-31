@@ -93,12 +93,23 @@ type Options struct {
 	// Secret resolves a ${secret:name} reference from the runner's secret
 	// store for k8s_secret_apply. nil makes that op refuse with ErrNoSecrets.
 	Secret func(name string) (string, bool)
+	// SourceDatabase is a SQL Server source's database (its connector's
+	// database.names), as the person typed it in the room release
+	// (setup.runner.sourceDatabase, --strimzi-source-database): SQL Server
+	// names its topics <prefix>.<database>.<schema>.<table>, so the canary
+	// topic carries it. "" for every other source. Never a param: a segment
+	// the model chose could name another pipeline's canary under a dotted
+	// prefix.
+	SourceDatabase string
 }
 
 // Driver holds the target's options and names.
 type Driver struct {
-	api        *API
-	pipeline   string
+	api      *API
+	pipeline string
+	// sourceDB is Options.SourceDatabase: the canary topic's database
+	// segment of a SQL Server source, "" otherwise.
+	sourceDB   string
 	connectors []string
 	secret     func(string) (string, bool)
 	// class is the Kubernetes target's class: Options.Class at
@@ -159,6 +170,9 @@ func Register(r *ops.Registry, o Options) (*Driver, error) {
 			return nil, fmt.Errorf("%w: connector %q is not a DNS label", ErrParams, clipText(c, 64))
 		}
 	}
+	if o.SourceDatabase != "" && !identRE.MatchString(o.SourceDatabase) {
+		return nil, fmt.Errorf("%w: source database %q is not an identifier", ErrParams, clipText(o.SourceDatabase, 64))
+	}
 	switch o.Class {
 	case "", protocol.ClassShared, protocol.ClassProduction:
 	case protocol.ClassLocal:
@@ -166,7 +180,7 @@ func Register(r *ops.Registry, o Options) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("%w: unknown class %q", ErrParams, clipText(o.Class, 32))
 	}
-	d := &Driver{api: o.API, pipeline: o.Pipeline, connectors: append([]string(nil), o.Connectors...), class: o.Class, secret: o.Secret, plugins: o.PluginHosts}
+	d := &Driver{api: o.API, pipeline: o.Pipeline, connectors: append([]string(nil), o.Connectors...), class: o.Class, secret: o.Secret, plugins: o.PluginHosts, sourceDB: o.SourceDatabase}
 	if d.class == "" {
 		d.class = protocol.ClassShared
 	}

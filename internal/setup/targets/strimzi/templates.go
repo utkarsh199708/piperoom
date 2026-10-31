@@ -98,10 +98,11 @@ func (d *Driver) validate(r rendered, kafka, ns string) error {
 // "<topic_prefix>.<schema>.piperoom_canary", so a KafkaTopic the runner fills
 // can never name, and on rollback delete, a pipeline topic or any other topic.
 //
-// Known gap: SQL Server names its topics <prefix>.<database>.<schema>.<table>,
-// so a SQL Server source's canary topic has a database segment this template
-// (and the admission policy's canary pin) does not render; the ladder's
-// canary rung on a SQL Server source over Strimzi needs that segment first.
+// A SQL Server source names its topics <prefix>.<database>.<schema>.<table>,
+// so with Options.SourceDatabase the canary is
+// "<topic_prefix>.<database>.<schema>.piperoom_canary": the database is the
+// one the person typed in the room release, never a param, and the
+// admission policy pins the same one (setup.pipeline.sourceDatabase).
 const CanaryTable = "piperoom_canary"
 
 type topicParams struct {
@@ -129,7 +130,7 @@ func renderCanaryTopic(d *Driver, _ string, raw json.RawMessage) (rendered, erro
 		return rendered{}, fmt.Errorf("%w: replicas must be 1 to 3", ErrParams)
 	}
 	return rendered{kind: "KafkaTopic", name: d.canaryTopicName(), path: "/spec", pause: true, topicPrefix: p.TopicPrefix, value: map[string]any{
-		"topicName":  p.TopicPrefix + "." + p.Schema + "." + p.Table,
+		"topicName":  d.canaryTopic(p.TopicPrefix, p.Schema),
 		"partitions": 1,
 		"replicas":   p.Replicas,
 		"config":     map[string]any{"cleanup.policy": "delete", "retention.ms": "604800000"},
@@ -209,4 +210,14 @@ func renderLogging(d *Driver, _ string, raw json.RawMessage) (rendered, error) {
 		b.WriteString(loggerNames[k] + "=" + v + "\n")
 	}
 	return rendered{kind: "ConfigMap", name: d.loggingName(), path: "/data", value: map[string]any{"log4j.properties": b.String()}}, nil
+}
+
+// canaryTopic is the canary topic's name for a prefix and a schema:
+// <prefix>.<schema>.piperoom_canary, with the SQL Server database segment
+// after the prefix when the driver has one.
+func (d *Driver) canaryTopic(prefix, schema string) string {
+	if d.sourceDB != "" {
+		return prefix + "." + d.sourceDB + "." + schema + "." + CanaryTable
+	}
+	return prefix + "." + schema + "." + CanaryTable
 }

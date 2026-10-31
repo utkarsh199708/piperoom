@@ -405,7 +405,7 @@ func TestReadCodeFile(t *testing.T) {
 }
 
 func TestInClusterJobPrefix(t *testing.T) {
-	if _, err := newInClusterJob("other-confirm", "orders", "orders-src"); err == nil || !strings.Contains(err.Error(), "piperoom-setup-<room>-confirm") {
+	if _, err := newInClusterJob("other-confirm", "orders", "orders-src", ""); err == nil || !strings.Contains(err.Error(), "piperoom-setup-<room>-confirm") {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -537,9 +537,10 @@ func (d *Driver) ValidateTopic(spec map[string]any, topicPrefix string) error {
 		return err
 	}
 	n, _ := asString(spec["topicName"])
-	rest, ok := strings.CutPrefix(n, topicPrefix+".")
-	schema, table, cut := strings.Cut(rest, ".")
-	if topicPrefix == "" || !ok || !cut || !identRE.MatchString(schema) || table != CanaryTable {
+	if topicPrefix == "" || !d.canaryTopicRE(topicPrefix).MatchString(n) {
+		if d.sourceDB != "" {
+			return refuse("spec.topicName", "must be the canary topic <topic_prefix>."+d.sourceDB+".<schema>."+CanaryTable)
+		}
 		return refuse("spec.topicName", "must be the canary topic <topic_prefix>.<schema>."+CanaryTable)
 	}
 	if n, ok := asInt(spec["partitions"]); !ok || n != 1 {

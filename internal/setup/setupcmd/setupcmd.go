@@ -58,6 +58,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	confirmPrefix := fs.String("confirm-secret-prefix", "", "in a Kubernetes Job: confirm the pairing with the Secret of this name, created by the person with the fingerprint (docs/design/setup-strimzi.md section 3.2)")
 	strimziPipeline := fs.String("strimzi-pipeline", "", "in a Kubernetes Job: the pipeline whose chart-made objects the Strimzi driver may touch")
 	strimziConnectors := fs.String("strimzi-connectors", "", "in a Kubernetes Job: the chart's KafkaConnector names, comma-separated")
+	strimziSourceDB := fs.String("strimzi-source-database", "", "in a Kubernetes Job: a SQL Server source's database (setup.runner.sourceDatabase), the canary topic's database segment")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -113,6 +114,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if (*strimziPipeline != "") != (*confirmPrefix != "") {
 		return errors.New("setup: --strimzi-pipeline and --confirm-secret-prefix go together (the in-cluster Job passes both)")
 	}
+	if *strimziSourceDB != "" && *strimziPipeline == "" {
+		return errors.New("setup: --strimzi-source-database is the in-cluster Job's, with --strimzi-pipeline")
+	}
 
 	log := newLogger(stderr)
 	// The real catalogue (U1-2). Targets arrive with the Welcome: the target
@@ -132,7 +136,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 	var confirm func(context.Context, *protocol.Welcome, func()) (bool, error)
 	if *confirmPrefix != "" {
-		job, err := newInClusterJob(*confirmPrefix, *strimziPipeline, *strimziConnectors)
+		job, err := newInClusterJob(*confirmPrefix, *strimziPipeline, *strimziConnectors, *strimziSourceDB)
 		if err != nil {
 			return err
 		}
