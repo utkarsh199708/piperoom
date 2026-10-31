@@ -132,6 +132,7 @@ func TestLoadRejectsBrokenRecordings(t *testing.T) {
 		{"bad reason", `{"scenario":"x","ops":[{"op":"env_detect","refusal":{"reason":"nope"}}]}`, "not a protocol.Refuse"},
 		{"bad source", `{"scenario":"x","source":"sqlite","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}]}`, "not a setup source kind"},
 		{"bad target", `{"scenario":"x","target":"laptop","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}]}`, "not a setup target kind"},
+		{"no target", `{"scenario":"x","ops":[{"op":"env_detect","refusal":{"reason":"guard"}}]}`, "target is required"},
 		{"bad tier", `{"scenario":"x","ops":[{"op":"env_detect","tier":"T9","refusal":{"reason":"guard"}}]}`, "not a protocol tier"},
 		{"short out_mac", `{"scenario":"x","ops":[{"op":"env_detect","result":{"ok":true,"summary":"s","receipt":{"out_mac":"abc"}}}]}`, "out_mac is not a 64-character lowercase hex digest"},
 		{"uppercase out_mac", `{"scenario":"x","ops":[{"op":"env_detect","result":{"ok":true,"summary":"s","receipt":{"out_mac":"` + strings.ToUpper(digestA) + `"}}}]}`, "out_mac is not a 64-character lowercase hex digest"},
@@ -164,6 +165,7 @@ func fixture(t *testing.T) Recording {
 	t.Helper()
 	raw := `{
 	  "scenario": "setup/fixture",
+	  "target": "compose",
 	  "ops": [
 	    {"op": "env_detect", "tier": "T0", "params": {},
 	     "result": {"ok": true, "summary": "docker present", "receipt": {"kind": "exec", "target": "env", "out_mac": "` + digestA + `"}}},
@@ -254,6 +256,7 @@ func TestSessionHonoursContext(t *testing.T) {
 func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
 	raw := `{
 	  "scenario": "setup/strict",
+	  "target": "compose",
 	  "ops": [
 	    {"op": "env_detect", "tier": "T0", "params": {},
 	     "result": {"ok": true, "summary": "docker present", "receipt": {"out_mac": "` + digestA + `"}}},
@@ -320,6 +323,7 @@ func TestSessionRefusesRequestsARunnerWouldRefuse(t *testing.T) {
 func TestSessionMatchesLiveShapedRequest(t *testing.T) {
 	raw := `{
 	  "scenario": "setup/live",
+	  "target": "compose",
 	  "ops": [
 	    {"op": "source_grant_select", "tier": "T2", "proposal_id": "p_recorded",
 	     "step_index": 1, "params_hash": "` + digestA + `",
@@ -376,6 +380,7 @@ func TestSessionServesOutOfOrderRequests(t *testing.T) {
 func TestSessionServesIdenticalOpsInRecordedOrder(t *testing.T) {
 	raw := `{
 	  "scenario": "setup/repeated",
+	  "target": "compose",
 	  "ops": [
 	    {"op": "net_probe", "tier": "T0", "params": {"from": "connect", "target": "postgres"},
 	     "result": {"ok": false, "summary": "timeout", "receipt": {"kind": "exec", "target": "connect", "out_mac": "` + digestA + `"}}},
@@ -520,5 +525,25 @@ func TestVerifyTargetWithoutPlanLadder(t *testing.T) {
 func TestVerifyNilRecording(t *testing.T) {
 	if c := Verify(context.Background(), nil); c.OK() || len(c.Failures) != 1 {
 		t.Fatalf("Check = %+v, want one failure", c)
+	}
+}
+
+// TestPlanLadderUndefinedIsAnAllowlist (review #6): only dbzserver and
+// embedded are excused a ladder. A target ladderFor does not know is not
+// excused by default, so a new target without a ladder fails its sessions
+// instead of passing them as "no ladder defined".
+func TestPlanLadderUndefinedIsAnAllowlist(t *testing.T) {
+	op := Op{Op: "env_detect", Tier: protocol.TierT0, Refusal: &protocol.Refusal{Reason: protocol.RefuseGuard}}
+	for _, target := range []string{"dbzserver", "embedded"} {
+		rec := Recording{Scenario: "setup/x", Source: "postgres", Target: target, Ops: []Op{op}}
+		if why := PlanLadderUndefined(rec); !strings.Contains(why, target) {
+			t.Errorf("PlanLadderUndefined(%s) = %q, want a reason naming it", target, why)
+		}
+	}
+	for _, target := range []string{"some-new-target", ""} {
+		rec := Recording{Scenario: "setup/x", Source: "postgres", Target: target, Ops: []Op{op}}
+		if why := PlanLadderUndefined(rec); why != "" {
+			t.Errorf("PlanLadderUndefined(%q) = %q, want none: only the allowlisted targets are excused", target, why)
+		}
 	}
 }

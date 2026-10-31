@@ -206,6 +206,12 @@ func (r *Recording) validate() error {
 			return fmt.Errorf("ladder: %v", err)
 		}
 	}
+	if r.Target == "" {
+		// The ladder a replay recomputes, and whether a missing one is
+		// excused (PlanLadderUndefined), depend on the target: a session
+		// must name it.
+		return errors.New("target is required")
+	}
 	return nil
 }
 
@@ -618,22 +624,32 @@ type Check struct {
 	Failures []string `json:"failures,omitempty"`
 }
 
+// noLadderTargets are the targets whose setup has no verification ladder a
+// replay can recompute: dbzserver's ladder reads server_status (U11b) and is
+// not in plan.Ladder; embedded has plan.EmbeddedLadder (U6b), which judges a
+// log file the person names and is not what ladderFor returns. Every other
+// target must have a ladder (plan.Ladder or managed.Ladder): a new target is
+// never excused by default.
+var noLadderTargets = map[string]bool{"dbzserver": true, "embedded": true}
+
 // PlanLadderUndefined says why no verification ladder is defined for rec's
 // setup, or "" when one is: plan.Ladder for the Connect REST targets,
 // managed.Ladder for the managed services (ladderFor, the server's choice).
-// It is the target alone that has none: the same source and sink on a
-// Connect target have a ladder, so an unknown source or sink kind is never
-// excused here. The targets with no ladder in either (dbzserver, embedded)
-// have theirs as their own rows, not written yet. A session on such a target
-// can only replay its ops; it must not claim a ladder nobody can recompute.
+// Only the targets of noLadderTargets are excused, and only when the same
+// source and sink on a Connect target do have a ladder, so an unknown source
+// or sink kind is never excused here. A session on such a target can only
+// replay its ops; it must not claim a ladder nobody can recompute.
 func PlanLadderUndefined(rec Recording) string {
+	if !noLadderTargets[rec.Target] {
+		return ""
+	}
 	if _, err := ladderFor(rec.SourceKind(), rec.Target, rec.SinkKind()); err == nil {
 		return ""
 	}
 	if _, err := plan.Ladder(rec.SourceKind(), "compose", rec.SinkKind()); err != nil {
 		return ""
 	}
-	return "no verification ladder is defined for target " + rec.Target + " (that target's ladder is its own row)"
+	return "no verification ladder is defined for target " + rec.Target + " (that target's ladder is not one a replay recomputes)"
 }
 
 // OK reports whether the recording replayed cleanly.
