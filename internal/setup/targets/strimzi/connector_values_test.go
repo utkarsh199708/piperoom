@@ -421,7 +421,7 @@ func TestCredentialLineRule(t *testing.T) {
 		{`Access denied for user 'cdc'@'10.0.0.4' (using password: YES)`, ""},
 		{`Access denied for user 'cdc'@'10.0.0.4' (using password: NO)`, ""},
 		{`database.password = ${secrets:data/orders-db-credentials:password}`, ""},
-		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=[masked:credential]`},
+		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=${secrets:data/x:password}, ssl.key.password=[masked:credential]`}, // round 11: the scan goes on after a kept value
 		{`at org.apache.hadoop.security.UserGroupInformation.doAs(UserGroupInformation.java:1899)`, ""},
 		{`Token: expired`, ""}, // round 8: a whole "expired" says only the token's state
 		{`database.user: cdc`, ""},
@@ -697,9 +697,9 @@ func TestSecretApplyRefusesAShortCredential(t *testing.T) {
 func TestCredentialKeysRound8(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"NOAUTH Authentication required", ""},
-		{"OAUTH: enabled", "OAUTH: [masked:credential]"}, // round 10
+		{"OAUTH: enabled", ""}, // round 11, F1: enabled and disabled are kept
 		{"OAUTH: true", ""},
-		{"useBasicAuth=true requireAuth: true auth=x", "useBasicAuth=[masked:credential]"}, // round 10: the whole rest is no boolean
+		{"useBasicAuth=true requireAuth: true auth=x", "useBasicAuth=true requireAuth: true auth=[masked:credential]"}, // round 11, F1: each value is judged on its own
 		{"useBasicAuth=true", ""},
 		{"resumeToken=8263A1B2C3", ""},
 		{"resume_token: 8263A1B2C3", ""},
@@ -710,7 +710,7 @@ func TestCredentialKeysRound8(t *testing.T) {
 		{"token: failed", ""},
 		{`secret: "rejected"`, ""},
 		{"token: expired yesterday", "token: [masked:credential]"},
-		{"(using password: YES) ssl.key.password=hunter2xyz", "(using password: [masked:credential]"}, // round 9, F3
+		{"(using password: YES) ssl.key.password=hunter2xyz", "(using password: YES) ssl.key.password=[masked:credential]"}, // round 9, F3; round 11: the next key is judged on its own
 		{"MYSQL_PWD=hunter2xyz", "MYSQL_PWD=[masked:credential]"},
 		{"DB_PWD: hunter2xyz", "DB_PWD: [masked:credential]"},
 		{"PWD=/opt/kafka", ""},
@@ -957,7 +957,7 @@ func TestReadsSanitizePlaceholder(t *testing.T) {
 		if strings.HasSuffix(op, " summary") {
 			continue
 		}
-		if strings.Contains(got, "masked") || strings.Contains(got, "\\u0001") || !strings.Contains(got, "a??b stays") {
+		if strings.Contains(got, "masked") || strings.Contains(got, "\\u0001") || !strings.Contains(got, "a__b stays") {
 			t.Errorf("%s: a 0x01 in the text: %s", op, got)
 		}
 	}

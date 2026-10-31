@@ -450,7 +450,7 @@ func (ru *rule) apply(s, lower string) (string, int) {
 		val := s[g0:g1]
 		// A one-character "value" is a parse artifact (a stray quote or
 		// backslash), never a credential worth a mask.
-		if len(val) <= 1 || (isMasked(val) && !ru.remask) || isPlaceholder(val) {
+		if len(val) <= 1 || (isMasked(val) && !ru.remask) || isPlaceholder(val) || bracketPlaceholder(s, g0, g1) {
 			continue
 		}
 		if ru.ok != nil && !ru.ok(s, m) {
@@ -510,10 +510,22 @@ func isPlaceholder(v string) bool {
 		return true
 	}
 	switch strings.ToLower(t) {
-	case "null", "none", "nil", "true", "false", "redacted", "[redacted]", "hidden", "<hidden>", "<redacted>", "changeme_placeholder":
+	case "null", "none", "nil", "true", "false", "redacted", "[redacted]", "hidden", "[hidden]", "<hidden>", "<redacted>", "changeme_placeholder":
 		return true
 	}
 	return false
+}
+
+// bracketPlaceholder reports a value a rule ended before its closing
+// bracket that is a placeholder in brackets: Kafka's own "[hidden]" for a
+// password config it will not print, or the Strimzi reads' own mask
+// "[masked:credential]" (exactly). Masking it would leave the "]" behind.
+func bracketPlaceholder(s string, g0, g1 int) bool {
+	if s[g0] != '[' || g1 >= len(s) || s[g1] != ']' {
+		return false
+	}
+	in := s[g0+1 : g1]
+	return isPlaceholder(in) || in == "masked:credential"
 }
 
 func mask(v string, style maskStyle) string {
