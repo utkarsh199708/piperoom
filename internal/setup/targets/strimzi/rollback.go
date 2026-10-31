@@ -73,7 +73,7 @@ func (k8sDeleteOp) Target() string { return targetKubernetes }
 func (k8sDeleteOp) Tier() string   { return protocol.TierT2 }
 func (k8sDeleteOp) Layer() string  { return layer }
 func (k8sDeleteOp) Describe() string {
-	return "roll back a KafkaConnector or the canary KafkaTopic: delete it by its chart-fixed name with foreground propagation (the Topic Operator then deletes the topic); refused for any other kind or name, and for the topic on a production target"
+	return "roll back a KafkaConnector or the canary KafkaTopic: delete it by its chart-fixed name with foreground propagation (the Topic Operator then deletes the topic); refused for any other kind or name, for an object the pipeline release does not own, and for both kinds on a production target"
 }
 func (k8sDeleteOp) ParamsSchema() map[string]any { return rollbackSchema(deleteKinds, true) }
 
@@ -90,8 +90,13 @@ func (o k8sDeleteOp) decode(params json.RawMessage) (rollbackParams, error) {
 	if !contains(o.d.allowedNames(p.Kind, ""), p.Name) {
 		return p, fmt.Errorf("%w: %s %q", ErrName, p.Kind, clipText(p.Name, 64))
 	}
-	if p.Kind == "KafkaTopic" && o.d.class == protocol.ClassProduction {
-		return p, fmt.Errorf("%w: the canary topic is data and is kept", ErrProduction)
+	if o.d.class == protocol.ClassProduction {
+		if p.Kind == "KafkaTopic" {
+			return p, fmt.Errorf("%w: the canary topic is data and is kept", ErrProduction)
+		}
+		// Parity with connect_delete_connector, which the guard refuses on
+		// production unconditionally: a connector is deleted by a person.
+		return p, fmt.Errorf("%w: deleting a connector on production is a person's change", ErrProduction)
 	}
 	return p, nil
 }
@@ -116,6 +121,29 @@ func (o k8sDeleteOp) Execute(ctx context.Context, params json.RawMessage, env op
 	path := objectPath(ns, p.Kind, p.Name)
 	rec := httpReceipt("DELETE", path)
 	data := map[string]any{"kind": p.Kind, "name": p.Name}
+	body, err := o.d.api.Get(ctx, path)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		data["deleted"] = false
+		return ops.Result{Summary: fmt.Sprintf("%s %s/%s is already absent", p.Kind, ns, p.Name), Data: data, Receipt: httpReceipt("GET", path)}, nil
+	case err != nil:
+		return ops.Result{Receipt: httpReceipt("GET", path)}, err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ops.Result{Receipt: httpReceipt("GET", path)}, fmt.Errorf("strimzi: decoding %s %s: %w", p.Kind, p.Name, err)
+	}
+	if err := o.d.checkOwned(obj, p.Kind, p.Name); err != nil {
+		return ops.Result{Receipt: httpReceipt("GET", path)}, err
+	}
+	if p.Kind == "KafkaTopic" {
+		// Only the canary is deleted: the Topic Operator deletes the Kafka
+		// topic the CR manages, so a CR that manages another topic is kept.
+		st, _ := obj["status"].(map[string]any)
+		if tn, _ := st["topicName"].(string); tn != "" && !strings.HasSuffix(tn, "."+CanaryTable) {
+			return ops.Result{Receipt: httpReceipt("GET", path)}, fmt.Errorf("%w: KafkaTopic %s manages topic %s, not a canary", ErrField, p.Name, clipText(tn, 128))
+		}
+	}
 	if err := o.d.api.Delete(ctx, path); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// A rollback that runs again after a partial one: the object is
@@ -183,8 +211,15 @@ func (o k8sUnapplyOp) decode(params json.RawMessage) (rollbackParams, unapplyTar
 	if !contains(names, name) {
 		return p, unapplyTarget{}, fmt.Errorf("%w: %s %q", ErrName, p.Kind, clipText(name, 64))
 	}
-	if p.Kind == "KafkaConnect" && o.d.class == protocol.ClassProduction {
-		return p, unapplyTarget{}, fmt.Errorf("%w: stopping a Connect cluster on production is a person's change", ErrProduction)
+	if o.d.class == protocol.ClassProduction {
+		switch p.Kind {
+		case "KafkaConnect":
+			return p, unapplyTarget{}, fmt.Errorf("%w: stopping a Connect cluster on production is a person's change", ErrProduction)
+		case "Secret":
+			// Emptying the credentials Secret under a running production
+			// connector stops it at its next restart: a person's change.
+			return p, unapplyTarget{}, fmt.Errorf("%w: emptying the db-credentials Secret on production is a person's change", ErrProduction)
+		}
 	}
 	return p, unapplyTarget{kind: p.Kind, name: name, cr: cr}, nil
 }
@@ -236,6 +271,9 @@ func (o k8sUnapplyOp) Execute(ctx context.Context, params json.RawMessage, env o
 	}
 	st, err := parseState(body, "/spec")
 	if err != nil {
+		return ops.Result{Receipt: rec}, err
+	}
+	if err := o.d.checkOwned(obj, t.kind, t.name); err != nil {
 		return ops.Result{Receipt: rec}, err
 	}
 	patch := []PatchOp{{Op: "test", Path: "/metadata/resourceVersion", Value: st.rv}}
@@ -353,11 +391,17 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 		}
 		return "keys " + strings.Join(keys, ", ")
 	}
-	return events.PreviewResult{
+	pr := events.PreviewResult{
 		Target:     "Secret " + ns + "/" + o.d.dbSecretName(),
 		Current:    keyList(current),
 		Expected:   keyList(next) + " (values materialised from ${secret:} references on the runner)",
 		Reversible: true,
 		Rollback:   rollbackRecord("k8s_unapply", "Secret", o.d.dbSecretName()),
-	}, nil
+	}
+	if o.d.class == protocol.ClassProduction {
+		// k8s_unapply refuses the Secret on production (§7).
+		pr.Reversible = false
+		pr.Rollback = "emptying the db-credentials Secret on a production target is a person's change: kubectl edit, or helm uninstall of the pipeline release"
+	}
+	return pr, nil
 }

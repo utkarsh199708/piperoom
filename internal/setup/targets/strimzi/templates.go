@@ -84,9 +84,7 @@ func (d *Driver) validate(r rendered, kafka, ns string) error {
 	case "KafkaUser":
 		return d.ValidateUser(r.value, r.template, r.topicPrefix)
 	case "KafkaTopic":
-		name, _ := r.value["topicName"].(string)
-		prefix, _, _ := strings.Cut(name, ".")
-		return d.ValidateTopic(r.value, prefix)
+		return d.ValidateTopic(r.value, r.topicPrefix)
 	case "ConfigMap":
 		return keysOnly("data", r.value, "log4j.properties")
 	}
@@ -94,6 +92,12 @@ func (d *Driver) validate(r rendered, kafka, ns string) error {
 }
 
 // ---- canary-topic ----
+
+// CanaryTable is the ladder's canary table (internal/room's
+// setupLadderCanaryName): the canary-topic template renders only
+// "<topic_prefix>.<schema>.piperoom_canary", so a KafkaTopic the runner fills
+// can never name, and on rollback delete, a pipeline topic or any other topic.
+const CanaryTable = "piperoom_canary"
 
 type topicParams struct {
 	TopicPrefix string `json:"topic_prefix"`
@@ -110,13 +114,16 @@ func renderCanaryTopic(d *Driver, _ string, raw json.RawMessage) (rendered, erro
 	if !topicPrefixRE.MatchString(p.TopicPrefix) || !identRE.MatchString(p.Schema) || !identRE.MatchString(p.Table) {
 		return rendered{}, fmt.Errorf("%w: topic_prefix, schema and table must be identifiers", ErrParams)
 	}
+	if p.Table != CanaryTable {
+		return rendered{}, fmt.Errorf("%w: table must be %s: the canary-topic template renders the ladder's canary topic only", ErrParams, CanaryTable)
+	}
 	if p.Replicas == 0 {
 		p.Replicas = 1
 	}
 	if p.Replicas < 1 || p.Replicas > 3 {
 		return rendered{}, fmt.Errorf("%w: replicas must be 1 to 3", ErrParams)
 	}
-	return rendered{kind: "KafkaTopic", name: d.canaryTopicName(), path: "/spec", pause: true, value: map[string]any{
+	return rendered{kind: "KafkaTopic", name: d.canaryTopicName(), path: "/spec", pause: true, topicPrefix: p.TopicPrefix, value: map[string]any{
 		"topicName":  p.TopicPrefix + "." + p.Schema + "." + p.Table,
 		"partitions": 1,
 		"replicas":   p.Replicas,

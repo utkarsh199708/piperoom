@@ -42,8 +42,8 @@ func TestK8sDelete(t *testing.T) {
 		if res.Receipt.Target != "DELETE "+path {
 			t.Fatalf("%s: receipt = %+v", tc.kind, res.Receipt)
 		}
-		if got := strings.Join(h.api.requests, ","); got != "DELETE "+path+"?" {
-			t.Fatalf("%s: requests = %s, want one DELETE", tc.kind, got)
+		if got := strings.Join(h.api.requests, ","); got != "GET "+path+"?,DELETE "+path+"?" {
+			t.Fatalf("%s: requests = %s, want the ownership GET and one DELETE", tc.kind, got)
 		}
 		// Again: already absent is the state a rollback wants.
 		if res, err := run(t, h, "k8s_delete", map[string]any{"kind": tc.kind, "name": tc.name}); err != nil || !strings.Contains(res.Summary, "already absent") {
@@ -81,27 +81,83 @@ func TestK8sDeleteRefusals(t *testing.T) {
 	}
 }
 
-// On production the topic is kept (§7, §8) and a connector delete passes the
-// D11 gate as k8s_apply does.
+// On production both kinds are refused before any request: the topic is
+// kept (§7, §8), and a connector delete is a person's change, as
+// connect_delete_connector is refused there by the guard.
 func TestK8sDeleteProduction(t *testing.T) {
 	h := newHarness(t, protocol.ClassProduction, nil)
 	h.shell("KafkaTopic", "orders-canary", map[string]any{})
-	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"}); !errors.Is(err, ErrProduction) {
-		t.Fatalf("topic on production: %v", err)
+	path := h.shell("KafkaConnector", "orders-src", map[string]any{})
+	for _, p := range []map[string]any{
+		{"kind": "KafkaTopic", "name": "orders-canary"},
+		{"kind": "KafkaConnector", "name": "orders-src"},
+		{"kind": "KafkaConnector", "name": "orders-src", "admission_policy_confirmed": true},
+	} {
+		if _, err := run(t, h, "k8s_delete", p); !errors.Is(err, ErrProduction) {
+			t.Errorf("%v on production: %v, want ErrProduction", p, err)
+		}
 	}
 	if len(h.api.requests) != 0 {
-		t.Fatalf("a refused topic delete reached the API: %v", h.api.requests)
-	}
-	path := h.shell("KafkaConnector", "orders-src", map[string]any{})
-	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaConnector", "name": "orders-src"}); err == nil || !strings.Contains(err.Error(), "card must confirm") {
-		t.Fatalf("connector on production without the card: %v", err)
+		t.Fatalf("a refused production delete reached the API: %v", h.api.requests)
 	}
 	if h.api.get(path) == nil {
-		t.Fatal("the gate let the delete through")
+		t.Fatal("the connector was deleted on production")
 	}
-	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaConnector", "name": "orders-src", "admission_policy_confirmed": true}); err != nil {
-		t.Fatalf("connector on production with the card: %v", err)
+}
+
+// An object of a chart name that the pipeline release does not own (no
+// instance label, or another release's annotation) is never deleted or
+// patched back.
+func TestRollbackRefusesUnownedObjects(t *testing.T) {
+	for name, md := range map[string]map[string]any{
+		"no labels":        {"labels": map[string]any{}},
+		"another instance": {"labels": map[string]any{"app.kubernetes.io/instance": "someone-else"}},
+		"another release": {"labels": map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-orders"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "other"}},
+	} {
+		h := newHarness(t, "", nil)
+		conn := objectPath(testNS, "KafkaConnector", "orders-src")
+		h.api.put(conn, map[string]any{"kind": "KafkaConnector", "metadata": cloneMap(md), "spec": map[string]any{}})
+		if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaConnector", "name": "orders-src"}); !errors.Is(err, ErrNotOwned) {
+			t.Errorf("%s: k8s_delete err = %v, want ErrNotOwned", name, err)
+		}
+		if h.api.get(conn) == nil {
+			t.Errorf("%s: an unowned connector was deleted", name)
+		}
+		user := objectPath(testNS, "KafkaUser", "orders-connect")
+		h.api.put(user, map[string]any{"kind": "KafkaUser", "metadata": cloneMap(md), "spec": map[string]any{"authentication": map[string]any{"type": "tls"}}})
+		if _, err := run(t, h, "k8s_unapply", map[string]any{"kind": "KafkaUser", "name": "orders-connect"}); !errors.Is(err, ErrNotOwned) {
+			t.Errorf("%s: k8s_unapply err = %v, want ErrNotOwned", name, err)
+		}
+		for _, r := range h.api.requests {
+			if !strings.HasPrefix(r, "GET ") {
+				t.Errorf("%s: a write reached the API: %s", name, r)
+			}
+		}
 	}
+}
+
+// Only a canary KafkaTopic is deleted: one whose status says it manages
+// another topic is kept.
+func TestK8sDeleteKeepsANonCanaryTopic(t *testing.T) {
+	h := newHarness(t, "", nil)
+	path := h.shell("KafkaTopic", "orders-canary", map[string]any{})
+	obj := h.api.get(path)
+	obj["status"] = map[string]any{"topicName": "pg.public.orders"}
+	h.api.put(path, obj)
+	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"}); !errors.Is(err, ErrField) {
+		t.Fatalf("err = %v, want ErrField", err)
+	}
+	if h.api.get(path) == nil {
+		t.Fatal("a non-canary topic was deleted")
+	}
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	b, _ := json.Marshal(m)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	return out
 }
 
 // k8s_unapply of a CR: one JSON patch under the resourceVersion test that
@@ -200,8 +256,17 @@ func TestK8sUnapplyRefusals(t *testing.T) {
 	}
 
 	prod := newHarness(t, protocol.ClassProduction, nil)
-	if _, err := run(t, prod, "k8s_unapply", map[string]any{"kind": "KafkaConnect"}); !errors.Is(err, ErrProduction) {
-		t.Fatalf("KafkaConnect on production: %v", err)
+	for _, p := range []map[string]any{
+		{"kind": "KafkaConnect"},
+		{"kind": "Secret"},
+		{"kind": "Secret", "admission_policy_confirmed": true},
+	} {
+		if _, err := run(t, prod, "k8s_unapply", p); !errors.Is(err, ErrProduction) {
+			t.Fatalf("%v on production: %v, want ErrProduction", p, err)
+		}
+	}
+	if len(prod.api.requests) != 0 {
+		t.Fatalf("a refused production unapply reached the API: %v", prod.api.requests)
 	}
 	user := prod.shell("KafkaUser", "orders-connect", map[string]any{"authentication": map[string]any{"type": "tls"}})
 	if _, err := run(t, prod, "k8s_unapply", map[string]any{"kind": "KafkaUser", "name": "orders-connect"}); err == nil || !strings.Contains(err.Error(), "card must confirm") {
@@ -235,10 +300,10 @@ func TestK8sUnapplyConflict(t *testing.T) {
 func TestApplyPreviewRollbackRunsAsRecorded(t *testing.T) {
 	for _, class := range []string{"", protocol.ClassProduction} {
 		h := newHarness(t, class, nil)
-		for kind, name := range map[string]string{"KafkaTopic": "orders-canary", "KafkaConnect": "orders-connect", "KafkaUser": "orders-connect", "ConfigMap": "orders-connect-logging"} {
+		for kind, name := range map[string]string{"KafkaTopic": "orders-canary", "KafkaConnect": "orders-connect", "KafkaUser": "orders-connect", "ConfigMap": "orders-connect-logging", "KafkaConnector": "orders-src"} {
 			r := rendered{kind: kind, name: name}
 			reversible, record := h.d.applyRollback(r)
-			refusedOnProd := class == protocol.ClassProduction && (kind == "KafkaTopic" || kind == "KafkaConnect")
+			refusedOnProd := class == protocol.ClassProduction && (kind == "KafkaTopic" || kind == "KafkaConnect" || kind == "KafkaConnector")
 			if reversible == refusedOnProd {
 				t.Errorf("%s %s on %q: reversible = %v", kind, name, class, reversible)
 				continue
@@ -332,5 +397,32 @@ func TestShellSpecIsTheCharts(t *testing.T) {
 	}
 	if !seen["KafkaConnect"] || !seen["KafkaUser"] {
 		t.Fatalf("the golden render has no KafkaConnect or KafkaUser shell (%v)", seen)
+	}
+}
+
+// On production the Secret's rollback is refused (k8s_unapply), so its
+// preview records it as not reversible, and k8s_secret_apply passes the D11
+// gate as k8s_apply does.
+func TestSecretApplyOnProduction(t *testing.T) {
+	h := newHarness(t, protocol.ClassProduction, map[string]string{"source_password": "s3cr3t-value"})
+	path := coreObjectPath(testNS, "secrets", "orders-db-credentials")
+	h.api.put(path, map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": "orders-db-credentials"}})
+	res, err := run(t, h, "preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr := res.Data.(events.PreviewResult); pr.Reversible || strings.HasPrefix(pr.Rollback, "k8s_unapply") {
+		t.Fatalf("production preview = %+v, want not reversible", pr)
+	}
+	keys := map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}}
+	if _, err := run(t, h, "k8s_secret_apply", keys); err == nil || !strings.Contains(err.Error(), "card must confirm") {
+		t.Fatalf("k8s_secret_apply on production without the card: %v", err)
+	}
+	if data, _ := h.api.get(path)["data"].(map[string]any); len(data) != 0 {
+		t.Fatal("the gate let the write through")
+	}
+	keys["admission_policy_confirmed"] = true
+	if _, err := run(t, h, "k8s_secret_apply", keys); err != nil {
+		t.Fatalf("k8s_secret_apply on production with the card: %v", err)
 	}
 }

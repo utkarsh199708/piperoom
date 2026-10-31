@@ -7,9 +7,11 @@
 // Every object the runner touches was pre-created by the Helm chart with a
 // name fixed at chart time (§3, §4): the Strimzi CRs as shells paused with
 // strimzi.io/pause-reconciliation, the db-credentials Secret and the logging
-// ConfigMap. The runner never creates anything. Its Role grants get, patch,
-// delete and watch by resourceNames only, and every op here refuses a name
-// outside the chart-fixed set before any request (and RBAC refuses it after).
+// ConfigMap. The runner never creates anything. Its Role grants get, patch
+// and delete by resourceNames only, and every op here refuses a name outside
+// the chart-fixed set before any request (and RBAC refuses it after); before
+// a patch or a delete it also checks the object is the pipeline release's
+// (checkOwned), so a same-named object someone else made is never touched.
 //
 // Ops: k8s_get, k8s_events, k8s_logs and strimzi_build_status (T0, one
 // namespace, read-only), k8s_apply {kind, template, params} (T2: a template

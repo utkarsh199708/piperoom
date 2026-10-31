@@ -328,13 +328,15 @@ var sha512HexRE = regexp.MustCompile(`^[0-9a-f]{128}$`)
 
 // ValidateConnector validates a KafkaConnector spec: §6's provider rule (no
 // ${provider:...} but the db-credentials Secret), no literal credential, no
-// lifecycle or offsets field.
+// lifecycle or offsets field, and every config key in the plugin's allow-list
+// (connector_config.go).
 func (d *Driver) ValidateConnector(spec map[string]any, ns string) error {
 	if err := keysOnly("spec", spec, "class", "tasksMax", "config", "autoRestart"); err != nil {
 		return err
 	}
 	cls, _ := asString(spec["class"])
-	if !strings.HasPrefix(cls, "io.debezium.connector.") {
+	plugin, ok := pluginOf(cls)
+	if !ok {
 		return refuse("spec.class", "must be a Debezium connector class from the knowledge index")
 	}
 	if n, ok := asInt(spec["tasksMax"]); ok && n != 1 {
@@ -356,6 +358,9 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns string) error {
 		if looksSecretKey(k) && !strings.HasPrefix(fmt.Sprint(v), allowedRef) {
 			return refuse("spec.config."+k, "a credential is a ${secrets:} reference, never a value")
 		}
+	}
+	if err := validateConnectorConfig(plugin, cfg); err != nil {
+		return err
 	}
 	if a, ok := spec["autoRestart"]; ok {
 		am, _ := asMap(a)
@@ -460,13 +465,17 @@ func (d *Driver) ValidateUser(spec map[string]any, template, topicPrefix string)
 	return nil
 }
 
-// ValidateTopic validates the canary KafkaTopic spec.
+// ValidateTopic validates the canary KafkaTopic spec: its topic is exactly
+// "<topicPrefix>.<schema>.piperoom_canary", never another topic of the prefix.
 func (d *Driver) ValidateTopic(spec map[string]any, topicPrefix string) error {
 	if err := keysOnly("spec", spec, "topicName", "partitions", "replicas", "config"); err != nil {
 		return err
 	}
-	if n, _ := asString(spec["topicName"]); !strings.HasPrefix(n, topicPrefix+".") {
-		return refuse("spec.topicName", "must be a topic of the pipeline's prefix")
+	n, _ := asString(spec["topicName"])
+	rest, ok := strings.CutPrefix(n, topicPrefix+".")
+	schema, table, cut := strings.Cut(rest, ".")
+	if topicPrefix == "" || !ok || !cut || !identRE.MatchString(schema) || table != CanaryTable {
+		return refuse("spec.topicName", "must be the canary topic <topic_prefix>.<schema>."+CanaryTable)
 	}
 	if n, ok := asInt(spec["partitions"]); !ok || n != 1 {
 		return refuse("spec.partitions", "the canary topic has one partition")

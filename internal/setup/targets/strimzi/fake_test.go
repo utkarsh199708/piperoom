@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
 )
 
@@ -49,6 +50,11 @@ func (f *fakeAPI) put(path string, obj map[string]any) {
 		obj["metadata"] = md
 	}
 	md["resourceVersion"] = strconv.Itoa(f.rv)
+	if _, set := md["labels"]; !set {
+		// The pipeline release's labels, as the chart renders them; a test
+		// of the ownership check sets labels itself.
+		md["labels"] = map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-" + testPipeline, "app.kubernetes.io/managed-by": "Helm"}
+	}
 	f.objects[path] = obj
 	f.allowed[path] = true
 }
@@ -228,6 +234,9 @@ type harness struct {
 
 const testNS, testKafka, testPipeline = "data", "prod-kafka", "orders"
 
+// testSource is the room's source target (kind postgres) in the harness.
+const testSource = "pg:5432"
+
 func newHarness(t *testing.T, class string, secrets map[string]string) *harness {
 	t.Helper()
 	f := newFakeAPI(t)
@@ -238,7 +247,8 @@ func newHarness(t *testing.T, class string, secrets map[string]string) *harness 
 		t.Fatal(err)
 	}
 	api.sleep = func(context.Context, time.Duration) error { return nil }
-	reg, err := ops.New(ops.Config{ProjectDir: t.TempDir(), Targets: targetsOf("kind-test", testNS, testKafka)})
+	targets := append(targetsOf("kind-test", testNS, testKafka), events.SetupTarget{Kind: targetPostgres, Address: testSource, Class: "shared"})
+	reg, err := ops.New(ops.Config{ProjectDir: t.TempDir(), Targets: targets})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +261,7 @@ func newHarness(t *testing.T, class string, secrets map[string]string) *harness 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{api: f, reg: reg, env: ops.Env{Targets: targetsOf("kind-test", testNS, testKafka)}, d: d}
+	return &harness{api: f, reg: reg, env: ops.Env{Targets: targets}, d: d}
 }
 
 // shell pre-creates a paused CR shell the way the chart does.

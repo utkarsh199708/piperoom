@@ -130,11 +130,56 @@ func (o k8sGetOp) Execute(ctx context.Context, params json.RawMessage, env ops.E
 		return ops.Result{}, fmt.Errorf("strimzi: decoding %s %s: %w", p.Kind, p.Name, err)
 	}
 	stripManaged(obj)
+	obj = getView(p.Kind, obj)
 	return ops.Result{
 		Summary: fmt.Sprintf("%s %s/%s: %s", p.Kind, ns, p.Name, readySummary(obj)),
 		Data:    obj,
 		Receipt: httpReceipt("GET", path),
 	}, nil
+}
+
+// lastApplied is the client-side apply annotation: a full copy of an earlier
+// spec, never needed by a read.
+const lastApplied = "kubectl.kubernetes.io/last-applied-configuration"
+
+// getView is what k8s_get answers: the object without what no reader needs
+// (a Pod's spec, whose env and volumes are the operator's, and the
+// last-applied copy of a spec), with every string redacted. Statuses carry
+// Connect traces and operator messages, which are untrusted text and can quote
+// a config value; the redactor masks credentials and credential-keyed values
+// wherever they sit. kind, metadata.name, status.conditions and
+// status.connectorStatus (what plan.StrimziLadder reads) stay.
+func getView(kind string, obj map[string]any) map[string]any {
+	if md, ok := obj["metadata"].(map[string]any); ok {
+		if ann, ok := md["annotations"].(map[string]any); ok {
+			delete(ann, lastApplied)
+		}
+	}
+	if kind == "Pod" {
+		if spec, ok := obj["spec"].(map[string]any); ok {
+			kept := map[string]any{}
+			for _, k := range []string{"nodeName", "serviceAccountName", "restartPolicy"} {
+				if v, ok := spec[k]; ok {
+					kept[k] = v
+				}
+			}
+			var containers []any
+			list, _ := spec["containers"].([]any)
+			for _, c := range list {
+				cm, _ := c.(map[string]any)
+				containers = append(containers, map[string]any{"name": cm["name"], "image": cm["image"]})
+			}
+			if containers != nil {
+				kept["containers"] = containers
+			}
+			obj["spec"] = kept
+		}
+	}
+	out, _ := redact.JSON(obj).(map[string]any)
+	if out == nil {
+		return obj
+	}
+	return out
 }
 
 // readySummary is one line of an object's Ready condition.

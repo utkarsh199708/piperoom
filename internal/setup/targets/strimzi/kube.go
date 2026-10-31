@@ -11,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -93,10 +95,30 @@ func InClusterConfig(getenv func(string) string) (APIConfig, error) {
 	return APIConfig{BaseURL: "https://" + net.JoinHostPort(host, port), CAFile: defaultCAFile, TokenFile: defaultTokenFile}, nil
 }
 
+// checkBaseURL accepts an https URL, and plain http only to a loopback IP
+// (the tests' httptest server): a prefix test would pass
+// http://127.0.0.1.evil.example, whose host is not loopback at all. A path,
+// query, fragment or userinfo is refused: the base is scheme://host:port.
+func checkBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.Trim(u.Path, "/") != "" {
+		return fmt.Errorf("strimzi: the API server URL must be https://host[:port]")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if ip, err := netip.ParseAddr(u.Hostname()); err == nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("strimzi: the API server URL must be https (plain http only to a loopback IP)")
+}
+
 // NewAPI builds the client.
 func NewAPI(c APIConfig) (*API, error) {
-	if !strings.HasPrefix(c.BaseURL, "https://") && !strings.HasPrefix(c.BaseURL, "http://127.0.0.1") {
-		return nil, fmt.Errorf("strimzi: the API server URL must be https")
+	if err := checkBaseURL(c.BaseURL); err != nil {
+		return nil, err
 	}
 	a := &API{base: strings.TrimRight(c.BaseURL, "/"), http: c.HTTPClient, token: c.Token, now: time.Now, sleep: sleepCtx}
 	if a.token == nil {

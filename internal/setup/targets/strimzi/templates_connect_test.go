@@ -165,7 +165,7 @@ func TestConnectorTemplate(t *testing.T) {
 		}})
 		return err
 	}
-	if err := apply("postgres", map[string]string{"database.hostname": "pg", "database.password": ref, "topic.prefix": "pg"}); err != nil {
+	if err := apply("postgres", map[string]string{"database.hostname": "pg", "database.port": "5432", "database.password": ref, "topic.prefix": "pg"}); err != nil {
 		t.Fatalf("k8s_apply: %v", err)
 	}
 	spec := h.api.get(path)["spec"].(map[string]any)

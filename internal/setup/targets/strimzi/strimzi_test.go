@@ -405,11 +405,49 @@ func TestProductionGate(t *testing.T) {
 		t.Fatalf("403 with the card confirmation: %v", err)
 	}
 
+	policy := "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/piperoom-pipeline-orders"
+	good := map[string]any{"kind": "ValidatingAdmissionPolicyBinding", "spec": map[string]any{"policyName": "piperoom-pipeline-orders", "validationActions": []any{"Deny"}}}
 	h = newHarness(t, protocol.ClassProduction, nil)
 	h.shell("KafkaTopic", "orders-canary", map[string]any{})
-	h.api.put(binding, map[string]any{"kind": "ValidatingAdmissionPolicyBinding"})
+	h.api.put(binding, good)
+	h.api.put(policy, map[string]any{"kind": "ValidatingAdmissionPolicy", "spec": map[string]any{"failurePolicy": "Fail"}})
 	if _, err := run(t, h, "k8s_apply", topicApply()); err != nil {
 		t.Fatalf("a bound policy: %v", err)
+	}
+
+	// A readable binding is checked: another policy, no Deny, a policy that
+	// fails open or is missing refuse even with the card; a policy the Role
+	// cannot read falls back to the card.
+	for name, tc := range map[string]struct {
+		binding, policy map[string]any
+		policyAllowed   bool
+		want            string
+	}{
+		"another policy": {binding: map[string]any{"spec": map[string]any{"policyName": "permissive", "validationActions": []any{"Deny"}}}, want: "binds policy"},
+		"warn only":      {binding: map[string]any{"spec": map[string]any{"policyName": "piperoom-pipeline-orders", "validationActions": []any{"Warn", "Audit"}}}, want: "does not Deny"},
+		"fails open":     {binding: good, policy: map[string]any{"spec": map[string]any{"failurePolicy": "Ignore"}}, want: "fails open"},
+		"no policy":      {binding: good, policyAllowed: true, want: "not installed"},
+	} {
+		h := newHarness(t, protocol.ClassProduction, nil)
+		h.shell("KafkaTopic", "orders-canary", map[string]any{})
+		h.api.put(binding, tc.binding)
+		if tc.policy != nil {
+			h.api.put(policy, tc.policy)
+		} else if tc.policyAllowed {
+			h.api.allow(policy)
+		}
+		if _, err := run(t, h, "k8s_apply", p); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
+		}
+	}
+	h = newHarness(t, protocol.ClassProduction, nil)
+	h.shell("KafkaTopic", "orders-canary", map[string]any{})
+	h.api.put(binding, good) // the policy itself answers 403
+	if _, err := run(t, h, "k8s_apply", topicApply()); err == nil || !strings.Contains(err.Error(), "card must confirm") {
+		t.Fatalf("an unreadable policy without the card: %v", err)
+	}
+	if _, err := run(t, h, "k8s_apply", p); err != nil {
+		t.Fatalf("an unreadable policy with the card: %v", err)
 	}
 
 	h = newHarness(t, protocol.ClassProduction, nil)

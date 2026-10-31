@@ -114,27 +114,99 @@ func canonical(v any) []byte {
 }
 
 // productionGate is owner decision D11 (§4): on a production target the
-// room's ValidatingAdmissionPolicy must be bound. A 403 on the
-// cluster-scoped binding (the Role cannot read it) falls back to the card
-// confirmation; a 404 refuses.
+// room's ValidatingAdmissionPolicy must be bound, with Deny, to this
+// pipeline's policy. A readable binding is checked (its policyName is
+// piperoom-pipeline-<pipeline> and its validationActions include Deny), and so
+// is the policy when readable (it exists and fails closed). A 403 on either
+// (the namespaced Role cannot read cluster-scoped objects) falls back to the
+// card confirmation; a 404, a binding to another policy, a binding without
+// Deny or a policy that fails open refuses. Any other error refuses too.
 func (d *Driver) productionGate(ctx context.Context, confirmed bool) error {
 	if d.class != protocol.ClassProduction {
 		return nil
 	}
-	path := "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/piperoom-pipeline-" + d.pipeline
-	_, err := d.api.Get(ctx, path)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, ErrForbidden):
+	name := "piperoom-pipeline-" + d.pipeline
+	const vap = "/apis/admissionregistration.k8s.io/v1/"
+	forbidden := func() error {
 		if confirmed {
 			return nil
 		}
 		return fmt.Errorf("%w: production target: the Role cannot read the admission policy binding; the card must confirm the policy is bound (D11)", ErrParams)
-	case errors.Is(err, ErrNotFound):
-		return fmt.Errorf("%w: production target: the admission policy binding piperoom-pipeline-%s is not installed (D11: required for production)", ErrParams, d.pipeline)
 	}
-	return err
+	body, err := d.api.Get(ctx, vap+"validatingadmissionpolicybindings/"+name)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		return forbidden()
+	case errors.Is(err, ErrNotFound):
+		return fmt.Errorf("%w: production target: the admission policy binding %s is not installed (D11: required for production)", ErrParams, name)
+	case err != nil:
+		return err
+	}
+	var binding struct {
+		Spec struct {
+			PolicyName        string   `json:"policyName"`
+			ValidationActions []string `json:"validationActions"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(body, &binding); err != nil {
+		return fmt.Errorf("%w: production target: the admission policy binding %s does not decode", ErrParams, name)
+	}
+	if binding.Spec.PolicyName != name {
+		return fmt.Errorf("%w: production target: the binding %s binds policy %q, not %s (D11)", ErrParams, name, clipText(binding.Spec.PolicyName, 64), name)
+	}
+	if !contains(binding.Spec.ValidationActions, "Deny") {
+		return fmt.Errorf("%w: production target: the binding %s does not Deny (validationActions %v; D11)", ErrParams, name, binding.Spec.ValidationActions)
+	}
+	body, err = d.api.Get(ctx, vap+"validatingadmissionpolicies/"+name)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		return forbidden()
+	case errors.Is(err, ErrNotFound):
+		return fmt.Errorf("%w: production target: the binding %s names a policy that is not installed (D11)", ErrParams, name)
+	case err != nil:
+		return err
+	}
+	var policy struct {
+		Spec struct {
+			FailurePolicy string `json:"failurePolicy"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(body, &policy); err != nil {
+		return fmt.Errorf("%w: production target: the admission policy %s does not decode", ErrParams, name)
+	}
+	// An absent failurePolicy defaults to Fail in admissionregistration/v1.
+	if fp := policy.Spec.FailurePolicy; fp != "" && fp != "Fail" {
+		return fmt.Errorf("%w: production target: the admission policy %s fails open (failurePolicy %s; D11)", ErrParams, name, clipText(fp, 16))
+	}
+	return nil
+}
+
+// releaseName is the pipeline release that creates every object the runner
+// writes or deletes (deploy/helm _setup_validate.tpl pins the name).
+func (d *Driver) releaseName() string { return "piperoom-pipeline-" + d.pipeline }
+
+// ErrNotOwned: the object is not the pipeline release's (a same-named object
+// someone else created, or one another release owns); the runner never
+// patches or deletes it.
+var ErrNotOwned = errors.New("strimzi: the object is not the pipeline release's")
+
+// checkOwned is the ownership check before every patch or delete: the object
+// carries the chart's app.kubernetes.io/instance label naming the pipeline
+// release and, when Helm recorded one, the same meta.helm.sh/release-name
+// annotation. A same-named object a person or another release created is
+// refused before any write.
+func (d *Driver) checkOwned(obj map[string]any, kind, name string) error {
+	md, _ := obj["metadata"].(map[string]any)
+	labels, _ := md["labels"].(map[string]any)
+	ann, _ := md["annotations"].(map[string]any)
+	want := d.releaseName()
+	if fmt.Sprint(labels["app.kubernetes.io/instance"]) != want {
+		return fmt.Errorf("%w: %s %s has no app.kubernetes.io/instance=%s label", ErrNotOwned, kind, name, want)
+	}
+	if rel, ok := ann["meta.helm.sh/release-name"]; ok && fmt.Sprint(rel) != want {
+		return fmt.Errorf("%w: %s %s belongs to Helm release %s, not %s", ErrNotOwned, kind, name, clipText(fmt.Sprint(rel), 64), want)
+	}
+	return nil
 }
 
 // ---- k8s_apply (T2) ----
@@ -207,6 +279,14 @@ func (d *Driver) apply(ctx context.Context, path string, r rendered) (string, er
 	st, err := d.state(ctx, path, r.path)
 	if err != nil {
 		return "", err
+	}
+	if err := d.checkOwned(st.raw, r.kind, r.name); err != nil {
+		return "", err
+	}
+	if r.kind == "KafkaTopic" {
+		if err := checkTopicName(st.raw, r); err != nil {
+			return "", err
+		}
 	}
 	if r.pause && !st.paused {
 		// A re-apply of a live CR: pause it again before the spec changes.
@@ -311,9 +391,9 @@ func (o k8sApplyOp) Preview(ctx context.Context, params json.RawMessage, env ops
 // applyRollback is the rollback a k8s_apply preview records (design §8), as
 // "<op> {json params}" for the room's rollback proposal: k8s_delete for a
 // KafkaConnector or the canary KafkaTopic, k8s_unapply for the rest. On a
-// production target the two the guard refuses there (§7) are not reversible
-// by the runner: the canary topic is kept, and the KafkaConnect is a person's
-// change.
+// production target the ones the guard refuses there (§7, plan's guard rows)
+// are not reversible by the runner: the canary topic is kept, and deleting the
+// KafkaConnector or stopping the KafkaConnect is a person's change.
 func (d *Driver) applyRollback(r rendered) (bool, string) {
 	prod := d.class == protocol.ClassProduction
 	switch r.kind {
@@ -323,6 +403,9 @@ func (d *Driver) applyRollback(r rendered) (bool, string) {
 		}
 		return true, rollbackRecord("k8s_delete", r.kind, r.name)
 	case "KafkaConnector":
+		if prod {
+			return false, "deleting a connector on a production target is a person's change (as connect_delete_connector is): kubectl delete kafkaconnector, or helm uninstall of the pipeline release"
+		}
 		return true, rollbackRecord("k8s_delete", r.kind, r.name)
 	case "KafkaConnect":
 		if prod {
@@ -362,6 +445,9 @@ type secretApplyParams struct {
 	// Keys maps a Secret key to a ${secret:name} reference the runner
 	// materialises from its store. A value is never a literal.
 	Keys map[string]string `json:"keys"`
+	// AdmissionPolicyConfirmed is the card confirmation of D11 on a
+	// production target, as for k8s_apply. Only the server's card sets it.
+	AdmissionPolicyConfirmed bool `json:"admission_policy_confirmed,omitempty"`
 }
 
 var (
@@ -380,7 +466,8 @@ func (k8sSecretApplyOp) Describe() string {
 func (k8sSecretApplyOp) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "required": []string{"keys"},
 		"properties": map[string]any{"keys": map[string]any{"type": "object", "minProperties": 1, "maxProperties": 16,
-			"additionalProperties": map[string]any{"type": "string", "pattern": secretRefRE.String()}}}}
+			"additionalProperties": map[string]any{"type": "string", "pattern": secretRefRE.String()}},
+			"admission_policy_confirmed": map[string]any{"type": "boolean"}}}
 }
 
 func decodeSecretApply(raw json.RawMessage) (secretApplyParams, error) {
@@ -420,6 +507,9 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 	if o.d.secret == nil {
 		return ops.Result{}, ErrNoSecrets
 	}
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
+		return ops.Result{}, err
+	}
 	values := make(map[string]string, len(p.Keys))
 	keys := make([]string, 0, len(p.Keys))
 	for k, ref := range p.Keys {
@@ -441,6 +531,9 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 	st, err := parseState(body, "/data")
 	if err != nil {
 		return ops.Result{}, err
+	}
+	if err := o.d.checkOwned(st.raw, "Secret", o.d.dbSecretName()); err != nil {
+		return ops.Result{Receipt: rec}, err
 	}
 	// data is emptied and stringData set in one patch, so no key of an
 	// earlier fill survives.
@@ -477,4 +570,24 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 		Data:    map[string]any{"secret": o.d.dbSecretName(), "keys": keys},
 		Receipt: rec,
 	}, nil
+}
+
+// checkTopicName refuses a k8s_apply of the canary KafkaTopic when the stored
+// object already reconciles another Kafka topic (status.topicName): the Topic
+// Operator would not rename it, and its rollback would delete that topic.
+//
+// Whether a Kafka topic of the rendered name already exists outside Strimzi's
+// management is not checkable from here: the runner's Role reads the one
+// KafkaTopic by name and no Kafka admin API. The rendered name is pinned to
+// "<prefix>.<schema>.piperoom_canary" (ValidateTopic), the table the setup
+// itself creates, so only a canary of an earlier run of the same pipeline can
+// share it; the guard keeps it on production (k8s_delete refuses there).
+func checkTopicName(obj map[string]any, r rendered) error {
+	st, _ := obj["status"].(map[string]any)
+	stored, _ := st["topicName"].(string)
+	want, _ := r.value["topicName"].(string)
+	if stored != "" && stored != want {
+		return fmt.Errorf("%w: KafkaTopic %s already manages topic %s, not %s", ErrField, r.name, clipText(stored, 128), clipText(want, 128))
+	}
+	return nil
 }

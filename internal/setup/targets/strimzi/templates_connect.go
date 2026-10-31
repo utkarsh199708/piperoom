@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -220,6 +221,9 @@ const targetImageRegistry = "image_registry"
 // the room's image_registry targets and the bootstrap comes from the Kafka CR's
 // status for the named listener. Other kinds pass unchanged.
 func (d *Driver) resolveFacts(ctx context.Context, r rendered, ns, kafka string, env ops.Env) (rendered, error) {
+	if r.kind == "KafkaConnector" {
+		return r, d.connectorFacts(ctx, r, ns, kafka, env)
+	}
 	if r.kind != "KafkaConnect" {
 		return r, nil
 	}
@@ -232,27 +236,11 @@ func (d *Driver) resolveFacts(ctx context.Context, r rendered, ns, kafka string,
 	if !found {
 		return rendered{}, fmt.Errorf("%w: registry %s is not an image_registry target of the room", ErrTarget, r.registry)
 	}
-	body, err := d.api.Get(ctx, objectPath(ns, "Kafka", kafka))
+	listeners, err := d.kafkaListeners(ctx, ns, kafka)
 	if err != nil {
-		return rendered{}, fmt.Errorf("strimzi: reading Kafka %s/%s: %w", ns, kafka, err)
+		return rendered{}, err
 	}
-	var k struct {
-		Status struct {
-			Listeners []struct {
-				Name             string `json:"name"`
-				BootstrapServers string `json:"bootstrapServers"`
-			} `json:"listeners"`
-		} `json:"status"`
-	}
-	if err := json.Unmarshal(body, &k); err != nil {
-		return rendered{}, fmt.Errorf("strimzi: decoding Kafka %s/%s: %w", ns, kafka, err)
-	}
-	bootstrap := ""
-	for _, l := range k.Status.Listeners {
-		if l.Name == r.listener {
-			bootstrap = l.BootstrapServers
-		}
-	}
+	bootstrap := listeners[r.listener]
 	if bootstrap == "" {
 		return rendered{}, fmt.Errorf("%w: Kafka %s/%s reports no bootstrap for listener %s (is it Ready?)", ErrTarget, ns, kafka, r.listener)
 	}
@@ -266,4 +254,108 @@ func (d *Driver) resolveFacts(ctx context.Context, r rendered, ns, kafka string,
 		return rendered{}, err
 	}
 	return r, nil
+}
+
+// kafkaListeners reads the Kafka CR's listener status: name -> bootstrap.
+func (d *Driver) kafkaListeners(ctx context.Context, ns, kafka string) (map[string]string, error) {
+	body, err := d.api.Get(ctx, objectPath(ns, "Kafka", kafka))
+	if err != nil {
+		return nil, fmt.Errorf("strimzi: reading Kafka %s/%s: %w", ns, kafka, err)
+	}
+	var k struct {
+		Status struct {
+			Listeners []struct {
+				Name             string `json:"name"`
+				BootstrapServers string `json:"bootstrapServers"`
+			} `json:"listeners"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(body, &k); err != nil {
+		return nil, fmt.Errorf("strimzi: decoding Kafka %s/%s: %w", ns, kafka, err)
+	}
+	out := map[string]string{}
+	for _, l := range k.Status.Listeners {
+		if l.BootstrapServers != "" {
+			out[l.Name] = l.BootstrapServers
+		}
+	}
+	return out, nil
+}
+
+// targetPostgres is the Env.Targets kind of the room's source database, for
+// every source kind (internal/room setupTargetKinds registers them all under
+// it).
+const targetPostgres = "postgres"
+
+// connectorFacts binds what a KafkaConnector config names to the room: the
+// source host and port (database.hostname and database.port, or the hosts of
+// mongodb.connection.string) must be a source target of the room, and a
+// schema history bootstrap must be one of the room Kafka CR's listeners. The
+// JDBC sink names no source.
+func (d *Driver) connectorFacts(ctx context.Context, r rendered, ns, kafka string, env ops.Env) error {
+	cfg, _ := asMap(r.value["config"])
+	type hp struct{ host, port string }
+	var sources []hp
+	for _, t := range env.Targets {
+		if t.Kind == targetPostgres {
+			h, p := sourceHostPort(t.Address)
+			if h != "" {
+				sources = append(sources, hp{h, p})
+			}
+		}
+	}
+	match := func(host, port string) bool {
+		host = strings.ToLower(strings.TrimSpace(host))
+		for _, s := range sources {
+			if s.host == host && (s.port == "" || s.port == port) {
+				return true
+			}
+		}
+		return false
+	}
+	cls, _ := asString(r.value["class"])
+	plugin, _ := pluginOf(cls)
+	switch plugin {
+	case "jdbc":
+	case "mongodb":
+		cs, _ := asString(cfg["mongodb.connection.string"])
+		hosts := mongoHosts(cs)
+		if len(hosts) == 0 {
+			return refuse("spec.config.mongodb.connection.string", "a mongodb:// connection string naming the room's source target is required")
+		}
+		for _, h := range hosts {
+			host, port, err := net.SplitHostPort(h)
+			if err != nil {
+				host, port = h, "27017"
+			}
+			if !match(host, port) {
+				return fmt.Errorf("%w: mongodb.connection.string names %s, which is not the room's source target", ErrTarget, clipText(h, 64))
+			}
+		}
+	default:
+		host, _ := asString(cfg["database.hostname"])
+		port, _ := asString(cfg["database.port"])
+		if host == "" {
+			return refuse("spec.config.database.hostname", "the room's source target host is required")
+		}
+		if !match(host, port) {
+			return fmt.Errorf("%w: database.hostname %s and database.port %q are not a source target of the room", ErrTarget, clipText(host, 64), clipText(port, 8))
+		}
+	}
+	if b, ok := asString(cfg["schema.history.internal.kafka.bootstrap.servers"]); ok {
+		listeners, err := d.kafkaListeners(ctx, ns, kafka)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, l := range listeners {
+			if l == b {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: schema.history.internal.kafka.bootstrap.servers is not a listener of Kafka %s/%s", ErrTarget, ns, kafka)
+		}
+	}
+	return nil
 }
