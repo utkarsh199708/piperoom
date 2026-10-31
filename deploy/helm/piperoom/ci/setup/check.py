@@ -11,7 +11,11 @@ the server's Deployment is absent, and the D11 admission policy (when
 rendered) fails closed, is bound with Deny to this pipeline's named objects
 (the KafkaConnect, KafkaConnectors, KafkaUsers and the canary KafkaTopic),
 holds each rule the runner's allow-list holds, and pins the values' topic
-prefix, registries and plugin hosts. The CEL itself is run by celcheck/.
+prefix, registries, plugin hosts, database hosts, Schema Registry URLs and
+the runner's key and URL parameter lists (files/). With networkPolicy.enabled
+one NetworkPolicy selects the Connect pods and has exactly the egress the
+values ask for (DNS, the Kafka pods, the API server, the databases, then
+setup.pipeline.networkPolicy.extraEgress). The CEL itself is run by celcheck/.
 runner: the Role grants no create, no escalate/bind/impersonate, no "*", no
 list but on events, every rule but the events ones names its objects, and the
 Secret, KafkaConnect and pod rules grant exactly the verbs the runner sends;
@@ -115,8 +119,12 @@ def check_policy(docs, values):
         "KafkaConnector": ["object.spec.class.startsWith('io.debezium.connector.')", "override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
                            "object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart'])", "object.spec.tasksMax == 1",
-                           r"r'^([^$]|\$+[^${]|\$\{secrets:", "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
-                           "'org.apache.kafka.connect.transforms.RegexRouter'", "'io.debezium.transforms.Filter'", "trustservercertificate=true"],
+                           r"r'^\$\{secrets:", "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
+                           "'org.apache.kafka.connect.transforms.RegexRouter'", "'io.debezium.transforms.Filter'", "trustservercertificate=true",
+                           "hostnameincertificate", r"!string(object.spec.config[k]).matches(r'^\s|\s$')", ".replace('%20', '').contains('%')",
+                           "object.spec.class.startsWith('io.debezium.connector.jdbc.')", ".split('$')[0]",
+                           "(k != 'database.sslmode' || string(object.spec.config[k]).lowerAscii() in ['require', 'verify-ca', 'verify-full'])",
+                           "(k != 'schema.history.internal.kafka.bootstrap.servers' || string(object.spec.config[k]).matches(r'^"],
         "KafkaTopic": ["piperoom_canary$'", "'strimzi.io/pause-reconciliation' in object.metadata.annotations", "object.spec.partitions == 1"],
         "KafkaUser": ["!has(object.spec.authentication.password)", "a.resource.type == 'topic'", "patternType == 'prefix'",
                       "a.resource.type == 'group'", "a.operations.all(", "a.operation in ["],
@@ -141,6 +149,20 @@ def check_policy(docs, values):
     regs = "|".join(quote_meta(r) for r in pv["imageRegistries"])
     if not regs or "matches(r'^(%s)/" % regs not in exprs:
         fail("the build output rule does not pin the values' imageRegistries")
+    # The lists the runner owns (files/, synced by the runner's tests) are
+    # in the key and URL parameter rules whole.
+    chart = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    for fname, what in (("setup-connector-keys.txt", "connector key"), ("setup-url-params.txt", "URL parameter")):
+        with open(os.path.join(chart, "files", fname)) as f:
+            items = [l.strip() for l in f if l.strip()]
+        if not items or "[%s]" % ", ".join("'%s'" % i for i in items) not in exprs:
+            fail("the KafkaConnector rules do not hold the runner's %s list (files/%s)" % (what, fname))
+    hosts = "[%s]" % ", ".join("'%s'" % h.lower() for h in pv["databaseHosts"])
+    if not pv["databaseHosts"] or exprs.count("in %s" % hosts) < 2:
+        fail("the KafkaConnector rules do not pin database.hostname and the URL hosts to the values' databaseHosts")
+    regurls = "[%s]" % ", ".join("'%s'" % u for u in pv.get("schemaRegistries") or [])
+    if exprs.count("string(object.spec.config[k]) in %s" % regurls) != 2:
+        fail("the worker and connector rules do not pin the Schema Registry URLs to the values' schemaRegistries")
 
 
 # The verbs each named Secret, the KafkaConnect and the pods get: exactly what
@@ -190,6 +212,55 @@ def check_runner_rules(docs, role):
         fail("the RoleBinding's subject is not the Job's ServiceAccount alone")
 
 
+def egress_rule(ports, to):
+    r = {"ports": [{"port": p, "protocol": proto} for proto, p in ports]}
+    if to:
+        r["to"] = to
+    return r
+
+
+def compare_egress(got, want, names, who):
+    for i, (g, w) in enumerate(zip(got, want)):
+        what = names[i] if i < len(names) else "extraEgress[%d]" % (i - len(names))
+        if g.get("ports") != w.get("ports"):
+            fail("the %s %s egress has other ports than the values ask for" % (who, what))
+        if g.get("to") != w.get("to"):
+            fail("the %s %s egress reaches other destinations than the values' (an unconstrained \"to\" where the values give one, or another one)" % (who, what))
+        if set(g) - {"ports", "to"}:
+            fail("the %s %s egress has fields beyond ports and to" % (who, what))
+    if len(got) != len(want):
+        fail("the %s NetworkPolicy has %d egress rules, the values ask for %d" % (who, len(got), len(want)))
+
+
+def check_pipeline_network_policy(docs, values):
+    """The Connect pods' egress: DNS, the Kafka cluster's pods, the API
+    server, the databases, then extraEgress, and nothing else; ingress is
+    Strimzi's."""
+    nps = by_kind(docs, "NetworkPolicy")
+    if not values["networkPolicy"]["enabled"]:
+        if nps:
+            fail("a NetworkPolicy rendered with networkPolicy.enabled false")
+        return
+    if len(nps) != 1:
+        fail("the pipeline release renders %d NetworkPolicies, want one" % len(nps))
+    pv = values["setup"]["pipeline"]
+    nv = pv["networkPolicy"]
+    np = nps[0]["spec"]
+    if np["podSelector"] != {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": "%s-connect-connect" % pv["id"]}}:
+        fail("the pipeline NetworkPolicy does not select exactly the Connect pods")
+    if np["policyTypes"] != ["Egress"] or np.get("ingress"):
+        fail("the pipeline NetworkPolicy must govern egress only")
+    kafka = egress_rule([("TCP", p) for p in nv["kafkaPorts"]],
+                        [{"podSelector": {"matchLabels": {"strimzi.io/cluster": pv["kafka"], "strimzi.io/kind": "Kafka"}}}])
+    want = [
+        egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
+        kafka,
+        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], nv["apiServer"].get("to")),
+        egress_rule([("TCP", p) for p in nv["databases"]["ports"]], nv["databases"].get("to")),
+    ] + list(nv.get("extraEgress") or [])
+    compare_egress(np.get("egress") or [], want, ["DNS", "Kafka", "API server", "databases"], "Connect pods'")
+
+
 def check_network_policy(docs, job, values):
     nps = by_kind(docs, "NetworkPolicy")
     if not nps:
@@ -208,29 +279,12 @@ def check_network_policy(docs, job, values):
     u = urlsplit(rv["serverURL"])
     server_port = u.port or (443 if u.scheme == "https" else 80)
 
-    def rule(ports, to):
-        r = {"ports": [{"port": p, "protocol": proto} for proto, p in ports]}
-        if to:
-            r["to"] = to
-        return r
-
     want = [
-        rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
-        rule([("TCP", p) for p in nv["apiServer"]["ports"]], nv["apiServer"].get("to")),
-        rule([("TCP", server_port)], nv["server"].get("to")),
+        egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
+        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], nv["apiServer"].get("to")),
+        egress_rule([("TCP", server_port)], nv["server"].get("to")),
     ] + list(nv.get("extraEgress") or [])
-    got = np.get("egress") or []
-    names = ["DNS", "API server", "server"]
-    for i, (g, w) in enumerate(zip(got, want)):
-        what = names[i] if i < len(names) else "extraEgress[%d]" % (i - len(names))
-        if g.get("ports") != w.get("ports"):
-            fail("the Job's %s egress has other ports than the values ask for" % what)
-        if g.get("to") != w.get("to"):
-            fail("the Job's %s egress reaches other destinations than the values' (an unconstrained \"to\" where the values give one, or another one)" % what)
-        if set(g) - {"ports", "to"}:
-            fail("the Job's %s egress has fields beyond ports and to" % what)
-    if len(got) != len(want):
-        fail("the Job's NetworkPolicy has %d egress rules, the values ask for %d" % (len(got), len(want)))
+    compare_egress(np.get("egress") or [], want, ["DNS", "API server", "server"], "Job's")
 
 
 def main():
@@ -258,6 +312,7 @@ def main():
             if obj.get("type") != "Opaque" or obj.get("data") or obj.get("stringData"):
                 fail("a Secret in the pipeline release is not an empty Opaque Secret")
         check_policy(docs, values)
+        check_pipeline_network_policy(docs, values)
     elif mode == "runner":
         roles = [d for d in docs if d["kind"] in ("Role", "ClusterRole")]
         if [r["kind"] for r in roles] != ["Role"]:

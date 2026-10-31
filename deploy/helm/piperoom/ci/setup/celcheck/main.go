@@ -6,7 +6,11 @@
 // least one. The cases are objects the runner never renders but a
 // compromised runner could send, and the shells and renders it does send.
 //
-//	cd deploy/helm/piperoom/ci/setup/celcheck && go run . ../pipeline.golden.yaml cases.json
+// Further case files after the first are read the same way: renders.json
+// holds the objects the runner writes for the CI values (written by
+// internal/setup/targets/strimzi policy_files_test.go), all allow cases.
+//
+//	cd deploy/helm/piperoom/ci/setup/celcheck && go run . ../pipeline.golden.yaml cases.json renders.json
 package main
 
 import (
@@ -60,10 +64,17 @@ func main() {
 		progs = append(progs, p)
 	}
 	fmt.Printf("%d expressions compile\n", len(progs))
-	cb, _ := os.ReadFile(os.Args[2])
 	var cases []tc
-	if err := json.Unmarshal(cb, &cases); err != nil {
-		panic(err)
+	for _, f := range os.Args[2:] {
+		cb, err := os.ReadFile(f)
+		if err != nil {
+			panic(err)
+		}
+		var cs []tc
+		if err := json.Unmarshal(cb, &cs); err != nil {
+			panic(fmt.Sprintf("%s: %v", f, err))
+		}
+		cases = append(cases, cs...)
 	}
 	bad := 0
 	for _, c := range cases {

@@ -8,3 +8,16 @@ setup:
     admissionPolicy: true
     topicPrefix: pg
     imageRegistries: [registry.data.svc:5000]
+    databaseHosts: [pg]
+    schemaRegistries: [http://registry.data.svc:8081]
+    networkPolicy:
+      apiServer:
+        to: [{ipBlock: {cidr: 10.96.0.1/32}}]
+      databases:
+        to: [{ipBlock: {cidr: 10.0.5.0/24}}]
+        ports: [5432]
+      extraEgress:
+        - to: [{ipBlock: {cidr: 10.0.6.10/32}}]
+          ports: [{port: 8081, protocol: TCP}]
+networkPolicy:
+  enabled: true

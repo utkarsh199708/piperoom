@@ -1,5 +1,78 @@
 ---
 # Source: piperoom/templates/setup-pipeline.yaml
+# The Connect pods' egress (networkPolicy.enabled): DNS, this Kafka
+# cluster's pods, the API server (the KubernetesSecretConfigProvider reads
+# the credentials Secret), the databases, then extraEgress. Ingress is left
+# to Strimzi, which writes the Connect REST API's own NetworkPolicy. The
+# build pod (strimzi.io/name <connect>-connect-build) is not selected: it
+# fetches plugins and pushes the image. An empty "to" opens the port to any
+# destination, because the chart cannot know your API server's or
+# databases' addresses: narrow it for production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "orders-connect-egress"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: "orders-connect-connect"
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    # the Kafka cluster prod-kafka
+    - ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: "prod-kafka"
+              strimzi.io/kind: Kafka
+    # the Kubernetes API server
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+    # the databases
+    - ports:
+        - port: 5432
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.0.5.0/24
+    - ports:
+      - port: 8081
+        protocol: TCP
+      to:
+      - ipBlock:
+          cidr: 10.0.6.10/32
+---
+# Source: piperoom/templates/setup-pipeline.yaml
 # Empty; k8s_secret_apply fills stringData. A Secret's type is immutable, so no
 # later patch can turn this into a service-account-token Secret.
 apiVersion: v1
@@ -253,11 +326,12 @@ spec:
         'offset.storage.replication.factor', 'config.storage.replication.factor', 'status.storage.replication.factor',
         'key.converter', 'value.converter', 'key.converter.schemas.enable', 'value.converter.schemas.enable',
         'key.converter.schema.registry.url', 'value.converter.schema.registry.url', 'config.providers', 'config.providers.secrets.class'] &&
-        !string(object.spec.config[k]).contains('${') &&
+        !string(object.spec.config[k]).contains('${') && !string(object.spec.config[k]).matches(r'^\s|\s$') &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in ['http://registry.data.svc:8081']) &&
         (k != 'config.providers' || string(object.spec.config[k]) == 'secrets') &&
         (k != 'config.providers.secrets.class' || string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider') &&
         (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in ['org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter', 'io.confluent.connect.avro.AvroConverter', 'io.apicurio.registry.utils.converter.AvroConverter']))
-      message: "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference and the converters are the allow-listed ones"
+      message: "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference or has whitespace at an end, the converters are the allow-listed ones and a Schema Registry URL is one of http://registry.data.svc:8081"
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
         object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
@@ -274,10 +348,13 @@ spec:
         object.spec.metricsConfig.valueFrom.configMapKeyRef.name == 'orders-connect-metrics')))
       message: "piperoom: logging and metrics read only the orders-connect-logging and orders-connect-metrics ConfigMaps"
     # ---- KafkaConnector ----
-    # A reference is the db-credentials Secret only: every ${ in a value must
-    # open one (a $ before it, as in $${secrets:other/...}, is refused), but
-    # for the schema history clients' store passwords, which are Strimzi's own
-    # ${strimzienv:CERTS_STORE_PASSWORD} exactly.
+    # Keys: the runner's allow-list (the union over plugins; the runner holds
+    # the per-plugin table) and transforms/predicates.<name>.<key>. Values:
+    # nothing at either end is whitespace (a plugin that trims would read
+    # " disable" as disable), and a ${ appears only as the whole value of a
+    # credential key, exactly ${secrets:<ns>/<pipeline>-db-credentials:<key>},
+    # or as Strimzi's own ${strimzienv:CERTS_STORE_PASSWORD} in the schema
+    # history clients' store passwords.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
         (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
@@ -287,9 +364,17 @@ spec:
         k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
         !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
         (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
-        ((k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.(truststore|keystore)\.password$') && string(object.spec.config[k]) == '${strimzienv:CERTS_STORE_PASSWORD}') ||
-        string(object.spec.config[k]).matches(r'^([^$]|\$+[^${]|\$\{secrets:data/orders-db-credentials:[A-Za-z0-9._-]+\})*\$*$')))))
-      message: "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart (no state or offsets change), with no client override, other bootstrap, connect-time SQL or provider, and references only ${secrets:data/orders-db-credentials:<key>}"
+        (k in ['archive.log.hours', 'batch.size', 'bigint.unsigned.handling.mode', 'binary.handling.mode', 'capture.mode', 'collection.exclude.list', 'collection.include.list', 'collection.name.format', 'collection.naming.strategy', 'column.exclude.list', 'column.include.list', 'column.propagate.source.type', 'connect.keep.alive', 'connect.keep.alive.interval.ms', 'connect.timeout.ms', 'connection.password', 'connection.pool.acquire_increment', 'connection.pool.max_size', 'connection.pool.min_size', 'connection.pool.timeout', 'connection.provider', 'connection.restart.on.errors', 'connection.url', 'connection.username', 'consumer.override.fetch.max.bytes', 'consumer.override.max.partition.fetch.bytes', 'consumer.override.max.poll.interval.ms', 'consumer.override.max.poll.records', 'data.query.mode', 'database.dbname', 'database.encrypt', 'database.exclude.list', 'database.hostname', 'database.include.list', 'database.names', 'database.password', 'database.pdb.name', 'database.port', 'database.server.id', 'database.ssl.mode', 'database.sslmode', 'database.time_zone', 'database.trustServerCertificate', 'database.user', 'datatype.propagate.source.type', 'decimal.handling.mode', 'delete.enabled', 'dialect.postgres.postgis.schema', 'dialect.sqlserver.identity.insert', 'enable.time.adjuster', 'errors.deadletterqueue.context.headers.enable', 'errors.deadletterqueue.topic.name', 'errors.deadletterqueue.topic.replication.factor', 'errors.log.enable', 'errors.log.include.messages', 'errors.max.retries', 'errors.retry.delay.max.ms', 'errors.retry.timeout', 'errors.tolerance', 'event.processing.failure.handling.mode', 'field.exclude.list', 'field.include.list', 'field.renames', 'flush.max.retries', 'flush.retry.delay.ms', 'gtid.source.excludes', 'gtid.source.includes', 'heartbeat.interval.ms', 'hstore.handling.mode', 'include.query', 'include.schema.changes', 'inconsistent.schema.handling.mode', 'incremental.snapshot.chunk.size', 'incremental.snapshot.option.recompile', 'insert.mode', 'interval.handling.mode', 'key.converter', 'key.converter.schema.registry.url', 'key.converter.schemas.enable', 'lob.enabled', 'log.mining.archive.log.only.mode', 'log.mining.batch.size.default', 'log.mining.batch.size.increment', 'log.mining.batch.size.max', 'log.mining.batch.size.min', 'log.mining.continuous.mine', 'log.mining.query.filter.mode', 'log.mining.sleep.time.default.ms', 'log.mining.sleep.time.increment.ms', 'log.mining.sleep.time.max.ms', 'log.mining.sleep.time.min.ms', 'log.mining.strategy', 'lsn.flush.mode', 'max.batch.size', 'max.queue.size', 'max.queue.size.in.bytes', 'message.key.columns', 'min.row.count.to.stream.results', 'money.fraction.digits', 'mongodb.authsource', 'mongodb.connection.mode', 'mongodb.connection.string', 'mongodb.password', 'mongodb.ssl.enabled', 'mongodb.user', 'plugin.name', 'poll.interval.ms', 'predicates', 'primary.key.fields', 'primary.key.mode', 'producer.override.acks', 'producer.override.batch.size', 'producer.override.buffer.memory', 'producer.override.compression.type', 'producer.override.enable.idempotence', 'producer.override.linger.ms', 'producer.override.max.in.flight.requests.per.connection', 'producer.override.max.request.size', 'provide.transaction.metadata', 'publication.autocreate.mode', 'publication.name', 'query.fetch.size', 'quote.identifiers', 'replica.identity.autoset.values', 'retriable.restart.connector.wait.ms', 'schema.evolution', 'schema.exclude.list', 'schema.history.internal.consumer.sasl.mechanism', 'schema.history.internal.consumer.security.protocol', 'schema.history.internal.consumer.ssl.keystore.location', 'schema.history.internal.consumer.ssl.keystore.password', 'schema.history.internal.consumer.ssl.keystore.type', 'schema.history.internal.consumer.ssl.truststore.location', 'schema.history.internal.consumer.ssl.truststore.password', 'schema.history.internal.consumer.ssl.truststore.type', 'schema.history.internal.kafka.bootstrap.servers', 'schema.history.internal.kafka.topic', 'schema.history.internal.producer.sasl.mechanism', 'schema.history.internal.producer.security.protocol', 'schema.history.internal.producer.ssl.keystore.location', 'schema.history.internal.producer.ssl.keystore.password', 'schema.history.internal.producer.ssl.keystore.type', 'schema.history.internal.producer.ssl.truststore.location', 'schema.history.internal.producer.ssl.truststore.password', 'schema.history.internal.producer.ssl.truststore.type', 'schema.history.internal.skip.unparseable.ddl', 'schema.history.internal.store.only.captured.databases.ddl', 'schema.history.internal.store.only.captured.tables.ddl', 'schema.include.list', 'schema.refresh.mode', 'signal.data.collection', 'signal.enabled.channels', 'skipped.operations', 'slot.drop.on.stop', 'slot.max.retries', 'slot.name', 'slot.retry.delay.ms', 'snapshot.fetch.size', 'snapshot.include.collection.list', 'snapshot.isolation.mode', 'snapshot.locking.mode', 'snapshot.max.threads', 'snapshot.mode', 'status.update.interval.ms', 'table.exclude.list', 'table.include.list', 'table.name.format', 'table.naming.strategy', 'time.precision.mode', 'tombstones.on.delete', 'topic.creation.default.cleanup.policy', 'topic.creation.default.compression.type', 'topic.creation.default.partitions', 'topic.creation.default.replication.factor', 'topic.prefix', 'topics', 'transforms', 'truncate.enabled', 'use.reduction.buffer', 'use.time.zone', 'value.converter', 'value.converter.schema.registry.url', 'value.converter.schemas.enable', 'xmin.fetch.interval.ms'] ||
+        k.matches(r'^(transforms|predicates)\.[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z0-9_.-]{1,64}$')) &&
+        !string(object.spec.config[k]).matches(r'^\s|\s$') &&
+        (!string(object.spec.config[k]).contains('${') ||
+        (k in ['database.user', 'database.password', 'connection.username', 'connection.password', 'mongodb.user', 'mongodb.password'] && string(object.spec.config[k]).matches(r'^\$\{secrets:data/orders-db-credentials:[A-Za-z0-9._-]{1,253}\}$')) ||
+        (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.(truststore|keystore)\.password$') && string(object.spec.config[k]) == '${strimzienv:CERTS_STORE_PASSWORD}')))))
+      message: "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart (no state or offsets change); its config keys are the runner's allow-list (no client override, other bootstrap, connect-time SQL or provider), no value has whitespace at an end, and a reference is the whole value of a user or password key, ${secrets:data/orders-db-credentials:<key>}"
+    # Files, converters and transforms. RegexRouter only renames the topic a
+    # JDBC sink maps to a table, so a sink may use it; on a source it would
+    # route records off the pipeline's prefix. The class is compared without
+    # its $Key/$Value variant.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
         object.spec.config.all(k,
@@ -297,20 +382,47 @@ spec:
         (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.truststore\.location$') && string(object.spec.config[k]) == '/tmp/kafka/cluster.truststore.p12') ||
         (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.keystore\.location$') && string(object.spec.config[k]) == '/tmp/kafka/cluster.keystore.p12')) &&
         (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in ['org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter', 'io.confluent.connect.avro.AvroConverter', 'io.apicurio.registry.utils.converter.AvroConverter']) &&
-        (!k.matches(r'^(transforms|predicates)\.[^.]+\.type$') || !(string(object.spec.config[k]) in ['io.debezium.transforms.Filter', 'io.debezium.transforms.ContentBasedRouter',
+        (!k.matches(r'^(transforms|predicates)\.[^.]+\.type$') ||
+        (string(object.spec.config[k]).split('$')[0] == 'org.apache.kafka.connect.transforms.RegexRouter' && has(object.spec.class) && object.spec.class.startsWith('io.debezium.connector.jdbc.')) ||
+        !(string(object.spec.config[k]).split('$')[0] in ['io.debezium.transforms.Filter', 'io.debezium.transforms.ContentBasedRouter',
         'io.debezium.transforms.ByLogicalTableRouter', 'io.debezium.transforms.outbox.EventRouter', 'io.debezium.connector.mongodb.transforms.outbox.MongoEventRouter',
         'org.apache.kafka.connect.transforms.RegexRouter', 'org.apache.kafka.connect.transforms.TimestampRouter', 'io.debezium.connector.postgresql.transforms.timescaledb.TimescaleDb'])) &&
         !k.matches(r'^transforms\.[^.]+\.(language|condition|topic\.expression)$'))
-      message: "piperoom: a KafkaConnector names no file in the Connect pod (but Strimzi's own stores for the schema history clients), only the allow-listed converters, and no scripting or routing transform"
+      message: "piperoom: a KafkaConnector names no file in the Connect pod (but Strimzi's own stores for the schema history clients), only the allow-listed converters, and no scripting or routing transform (RegexRouter on a JDBC sink only)"
+    # TLS: the mode keys are allow-lists, never deny-lists. Connection URLs:
+    # no whitespace, no percent escape but %20 (an escaped name would pass a
+    # name check here and decode in the driver), one query, every parameter
+    # name in the runner's list, and none of the off or unverified modes.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
         object.spec.config.all(k,
-        !(k in ['database.sslmode'] && string(object.spec.config[k]).lowerAscii() in ['disable', 'allow', 'prefer']) &&
-        !(k == 'database.ssl.mode' && string(object.spec.config[k]).lowerAscii() in ['disabled', 'preferred']) &&
-        !(k == 'database.encrypt' && string(object.spec.config[k]).lowerAscii() == 'false') &&
-        !(k == 'database.trustServerCertificate' && string(object.spec.config[k]).lowerAscii() != 'false') &&
-        !(k in ['connection.url', 'mongodb.connection.string'] && string(object.spec.config[k]).matches(r'(?i)(sslmode=(disable|allow|prefer|disabled|preferred|trust)|usessl=false|encrypt=false|trustservercertificate=true|autodeserialize|allowloadlocalinfile|allowurlinlocalinfile|socketfactory|sslfactory|loggerfile|(tls|ssl)=false|tlsinsecure|tlsallowinvalid)')))
-      message: "piperoom: TLS to a database is never turned off or left unverified, and a connection URL loads no class or local file"
+        (k != 'database.sslmode' || string(object.spec.config[k]).lowerAscii() in ['require', 'verify-ca', 'verify-full']) &&
+        (k != 'database.ssl.mode' || string(object.spec.config[k]).lowerAscii() in ['required', 'verify_ca', 'verify_identity']) &&
+        (k != 'database.encrypt' || string(object.spec.config[k]).lowerAscii() == 'true') &&
+        (k != 'database.trustServerCertificate' || string(object.spec.config[k]).lowerAscii() == 'false') &&
+        (!(k in ['connection.url', 'mongodb.connection.string']) || (
+        !string(object.spec.config[k]).matches(r'\s') &&
+        !string(object.spec.config[k]).replace('%20', '').contains('%') &&
+        string(object.spec.config[k]).split('?').size() <= 2 &&
+        (string(object.spec.config[k]).contains('?') ? string(object.spec.config[k]).substring(string(object.spec.config[k]).indexOf('?') + 1) :
+        (string(object.spec.config[k]).contains(';') ? string(object.spec.config[k]).substring(string(object.spec.config[k]).indexOf(';') + 1) : '')).replace(';', '&').split('&').all(q,
+        q == '' || q.split('=')[0].lowerAscii() in ['allowpublickeyretrieval', 'applicationname', 'appname', 'authmechanism', 'authsource', 'characterencoding', 'connecttimeout', 'connecttimeoutms', 'currentschema', 'databasename', 'directconnection', 'encrypt', 'logintimeout', 'maxpoolsize', 'preparethreshold', 'readpreference', 'replicaset', 'requiressl', 'retrywrites', 'rewritebatchedinserts', 'rewritebatchedstatements', 'serverselectiontimeoutms', 'servertimezone', 'sockettimeout', 'sockettimeoutms', 'ssl', 'sslmode', 'stringtype', 'targetservertype', 'tcpkeepalive', 'tls', 'trustservercertificate', 'usessl', 'useunicode', 'verifyservercertificate', 'w', 'zerodatetimebehavior']) &&
+        !string(object.spec.config[k]).matches(r'(?i)(sslmode=(disable|allow|prefer|disabled|preferred|trust)|usessl=false|encrypt=false|trustservercertificate=true|hostnameincertificate|autodeserialize|allowloadlocalinfile|allowurlinlocalinfile|socketfactory|sslfactory|loggerfile|(tls|ssl)=false|tlsinsecure|tlsallowinvalid)'))))
+      message: "piperoom: TLS to a database is never turned off or left unverified, and a connection URL has no whitespace, no percent escape but %20, and only the runner's parameters (none that loads a class or a local file)"
+    # Where a connector connects: the schema history to this Kafka cluster's
+    # bootstrap Service, the database to setup.pipeline.databaseHosts, the
+    # Schema Registry to setup.pipeline.schemaRegistries.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k,
+        (k != 'schema.history.internal.kafka.bootstrap.servers' || string(object.spec.config[k]).matches(r'^prod-kafka-kafka-bootstrap(\.data(\.svc(\.cluster\.local)?)?)?:[0-9]{1,5}$')) &&
+        (k != 'database.hostname' || string(object.spec.config[k]).lowerAscii() in ['pg']) &&
+        (!(k in ['connection.url', 'mongodb.connection.string']) ||
+        (string(object.spec.config[k]).contains('//') ? string(object.spec.config[k]).split('//')[1] :
+        string(object.spec.config[k]).split('@')[string(object.spec.config[k]).split('@').size() - 1]).split('/')[0].split('?')[0].split(';')[0].split(',').all(h,
+        h.split(':')[0].lowerAscii() in ['pg'])) &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in ['http://registry.data.svc:8081']))
+      message: "piperoom: a KafkaConnector's schema history reaches prod-kafka-kafka-bootstrap only, its database is one of pg, and a Schema Registry URL is one of http://registry.data.svc:8081"
     # ---- KafkaTopic ----
     # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
     # shell that names no topic yet (the operator would read metadata.name).

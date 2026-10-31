@@ -28,6 +28,12 @@ each value's shape; this checks the combination. */}}
   {{- if and $s.pipeline.admissionPolicy (not $s.pipeline.imageRegistries) -}}
   {{- fail "setup.pipeline.admissionPolicy needs setup.pipeline.imageRegistries, the registries (host[:port]) a KafkaConnect build may push to" -}}
   {{- end -}}
+  {{- if and $s.pipeline.admissionPolicy (not $s.pipeline.databaseHosts) -}}
+  {{- fail "setup.pipeline.admissionPolicy needs setup.pipeline.databaseHosts, the database hosts a KafkaConnector may connect to (the room's source and sink targets)" -}}
+  {{- end -}}
+  {{- if and .Values.networkPolicy.enabled (not $s.pipeline.networkPolicy.databases.ports) -}}
+  {{- fail "networkPolicy.enabled needs setup.pipeline.networkPolicy.databases.ports, the database ports the Connect pods dial (and databases.to, their addresses, for production)" -}}
+  {{- end -}}
   {{- range $s.pipeline.imageRegistries -}}
   {{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$" .) -}}
   {{- fail (printf "setup.pipeline.imageRegistries: %q is not a host[:port]" .) -}}

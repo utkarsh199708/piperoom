@@ -86,7 +86,8 @@ jobs:
           kubectl -n "$NS" wait kafka/prod-kafka --for=condition=Ready --timeout=360s
       - name: Pipeline release; the paused shells create nothing
         run: |
-          helm install piperoom-pipeline-orders deploy/helm/piperoom -n "$NS" -f deploy/helm/piperoom/ci/setup/pipeline-values.yaml --set setup.pipeline.admissionPolicy=false
+          # The CI values' Connect egress names example addresses, not kind's.
+          helm install piperoom-pipeline-orders deploy/helm/piperoom -n "$NS" -f deploy/helm/piperoom/ci/setup/pipeline-values.yaml --set setup.pipeline.admissionPolicy=false --set networkPolicy.enabled=false
           sleep 30
           for o in kafkaconnect/orders-connect kafkatopic/orders-canary kafkauser/orders-connect kafkauser/orders-piperoom-ro; do
             kubectl -n "$NS" get "$o" -o jsonpath='{.status.conditions[*].type}' | grep -q ReconciliationPaused || { echo "$o is not ReconciliationPaused"; kubectl -n "$NS" get "$o" -o yaml; exit 1; }

@@ -379,6 +379,30 @@ setup:
     # the policy pins spec.build.output.image to
     # <registry>/<repo>:piperoom-<id>-<digest> on one of them.
     imageRegistries: []
+    # The database hosts (lower-case names, no port) a KafkaConnector may
+    # connect to: database.hostname, the hosts of a JDBC sink's
+    # connection.url and of mongodb.connection.string. The room's source and
+    # sink targets. Required with admissionPolicy.
+    databaseHosts: []
+    # The Schema Registry URLs (http[s]://host[:port], exactly as the
+    # connectors and the worker name them) the *.converter.schema.registry.url
+    # keys may hold: the room's registry targets. Empty refuses those keys.
+    schemaRegistries: []
+    # The Connect pods' egress, rendered when networkPolicy.enabled: DNS
+    # (networkPolicy.dns), the Kafka cluster's pods on kafkaPorts, the API
+    # server (the secrets config provider reads the credentials Secret), the
+    # databases, then extraEgress verbatim (e.g. the Schema Registry). An
+    # empty "to" opens the port to any destination: narrow it for
+    # production. databases.ports is required when the policy renders.
+    networkPolicy:
+      kafkaPorts: [9092, 9093]
+      apiServer:
+        to: []
+        ports: [443, 6443]
+      databases:
+        to: []
+        ports: []
+      extraEgress: []
   runner:
     enabled: false
     room: ""                # the room id POST /api/setup returned, without its r_ prefix

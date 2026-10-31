@@ -146,6 +146,76 @@ subjects:
   - kind: ServiceAccount
     name: {{ printf "%s-connect" $connect }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.setup.pipeline.networkPolicy }}
+---
+# The Connect pods' egress (networkPolicy.enabled): DNS, this Kafka
+# cluster's pods, the API server (the KubernetesSecretConfigProvider reads
+# the credentials Secret), the databases, then extraEgress. Ingress is left
+# to Strimzi, which writes the Connect REST API's own NetworkPolicy. The
+# build pod (strimzi.io/name <connect>-connect-build) is not selected: it
+# fetches plugins and pushes the image. An empty "to" opens the port to any
+# destination, because the chart cannot know your API server's or
+# databases' addresses: narrow it for production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress" $connect | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: {{ printf "%s-connect" $connect | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with .Values.networkPolicy.dns.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # the Kafka cluster {{ $kafka }}
+    - ports:
+        {{- range $np.kafkaPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: {{ $kafka | quote }}
+              strimzi.io/kind: Kafka
+    # the Kubernetes API server
+    - ports:
+        {{- range $np.apiServer.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      {{- with $np.apiServer.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # the databases
+    - ports:
+        {{- range $np.databases.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      {{- with $np.databases.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
 {{- if .Values.setup.pipeline.admissionPolicy }}
 {{- $prefix := .Values.setup.pipeline.topicPrefix }}
 {{- $ro := printf "%s-piperoom-ro" $p }}
@@ -155,6 +225,19 @@ subjects:
 {{- $regs := list }}
 {{- range .Values.setup.pipeline.imageRegistries }}{{ $regs = append $regs (regexQuoteMeta .) }}{{ end }}
 {{- $converters := "['org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter', 'io.confluent.connect.avro.AvroConverter', 'io.apicurio.registry.utils.converter.AvroConverter']" }}
+{{- /* The runner's lists (files/, kept equal to the runner by
+internal/setup/targets/strimzi policy_files_test.go): every KafkaConnector
+config key any plugin admits, and every JDBC or MongoDB URL parameter. */}}
+{{- $ckeys := list }}
+{{- range (.Files.Lines "files/setup-connector-keys.txt") }}{{ if . }}{{ $ckeys = append $ckeys (squote .) }}{{ end }}{{ end }}
+{{- $uparams := list }}
+{{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}{{ $uparams = append $uparams (squote .) }}{{ end }}{{ end }}
+{{- $dbhosts := list }}
+{{- range .Values.setup.pipeline.databaseHosts }}{{ $dbhosts = append $dbhosts (squote (lower .)) }}{{ end }}
+{{- $regurls := list }}
+{{- range .Values.setup.pipeline.schemaRegistries }}{{ $regurls = append $regurls (squote .) }}{{ end }}
+{{- $bootstrapRE := printf `r'^%s-kafka-bootstrap(\.%s(\.svc(\.cluster\.local)?)?)?:[0-9]{1,5}$'` (regexQuoteMeta $kafka) (regexQuoteMeta $ns) }}
+{{- $credKeys := "['database.user', 'database.password', 'connection.username', 'connection.password', 'mongodb.user', 'mongodb.password']" }}
 ---
 # D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
 # named objects only, mirrors the runner's field allow-list
@@ -187,7 +270,7 @@ spec:
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         (object.spec.all(k, k in ['replicas', 'version', 'bootstrapServers', 'tls', 'authentication', 'config', 'build', 'resources', 'logging', 'metricsConfig', 'jvmOptions']) &&
         (!has(object.spec.jvmOptions) || object.spec.jvmOptions.all(k, k in ['-Xms', '-Xmx'])) &&
-        (!has(object.spec.bootstrapServers) || string(object.spec.bootstrapServers).matches({{ printf `r'^%s-kafka-bootstrap(\.%s(\.svc(\.cluster\.local)?)?)?:[0-9]{1,5}$'` (regexQuoteMeta $kafka) (regexQuoteMeta $ns) }})))
+        (!has(object.spec.bootstrapServers) || string(object.spec.bootstrapServers).matches({{ $bootstrapRE }})))
       message: {{ printf "piperoom: a KafkaConnect sets only replicas, version, bootstrapServers, tls, authentication, config, build, resources, logging, metricsConfig and jvmOptions (-Xms, -Xmx); no image, template, externalConfiguration or system properties; and its bootstrap is %s-kafka-bootstrap" $kafka | quote }}
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) ||
@@ -215,11 +298,12 @@ spec:
         'offset.storage.replication.factor', 'config.storage.replication.factor', 'status.storage.replication.factor',
         'key.converter', 'value.converter', 'key.converter.schemas.enable', 'value.converter.schemas.enable',
         'key.converter.schema.registry.url', 'value.converter.schema.registry.url', 'config.providers', 'config.providers.secrets.class'] &&
-        !string(object.spec.config[k]).contains('${') &&
+        !string(object.spec.config[k]).contains('${') && !string(object.spec.config[k]).matches(r'^\s|\s$') &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in [{{ join ", " $regurls }}]) &&
         (k != 'config.providers' || string(object.spec.config[k]) == 'secrets') &&
         (k != 'config.providers.secrets.class' || string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider') &&
         (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in {{ $converters }}))
-      message: "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference and the converters are the allow-listed ones"
+      message: {{ printf "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference or has whitespace at an end, the converters are the allow-listed ones and a Schema Registry URL is one of %s" (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
         object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
@@ -236,10 +320,13 @@ spec:
         object.spec.metricsConfig.valueFrom.configMapKeyRef.name == {{ printf "%s-connect-metrics" $p | squote }})))
       message: {{ printf "piperoom: logging and metrics read only the %s-connect-logging and %s-connect-metrics ConfigMaps" $p $p | quote }}
     # ---- KafkaConnector ----
-    # A reference is the db-credentials Secret only: every ${ in a value must
-    # open one (a $ before it, as in $${secrets:other/...}, is refused), but
-    # for the schema history clients' store passwords, which are Strimzi's own
-    # ${strimzienv:CERTS_STORE_PASSWORD} exactly.
+    # Keys: the runner's allow-list (the union over plugins; the runner holds
+    # the per-plugin table) and transforms/predicates.<name>.<key>. Values:
+    # nothing at either end is whitespace (a plugin that trims would read
+    # " disable" as disable), and a ${ appears only as the whole value of a
+    # credential key, exactly ${secrets:<ns>/<pipeline>-db-credentials:<key>},
+    # or as Strimzi's own ${strimzienv:CERTS_STORE_PASSWORD} in the schema
+    # history clients' store passwords.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
         (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
@@ -249,9 +336,17 @@ spec:
         k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
         !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
         (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
-        ((k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.(truststore|keystore)\.password$') && string(object.spec.config[k]) == '${strimzienv:CERTS_STORE_PASSWORD}') ||
-        string(object.spec.config[k]).matches({{ printf `r'^([^$]|\$+[^${]|\$\{secrets:%s/%s-db-credentials:[A-Za-z0-9._-]+\})*\$*$'` (regexQuoteMeta $ns) (regexQuoteMeta $p) }})))))
-      message: {{ printf "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart (no state or offsets change), with no client override, other bootstrap, connect-time SQL or provider, and references only ${secrets:%s/%s-db-credentials:<key>}" $ns $p | quote }}
+        (k in [{{ join ", " $ckeys }}] ||
+        k.matches(r'^(transforms|predicates)\.[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z0-9_.-]{1,64}$')) &&
+        !string(object.spec.config[k]).matches(r'^\s|\s$') &&
+        (!string(object.spec.config[k]).contains('${') ||
+        (k in {{ $credKeys }} && string(object.spec.config[k]).matches({{ printf `r'^\$\{secrets:%s/%s-db-credentials:[A-Za-z0-9._-]{1,253}\}$'` (regexQuoteMeta $ns) (regexQuoteMeta $p) }})) ||
+        (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.(truststore|keystore)\.password$') && string(object.spec.config[k]) == '${strimzienv:CERTS_STORE_PASSWORD}')))))
+      message: {{ printf "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart (no state or offsets change); its config keys are the runner's allow-list (no client override, other bootstrap, connect-time SQL or provider), no value has whitespace at an end, and a reference is the whole value of a user or password key, ${secrets:%s/%s-db-credentials:<key>}" $ns $p | quote }}
+    # Files, converters and transforms. RegexRouter only renames the topic a
+    # JDBC sink maps to a table, so a sink may use it; on a source it would
+    # route records off the pipeline's prefix. The class is compared without
+    # its $Key/$Value variant.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
         object.spec.config.all(k,
@@ -259,20 +354,47 @@ spec:
         (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.truststore\.location$') && string(object.spec.config[k]) == '/tmp/kafka/cluster.truststore.p12') ||
         (k.matches(r'^schema\.history\.internal\.(producer|consumer)\.ssl\.keystore\.location$') && string(object.spec.config[k]) == '/tmp/kafka/cluster.keystore.p12')) &&
         (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in {{ $converters }}) &&
-        (!k.matches(r'^(transforms|predicates)\.[^.]+\.type$') || !(string(object.spec.config[k]) in ['io.debezium.transforms.Filter', 'io.debezium.transforms.ContentBasedRouter',
+        (!k.matches(r'^(transforms|predicates)\.[^.]+\.type$') ||
+        (string(object.spec.config[k]).split('$')[0] == 'org.apache.kafka.connect.transforms.RegexRouter' && has(object.spec.class) && object.spec.class.startsWith('io.debezium.connector.jdbc.')) ||
+        !(string(object.spec.config[k]).split('$')[0] in ['io.debezium.transforms.Filter', 'io.debezium.transforms.ContentBasedRouter',
         'io.debezium.transforms.ByLogicalTableRouter', 'io.debezium.transforms.outbox.EventRouter', 'io.debezium.connector.mongodb.transforms.outbox.MongoEventRouter',
         'org.apache.kafka.connect.transforms.RegexRouter', 'org.apache.kafka.connect.transforms.TimestampRouter', 'io.debezium.connector.postgresql.transforms.timescaledb.TimescaleDb'])) &&
         !k.matches(r'^transforms\.[^.]+\.(language|condition|topic\.expression)$'))
-      message: "piperoom: a KafkaConnector names no file in the Connect pod (but Strimzi's own stores for the schema history clients), only the allow-listed converters, and no scripting or routing transform"
+      message: "piperoom: a KafkaConnector names no file in the Connect pod (but Strimzi's own stores for the schema history clients), only the allow-listed converters, and no scripting or routing transform (RegexRouter on a JDBC sink only)"
+    # TLS: the mode keys are allow-lists, never deny-lists. Connection URLs:
+    # no whitespace, no percent escape but %20 (an escaped name would pass a
+    # name check here and decode in the driver), one query, every parameter
+    # name in the runner's list, and none of the off or unverified modes.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
         object.spec.config.all(k,
-        !(k in ['database.sslmode'] && string(object.spec.config[k]).lowerAscii() in ['disable', 'allow', 'prefer']) &&
-        !(k == 'database.ssl.mode' && string(object.spec.config[k]).lowerAscii() in ['disabled', 'preferred']) &&
-        !(k == 'database.encrypt' && string(object.spec.config[k]).lowerAscii() == 'false') &&
-        !(k == 'database.trustServerCertificate' && string(object.spec.config[k]).lowerAscii() != 'false') &&
-        !(k in ['connection.url', 'mongodb.connection.string'] && string(object.spec.config[k]).matches(r'(?i)(sslmode=(disable|allow|prefer|disabled|preferred|trust)|usessl=false|encrypt=false|trustservercertificate=true|autodeserialize|allowloadlocalinfile|allowurlinlocalinfile|socketfactory|sslfactory|loggerfile|(tls|ssl)=false|tlsinsecure|tlsallowinvalid)')))
-      message: "piperoom: TLS to a database is never turned off or left unverified, and a connection URL loads no class or local file"
+        (k != 'database.sslmode' || string(object.spec.config[k]).lowerAscii() in ['require', 'verify-ca', 'verify-full']) &&
+        (k != 'database.ssl.mode' || string(object.spec.config[k]).lowerAscii() in ['required', 'verify_ca', 'verify_identity']) &&
+        (k != 'database.encrypt' || string(object.spec.config[k]).lowerAscii() == 'true') &&
+        (k != 'database.trustServerCertificate' || string(object.spec.config[k]).lowerAscii() == 'false') &&
+        (!(k in ['connection.url', 'mongodb.connection.string']) || (
+        !string(object.spec.config[k]).matches(r'\s') &&
+        !string(object.spec.config[k]).replace('%20', '').contains('%') &&
+        string(object.spec.config[k]).split('?').size() <= 2 &&
+        (string(object.spec.config[k]).contains('?') ? string(object.spec.config[k]).substring(string(object.spec.config[k]).indexOf('?') + 1) :
+        (string(object.spec.config[k]).contains(';') ? string(object.spec.config[k]).substring(string(object.spec.config[k]).indexOf(';') + 1) : '')).replace(';', '&').split('&').all(q,
+        q == '' || q.split('=')[0].lowerAscii() in [{{ join ", " $uparams }}]) &&
+        !string(object.spec.config[k]).matches(r'(?i)(sslmode=(disable|allow|prefer|disabled|preferred|trust)|usessl=false|encrypt=false|trustservercertificate=true|hostnameincertificate|autodeserialize|allowloadlocalinfile|allowurlinlocalinfile|socketfactory|sslfactory|loggerfile|(tls|ssl)=false|tlsinsecure|tlsallowinvalid)'))))
+      message: "piperoom: TLS to a database is never turned off or left unverified, and a connection URL has no whitespace, no percent escape but %20, and only the runner's parameters (none that loads a class or a local file)"
+    # Where a connector connects: the schema history to this Kafka cluster's
+    # bootstrap Service, the database to setup.pipeline.databaseHosts, the
+    # Schema Registry to setup.pipeline.schemaRegistries.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k,
+        (k != 'schema.history.internal.kafka.bootstrap.servers' || string(object.spec.config[k]).matches({{ $bootstrapRE }})) &&
+        (k != 'database.hostname' || string(object.spec.config[k]).lowerAscii() in [{{ join ", " $dbhosts }}]) &&
+        (!(k in ['connection.url', 'mongodb.connection.string']) ||
+        (string(object.spec.config[k]).contains('//') ? string(object.spec.config[k]).split('//')[1] :
+        string(object.spec.config[k]).split('@')[string(object.spec.config[k]).split('@').size() - 1]).split('/')[0].split('?')[0].split(';')[0].split(',').all(h,
+        h.split(':')[0].lowerAscii() in [{{ join ", " $dbhosts }}])) &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in [{{ join ", " $regurls }}]))
+      message: {{ printf "piperoom: a KafkaConnector's schema history reaches %s-kafka-bootstrap only, its database is one of %s, and a Schema Registry URL is one of %s" $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
     # ---- KafkaTopic ----
     # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
     # shell that names no topic yet (the operator would read metadata.name).

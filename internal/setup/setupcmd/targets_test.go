@@ -268,7 +268,7 @@ func TestKubernetesClassIsTheRoomsHighest(t *testing.T) {
 	if !ok {
 		t.Fatal("k8s_delete is not registered")
 	}
-	if err := op.Validate(json.RawMessage(`{"kind":"KafkaTopic","name":"orders-canary"}`), ops.Env{Targets: targets}); !errors.Is(err, strimzi.ErrProduction) {
+	if err := op.Validate(json.RawMessage(`{"kind":"KafkaTopic","name":"orders-canary","topic_prefix":"pg"}`), ops.Env{Targets: targets}); !errors.Is(err, strimzi.ErrProduction) {
 		t.Fatalf("k8s_delete of the canary with a production kafka target: %v, want ErrProduction", err)
 	}
 }

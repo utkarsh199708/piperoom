@@ -1,0 +1,344 @@
+[
+ {
+  "name": "render: KafkaConnect",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaConnect",
+   "metadata": {
+    "name": "orders-connect"
+   },
+   "spec": {
+    "authentication": {
+     "certificateAndKey": {
+      "certificate": "user.crt",
+      "key": "user.key",
+      "secretName": "orders-connect"
+     },
+     "type": "tls"
+    },
+    "bootstrapServers": "prod-kafka-kafka-bootstrap.data.svc:9093",
+    "build": {
+     "output": {
+      "image": "registry.data.svc:5000/data/connect:piperoom-orders-22462615cef7",
+      "pushSecret": "orders-registry-push",
+      "type": "docker"
+     },
+     "plugins": [
+      {
+       "artifacts": [
+        {
+         "sha512sum": "0f1b1d505c1b1f5ad12746de8f4150d6eb4c5d8c1930e22b189a341e59d22c8b0edd189b008fd2e9275e9b3681170de390466202a88894754622997764cf020b",
+         "type": "tgz",
+         "url": "https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-plugin.tar.gz"
+        }
+       ],
+       "name": "debezium-connector-postgres"
+      }
+     ]
+    },
+    "config": {
+     "config.providers": "secrets",
+     "config.providers.secrets.class": "io.strimzi.kafka.KubernetesSecretConfigProvider",
+     "config.storage.replication.factor": -1,
+     "config.storage.topic": "orders-connect-connect-configs",
+     "group.id": "orders-connect",
+     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+     "key.converter.schemas.enable": "false",
+     "offset.storage.replication.factor": -1,
+     "offset.storage.topic": "orders-connect-connect-offsets",
+     "status.storage.replication.factor": -1,
+     "status.storage.topic": "orders-connect-connect-status",
+     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+     "value.converter.schemas.enable": "false"
+    },
+    "logging": {
+     "type": "external",
+     "valueFrom": {
+      "configMapKeyRef": {
+       "key": "log4j.properties",
+       "name": "orders-connect-logging"
+      }
+     }
+    },
+    "metricsConfig": {
+     "type": "jmxPrometheusExporter",
+     "valueFrom": {
+      "configMapKeyRef": {
+       "key": "metrics-config.yml",
+       "name": "orders-connect-metrics"
+      }
+     }
+    },
+    "replicas": 1,
+    "tls": {
+     "trustedCertificates": [
+      {
+       "pattern": "*.crt",
+       "secretName": "prod-kafka-cluster-ca-cert"
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "name": "render: postgres source",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaConnector",
+   "metadata": {
+    "name": "orders-src"
+   },
+   "spec": {
+    "autoRestart": {
+     "enabled": true,
+     "maxRestarts": 3
+    },
+    "class": "io.debezium.connector.postgresql.PostgresConnector",
+    "config": {
+     "database.dbname": "orders",
+     "database.hostname": "pg",
+     "database.password": "${secrets:data/orders-db-credentials:password}",
+     "database.port": "5432",
+     "database.sslmode": "verify-full",
+     "database.user": "${secrets:data/orders-db-credentials:username}",
+     "plugin.name": "pgoutput",
+     "publication.name": "orders",
+     "slot.name": "orders",
+     "table.include.list": "public.orders",
+     "topic.prefix": "pg",
+     "transforms": "unwrap",
+     "transforms.unwrap.delete.tombstone.handling.mode": "rewrite",
+     "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+     "value.converter": "io.confluent.connect.avro.AvroConverter",
+     "value.converter.schema.registry.url": "http://registry.data.svc:8081"
+    },
+    "tasksMax": 1
+   }
+  }
+ },
+ {
+  "name": "render: mysql source with TLS schema history",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaConnector",
+   "metadata": {
+    "name": "orders-src"
+   },
+   "spec": {
+    "autoRestart": {
+     "enabled": true,
+     "maxRestarts": 3
+    },
+    "class": "io.debezium.connector.mysql.MySqlConnector",
+    "config": {
+     "database.hostname": "pg",
+     "database.password": "${secrets:data/orders-db-credentials:password}",
+     "database.port": "5432",
+     "database.server.id": "5401",
+     "database.ssl.mode": "verify_identity",
+     "database.user": "${secrets:data/orders-db-credentials:username}",
+     "schema.history.internal.consumer.security.protocol": "SSL",
+     "schema.history.internal.consumer.ssl.keystore.location": "/tmp/kafka/cluster.keystore.p12",
+     "schema.history.internal.consumer.ssl.keystore.password": "${strimzienv:CERTS_STORE_PASSWORD}",
+     "schema.history.internal.consumer.ssl.keystore.type": "PKCS12",
+     "schema.history.internal.consumer.ssl.truststore.location": "/tmp/kafka/cluster.truststore.p12",
+     "schema.history.internal.consumer.ssl.truststore.password": "${strimzienv:CERTS_STORE_PASSWORD}",
+     "schema.history.internal.consumer.ssl.truststore.type": "PKCS12",
+     "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093",
+     "schema.history.internal.kafka.topic": "schemahistory.pg",
+     "schema.history.internal.producer.security.protocol": "SSL",
+     "schema.history.internal.producer.ssl.keystore.location": "/tmp/kafka/cluster.keystore.p12",
+     "schema.history.internal.producer.ssl.keystore.password": "${strimzienv:CERTS_STORE_PASSWORD}",
+     "schema.history.internal.producer.ssl.keystore.type": "PKCS12",
+     "schema.history.internal.producer.ssl.truststore.location": "/tmp/kafka/cluster.truststore.p12",
+     "schema.history.internal.producer.ssl.truststore.password": "${strimzienv:CERTS_STORE_PASSWORD}",
+     "schema.history.internal.producer.ssl.truststore.type": "PKCS12",
+     "topic.prefix": "pg"
+    },
+    "tasksMax": 1
+   }
+  }
+ },
+ {
+  "name": "render: jdbc sink",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaConnector",
+   "metadata": {
+    "name": "orders-src"
+   },
+   "spec": {
+    "autoRestart": {
+     "enabled": true,
+     "maxRestarts": 3
+    },
+    "class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "config": {
+     "connection.password": "${secrets:data/orders-db-credentials:password}",
+     "connection.url": "jdbc:postgresql://pg:5432/warehouse?sslmode=verify-full\u0026ApplicationName=pipe%20room\u0026prepareThreshold=0",
+     "connection.username": "${secrets:data/orders-db-credentials:username}",
+     "errors.deadletterqueue.topic.name": "pg.dlq",
+     "errors.tolerance": "all",
+     "topics": "pg.public.orders",
+     "transforms": "route",
+     "transforms.route.regex": "([^.]+)\\.([^.]+)\\.([^.]+)",
+     "transforms.route.replacement": "$3",
+     "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter"
+    },
+    "tasksMax": 1
+   }
+  }
+ },
+ {
+  "name": "render: canary topic",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaTopic",
+   "metadata": {
+    "name": "orders-canary"
+   },
+   "spec": {
+    "config": {
+     "cleanup.policy": "delete",
+     "retention.ms": "604800000"
+    },
+    "partitions": 1,
+    "replicas": 1,
+    "topicName": "pg.public.piperoom_canary"
+   }
+  }
+ },
+ {
+  "name": "render: connect user",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaUser",
+   "metadata": {
+    "name": "orders-connect"
+   },
+   "spec": {
+    "authentication": {
+     "type": "tls"
+    },
+    "authorization": {
+     "acls": [
+      {
+       "host": "*",
+       "operations": [
+        "Create",
+        "Describe",
+        "Read",
+        "Write"
+       ],
+       "resource": {
+        "name": "pg.",
+        "patternType": "prefix",
+        "type": "topic"
+       }
+      },
+      {
+       "host": "*",
+       "operations": [
+        "Create",
+        "Describe",
+        "Read",
+        "Write"
+       ],
+       "resource": {
+        "name": "orders-connect-connect-configs",
+        "patternType": "literal",
+        "type": "topic"
+       }
+      },
+      {
+       "host": "*",
+       "operations": [
+        "Create",
+        "Describe",
+        "Read",
+        "Write"
+       ],
+       "resource": {
+        "name": "orders-connect-connect-offsets",
+        "patternType": "literal",
+        "type": "topic"
+       }
+      },
+      {
+       "host": "*",
+       "operations": [
+        "Create",
+        "Describe",
+        "Read",
+        "Write"
+       ],
+       "resource": {
+        "name": "orders-connect-connect-status",
+        "patternType": "literal",
+        "type": "topic"
+       }
+      },
+      {
+       "host": "*",
+       "operations": [
+        "Describe",
+        "Read"
+       ],
+       "resource": {
+        "name": "orders-connect",
+        "patternType": "literal",
+        "type": "group"
+       }
+      }
+     ],
+     "type": "simple"
+    }
+   }
+  }
+ },
+ {
+  "name": "render: read user",
+  "allow": true,
+  "obj": {
+   "kind": "KafkaUser",
+   "metadata": {
+    "name": "orders-piperoom-ro"
+   },
+   "spec": {
+    "authentication": {
+     "type": "scram-sha-512"
+    },
+    "authorization": {
+     "acls": [
+      {
+       "host": "*",
+       "operations": [
+        "Describe",
+        "Read",
+        "DescribeConfigs"
+       ],
+       "resource": {
+        "name": "pg.",
+        "patternType": "prefix",
+        "type": "topic"
+       }
+      },
+      {
+       "host": "*",
+       "operations": [
+        "Describe"
+       ],
+       "resource": {
+        "name": "orders-connect",
+        "patternType": "literal",
+        "type": "group"
+       }
+      }
+     ],
+     "type": "simple"
+    }
+   }
+  }
+ }
+]
