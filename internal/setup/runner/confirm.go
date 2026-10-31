@@ -44,13 +44,16 @@ func scrub(s string, maxLen int) string {
 	return string(out)
 }
 
-// confirm prints what the server claims the room is (origin, room, creator)
-// and asks for a y/N on the runner's terminal, unless the runner was started
-// with --yes, which Run only allows on loopback. It returns true on "y". The
-// room id, title and creator are untrusted server text: they are scrubbed
-// before printing. The read happens on a goroutine and returns as soon as a
-// line arrives or ctx ends, so a Ctrl-C stops the prompt (Run returns
-// ctx.Err()).
+// confirm prints what the server claims the room is (origin, room, pipeline,
+// tenant, creator, the targets the setup may reach with their classes, and
+// the pairing fingerprint) and asks for a y/N on the runner's terminal,
+// unless the runner was started with --yes, which Run only allows on
+// loopback. It returns true on "y". Every field is untrusted server text: it
+// is scrubbed before printing. The read happens on a goroutine and returns as
+// soon as a line arrives or ctx ends, so a Ctrl-C stops the prompt (Run
+// returns ctx.Err()). Nothing of the room's targets runs before this answer:
+// pair registers the target drivers (and so loads any cloud credential
+// chain) only after a "y".
 func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, error) {
 	creator := welcome.Creator.Name
 	if creator == "" {
@@ -59,13 +62,31 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 	if r.extConfirm != nil {
 		return r.confirmExternal(ctx, welcome, creator)
 	}
-	fmt.Fprintf(r.stdout, "pair with %s\n", r.serverURL)
-	fmt.Fprintf(r.stdout, "room %s: %s\n", scrub(welcome.RoomID, maxPrintedFieldLen), scrub(welcome.Title, maxPrintedFieldLen))
-	fmt.Fprintf(r.stdout, "created by %s\n", scrub(creator, maxPrintedFieldLen))
+	r.printWelcome(welcome, creator)
+	if welcome.Fingerprint == "" {
+		fmt.Fprintln(r.stdout, "the server sent no fingerprint (it has no PIPEROOM_PUBLIC_URL): compare the origin above with the Set up card instead")
+	} else {
+		fmt.Fprintln(r.stdout, "compare the fingerprint with the room's Set up card before you answer")
+	}
 	if r.yes {
 		return true, nil
 	}
 	return r.ask(ctx, "continue? [y/N] ")
+}
+
+// printWelcome is the block both confirmations show: the origin the runner
+// dialed, the room, its pipeline and tenant, the creator, each target (kind,
+// address: the account, environment or project of a managed one, and class)
+// and the fingerprint the Set up card shows.
+func (r *Runner) printWelcome(welcome *protocol.Welcome, creator string) {
+	fmt.Fprintf(r.stdout, "pair with %s\n", r.serverURL)
+	fmt.Fprintf(r.stdout, "room %s: %s\n", scrub(welcome.RoomID, maxPrintedFieldLen), scrub(welcome.Title, maxPrintedFieldLen))
+	fmt.Fprintf(r.stdout, "pipeline %s, tenant %s\n", scrub(welcome.PipelineID, maxPrintedFieldLen), scrub(welcome.Tenant, maxPrintedFieldLen))
+	fmt.Fprintf(r.stdout, "created by %s\n", scrub(creator, maxPrintedFieldLen))
+	for _, t := range welcome.Targets {
+		fmt.Fprintf(r.stdout, "target %s %s (%s)\n", scrub(t.Kind, 32), scrub(t.Address, maxPrintedFieldLen), scrub(t.Class, 32))
+	}
+	fmt.Fprintf(r.stdout, "fingerprint %s\n", scrub(welcome.Fingerprint, 32))
 }
 
 // ErrOriginMismatch is a Welcome whose PublicOrigin is not the origin the
@@ -87,16 +108,7 @@ func (r *Runner) confirmExternal(ctx context.Context, welcome *protocol.Welcome,
 		return false, fmt.Errorf("%w: welcome says %q, runner dialed %q", ErrOriginMismatch,
 			scrub(welcome.PublicOrigin, maxPrintedFieldLen), r.serverURL)
 	}
-	show := func() {
-		fmt.Fprintf(r.stdout, "pair with %s\n", r.serverURL)
-		fmt.Fprintf(r.stdout, "room %s: %s\n", scrub(welcome.RoomID, maxPrintedFieldLen), scrub(welcome.Title, maxPrintedFieldLen))
-		fmt.Fprintf(r.stdout, "pipeline %s, tenant %s\n", scrub(welcome.PipelineID, maxPrintedFieldLen), scrub(welcome.Tenant, maxPrintedFieldLen))
-		fmt.Fprintf(r.stdout, "created by %s\n", scrub(creator, maxPrintedFieldLen))
-		for _, t := range welcome.Targets {
-			fmt.Fprintf(r.stdout, "target %s %s (%s)\n", scrub(t.Kind, 32), scrub(t.Address, maxPrintedFieldLen), scrub(t.Class, 32))
-		}
-		fmt.Fprintf(r.stdout, "fingerprint %s\n", scrub(welcome.Fingerprint, 32))
-	}
+	show := func() { r.printWelcome(welcome, creator) }
 	ok, err := r.extConfirm(ctx, welcome, show)
 	if err != nil && ctx.Err() == nil {
 		return false, fmt.Errorf("%w: %w", errExternalConfirm, err)

@@ -101,12 +101,16 @@ type Options struct {
 	// (U1-24): a corrupt index must never reach a template or a download.
 	Check func() error
 	// RegisterTargets is called with the room id and the targets each
-	// Welcome names, after the runner's class floors are seeded from them
-	// and before any op of the session executes: setupcmd registers the
-	// target driver the room needs (compose or host, row U8f; a managed
-	// cloud driver, which tags what it creates with the room id) into the
-	// catalogue there. ctx is the handshake's. nil ignores the Welcome's
-	// targets. An error fails the handshake, because a runner without the
+	// Welcome names, after the runner's class floors are seeded from them,
+	// after the person confirmed the pairing (never before: a managed
+	// driver loads the cloud credential chain when it registers) and before
+	// any op of the session executes: setupcmd registers the target driver
+	// the room needs (compose or host, row U8f; a managed cloud driver,
+	// which tags what it creates with the room id) into the catalogue
+	// there. On a reconnect it gets the room id confirmed at pairing, never
+	// one a later Welcome names. ctx is the handshake's. nil ignores the
+	// Welcome's targets. An error fails the handshake for good
+	// (ErrRegisterTargets, not retried), because a runner without the
 	// room's target driver would refuse every step the plan sends; the
 	// callee is idempotent across reconnects.
 	RegisterTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
@@ -336,6 +340,24 @@ func (r *Runner) connectLoop(ctx context.Context, loopback bool, wsURL string) e
 	}
 }
 
+// ErrRegisterTargets wraps an Options.RegisterTargets failure: the room's
+// target driver could not be registered (a broken AWS chain, two accounts of
+// one provider, a registrar already bound to another room). It is terminal:
+// retrying would re-send a pairing code the server has already spent, and
+// the registrar does not register into a catalogue twice, so a retry could
+// only fail the same way.
+var ErrRegisterTargets = errors.New("setup: registering the room's target driver")
+
+// registerTargetsErr wraps a RegisterTargets failure in ErrRegisterTargets,
+// unless ctx ended (the runner is stopping: Run returns as it does for any
+// other cancelled handshake).
+func registerTargetsErr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("setup: registering the room's target driver: %w", err)
+	}
+	return fmt.Errorf("%w: %w", ErrRegisterTargets, err)
+}
+
 // connectTransient reports whether a connect error is a transient dial or
 // handshake failure the runner should retry. Terminal errors — a refused
 // pairing, a declined confirmation, an expired or rejected token, a protocol
@@ -347,6 +369,7 @@ func connectTransient(err error) bool {
 	switch {
 	case errors.Is(err, ErrPairingRefused),
 		errors.Is(err, ErrDeclined),
+		errors.Is(err, ErrRegisterTargets),
 		errors.Is(err, ErrOriginMismatch),
 		errors.Is(err, errExternalConfirm),
 		errors.Is(err, ErrTokenExpired),
@@ -506,11 +529,6 @@ func (r *Runner) pair(ctx context.Context) error {
 	r.negotiated = protocol.Negotiate(cur, welcome.Version())
 	r.roomID = welcome.RoomID
 	r.applyTargets(welcome.Targets)
-	if r.regTargets != nil {
-		if err := r.regTargets(ctx, welcome.RoomID, welcome.Targets); err != nil {
-			return fmt.Errorf("setup: registering the room's target driver: %w", err)
-		}
-	}
 
 	ok, err := r.confirm(ctx, welcome)
 	if err != nil {
@@ -518,6 +536,16 @@ func (r *Runner) pair(ctx context.Context) error {
 	}
 	if !ok {
 		return ErrDeclined
+	}
+	// The target drivers register only after the person confirmed the room:
+	// a managed driver loads this machine's AWS credential chain (or reads
+	// the store's cloud keys) when it registers, and none of that may run
+	// for a room nobody said yes to. The room is the confirmed one; a resume
+	// passes the same pinned id.
+	if r.regTargets != nil {
+		if err := r.regTargets(ctx, welcome.RoomID, welcome.Targets); err != nil {
+			return registerTargetsErr(ctx, err)
+		}
 	}
 
 	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameHello, Hello: &protocol.Hello{
@@ -576,7 +604,7 @@ func (r *Runner) resume(ctx context.Context) error {
 				// The room the person confirmed at pairing, never one a
 				// later Welcome names.
 				if err := r.regTargets(ctx, r.roomID, f.Welcome.Targets); err != nil {
-					return false, fmt.Errorf("setup: registering the room's target driver: %w", err)
+					return false, registerTargetsErr(ctx, err)
 				}
 			}
 			return false, nil

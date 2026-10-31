@@ -2,6 +2,7 @@ package setupcmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,7 +28,14 @@ type targetRegistrar struct {
 	done bool
 	// err is the first Welcome's registration error, returned again on a
 	// reconnect: a half-registered catalogue is never registered into twice.
-	err         error
+	// A cancelled or timed-out ctx is not cached when it left the catalogue
+	// untouched (the AWS chain is loaded before anything registers), so a
+	// later Apply may try again.
+	err error
+	// room is the room the drivers were registered for: they tag what they
+	// create with it, so an Apply for another room is refused
+	// (errOtherRoom) rather than answered with this room's drivers.
+	room        string
 	cat         *ops.Registry
 	pluginHosts []string
 	// prodPatterns are PIPEROOM_SETUP_PROD_PATTERNS: a managed target whose
@@ -63,16 +71,33 @@ func newTargetRegistrar(cat *ops.Registry, pluginHosts []string) *targetRegistra
 // runner.Options.RegisterTargets and is idempotent: the first Welcome decides,
 // later calls (reconnects) change nothing and return its error again. roomID
 // tags what a managed driver creates; ctx bounds the AWS credential fetch.
+//
+// A registration is bound to its room: an Apply naming another room (a
+// runner process re-paired with a second code) is refused with errOtherRoom,
+// because the registered drivers tag and guard by the first room's id; the
+// person restarts the runner to set up another room.
 func (t *targetRegistrar) Apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.done {
+		if roomID != t.room {
+			return fmt.Errorf("%w: this runner registered room %s's target drivers; restart it to pair with room %s", errOtherRoom, t.room, roomID)
+		}
 		return t.err
 	}
-	t.err = t.apply(ctx, roomID, targets)
-	t.done = true
-	return t.err
+	before := len(t.cat.Names())
+	err := t.apply(ctx, roomID, targets)
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && len(t.cat.Names()) == before {
+		// Nothing registered: the next Welcome may try again.
+		return err
+	}
+	t.err, t.done, t.room = err, true, roomID
+	return err
 }
+
+// errOtherRoom: Apply named a room other than the one the drivers were
+// registered for.
+var errOtherRoom = errors.New("setup: the runner is already set up for another room")
 
 func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
 	driver, class := chooseTargetDriver(targets)

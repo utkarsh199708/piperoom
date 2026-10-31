@@ -3,6 +3,7 @@ package setupcmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -376,5 +377,49 @@ func TestStoreAdaptersRefuseCloudReferences(t *testing.T) {
 	}
 	if v, err := open.get(secretCCloudAPISecret); err != nil || v != "cloud-secret-value-1" {
 		t.Fatalf("get(cloud) = %q, %v; the managed client must still read its key", v, err)
+	}
+}
+
+// TestRegistrarRetriesAfterACancelledLoad: a cancelled or timed-out AWS load
+// registered nothing, so it is not cached: the next Apply loads again and
+// registers. Any other failure stays cached (TestRegistrarManagedErrors).
+func TestRegistrarRetriesAfterACancelledLoad(t *testing.T) {
+	cat := newCatalogue(t)
+	reg, calls := fakeManagedRegistrar(t, cat)
+	calls.mskErr = fmt.Errorf("setup: retrieving AWS credentials: %w", context.DeadlineExceeded)
+	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
+	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Apply = %v, want the deadline", err)
+	}
+	calls.mu.Lock()
+	calls.mskErr = nil
+	calls.mu.Unlock()
+	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+		t.Fatalf("second Apply = %v, want a fresh registration", err)
+	}
+	if len(calls.regions) != 2 {
+		t.Errorf("the AWS chain was loaded %d times, want twice", len(calls.regions))
+	}
+	if in, _ := registered(cat, mskOps); len(in) != len(mskOps) {
+		t.Errorf("registered %v, want every MSK op", in)
+	}
+}
+
+// TestRegistrarRefusesAnotherRoom: the drivers are bound to the room they
+// were registered for (they tag and guard by its id); an Apply for another
+// room says to restart the runner instead of reusing them.
+func TestRegistrarRefusesAnotherRoom(t *testing.T) {
+	cat := newCatalogue(t)
+	reg, _ := fakeManagedRegistrar(t, cat)
+	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
+	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+		t.Fatal(err)
+	}
+	err := reg.Apply(context.Background(), "room-2", aws)
+	if !errors.Is(err, errOtherRoom) || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("Apply(room-2) = %v, want errOtherRoom naming a restart", err)
+	}
+	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+		t.Fatalf("Apply(room-1) again = %v", err)
 	}
 }
