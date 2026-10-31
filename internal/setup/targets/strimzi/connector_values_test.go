@@ -469,7 +469,7 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"path a%2Bb%21c%23d end", "path [masked:credential] end"},
 		// 2: a stray % ahead of an encoded value.
 		{"pct %ab%21xy end", "pct %[masked:credential] end"},
-		{"x ab%1ab%251 y", "x [masked:credential][masked:credential] y"},
+		{"x ab%1ab%251 y", "x [masked:credential] y"}, // adjacent masks merge (round 9)
 		// Round 8, S5: a value under 4 characters (read back from an old
 		// Secret) is masked as a whole token only.
 		{"task 1 of 3 at ab", "task [masked:credential] of 3 at [masked:credential]"},
@@ -505,7 +505,7 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		// 8: an exemption holds only for the exact whole value.
 		{"password: YES)hunter2xyz", "password: [masked:credential]"},
 		{"(using password: YES)", "(using password: YES)"},
-		{"(using password: NO) at login", "(using password: NO) at login"},
+		{"(using password: NO) at login", "(using password: [masked:credential]"}, // round 9, F3: only a whole YES)/NO) is kept
 		{"password=${a}hunter2xyz", "password=[masked:credential]"},
 		{"password=${secrets:data/x:password} hunter2xyz", "password=[masked:credential]"},
 		{"password = [hidden]zz1", "password = [masked:credential]"},
@@ -698,7 +698,7 @@ func TestCredentialKeysRound8(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"NOAUTH Authentication required", ""},
 		{"OAUTH: enabled", ""},
-		{"useBasicAuth=true requireAuth: true auth=x", ""},
+		{"useBasicAuth=true requireAuth: true auth=x", "useBasicAuth=true requireAuth: true auth=[masked:credential]"}, // round 9, F2
 		{"resumeToken=8263A1B2C3", ""},
 		{"resume_token: 8263A1B2C3", ""},
 		{"Debezium resume token: 8263A1B2C3", ""},
@@ -708,7 +708,7 @@ func TestCredentialKeysRound8(t *testing.T) {
 		{"token: failed", ""},
 		{`secret: "rejected"`, ""},
 		{"token: expired yesterday", "token: [masked:credential]"},
-		{"(using password: YES) ssl.key.password=hunter2xyz", "(using password: YES) ssl.key.password=[masked:credential]"},
+		{"(using password: YES) ssl.key.password=hunter2xyz", "(using password: [masked:credential]"}, // round 9, F3
 		{"MYSQL_PWD=hunter2xyz", "MYSQL_PWD=[masked:credential]"},
 		{"DB_PWD: hunter2xyz", "DB_PWD: [masked:credential]"},
 		{"PWD=/opt/kafka", ""},
@@ -858,3 +858,138 @@ var (
 	fakeKeyID     = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
 	fakeSecretKey = "wJalrXUtnF" + "EMI/K7MDENG/" + "bPxRfiCYzZ9TESTKEY"
 )
+
+// readsOf runs line through every read that masks: k8s_logs (a pod log
+// line), k8s_get (a KafkaConnect condition), k8s_events (an event message)
+// and strimzi_build_status (a build condition and the build pod's log),
+// each on a fresh driver that remembers written. It returns each op's
+// Data as JSON, and its Summary.
+func readsOf(t *testing.T, written []string, line string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, op := range []string{"k8s_logs", "k8s_get", "k8s_events", "strimzi_build_status"} {
+		h := newHarness(t, "", nil)
+		h.d.rememberWritten(written)
+		h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = line + "\n"
+		h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-build/log"] = line + "\n"
+		h.api.allowed["events"] = true
+		h.api.objects["events"] = map[string]any{"items": []any{
+			map[string]any{"type": "Warning", "reason": "Failed", "message": line, "lastTimestamp": "2026-10-30T10:00:00Z"},
+		}}
+		cp := h.shell("KafkaConnect", "orders-connect", map[string]any{})
+		h.api.allow(cp)
+		h.api.allow("/api/v1/namespaces/data/pods/orders-connect-connect-build")
+		h.api.objects[cp]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "NotReady", "status": "True", "reason": "BuildFailed", "message": "build: " + line}}}
+		params := map[string]map[string]any{
+			"k8s_logs":             {"pod": "orders-connect-connect-0"},
+			"k8s_get":              {"kind": "KafkaConnect", "name": "orders-connect"},
+			"k8s_events":           {"involved": "orders-connect-connect-0"},
+			"strimzi_build_status": {},
+		}[op]
+		res, err := run(t, h, op, params)
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		b, _ := json.Marshal(res.Data)
+		out[op] = string(b)
+		out[op+" summary"] = res.Summary
+	}
+	return out
+}
+
+// Round 9 key rule, through every read: credential keys by a
+// case-insensitive suffix of the last segment (F1, M1), the ...Auth keys
+// (F2), a YES)/NO) kept only whole (F3), doubly escaped JSON in pod logs
+// and build logs too (F4), PWD after - or ., pagination cursors kept (C4).
+func TestReadsKeyRuleRound9(t *testing.T) {
+	const v = "Zq9pLm2x Vb7Kd"
+	for _, k := range []string{"APIToken", "DBPassword", "PGPASSWORD", "MYSQLPASSWORD", "SASLPassword", "LDAPPassword", "AWSSecret", "OAUTHTOKEN", "GITHUBTOKEN", "JWTToken",
+		"csrftoken", "httpAuth", "basicAuth", "proxyAuth", "MYSQL-PWD", "MYSQL.PWD", "MYSQL_PWD", "dbPwd", "DBPWD"} {
+		for _, sep := range []string{"=", ": "} {
+			for op, got := range readsOf(t, nil, "cfg "+k+sep+v) {
+				if strings.Contains(got, "Zq9pLm2x") || strings.Contains(got, "Vb7Kd") {
+					t.Errorf("%s: %s%s%s leaks: %s", op, k, sep, v, got)
+				}
+			}
+		}
+	}
+	for _, line := range []string{"password: NO) Zq9pLm2xVb7Kd", `password: "YES) Zq9pLm2xVb7Kd"`, `m="{\"password\":\"Zq9pLm2x\\\"Vb7Kd\",\"k\":\"v\"}"`} {
+		for op, got := range readsOf(t, nil, line) {
+			if strings.Contains(got, "Zq9pLm2x") || strings.Contains(got, "Vb7Kd") {
+				t.Errorf("%s: %q leaks: %s", op, line, got)
+			}
+		}
+	}
+	// PWD=/opt/kafka is kept by the key rule (TestMaskCredentialsRound7);
+	// redact's own rule masks it after, so it is not checked here.
+	for _, keep := range []string{"OAUTH: enabled now", "resumeToken=8263A1 B2", "resume_token: 8263A1 B2", "tokenizer=standard x",
+		"nexttoken=AbC123 x", "pagetoken: AbC123 x", "continuationtoken=AbC123 x", "next_page_token: AbC123 x", "NEXTTOKEN=AbC123 x",
+		"useBasicAuth=true", "requireAuth: false", "httpAuth=false", "httpAuth: none", "basicAuth: null", "Token: expired"} {
+		// "(using password: YES)" is kept by the key rule
+		// (TestCredentialLineRule) but redact's own rule masks it after.
+		for op, got := range readsOf(t, nil, keep) {
+			if strings.HasSuffix(op, " summary") {
+				continue
+			}
+			j, _ := json.Marshal(keep)
+			if !strings.Contains(got, strings.Trim(string(j), `"`)) {
+				t.Errorf("%s: %q is masked: %s", op, keep, got)
+			}
+		}
+	}
+}
+
+// A written value holding the placeholder byte or invalid UTF-8 (read
+// back from an old Secret) is still masked: the value is sanitized as the
+// text is (round 9, F5); a 0x01 in a read's text is neither masked nor
+// passed through (C5).
+func TestReadsSanitizePlaceholder(t *testing.T) {
+	for _, w := range []string{"ab\x01cdefgh", "ab\xffcdefgh"} {
+		for op, got := range readsOf(t, []string{w}, "login with "+w+" refused") {
+			if strings.Contains(got, "cdefgh") {
+				t.Errorf("%s: written %q leaks: %s", op, w, got)
+			}
+		}
+	}
+	for op, got := range readsOf(t, nil, "a\x01\x01b stays") {
+		if strings.HasSuffix(op, " summary") {
+			continue
+		}
+		if strings.Contains(got, "masked") || strings.Contains(got, "\\u0001") || !strings.Contains(got, "a??b stays") {
+			t.Errorf("%s: a 0x01 in the text: %s", op, got)
+		}
+	}
+}
+
+// k8s_secret_apply and its preview refuse a value holding a control
+// character or invalid UTF-8, which no read could match (round 9, F5).
+func TestSecretApplyRefusesControlCharacters(t *testing.T) {
+	for _, v := range []string{"long\x01enough", "long\tenough", "long\xffenough"} {
+		for _, op := range []string{"k8s_secret_apply", "preview_k8s_secret_apply"} {
+			h := newHarness(t, "", map[string]string{"pw": v})
+			path := coreObjectPath(testNS, "secrets", "orders-db-credentials")
+			h.api.put(path, map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": "orders-db-credentials"}})
+			_, err := run(t, h, op, map[string]any{"keys": map[string]string{"password": "${secret:pw}"}})
+			if !errors.Is(err, ErrParams) || !strings.Contains(err.Error(), "control character") {
+				t.Errorf("%s %q: err = %v", op, v, err)
+			}
+		}
+	}
+}
+
+// The rotate warning says what the reads do (round 9, C2): 4 to 7
+// characters are masked wherever they appear, counted in runes.
+func TestShortCredentialWarningRound9(t *testing.T) {
+	got := readsOf(t, []string{"\u00e9\u00e9\u00e9\u00e9x"}, "login with \u00e9\u00e9\u00e9\u00e9x refused (and xx\u00e9\u00e9\u00e9\u00e9xx)")
+	for _, op := range []string{"k8s_logs", "k8s_get", "k8s_events", "strimzi_build_status"} {
+		if strings.Contains(got[op], "\u00e9\u00e9\u00e9\u00e9x") || strings.Contains(got[op], "\\u00e9\\u00e9") {
+			t.Errorf("%s: a 5-rune value leaks: %s", op, got[op])
+		}
+		if s := got[op+" summary"]; !strings.Contains(s, "rotate it") || strings.Contains(s, "only as a whole word)") {
+			t.Errorf("%s summary: %q", op, s)
+		}
+	}
+	if got := readsOf(t, []string{"\u00e9\u00e9\u00e9"}, "task \u00e9\u00e9\u00e9 and x\u00e9\u00e9\u00e9x")["k8s_logs"]; !strings.Contains(got, "x\u00e9\u00e9\u00e9x") || strings.Contains(got, "task \u00e9") {
+		t.Errorf("a 3-rune value (6 bytes) is not masked as a whole token only: %s", got)
+	}
+}

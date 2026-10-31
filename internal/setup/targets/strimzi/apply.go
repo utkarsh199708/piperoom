@@ -535,6 +535,11 @@ const minCredentialLen = 8
 // minCredentialLen, naming the key, the secret and the length, never the
 // value. Execute and Preview both run it (round 8, S5).
 func checkCredentialLen(k, name, v string) error {
+	if strings.IndexFunc(v, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || !utf8.ValidString(v) {
+		// A control character or invalid UTF-8 would not match the
+		// sanitized text a read masks (round 9, F5).
+		return fmt.Errorf("%w: key %s: secret %s holds a control character or invalid UTF-8; a db-credentials value must be printable text", ErrParams, k, name)
+	}
 	if n := utf8.RuneCountInString(v); !secretKeyIsUser(k) && n < minCredentialLen {
 		return fmt.Errorf("%w: key %s: secret %s is %d characters; a credential in the db-credentials Secret must be at least %d (reads mask credentials by value, and a shorter one cannot be masked without garbling the logs)", ErrParams, k, name, n, minCredentialLen)
 	}
