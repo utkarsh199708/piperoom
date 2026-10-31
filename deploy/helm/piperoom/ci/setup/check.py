@@ -94,6 +94,8 @@ def check_policy(docs):
 
 # The verbs each named Secret, the KafkaConnect and the pods get: exactly what
 # the runner's ops send (internal/setup/targets/strimzi), nothing more.
+# Messages about these rules print fixed text only: never a Secret's name or
+# the suffix table (CodeQL: clear-text logging of sensitive information).
 SECRET_VERBS = {"-pairing": {"delete"}, "-confirm": {"get", "delete"}, "-db-credentials": {"get", "patch"}, "-piperoom-ro": {"get"}}
 
 
@@ -107,7 +109,7 @@ def check_runner_rules(docs, role):
         if res == ["secrets"]:
             for n in rule["resourceNames"]:
                 if n in secrets:
-                    fail("Secret %s is named twice" % n)
+                    fail("the Role names one Secret twice")
                 secrets[n] = verbs
         if res == ["kafkaconnects"] and verbs != {"get", "patch"}:
             fail("kafkaconnects: verbs %s, want get and patch" % sorted(verbs))
@@ -116,11 +118,11 @@ def check_runner_rules(docs, role):
         if res == ["events"] and rule["apiGroups"] != [""]:
             fail("events are listed in the core group only")
     if len(secrets) != len(SECRET_VERBS):
-        fail("the Role names Secrets %s, want one each of %s" % (sorted(secrets), sorted(SECRET_VERBS)))
+        fail("the Role does not name exactly one rule per runner Secret")
     for name, verbs in secrets.items():
         want = [v for suffix, v in SECRET_VERBS.items() if name.endswith(suffix)]
         if len(want) != 1 or verbs != want[0]:
-            fail("Secret %s: verbs %s" % (name, sorted(verbs)))
+            fail("a named Secret's verbs are not the ones the runner sends")
     pods = [r for r in role["rules"] if r["resources"] == ["pods"]][0]["resourceNames"]
     logs = [r for r in role["rules"] if r["resources"] == ["pods/log"]][0]["resourceNames"]
     if pods != logs or len(pods) != 4:
