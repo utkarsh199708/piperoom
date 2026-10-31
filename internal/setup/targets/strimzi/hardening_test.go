@@ -68,7 +68,7 @@ func TestApplyRefusesUnownedObject(t *testing.T) {
 	if _, err := run(t, h, "k8s_apply", topicApply()); !errors.Is(err, ErrNotOwned) {
 		t.Fatalf("err = %v, want ErrNotOwned", err)
 	}
-	sec := newHarness(t, "", map[string]string{"pw": "v"})
+	sec := newHarness(t, "", map[string]string{"pw": "v-long-enough"})
 	sp := coreObjectPath(testNS, "secrets", "orders-db-credentials")
 	sec.api.put(sp, map[string]any{"kind": "Secret", "metadata": map[string]any{"name": "orders-db-credentials", "labels": map[string]any{"app.kubernetes.io/instance": "x"}}})
 	if _, err := run(t, sec, "k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:pw}"}}); !errors.Is(err, ErrNotOwned) {

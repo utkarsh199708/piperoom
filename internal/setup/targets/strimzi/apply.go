@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
@@ -524,6 +525,12 @@ func (k8sSecretApplyOp) Validate(params json.RawMessage, _ ops.Env) error {
 	return err
 }
 
+// minCredentialLen is the shortest credential (a non-user value)
+// k8s_secret_apply writes (round 7, C5): reads mask the written values
+// wherever they appear, and a value of a few characters would mask every
+// "task 1 of 3". Checked before anything is remembered or written.
+const minCredentialLen = 8
+
 func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, env ops.Env) (ops.Result, error) {
 	p, err := decodeSecretApply(params)
 	if err != nil {
@@ -546,6 +553,9 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 		v, ok := o.d.secret(name)
 		if !ok {
 			return ops.Result{}, fmt.Errorf("%w: secret %s is not in the runner's store", ErrParams, name)
+		}
+		if n := utf8.RuneCountInString(v); !secretKeyIsUser(k) && n < minCredentialLen {
+			return ops.Result{}, fmt.Errorf("%w: key %s: secret %s is %d characters; a credential in the db-credentials Secret must be at least %d (reads mask credentials by value, and a shorter one cannot be masked without garbling the logs)", ErrParams, k, name, n, minCredentialLen)
 		}
 		values[k] = v
 		keys = append(keys, k)
