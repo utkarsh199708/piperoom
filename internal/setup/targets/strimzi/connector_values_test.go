@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/redact"
@@ -409,8 +410,9 @@ func TestUserNameIsNotMaskedByValue(t *testing.T) {
 // The line rule masks only a credential key's value (round 6, B): a JSON
 // log keeps its other fields and a user key, MySQL's "(using password:
 // YES)", a whole ${secrets:...} reference and a Java frame stay. Since round
-// 7 a token key is a credential key again (Token: expired is masked) and an
-// exemption holds only for the exact whole value.
+// 7 a token key is a credential key again and an exemption holds only for
+// the exact whole value; since round 8 a whole value of expired (Token:
+// expired) is kept, as null, none, failed and rejected are.
 func TestCredentialLineRule(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{`{"user":"cdc","password":"p w","message":"connector started"}`, `{"user":"cdc","password":"[masked:credential]","message":"connector started"}`},
@@ -421,7 +423,7 @@ func TestCredentialLineRule(t *testing.T) {
 		{`database.password = ${secrets:data/orders-db-credentials:password}`, ""},
 		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=[masked:credential]`},
 		{`at org.apache.hadoop.security.UserGroupInformation.doAs(UserGroupInformation.java:1899)`, ""},
-		{`Token: expired`, `Token: [masked:credential]`},
+		{`Token: expired`, ""}, // round 8: a whole "expired" says only the token's state
 		{`database.user: cdc`, ""},
 		{`     database.password = two words, and a comma`, `     database.password = [masked:credential]`},
 		{`client_secret: abc`, `client_secret: [masked:credential]`},
@@ -468,8 +470,10 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		// 2: a stray % ahead of an encoded value.
 		{"pct %ab%21xy end", "pct %[masked:credential] end"},
 		{"x ab%1ab%251 y", "x [masked:credential][masked:credential] y"},
-		// C5: a value under 4 characters is not masked by value.
-		{"task 1 of 3 at ab", "task 1 of 3 at ab"},
+		// Round 8, S5: a value under 4 characters (read back from an old
+		// Secret) is masked as a whole token only.
+		{"task 1 of 3 at ab", "task [masked:credential] of 3 at [masked:credential]"},
+		{"task 12 of 31 at abc", "task 12 of 31 at abc"},
 		{"login with uni\u00e9code and uni%C3%A9code", "login with [masked:credential] and [masked:credential]"},
 	} {
 		if got := maskCredentials(c.in, written); got != c.want {
@@ -487,7 +491,6 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"api_key=zz1 apikey=zz2", "api_key=[masked:credential]"},
 		{"x-api-key: zz1", "x-api-key: [masked:credential]"},
 		{"Authorization: Basic zz1", "Authorization: [masked:credential]"},
-		{"auth=zz1", "auth=[masked:credential]"},
 		{"bearer: zz1", "bearer: [masked:credential]"},
 		{"credentials=zz1", "credentials=[masked:credential]"},
 		{"private_key: zz1", "private_key: [masked:credential]"},
@@ -527,7 +530,7 @@ func TestMaskCredentialsRound7(t *testing.T) {
 func TestPodLogRound7(t *testing.T) {
 	h := newHarness(t, "", nil)
 	h.d.rememberWritten([]string{"hunter2xyz"})
-	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Repeat("x", 990) + " AKIAABCDEFGHIJKLMNOP tail\n" +
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Repeat("x", 990) + " " + fakeKeyID + " tail\n" +
 		"a cut line ending with hunter2"
 	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
 	if err != nil {
@@ -591,6 +594,62 @@ func TestPodLogRedactsAPEMBlockBeforeTheMasks(t *testing.T) {
 	}
 }
 
+// Written values are masked before the whole log is redacted, without
+// lengthening it (round 8): masks that lengthened a log near maxLogBytes
+// pushed its tail past redact's scan limit, which masks it whole. The PEM
+// block in it is still redacted.
+func TestPodLogMasksWithoutLengthening(t *testing.T) {
+	if maxLogBytes > redact.MaxScan {
+		t.Fatalf("maxLogBytes %d > redact.MaxScan %d: a whole log no longer fits one redact scan", maxLogBytes, redact.MaxScan)
+	}
+	h := newHarness(t, "", nil)
+	pw := "Wq7xPw"
+	h.d.rememberWritten([]string{pw})
+	var pem []string
+	pem = append(pem, "-----BEGIN PRIVATE KEY-----")
+	for i := 0; i < 26; i++ {
+		pem = append(pem, base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("private key body line %02d of the test key, 48 bytes", i)))[:64])
+	}
+	pem = append(pem, "-----END PRIVATE KEY-----")
+	head := "2026-10-31 INFO starting the connect worker with its key material from the mounted file\n"
+	block := strings.Join(pem, "\n") + "\n"
+	line := "2026-10-31 WARN task retry" + strings.Repeat(" login "+pw+" refused, retrying", 6) + strings.Repeat(".", 400) + "\n"
+	masked := len(line) + 6*(len("[masked:credential]")-len(pw))
+	// Enough lines that the body is within maxLogBytes but would pass
+	// redact.MaxScan if the masks lengthened it before redact (round 8),
+	// and, with the masks after redact, that the old window (the last
+	// redact.MaxScan-1024 bytes of the masked text) started inside the
+	// PEM block (round 7, C1).
+	n := (maxLogBytes - len(head) - len(block)) / len(line)
+	body := head + block + strings.Repeat(line, n)
+	if len(body) > maxLogBytes || strings.Count(body, "\n") >= maxLogLines || len(head)+len(block)+n*masked <= redact.MaxScan {
+		t.Fatalf("the test log is %d bytes, %d lines, %d masked: not the shape", len(body), strings.Count(body, "\n"), len(head)+len(block)+n*masked)
+	}
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = body
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	got := string(b)
+	for _, l := range pem[1 : len(pem)-1] {
+		if strings.Contains(got, l[:24]) {
+			t.Fatalf("the PEM body is returned (%d-byte log, %d lines): %q", len(body), strings.Count(body, "\n"), l)
+		}
+	}
+	if strings.Contains(got, pw) {
+		t.Errorf("the password is returned")
+	}
+	// The masks must not lengthen the body before redact (round 8): past
+	// redact's scan limit the tail, the part a reader wants, is masked
+	// whole.
+	var d struct{ Lines []string }
+	_ = json.Unmarshal(b, &d)
+	if len(d.Lines) == 0 || !strings.HasPrefix(d.Lines[len(d.Lines)-1], "2026-10-31 WARN task retry login [masked:credential] refused") {
+		t.Errorf("the log's tail is lost: %q", d.Lines[max(0, len(d.Lines)-1):])
+	}
+}
+
 // A log of one line without a newline (64 KiB or more) is not returned as
 // zero lines with no word why (round 7, C3).
 func TestPodLogMarksADroppedLine(t *testing.T) {
@@ -630,3 +689,153 @@ func TestSecretApplyRefusesAShortCredential(t *testing.T) {
 		t.Fatalf("an 8-character password with a short user name: %v", err)
 	}
 }
+
+// Round 8 key rule: no bare auth or upper-case camelCase tail, Debezium's
+// resume token kept, whole null/none/failed/expired/rejected values kept,
+// later keys after YES) still masked (S2), MYSQL_PWD and all-lower-case
+// compounds and a quoted key with = masked (S3), doubly escaped JSON (S4).
+func TestCredentialKeysRound8(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"NOAUTH Authentication required", ""},
+		{"OAUTH: enabled", ""},
+		{"useBasicAuth=true requireAuth: true auth=x", ""},
+		{"resumeToken=8263A1B2C3", ""},
+		{"resume_token: 8263A1B2C3", ""},
+		{"Debezium resume token: 8263A1B2C3", ""},
+		{`{"resumeToken":"8263A1B2C3","m":"ok"}`, ""},
+		{`{"password": null, "m":"ok"}`, ""},
+		{"password=none", ""},
+		{"token: failed", ""},
+		{`secret: "rejected"`, ""},
+		{"token: expired yesterday", "token: [masked:credential]"},
+		{"(using password: YES) ssl.key.password=hunter2xyz", "(using password: YES) ssl.key.password=[masked:credential]"},
+		{"MYSQL_PWD=hunter2xyz", "MYSQL_PWD=[masked:credential]"},
+		{"DB_PWD: hunter2xyz", "DB_PWD: [masked:credential]"},
+		{"PWD=/opt/kafka", ""},
+		{"dbpassword=hunter2xyz", "dbpassword=[masked:credential]"},
+		{"sslpassword: hunter2xyz", "sslpassword: [masked:credential]"},
+		{"accesstoken=hunter2xyz", "accesstoken=[masked:credential]"},
+		{`"password" = "hunter2xyz"`, `"password" = [masked:credential]`},
+		{`m="{\"password\":\"hun\\\"ter2xyz\",\"k\":\"v\"}"`, `m="{\"password\":\"[masked:credential]\",\"k\":\"v\"}"`},
+		{`m="{\"password\":\"a\\\\\",\"k\":\"v\"}"`, `m="{\"password\":\"[masked:credential]\",\"k\":\"v\"}"`},
+		{`{"token":["a",{"b":"]"}],"m":"ok"}`, `{"token":[masked:credential],"m":"ok"}`},
+	} {
+		want := c.want
+		if want == "" {
+			want = c.in
+		}
+		if got := maskCredentials(c.in, nil); got != want {
+			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, want)
+		}
+	}
+}
+
+// The JSON key scan is one pass (round 8, item 4): a long line of
+// unclosed credential values took quadratic time.
+func TestCredentialKeysLinear(t *testing.T) {
+	for _, unit := range []string{`"token":[`, `"token":1,`, `\"token\":\"x`} {
+		line := strings.Repeat(unit, (256<<10)/len(unit))
+		start := time.Now()
+		maskCredentials(line, nil)
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("%q x %d: %v", unit, len(line)/len(unit), d)
+		}
+	}
+}
+
+// Each decoded copy catches a form no other copy or literal form does
+// (round 8, item 5): mixed-case percent hex next to a literal + (%XX
+// copy), '+' with
+// mixed-case hex (%XX and + copy), and JSON escapes Go and Java never write
+// (JSON copy); and \u escapes are decoded by hand, surrogate pairs too.
+func TestCredentialValueCopies(t *testing.T) {
+	written := []string{"uni\u00e9code", "two words\u00e9x", "a/b/c/d", "Ab12x", "x\U0001F600yzab", "a+b\u00e9xy"}
+	for _, c := range []struct{ in, want string }{
+		{"pct uni%c3%A9code end", "pct [masked:credential] end"},
+		{"q two+words%c3%A9x end", "q [masked:credential] end"},
+		{"p a+b%c3%A9xy end", "p [masked:credential] end"},
+		{`{"m":"a\/b\/c\/d"}`, `{"m":"[masked:credential]"}`},
+		{`{"m":"\u0041b12x"}`, `{"m":"[masked:credential]"}`},
+		{`{"m":"x\ud83d\ude00yzab"}`, `{"m":"[masked:credential]"}`},
+		{`{"m":"\u00G1b12x \u12"}`, `{"m":"\u00G1b12x \u12"}`},
+	} {
+		if got := maskCredentials(c.in, written); got != c.want {
+			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Written values are masked before redaction in every read (round 8, item
+// 2 and S1): redact keeps the first and last characters of a token, so a
+// password holding an AWS-key-shaped part leaked "Kx7orders-AKIA…" around
+// the mask when redact ran first. The PEM test pins the other half of the
+// order: the whole body is still redacted at once.
+func TestReadsMaskBeforeRedact(t *testing.T) {
+	pws := []string{"Kx7orders-" + fakeKeyID + "-x", "Zq3x-" + fakeKeyID + "-9fTr2LmQ8vWk1s", fakeSecretKey}
+	for _, pw := range pws {
+		h := newHarness(t, "", nil)
+		h.d.rememberWritten([]string{pw})
+		h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = "login with " + pw + " refused\n"
+		cp := h.shell("KafkaConnect", "orders-connect", map[string]any{})
+		h.api.allow(cp)
+		h.api.objects[cp]["status"] = map[string]any{"conditions": []any{map[string]any{"type": "NotReady", "status": "True", "message": "login with " + pw + " refused"}}}
+		for op, params := range map[string]map[string]any{
+			"k8s_logs": {"pod": "orders-connect-connect-0"},
+			"k8s_get":  {"kind": "KafkaConnect", "name": "orders-connect"},
+		} {
+			res, err := run(t, h, op, params)
+			if err != nil {
+				t.Fatalf("%s: %v", op, err)
+			}
+			b, _ := json.Marshal(res.Data)
+			got := string(b)
+			for _, part := range []string{pw[:6], pw[len(pw)-6:], "AKIA", "redacted"} {
+				if strings.Contains(got, part) {
+					t.Errorf("%s with %q returns %q: %s", op, pw, part, got)
+				}
+			}
+		}
+	}
+}
+
+// A short credential read back from an existing Secret is masked as a
+// whole token, and the reads' summaries say to rotate it (round 8, S5).
+func TestShortReadBackCredential(t *testing.T) {
+	h := newHarness(t, "", nil)
+	sp := coreObjectPath(testNS, "secrets", h.d.dbSecretName())
+	h.api.objects[sp] = map[string]any{"metadata": map[string]any{"name": h.d.dbSecretName()}, "data": map[string]any{
+		"password": base64.StdEncoding.EncodeToString([]byte("q9z")), "username": base64.StdEncoding.EncodeToString([]byte("cdc"))}}
+	h.api.allow(sp)
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = "login%20q9z%20failed for cdc; q9zz stays\n"
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	if got := string(b); strings.Contains(got, "%20q9z%20") || !strings.Contains(got, "q9zz stays") || !strings.Contains(got, "for cdc") {
+		t.Errorf("k8s_logs: %s", got)
+	}
+	if !strings.Contains(res.Summary, "rotate it") {
+		t.Errorf("no warning in the summary: %q", res.Summary)
+	}
+}
+
+// preview_k8s_secret_apply refuses a short credential as k8s_secret_apply
+// does (round 8, S5).
+func TestPreviewRefusesAShortCredential(t *testing.T) {
+	h := newHarness(t, "", map[string]string{"short": "1234567"})
+	path := coreObjectPath(testNS, "secrets", "orders-db-credentials")
+	h.api.put(path, map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": "orders-db-credentials"}})
+	_, err := run(t, h, "preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:short}"}})
+	if !errors.Is(err, ErrParams) || !strings.Contains(err.Error(), "at least 8") || strings.Contains(err.Error(), "1234567") {
+		t.Fatalf("preview of a 7-character password: err = %v", err)
+	}
+}
+
+// fakeKeyID and fakeSecretKey have the shapes redact masks (an AWS access
+// key id; a 40-character secret key), built at run time so no key-shaped
+// literal sits in the source for secret scanners. Neither is a real key.
+var (
+	fakeKeyID     = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+	fakeSecretKey = "wJalrXUtnF" + "EMI/K7MDENG/" + "bPxRfiCYzZ9TESTKEY"
+)

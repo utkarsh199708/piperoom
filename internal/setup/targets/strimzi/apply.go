@@ -531,6 +531,16 @@ func (k8sSecretApplyOp) Validate(params json.RawMessage, _ ops.Env) error {
 // "task 1 of 3". Checked before anything is remembered or written.
 const minCredentialLen = 8
 
+// checkCredentialLen refuses a credential (a non-user key's value) under
+// minCredentialLen, naming the key, the secret and the length, never the
+// value. Execute and Preview both run it (round 8, S5).
+func checkCredentialLen(k, name, v string) error {
+	if n := utf8.RuneCountInString(v); !secretKeyIsUser(k) && n < minCredentialLen {
+		return fmt.Errorf("%w: key %s: secret %s is %d characters; a credential in the db-credentials Secret must be at least %d (reads mask credentials by value, and a shorter one cannot be masked without garbling the logs)", ErrParams, k, name, n, minCredentialLen)
+	}
+	return nil
+}
+
 func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, env ops.Env) (ops.Result, error) {
 	p, err := decodeSecretApply(params)
 	if err != nil {
@@ -554,8 +564,8 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 		if !ok {
 			return ops.Result{}, fmt.Errorf("%w: secret %s is not in the runner's store", ErrParams, name)
 		}
-		if n := utf8.RuneCountInString(v); !secretKeyIsUser(k) && n < minCredentialLen {
-			return ops.Result{}, fmt.Errorf("%w: key %s: secret %s is %d characters; a credential in the db-credentials Secret must be at least %d (reads mask credentials by value, and a shorter one cannot be masked without garbling the logs)", ErrParams, k, name, n, minCredentialLen)
+		if err := checkCredentialLen(k, name, v); err != nil {
+			return ops.Result{}, err
 		}
 		values[k] = v
 		keys = append(keys, k)
