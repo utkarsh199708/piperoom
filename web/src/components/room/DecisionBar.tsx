@@ -145,11 +145,20 @@ export function DecisionBar({
           sheet && kind === "needs-you" && "flex-col flex-nowrap items-stretch",
         )}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2">{text}</div>
+        <div
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2",
+            // The basis sends the buttons to their own row before the headline gets squeezed: at flex-1's
+            // basis of 0 they always fit beside it, which cut it to "Needs yo…" at 1280 wide (KAN-593).
+            !sheet && kind === "needs-you" && "basis-80",
+          )}
+        >
+          {text}
+        </div>
         {actions && (
           <div
             className={cn(
-              "flex flex-wrap items-center gap-2",
+              "flex max-w-full flex-wrap items-center gap-2",
               // The sheet's two buttons share a row until a long Approve label can't fit: a button is
               // never narrower than its label, so that one then takes a row of its own (KAN-595).
               sheet && kind === "needs-you" ? "w-full" : "shrink-0",
