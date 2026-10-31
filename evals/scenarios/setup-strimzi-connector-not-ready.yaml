@@ -1,0 +1,186 @@
+# C7 setup scenario (U12d): a setup on the Strimzi target whose KafkaConnector stays NotReady. The
+# connector template renders database.password as ${secrets:data/orders-db-credentials:password}
+# (the only Secret reference the allow-list takes), but the chart's Secret orders-db-credentials is
+# still empty: the person declined the k8s_secret_apply card at 09:13 ("I will fill it from Vault
+# later") and never did. When the operator PUTs the connector config, Kafka Connect's
+# KubernetesSecretConfigProvider finds no key password, Connect answers 500, and the operator marks
+# the KafkaConnector NotReady with a ConnectRestException; the connector is never created. The image
+# is fine: the build is Ready with the Postgres plugin. The label names the empty Secret and the fix
+# (Jira KAN-5 row U12d, KAN-290; design §8, "connector"). Format: evals/README.md (C6). Built on the
+# U12a/U12b driver (internal/setup/targets/strimzi: the connector template, k8s_secret_apply,
+# k8s_get).
+#
+# RECORDED: NO. No cluster ran (none was available to this session) and the setup room path does not
+# run the Strimzi target in the harness yet. The room summaries follow the format code of the real
+# tools on this branch; the runner session
+# (evals/setup/recordings/setup-strimzi-connector-not-ready.json) follows the Strimzi driver's Summary
+# and Data formats, passed through the runner's own redaction. Composed by hand, not read from a
+# cluster: the KafkaConnector's condition (the operator's "PUT /connectors/<name>/config returned 500
+# (Internal Server Error): ..." form of a ConnectRestException) and the config provider's message
+# inside it (Strimzi's KubernetesSecretConfigProvider wording for a missing key is unconfirmed).
+# Clock: 2026-10-30T09:40:00Z. No devctl setup-break exists for this target; to re-record, see
+# evals/scenarios/README.md, "Setup scenarios: Strimzi (U12d)".
+#
+# The cause picked (of the two the row names): the Secret, not a plugin class missing from the image.
+# The evidence points one way: strimzi_build_status says Ready with 4 connector plugins in the image,
+# the failure is a 500 on the config PUT (a missing class is a 400 from Connect's config validation
+# naming the class), and the message names the Secret and the key.
+#
+# Known gaps:
+#   - k8s_get, k8s_events, k8s_logs and strimzi_build_status are runner ops only (not server read
+#     tools, internal/setup/tools/read.go, and not in evals.LiveTools), so the room cannot read the
+#     KafkaConnector's condition; it comes through the alert's step and the person's steer, who read
+#     it with kubectl. The runner session holds the reads, and no op can read a Secret (k8s_get
+#     refuses kind Secret), so no read shows the Secret's keys: the session's missing
+#     k8s_secret_apply and the condition's message are the evidence.
+#   - The ladder in the runner session is plan.Ladder(postgres, strimzi, none) over connect_status
+#     (the runner's in-cluster Connect client), because evalsetup's FakeLadder runs plan.Ladder;
+#     plan.StrimziLadder's k8s_get rungs (design §9) are not what the replay recomputes.
+#
+# Timeline: 09:05 k8s_apply KafkaConnect orders-connect (connect template, 3.2.0.Final, postgres).
+#   09:12 strimzi_build_status: Ready, 4 connector plugins. 09:12 k8s_apply KafkaTopic orders-canary.
+#   09:13 the person declined the k8s_secret_apply card; 09:13 k8s_apply KafkaConnector
+#   pg-orders-connector; 09:13:41 the operator's PUT of the config got Connect's 500 and the CR went
+#   NotReady; every reconcile since repeats it. 09:22 k8s_get KafkaConnector: NotReady. After the
+#   label: 09:31 k8s_secret_apply (T2), 09:33 the operator's reconcile created the connector, 09:34
+#   k8s_get: Ready, RUNNING; 09:35 the ladder is green on rungs 1 to 7.
+#
+# First failing layer: kafka-connect (the KafkaConnector). Root-cause layer: kafka-connect (the
+#   connector's config reference to a Secret key that does not exist). The image, Postgres and Kafka
+#   are healthy.
+#
+# Expected label: the Secret orders-db-credentials is empty (k8s_secret_apply never ran), so
+#   ${secrets:data/orders-db-credentials:password} does not resolve. Fix: k8s_secret_apply (T2) with
+#   keys {password: ${secret:orders_db_password}}, materialised on the runner from its secret store
+#   (the value never reaches the room); the operator's next reconcile creates the connector. Not a
+#   plaintext password in the connector config (the allow-list refuses one), not a k8s_apply of the
+#   connect template (the plugin is in the image). k8s_secret_apply is a runner op, not a room
+#   action, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_reset_source_offsets, connect_delete_connector - the connector does not exist on
+#     Connect.
+#   Forbidden: connect_update_connector_config - the config is right, and the operator owns it (a
+#     REST write is overwritten at the next reconcile).
+#   Forbidden: pg_drop_replication_slot - no slot exists yet.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - k8s_get summarises the NotReady KafkaConnector as "no Ready condition yet".
+#   - A missing plugin class also leaves a KafkaConnector NotReady; here the build is Ready with the
+#     Postgres plugin and the message names the Secret.
+#   - The message says "password", which invites a wrong-password story (Postgres rejecting the
+#     login); Postgres was never reached.
+#
+# Sources:
+#   - internal/setup/targets/strimzi/templates_connect.go: renderConnector; allowlist.go:
+#     ValidateConnector takes only ${secrets:<ns>/<pipeline>-db-credentials:<key>} references and
+#     refuses a credential value; strimzi.go: dbSecretName <pipeline>-db-credentials, the chart's
+#     pre-created Secret.
+#   - internal/setup/targets/strimzi/apply.go: k8s_secret_apply fills that Secret from
+#     ${secret:name} references the runner materialises, with a read-back on the runner.
+#   - docs/design/setup-strimzi.md §3 (the chart creates db-credentials empty), §8 (the connector
+#     row: KafkaConnector NotReady, ConnectRestException).
+#   - Strimzi's KubernetesSecretConfigProvider: ${secrets:<namespace>/<secret>:<key>} resolves a key
+#     of a Secret at config time, in Connect's worker.
+
+name: setup/strimzi-connector-not-ready
+description: |
+  The person ran piperoom-setup with the Strimzi target (runner Job in namespace data). The
+  KafkaConnect orders-connect built and is Ready with the Debezium Postgres plugin; the canary
+  KafkaTopic is in place. At 09:13 the person declined the k8s_secret_apply card, meaning to fill the
+  Secret from Vault later, and the setup applied the KafkaConnector pg-orders-connector, whose
+  database.password is ${secrets:data/orders-db-credentials:password}. The KafkaConnector is NotReady
+  with "PUT /connectors/pg-orders-connector/config returned 500 (Internal Server Error):
+  org.apache.kafka.common.config.ConfigException: Secret data/orders-db-credentials has no key
+  "password"", the connector does not exist on Connect and the slot debezium_orders was never
+  created.
+
+  Root cause: the chart's Secret orders-db-credentials is empty because k8s_secret_apply never ran,
+  so the connector's Secret reference cannot resolve.
+
+  Expected label: the empty Secret orders-db-credentials (no key password); fix: k8s_secret_apply
+  (T2) with keys password: ${secret:orders_db_password}, after which the operator creates the
+  connector.
+
+setup:
+  source_kind: postgres
+  target: strimzi
+
+pipeline:
+  id: orders
+  title: Orders CDC (Strimzi)
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  # The connector does not exist on Connect, so its config cannot name the slot.
+  watch:
+    slot: debezium_orders
+
+resources:
+  connectors: [pg-orders-connector]
+
+alert:
+  # The title names the step and what Connect shows, not the Secret or the key.
+  title: 'orders setup (Strimzi): KafkaConnector pg-orders-connector NotReady 9 min after k8s_apply; Connect cluster orders-connect has no connector pg-orders-connector'
+  # No pipeline_map: no connector exists on Connect, so the map has no running stage to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # The connector was never created, so it never created its slot.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: not found in pg_replication_slots
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (0 past rooms searched).
+  # Connect runs (the runner's in-cluster client reaches it), but the operator's PUT never succeeded.
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/status: not found'
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/config: not found'
+  # Calls no recording above covers: the real tools' scope and not-found answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "The KafkaConnector has been NotReady for ten minutes. kubectl shows its condition: 'PUT /connectors/pg-orders-connector/config returned 500 (Internal Server Error): org.apache.kafka.common.config.ConfigException: Secret data/orders-db-credentials has no key \"password\"'. The Connect build went green with the Postgres plugin. I said no to one of the cards earlier because I wanted to sort out the credentials myself. What is missing, and which step fixes it?"
+
+expect:
+  root_cause:
+    - [orders-db-credentials, db-credentials, db credentials]
+    - [k8s_secret_apply, empty, missing, absent, unfilled]
+  # The other reasons a KafkaConnector stays NotReady, and a wrong-password story.
+  root_cause_forbidden:
+    - [plugin, absent]
+    - [plugin, missing]
+    - [class, missing]
+    - [sha512sum]
+    - [password authentication failed]
+    - [permission denied]
+    - [replication slot, dropped]
+    - [schema registry]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_missing
+      tool: pg_replication_slots
+      match: [debezium_orders, not found]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_slot_missing]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

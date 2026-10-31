@@ -931,6 +931,292 @@ profile as the source, then one of `devctl setup-break no-archivelog`, `no-suppl
 from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl
 setup-fix` restores the profile.
 
+### Setup scenarios: MySQL (U2c)
+
+Four setup scenarios on the MySQL 8.4 source of the `mysql` dev profile (database `shop`, tables `shop.orders` and
+`shop.order_items`, connector user `debezium`, `dev/mysql/README.md`) and the Compose target, each with a runner session
+in `evals/setup/recordings` (the eval replay). Three are built on the U2b `devctl setup-break` names; their labels name
+the failing check (the U2a driver's check ids, `internal/setup/sources/mysql/driver.go`, and the messages of
+`cmd/devctl/setupbreaks_mysql.go`) and the fix with its tier from the driver's `FixFor` (Jira KAN-5, U2a). A MySQL
+scenario sets `pipeline.source_kind: mysql`, so the room is a MySQL room (Q8j): the room's `source_settings`,
+`source_role_grants` and `source_table_replication` read the source, and `mysql_binlog_status` is there.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-mysql-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every MySQL check passed | - | outcome `healthy`; no proposal |
+| `setup/binlog-statement` | re-verification failed at `canary_event`; check `binlog_format` failed | `SET GLOBAL binlog_format = 'STATEMENT'`: new sessions log statements, Debezium skips them (a WARN per insert); the task stays RUNNING | mysql / mysql | `binlog_format`; the driver's ask at T3: `binlog_format=ROW` in the option file and a restart in a maintenance window (the profile's command line restores ROW), then re-snapshot the rows written meanwhile; no connector action |
+| `setup/no-replication-grant` | re-verification failed at `tasks_running`; check `read_role` failed | `REPLICATION CLIENT` revoked from `'debezium'@'%'`; the next task start's `SHOW BINARY LOGS` is refused (error 1227) | kafka-connect / mysql | `read_role`; the user exists, so no op (an existing user is never altered): a DBA's `GRANT REPLICATION CLIENT ON *.* TO 'debezium'@'%'`, then `connect_restart_task` |
+| `setup/server-id-zero` | re-verification failed at `tasks_running`; check `server_id` failed | `SET GLOBAL server_id = 0`: the server refuses the binlog dump (error 1236, "Misconfigured source") | kafka-connect / mysql | `server_id`; the driver's ask at T3: a unique non-zero `server_id` in the option file and a restart (the profile's `--server-id=223344`), then `connect_restart_task`; the connector's `database.server.id` stays |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats on this branch, and the
+runner sessions record the U2a driver's three reads under the remote clients' source op names (`source_settings`,
+`source_table_replication`, `source_role_info`) with the Q8 client's DTOs. Digests are synthetic placeholders.
+Conventions the four share, which a re-recording keeps:
+
+- **Layers.** owners.yaml has a `mysql` source kind and layer (Q0 item 7), so the source is graded as `mysql`, not as
+  the `postgres` stand-in of the other setup sources.
+- **connect_config.** It shows only the keys the real tool keeps (`internal/tools/kafkatools/connect_tools.go`): the
+  connector's `database.server.id` (5401), `database.include.list` and schema history keys are in the runner
+  session's `connect_create_connector` params, not in the room's read.
+- **Error texts.** The WARN line is Debezium MySQL's message for a DML query event in the binlog; the task traces are
+  MySQL's errors 1227 and 1236 under Debezium's wrapping. Their wording is unconfirmed on Debezium 3.2 (each scenario
+  says so).
+- **Titles.** A title names the failed rung and the check, not the check's message (`TestScoringOldVsNew`).
+
+None of the three sets `expect.fix`: every MySQL server setting is a documented ask (there is no `ALTER SYSTEM` on
+MySQL), and the grant of an existing user is a DBA's statement; the task restart that follows is allowed, not
+required. `setup/server-id-zero` forbids `connect_update_connector_config` (the MySQL room offers
+`database.server.id`, which is not what is wrong) and `setup/binlog-statement` forbids every connector restart
+(Debezium refuses a STATEMENT server at start).
+
+To re-record on the dev stack: start the profile (`docker compose -f dev/docker-compose.yml --profile mysql up -d
+--wait mysql`), run `piperoom-setup` into a fresh project with the Compose target and the profile as the source,
+then `devctl setup-break binlog-statement` (or `no-replication-grant`, `server-id-zero`) after the first
+verification; for the two grant and id breaks restart the project's Connect service so the task reconnects, then
+re-verify and re-run the checks. Take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op
+log for the session file, and set `RECORDED: YES`. `devctl setup-fix` (or a restart of the mysql container)
+restores the profile.
+
+### Setup scenarios: transforms and sinks (U3d)
+
+Two setup scenarios in which the setup run adds a JDBC sink (`wh-orders-sink`, into `analytics.orders` of the dev
+Postgres) to a green Postgres pipeline on the Compose target. Each has a runner session in `evals/setup/recordings`
+whose sink kind is `postgres`, so the ladder has a rung 7 (`warehouse_row`) and it is the red one. The labels name the
+SMT class and key or the sink key, as U3a's index (`internal/setup/knowledge/index/*.yaml`) and U3b's builder and
+`setup_config_help` (`internal/setup/tools/configbuild.go`, `confighelp.go`; `docs/pilot/transforms-and-sinks.md`)
+know them.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/unwrap-missing` | re-verification failed at `sink_row`; `wh-orders-sink` task 0 FAILED | the Confluent JDBC sink (flat records only) gets Debezium's change event envelope: `Table "analytics"."orders" is missing fields (... before, after, source, op, ts_ms ...)` | kafka-connect / kafka-connect | the SMT: `transforms=unwrap`, `transforms.unwrap.type=io.debezium.transforms.ExtractNewRecordState` (index `extract-new-record-state`; the `confluent-jdbc-sink` check "Needs flat records"); re-register the sink (`connect_delete_connector`, `connect_create_connector`, T2) |
+| `setup/jdbc-sink-no-pk` | re-verification failed at `sink_row`; `wh-orders-sink` task 0 FAILED | Debezium's JDBC sink with `insert.mode=upsert` and `primary.key.mode` at its default `none`: `Cannot write to table orders with no key fields defined.` | kafka-connect / kafka-connect | the sink key: `primary.key.mode=record_key` (with `primary.key.fields`; the `debezium-jdbc-sink` check "upsert needs primary.key.mode and primary.key.fields"); re-register the sink as above |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats on this branch; the
+runner sessions record only the sink step (`connect_plugins`, `connect_validate_config` with 0 errors,
+`connect_create_connector`, the sink's `connect_status`) over the remote Connect client's wire shapes, and the
+ladder's reads. The two task errors are the sinks' own messages under Connect's `WorkerSinkTask` wrapper, composed by
+hand (unconfirmed on the releases named). Points a re-recording keeps:
+
+- **What the room can see.** `connect_config` shows a sink's `connector.class` and the redacted password only:
+  `insert.mode`, `pk.mode`, `primary.key.mode`, `topics` and `connection.url` are not on its key list, and an absent
+  `transforms` key is the visible half of `setup/unwrap-missing`. The task trace carries the rest.
+- **Two sinks, two stories.** Debezium's JDBC sink reads the envelope natively (the index's check), so the missing
+  SMT is a Confluent-sink story; each scenario's wrong text is the other's cause, and each forbids the other's
+  vocabulary in `root_cause_forbidden`.
+- **No `expect.fix`.** `connect_update_connector_config` cannot set a `transforms.*` or sink key (its allow-list,
+  `internal/actions/connector_config.go`), so it is forbidden; the fix is a Q5c re-registration, which the replay
+  cannot validate for an existing connector name.
+
+To re-record on the dev stack: bring a Compose project up with `piperoom-setup` on the dev Postgres, then ask the
+setup run for a warehouse sink into `analytics.orders`: with the Confluent JDBC sink copied into the project's plugin
+directory and no transform (unwrap-missing), or with Debezium's JDBC sink, `insert.mode=upsert` and no
+`primary.key.mode` (jdbc-sink-no-pk); re-verify after the task fails. Take the room's tool results from `GET
+/api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
+### Setup scenarios: host target (U8d)
+
+Three setup scenarios on the plain-host target (`internal/setup/targets/host`, U8a; `docs/pilot/host-target.md`): a
+standalone Kafka Connect worker that the setup run installed as the user unit `piperoom-connect.service` on a Linux host,
+in the project layout of the `host` dev profile (`dev/host/base`: the unit, `connect-standalone.properties`,
+`connect-distributed.properties`, `connect-plugins/`, the JDKs under `/opt`), with the dev Postgres as the source. Each is
+built on a U8c `devctl setup-break` name, and each has a runner session in `evals/setup/recordings` with target `host`
+(the ladder is `plan.Ladder`'s for host: rungs 1 and 2 read the Connect REST status). The labels name the argv, the
+properties key or the unit's `JAVA_HOME` (the check names and messages of `cmd/devctl/setupbreaks_host.go`).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/wrong-standalone-args` | re-verification failed at `connector_running` (REST refused); check `host-standalone-args` failed | the person's unit edit: `ExecStart` hands `connect-distributed.properties` to `connect-standalone.sh`; the worker exits on the missing `offset.storage.file.filename` | kafka-connect / kafka-connect | the argv: `ExecStart=<project>/kafka/bin/connect-standalone.sh <project>/connect-standalone.properties`; `service_install` (standalone, T2) renders it again, `service_restart` (T2), then `connect_create_connector` |
+| `setup/plugin-path-unset` | the connector's re-registration failed, re-verification failed at `connector_running`; check `host-plugin-path` failed | the person's tidy-up removed `plugin.path`: the worker loads only its classpath and answers HTTP 500 "Failed to find any class that implements Connector" | kafka-connect / kafka-connect | the key `plugin.path`: `properties_write` (T1; it adds `plugin.path=<project>/connect-plugins` as a default), `service_restart` (T2), then `connect_create_connector` |
+| `setup/java-too-old` | re-verification failed at `connector_running` (REST refused); check `host-java-version` failed | the unit's `Environment=JAVA_HOME=/opt/piperoom/jdk-11`: Java 11.0.22 cannot load Kafka 4.1's Connect classes (class file 61) | kafka-connect / kafka-connect | the unit's `JAVA_HOME` and the version (17 or newer): `service_install` (it pins the JDK 21 that `java` on PATH resolves to), `service_restart`, then `connect_create_connector` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the fake host runs no systemd and no worker, so nothing here was
+observed. The room summaries follow the real tools' formats on this branch (`connect_worker_logs` and
+`debezium_metrics` give their not-configured answers: a host project has no Loki and no metrics endpoint), and the
+runner sessions the host ops' summary and Data formats (`service_status`, `journal_tail`, `properties_read`,
+`properties_write`, `service_install`, `service_restart`) and `java_version`. The journal lines are Kafka Connect's,
+the JVM's and systemd's own messages, composed by hand; digests are synthetic. Points a re-recording keeps:
+
+- **The room sees little.** With the worker down the room's Connect reads fail with "connection refused", and the
+  evidence it can establish is the inactive slot (`pg_replication_slots`) and the missing canary; the cause is in the
+  check (the alert) and in the runner's own reads. `setup/plugin-path-unset` has a running worker, so
+  `connect_plugins` shows the classpath-only list (written in the convention of `plugin-missing-in-image`: connectors
+  and the converter the worker names).
+- **Standalone keeps REST connectors in memory.** After every restart the setup registers `pg-orders-connector`
+  again; it resumes from `connect.offsets` and the slot, so `pg_drop_replication_slot` and
+  `connect_reset_source_offsets` are forbidden.
+- **No `expect.fix`.** The fixes are host ops (`service_install`, `service_restart`, `properties_write`) and the
+  Q5c create, none of which is a room action in `evals.LiveActions`; the connector writes, which cannot reach a
+  worker that is down or reach a connector the worker lost, are forbidden.
+- **Two traps.** `java_version` reports the java on PATH (21.0.8), not the unit's; and `properties_read` shows
+  `connect-distributed.properties` as a valid distributed file, the wrong one for the standalone launcher.
+
+To re-record on a real Linux host (U8-R): run `piperoom-setup` there with the host target, the standalone mode and
+the dev Postgres as the source, let the first verification go green, then make the person's change by hand (the
+`ExecStart` edit, removing `plugin.path`, or `Environment=JAVA_HOME` at a Java 11) and restart the unit
+(`systemctl --user daemon-reload` and `restart`, or `service_restart`); re-verify and re-run the checks. `devctl
+setup-break wrong-standalone-args` (or `plugin-path-unset`, `java-too-old`) applies the same file change to the fake
+host of the `host` profile, which is enough to re-check the check names and messages. Take the room's tool results from
+`GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
+### Setup scenarios: Debezium Server (U11c)
+
+Two setup scenarios on the Debezium Server target (`dbzserver`, U11a `internal/setup/targets/server`) in Compose mode:
+the server as one service of the rendered stack (the pinned `debezium/server:3.2.0.Final` image, the config directory a
+read-only bind, the offsets on the named volume `dbz-server-data`), a co-located Postgres source and the HTTP sink to the
+warehouse's ingest API. Each has a runner session in `evals/setup/recordings` with target `dbzserver`; the labels name
+U11b's probe (`internal/setup/ops/sink_probe.go`) or the server property.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/server-sink-unreachable` | step `sink_probe` failed (`sink_probe http: HEAD request failed`); `server_status`: dbzserver has no container | nothing listens at `ingest.warehouse.internal:8080`: every POST is refused, the HTTP sink gives up and the server exits | kafka-connect / warehouse | the probe: `sink_probe http` fails for the sink's registered address; the endpoint's owner starts it (or `server_properties_write` corrects `debezium.sink.http.url`, T1), `sink_probe` passes, then `compose_up` (T1) |
+| `setup/server-offset-file-unwritable` | after `compose_restart` the server snapshotted `public.orders` again; `server_status` running | a hand edit set `debezium.source.offset.storage.file.filename=config/offsets.dat` on the read-only config bind: every flush fails, each start snapshots again | kafka-connect / kafka-connect | the property `debezium.source.offset.storage.file.filename`: `server_properties_write` (T1; `offsets_file` takes only `data/<name>`, default `data/offsets.dat`), then `compose_restart` (T1); the sink absorbs the duplicates |
+
+**Synthesised, not recorded** (`RECORDED: NO`). The room summaries follow the real tools' formats on this branch;
+the runner sessions the server target's ops (`server_properties_write`, `server_compose_write`, `server_status`), the
+Compose driver's `compose_up`, `compose_restart` and `container_logs` and `sink_probe`, with Debezium Server's log
+lines composed by hand (their wording, and the engine running on after a failed offset flush, are unconfirmed on
+3.2.0.Final). Digests are synthetic. Three conventions a re-recording keeps:
+
+- **No ladder.** `plan.Ladder` defines none for `dbzserver` (`internal/setup/plan/ladder.go`: the server's status is
+  not a Connect REST endpoint, and its ladder is its own row), so the two sessions record none.
+  `evalsetup.Verify` replays their ops and reports the ladder as not defined (`Check.NoLadder`, carried into the
+  run's `setup_replay.no_ladder`); a session on such a target that records a ladder fails, and a session on a target
+  with a ladder that records none still fails (`evalsetup.PlanLadderUndefined`; U11c added the rule, with its test in
+  `evals/setup/setup_test.go`).
+- **A stand-in connector.** owners.yaml requires a connector on a CDC pipeline and has no Debezium Server kind, so the
+  pipeline names the server's Compose service, `dbzserver`, whose Connect reads answer not found, and `watch.slot`
+  names the server's slot `debezium_orders`, so `pg_replication_slots` reads it without a Connect config. The slot is
+  the room's evidence: inactive after the server exited, or active with its WAL growing while no offset commits.
+- **The cause is in the runner's reads.** `server_status`, `container_logs` and `sink_probe` are runner ops, not
+  room tools (`evals.LiveTools`), so the room reaches the cause through the alert's step and the runner session, as
+  the U5c section says for `container_logs`. `pipeline_map` is not recorded: with a stand-in connector and no
+  Kafka topic its map would mislead, and a call is a counted miss.
+
+To re-record on the dev stack once the setup room path runs the server target: run `piperoom-setup` into a fresh
+project with the `dbzserver` target in Compose mode, the HTTP sink and a registered host target for the ingest
+address; for sink-unreachable leave nothing listening there, for offset-file-unwritable start an HTTP receiver (any
+2xx), let the server stream, then edit `debezium/config/application.properties` by hand to
+`debezium.source.offset.storage.file.filename=config/offsets.dat` and restart the service. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
+### Setup scenarios: managed targets (U13e)
+
+Four setup scenarios on the managed targets of U13 (`docs/design/setup-managed.md`): AWS MSK Connect, Confluent Cloud
+and Aiven, each on a Postgres source with a runner session in `evals/setup/recordings` (the eval replay). The
+sessions' ops are the managed ops of `internal/setup/targets/managed`, and their ladders are `managed.Ladder`'s: rungs
+1 and 2 read the provider's status op (`msk_describe_connector`, `ccloud_connector_status`, `aiven_connector_status`)
+instead of `connect_status`, and on MSK rung 2 is not applicable (MSK Connect reports no per-task state). The
+evals' fake ladder (`evals/setup/ladder.go`) picks that ladder for the three managed targets, as the server's ladder
+runner must (the A9 follow-up of U13b2).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/msk-plugin-s3-denied` | step `msk_plugin_object_check` failed (forbidden); `msk_create_plugin` refused; rung `connector_running` red | the plugin bucket's policy grants `s3:GetObject` to the uploader only; the setup role `PiperoomSetup` cannot read the archive | kafka-connect / kafka-connect | grant `s3:GetObject` on the plugin object to the setup role (a documented ask: no op writes IAM or a bucket policy), then `msk_create_plugin` again (T2; T3 on production) |
+| `setup/msk-vpc-no-route` | `orders-msk-connector` FAILED after provisioning; check `msk_vpc_check` failed | the connector's subnets (10.0.0.0/16) have no route to the database's VPC (172.31.0.0/16) | kafka-connect / kafka-connect | a peering or transit gateway route and the database's security group (a documented ask), or the connector recreated in subnets that reach the database (`msk_delete_connector`, `msk_create_connector`, T2) |
+| `setup/ccloud-acl-missing` | rungs `connector_running` and `tasks_running` red; task 0 FAILED | the connector's service account `sa-00000` has no ACLs; only the watcher template was applied | kafka-connect / kafka | `ccloud_acl_create` with the connector template for `User:sa-00000` on the topic prefix (T2) |
+| `setup/aiven-plugin-unavailable` | step `aiven_create_connector` refused; rung `connector_running` red | the Connect service `connect-0` does not offer the Debezium PostgreSQL connector | kafka-connect / kafka-connect | a Connect service that offers it (a documented ask; which Aiven setting governs the list is unconfirmed), then `aiven_create_connector` again (T2) |
+
+**Synthesised, not recorded** (`RECORDED: NO`): no sandbox account was used. The runner sessions are composed from
+the managed ops' own summaries and Data over the hand-written cassettes of
+`internal/setup/targets/managed/testdata/{msk,confluent,aiven}` (themselves `recorded: false`); the room's tool
+summaries follow `internal/tools/kafkatools` over the managed clients' mappings, and `CONNECT_KIND=msk`, `confluent`
+and `aiven` are not wired on main (the A4 follow-ups of U13b1, U13c, U13d). Digests are synthetic placeholders.
+Conventions the four share, which a re-recording keeps:
+
+- **Identifiers** are the cassette scrubber's placeholders (account `000000000000`, region `us-east-1`, `env-00000`,
+  `lkc-00000`, `sa-00000`, `project-0`, `connect-0`), so a scenario, its session and the cassettes name the same
+  resources.
+- **Titles** name the failed step, check or rung, never the cause: "forbidden" is in the S3 title, so the root cause
+  terms ask for the bucket and the policy, not the status.
+- **No `expect.fix`**: every fix is a runner op or a person's change, none in `evals.LiveActions`; the connector
+  writes are forbidden where no connector exists or a restart changes nothing.
+
+To re-record on the sandbox accounts (design §6): run the clients' manual tests to confirm the response shapes
+(`go test -tags manual ./internal/clients/{mskconnect,confluentcloud,aiven}/`), then run `piperoom-setup` with the
+managed target into a room, reproduce the break (a bucket policy limited to the uploader; a connector in the cluster's
+VPC with an RDS source in another; the watcher template only; a Connect service without the Debezium PostgreSQL
+connector), and take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op log for the
+session file. Set `RECORDED: YES` and date the run.
+
+### Setup scenarios: Strimzi (U12d)
+
+Two setup scenarios on the Strimzi target (U12a/U12b `internal/setup/targets/strimzi`, `docs/design/setup-strimzi.md`):
+the runner as an in-cluster Job in namespace `data`, the chart's paused shells filled from templates (`k8s_apply`, T2),
+the Kafka cluster `kafka`, a Postgres source and no sink. Each has a runner session in `evals/setup/recordings` with
+target `strimzi`; the labels name the failing artifact or the empty Secret, and the T2 op that fixes it (design §8,
+the build and connector rows).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/strimzi-build-failed` | KafkaConnect `orders-connect` not Ready; `strimzi_build_status`: build failed, build pod `orders-connect-connect-build` Failed | a hand edit (`kubectl edit`) moved the Postgres plugin's artifact url to 3.1.3.Final and kept the 3.2.0.Final `sha512sum`, so the build's checksum check fails | kafka-connect / kafka-connect | the failing artifact `debezium-connector-postgres-3.1.3.Final-plugin.tar.gz` and its checksum mismatch; `k8s_apply` (T2) the KafkaConnect from the `connect` template again (url and digest from the knowledge index), never a hand-edited spec |
+| `setup/strimzi-connector-not-ready` | KafkaConnector `pg-orders-connector` NotReady; the connector is absent from Connect | `database.password` is `${secrets:data/orders-db-credentials:password}` and the chart's Secret is empty: the person declined the `k8s_secret_apply` card | kafka-connect / kafka-connect | the empty Secret `orders-db-credentials`; `k8s_secret_apply` (T2, `password: ${secret:orders_db_password}`), then the operator's reconcile creates the connector |
+
+**Synthesised, not recorded** (`RECORDED: NO`): no cluster was available. The room summaries follow the real tools'
+formats on this branch; the runner sessions the Strimzi driver's Summary and Data formats, passed through the runner's
+own redaction (`redact.JSONStats` masks a `pushSecret` or `secret` value, a Secret's name, as `[redacted 24]`; a
+`${secrets:...}` reference is kept). Composed by hand: the Strimzi `NotReady` conditions and their messages (the exact
+reason strings and the config provider's wording are unconfirmed), the Kaniko build log tail and the refused
+connection of the room's Connect reads. Digests are synthetic. Conventions a re-recording keeps:
+
+- **The cause is in the runner's reads.** `k8s_get`, `k8s_events`, `k8s_logs` and `strimzi_build_status` are runner ops
+  only: no server read tool exposes them (`internal/setup/tools/read.go`) and none is in `evals.LiveTools`. The room
+  reaches the cause through the alert's step and the person's steer (who read the build log or the CR's condition);
+  the one replayed fact is the slot the connector never created (`watch.slot` names it, since Connect has no config
+  for it).
+- **The ladder is `plan.Ladder`'s.** `plan.Ladder` accepts `strimzi`, so each session records a ladder, and evalsetup's
+  `FakeLadder` recomputes it with rungs 1 and 2 over `connect_status` (the runner's in-cluster Connect client reaches
+  `orders-connect-connect-api:8083`). `plan.StrimziLadder` (rungs 1 and 2 over the KafkaConnector CR through `k8s_get`,
+  design §9) is not what the replay runs; moving the replay to it is a C6 change.
+- **No room action is the fix.** `k8s_apply` and `k8s_secret_apply` are runner ops, not `evals.LiveActions`, so the
+  files set no `expect.fix` and forbid every Connect REST write (no worker runs, or the operator owns the config).
+
+To re-record on a cluster once the setup room path runs the Strimzi target: install the pipeline chart and the runner
+Job (`deploy/helm`, U12c) on `kind` with Strimzi and a local registry, then for build-failed edit the KafkaConnect's
+`spec.build.plugins[0].artifacts[0].url` to the 3.1.3.Final archive during the first build (or let the U12 kind test
+break the `sha512sum`), and for connector-not-ready decline the `k8s_secret_apply` card. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`.
+
+### Setup scenarios: embedded (U6c)
+
+Two setup scenarios on the embedded target (U6b `internal/setup/ops/embedded_ops.go`, `docs/design/setup-agent.md`
+§2.5): the Debezium Engine runs inside the person's own service, a Postgres source, no Kafka Connect and no sink. The
+runner reads the person's build files (`project_inspect`), files (`file_read`) and log (`embedded_log_read`, which keeps
+only the reference app's `piperoom-reference ...` lines) and writes only `piperoom-reference/` (`reference_write`, T1).
+Each has a runner session in `evals/setup/recordings` with target `embedded`; the labels name the mismatch or the
+offset store and the documented ask that fixes it.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/embedded-version-mismatch` | the engine in `orders-cdc` stops right after it starts; `embedded_log_read`: stopped with an error | the pom.xml mixes releases: `debezium-embedded` 3.2.0.Final (a bot bumped `version.debezium`) with `debezium-connector-postgres` pinned to 2.7.2.Final, so the connector fails over the 3.2.0.Final `debezium-core` | kafka-connect / kafka-connect | the mismatch; the person aligns their own pom.xml (`debezium-bom` 3.2.0.Final, no connector version), a documented ask, or `reference_write` (T1) regenerates the reference project to compare; no other write |
+| `setup/embedded-offset-storage` | the search index got all 12 orders again after the third start today | `offset.storage=org.apache.kafka.connect.storage.MemoryOffsetBackingStore`: no offset survives a restart, so each start takes a new initial snapshot | kafka-connect / kafka-connect | offset storage; the person switches to `FileOffsetBackingStore` with `offset.storage.file.filename` on a writable volume (or a JDBC offset store), a documented ask |
+
+**Synthesised, not recorded** (`RECORDED: NO`), but the runner sessions are the real ops' output: `project_inspect`,
+`file_read`, `embedded_log_read` and `reference_write` ran through `ops.Registry.Execute` over a composed project (the
+person's build file, properties and log file), and their summaries and Data are in the session files unchanged; only
+the receipts' MACs and timings are synthetic. Composed by hand: the log files' lines (the `NoSuchMethodError`'s member
+is made up) and the room's reads. Conventions a re-recording keeps:
+
+- **No ladder.** `plan.Ladder` defines none for `embedded` (`plan.EmbeddedLadder` is the target's own, and the room's
+  ladder runner cannot fill the log path yet), so the sessions record none and `evalsetup.Verify` reports it as not
+  defined (`Check.NoLadder`), as for `dbzserver` (U11c).
+- **A stand-in connector.** owners.yaml requires a connector and has no embedded kind, so the pipeline names the
+  application (`orders-cdc`, `orders-search-sync`), whose Connect reads answer not found, and `watch.slot` names the
+  engine's slot `debezium_orders`, the room's one replayed fact (absent before the engine's first good start, or active).
+- **The cause is in the runner's reads.** The setup read tools are not in `evals.LiveTools`, so the cause reaches the
+  room through the alert's step and the person's steer. Two gaps of the ops themselves: `project_inspect` reads no
+  connector artifact's version and the U6a rules have no one-release rule (the reference project enforces it with
+  `debezium-bom`), so the mismatch shows only in `file_read` of the pom and in the engine's error; and `project_inspect`
+  reads build files only, so the offset store shows only in `file_read` of the properties file.
+- **The person's app prints the reference lines.** Both services carry the reference app's callbacks, so
+  `embedded_log_read` sees their `started`, `event`, `canary` and `engine stopped with an error` lines; Debezium's own
+  snapshot lines are in the files and dropped by the reader.
+
+To re-record once the setup room path runs the embedded target: run `piperoom-setup --embedded` in a project that
+embeds the engine with the reference app's callbacks; for version-mismatch pin `debezium-connector-postgres` to
+2.7.2.Final beside a 3.2.0.Final `debezium-embedded`, for offset-storage set the memory offset store and restart the
+service twice. Take the room's tool results from `GET /api/rooms/{id}/export` and the runner's op log for the session
+file, and set `RECORDED: YES`.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse

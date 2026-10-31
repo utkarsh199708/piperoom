@@ -1,0 +1,23 @@
+{
+  "provider": "aws",
+  "name": "list_connectors_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/connectors",
+        "query": "maxResults=100"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connectors\":[{\"connectorArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders/0a1b2c3d-4e5f-6789-abcd-ef0123456789-2\",\"connectorName\":\"it_orders\",\"connectorState\":\"RUNNING\"},{\"connectorArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders_old/0a1b2c3d-4e5f-6789-abcd-ef0123456789-9\",\"connectorName\":\"it_orders_old\",\"connectorState\":\"RUNNING\"}]}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "provider": "aws",
+  "name": "simulate_on_resources",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=SimulatePrincipalPolicy&ActionNames.member.1=iam%3APutRolePolicy&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&ResourceArns.member.1=%2A&ResourceArns.member.2=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "ca1080c175b0a6253fc97f558cd189ce394e2b6ca7ab0421b1ec598af4ae9f08",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<SimulatePrincipalPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults><member><EvalActionName>iam:PutRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision><ResourceSpecificResults><member><EvalResourceName>arn:aws:iam::000000000000:role/PiperoomMSKConnect</EvalResourceName><EvalResourceDecision>allowed</EvalResourceDecision></member></ResourceSpecificResults></member></EvaluationResults></SimulatePrincipalPolicyResult></SimulatePrincipalPolicyResponse>"
+      }
+    }
+  ]
+}

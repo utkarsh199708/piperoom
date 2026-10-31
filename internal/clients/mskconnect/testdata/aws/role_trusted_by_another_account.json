@@ -1,0 +1,27 @@
+{
+  "provider": "aws",
+  "name": "role_trusted_by_another_account",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetRole&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "f880add47c32d84449c83dc337cd33beb6ad24a93db9c056fd4238d14f97bccf",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetRoleResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>arn:aws:iam::000000000000:role/PiperoomMSKConnect</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate><AssumeRolePolicyDocument>%7B%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22kafkaconnect.amazonaws.com%22%2C%22AWS%22%3A%22arn%3Aaws%3Aiam%3A%3A000000000000%3Aroot%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>"
+      }
+    }
+  ]
+}

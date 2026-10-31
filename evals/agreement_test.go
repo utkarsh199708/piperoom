@@ -425,6 +425,40 @@ var syntheticLabels = map[string]Label{
 	// term.
 	"setup/agent-stopped":         {"postgres", []string{"sql server agent", "capture job"}},
 	"setup/cdc-not-enabled-table": {"postgres", []string{"not tracked", "capture instance", "is_tracked_by_cdc"}},
+	// The U2c MySQL setup scenarios (KAN-333): the terms name the failing
+	// check's cause; the titles name the rung and the check only.
+	"setup/binlog-statement":     {"mysql", []string{"statement", "row images"}},
+	"setup/no-replication-grant": {"kafka-connect", []string{"replication client"}},
+	"setup/server-id-zero":       {"kafka-connect", []string{"server_id 0", "server_id is 0", "misconfigured source"}},
+	// The U3d sink scenarios (KAN-364): the terms name the SMT class and the
+	// sink key.
+	"setup/unwrap-missing":  {"kafka-connect", []string{"extractnewrecordstate", "extract new record state", "unwrap"}},
+	"setup/jdbc-sink-no-pk": {"kafka-connect", []string{"primary.key.mode", "primary key mode"}},
+	// The U8d host-target scenarios (KAN-346): the terms name the argv, the
+	// properties key and the unit's JAVA_HOME. plugin-path-unset's check name
+	// (host-plugin-path) holds the key itself, so its terms name the removal.
+	"setup/wrong-standalone-args": {"kafka-connect", []string{"connect-distributed.properties", "distributed worker file", "execstart"}},
+	"setup/plugin-path-unset":     {"kafka-connect", []string{"removed plugin.path", "plugin.path unset"}},
+	"setup/java-too-old":          {"kafka-connect", []string{"java_home", "jdk-11", "java 11"}},
+	// The U11c Debezium Server scenarios (KAN-351): the terms name the
+	// probe's finding and the property. sink-unreachable's title names the
+	// step sink_probe, so its terms name the refusal.
+	"setup/server-sink-unreachable":       {"kafka-connect", []string{"connection refused", "refuses connections"}},
+	"setup/server-offset-file-unwritable": {"kafka-connect", []string{"offset.storage.file.filename", "read-only file system", "config/offsets.dat"}},
+	// The U13e managed-target setup scenarios. The alert titles name the step or
+	// check and the rung, not the cause, so no title states a label term.
+	"setup/msk-plugin-s3-denied":     {"kafka-connect", []string{"getobject", "bucket policy"}},
+	"setup/msk-vpc-no-route":         {"kafka-connect", []string{"no route", "peering", "transit gateway"}},
+	"setup/ccloud-acl-missing":       {"kafka-connect", []string{"acl", "acls", "sa-00000"}},
+	"setup/aiven-plugin-unavailable": {"kafka-connect", []string{"postgresconnector", "postgres connector"}},
+	// The U12d Strimzi scenarios (KAN-290): the terms name the artifact's
+	// checksum mismatch and the empty db-credentials Secret.
+	"setup/strimzi-build-failed":        {"kafka-connect", []string{"3.1.3", "sha512sum", "checksum"}},
+	"setup/strimzi-connector-not-ready": {"kafka-connect", []string{"orders-db-credentials", "k8s_secret_apply"}},
+	// The U6c embedded scenarios (KAN-344): the terms name the two releases
+	// and the in-memory offset store.
+	"setup/embedded-version-mismatch": {"kafka-connect", []string{"2.7.2", "mix*"}},
+	"setup/embedded-offset-storage":   {"kafka-connect", []string{"memory offset backing store", "in memory"}},
 	// The Q8i MySQL scenarios (KAN-302): the label layer is the first failing
 	// one (kafka-connect in all four); the terms name the cause.
 	"mysql-binlog-purged":             {"kafka-connect", []string{"purged", "binlog.000003"}},
@@ -623,6 +657,51 @@ var syntheticTruth = map[string]map[string]truth{
 	// right layer, the wrong cause.
 	"setup/agent-stopped":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"setup/cdc-not-enabled-table": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U2c: binlog-statement's title starts with orders-mysql, the connector
+	// (kafka-connect), and names no cause; its wrong text blames purged
+	// binlogs on the source, the right layer and the wrong cause. The other
+	// two titles name the FAILED task (kafka-connect) and a check; their
+	// wrong texts blame the connector's id and the password, both on Connect.
+	"setup/binlog-statement":     {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/no-replication-grant": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/server-id-zero":       {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U3d: the lazy texts are the alert titles, which name the sink and its
+	// FAILED task (kafka-connect) and no cause. Each wrong text tells the
+	// other scenario's story about the same sink: the right layer, the wrong
+	// cause.
+	"setup/unwrap-missing":  {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/jdbc-sink-no-pk": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U8d: the lazy texts are the alert titles, which name the rung
+	// connector_running (kafka-connect) and a check, and no cause. Each wrong
+	// text tells another worker story on the same host: the right layer, the
+	// wrong cause.
+	"setup/wrong-standalone-args": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/plugin-path-unset":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/java-too-old":          {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U11c: the lazy texts are the alert titles, which name the server only
+	// by its service name (dbzserver, no layer word) and a setup step, and no
+	// cause. Each wrong text tells the other scenario's story about the same
+	// Debezium Server.
+	"setup/server-sink-unreachable":       {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/server-offset-file-unwritable": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	// U13e: every title names a step, a connector or a rung of the Connect layer
+	// and no cause. The wrong texts: a bad plugin build (Connect, wrong cause), a
+	// database outage (the source layer), a registry rejection (the registry), a
+	// missing integration (Connect, wrong cause).
+	"setup/msk-plugin-s3-denied":     {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/msk-vpc-no-route":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/ccloud-acl-missing":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"setup/aiven-plugin-unavailable": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U12d: the lazy texts are the alert titles, which name the KafkaConnect
+	// or the KafkaConnector (Connect words) and a status, no cause. Each wrong
+	// text is another Strimzi failure on the same Connect cluster.
+	"setup/strimzi-build-failed":        {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/strimzi-connector-not-ready": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// U6c: the lazy texts are the alert titles, which name the application
+	// and the engine (no layer word) and no cause. Each wrong text is the
+	// other scenario's story about the same Debezium Engine.
+	"setup/embedded-version-mismatch": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"setup/embedded-offset-storage":   {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	// Q8i: the lazy texts are the alert titles, which name the connector
 	// (orders-mysql, kafka-connect through the pipeline map) and no cause. The
 	// wrong texts name Debezium, the connector or Connect first, so they hit

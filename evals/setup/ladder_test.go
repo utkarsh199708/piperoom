@@ -167,6 +167,75 @@ func TestFakeLadderRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
+// TestFakeLadderReadsTheManagedStatusOps: on a managed target (U13e) rungs 1
+// and 2 read the provider's status op, and MSK's rung 2 is not applicable.
+func TestFakeLadderReadsTheManagedStatusOps(t *testing.T) {
+	for target, read := range map[string]string{"msk": "msk_describe_connector", "confluent": "ccloud_connector_status", "aiven": "aiven_connector_status"} {
+		reader := ReadFunc(func(_ context.Context, req ReadRequest) (json.RawMessage, error) {
+			return json.RawMessage(`{"state":"RUNNING","tasks":[{"id":0,"state":"RUNNING"}]}`), nil
+		})
+		ladder := NewFakeLadder(LadderConfig{Source: "postgres", Target: target, PlanID: "pl_1"}, reader, &MemorySink{})
+		v, err := ladder.Verify(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		reqs := ladder.Requests()
+		if len(reqs) == 0 || reqs[0].Tool != read {
+			t.Errorf("%s: first read %+v, want %s", target, reqs, read)
+		}
+		if !v.Rungs[0].OK || !v.Rungs[1].OK {
+			t.Errorf("%s: rungs 1 and 2 = %+v %+v", target, v.Rungs[0], v.Rungs[1])
+		}
+		if target == "msk" && !strings.Contains(v.Rungs[1].Note, "no per-task state") {
+			t.Errorf("msk rung 2 note %q", v.Rungs[1].Note)
+		}
+	}
+}
+
+// TestFakeLadderReadsTheStrimziConnectorCR: on a Strimzi target rungs 1 and 2
+// read the KafkaConnector CR with k8s_get (plan.StrimziLadder, the room's
+// choice), never Connect's REST status; the two recordings replay through
+// those predicates, and a CR whose task failed fails rung 2 with its trace.
+func TestFakeLadderReadsTheStrimziConnectorCR(t *testing.T) {
+	recs, err := LoadDir("recordings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"setup/strimzi-connector-not-ready", "setup/strimzi-build-failed"} {
+		rec := recs[name]
+		ladder := NewFakeLadder(LadderConfig{Source: rec.SourceKind(), Target: rec.Target, Sink: rec.SinkKind(), PlanID: rec.Ladder.PlanID}, NewRecordingReader(rec), &MemorySink{})
+		v, err := ladder.Verify(context.Background())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		reqs := ladder.Requests()
+		if len(reqs) < 2 || reqs[0].Tool != "k8s_get" || reqs[1].Tool != "k8s_get" {
+			t.Fatalf("%s: rungs 1 and 2 read %+v, want k8s_get twice", name, reqs)
+		}
+		if !v.Rungs[0].OK || v.Rungs[0].Note != "the KafkaConnector is Ready and the connector is RUNNING" {
+			t.Errorf("%s: rung 1 = %+v, want strimziConnectorRunning's verdict", name, v.Rungs[0])
+		}
+		if !v.Rungs[1].OK || v.Rungs[1].Note != "all 1 tasks are RUNNING" {
+			t.Errorf("%s: rung 2 = %+v, want strimziTasksRunning's verdict", name, v.Rungs[1])
+		}
+	}
+	failed := ReadFunc(func(_ context.Context, req ReadRequest) (json.RawMessage, error) {
+		if req.Tool != "k8s_get" {
+			return nil, errors.New("not recorded")
+		}
+		return json.RawMessage(`{"kind":"KafkaConnector","status":{"conditions":[{"type":"Ready","status":"True"}],
+			"connectorStatus":{"connector":{"state":"RUNNING"},"tasks":[{"id":0,"state":"FAILED","trace":"org.postgresql.util.PSQLException: FATAL: no pg_hba.conf entry\n\tat x"}]}}}`), nil
+	})
+	ladder := NewFakeLadder(LadderConfig{Source: "postgres", Target: "strimzi", PlanID: "pl_1"}, failed, &MemorySink{})
+	v, err := ladder.Verify(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Rungs[0].OK || v.Rungs[1].OK || !strings.Contains(v.Rungs[1].Note, "task 0 is FAILED") || !strings.Contains(v.Rungs[1].Note, "pg_hba.conf") {
+		t.Fatalf("a failed task: rungs %+v %+v", v.Rungs[0], v.Rungs[1])
+	}
+}
+
 // TestFakeLadderStopsOnCancel: a context cancelled between rungs stops the
 // ladder; it returns the context's error and writes no setup.verified.
 func TestFakeLadderStopsOnCancel(t *testing.T) {

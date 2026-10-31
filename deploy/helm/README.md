@@ -190,6 +190,105 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 | `extraVolumes`, `extraVolumeMounts` | empty | TLS files, cloud key files |
 | `serviceAccount.annotations` | empty | IRSA / workload identity |
 
+## Setup on Kubernetes with Strimzi (two more releases)
+
+For a setup room whose target is a Strimzi cluster (`docs/design/setup-strimzi.md`), the same chart is
+installed twice more in the **target namespace**. A release with `setup.pipeline.enabled` or
+`setup.runner.enabled` renders only its own objects, never the server. The room's **Set up** page shows the
+exact commands; in outline:
+
+```sh
+# once per pipeline, with your own kubectl (it holds a credential, so the chart never makes it)
+kubectl -n data create secret docker-registry orders-registry-push --docker-server=... --docker-username=... --docker-password=...
+# the pipeline release: every object the runner will touch, pre-created; the Strimzi CRs are paused shells
+helm upgrade --install piperoom-pipeline-orders deploy/helm/piperoom -n data --set setup.pipeline.enabled=true \
+  --set setup.pipeline.id=orders --set setup.pipeline.kafka=prod-kafka --set 'setup.pipeline.connectors={orders-src}'
+# per room: the pairing code as a Secret (never a value), then the runner release
+kubectl -n data create secret generic piperoom-setup-<room>-pairing --from-literal=code=<CODE>
+helm upgrade --install piperoom-setup-<room> deploy/helm/piperoom -n data --set setup.runner.enabled=true \
+  --set setup.runner.room=<ROOM> --set setup.runner.pipeline=orders --set setup.runner.kafka=prod-kafka \
+  --set 'setup.runner.connectors={orders-src}' --set setup.runner.serverURL=https://piperoom.example.com
+```
+
+`<room>` is the room id without its `r_` prefix, lowercased (the chart lowercases `setup.runner.room` itself).
+The chart refuses a release whose name is not `piperoom-pipeline-<pipeline>` or `piperoom-setup-<room>`, both
+blocks in one release, and a connector name twice. The runner's Role has **no `create`** and names every object
+(`resourceNames`); `list` only on events; no `escalate`, `bind`, `impersonate` or `*`; nothing cluster-scoped.
+`setup.pipeline.admissionPolicy=true` adds the D11 `ValidatingAdmissionPolicy` and its binding (cluster-scoped:
+cluster-admin at install; required for a `production` target); it needs `setup.pipeline.topicPrefix` (the
+pipeline's topic prefix: a KafkaUser's topic ACLs and the canary KafkaTopic are held to it) and
+`setup.pipeline.imageRegistries` (the registries a KafkaConnect build may push to) and
+`setup.pipeline.databaseHosts` (the database hosts a KafkaConnector may connect to: the room's source and sink
+targets), and pins build artifacts to `setup.pipeline.pluginHosts` (default `repo1.maven.org`) and Schema
+Registry URLs to `setup.pipeline.schemaRegistries` (empty refuses the `*.converter.schema.registry.url` keys).
+The policy also holds the KafkaConnect's and the schema history's bootstrap to the Kafka CR's in-cluster bootstrap
+Service (an external listener is refused; with `networkPolicy.enabled` the port is one of
+`setup.pipeline.networkPolicy.kafkaPorts`, so the egress policy and the bootstrap cannot drift apart), and refuses
+JVM system properties and a KafkaConnector's `state`, `alterOffsets` and `listOffsets`. Every connector value check
+is an **allow-list that mirrors the runner**, generated from it into `files/` (the runner's
+`policy_files_test.go` fails when a file drifts; `celcheck_parity_test.go` runs every celcheck case through the
+runner too; `ci/setup/celcheck` runs the CEL over the golden render with `cases.json` and `renders.json`, the
+objects the runner writes for the CI values):
+
+- `setup-connector-keys.txt`: the config keys any plugin admits; any other key is refused.
+- `setup-connector-values.txt`: keys pinned to exact or case-folded values (TLS modes, converters, naming
+  strategies, the connection provider, `signal.enabled.channels`, the schema history's SSL client settings), the
+  credential keys (a user key must be exactly `${secrets:<ns>/<pipeline>-db-credentials:username}`, a password key
+  `...:password`; no other `${...}` anywhere), and the TLS key each source dialect must set.
+- `setup-url-params.txt`: per JDBC dialect and for MongoDB, the free parameters, the enumerated `name=value` pairs,
+  the required TLS parameter and the default port.
+- `setup-smt.txt`: the transform and predicate classes (and the RegexRouter, only on a JDBC sink, with a
+  replacement without `.`), their keys and enumerated values; aliases and `route.by.field` are refused.
+- `setup-patterns.txt`: the per-dialect URL shapes and the name patterns.
+
+No key or value may hold a control character (Java's `trim()` strips them) or start or end in whitespace. A
+connection URL must match its dialect's shape: no userinfo (`@`), no percent escape but `%20`, **no IPv6 literal**
+(the runner refuses them too), Db2 as `db:k=v;...;`, MongoDB as plain `mongodb://` (no `+srv`). A source's
+`topic.prefix` is `setup.pipeline.topicPrefix`; a sink's topics, the dead letter queue and the schema history are
+under it and never one of the Connect cluster's own `<connect>-*` topics; database hosts are
+`setup.pipeline.databaseHosts` (`host:port`) and Schema Registry URLs `setup.pipeline.schemaRegistries`, exactly
+(lower case, no path, no trailing `/`).
+
+**Behaviour changes (round 4).** A source must name a verifying TLS mode (`database.sslmode` `verify-ca` or
+`verify-full` for PostgreSQL, `database.ssl.mode` `verify_ca` or `verify_identity` for MySQL, `database.encrypt=true`
+for SQL Server), and a JDBC sink URL must carry its dialect's (`sslmode=verify-ca` or `verify-full` for PostgreSQL and MariaDB,
+`sslmode=VERIFY_CA` or `VERIFY_IDENTITY` for MySQL, `encrypt=true` for SQL Server; `allowPublicKeyRetrieval` only with a verifying mode): a plaintext database
+or `require` (TLS without verification) is refused where it was allowed. The schema history clients must use
+`SSL` (no `PLAINTEXT` or `SASL_*`). Oracle and Db2 have no URL parameter that pins certificate verification, so
+the chart cannot require one (Db2 `sslConnection=true` is allowed, not required): their TLS is the database's
+configuration. A JDBC sink's table and schema are not bound to a list: `table.name.format`, `collection.name.format` and
+`currentSchema` are refused, and a RegexRouter replacement or CollectionNameTransformation prefix or suffix may not
+hold a `.`, so tables stay in the connection's default schema, but the **sink database's grants** for the
+connector's user are the boundary for what it may write.
+
+The runner and the server both require a connector step's `topic_prefix` param to be the pipeline's. With
+`networkPolicy.enabled` the runner release adds a NetworkPolicy for the Job: no ingress, egress to DNS, the API
+server and the server only (`setup.runner.networkPolicy`; add the source database to its `extraEgress` when the
+Job runs the source ops). The pipeline release adds one for the Connect pods: egress to DNS, the other Connect
+workers on 8083 (a worker forwards REST writes to the leader), the Kafka cluster's pods
+(`setup.pipeline.networkPolicy.kafkaPorts`), the API server (the secrets config provider reads the credentials
+Secret), the databases (`databases.ports`; each `databaseHosts` port must be one of them), the Schema Registries
+(ports from `schemaRegistries`, peers in `schemaRegistries.to`) and `extraEgress`; ingress stays Strimzi's. It
+also adds one for the KafkaConnect build pod (`<connect>-connect-build`): DNS, the plugin hosts
+(`build.sources.to`, ports from `pluginHosts`) and the image registries (`build.registry.to`, ports from
+`imageRegistries`); it needs nothing else. Every `to` of these policies but DNS's is **required and non-empty**:
+the chart refuses to render with an empty one, which would open the port to any destination.
+The runner refuses to patch or delete an object of a chart name that does not carry the pipeline release's
+`app.kubernetes.io/instance` label and Helm's `meta.helm.sh/release-name` annotation naming that release (and, at
+`helm install` of the runner release, the chart checks the same of the KafkaConnect shell). That check catches
+mistakes, not an adversary: labels and annotations are set by whoever writes the object, so the boundary is the
+runner's RBAC and the admission policy. It needs objects Helm installed: a pipeline release rendered with
+`helm template` and applied by kubectl, or deployed by Argo CD, is unsupported. The Strimzi floor is 0.49 (the
+`kafka.strimzi.io/v1` API), which also provides the `strimzienv` provider and `CERTS_STORE_PASSWORD` the schema
+history TLS settings use. The close card gives
+`helm uninstall piperoom-setup-<room> -n data`; the pipeline release is uninstalled only by the rollback card.
+
+The Job runs `piperoom-setup --code-file ... --confirm-secret-prefix ... --strimzi-pipeline ...`: it reads the
+code from the mounted Secret, deletes that Secret once the server's Welcome arrives, logs the Welcome block with
+its fingerprint (`kubectl -n data logs job/piperoom-setup-<room>`), and waits up to 10 minutes for you to confirm
+with `kubectl -n data create secret generic piperoom-setup-<room>-confirm --from-literal=fingerprint=<12 characters>`.
+A confirm Secret that exists before the Welcome, a wrong fingerprint or no Secret in time ends the Job.
+
 ## Upgrade
 
 ```sh
@@ -221,3 +320,8 @@ done
 helm template piperoom deploy/helm/piperoom -f deploy/helm/piperoom/ci/oidc-values.yaml --set replicaCount=3 \
   | grep -E 'kind: PodDisruptionBudget|type: RollingUpdate'
 ```
+
+The two setup releases have their own checks: `deploy/helm/piperoom/ci/setup/golden.sh` renders both, diffs
+them against `pipeline.golden.yaml` and `runner.golden.yaml` (`-update` rewrites them after an intended change)
+and runs `check.py` (every Strimzi CR paused, the Role's verbs and names, the Job's pod security). The Go
+test `internal/setup/targets/strimzi/chart_names_test.go` pins the golden names to the driver's.

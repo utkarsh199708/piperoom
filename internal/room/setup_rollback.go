@@ -222,7 +222,7 @@ func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]
 				"step %d: the room log does not hold the proposal of this executed step, so its rollback is unknown; record a new setup plan before rolling back",
 				r.PlanIndex+1))
 		}
-		op, params, err := setupRollbackOf(r)
+		op, params, err := setupRollbackOf(r, snap.Setup.Provisional.TopicPrefix)
 		if err != nil {
 			return nil, nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
 		}
@@ -294,7 +294,7 @@ func (s *Service) setupRanSteps(ctx context.Context, snap *RoomSnapshot) ([]setu
 	if err != nil {
 		return nil, 0, err
 	}
-	ran, executed := setupWalkRan(evs)
+	ran, executed := setupWalkRan(evs, snap.Setup.Provisional.TopicPrefix)
 	return ran, executed, nil
 }
 
@@ -344,7 +344,7 @@ func (s *Service) setupLogSince(ctx context.Context, roomID string, afterSeq int
 // Every piece of the answer is server-written: the preview's rollback, the
 // plan index and the step's own params. The model writes params, but only a
 // proposal that was created (and so validated, guarded and approved) has them.
-func setupWalkRan(evs []events.Event) ([]setupRanStep, int) {
+func setupWalkRan(evs []events.Event, topicPrefix string) ([]setupRanStep, int) {
 	proposals := map[string][]events.ProposalStep{}
 	previews := map[string]map[int]string{}
 	for _, e := range evs {
@@ -404,7 +404,7 @@ func setupWalkRan(evs []events.Event) ([]setupRanStep, int) {
 			if !p.OK || !found {
 				continue
 			}
-			if i := setupUndoneIndex(ran, steps[p.StepIndex]); i >= 0 {
+			if i := setupUndoneIndex(ran, steps[p.StepIndex], topicPrefix); i >= 0 {
 				ran = append(ran[:i], ran[i+1:]...)
 			}
 		}
@@ -416,13 +416,13 @@ func setupWalkRan(evs []events.Event) ([]setupRanStep, int) {
 // recorded rollback is exactly step's action and params), or -1. Newest first
 // is the rollback order, so a repeated rollback of two identical steps undoes
 // the one that ran last.
-func setupUndoneIndex(ran []setupRanStep, step events.ProposalStep) int {
+func setupUndoneIndex(ran []setupRanStep, step events.ProposalStep, topicPrefix string) int {
 	for i := len(ran) - 1; i >= 0; i-- {
 		r := ran[i]
 		if r.Action == "" {
 			continue
 		}
-		op, params, err := setupRollbackOf(r)
+		op, params, err := setupRollbackOf(r, topicPrefix)
 		if err != nil || op != step.Action {
 			continue
 		}
@@ -446,8 +446,10 @@ func setupSameParams(a, b json.RawMessage) bool {
 }
 
 // setupRollbackOf resolves one executed step's rollback: the action to run and
-// the params it runs with.
-func setupRollbackOf(r setupRanStep) (string, json.RawMessage, error) {
+// the params it runs with. topicPrefix is the room's provisional pipeline's,
+// which a KafkaTopic delete recorded before k8s_delete took topic_prefix
+// lacks (setupRollbackParams).
+func setupRollbackOf(r setupRanStep, topicPrefix string) (string, json.RawMessage, error) {
 	record := strings.TrimSpace(r.Rollback)
 	if record == "" {
 		return "", nil, errors.New("the room recorded no rollback for it, so no action can undo it")
@@ -456,7 +458,7 @@ func setupRollbackOf(r setupRanStep) (string, json.RawMessage, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	params, err := setupRollbackParams(op, obj)
+	params, err := setupRollbackParams(op, obj, topicPrefix)
 	if err != nil {
 		return "", nil, err
 	}
@@ -490,11 +492,20 @@ func parseSetupRollback(record string) (string, map[string]any, error) {
 
 // setupRollbackParams builds the params the rollback step runs with: the
 // recorded ones as written, and for compose_down the room's volumes-kept mark.
+// One more is added: a k8s_delete of a KafkaTopic recorded before the op
+// took topic_prefix (round 4) carries none, and the server and the runner
+// now both require it, so such a record gets the room's own topic prefix,
+// the one its scope checks the delete against. The runner stays strict.
 // Nothing else is added: an action decodes its params strictly, and an
 // injected field would make it refuse its own rollback. The class the undo
 // routes at is checked against the class the step ran at instead
 // (setupRollbackPlan).
-func setupRollbackParams(op string, recorded map[string]any) (json.RawMessage, error) {
+func setupRollbackParams(op string, recorded map[string]any, topicPrefix string) (json.RawMessage, error) {
+	if op == "k8s_delete" && recorded["kind"] == "KafkaTopic" && topicPrefix != "" {
+		if _, ok := recorded["topic_prefix"]; !ok {
+			recorded["topic_prefix"] = topicPrefix
+		}
+	}
 	if op == plan.OpComposeDown {
 		// The rollback of a compose_up is a compose_down that keeps its
 		// volumes (U1-14b, design §2.5: no op deletes data). The catalogue has

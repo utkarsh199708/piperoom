@@ -1,0 +1,255 @@
+# C7 setup scenario (U3d): the setup run added Debezium's JDBC sink to a green Postgres pipeline
+# with insert.mode=upsert, but primary.key.mode stayed at its default none and primary.key.fields
+# unset. An upsert needs the row's key; the sink has none, so task 0 FAILS on the first record. The
+# label names the sink key (Jira KAN-5 row U3d, KAN-364; the row's done-when: "labels name the SMT
+# or sink key"). Format: evals/README.md (C6). Built on U3a's SMT and sink index and U3b's
+# setup_config_help and sink registration (internal/setup/knowledge/index/sink-connect.yaml,
+# internal/setup/tools/confighelp.go and configbuild.go; docs/pilot/transforms-and-sinks.md).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_plugins, kafkatools and dbtools code on this branch,
+# composed by hand (the U1-19 approach; this session has no Docker). The task's error is Debezium's
+# JDBC sink refusing an upsert with no key fields (JdbcChangeEventSink; text unconfirmed on 3.2)
+# under its "JDBC sink connector failure" and WorkerSinkTask's wrappers. Clock:
+# 2026-10-29T09:40:00Z. Runner session: evals/setup/recordings/setup-jdbc-sink-no-pk.json (the sink
+# step; the ladder with a postgres sink). To re-record both on the dev stack, see
+# evals/scenarios/README.md, "Setup scenarios: transforms and sinks (U3d)".
+#
+# Timeline: 09:05 the pipeline was green. 09:25 the person asked the setup to add a warehouse sink
+#   that keeps analytics.orders current ("update the row when an order changes"), so the run chose
+#   Debezium's JDBC sink (bundled in the Connect image) with insert.mode=upsert and
+#   schema.evolution=none, and left primary.key.mode at its default. 09:30 connect_validate_config: 0
+#   errors (Connect checks each key's value, not the pair). 09:32 the setup registered wh-orders-sink
+#   (connect_create_connector, T2). 09:32:38 task 0 FAILED on its first record. 09:39 the
+#   re-verification: rungs 1 to 6 green, rung sink_row red.
+#
+# First failing layer: kafka-connect (the sink task FAILED; the warehouse answers reads).
+#   Root-cause layer: kafka-connect (the sink connector's config).
+#
+# Expected label: the sink key primary.key.mode (with primary.key.fields): insert.mode=upsert needs
+#   primary.key.mode=record_key (the Debezium record key, id) - the index's debezium-jdbc-sink check
+#   "upsert needs primary.key.mode and primary.key.fields" and "with the default
+#   primary.key.mode=none rows have no key and upserts cannot work". Fix: the U3b builder sets
+#   primary.key.mode=record_key (primary.key.fields=id names the key column; with record_key the key
+#   struct's fields are the default) through the index, and the sink is registered again as Q5c
+#   steps: connect_delete_connector, then connect_create_connector (T2). Its group committed no
+#   offset, so it starts from the beginning of pg.public.orders. No expect.fix (as
+#   setup/unwrap-missing).
+#   Forbidden: connect_update_connector_config - its allow-list has no sink key; the action cannot
+#     set primary.key.mode.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - the first
+#     record fails the same way after any restart; nothing is paused.
+#   Forbidden: kafka_reset_consumer_offsets - nothing was committed; a reset gives the rows no key.
+#   Forbidden: schema_register, schema_set_compatibility - the subjects are fine.
+#
+# Traps:
+#   - The unwrap story (setup/unwrap-missing): Debezium's JDBC sink reads the change event envelope
+#     natively, so no SMT is missing here; adding ExtractNewRecordState changes nothing about the key.
+#   - connect_config hides insert.mode and primary.key.mode (they are not on its key list); the trace
+#     and the setup's own request ("update the row") say upsert.
+#   - schema.evolution=none is not the problem: analytics.orders exists with the row's columns.
+#
+# Sources:
+#   - internal/setup/knowledge/index/sink-connect.yaml: debezium-jdbc-sink (insert.mode values and
+#     check, primary.key.mode values and default none, primary.key.fields, delete.enabled's check,
+#     the checks block).
+#   - internal/setup/tools/configbuild.go: the builder and SinkRegistrationAction;
+#     internal/actions/connector_config.go: the update allow-list.
+#   - internal/tools/kafkatools/connect_tools.go: connect_config's redaction and key list.
+#   - https://debezium.io/documentation/reference/3.2/connectors/jdbc.html: insert.mode upsert
+#     requires a primary key; primary.key.mode, primary.key.fields.
+
+name: setup/jdbc-sink-no-pk
+description: |
+  The orders pipeline was green when the person asked the setup run to add a warehouse sink that
+  keeps analytics.orders current. The run registered Debezium's JDBC sink wh-orders-sink at 09:32
+  with insert.mode=upsert and schema.evolution=none; primary.key.mode stayed at its default none and
+  primary.key.fields unset, and connect_validate_config reported 0 errors. Task 0 FAILED on its first
+  record: "Cannot write to table orders with no key fields defined." The re-verification at 09:39 is
+  green on rungs 1 to 6 and red at rung sink_row. pg-orders-connector, the topic and the registry are
+  healthy.
+
+  Root cause: an upsert sink without a primary key mode: insert.mode=upsert needs
+  primary.key.mode=record_key (or primary.key.fields), and the default none gives the rows no key.
+
+  Expected label: the sink key primary.key.mode (set it to record_key, with primary.key.fields=id) and
+  register wh-orders-sink again with it (connect_delete_connector, then connect_create_connector, T2).
+
+setup:
+  source_kind: postgres
+  target: compose
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector, wh-orders-sink]
+  consumer_groups: [connect-wh-orders-sink]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector, wh-orders-sink]
+  subjects: [pg.public.orders-key, pg.public.orders-value, pg.public.piperoom_canary-key, pg.public.piperoom_canary-value]
+
+alert:
+  title: 'orders setup: re-verification failed at rung sink_row (the canary row is not in the sink); wh-orders-sink task 0 FAILED'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.2 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+      from: connect:pg-orders-connector
+    4 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: topic:pg.public.orders
+    5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=103 state=Empty
+      from: topic:pg.public.orders
+    6 wh:analytics.orders [warehouse, owner meera] UNKNOWN ts_column=updated_at
+      from: connect:wh-orders-sink, group:connect-wh-orders-sink
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.2 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK tasks_running=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+        from: connect:pg-orders-connector
+      4 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: topic:pg.public.orders
+      5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=103 state=Empty
+        from: topic:pg.public.orders
+      6 wh:analytics.orders [warehouse, owner meera] UNKNOWN ts_column=updated_at
+        from: connect:wh-orders-sink, group:connect-wh-orders-sink
+  - tool: connect_status
+    input: {connector: wh-orders-sink}
+    summary: |-
+      wh-orders-sink (sink): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Exiting WorkerSinkTask due to unrecoverable exception.
+      Caused by: org.apache.kafka.connect.errors.ConnectException: JDBC sink connector failure
+      Caused by: org.apache.kafka.connect.errors.ConnectException: Cannot write to table orders with no key fields defined.
+    data:
+      name: wh-orders-sink
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: Exiting WorkerSinkTask due to unrecoverable exception.\nCaused by: org.apache.kafka.connect.errors.ConnectException: JDBC sink connector failure\nCaused by: org.apache.kafka.connect.errors.ConnectException: Cannot write to table orders with no key fields defined."
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  # connect_config keeps only its fixed key list and redacts credentials: insert.mode,
+  # primary.key.mode, topics and connection.url of a sink are not shown.
+  - tool: connect_config
+    input: {connector: wh-orders-sink}
+    summary: |-
+      connection.password: ***
+      connector.class: io.debezium.connector.jdbc.JdbcSinkConnector
+    data:
+      connection.password: '***'
+      connector.class: io.debezium.connector.jdbc.JdbcSinkConnector
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom_cdc
+      publication.name: dbz_publication
+      slot.name: debezium_orders
+      table.include.list: public.orders,public.piperoom_canary
+      topic.prefix: pg
+  - tool: connect_plugins
+    summary: |-
+      Kafka 4.1.0: 8 plugins
+      2 source, 1 sink, 2 converter, 3 transformation
+      - source io.debezium.connector.mysql.MySqlConnector 3.2.0.Final
+      - source io.debezium.connector.postgresql.PostgresConnector 3.2.0.Final
+      - sink io.debezium.connector.jdbc.JdbcSinkConnector 3.2.0.Final
+      - converter io.confluent.connect.avro.AvroConverter 8.0.0
+      - converter org.apache.kafka.connect.json.JsonConverter 4.1.0
+      - transformation io.debezium.transforms.ByLogicalTableRouter 3.2.0.Final
+      - transformation io.debezium.transforms.ExtractNewRecordState 3.2.0.Final
+      - transformation org.apache.kafka.connect.transforms.RegexRouter 4.1.0
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–103 (103 records), newest 1 min ago
+  - tool: kafka_consumer_lag
+    input: {group: connect-wh-orders-sink}
+    summary: |-
+      connect-wh-orders-sink: Empty, 0 members, total lag 103
+        pg.public.orders/0: no committed offset, end 103, lag 103
+  - tool: warehouse_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+      pg.public.piperoom_canary-key
+      pg.public.piperoom_canary-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: meera
+    text: "I asked for a sink that updates the order row when it changes, and it died on the first record although validation passed. Which setting is wrong in the sink?"
+
+expect:
+  root_cause:
+    - [primary key mode, primary key fields]
+    - [upsert, insert mode]
+  root_cause_forbidden:
+    - [password]
+    - [unwrap]
+    - [extract new record state]
+    - [schema evolution]
+    - [permission denied]
+    - [connector, paused]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_no_key_fields
+      tool: connect_status
+      match: [task 0 failed, cannot write to table orders, key fields defined]
+      required: true
+    - id: f_debezium_sink
+      tool: connect_config
+      match: [io debezium connector jdbc jdbc sink connector]
+  claims:
+    - about: root_cause
+      facts: [f_no_key_fields]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_update_connector_config, connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

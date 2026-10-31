@@ -1,0 +1,531 @@
+{
+  "scenario": "setup/java-too-old",
+  "source": "postgres",
+  "target": "host",
+  "sink": "none",
+  "recorded_at": "2026-10-29T09:40:00Z",
+  "note": "Composed from the host target's ops (internal/setup/targets/host: properties_write, service_install, service_restart, service_status, journal_tail, properties_read; their summary and Data formats) and the generic java_version, over the project layout of the `host` dev profile (dev/host/base: the unit file, connect-standalone.properties, the JDKs under /opt), on the fixed clock of the U8d scenarios. The journal lines are Kafka Connect's and the JVM's own messages composed by hand (the fake host runs no worker). Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC. No real host session: re-record on the host profile per evals/scenarios/README.md, Setup scenarios: host target (U8d).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "linux/amd64; project has kafka; java, systemctl on PATH",
+        "data": {
+          "os": "linux",
+          "arch": "amd64",
+          "project_dir": "/piperoom-host/project",
+          "project_files": [
+            {
+              "name": "kafka",
+              "kind": "dir"
+            }
+          ],
+          "tools": [
+            "java",
+            "systemctl"
+          ]
+        },
+        "receipt": {
+          "kind": "",
+          "target": "/piperoom-host/project",
+          "exit_code": 0,
+          "at": "2026-10-29T09:05:01Z",
+          "took_ms": 4,
+          "out_mac": "48f417afc26831b1795b0d84d57522ef51626412a05aba3eac84999c6dbe6c31"
+        }
+      }
+    },
+    {
+      "op": "java_version",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "java 21.0.8",
+        "data": {
+          "version": "21.0.8",
+          "vendor": "openjdk",
+          "line": "openjdk version \"21.0.8\" 2025-07-15 LTS"
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "java",
+            "-version"
+          ],
+          "target": "java",
+          "exit_code": 0,
+          "at": "2026-10-29T09:05:02Z",
+          "took_ms": 118,
+          "out_mac": "5f66ca03f7c14c74f8f25b0fa6a14b960314d3eea8c2e221d5c5310935c67a4a"
+        }
+      }
+    },
+    {
+      "op": "properties_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "45f2e38fdd8fb293204307a53ab8983b91f1465a4e6e301278c52924698c25af",
+      "params": {
+        "file": "connect-standalone.properties",
+        "entries": {
+          "bootstrap.servers": "127.0.0.1:29092",
+          "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+          "listeners": "http://127.0.0.1:8083",
+          "offset.storage.file.filename": "/piperoom-host/project/connect.offsets",
+          "plugin.path": "/piperoom-host/project/connect-plugins",
+          "value.converter": "org.apache.kafka.connect.json.JsonConverter"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote connect-standalone.properties (standalone worker, 6 keys)",
+        "data": {
+          "file": "connect-standalone.properties",
+          "mode": "standalone",
+          "keys": [
+            "bootstrap.servers",
+            "key.converter",
+            "listeners",
+            "offset.storage.file.filename",
+            "plugin.path",
+            "value.converter"
+          ],
+          "defaults_added": null,
+          "changed": true,
+          "bytes": 412,
+          "outside_project": false,
+          "tier": "T1"
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "connect-standalone.properties",
+          "exit_code": 0,
+          "at": "2026-10-29T09:06:10Z",
+          "took_ms": 3,
+          "out_mac": "03f733f72bd4a17b10e7732d05ab6c1816093875ff9567e2a765fb5cc79d57d5"
+        }
+      }
+    },
+    {
+      "op": "service_install",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "5f831bd5ea6d829651299bc39355dc0aff71777cf7897864dfa3074bc5b67b88",
+      "params": {
+        "name": "connect",
+        "mode": "standalone"
+      },
+      "result": {
+        "ok": true,
+        "summary": "installed piperoom-connect.service (standalone, user unit): unit file systemd/piperoom-connect.service written, enabled; service_restart starts it",
+        "data": {
+          "unit": "piperoom-connect.service",
+          "mode": "standalone",
+          "scope": "user",
+          "unit_file": "systemd/piperoom-connect.service",
+          "java_home": "/opt/java/openjdk",
+          "exec_start": [
+            "/piperoom-host/project/kafka/bin/connect-standalone.sh",
+            "/piperoom-host/project/connect-standalone.properties"
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "systemctl",
+            "--user",
+            "enable",
+            "/piperoom-host/project/systemd/piperoom-connect.service"
+          ],
+          "target": "piperoom-connect.service",
+          "exit_code": 0,
+          "at": "2026-10-29T09:07:30Z",
+          "took_ms": 412,
+          "out_mac": "e5c974246fc24c8eba2112ac3e5becc714ba6559a0886508f7fc4f205a79e731"
+        }
+      }
+    },
+    {
+      "op": "service_restart",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "8aa7f8f2d97f2a87278af1b5bd7426c7083bc33a8e74a1a4fd8b19f2a8116bd4",
+      "params": {
+        "name": "connect"
+      },
+      "result": {
+        "ok": true,
+        "summary": "restarted piperoom-connect.service; now piperoom-connect.service: active (running), enabled",
+        "data": {
+          "unit": "piperoom-connect.service",
+          "argv": [
+            "systemctl",
+            "--user",
+            "restart",
+            "piperoom-connect.service"
+          ],
+          "state": {
+            "unit": "piperoom-connect.service",
+            "scope": "user",
+            "installed": true,
+            "running": true,
+            "load_state": "loaded",
+            "active_state": "active",
+            "sub_state": "running",
+            "unit_file_state": "enabled",
+            "result": "success",
+            "main_pid": "4121",
+            "exec_main_status": "0",
+            "restarts": "0",
+            "fragment_path": "/piperoom-host/project/systemd/piperoom-connect.service",
+            "this_project": true
+          }
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "systemctl",
+            "--user",
+            "restart",
+            "piperoom-connect.service"
+          ],
+          "target": "piperoom-connect.service",
+          "exit_code": 0,
+          "at": "2026-10-29T09:08:02Z",
+          "took_ms": 1640,
+          "out_mac": "cbebac09ea4688af83a12cbd6581822d83872038cf98545cbea7ae05bf971a51"
+        }
+      }
+    },
+    {
+      "op": "service_status",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "name": "connect"
+      },
+      "result": {
+        "ok": true,
+        "summary": "piperoom-connect.service: active (running), enabled",
+        "data": {
+          "unit": "piperoom-connect.service",
+          "scope": "user",
+          "installed": true,
+          "running": true,
+          "load_state": "loaded",
+          "active_state": "active",
+          "sub_state": "running",
+          "unit_file_state": "enabled",
+          "result": "success",
+          "main_pid": "4121",
+          "exec_main_status": "0",
+          "restarts": "0",
+          "fragment_path": "/piperoom-host/project/systemd/piperoom-connect.service",
+          "this_project": true
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "systemctl",
+            "--user",
+            "show",
+            "--no-pager",
+            "--property=LoadState,ActiveState,SubState,UnitFileState,Result,MainPID,ExecMainStatus,NRestarts,FragmentPath",
+            "piperoom-connect.service"
+          ],
+          "target": "piperoom-connect.service",
+          "exit_code": 0,
+          "at": "2026-10-29T09:08:40Z",
+          "took_ms": 22,
+          "out_mac": "91da706fdad647968999434227bf26ef4cc91d522ac371d36a990c6fe98a4a35"
+        }
+      }
+    },
+    {
+      "op": "connect_create_connector",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_4",
+      "step_index": 0,
+      "params_hash": "5ad7afc61a098da1d34862edb2d913ee7d421e204b7222baae5892d418e3bb95",
+      "params": {
+        "connector": "pg-orders-connector",
+        "config": {
+          "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+          "database.dbname": "orders",
+          "database.hostname": "127.0.0.1",
+          "database.password": "${secret:source_read_piperoom_cdc}",
+          "database.port": "5432",
+          "database.user": "piperoom_cdc",
+          "plugin.name": "pgoutput",
+          "publication.name": "dbz_publication",
+          "slot.name": "debezium_orders",
+          "table.include.list": "public.orders,public.piperoom_canary",
+          "topic.prefix": "pg"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "created pg-orders-connector (RUNNING, 1 task)",
+        "data": {
+          "connector": "pg-orders-connector",
+          "state": "RUNNING",
+          "tasks": 1
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "http://127.0.0.1:8083/connectors",
+          "exit_code": 0,
+          "at": "2026-10-29T09:12:03Z",
+          "took_ms": 377,
+          "out_mac": "10a4e605607806930f7d49217d7ec79b774f0c6e97770db3c8fbe3d8730e7924"
+        }
+      }
+    },
+    {
+      "op": "service_status",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "name": "connect"
+      },
+      "result": {
+        "ok": true,
+        "summary": "piperoom-connect.service: failed (failed), enabled, last result start-limit-hit, exit status 1",
+        "data": {
+          "unit": "piperoom-connect.service",
+          "scope": "user",
+          "installed": true,
+          "running": false,
+          "load_state": "loaded",
+          "active_state": "failed",
+          "sub_state": "failed",
+          "unit_file_state": "enabled",
+          "result": "start-limit-hit",
+          "main_pid": "0",
+          "exec_main_status": "1",
+          "restarts": "5",
+          "fragment_path": "/piperoom-host/project/systemd/piperoom-connect.service",
+          "this_project": true
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "systemctl",
+            "--user",
+            "show",
+            "--no-pager",
+            "--property=LoadState,ActiveState,SubState,UnitFileState,Result,MainPID,ExecMainStatus,NRestarts,FragmentPath",
+            "piperoom-connect.service"
+          ],
+          "target": "piperoom-connect.service",
+          "exit_code": 0,
+          "at": "2026-10-29T09:40:01Z",
+          "took_ms": 21,
+          "out_mac": "912fa5412b28b6e3f0012978bb391c5eaba556243130272a8ddb1515045cd492"
+        }
+      }
+    },
+    {
+      "op": "journal_tail",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "unit": "piperoom-connect.service",
+        "user": true
+      },
+      "result": {
+        "ok": true,
+        "summary": "piperoom-connect.service journal (user): 7 lines, newest last:\n2026-10-29T09:31:08+0000 orders-host connect-standalone.sh[5266]: Error: LinkageError occurred while loading main class org.apache.kafka.connect.cli.ConnectStandalone\n2026-10-29T09:31:08+0000 orders-host connect-standalone.sh[5266]: \tjava.lang.UnsupportedClassVersionError: org/apache/kafka/connect/cli/ConnectStandalone has been compiled by a more recent version of the Java Runtime (class file version 61.0), this version of the Java Runtime only recognizes class file versions up to 55.0\n2026-10-29T09:31:08+0000 orders-host systemd[1187]: piperoom-connect.service: Main process exited, code=exited, status=1/FAILURE\n2026-10-29T09:31:08+0000 orders-host systemd[1187]: piperoom-connect.service: Failed with result 'exit-code'.\n2026-10-29T09:31:59+0000 orders-host systemd[1187]: piperoom-connect.service: Start request repeated too quickly.\n2026-10-29T09:31:59+0000 orders-host systemd[1187]: piperoom-connect.service: Failed with result 'start-limit-hit'.\n2026-10-29T09:31:59+0000 orders-host systemd[1187]: Failed to start piperoom-connect.service - Piperoom Kafka Connect worker (standalone).",
+        "data": {
+          "unit": "piperoom-connect.service",
+          "user": true,
+          "lines": [
+            "2026-10-29T09:31:08+0000 orders-host connect-standalone.sh[5266]: Error: LinkageError occurred while loading main class org.apache.kafka.connect.cli.ConnectStandalone",
+            "2026-10-29T09:31:08+0000 orders-host connect-standalone.sh[5266]: \tjava.lang.UnsupportedClassVersionError: org/apache/kafka/connect/cli/ConnectStandalone has been compiled by a more recent version of the Java Runtime (class file version 61.0), this version of the Java Runtime only recognizes class file versions up to 55.0",
+            "2026-10-29T09:31:08+0000 orders-host systemd[1187]: piperoom-connect.service: Main process exited, code=exited, status=1/FAILURE",
+            "2026-10-29T09:31:08+0000 orders-host systemd[1187]: piperoom-connect.service: Failed with result 'exit-code'.",
+            "2026-10-29T09:31:59+0000 orders-host systemd[1187]: piperoom-connect.service: Start request repeated too quickly.",
+            "2026-10-29T09:31:59+0000 orders-host systemd[1187]: piperoom-connect.service: Failed with result 'start-limit-hit'.",
+            "2026-10-29T09:31:59+0000 orders-host systemd[1187]: Failed to start piperoom-connect.service - Piperoom Kafka Connect worker (standalone)."
+          ],
+          "count": 7,
+          "tail": 200
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "journalctl",
+            "--user",
+            "-u",
+            "piperoom-connect.service",
+            "-n",
+            "200",
+            "--no-pager",
+            "-o",
+            "short-iso"
+          ],
+          "target": "piperoom-connect.service",
+          "exit_code": 0,
+          "at": "2026-10-29T09:40:02Z",
+          "took_ms": 57,
+          "out_mac": "7de014fee206f6cd9a66e6296be02d3cac3cd9ba9e3fa7082d2402e68b2233f6"
+        }
+      }
+    },
+    {
+      "op": "java_version",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "java 21.0.8",
+        "data": {
+          "version": "21.0.8",
+          "vendor": "openjdk",
+          "line": "openjdk version \"21.0.8\" 2025-07-15 LTS"
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "java",
+            "-version"
+          ],
+          "target": "java",
+          "exit_code": 0,
+          "at": "2026-10-29T09:40:04Z",
+          "took_ms": 121,
+          "out_mac": "63484848467cccf517d2d52d54aef7972ff5e80d1ab774a96f3e4b58346b640f"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_host_setup",
+    "nonce_hash": "8688f7cf70531022b7e786f8ad8b41c916e6be22f2c160dfa80f773f82d7f628",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "error": "connect: GET /connectors/pg-orders-connector/status: Get \"http://127.0.0.1:8083/connectors/pg-orders-connector/status\": dial tcp 127.0.0.1:8083: connect: connection refused",
+        "at": "2026-10-29T09:39:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "error": "connect: GET /connectors/pg-orders-connector/status: Get \"http://127.0.0.1:8083/connectors/pg-orders-connector/status\": dial tcp 127.0.0.1:8083: connect: connection refused",
+        "at": "2026-10-29T09:39:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "pg.public.piperoom_canary",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 1
+            }
+          ],
+          "total_records": 1
+        },
+        "at": "2026-10-29T09:39:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {
+          "configured": false
+        },
+        "at": "2026-10-29T09:39:04Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "pg.public.piperoom_canary",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 1
+            }
+          ],
+          "total_records": 1
+        },
+        "at": "2026-10-29T09:39:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {
+          "topic": "pg.public.piperoom_canary",
+          "key": "8a0f3c6e2d91b74f5e0c8a17d3b2f694",
+          "found": false
+        },
+        "at": "2026-10-29T09:39:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {
+          "configured": false
+        },
+        "at": "2026-10-29T09:39:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {
+          "name": "connector_running",
+          "ok": false,
+          "note": "the read connect_status failed: connect: GET /connectors/pg-orders-connector/status: Get \"http://127.0.0.1:8083/connectors/pg-orders-connector/status\": dial tcp 127.0.0.1:8083: connect: connection refused"
+        },
+        {
+          "name": "tasks_running",
+          "ok": false,
+          "note": "the read connect_status failed: connect: GET /connectors/pg-orders-connector/status: Get \"http://127.0.0.1:8083/connectors/pg-orders-connector/status\": dial tcp 127.0.0.1:8083: connect: connection refused"
+        },
+        {
+          "name": "canary_topic",
+          "ok": true,
+          "note": "the topic exists with 1 partition(s)"
+        },
+        {
+          "name": "snapshot_complete",
+          "ok": true,
+          "note": "1 canary record(s) on the topic (no metrics endpoint)"
+        },
+        {
+          "name": "canary_event",
+          "ok": false,
+          "note": "no record with the canary key yet"
+        },
+        {
+          "name": "canary_subject",
+          "ok": true,
+          "note": "no schema registry is configured"
+        },
+        {
+          "name": "sink_row",
+          "ok": true,
+          "note": "no sink was set up"
+        },
+        {
+          "name": "person_change",
+          "ok": false,
+          "note": "awaiting the person's change"
+        }
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

@@ -22,6 +22,7 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/setup/ops"
+	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/runner"
 	"piperoom/internal/setup/standalone"
 	"piperoom/internal/setup/targets/host"
@@ -52,6 +53,11 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	standaloneMode := fs.Bool("standalone", false, "run the Piperoom server for this machine in-process (write mode and setup on, loopback only) and keep serving; prints the URL to open")
 	watch := fs.Bool("watch", false, "with --standalone: restart the server whenever owners.yaml is written")
 	watchInterval := fs.Duration("watch-interval", standalone.DefaultWatchInterval, "with --watch: how often to poll owners.yaml")
+	embedded := fs.Bool("embedded", false, "the room's target is embedded (the Debezium Engine in your own application): register only the reference project and log reads, and refuse every other write")
+	codeFile := fs.String("code-file", "", "read the pairing code from this file (the in-cluster Job's mounted Secret) instead of --code")
+	confirmPrefix := fs.String("confirm-secret-prefix", "", "in a Kubernetes Job: confirm the pairing with the Secret of this name, created by the person with the fingerprint (docs/design/setup-strimzi.md section 3.2)")
+	strimziPipeline := fs.String("strimzi-pipeline", "", "in a Kubernetes Job: the pipeline whose chart-made objects the Strimzi driver may touch")
+	strimziConnectors := fs.String("strimzi-connectors", "", "in a Kubernetes Job: the chart's KafkaConnector names, comma-separated")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -65,8 +71,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if *standaloneMode {
 		// Standalone means this process is the server: a server origin or a
 		// pairing code would name a different one.
-		if *server != "" || *code != "" || *label != "" {
-			return errors.New("setup: --standalone runs its own server; --server, --code and --label pair with an existing one")
+		if *server != "" || *code != "" || *label != "" || *embedded || *codeFile != "" || *confirmPrefix != "" {
+			return errors.New("setup: --standalone runs its own server; --server, --code, --label and --embedded pair a runner with an existing one")
 		}
 		return standalone.Run(ctx, standalone.Options{
 			Config:        config.Load(),
@@ -93,19 +99,46 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		serverURL = cfg.ServerURL
 	}
 	codeStr := *code
+	if *codeFile != "" {
+		if codeStr != "" {
+			return errors.New("setup: --code and --code-file name two codes; give one")
+		}
+		if codeStr, err = readCodeFile(*codeFile); err != nil {
+			return err
+		}
+	}
 	if codeStr == "" {
 		codeStr = cfg.Code
 	}
+	if (*strimziPipeline != "") != (*confirmPrefix != "") {
+		return errors.New("setup: --strimzi-pipeline and --confirm-secret-prefix go together (the in-cluster Job passes both)")
+	}
 
 	log := newLogger(stderr)
-	// The real catalogue (U1-2). Targets arrive with the Welcome, and the
-	// runner's target registry is a later row: until it hands them over,
-	// http_get and net_probe refuse every host and the file and env ops work.
+	// The real catalogue (U1-2). Targets arrive with the Welcome: the target
+	// driver (compose or host, row U8f) registers then, through the
+	// registrar; until the handshake hands them over, http_get and net_probe
+	// refuse every host and the file and env ops work.
 	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
 	if err != nil {
 		return err
 	}
 	defer catalogue.Close()
+	env := config.Load()
+	registrar := newTargetRegistrar(catalogue, parsePluginHosts(env.SetupPluginHosts))
+	registrar.prodPatterns = parseProdPatterns(env.SetupProdPatterns)
+	if *embedded {
+		registrar.embedded = true
+	}
+	var confirm func(context.Context, *protocol.Welcome, func()) (bool, error)
+	if *confirmPrefix != "" {
+		job, err := newInClusterJob(*confirmPrefix, *strimziPipeline, *strimziConnectors)
+		if err != nil {
+			return err
+		}
+		registrar.strimzi = &job.strimzi
+		confirm = job.confirmer.Confirm
+	}
 	r, err := runner.New(runner.Options{
 		ServerURL:        serverURL,
 		Code:             codeStr,
@@ -115,10 +148,17 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		Log:              log,
 		Catalogue:        catalogue,
 		CatalogueVersion: ops.CatalogueVersion,
+		RegisterTargets:  registrar.Apply,
+		Confirm:          confirm,
+		SecretsFile:      cfg.SecretsFile,
 	})
 	if err != nil {
 		return err
 	}
+	// The drivers resolve ${secret:} references and the managed setup
+	// credentials from the runner's own store: the one secret_set writes.
+	// It is set before Run, which is where the Welcome registers a driver.
+	registrar.secrets = r.SecretStore
 
 	if err := r.Run(ctx); err != nil {
 		if errors.Is(err, runner.ErrDeclined) {

@@ -1,0 +1,45 @@
+{
+  "provider": "aws",
+  "name": "role_policies_denied",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "05fea88b5383f26d0c46be6a160cab888ec81ba8afb6b89800c52e7d0aee6f9d",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ListRolePoliciesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><ListRolePoliciesResult><IsTruncated>false</IsTruncated><PolicyNames></PolicyNames></ListRolePoliciesResult></ListRolePoliciesResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListAttachedRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "e7d39b64c421c29421f819c4c48433b85b18f02cbbe68446908ee38254e86370",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ErrorResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>User is not authorized to perform: iam:ListAttachedRolePolicies</Message></Error><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ErrorResponse>"
+      }
+    }
+  ]
+}

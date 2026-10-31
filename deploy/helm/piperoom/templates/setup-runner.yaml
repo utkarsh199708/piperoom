@@ -1,0 +1,258 @@
+{{- if .Values.setup.runner.enabled }}
+{{- include "piperoom.setupValidate" . }}
+{{- $r := .Values.setup.runner }}
+{{- $room := include "piperoom.setupRoom" . }}
+{{- $name := printf "piperoom-setup-%s" $room }}
+{{- $p := $r.pipeline }}
+{{- $connect := printf "%s-connect" $p }}
+{{- $pods := list (printf "%s-connect-0" $connect) (printf "%s-connect-1" $connect) (printf "%s-connect-2" $connect) (printf "%s-connect-build" $connect) }}
+# The room release (docs/design/setup-strimzi.md §3, §4): the setup runner of
+# one room, in the target namespace. The close card uninstalls it; nothing the
+# running pipeline needs lives here.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# No create on anything and no list but events: every object the runner can
+# reach exists before the Job starts, named here, with only the verbs its ops
+# send (internal/setup/targets/strimzi: GET, JSON PATCH and DELETE; no watch).
+# escalate, bind and impersonate are never granted; nothing is cluster-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkas]
+    resourceNames: [{{ $r.kafka | quote }}]
+    verbs: [get]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnects]
+    resourceNames: [{{ $connect | quote }}]
+    verbs: [get, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnectors]
+    resourceNames: [{{ range $i, $c := $r.connectors }}{{ if $i }}, {{ end }}{{ $c | quote }}{{ end }}]
+    verbs: [get, patch, delete]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkausers]
+    resourceNames: [{{ $connect | quote }}, {{ printf "%s-piperoom-ro" $p | quote }}]
+    verbs: [get, patch]
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkatopics]
+    resourceNames: [{{ printf "%s-canary" $p | quote }}]
+    verbs: [get, patch, delete]
+  # The pairing code is mounted (the kubelet reads it, not this Role); the
+  # runner deletes it once the Welcome arrives.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ printf "%s-pairing" $name | quote }}]
+    verbs: [delete]
+  # The person's confirm Secret: read once, then deleted.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ printf "%s-confirm" $name | quote }}]
+    verbs: [get, delete]
+  # k8s_secret_apply fills the chart's empty Secret and k8s_unapply empties it;
+  # it is never deleted by the runner (helm uninstall of the pipeline release).
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ printf "%s-db-credentials" $p | quote }}]
+    verbs: [get, patch]
+  # The read KafkaUser's generated credential (design §9): read only.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ printf "%s-piperoom-ro" $p | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-connect-logging" $p | quote }}]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ printf "%s-connect-metrics" $p | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    resourceNames: [{{ range $i, $n := $pods }}{{ if $i }}, {{ end }}{{ $n | quote }}{{ end }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/log]
+    resourceNames: [{{ range $i, $n := $pods }}{{ if $i }}, {{ end }}{{ $n | quote }}{{ end }}]
+    verbs: [get]
+  # The one namespace-wide read: k8s_events lists core events with a
+  # fieldSelector on involvedObject.name, and RBAC cannot scope a list by a
+  # field other than metadata.name, so resourceNames cannot narrow it. The
+  # runner refuses an involvedObject outside the chart's names before the
+  # request; event messages it returns are redacted and capped.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name | quote }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name | quote }}
+    namespace: {{ .Release.Namespace | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ $r.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $r.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "piperoom.setupLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name | quote }}
+      # The token comes from the projected volume below (one hour, rotated;
+      # the runner re-reads the file per request), not the automount.
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          image: {{ include "piperoom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/piperoom-setup"]
+          args:
+            - --server
+            - {{ $r.serverURL | quote }}
+            - --code-file
+            - /var/run/piperoom/pairing/code
+            - --confirm-secret-prefix
+            - {{ printf "%s-confirm" $name | quote }}
+            - --project
+            - /work
+            - --strimzi-pipeline
+            - {{ $p | quote }}
+            - --strimzi-connectors
+            - {{ join "," $r.connectors | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml $r.resources | nindent 12 }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+            - name: pairing
+              mountPath: /var/run/piperoom/pairing
+              readOnly: true
+            - name: token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: pairing
+          projected:
+            sources:
+              - secret:
+                  name: {{ printf "%s-pairing" $name | quote }}
+                  optional: false
+                  items:
+                    - key: code
+                      path: code
+        - name: token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := $r.networkPolicy }}
+{{- $u := urlParse $r.serverURL }}
+{{- $explicit := regexFind ":[0-9]+$" $u.host | trimPrefix ":" }}
+{{- $serverPort := $explicit | default (ternary "443" "80" (eq $u.scheme "https")) }}
+---
+# The Job's egress (networkPolicy.enabled): DNS, the Kubernetes API server and
+# the piperoom server only, and no ingress at all. A runner that also runs the
+# source ops (a source database the room names) needs that database in
+# setup.runner.networkPolicy.extraEgress. apiServer.to and server.to are
+# required and non-empty (piperoom.setupValidate): an empty "to" would open
+# the port to any destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/part-of: piperoom-setup
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with .Values.networkPolicy.dns.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # the Kubernetes API server
+    - ports:
+        {{- range $np.apiServer.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.apiServer.to | nindent 8 }}
+    # the piperoom server ({{ $u.host }})
+    - ports:
+        - port: {{ $serverPort }}
+          protocol: TCP
+      to:
+        {{- toYaml $np.server.to | nindent 8 }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

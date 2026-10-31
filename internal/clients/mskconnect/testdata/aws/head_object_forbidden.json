@@ -1,0 +1,19 @@
+{
+  "provider": "aws",
+  "name": "head_object_forbidden",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "HEAD",
+        "path": "/plugins/debezium-connector-postgres-2.7.3.zip"
+      },
+      "response": {
+        "status": 403,
+        "body": ""
+      }
+    }
+  ]
+}

@@ -1,0 +1,170 @@
+# C7 setup scenario (U11c): a setup run on the Debezium Server target (dbzserver, Compose mode: the
+# server as one service of the rendered stack, with a co-located Postgres source) and the HTTP sink.
+# The sink endpoint refuses connections: the server's HTTP sink retries, gives up and the engine
+# stops, the container exits, and the setup's own probe of the sink (U11b sink_probe) fails. The label
+# names the probe (Jira KAN-5 row U11c, KAN-351; the row's done-when: "labels name the probe or the
+# property"). Format: evals/README.md (C6). Built on the U11a target (internal/setup/targets/server:
+# server_properties_write, server_compose_write, server_status) and U11b's sink_probe
+# (internal/setup/ops/sink_probe.go).
+#
+# RECORDED: NO, and the room has little to read: a Debezium Server pipeline has no Kafka Connect
+# connector (the pipeline names the server's service as one, a stand-in whose Connect reads answer
+# not found), and server_status, container_logs and sink_probe are runner ops (the setup room's read
+# tools are not in evals.LiveTools; see the U5c section of evals/scenarios/README.md). The replayed
+# room reads are the source settings, the server's slot (named by watch.slot) and similar_incidents,
+# each in the real tool's format; the cause is in the setup step of the alert and the runner session
+# evals/setup/recordings/setup-server-sink-unreachable.json (target dbzserver, no ladder:
+# plan.Ladder defines none for dbzserver, evalsetup.PlanLadderUndefined). The server's log lines in
+# that session are Debezium Server's messages composed by hand (unconfirmed on 3.2.0.Final). Clock:
+# 2026-10-29T09:40:00Z. To re-record, see evals/scenarios/README.md, "Setup scenarios: Debezium
+# Server (U11c)".
+#
+# Timeline: 09:06 server_properties_write wrote debezium/config/application.properties (postgres ->
+#   http, debezium.sink.http.url=http://ingest.warehouse.internal:8080/cdc/orders, the offsets in
+#   data/offsets.dat); 09:06:40 server_compose_write rendered the stack (dbzserver, postgres);
+#   09:07:42 compose_up started it. The server created the slot, snapshotted public.orders and sent
+#   the first batch: Connection refused, five retries a second apart (the index's defaults), then the
+#   engine stopped at 09:07:50 and the container exited. 09:08:30 server_status: dbzserver has no
+#   container (docker compose ps lists no exited one). 09:09 sink_probe against the registered host
+#   target ingest.warehouse.internal:8080: "sink_probe http: HEAD request failed" (reachable=false).
+#   Nothing listens on that port: the warehouse team's ingest service is not running there.
+#
+# First failing layer: kafka-connect (the Debezium Server, the engine layer, exited). Root-cause layer:
+#   warehouse (the sink endpoint the server writes to: the warehouse's ingest API).
+#
+# Expected label: the probe - sink_probe http failed (HEAD request failed: reachable=false,
+#   configured=true) against ingest.warehouse.internal:8080, the address of debezium.sink.http.url.
+#   Fix: nothing on the server is wrong; the ingest service's owner starts it at that address (or, if
+#   the address is wrong, the person changes debezium.sink.http.url with server_properties_write, T1,
+#   and registers the right host target: a driver click), then sink_probe (T0) must answer 2xx before
+#   compose_up (T1) starts dbzserver again. No room action reaches the server, so there is no
+#   expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config - there is no Connect worker; the server is not a connector.
+#   Forbidden: pg_drop_replication_slot - the slot the server created is its position; dropping it
+#     changes nothing about the sink.
+#   Forbidden: schema_register, schema_set_compatibility - the server writes JSON to HTTP.
+#
+# Traps:
+#   - server_status says "has no container": it does not mean the stack never started; docker compose
+#     ps lists running containers only, and compose_up started it at 09:07:42.
+#   - The source is fine (source_settings: wal_level=logical); the server read it and snapshotted.
+#   - sink_probe sends an empty HEAD and nothing else: it changes nothing at the sink.
+#
+# Sources:
+#   - internal/setup/ops/sink_probe.go: the HTTP-only probe, its summaries ("sink_probe http: HEAD
+#     request failed"), its Data (reachable, configured) and the registered-host-target rule.
+#   - internal/setup/targets/server: properties.go (debezium.sink.type, the offset file under
+#     data/), compose.go (the read-only config bind, the data volume, no restart policy), status.go
+#     (server_status' compose answers).
+#   - internal/setup/knowledge/index/sink-server.yaml: server-http (debezium.sink.http.url,
+#     retries 5, retry.interval.ms 1000; "Only 200, 202 and 204 count as delivered").
+#   - https://debezium.io/documentation/reference/3.2/operations/debezium-server.html: the HTTP
+#     client sink.
+
+name: setup/server-sink-unreachable
+description: |
+  The person ran piperoom-setup with the Debezium Server target in Compose mode: a co-located
+  Postgres source (public.orders) and the HTTP sink, debezium.sink.http.url
+  http://ingest.warehouse.internal:8080/cdc/orders. compose_up started the stack at 09:07:42; the
+  server snapshotted public.orders and every POST of the first batch ended in "Connection refused";
+  after five retries the engine stopped and the container exited. server_status reports "dbzserver
+  has no container: the stack is not running", and the setup's sink_probe against the registered
+  target ingest.warehouse.internal:8080 failed with "sink_probe http: HEAD request failed"
+  (reachable=false).
+
+  Root cause: the HTTP sink endpoint refuses connections - nothing listens at
+  ingest.warehouse.internal:8080, the warehouse's ingest API the server writes to.
+
+  Expected label: the probe - sink_probe http fails against the sink's address; the endpoint's owner
+  starts it there (or the person corrects debezium.sink.http.url with server_properties_write), then
+  sink_probe must pass before compose_up starts dbzserver again.
+
+setup:
+  source_kind: postgres
+  target: dbzserver
+
+pipeline:
+  id: orders-dbz
+  title: Orders to the warehouse ingest API (Debezium Server)
+  topic_prefix: dbz
+  source_tables: [public.orders]
+  # owners.yaml requires a connector on a CDC pipeline and has no Debezium Server kind: the server's
+  # Compose service name stands in, and the room's Connect reads of it answer not found (there is no
+  # Connect worker). watch.slot names the server's slot, so the slot read needs no Connect config.
+  connectors: [dbzserver]
+  watch:
+    slot: debezium_orders
+
+alert:
+  # The title names the failed step and the server's state, not why the probe failed.
+  title: 'orders-dbz setup: step sink_probe failed (sink_probe http: HEAD request failed); server_status: dbzserver has no container'
+  # No pipeline_map: a Debezium Server pipeline has no connector, topic or sink table in owners.yaml
+  # for the map to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # The server created the slot at 09:07 and exited after the snapshot: inactive, holding the WAL
+  # since then.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=6.3 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 0/1B2C4D0
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1B2C498
+        retained_wal_bytes: 6606028
+        wal_status: reserved
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-dbz (0 past rooms searched).
+  # The stand-in connector name has no Connect worker behind it.
+  - tool: connect_status
+    input: {connector: dbzserver}
+    error: 'connect: GET /connectors/dbzserver/status: not found'
+  - tool: connect_config
+    input: {connector: dbzserver}
+    error: 'connect: GET /connectors/dbzserver/config: not found'
+  # Calls no recording above covers: the real tools' scope answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders-dbz" (allowed connectors: dbzserver)'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The setup stopped after the sink probe, and the server container is gone. What failed, and what has to happen before the setup can start the server again?"
+
+expect:
+  root_cause:
+    - [ingest warehouse internal, ingest endpoint, ingest service, sink endpoint, http sink, sink url, receiver]
+    - [connection refused, refuses connections, refused, unreachable, not listening, down]
+  root_cause_forbidden:
+    - [offset*]
+    - [password]
+    - [replication slot]
+    - [wal_level]
+    - [publication]
+  first_failing_layer: kafka-connect
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium_orders, active false]
+      required: true
+    - id: f_source_ok
+      tool: source_settings
+      match: [wal_level logical]
+  claims:
+    - about: root_cause
+      facts: [f_slot_inactive]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

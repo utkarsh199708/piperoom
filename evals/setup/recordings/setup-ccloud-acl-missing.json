@@ -1,0 +1,266 @@
+{
+ "scenario": "setup/ccloud-acl-missing",
+ "source": "postgres",
+ "target": "confluent",
+ "sink": "none",
+ "recorded_at": "2026-10-30T12:20:00Z",
+ "note": "Composed from the managed ops' own summaries and Data (internal/setup/targets/managed) over the hand-written cassettes of internal/setup/targets/managed/testdata, on the scenario's fixed clock. No sandbox account was used and no runner ran: re-record per evals/scenarios/README.md, Setup scenarios: managed targets (U13e). Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC.",
+ "ops": [
+  {
+   "op": "ccloud_cluster",
+   "tier": "T0",
+   "class": "shared",
+   "params": {},
+   "result": {
+    "ok": true,
+    "summary": "cluster orders (lkc-00000) is PROVISIONED on AWS us-east-1",
+    "data": {
+     "id": "lkc-00000",
+     "name": "orders",
+     "cloud": "AWS",
+     "region": "us-east-1",
+     "availability": "SINGLE_ZONE",
+     "bootstrap_endpoint": "SASL_SSL://scrubbed.confluent.cloud:9092",
+     "http_endpoint": "https://scrubbed.confluent.cloud:443",
+     "phase": "PROVISIONED"
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "confluent:env-00000/lkc-00000",
+     "exit_code": 0,
+     "at": "2026-10-30T12:04:05Z",
+     "took_ms": 310,
+     "out_mac": "6d55182d7318df7cf612d431c90d7dd90c835ba60bbc00f9c1ab3b3af2eee276"
+    }
+   }
+  },
+  {
+   "op": "ccloud_acl_create",
+   "tier": "T2",
+   "class": "shared",
+   "params": {
+    "template": "watcher",
+    "principal": "User:sa-00001",
+    "topic_prefix": "orders",
+    "group": "connect-orders-cc-connector"
+   },
+   "result": {
+    "ok": true,
+    "summary": "4 ACL rows of the watcher template for User:sa-00001 on orders*",
+    "data": {
+     "created": [
+      {
+       "resource_type": "TOPIC",
+       "resource_name": "orders",
+       "pattern_type": "PREFIXED",
+       "principal": "User:sa-00001",
+       "host": "*",
+       "operation": "DESCRIBE",
+       "permission": "ALLOW"
+      },
+      {
+       "resource_type": "TOPIC",
+       "resource_name": "orders",
+       "pattern_type": "PREFIXED",
+       "principal": "User:sa-00001",
+       "host": "*",
+       "operation": "READ",
+       "permission": "ALLOW"
+      },
+      {
+       "resource_type": "TOPIC",
+       "resource_name": "orders",
+       "pattern_type": "PREFIXED",
+       "principal": "User:sa-00001",
+       "host": "*",
+       "operation": "DESCRIBE_CONFIGS",
+       "permission": "ALLOW"
+      },
+      {
+       "resource_type": "GROUP",
+       "resource_name": "connect-orders-cc-connector",
+       "pattern_type": "LITERAL",
+       "principal": "User:sa-00001",
+       "host": "*",
+       "operation": "DESCRIBE",
+       "permission": "ALLOW"
+      }
+     ]
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "confluent:env-00000/lkc-00000",
+     "exit_code": 0,
+     "at": "2026-10-30T12:05:20Z",
+     "took_ms": 880,
+     "out_mac": "dc5950a739818b2290420d3884e75de69e4662e896a4d9f19937db61dcaa2944"
+    }
+   },
+   "proposal_id": "pr_orders_cc_setup",
+   "step_index": 0,
+   "params_hash": "9c4815757f083a249dc4a88b7d23af6cb0e29d4b14aa21c61a6706779b84a4e5"
+  },
+  {
+   "op": "ccloud_create_connector",
+   "tier": "T2",
+   "class": "shared",
+   "params": {
+    "name": "orders-cc-connector",
+    "plugin": "PostgresCdcSourceV2",
+    "config": {
+     "kafka.auth.mode": "SERVICE_ACCOUNT",
+     "kafka.service.account.id": "sa-00000",
+     "database.hostname": "orders.example.com",
+     "database.port": "5432",
+     "database.user": "debezium",
+     "database.password": "${secret:db_password}",
+     "database.dbname": "orders",
+     "topic.prefix": "orders",
+     "output.data.format": "JSON",
+     "tasks.max": "1"
+    }
+   },
+   "result": {
+    "ok": true,
+    "summary": "connector orders-cc-connector created after a clean validation; read its status with ccloud_connector_status",
+    "data": {
+     "connector": "orders-cc-connector",
+     "type": "source",
+     "config": {
+      "kafka.auth.mode": "SERVICE_ACCOUNT",
+      "kafka.service.account.id": "sa-00000",
+      "database.hostname": "orders.example.com",
+      "database.port": "5432",
+      "database.user": "debezium",
+      "database.password": "${secret:db_password}",
+      "database.dbname": "orders",
+      "topic.prefix": "orders",
+      "output.data.format": "JSON",
+      "tasks.max": "1"
+     },
+     "created": true
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "confluent:env-00000/lkc-00000",
+     "exit_code": 0,
+     "at": "2026-10-30T12:08:44Z",
+     "took_ms": 1630,
+     "out_mac": "aba68f93250a1d7ea131d0a69fc0523f9fd5d8d1e6a093e1298cebfadfffaa46"
+    }
+   },
+   "proposal_id": "pr_orders_cc_setup",
+   "step_index": 2,
+   "params_hash": "6f1133f3956f25dc6591e21dc90c49bf37d503d2c3b860a636719866c7f50817"
+  }
+ ],
+ "ladder": {
+  "plan_id": "pl_orders_cc_setup",
+  "nonce_hash": "5c908aa65bd6f5c85583ba14911e27731e810b1effeeae105a521ab354d506a1",
+  "reads": [
+   {
+    "tool": "ccloud_connector_status",
+    "data": {
+     "name": "orders-cc-connector",
+     "type": "source",
+     "state": "FAILED",
+     "worker_id": "orders-cc-connector",
+     "tasks": [
+      {
+       "id": 0,
+       "state": "FAILED",
+       "worker_id": "orders-cc-connector",
+       "trace": "org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [orders.public.orders]"
+      }
+     ]
+    }
+   },
+   {
+    "tool": "ccloud_connector_status",
+    "data": {
+     "name": "orders-cc-connector",
+     "type": "source",
+     "state": "FAILED",
+     "worker_id": "orders-cc-connector",
+     "tasks": [
+      {
+       "id": 0,
+       "state": "FAILED",
+       "worker_id": "orders-cc-connector",
+       "trace": "org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [orders.public.orders]"
+      }
+     ]
+    }
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "debezium_metrics",
+    "error": "debezium_metrics: no metrics for orders-cc-connector"
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "kafka_find_by_key",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "schema_registry_subjects",
+    "data": {
+     "subjects": [],
+     "deleted_subjects": []
+    }
+   }
+  ],
+  "table": "public.orders",
+  "example_sql": "INSERT INTO public.orders (customer_id, amount, status) VALUES (42, 4250, 'packed');",
+  "verified": {
+   "rungs": [
+    {
+     "name": "connector_running",
+     "note": "the connector is FAILED",
+     "ok": false
+    },
+    {
+     "name": "tasks_running",
+     "note": "task 0 is FAILED",
+     "ok": false
+    },
+    {
+     "name": "canary_topic",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "snapshot_complete",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_event",
+     "note": "the read kafka_find_by_key failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_subject",
+     "note": "no subject under the canary topic's prefix yet",
+     "ok": false
+    },
+    {
+     "name": "sink_row",
+     "note": "no sink was set up",
+     "ok": true
+    },
+    {
+     "name": "person_change",
+     "note": "awaiting the person's change",
+     "ok": false
+    }
+   ]
+  }
+ }
+}

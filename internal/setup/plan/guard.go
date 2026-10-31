@@ -34,23 +34,35 @@ const (
 	OpComposeDown            = "compose_down"
 	OpK8sDeleteNamespace     = "k8s_delete_namespace"
 	OpMSKDeleteConnector     = "msk_delete_connector"
-	OpFileWrite              = "file_write"
-	OpFileDelete             = "file_delete"
+	// OpK8sDelete and OpK8sUnapply are the Strimzi driver's rollback ops
+	// (internal/setup/targets/strimzi rollback.go); the driver refuses the
+	// same pairs on production before any request.
+	OpK8sDelete  = "k8s_delete"
+	OpK8sUnapply = "k8s_unapply"
+	OpFileWrite  = "file_write"
+	OpFileDelete = "file_delete"
 )
 
 // Reasons of a guard row: fixed codes a refusal and the UI carry, never text
 // from a model or an endpoint.
 const (
-	ReasonDropTable             = "drop_table"
-	ReasonTruncateTable         = "truncate_table"
-	ReasonDropSlot              = "drop_slot"
-	ReasonDropPublication       = "drop_publication"
-	ReasonAlterSystem           = "alter_system"
-	ReasonDeleteConnector       = "delete_connector"
-	ReasonDeleteTopic           = "delete_topic"
-	ReasonComposeDownVolumes    = "compose_down_volumes"
-	ReasonDeleteNamespace       = "delete_namespace"
-	ReasonDeleteCloud           = "delete_cloud_resource"
+	ReasonDropTable          = "drop_table"
+	ReasonTruncateTable      = "truncate_table"
+	ReasonDropSlot           = "drop_slot"
+	ReasonDropPublication    = "drop_publication"
+	ReasonAlterSystem        = "alter_system"
+	ReasonDeleteConnector    = "delete_connector"
+	ReasonDeleteTopic        = "delete_topic"
+	ReasonComposeDownVolumes = "compose_down_volumes"
+	ReasonDeleteNamespace    = "delete_namespace"
+	ReasonDeleteCloud        = "delete_cloud_resource"
+	// ReasonDeleteK8sObject: k8s_delete of the canary KafkaTopic (data) or
+	// a KafkaConnector (a person's change, as connect_delete_connector).
+	ReasonDeleteK8sObject = "delete_k8s_object"
+	// ReasonUnapplyProduction: k8s_unapply of the KafkaConnect (stops the
+	// Connect cluster) or of the db-credentials Secret (stops the connector
+	// at its next restart).
+	ReasonUnapplyProduction     = "unapply_production"
 	ReasonLocalFileOnProduction = "local_file_on_production"
 	// ReasonUnknownClass is the reason Forbidden returns for a class that is
 	// not a class: the guard boundary fails closed, never open.
@@ -75,6 +87,16 @@ type StepFacts struct {
 	Param string
 	// KeepsVolumes: a compose_down that does not remove volumes (no "-v").
 	KeepsVolumes bool
+	// Kind is the object kind a k8s_unapply step names ("" when the params
+	// do not say, which reads as the strictest answer).
+	Kind string
+}
+
+// K8sUnapplyAllowedOnProduction reports whether a k8s_unapply of kind may
+// run on production: re-pausing a KafkaUser and emptying the logging
+// ConfigMap stop nothing the running pipeline needs.
+func K8sUnapplyAllowedOnProduction(kind string) bool {
+	return kind == "KafkaUser" || kind == "ConfigMap"
 }
 
 // GuardRequest is one question to the guard table.
@@ -122,6 +144,9 @@ var guardRows = []GuardRow{
 		Allowed: func(f StepFacts) bool { return f.KeepsVolumes }},
 	{Op: OpK8sDeleteNamespace, Class: ClassProduction, Reason: ReasonDeleteNamespace},
 	{Op: OpMSKDeleteConnector, Class: ClassProduction, Reason: ReasonDeleteCloud},
+	{Op: OpK8sDelete, Class: ClassProduction, Reason: ReasonDeleteK8sObject},
+	{Op: OpK8sUnapply, Class: ClassProduction, Reason: ReasonUnapplyProduction,
+		Allowed: func(f StepFacts) bool { return K8sUnapplyAllowedOnProduction(f.Kind) }},
 	{Op: OpFileWrite, Class: ClassProduction, Reason: ReasonLocalFileOnProduction},
 	{Op: OpFileDelete, Class: ClassProduction, Reason: ReasonLocalFileOnProduction},
 }

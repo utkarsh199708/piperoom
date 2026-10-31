@@ -1,6 +1,7 @@
 package setupactions
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/targets/compose"
+	"piperoom/internal/setup/targets/host"
 	"piperoom/internal/tools"
 )
 
@@ -39,6 +41,7 @@ func TestEnvironmentSpecsAreSafe(t *testing.T) {
 	for _, name := range []string{
 		"file_write", "file_delete", "compose_write", "properties_write",
 		"compose_up", "compose_restart", "compose_down", "plugin_install",
+		"service_install", "service_restart", "reference_write",
 	} {
 		if !seen[name] {
 			t.Errorf("EnvironmentSpecs is missing %s", name)
@@ -133,6 +136,9 @@ var previewPendingRunner = map[string]bool{
 	"compose_write":    true,
 	"properties_write": true,
 	"plugin_install":   true,
+	"service_install":  true,
+	"service_restart":  true,
+	"reference_write":  true,
 }
 
 // runnerCatalogue builds the runner's real op catalogue the way the runner
@@ -150,16 +156,61 @@ func runnerCatalogue(t *testing.T) *ops.Registry {
 	return reg
 }
 
+// hostCatalogue is the host target's runner catalogue. It is a second
+// registry because compose.Register and host.Register are exclusive in one
+// (both name properties_write): the runner registers the one driver the
+// Welcome's targets name.
+func hostCatalogue(t *testing.T) *ops.Registry {
+	t.Helper()
+	reg, err := ops.New(ops.Config{ProjectDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("ops.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	if _, err := host.Register(reg, host.Options{}); err != nil {
+		t.Fatalf("host.Register: %v", err)
+	}
+	return reg
+}
+
 func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
-	reg := runnerCatalogue(t)
+	composeReg := runnerCatalogue(t)
+	hostReg := hostCatalogue(t)
+	embeddedReg, err := ops.New(ops.Config{ProjectDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = embeddedReg.Close() })
+	if err := ops.RegisterEmbedded(embeddedReg); err != nil {
+		t.Fatal(err)
+	}
+	// floorOf looks an op up in whichever target catalogue registers it;
+	// properties_write is in both compose and host with one floor.
+	floorOf := func(name string) (string, bool) {
+		for _, reg := range []*ops.Registry{composeReg, hostReg, embeddedReg} {
+			if f, ok := reg.Floor(name); ok {
+				return f, true
+			}
+		}
+		return "", false
+	}
+	targets := map[string]bool{}
+	for _, spec := range targetSpecs() {
+		targets[spec.Name] = true
+	}
 	for _, spec := range EnvironmentSpecs() {
-		floor, ok := reg.Floor(spec.Name)
+		if targets[spec.Name] {
+			// The Strimzi and managed writes: their catalogues are checked
+			// by the external round trip (specs_targets_test.go).
+			continue
+		}
+		floor, ok := floorOf(spec.Name)
 		if !ok {
 			t.Errorf("%s: the runner catalogue has no such op", spec.Name)
 		} else if floor != spec.Tier {
 			t.Errorf("%s: spec tier %q, runner floor %q", spec.Name, spec.Tier, floor)
 		}
-		_, ownRegistered := reg.Floor(PreviewOpName(spec.Name))
+		_, ownRegistered := floorOf(PreviewOpName(spec.Name))
 		if previewPendingRunner[spec.Name] {
 			if spec.PreviewOp != "" {
 				t.Errorf("%s: pending a runner preview op, but names preview op %q", spec.Name, spec.PreviewOp)
@@ -173,7 +224,7 @@ func TestSpecOpsAreInTheRunnerCatalogue(t *testing.T) {
 			t.Errorf("%s: no preview op and not in previewPendingRunner", spec.Name)
 			continue
 		}
-		pfloor, registered := reg.Floor(spec.PreviewOp)
+		pfloor, registered := floorOf(spec.PreviewOp)
 		switch {
 		case !registered:
 			t.Errorf("%s: preview op %q is not in the runner catalogue", spec.Name, spec.PreviewOp)
@@ -203,6 +254,9 @@ func TestPendingPreviewsMakeNoRunnerCall(t *testing.T) {
 		"compose_write":    json.RawMessage(`{"templates":["kafka-kraft"]}`),
 		"properties_write": json.RawMessage(`{"file":".env","entries":{"A":"b"}}`),
 		"plugin_install":   json.RawMessage(`{"release":"2.7.0","connector":"postgres"}`),
+		"service_install":  json.RawMessage(`{"name":"connect","mode":"distributed"}`),
+		"service_restart":  json.RawMessage(`{"name":"connect"}`),
+		"reference_write":  json.RawMessage(`{"build":"maven","source":"postgres","group_id":"com.example.cdc","artifact_id":"orders-cdc","release":"3.2.0.Final","host":"db.internal","port":5432,"database":"orders","user":"debezium","password_secret":"orders_db_password","topic_prefix":"orders","slot_name":"orders_cdc"}`),
 	}
 	for _, spec := range EnvironmentSpecs() {
 		if !previewPendingRunner[spec.Name] {
@@ -236,5 +290,61 @@ func TestLongOpsGetASpecTimeout(t *testing.T) {
 	// (targets/compose downloadTimeout, 5 minutes).
 	if longOpTimeout <= 5*time.Minute || longOpTimeout > maxSpecTimeout {
 		t.Fatalf("longOpTimeout = %s, want above 5m and within %s", longOpTimeout, maxSpecTimeout)
+	}
+}
+
+// TestHostOpParamsRoundTrip: the host write specs' example params pass both
+// the spec's own validation and the host op's Validate in the runner
+// catalogue, and a bad service name is refused by both (row U8f: the server's
+// view and the runner compute one answer from one params set).
+func TestHostOpParamsRoundTrip(t *testing.T) {
+	hostReg := hostCatalogue(t)
+	cases := []struct {
+		op      string
+		good    json.RawMessage
+		bad     json.RawMessage
+		badWhat string
+	}{
+		{"service_install", json.RawMessage(`{"name":"connect","mode":"distributed"}`), json.RawMessage(`{"name":"Not A Name"}`), "an uppercase name"},
+		{"service_restart", json.RawMessage(`{"name":"connect"}`), json.RawMessage(`{"name":"-bad"}`), "a leading dash"},
+	}
+	for _, tc := range cases {
+		var spec *Spec
+		for _, s := range EnvironmentSpecs() {
+			if s.Name == tc.op {
+				spec = &s
+				break
+			}
+		}
+		if spec == nil {
+			t.Fatalf("%s: not in EnvironmentSpecs", tc.op)
+		}
+		a, err := New(*spec, Deps{})
+		if err != nil {
+			t.Fatalf("New(%s): %v", tc.op, err)
+		}
+		op, ok := hostReg.Get(tc.op)
+		if !ok {
+			t.Fatalf("%s: not in the host catalogue", tc.op)
+		}
+		if err := a.Validate(context.Background(), tc.good); err != nil {
+			t.Errorf("%s: spec Validate(good) = %v", tc.op, err)
+		}
+		if err := a.Validate(context.Background(), tc.bad); err == nil {
+			t.Errorf("%s: spec Validate accepted %s", tc.op, tc.badWhat)
+		}
+		// On an OS with no service manager (macOS) the driver refuses every
+		// service op before reading its params, so there is no runner side to
+		// compare with.
+		err = op.Validate(tc.good, ops.Env{})
+		if errors.Is(err, host.ErrUnsupported) {
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: runner Validate(good) = %v", tc.op, err)
+		}
+		if err := op.Validate(tc.bad, ops.Env{}); err == nil {
+			t.Errorf("%s: runner Validate accepted %s", tc.op, tc.badWhat)
+		}
 	}
 }

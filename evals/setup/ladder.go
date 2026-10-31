@@ -9,6 +9,7 @@ import (
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/plan"
+	"piperoom/internal/setup/targets/managed"
 )
 
 // ErrAgentVerified is what AgentSink returns for setup.verified: the type is
@@ -193,7 +194,7 @@ func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, e
 	if l.sink == nil {
 		return events.SetupVerifiedPayload{}, errors.New("evals/setup: a ladder needs a sink")
 	}
-	rungs, err := plan.Ladder(l.cfg.Source, l.cfg.Target, l.cfg.Sink)
+	rungs, err := ladderFor(l.cfg.Source, l.cfg.Target, l.cfg.Sink)
 	if err != nil {
 		return events.SetupVerifiedPayload{}, fmt.Errorf("evals/setup: ladder: %w", err)
 	}
@@ -242,6 +243,25 @@ func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, e
 		return out, fmt.Errorf("evals/setup: write setup.verified: %w", err)
 	}
 	return out, nil
+}
+
+// ladderFor is the server's choice of ladder (internal/room
+// setupLadderRungs): plan.Ladder for the targets with a Connect REST endpoint,
+// plan.StrimziLadder for Strimzi, whose rungs 1 and 2 read the KafkaConnector
+// CR (k8s_get), and managed.Ladder for the managed services (U13b2, U13c,
+// U13d), whose rungs 1 and 2 read the provider's own status op because
+// plan.Ladder refuses them by design.
+func ladderFor(source, target, sink string) ([]plan.Rung, error) {
+	switch target {
+	case "strimzi":
+		// The room's choice (internal/room setupLadderRungs): a Strimzi
+		// Connect cluster is a ClusterIP service the server cannot reach,
+		// so rungs 1 and 2 read the KafkaConnector CR through k8s_get.
+		return plan.StrimziLadder(source, sink)
+	case "msk", "confluent", "aiven":
+		return managed.Ladder(target, source, sink)
+	}
+	return plan.Ladder(source, target, sink)
 }
 
 // runRung issues rung.Reads in order until a predicate decides. The last

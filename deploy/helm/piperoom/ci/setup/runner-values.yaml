@@ -1,0 +1,20 @@
+# helm template piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4 deploy/helm/piperoom -n data -f this file
+image: {repository: registry.example.com/piperoom, tag: pilot}
+setup:
+  runner:
+    enabled: true
+    room: 01JBZ3K7Q8X9V2M4N6P8R0S2T4
+    pipeline: orders
+    kafka: prod-kafka
+    connectors: [orders-src, orders-sink]
+    serverURL: https://piperoom.example.com
+    networkPolicy:
+      apiServer:
+        to: [{ipBlock: {cidr: 10.96.0.1/32}}]
+      server:
+        to: [{ipBlock: {cidr: 203.0.113.10/32}}]
+      extraEgress:
+        - to: [{ipBlock: {cidr: 10.0.5.0/24}}]
+          ports: [{port: 5432, protocol: TCP}]
+networkPolicy:
+  enabled: true

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/targets/host"
 )
@@ -19,13 +20,14 @@ import (
 // model-facing view of them, and the runner re-validates every param before it
 // executes.
 //
-// Every entry's scope is ScopeFree: these ops write only under the runner's
-// project directory or into the Compose stack the runner rendered itself, and
-// name no table, connector or host of the pipeline. A row that does name a
-// pipeline resource (the source and connector drivers of U1-9) supplies its own
-// scope: ScopeTables, ScopeConnector or ScopeField.
+// The environment entries' scope is ScopeFree: these ops write only under the
+// runner's project directory or into the Compose stack the runner rendered
+// itself, and name no table, connector or host of the pipeline. A row that
+// does name a pipeline resource supplies its own scope: ScopeTables,
+// ScopeConnector or ScopeField (the Strimzi and managed connector writes of
+// specs_targets.go check the connector against the pipeline's).
 func EnvironmentSpecs() []Spec {
-	return []Spec{
+	specs := []Spec{
 		{
 			Name:     "file_write",
 			Tier:     "T1",
@@ -55,12 +57,12 @@ func EnvironmentSpecs() []Spec {
 			Name:     "compose_write",
 			Tier:     "T1",
 			Layer:    "environment",
-			Describe: "Render a Compose stack from a typed template (kafka-kraft, connect, registry, source-postgres) and write it under the project directory.",
+			Describe: "Render a Compose stack from typed templates (kafka-kraft, connect, registry, source-postgres, and sink-postgres: the dev warehouse a JDBC sink writes into) and write it under the project directory.",
 			Schema: objectSchema(map[string]any{
 				"templates": map[string]any{
-					"type": "array", "minItems": 1, "maxItems": 4,
+					"type": "array", "minItems": 1, "maxItems": 5,
 					"items": map[string]any{"type": "string", "enum": []string{
-						"kafka-kraft", "connect", "registry", "source-postgres",
+						"kafka-kraft", "connect", "registry", "source-postgres", "sink-postgres",
 					}},
 				},
 				"project":  map[string]any{"type": "string", "pattern": `^piperoom-[a-z0-9_-]{1,54}$`},
@@ -137,7 +139,7 @@ func EnvironmentSpecs() []Spec {
 			Name:     "plugin_install",
 			Tier:     "T1",
 			Layer:    "kafka-connect",
-			Describe: "Download one Debezium connector archive from an allow-listed host into the Connect plugin directory, verified against the pinned digest.",
+			Describe: "Download one Debezium connector archive (a source connector, or jdbc for the JDBC sink) from an allow-listed host into the Connect plugin directory, verified against the pinned digest.",
 			Schema: objectSchema(map[string]any{
 				"release":   map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$`},
 				"connector": map[string]any{"type": "string", "minLength": 1, "maxLength": 32, "pattern": `^[a-z][a-z0-9-]{0,31}$`},
@@ -149,6 +151,116 @@ func EnvironmentSpecs() []Spec {
 			// No PreviewOp until the runner registers preview_plugin_install:
 			// Preview answers "no preview" without a runner round trip.
 		},
+		// The host target's writes (row U8f). A runner whose room has another
+		// target does not register these ops and refuses them as unknown; the
+		// T0 host reads (service_status, properties_read, journal_tail) are
+		// read tools (setuptools), not actions, because every entry here is a
+		// write the agent may only propose.
+		{
+			Name:     "service_install",
+			Tier:     "T2",
+			Layer:    "environment",
+			Describe: "Render the Kafka Connect worker service from the host driver's template and enable it: a piperoom-<name> systemd unit, or the Windows service. The unit's command and paths come from the template and detection, never from these params.",
+			Schema: objectSchema(map[string]any{
+				"name": map[string]any{"type": "string", "pattern": hostServiceNamePattern},
+				"mode": map[string]any{"type": "string", "enum": []string{host.ModeDistributed, host.ModeStandalone}},
+			}),
+			Scope:       ScopeFree,
+			CheckParams: checkServiceInstall,
+			// No PreviewOp until the runner registers preview_service_install
+			// (the host driver has the Preview; the catalogue does not expose
+			// it as an op yet): Preview answers "no preview" without a runner
+			// round trip.
+		},
+		{
+			Name:     "service_restart",
+			Tier:     "T2",
+			Layer:    "environment",
+			Describe: "Restart one piperoom service on the runner's host (systemctl restart of the unit, or the Windows service control manager).",
+			Schema: objectSchema(map[string]any{
+				"name": map[string]any{"type": "string", "pattern": hostServiceNamePattern},
+			}),
+			Scope:       ScopeFree,
+			CheckParams: checkServiceName,
+			// No PreviewOp until the runner registers preview_service_restart:
+			// Preview answers "no preview" without a runner round trip.
+		},
+		// The embedded target's one write (row U6b): the reference project,
+		// rendered from typed params under piperoom-reference/. A runner in
+		// embedded mode refuses every other write; one that is not in
+		// embedded mode does not register it and refuses it as unknown.
+		{
+			Name:     "reference_write",
+			Tier:     "T1",
+			Layer:    "environment",
+			Describe: "Render the Debezium Engine reference project (Maven or Gradle, Postgres or MySQL) from typed params into piperoom-reference/ under the project directory, for the person to compare with their own build and run themselves. The runner never builds or runs it; the password is a ${secret:name} reference.",
+			Schema:   referenceSchema(),
+			Scope:    ScopeFree,
+			CheckParams: func(params json.RawMessage) error {
+				var p ops.ReferenceParams
+				dec := json.NewDecoder(strings.NewReader(string(params)))
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&p); err != nil {
+					return fmt.Errorf("reference_write params: %v", err)
+				}
+				return p.Embedded().Validate()
+			},
+			// No PreviewOp until the runner registers preview_reference_write:
+			// Preview answers "no preview" without a runner round trip.
+		},
+	}
+	// The Strimzi and managed targets' writes (specs_targets.go).
+	return append(specs, targetSpecs()...)
+}
+
+// referenceSchema is reference_write's params schema: the runner op's own
+// (ops.ReferenceParams), so the model sees exactly what the runner decodes.
+func referenceSchema() map[string]any {
+	return ops.ReferenceWriteSchema()
+}
+
+// hostServiceNamePattern mirrors the host driver's service name rule (host's
+// serviceNameRE in unit.go): the NAME of piperoom-NAME.service. The runner
+// re-checks it when it decodes the op's params.
+const hostServiceNamePattern = `^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$`
+
+var hostServiceNameRE = regexp.MustCompile(hostServiceNamePattern)
+
+// hostServiceParams is the part of the host service ops' params this package
+// checks; the runner decodes them strictly against the driver's own types.
+type hostServiceParams struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+}
+
+// checkServiceName mirrors the host driver's service name rule for
+// service_restart (and service_install through checkServiceInstall): the
+// schema states the pattern for the model, this enforces it.
+func checkServiceName(params json.RawMessage) error {
+	var p hostServiceParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("service params: %v", err)
+	}
+	if p.Name != "" && !hostServiceNameRE.MatchString(p.Name) {
+		return fmt.Errorf("name is not a lowercase service name (the NAME of piperoom-NAME.service)")
+	}
+	return nil
+}
+
+// checkServiceInstall checks service_install's name and worker mode.
+func checkServiceInstall(params json.RawMessage) error {
+	if err := checkServiceName(params); err != nil {
+		return err
+	}
+	var p hostServiceParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("service params: %v", err)
+	}
+	switch p.Mode {
+	case "", host.ModeDistributed, host.ModeStandalone:
+		return nil
+	default:
+		return fmt.Errorf("mode %q is not %s or %s", clipText(p.Mode), host.ModeDistributed, host.ModeStandalone)
 	}
 }
 

@@ -1,0 +1,645 @@
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The Connect pods' egress (networkPolicy.enabled): DNS, the other Connect
+# workers' REST API on 8083 (a worker forwards connector writes to the
+# leader), this Kafka cluster's pods, the API server (the
+# KubernetesSecretConfigProvider reads the credentials Secret), the
+# databases, the Schema Registries, then extraEgress. Ingress is left to
+# Strimzi, which writes the Connect REST API's own NetworkPolicy. Every "to"
+# is required and non-empty (piperoom.setupValidate): an empty one would
+# open the port to any destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "orders-connect-egress"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: "orders-connect-connect"
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    # the other Connect workers' REST API
+    - ports:
+        - port: 8083
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/kind: KafkaConnect
+              strimzi.io/name: "orders-connect-connect"
+    # the Kafka cluster prod-kafka
+    - ports:
+        - port: 9092
+          protocol: TCP
+        - port: 9093
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: "prod-kafka"
+              strimzi.io/kind: Kafka
+    # the Kubernetes API server
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+    # the databases
+    - ports:
+        - port: 5432
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.0.5.0/24
+    # the Schema Registries (http://registry.data.svc:8081)
+    - ports:
+        - port: 8081
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.0.6.10/32
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The KafkaConnect build pod's egress (networkPolicy.enabled): DNS, the
+# plugin artifact hosts (pluginHosts) and the registries the image is pushed
+# to (imageRegistries), on the ports their host[:port] names (443 without
+# one). It needs no Kafka, API server or database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "orders-connect-build-egress"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: "orders-connect-connect-build"
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    # the plugin artifact hosts (repo1.maven.org)
+    - ports:
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 199.232.0.0/16
+    # the image registries (registry.data.svc:5000)
+    - ports:
+        - port: 5000
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              app: registry
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# Empty; k8s_secret_apply fills stringData. A Secret's type is immutable, so no
+# later patch can turn this into a service-account-token Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db-credentials
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+type: Opaque
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-connect-logging
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# Fixed content: the runner reads it, never patches it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orders-connect-metrics
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+data:
+  metrics-config.yml: |
+    lowercaseOutputName: true
+    lowercaseOutputLabelNames: true
+    rules:
+      - pattern: "kafka.connect<type=connect-worker-metrics>([^:]+):"
+        name: "kafka_connect_worker_$1"
+      - pattern: "kafka.connect<type=connect-metrics, client-id=([^:]+)><>([^:]+)"
+        name: "kafka_connect_$2"
+        labels:
+          client: "$1"
+      - pattern: "kafka.connect<type=connector-task-metrics, connector=([^,]+), task=([^>]+)><>status: ([^:]+)"
+        name: "kafka_connect_connector_status"
+        value: 1
+        labels:
+          connector: "$1"
+          task: "$2"
+          status: "$3"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,]+), key=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$5"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+          key: "$4"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$4"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The Connect pods read the one credentials Secret through Strimzi's
+# KubernetesSecretConfigProvider; the ServiceAccount is the one Strimzi
+# creates for the KafkaConnect (<name>-connect).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orders-connect-secrets
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [orders-db-credentials]
+    verbs: [get]
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orders-connect-secrets
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orders-connect-secrets
+subjects:
+  - kind: ServiceAccount
+    name: orders-connect-connect
+    namespace: data
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# The pipeline release (docs/design/setup-strimzi.md §3): every object the
+# setup runner touches, pre-created with a chart-fixed name, so the runner's
+# Role needs no create. The Strimzi CRs are paused shells: the operators
+# reconcile nothing until the runner has filled the spec and removed the
+# annotation. Shell specs are the smallest the v1 schema accepts; the runner
+# replaces /spec whole.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnect
+metadata:
+  name: orders-connect
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+    strimzi.io/use-connector-resources: "true"
+spec:
+  replicas: 1
+  bootstrapServers: prod-kafka-kafka-bootstrap:9092
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnector
+metadata:
+  name: orders-src
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: orders-connect
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec:
+  tasksMax: 1
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: orders-canary
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec:
+  partitions: 1
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: orders-connect
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec: {}
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: orders-piperoom-ro
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+    strimzi.io/cluster: prod-kafka
+  annotations:
+    strimzi.io/pause-reconciliation: "true"
+spec: {}
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+# D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
+# named objects only, mirrors the runner's field allow-list
+# (internal/setup/targets/strimzi allowlist.go, connector_config.go) for the
+# fields a compromised runner could use to mount any Secret, read another
+# Secret or file through a config provider, pull an unpinned plugin, push to
+# another registry, reach another Kafka cluster, run code in a transform,
+# move offsets, re-point the canary topic or mint a Kafka superuser. Every
+# field is read behind has(), so a field the CRD lacks is absent, never an
+# evaluation error. The JDBC URL and Debezium key allow-lists stay the
+# runner's (connector_config.go); this policy holds the refusals that would
+# hand the cluster to whoever controls the runner.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: "piperoom-pipeline-orders"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects, kafkaconnectors, kafkausers, kafkatopics]
+  # Per-request values the KafkaConnector rules read: its config, its
+  # connection URL and MongoDB string, their dialect, parameters and hosts.
+  # Each is read only after the URL's shape matched the runner's pattern.
+  variables:
+    - name: cc
+      expression: >-
+        object.kind == 'KafkaConnector' && has(object.spec) && has(object.spec.config) ? object.spec.config : {}
+    - name: sink
+      expression: >-
+        object.kind == 'KafkaConnector' && has(object.spec) && has(object.spec.class) && object.spec.class == 'io.debezium.connector.jdbc.JdbcSinkConnector'
+    - name: url
+      expression: >-
+        'connection.url' in variables.cc ? string(variables.cc['connection.url']) : ''
+    - name: mongo
+      expression: >-
+        'mongodb.connection.string' in variables.cc ? string(variables.cc['mongodb.connection.string']) : ''
+    - name: dialect
+      expression: >-
+        variables.url.startsWith('jdbc:oracle:thin:@') ? 'oracle' :
+        (variables.url.startsWith('jdbc:') && variables.url.contains('://') ? variables.url.substring(5, variables.url.indexOf('://')) : '')
+    - name: urlRest
+      expression: >-
+        variables.url.contains('://') ? variables.url.substring(variables.url.indexOf('://') + 3) : ''
+    - name: oracleAddr
+      expression: >-
+        variables.dialect != 'oracle' ? '' :
+        (variables.url.substring(18).startsWith('//') ? variables.url.substring(20) : variables.url.substring(18))
+    - name: urlParams
+      expression: >-
+        (variables.dialect == 'sqlserver' ? (variables.urlRest.contains(';') ? variables.urlRest.substring(variables.urlRest.indexOf(';') + 1) : '') :
+        variables.dialect == 'db2' ? (variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).contains(':') ?
+        variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).substring(variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).indexOf(':') + 1) : '') :
+        variables.dialect == 'oracle' ? '' :
+        (variables.url.contains('?') ? variables.url.substring(variables.url.indexOf('?') + 1) : '')).replace(';', '&').split('&').filter(q, q != '')
+    - name: urlHosts
+      expression: >-
+        variables.dialect == 'oracle' ? (variables.oracleAddr.contains('/') ? variables.oracleAddr.split('/')[0] :
+        variables.oracleAddr.substring(0, variables.oracleAddr.lastIndexOf(':'))).split(',') :
+        (variables.dialect == 'sqlserver' ? variables.urlRest.split(';')[0] : variables.urlRest.split('/')[0]).split(',')
+    - name: mongoParams
+      expression: >-
+        variables.mongo.contains('?') ? variables.mongo.substring(variables.mongo.indexOf('?') + 1).split('&').filter(q, q != '') : []
+    - name: mongoHosts
+      expression: >-
+        variables.mongo.startsWith('mongodb://') ? variables.mongo.substring(10).split('/')[0].split('?')[0].split(',') : []
+  validations:
+    # ---- KafkaConnect ----
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        (object.spec.all(k, k in ['replicas', 'version', 'bootstrapServers', 'tls', 'authentication', 'config', 'build', 'resources', 'logging', 'metricsConfig', 'jvmOptions']) &&
+        (!has(object.spec.jvmOptions) || object.spec.jvmOptions.all(k, k in ['-Xms', '-Xmx'])) &&
+        (!has(object.spec.bootstrapServers) || string(object.spec.bootstrapServers).matches(r'^prod-kafka-kafka-bootstrap(\.data(\.svc(\.cluster\.local)?)?)?:(9092|9093)$')))
+      message: "piperoom: a KafkaConnect sets only replicas, version, bootstrapServers, tls, authentication, config, build, resources, logging, metricsConfig and jvmOptions (-Xms, -Xmx); no image, template, externalConfiguration or system properties; and its bootstrap is prod-kafka-kafka-bootstrap"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) ||
+        (object.spec.build.all(k, k in ['output', 'plugins']) && has(object.spec.build.output) &&
+        object.spec.build.output.all(k, k in ['type', 'image', 'pushSecret']) &&
+        has(object.spec.build.output.type) && object.spec.build.output.type == 'docker' &&
+        has(object.spec.build.output.pushSecret) && object.spec.build.output.pushSecret == 'orders-registry-push' &&
+        has(object.spec.build.output.image) && string(object.spec.build.output.image).matches(r'^(registry\.data\.svc:5000)/[a-z0-9._/-]{1,200}:piperoom-orders-[a-z0-9-]{1,60}$'))
+      message: "piperoom: a build pushes a docker image <registry>/<repo>:piperoom-orders-<digest> to one of registry.data.svc:5000, with orders-registry-push only"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.tls) || !has(object.spec.tls.trustedCertificates) ||
+        object.spec.tls.trustedCertificates.all(c, has(c.secretName) && c.secretName == 'prod-kafka-cluster-ca-cert')
+      message: "piperoom: spec.tls trusts only the prod-kafka-cluster-ca-cert Secret"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.authentication) ||
+        (has(object.spec.authentication.type) &&
+        ((object.spec.authentication.type == 'tls' && has(object.spec.authentication.certificateAndKey) &&
+        has(object.spec.authentication.certificateAndKey.secretName) && object.spec.authentication.certificateAndKey.secretName == 'orders-connect') ||
+        (object.spec.authentication.type == 'scram-sha-512' && has(object.spec.authentication.passwordSecret) &&
+        has(object.spec.authentication.passwordSecret.secretName) && object.spec.authentication.passwordSecret.secretName == 'orders-connect')))
+      message: "piperoom: spec.authentication is tls or scram-sha-512 with the orders-connect KafkaUser's Secret only"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k, k in ['group.id', 'offset.storage.topic', 'config.storage.topic', 'status.storage.topic',
+        'offset.storage.replication.factor', 'config.storage.replication.factor', 'status.storage.replication.factor',
+        'key.converter', 'value.converter', 'key.converter.schemas.enable', 'value.converter.schemas.enable',
+        'key.converter.schema.registry.url', 'value.converter.schema.registry.url', 'config.providers', 'config.providers.secrets.class'] &&
+        !string(object.spec.config[k]).contains('${') && !string(object.spec.config[k]).matches(r'^[\s\pZ]|[\s\pZ]$') &&
+        !string(object.spec.config[k]).matches(r'[\x00-\x1f\x7f-\x9f]') &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in ['http://registry.data.svc:8081']) &&
+        (k != 'config.providers' || string(object.spec.config[k]) == 'secrets') &&
+        (k != 'config.providers.secrets.class' || string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider') &&
+        (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in ['org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter', 'io.confluent.connect.avro.AvroConverter', 'io.apicurio.registry.utils.converter.AvroConverter']))
+      message: "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference or has whitespace at an end, the converters are the allow-listed ones and a Schema Registry URL is one of http://registry.data.svc:8081"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
+        object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
+        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
+        has(a.url) && ['https://repo1.maven.org/'].exists(h, a.url.startsWith(h))))
+      message: "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from repo1.maven.org"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
+        (has(object.spec.logging.valueFrom.configMapKeyRef) && has(object.spec.logging.valueFrom.configMapKeyRef.name) &&
+        object.spec.logging.valueFrom.configMapKeyRef.name == 'orders-connect-logging')) &&
+        (!has(object.spec.metricsConfig) || !has(object.spec.metricsConfig.valueFrom) ||
+        (has(object.spec.metricsConfig.valueFrom.configMapKeyRef) && has(object.spec.metricsConfig.valueFrom.configMapKeyRef.name) &&
+        object.spec.metricsConfig.valueFrom.configMapKeyRef.name == 'orders-connect-metrics')))
+      message: "piperoom: logging and metrics read only the orders-connect-logging and orders-connect-metrics ConfigMaps"
+    # ---- KafkaConnector ----
+    # Every value check is an allow-list from the runner's tables (files/):
+    # the keys, the pinned values, the transform classes and keys, the URL
+    # shapes and parameters. Keys and values carry no control character
+    # anywhere (Java's trim() strips every character up to U+0020, so one at
+    # an end is whitespace to the plugin) and no white space at an end. A ${
+    # appears only as a credential key's whole value, naming its own Secret
+    # key (a user key the username, a password key the password), or as a
+    # pinned value (Strimzi's store password).
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
+        (!has(object.spec.tasksMax) || object.spec.tasksMax == 1) &&
+        (!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        variables.cc.all(k,
+        k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
+        !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
+        (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
+        (k in ['archive.log.hours', 'batch.size', 'bigint.unsigned.handling.mode', 'binary.handling.mode', 'capture.mode', 'collection.exclude.list', 'collection.include.list', 'collection.naming.strategy', 'column.exclude.list', 'column.include.list', 'column.propagate.source.type', 'connect.keep.alive', 'connect.keep.alive.interval.ms', 'connect.timeout.ms', 'connection.password', 'connection.pool.acquire_increment', 'connection.pool.max_size', 'connection.pool.min_size', 'connection.pool.timeout', 'connection.provider', 'connection.restart.on.errors', 'connection.url', 'connection.username', 'consumer.override.fetch.max.bytes', 'consumer.override.max.partition.fetch.bytes', 'consumer.override.max.poll.interval.ms', 'consumer.override.max.poll.records', 'data.query.mode', 'database.dbname', 'database.encrypt', 'database.exclude.list', 'database.hostname', 'database.include.list', 'database.names', 'database.password', 'database.pdb.name', 'database.port', 'database.server.id', 'database.ssl.mode', 'database.sslmode', 'database.time_zone', 'database.trustServerCertificate', 'database.user', 'datatype.propagate.source.type', 'decimal.handling.mode', 'delete.enabled', 'dialect.postgres.postgis.schema', 'dialect.sqlserver.identity.insert', 'enable.time.adjuster', 'errors.deadletterqueue.context.headers.enable', 'errors.deadletterqueue.topic.name', 'errors.deadletterqueue.topic.replication.factor', 'errors.log.enable', 'errors.log.include.messages', 'errors.max.retries', 'errors.retry.delay.max.ms', 'errors.retry.timeout', 'errors.tolerance', 'event.processing.failure.handling.mode', 'field.exclude.list', 'field.include.list', 'field.renames', 'flush.max.retries', 'flush.retry.delay.ms', 'gtid.source.excludes', 'gtid.source.includes', 'heartbeat.interval.ms', 'hstore.handling.mode', 'include.query', 'include.schema.changes', 'inconsistent.schema.handling.mode', 'incremental.snapshot.chunk.size', 'incremental.snapshot.option.recompile', 'insert.mode', 'interval.handling.mode', 'key.converter', 'key.converter.schema.registry.url', 'key.converter.schemas.enable', 'lob.enabled', 'log.mining.archive.log.only.mode', 'log.mining.batch.size.default', 'log.mining.batch.size.increment', 'log.mining.batch.size.max', 'log.mining.batch.size.min', 'log.mining.continuous.mine', 'log.mining.query.filter.mode', 'log.mining.sleep.time.default.ms', 'log.mining.sleep.time.increment.ms', 'log.mining.sleep.time.max.ms', 'log.mining.sleep.time.min.ms', 'log.mining.strategy', 'lsn.flush.mode', 'max.batch.size', 'max.queue.size', 'max.queue.size.in.bytes', 'message.key.columns', 'min.row.count.to.stream.results', 'money.fraction.digits', 'mongodb.authsource', 'mongodb.connection.mode', 'mongodb.connection.string', 'mongodb.password', 'mongodb.ssl.enabled', 'mongodb.user', 'plugin.name', 'poll.interval.ms', 'predicates', 'primary.key.fields', 'primary.key.mode', 'producer.override.acks', 'producer.override.batch.size', 'producer.override.buffer.memory', 'producer.override.compression.type', 'producer.override.enable.idempotence', 'producer.override.linger.ms', 'producer.override.max.in.flight.requests.per.connection', 'producer.override.max.request.size', 'provide.transaction.metadata', 'publication.autocreate.mode', 'publication.name', 'query.fetch.size', 'quote.identifiers', 'replica.identity.autoset.values', 'retriable.restart.connector.wait.ms', 'schema.evolution', 'schema.exclude.list', 'schema.history.internal.consumer.sasl.mechanism', 'schema.history.internal.consumer.security.protocol', 'schema.history.internal.consumer.ssl.keystore.location', 'schema.history.internal.consumer.ssl.keystore.password', 'schema.history.internal.consumer.ssl.keystore.type', 'schema.history.internal.consumer.ssl.truststore.location', 'schema.history.internal.consumer.ssl.truststore.password', 'schema.history.internal.consumer.ssl.truststore.type', 'schema.history.internal.kafka.bootstrap.servers', 'schema.history.internal.kafka.topic', 'schema.history.internal.producer.sasl.mechanism', 'schema.history.internal.producer.security.protocol', 'schema.history.internal.producer.ssl.keystore.location', 'schema.history.internal.producer.ssl.keystore.password', 'schema.history.internal.producer.ssl.keystore.type', 'schema.history.internal.producer.ssl.truststore.location', 'schema.history.internal.producer.ssl.truststore.password', 'schema.history.internal.producer.ssl.truststore.type', 'schema.history.internal.skip.unparseable.ddl', 'schema.history.internal.store.only.captured.databases.ddl', 'schema.history.internal.store.only.captured.tables.ddl', 'schema.include.list', 'schema.refresh.mode', 'signal.data.collection', 'signal.enabled.channels', 'skipped.operations', 'slot.drop.on.stop', 'slot.max.retries', 'slot.name', 'slot.retry.delay.ms', 'snapshot.fetch.size', 'snapshot.include.collection.list', 'snapshot.isolation.mode', 'snapshot.locking.mode', 'snapshot.max.threads', 'snapshot.mode', 'status.update.interval.ms', 'table.exclude.list', 'table.include.list', 'table.naming.strategy', 'time.precision.mode', 'tombstones.on.delete', 'topic.creation.default.cleanup.policy', 'topic.creation.default.compression.type', 'topic.creation.default.partitions', 'topic.creation.default.replication.factor', 'topic.prefix', 'topics', 'transforms', 'truncate.enabled', 'use.reduction.buffer', 'use.time.zone', 'value.converter', 'value.converter.schema.registry.url', 'value.converter.schemas.enable', 'xmin.fetch.interval.ms'] || k.matches(r'^(transforms|predicates)\.([A-Za-z][A-Za-z0-9_-]{0,31})\.([A-Za-z0-9_.-]{1,64})$')) &&
+        !(k + string(variables.cc[k])).matches(r'[\x00-\x1f\x7f-\x9f]') &&
+        !k.matches(r'^[\s\pZ]|[\s\pZ]$') && !string(variables.cc[k]).matches(r'^[\s\pZ]|[\s\pZ]$') &&
+        (!string(variables.cc[k]).contains('${') ||
+        (k in {'connection.password': 'password', 'connection.username': 'username', 'database.password': 'password', 'database.user': 'username', 'mongodb.password': 'password', 'mongodb.user': 'username'} && string(variables.cc[k]) == '${secrets:data/orders-db-credentials:' + {'connection.password': 'password', 'connection.username': 'username', 'database.password': 'password', 'database.user': 'username', 'mongodb.password': 'password', 'mongodb.user': 'username'}[k] + '}') ||
+        (k in {'collection.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy', 'io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'column.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy', 'io.debezium.sink.naming.DefaultColumnNamingStrategy'], 'connection.provider': ['org.hibernate.c3p0.internal.C3P0ConnectionProvider'], 'key.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter'], 'schema.history.internal.consumer.security.protocol': ['SSL'], 'schema.history.internal.consumer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.consumer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.consumer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.consumer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.truststore.type': ['PKCS12'], 'schema.history.internal.producer.security.protocol': ['SSL'], 'schema.history.internal.producer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.producer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.producer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.producer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.truststore.type': ['PKCS12'], 'signal.enabled.channels': ['source'], 'table.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'value.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter']} && string(variables.cc[k]) in {'collection.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy', 'io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'column.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy', 'io.debezium.sink.naming.DefaultColumnNamingStrategy'], 'connection.provider': ['org.hibernate.c3p0.internal.C3P0ConnectionProvider'], 'key.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter'], 'schema.history.internal.consumer.security.protocol': ['SSL'], 'schema.history.internal.consumer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.consumer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.consumer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.consumer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.truststore.type': ['PKCS12'], 'schema.history.internal.producer.security.protocol': ['SSL'], 'schema.history.internal.producer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.producer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.producer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.producer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.truststore.type': ['PKCS12'], 'signal.enabled.channels': ['source'], 'table.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'value.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter']}[k]))))
+      message: "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart; its config keys are the runner's allow-list, no key or value has a control character or white space at an end, and a reference is the whole value of a user or password key naming its own key, ${secrets:data/orders-db-credentials:username|password}"
+    # Pinned values, required keys, file keys and database names.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        (variables.cc.all(k,
+        (!(k in {'collection.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy', 'io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'column.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy', 'io.debezium.sink.naming.DefaultColumnNamingStrategy'], 'connection.provider': ['org.hibernate.c3p0.internal.C3P0ConnectionProvider'], 'key.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter'], 'schema.history.internal.consumer.security.protocol': ['SSL'], 'schema.history.internal.consumer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.consumer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.consumer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.consumer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.truststore.type': ['PKCS12'], 'schema.history.internal.producer.security.protocol': ['SSL'], 'schema.history.internal.producer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.producer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.producer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.producer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.truststore.type': ['PKCS12'], 'signal.enabled.channels': ['source'], 'table.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'value.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter']}) || string(variables.cc[k]) in {'collection.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy', 'io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'column.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy', 'io.debezium.sink.naming.DefaultColumnNamingStrategy'], 'connection.provider': ['org.hibernate.c3p0.internal.C3P0ConnectionProvider'], 'key.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter'], 'schema.history.internal.consumer.security.protocol': ['SSL'], 'schema.history.internal.consumer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.consumer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.consumer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.consumer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.truststore.type': ['PKCS12'], 'schema.history.internal.producer.security.protocol': ['SSL'], 'schema.history.internal.producer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.producer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.producer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.producer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.truststore.type': ['PKCS12'], 'signal.enabled.channels': ['source'], 'table.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'value.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter']}[k]) &&
+        (!(k in {'database.encrypt': ['true'], 'database.ssl.mode': ['verify_ca', 'verify_identity'], 'database.sslmode': ['verify-ca', 'verify-full'], 'database.trustServerCertificate': ['false']}) || string(variables.cc[k]).lowerAscii() in {'database.encrypt': ['true'], 'database.ssl.mode': ['verify_ca', 'verify_identity'], 'database.sslmode': ['verify-ca', 'verify-full'], 'database.trustServerCertificate': ['false']}[k]) &&
+        (!k.matches(r'(^|\.)(ssl\.(keystore|truststore)\.location|sslrootcert|sslcert|sslkey|sslfactory|socketFactory)$') || k in {'collection.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy', 'io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'column.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy', 'io.debezium.sink.naming.DefaultColumnNamingStrategy'], 'connection.provider': ['org.hibernate.c3p0.internal.C3P0ConnectionProvider'], 'key.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter'], 'schema.history.internal.consumer.security.protocol': ['SSL'], 'schema.history.internal.consumer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.consumer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.consumer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.consumer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.consumer.ssl.truststore.type': ['PKCS12'], 'schema.history.internal.producer.security.protocol': ['SSL'], 'schema.history.internal.producer.ssl.keystore.location': ['/tmp/kafka/cluster.keystore.p12'], 'schema.history.internal.producer.ssl.keystore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.keystore.type': ['PKCS12'], 'schema.history.internal.producer.ssl.truststore.location': ['/tmp/kafka/cluster.truststore.p12'], 'schema.history.internal.producer.ssl.truststore.password': ['${strimzienv:CERTS_STORE_PASSWORD}'], 'schema.history.internal.producer.ssl.truststore.type': ['PKCS12'], 'signal.enabled.channels': ['source'], 'table.naming.strategy': ['io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy', 'io.debezium.sink.naming.DefaultCollectionNamingStrategy'], 'value.converter': ['io.apicurio.registry.utils.converter.AvroConverter', 'io.confluent.connect.avro.AvroConverter', 'org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter']}) &&
+        (!(k in ['database.dbname', 'database.pdb.name']) || string(variables.cc[k]).matches(r'^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$')) &&
+        (k != 'database.names' || string(variables.cc[k]).split(',').all(n, n.trim().matches(r'^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$')))) &&
+        (!has(object.spec.class) || !(object.spec.class in {'io.debezium.connector.jdbc.JdbcSinkConnector': ['connection.url'], 'io.debezium.connector.mongodb.MongoDbConnector': ['mongodb.connection.string'], 'io.debezium.connector.mysql.MySqlConnector': ['database.ssl.mode'], 'io.debezium.connector.postgresql.PostgresConnector': ['database.sslmode'], 'io.debezium.connector.sqlserver.SqlServerConnector': ['database.encrypt']}) ||
+        {'io.debezium.connector.jdbc.JdbcSinkConnector': ['connection.url'], 'io.debezium.connector.mongodb.MongoDbConnector': ['mongodb.connection.string'], 'io.debezium.connector.mysql.MySqlConnector': ['database.ssl.mode'], 'io.debezium.connector.postgresql.PostgresConnector': ['database.sslmode'], 'io.debezium.connector.sqlserver.SqlServerConnector': ['database.encrypt']}[object.spec.class].all(r, r in variables.cc)) &&
+        (!('schema.history.internal.kafka.topic' in variables.cc || 'schema.history.internal.kafka.bootstrap.servers' in variables.cc) ||
+        ['schema.history.internal.producer.security.protocol', 'schema.history.internal.consumer.security.protocol'].all(r, r in variables.cc)))
+      message: "piperoom: a KafkaConnector's pinned keys hold one of the runner's values (TLS on and verified, the sink's own classes, the allow-listed converters, Strimzi's own stores, the source signal channel), a source sets its TLS key, a schema history uses SSL, and database names are names"
+    # Transforms and predicates: a declared name, a class from the runner's
+    # list (RegexRouter on a JDBC sink only), and each other key one of that
+    # class's keys with one of its values; a key that names a table (the
+    # "nodot" rows: a RegexRouter replacement, a CollectionNameTransformation
+    # prefix or suffix) never names another schema. route.by.field is not in
+    # the key list.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((!('transforms' in variables.cc) || string(variables.cc['transforms']).matches(r'^[A-Za-z][A-Za-z0-9_-]{0,31}(,[A-Za-z][A-Za-z0-9_-]{0,31}){0,15}$')) &&
+        (!('predicates' in variables.cc) || string(variables.cc['predicates']).matches(r'^[A-Za-z][A-Za-z0-9_-]{0,31}(,[A-Za-z][A-Za-z0-9_-]{0,31}){0,15}$')) &&
+        variables.cc.all(k, !k.matches(r'^(transforms|predicates)\.([A-Za-z][A-Za-z0-9_-]{0,31})\.([A-Za-z0-9_.-]{1,64})$') || (
+        k.split('.')[0] in variables.cc && k.split('.')[1] in string(variables.cc[k.split('.')[0]]).split(',') &&
+        (k == k.split('.')[0] + '.' + k.split('.')[1] + '.type' ?
+        (string(variables.cc[k]) in ['io.debezium.connector.jdbc.transforms.CollectionNameTransformation', 'io.debezium.connector.jdbc.transforms.FieldNameTransformation', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState', 'io.debezium.connector.mysql.transforms.ReadToInsertEvent', 'io.debezium.connector.postgresql.transforms.DecodeLogicalDecodingMessageContent', 'io.debezium.transforms.ExtractChangedRecordState', 'io.debezium.transforms.ExtractNewRecordState', 'io.debezium.transforms.ExtractSchemaToNewRecord', 'io.debezium.transforms.HeaderToValue', 'io.debezium.transforms.SchemaChangeEventFilter', 'io.debezium.transforms.TimezoneConverter', 'io.debezium.transforms.VectorToJsonConverter', 'io.debezium.transforms.partitions.PartitionRouting', 'io.debezium.transforms.tracing.ActivateTracingSpan', 'org.apache.kafka.connect.transforms.Cast$Key', 'org.apache.kafka.connect.transforms.Cast$Value', 'org.apache.kafka.connect.transforms.DropHeaders', 'org.apache.kafka.connect.transforms.ExtractField$Key', 'org.apache.kafka.connect.transforms.ExtractField$Value', 'org.apache.kafka.connect.transforms.Filter', 'org.apache.kafka.connect.transforms.Flatten$Key', 'org.apache.kafka.connect.transforms.Flatten$Value', 'org.apache.kafka.connect.transforms.HeaderFrom$Key', 'org.apache.kafka.connect.transforms.HeaderFrom$Value', 'org.apache.kafka.connect.transforms.HoistField$Key', 'org.apache.kafka.connect.transforms.HoistField$Value', 'org.apache.kafka.connect.transforms.InsertField$Key', 'org.apache.kafka.connect.transforms.InsertField$Value', 'org.apache.kafka.connect.transforms.InsertHeader', 'org.apache.kafka.connect.transforms.MaskField$Key', 'org.apache.kafka.connect.transforms.MaskField$Value', 'org.apache.kafka.connect.transforms.ReplaceField$Key', 'org.apache.kafka.connect.transforms.ReplaceField$Value', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Key', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Value', 'org.apache.kafka.connect.transforms.TimestampConverter$Key', 'org.apache.kafka.connect.transforms.TimestampConverter$Value', 'org.apache.kafka.connect.transforms.ValueToKey', 'org.apache.kafka.connect.transforms.predicates.HasHeaderKey', 'org.apache.kafka.connect.transforms.predicates.RecordIsTombstone', 'org.apache.kafka.connect.transforms.predicates.TopicNameMatches'] || (string(variables.cc[k]) in ['org.apache.kafka.connect.transforms.RegexRouter'] && variables.sink)) :
+        (k == 'transforms.' + k.split('.')[1] + '.predicate' ?
+        ('predicates' in variables.cc && string(variables.cc[k]) in string(variables.cc['predicates']).split(',')) :
+        (k == 'transforms.' + k.split('.')[1] + '.negate' ? string(variables.cc[k]) in ['true', 'false'] :
+        ((k.split('.')[0] + '.' + k.split('.')[1] + '.type') in variables.cc &&
+        (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in ['io.debezium.connector.jdbc.transforms.CollectionNameTransformation collection.naming.prefix', 'io.debezium.connector.jdbc.transforms.CollectionNameTransformation collection.naming.style', 'io.debezium.connector.jdbc.transforms.CollectionNameTransformation collection.naming.suffix', 'io.debezium.connector.jdbc.transforms.FieldNameTransformation column.naming.prefix', 'io.debezium.connector.jdbc.transforms.FieldNameTransformation column.naming.style', 'io.debezium.connector.jdbc.transforms.FieldNameTransformation column.naming.suffix', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState array.encoding', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode.rewrite-with-id', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState drop.tombstones', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState flatten.struct', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState flatten.struct.delimiter', 'io.debezium.connector.postgresql.transforms.DecodeLogicalDecodingMessageContent fields.null.include', 'io.debezium.transforms.ExtractChangedRecordState header.changed.name', 'io.debezium.transforms.ExtractChangedRecordState header.unchanged.name', 'io.debezium.transforms.ExtractNewRecordState add.fields', 'io.debezium.transforms.ExtractNewRecordState add.fields.prefix', 'io.debezium.transforms.ExtractNewRecordState add.headers', 'io.debezium.transforms.ExtractNewRecordState add.headers.prefix', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState drop.fields.from.key', 'io.debezium.transforms.ExtractNewRecordState drop.fields.header.name', 'io.debezium.transforms.ExtractNewRecordState drop.fields.keep.schema.compatible', 'io.debezium.transforms.ExtractNewRecordState drop.tombstones', 'io.debezium.transforms.ExtractNewRecordState replace.null.with.default', 'io.debezium.transforms.HeaderToValue fields', 'io.debezium.transforms.HeaderToValue headers', 'io.debezium.transforms.HeaderToValue operation', 'io.debezium.transforms.SchemaChangeEventFilter schema.change.event.exclude.list', 'io.debezium.transforms.TimezoneConverter converted.timezone', 'io.debezium.transforms.TimezoneConverter exclude.list', 'io.debezium.transforms.TimezoneConverter include.list', 'io.debezium.transforms.partitions.PartitionRouting partition.hash.function', 'io.debezium.transforms.partitions.PartitionRouting partition.payload.fields', 'io.debezium.transforms.partitions.PartitionRouting partition.topic.num', 'io.debezium.transforms.tracing.ActivateTracingSpan tracing.operation.name', 'io.debezium.transforms.tracing.ActivateTracingSpan tracing.span.context.field', 'io.debezium.transforms.tracing.ActivateTracingSpan tracing.with.context.field.only', 'org.apache.kafka.connect.transforms.Cast$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.Cast$Key spec', 'org.apache.kafka.connect.transforms.Cast$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.Cast$Value spec', 'org.apache.kafka.connect.transforms.DropHeaders headers', 'org.apache.kafka.connect.transforms.ExtractField$Key field', 'org.apache.kafka.connect.transforms.ExtractField$Key field.syntax.version', 'org.apache.kafka.connect.transforms.ExtractField$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.ExtractField$Value field', 'org.apache.kafka.connect.transforms.ExtractField$Value field.syntax.version', 'org.apache.kafka.connect.transforms.ExtractField$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.Filter negate', 'org.apache.kafka.connect.transforms.Filter predicate', 'org.apache.kafka.connect.transforms.Flatten$Key delimiter', 'org.apache.kafka.connect.transforms.Flatten$Value delimiter', 'org.apache.kafka.connect.transforms.HeaderFrom$Key fields', 'org.apache.kafka.connect.transforms.HeaderFrom$Key headers', 'org.apache.kafka.connect.transforms.HeaderFrom$Key operation', 'org.apache.kafka.connect.transforms.HeaderFrom$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.HeaderFrom$Value fields', 'org.apache.kafka.connect.transforms.HeaderFrom$Value headers', 'org.apache.kafka.connect.transforms.HeaderFrom$Value operation', 'org.apache.kafka.connect.transforms.HeaderFrom$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.HoistField$Key field', 'org.apache.kafka.connect.transforms.HoistField$Value field', 'org.apache.kafka.connect.transforms.InsertField$Key offset.field', 'org.apache.kafka.connect.transforms.InsertField$Key partition.field', 'org.apache.kafka.connect.transforms.InsertField$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.InsertField$Key static.field', 'org.apache.kafka.connect.transforms.InsertField$Key static.value', 'org.apache.kafka.connect.transforms.InsertField$Key timestamp.field', 'org.apache.kafka.connect.transforms.InsertField$Key topic.field', 'org.apache.kafka.connect.transforms.InsertField$Value offset.field', 'org.apache.kafka.connect.transforms.InsertField$Value partition.field', 'org.apache.kafka.connect.transforms.InsertField$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.InsertField$Value static.field', 'org.apache.kafka.connect.transforms.InsertField$Value static.value', 'org.apache.kafka.connect.transforms.InsertField$Value timestamp.field', 'org.apache.kafka.connect.transforms.InsertField$Value topic.field', 'org.apache.kafka.connect.transforms.InsertHeader header', 'org.apache.kafka.connect.transforms.InsertHeader value.literal', 'org.apache.kafka.connect.transforms.MaskField$Key fields', 'org.apache.kafka.connect.transforms.MaskField$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.MaskField$Key replacement', 'org.apache.kafka.connect.transforms.MaskField$Value fields', 'org.apache.kafka.connect.transforms.MaskField$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.MaskField$Value replacement', 'org.apache.kafka.connect.transforms.RegexRouter regex', 'org.apache.kafka.connect.transforms.RegexRouter replacement', 'org.apache.kafka.connect.transforms.ReplaceField$Key exclude', 'org.apache.kafka.connect.transforms.ReplaceField$Key include', 'org.apache.kafka.connect.transforms.ReplaceField$Key renames', 'org.apache.kafka.connect.transforms.ReplaceField$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.ReplaceField$Value exclude', 'org.apache.kafka.connect.transforms.ReplaceField$Value include', 'org.apache.kafka.connect.transforms.ReplaceField$Value renames', 'org.apache.kafka.connect.transforms.ReplaceField$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Key schema.name', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Key schema.version', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Value schema.name', 'org.apache.kafka.connect.transforms.SetSchemaMetadata$Value schema.version', 'org.apache.kafka.connect.transforms.TimestampConverter$Key field', 'org.apache.kafka.connect.transforms.TimestampConverter$Key format', 'org.apache.kafka.connect.transforms.TimestampConverter$Key replace.null.with.default', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Value field', 'org.apache.kafka.connect.transforms.TimestampConverter$Value format', 'org.apache.kafka.connect.transforms.TimestampConverter$Value replace.null.with.default', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision', 'org.apache.kafka.connect.transforms.ValueToKey fields', 'org.apache.kafka.connect.transforms.ValueToKey replace.null.with.default', 'org.apache.kafka.connect.transforms.predicates.HasHeaderKey name', 'org.apache.kafka.connect.transforms.predicates.TopicNameMatches pattern'] &&
+        (!((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in ['io.debezium.connector.mongodb.transforms.ExtractNewDocumentState array.encoding', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState array.encoding', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode', 'io.debezium.transforms.ExtractNewRecordState drop.fields.from.key', 'io.debezium.transforms.ExtractNewRecordState drop.fields.from.key', 'io.debezium.transforms.ExtractNewRecordState drop.fields.keep.schema.compatible', 'io.debezium.transforms.ExtractNewRecordState drop.fields.keep.schema.compatible', 'io.debezium.transforms.HeaderToValue operation', 'io.debezium.transforms.HeaderToValue operation', 'org.apache.kafka.connect.transforms.ExtractField$Key field.syntax.version', 'org.apache.kafka.connect.transforms.ExtractField$Key field.syntax.version', 'org.apache.kafka.connect.transforms.ExtractField$Value field.syntax.version', 'org.apache.kafka.connect.transforms.ExtractField$Value field.syntax.version', 'org.apache.kafka.connect.transforms.HeaderFrom$Key operation', 'org.apache.kafka.connect.transforms.HeaderFrom$Key operation', 'org.apache.kafka.connect.transforms.HeaderFrom$Value operation', 'org.apache.kafka.connect.transforms.HeaderFrom$Value operation', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision']) ||
+        (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) + ' ' + string(variables.cc[k])) in ['io.debezium.connector.mongodb.transforms.ExtractNewDocumentState array.encoding array', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState array.encoding document', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode drop', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode none', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.handling.mode rewrite', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode delete-to-tombstone', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode drop', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode rewrite', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode rewrite-with-tombstone', 'io.debezium.connector.mongodb.transforms.ExtractNewDocumentState delete.tombstone.handling.mode tombstone', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode drop', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode none', 'io.debezium.transforms.ExtractNewRecordState delete.handling.mode rewrite', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode delete-to-tombstone', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode drop', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode rewrite', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode rewrite-with-tombstone', 'io.debezium.transforms.ExtractNewRecordState delete.tombstone.handling.mode tombstone', 'io.debezium.transforms.ExtractNewRecordState drop.fields.from.key false', 'io.debezium.transforms.ExtractNewRecordState drop.fields.from.key true', 'io.debezium.transforms.ExtractNewRecordState drop.fields.keep.schema.compatible false', 'io.debezium.transforms.ExtractNewRecordState drop.fields.keep.schema.compatible true', 'io.debezium.transforms.HeaderToValue operation copy', 'io.debezium.transforms.HeaderToValue operation move', 'org.apache.kafka.connect.transforms.ExtractField$Key field.syntax.version V1', 'org.apache.kafka.connect.transforms.ExtractField$Key field.syntax.version V2', 'org.apache.kafka.connect.transforms.ExtractField$Value field.syntax.version V1', 'org.apache.kafka.connect.transforms.ExtractField$Value field.syntax.version V2', 'org.apache.kafka.connect.transforms.HeaderFrom$Key operation copy', 'org.apache.kafka.connect.transforms.HeaderFrom$Key operation move', 'org.apache.kafka.connect.transforms.HeaderFrom$Value operation copy', 'org.apache.kafka.connect.transforms.HeaderFrom$Value operation move', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type Date', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type Time', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type Timestamp', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type string', 'org.apache.kafka.connect.transforms.TimestampConverter$Key target.type unix', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision microseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision milliseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision nanoseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Key unix.precision seconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type Date', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type Time', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type Timestamp', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type string', 'org.apache.kafka.connect.transforms.TimestampConverter$Value target.type unix', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision microseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision milliseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision nanoseconds', 'org.apache.kafka.connect.transforms.TimestampConverter$Value unix.precision seconds']) &&
+        !((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in ['io.debezium.connector.jdbc.transforms.CollectionNameTransformation collection.naming.prefix', 'io.debezium.connector.jdbc.transforms.CollectionNameTransformation collection.naming.suffix', 'org.apache.kafka.connect.transforms.RegexRouter replacement'] &&
+        string(variables.cc[k]).contains('.')))))))))
+      message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, and no table name, a RegexRouter replacement or a CollectionNameTransformation prefix or suffix, into another schema)"
+    # Connection URLs: the runner's shape for the dialect (no user info, no
+    # IPv6 literal), every parameter from the dialect's list with a plain or
+    # label value and an allowed value where the runner pins one, no
+    # parameter twice, the dialect's TLS parameter set, and every host one of
+    # setup.pipeline.databaseHosts (the dialect's default port filled in).
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((variables.url == '' || (
+        variables.dialect in {'db2': r'^jdbc:db2://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/[A-Za-z0-9_][A-Za-z0-9_-]{0,62}(:([^;]*;)*)?$', 'mariadb': r'^jdbc:mariadb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'mysql': r'^jdbc:mysql://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'oracle': r'^jdbc:oracle:thin:@(//)?([A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|[A-Za-z0-9.-]{1,253}:[0-9]{1,5}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$', 'postgresql': r'^jdbc:postgresql://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'sqlserver': r'^jdbc:sqlserver://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(;[^;]*)*$'} && variables.url.matches({'db2': r'^jdbc:db2://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/[A-Za-z0-9_][A-Za-z0-9_-]{0,62}(:([^;]*;)*)?$', 'mariadb': r'^jdbc:mariadb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'mysql': r'^jdbc:mysql://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'oracle': r'^jdbc:oracle:thin:@(//)?([A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|[A-Za-z0-9.-]{1,253}:[0-9]{1,5}:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})$', 'postgresql': r'^jdbc:postgresql://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(/([A-Za-z0-9_][A-Za-z0-9_-]{0,62})?(\?[^?]*)?)?$', 'sqlserver': r'^jdbc:sqlserver://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(;[^;]*)*$'}[variables.dialect]) &&
+        variables.urlParams.all(q, q.split('=').size() == 2 && q.split('=')[0].matches('^[A-Za-z]{1,64}$') &&
+        (q.split('=')[0].lowerAscii() in ['applicationname'] ? q.split('=')[1].replace('%20', ' ').matches(r'^[A-Za-z0-9._/+:-]([A-Za-z0-9._/+: -]{0,126}[A-Za-z0-9._/+:-])?$') : q.split('=')[1].matches(r'^[A-Za-z0-9._/+:-]{1,128}$')) &&
+        (q.lowerAscii() in {'db2': ['sslconnection=true'], 'mariadb': ['rewritebatchedstatements=false', 'rewritebatchedstatements=true', 'sslmode=verify-ca', 'sslmode=verify-full'], 'mongodb': ['authmechanism=scram-sha-1', 'authmechanism=scram-sha-256', 'directconnection=false', 'directconnection=true', 'retrywrites=false', 'retrywrites=true', 'ssl=true', 'tls=true'], 'mysql': ['allowpublickeyretrieval=false', 'allowpublickeyretrieval=true', 'requiressl=true', 'rewritebatchedstatements=false', 'rewritebatchedstatements=true', 'sslmode=verify_ca', 'sslmode=verify_identity', 'usessl=true', 'useunicode=false', 'useunicode=true', 'verifyservercertificate=true', 'zerodatetimebehavior=convert_to_null', 'zerodatetimebehavior=converttonull', 'zerodatetimebehavior=exception', 'zerodatetimebehavior=round'], 'oracle': [], 'postgresql': ['rewritebatchedinserts=false', 'rewritebatchedinserts=true', 'ssl=true', 'sslmode=verify-ca', 'sslmode=verify-full', 'stringtype=unspecified', 'stringtype=varchar', 'targetservertype=any', 'targetservertype=master', 'targetservertype=preferprimary', 'targetservertype=prefersecondary', 'targetservertype=primary', 'targetservertype=secondary', 'tcpkeepalive=false', 'tcpkeepalive=true'], 'sqlserver': ['encrypt=strict', 'encrypt=true', 'trustservercertificate=false']}[variables.dialect] || q.split('=')[0].lowerAscii() in {'db2': [], 'mariadb': ['connecttimeout', 'sockettimeout'], 'mongodb': ['appname', 'authsource', 'connecttimeoutms', 'maxpoolsize', 'readpreference', 'replicaset', 'serverselectiontimeoutms', 'sockettimeoutms', 'w'], 'mysql': ['characterencoding', 'connecttimeout', 'servertimezone', 'sockettimeout'], 'oracle': [], 'postgresql': ['applicationname', 'connecttimeout', 'logintimeout', 'preparethreshold', 'sockettimeout'], 'sqlserver': ['applicationname', 'databasename', 'logintimeout']}[variables.dialect]) &&
+        variables.urlParams.filter(r, r.split('=')[0].lowerAscii() == q.split('=')[0].lowerAscii()).size() == 1) &&
+        ({'db2': [], 'mariadb': ['sslmode'], 'mongodb': ['ssl', 'tls'], 'mysql': ['sslmode'], 'oracle': [], 'postgresql': ['sslmode'], 'sqlserver': ['encrypt']}[variables.dialect].size() == 0 ||
+        {'db2': [], 'mariadb': ['sslmode'], 'mongodb': ['ssl', 'tls'], 'mysql': ['sslmode'], 'oracle': [], 'postgresql': ['sslmode'], 'sqlserver': ['encrypt']}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0].lowerAscii() == n))) &&
+        (!variables.urlParams.exists(q, q.lowerAscii() == 'allowpublickeyretrieval=true') ||
+        variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
+        variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {'db2': '50000', 'mariadb': '3306', 'mongodb': '27017', 'mysql': '3306', 'oracle': '1521', 'postgresql': '5432', 'sqlserver': '1433'}[variables.dialect]).lowerAscii() in ['pg:5432'] ||
+        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432'])))) &&
+        (variables.mongo == '' || (
+        variables.mongo.matches(r'^mongodb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/?(\?[^?/@]*)?$') &&
+        variables.mongoParams.all(q, q.split('=').size() == 2 && q.split('=')[1].matches(r'^[A-Za-z0-9._/+:-]{1,128}$') &&
+        (q.lowerAscii() in {'db2': ['sslconnection=true'], 'mariadb': ['rewritebatchedstatements=false', 'rewritebatchedstatements=true', 'sslmode=verify-ca', 'sslmode=verify-full'], 'mongodb': ['authmechanism=scram-sha-1', 'authmechanism=scram-sha-256', 'directconnection=false', 'directconnection=true', 'retrywrites=false', 'retrywrites=true', 'ssl=true', 'tls=true'], 'mysql': ['allowpublickeyretrieval=false', 'allowpublickeyretrieval=true', 'requiressl=true', 'rewritebatchedstatements=false', 'rewritebatchedstatements=true', 'sslmode=verify_ca', 'sslmode=verify_identity', 'usessl=true', 'useunicode=false', 'useunicode=true', 'verifyservercertificate=true', 'zerodatetimebehavior=convert_to_null', 'zerodatetimebehavior=converttonull', 'zerodatetimebehavior=exception', 'zerodatetimebehavior=round'], 'oracle': [], 'postgresql': ['rewritebatchedinserts=false', 'rewritebatchedinserts=true', 'ssl=true', 'sslmode=verify-ca', 'sslmode=verify-full', 'stringtype=unspecified', 'stringtype=varchar', 'targetservertype=any', 'targetservertype=master', 'targetservertype=preferprimary', 'targetservertype=prefersecondary', 'targetservertype=primary', 'targetservertype=secondary', 'tcpkeepalive=false', 'tcpkeepalive=true'], 'sqlserver': ['encrypt=strict', 'encrypt=true', 'trustservercertificate=false']}['mongodb'] || q.split('=')[0].lowerAscii() in {'db2': [], 'mariadb': ['connecttimeout', 'sockettimeout'], 'mongodb': ['appname', 'authsource', 'connecttimeoutms', 'maxpoolsize', 'readpreference', 'replicaset', 'serverselectiontimeoutms', 'sockettimeoutms', 'w'], 'mysql': ['characterencoding', 'connecttimeout', 'servertimezone', 'sockettimeout'], 'oracle': [], 'postgresql': ['applicationname', 'connecttimeout', 'logintimeout', 'preparethreshold', 'sockettimeout'], 'sqlserver': ['applicationname', 'databasename', 'logintimeout']}['mongodb'])) &&
+        {'db2': [], 'mariadb': ['sslmode'], 'mongodb': ['ssl', 'tls'], 'mysql': ['sslmode'], 'oracle': [], 'postgresql': ['sslmode'], 'sqlserver': ['encrypt']}['mongodb'].exists(n, variables.mongoParams.exists(q, q.split('=')[0].lowerAscii() == n)) &&
+        variables.mongoHosts.all(h, !h.contains('@') &&
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in ['pg:5432'] ||
+        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432'])))))
+      message: "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from pg:5432"
+    # Topics and where a connector connects: a source's topic.prefix is the
+    # pipeline's, a sink reads topics under it, the dead letter queue and the
+    # schema history follow the kafkatopics rules under it, none is a topic
+    # of the Connect cluster, the schema history reaches this cluster's
+    # bootstrap Service, the source database is one of databaseHosts, and a
+    # Schema Registry URL is one of schemaRegistries.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        ((variables.sink ? !('topic.prefix' in variables.cc) :
+        ('topic.prefix' in variables.cc && string(variables.cc['topic.prefix']) == 'pg')) &&
+        (variables.sink || variables.mongo != '' || 'database.hostname' in variables.cc) &&
+        variables.cc.all(k,
+        (k != 'topics' || string(variables.cc[k]).split(',').all(t,
+        t.trim().matches(r'^[A-Za-z0-9._-]{1,249}$') && t.trim().startsWith('pg.') && t.trim().size() > 3 && !t.trim().startsWith('orders-connect-'))) &&
+        (k != 'errors.deadletterqueue.topic.name' || (
+        string(variables.cc[k]).matches(r'^[A-Za-z0-9._-]{1,249}$') && string(variables.cc[k]).startsWith('pg.') && string(variables.cc[k]).size() > 3 &&
+        !string(variables.cc[k]).startsWith('orders-connect-') &&
+        !(string(variables.cc[k]) in ('topics' in variables.cc ? string(variables.cc['topics']).split(',').map(t, t.trim()) : [])))) &&
+        (k != 'schema.history.internal.kafka.topic' || (string(variables.cc[k]).matches(r'^[A-Za-z0-9._-]{1,249}$') &&
+        !string(variables.cc[k]).startsWith('orders-connect-') &&
+        ((string(variables.cc[k]).startsWith('pg.') && string(variables.cc[k]).size() > 3) ||
+        string(variables.cc[k]) == 'schemahistory.pg' || string(variables.cc[k]).startsWith('schemahistory.pg.')))) &&
+        (k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches(r'^prod-kafka-kafka-bootstrap(\.data(\.svc(\.cluster\.local)?)?)?:(9092|9093)$')) &&
+        (k != 'database.hostname' ||
+        (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in ['pg:5432'] ||
+        string(variables.cc[k]).lowerAscii() in ['pg:5432']) &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in ['http://registry.data.svc:8081'])))
+      message: "piperoom: a source's topic.prefix is pg, a sink's topics, the dead letter queue and the schema history are under it (never a orders-connect-* Connect topic), the schema history reaches prod-kafka-kafka-bootstrap, the database is one of pg:5432, and a Schema Registry URL is one of http://registry.data.svc:8081"
+    # ---- KafkaTopic ----
+    # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
+    # shell that names no topic yet (the operator would read metadata.name).
+    - expression: >-
+        object.kind != 'KafkaTopic' || !has(object.spec) ||
+        (object.spec.all(k, k in ['topicName', 'partitions', 'replicas', 'config']) &&
+        (!has(object.spec.partitions) || object.spec.partitions == 1) &&
+        (!has(object.spec.replicas) || (object.spec.replicas >= 1 && object.spec.replicas <= 3)) &&
+        (!has(object.spec.config) || object.spec.config.all(k, k in ['cleanup.policy', 'retention.ms'])) &&
+        (has(object.spec.topicName) ?
+        string(object.spec.topicName).matches(r'^pg\.[A-Za-z_][A-Za-z0-9_]{0,62}\.piperoom_canary$') :
+        (has(object.metadata.annotations) && 'strimzi.io/pause-reconciliation' in object.metadata.annotations &&
+        object.metadata.annotations['strimzi.io/pause-reconciliation'] == 'true')))
+      message: "piperoom: the KafkaTopic is the canary pg.<schema>.piperoom_canary (one partition, 1 to 3 replicas), or the paused shell"
+    # ---- KafkaUser ----
+    - expression: >-
+        object.kind != 'KafkaUser' || !has(object.spec) ||
+        ((!has(object.spec.authentication) || (!has(object.spec.authentication.password) &&
+        has(object.spec.authentication.type) && object.spec.authentication.type in ['tls', 'scram-sha-512'])) &&
+        (!has(object.spec.authorization) || !has(object.spec.authorization.acls) ||
+        object.spec.authorization.acls.all(a, has(a.resource) && has(a.resource.type) && has(a.resource.name) &&
+        ((a.resource.type == 'topic' &&
+        ((a.resource.name == 'pg.' && has(a.resource.patternType) && a.resource.patternType == 'prefix') ||
+        ((!has(a.resource.patternType) || a.resource.patternType == 'literal') &&
+        a.resource.name in ['orders-connect-connect-configs', 'orders-connect-connect-offsets', 'orders-connect-connect-status'])))
+        || (a.resource.type == 'group' && a.resource.name == 'orders-connect' &&
+        (!has(a.resource.patternType) || a.resource.patternType == 'literal'))) &&
+        has(a.operations) && a.operations.all(o, o in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']) &&
+        (!has(a.operation) || a.operation in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']))))
+      message: "piperoom: a KafkaUser has no password source, and its ACLs are the pipeline's own: topics under pg. (prefix), the orders-connect-connect-* internal topics and group orders-connect (literal), with no other resource type or operation (operations or the deprecated operation)"
+---
+# Source: piperoom/templates/setup-pipeline.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: "piperoom-pipeline-orders"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-pipeline-orders
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  policyName: "piperoom-pipeline-orders"
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: "data"
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects]
+        resourceNames: ["orders-connect"]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnectors]
+        resourceNames: ["orders-src"]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkausers]
+        resourceNames: ["orders-connect", "orders-piperoom-ro"]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkatopics]
+        resourceNames: ["orders-canary"]

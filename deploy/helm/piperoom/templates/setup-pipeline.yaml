@@ -1,0 +1,657 @@
+{{- if .Values.setup.pipeline.enabled }}
+{{- include "piperoom.setupValidate" . }}
+{{- $p := .Values.setup.pipeline.id }}
+{{- $kafka := .Values.setup.pipeline.kafka }}
+{{- $connect := printf "%s-connect" $p }}
+# The pipeline release (docs/design/setup-strimzi.md §3): every object the
+# setup runner touches, pre-created with a chart-fixed name, so the runner's
+# Role needs no create. The Strimzi CRs are paused shells: the operators
+# reconcile nothing until the runner has filled the spec and removed the
+# annotation. Shell specs are the smallest the v1 schema accepts; the runner
+# replaces /spec whole.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnect
+metadata:
+  name: {{ $connect }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+  annotations:
+    {{- include "piperoom.pausedShell" . | nindent 4 }}
+    strimzi.io/use-connector-resources: "true"
+spec:
+  replicas: 1
+  bootstrapServers: {{ printf "%s-kafka-bootstrap:9092" $kafka }}
+{{- range .Values.setup.pipeline.connectors }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnector
+metadata:
+  name: {{ . }}
+  labels:
+    {{- include "piperoom.setupLabels" $ | nindent 4 }}
+    strimzi.io/cluster: {{ $connect }}
+  annotations:
+    {{- include "piperoom.pausedShell" $ | nindent 4 }}
+spec:
+  tasksMax: 1
+{{- end }}
+{{- range (list $connect (printf "%s-piperoom-ro" $p)) }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: {{ . }}
+  labels:
+    {{- include "piperoom.setupLabels" $ | nindent 4 }}
+    strimzi.io/cluster: {{ $kafka }}
+  annotations:
+    {{- include "piperoom.pausedShell" $ | nindent 4 }}
+spec: {}
+{{- end }}
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: {{ printf "%s-canary" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+    strimzi.io/cluster: {{ $kafka }}
+  annotations:
+    {{- include "piperoom.pausedShell" . | nindent 4 }}
+spec:
+  partitions: 1
+---
+# Empty; k8s_secret_apply fills stringData. A Secret's type is immutable, so no
+# later patch can turn this into a service-account-token Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ printf "%s-db-credentials" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+type: Opaque
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-connect-logging" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+---
+# Fixed content: the runner reads it, never patches it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-connect-metrics" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+data:
+  metrics-config.yml: |
+    lowercaseOutputName: true
+    lowercaseOutputLabelNames: true
+    rules:
+      - pattern: "kafka.connect<type=connect-worker-metrics>([^:]+):"
+        name: "kafka_connect_worker_$1"
+      - pattern: "kafka.connect<type=connect-metrics, client-id=([^:]+)><>([^:]+)"
+        name: "kafka_connect_$2"
+        labels:
+          client: "$1"
+      - pattern: "kafka.connect<type=connector-task-metrics, connector=([^,]+), task=([^>]+)><>status: ([^:]+)"
+        name: "kafka_connect_connector_status"
+        value: 1
+        labels:
+          connector: "$1"
+          task: "$2"
+          status: "$3"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^,]+), key=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$5"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+          key: "$4"
+      - pattern: "debezium.([^:]+)<type=connector-metrics, context=([^,]+), server=([^>]+)><>([^:]+)"
+        name: "debezium_metrics_$4"
+        labels:
+          plugin: "$1"
+          context: "$2"
+          name: "$3"
+---
+# The Connect pods read the one credentials Secret through Strimzi's
+# KubernetesSecretConfigProvider; the ServiceAccount is the one Strimzi
+# creates for the KafkaConnect (<name>-connect).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-connect-secrets" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ printf "%s-db-credentials" $p }}]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-connect-secrets" $p }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-connect-secrets" $p }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ printf "%s-connect" $connect }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.setup.pipeline.networkPolicy }}
+---
+# The Connect pods' egress (networkPolicy.enabled): DNS, the other Connect
+# workers' REST API on 8083 (a worker forwards connector writes to the
+# leader), this Kafka cluster's pods, the API server (the
+# KubernetesSecretConfigProvider reads the credentials Secret), the
+# databases, the Schema Registries, then extraEgress. Ingress is left to
+# Strimzi, which writes the Connect REST API's own NetworkPolicy. Every "to"
+# is required and non-empty (piperoom.setupValidate): an empty one would
+# open the port to any destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-egress" $connect | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: {{ printf "%s-connect" $connect | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with .Values.networkPolicy.dns.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # the other Connect workers' REST API
+    - ports:
+        - port: 8083
+          protocol: TCP
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/kind: KafkaConnect
+              strimzi.io/name: {{ printf "%s-connect" $connect | quote }}
+    # the Kafka cluster {{ $kafka }}
+    - ports:
+        {{- range $np.kafkaPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: {{ $kafka | quote }}
+              strimzi.io/kind: Kafka
+    # the Kubernetes API server
+    - ports:
+        {{- range $np.apiServer.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.apiServer.to | nindent 8 }}
+    # the databases
+    - ports:
+        {{- range $np.databases.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.databases.to | nindent 8 }}
+    {{- with .Values.setup.pipeline.schemaRegistries }}
+    # the Schema Registries ({{ join ", " . }})
+    - ports:
+        {{- range (include "piperoom.urlPorts" (dict "urls" .) | fromJsonArray) }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.schemaRegistries.to | nindent 8 }}
+    {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# The KafkaConnect build pod's egress (networkPolicy.enabled): DNS, the
+# plugin artifact hosts (pluginHosts) and the registries the image is pushed
+# to (imageRegistries), on the ports their host[:port] names (443 without
+# one). It needs no Kafka, API server or database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-build-egress" $connect | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/kind: KafkaConnect
+      strimzi.io/name: {{ printf "%s-connect-build" $connect | quote }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      {{- with .Values.networkPolicy.dns.to }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # the plugin artifact hosts ({{ join ", " .Values.setup.pipeline.pluginHosts }})
+    - ports:
+        {{- range (include "piperoom.hostPorts" (dict "hosts" .Values.setup.pipeline.pluginHosts) | fromJsonArray) }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.build.sources.to | nindent 8 }}
+    # the image registries ({{ join ", " (.Values.setup.pipeline.imageRegistries | default (list "none set: 443")) }})
+    - ports:
+        {{- range (include "piperoom.hostPorts" (dict "hosts" (.Values.setup.pipeline.imageRegistries | default (list "registry"))) | fromJsonArray) }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.build.registry.to | nindent 8 }}
+{{- end }}
+{{- if .Values.setup.pipeline.admissionPolicy }}
+{{- $prefix := .Values.setup.pipeline.topicPrefix }}
+{{- $ro := printf "%s-piperoom-ro" $p }}
+{{- $ns := .Release.Namespace }}
+{{- $hosts := list }}
+{{- range .Values.setup.pipeline.pluginHosts }}{{ $hosts = append $hosts (printf "'https://%s/'" .) }}{{ end }}
+{{- $regs := list }}
+{{- range .Values.setup.pipeline.imageRegistries }}{{ $regs = append $regs (regexQuoteMeta .) }}{{ end }}
+{{- $converters := "['org.apache.kafka.connect.json.JsonConverter', 'org.apache.kafka.connect.storage.StringConverter', 'io.confluent.connect.avro.AvroConverter', 'io.apicurio.registry.utils.converter.AvroConverter']" }}
+{{- /* The runner's tables (files/, written and kept equal to the runner by
+internal/setup/targets/strimzi policy_files_test.go): the config keys any
+plugin admits, the keys pinned to a value set, the URL parameters per
+dialect, the transform and predicate classes and keys, and the runner's
+patterns. The policy matches values against these allow-lists only. */}}
+{{- $ckeys := list }}
+{{- range (.Files.Lines "files/setup-connector-keys.txt") }}{{ if . }}{{ $ckeys = append $ckeys (squote .) }}{{ end }}{{ end }}
+{{- $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
+{{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}
+{{- $f := splitList "\t" . }}{{ $k := index $f 1 }}{{ $v := squote (index $f 2) }}
+{{- if eq (index $f 0) "exact" }}{{ $_ := set $exact $k (append (get $exact $k | default (list)) $v) }}{{ end }}
+{{- if eq (index $f 0) "fold" }}{{ $_ := set $fold $k (append (get $fold $k | default (list)) $v) }}{{ end }}
+{{- if eq (index $f 0) "cred" }}{{ $_ := set $cred $k $v }}{{ end }}
+{{- if eq (index $f 0) "require" }}{{ $_ := set $reqc $k (append (get $reqc $k | default (list)) $v) }}{{ end }}
+{{- end }}{{ end }}
+{{- $free := dict }}{{ $enum := dict }}{{ $requ := dict }}{{ $dport := dict }}{{ $labels := list }}
+{{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
+{{- $f := splitList "\t" . }}
+{{- if eq (index $f 0) "port" }}{{ $_ := set $dport (index $f 1) (squote (index $f 2)) }}{{ end }}
+{{- if eq (index $f 0) "label" }}{{ $labels = append $labels (squote (index $f 1)) }}{{ end }}
+{{- end }}{{ end }}
+{{- range $d, $_ := $dport }}{{ $_ := set $free $d (list) }}{{ $_ := set $enum $d (list) }}{{ $_ := set $requ $d (list) }}{{ end }}
+{{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
+{{- $f := splitList "\t" . }}
+{{- if eq (index $f 0) "free" }}{{ $_ := set $free (index $f 1) (append (get $free (index $f 1)) (squote (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "enum" }}{{ $_ := set $enum (index $f 1) (append (get $enum (index $f 1)) (squote (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "require" }}{{ $_ := set $requ (index $f 1) (append (get $requ (index $f 1)) (squote (index $f 2))) }}{{ end }}
+{{- end }}{{ end }}
+{{- $types := list }}{{ $sinktypes := list }}{{ $smtkeys := list }}{{ $smtenumkeys := list }}{{ $smtenum := list }}{{ $nodot := list }}
+{{- range (.Files.Lines "files/setup-smt.txt") }}{{ if . }}
+{{- $f := splitList "\t" . }}
+{{- if eq (index $f 0) "type" }}{{ $types = append $types (squote (index $f 1)) }}{{ end }}
+{{- if eq (index $f 0) "sinktype" }}{{ $sinktypes = append $sinktypes (squote (index $f 1)) }}{{ end }}
+{{- if eq (index $f 0) "key" }}{{ $smtkeys = append $smtkeys (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "nodot" }}{{ $nodot = append $nodot (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "enum" }}{{ $smtenumkeys = append $smtenumkeys (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ $smtenum = append $smtenum (squote (printf "%s %s %s" (index $f 1) (index $f 2) (index $f 3))) }}{{ end }}
+{{- end }}{{ end }}
+{{- $pat := dict }}
+{{- range (.Files.Lines "files/setup-patterns.txt") }}{{ if . }}{{ $f := splitList "\t" . }}{{ $_ := set $pat (index $f 0) (printf "r'%s'" (index $f 1)) }}{{ end }}{{ end }}
+{{- $shapes := list }}
+{{- range $k, $v := $pat }}{{ if hasPrefix "jdbc." $k }}{{ $shapes = append $shapes (printf "'%s': %s" (trimPrefix "jdbc." $k) $v) }}{{ end }}{{ end }}
+{{- $dbhosts := list }}
+{{- range .Values.setup.pipeline.databaseHosts }}{{ $dbhosts = append $dbhosts (squote (lower .)) }}{{ end }}
+{{- $regurls := list }}
+{{- range .Values.setup.pipeline.schemaRegistries }}{{ $regurls = append $regurls (squote .) }}{{ end }}
+{{- /* With networkPolicy.enabled the bootstrap port is one of kafkaPorts,
+the ports the Connect egress policy opens to the Kafka pods (Strimzi's
+bootstrap Service listens on the listener's port), so a bootstrap the
+policy would drop is refused at admission instead. */}}
+{{- $bport := "[0-9]{1,5}" }}
+{{- if .Values.networkPolicy.enabled }}{{ $ps := list }}{{ range .Values.setup.pipeline.networkPolicy.kafkaPorts }}{{ $ps = append $ps (toString .) }}{{ end }}{{ $bport = printf "(%s)" (join "|" $ps) }}{{ end }}
+{{- $bootstrapRE := printf `r'^%s-kafka-bootstrap(\.%s(\.svc(\.cluster\.local)?)?)?:%s$'` (regexQuoteMeta $kafka) (regexQuoteMeta $ns) $bport }}
+{{- $sinkClass := "'io.debezium.connector.jdbc.JdbcSinkConnector'" }}
+{{- $pdot := squote (printf "%s." $prefix) }}{{ $plen := add 1 (len $prefix) }}
+{{- $hist := squote (printf "schemahistory.%s" $prefix) }}{{ $histdot := squote (printf "schemahistory.%s." $prefix) }}
+{{- $internal := squote (printf "%s-" $connect) }}
+---
+# D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
+# named objects only, mirrors the runner's field allow-list
+# (internal/setup/targets/strimzi allowlist.go, connector_config.go) for the
+# fields a compromised runner could use to mount any Secret, read another
+# Secret or file through a config provider, pull an unpinned plugin, push to
+# another registry, reach another Kafka cluster, run code in a transform,
+# move offsets, re-point the canary topic or mint a Kafka superuser. Every
+# field is read behind has(), so a field the CRD lacks is absent, never an
+# evaluation error. The JDBC URL and Debezium key allow-lists stay the
+# runner's (connector_config.go); this policy holds the refusals that would
+# hand the cluster to whoever controls the runner.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ printf "piperoom-pipeline-%s" $p | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects, kafkaconnectors, kafkausers, kafkatopics]
+  # Per-request values the KafkaConnector rules read: its config, its
+  # connection URL and MongoDB string, their dialect, parameters and hosts.
+  # Each is read only after the URL's shape matched the runner's pattern.
+  variables:
+    - name: cc
+      expression: >-
+        object.kind == 'KafkaConnector' && has(object.spec) && has(object.spec.config) ? object.spec.config : {}
+    - name: sink
+      expression: >-
+        object.kind == 'KafkaConnector' && has(object.spec) && has(object.spec.class) && object.spec.class == {{ $sinkClass }}
+    - name: url
+      expression: >-
+        'connection.url' in variables.cc ? string(variables.cc['connection.url']) : ''
+    - name: mongo
+      expression: >-
+        'mongodb.connection.string' in variables.cc ? string(variables.cc['mongodb.connection.string']) : ''
+    - name: dialect
+      expression: >-
+        variables.url.startsWith('jdbc:oracle:thin:@') ? 'oracle' :
+        (variables.url.startsWith('jdbc:') && variables.url.contains('://') ? variables.url.substring(5, variables.url.indexOf('://')) : '')
+    - name: urlRest
+      expression: >-
+        variables.url.contains('://') ? variables.url.substring(variables.url.indexOf('://') + 3) : ''
+    - name: oracleAddr
+      expression: >-
+        variables.dialect != 'oracle' ? '' :
+        (variables.url.substring(18).startsWith('//') ? variables.url.substring(20) : variables.url.substring(18))
+    - name: urlParams
+      expression: >-
+        (variables.dialect == 'sqlserver' ? (variables.urlRest.contains(';') ? variables.urlRest.substring(variables.urlRest.indexOf(';') + 1) : '') :
+        variables.dialect == 'db2' ? (variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).contains(':') ?
+        variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).substring(variables.urlRest.substring(variables.urlRest.indexOf('/') + 1).indexOf(':') + 1) : '') :
+        variables.dialect == 'oracle' ? '' :
+        (variables.url.contains('?') ? variables.url.substring(variables.url.indexOf('?') + 1) : '')).replace(';', '&').split('&').filter(q, q != '')
+    - name: urlHosts
+      expression: >-
+        variables.dialect == 'oracle' ? (variables.oracleAddr.contains('/') ? variables.oracleAddr.split('/')[0] :
+        variables.oracleAddr.substring(0, variables.oracleAddr.lastIndexOf(':'))).split(',') :
+        (variables.dialect == 'sqlserver' ? variables.urlRest.split(';')[0] : variables.urlRest.split('/')[0]).split(',')
+    - name: mongoParams
+      expression: >-
+        variables.mongo.contains('?') ? variables.mongo.substring(variables.mongo.indexOf('?') + 1).split('&').filter(q, q != '') : []
+    - name: mongoHosts
+      expression: >-
+        variables.mongo.startsWith('mongodb://') ? variables.mongo.substring(10).split('/')[0].split('?')[0].split(',') : []
+  validations:
+    # ---- KafkaConnect ----
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        (object.spec.all(k, k in ['replicas', 'version', 'bootstrapServers', 'tls', 'authentication', 'config', 'build', 'resources', 'logging', 'metricsConfig', 'jvmOptions']) &&
+        (!has(object.spec.jvmOptions) || object.spec.jvmOptions.all(k, k in ['-Xms', '-Xmx'])) &&
+        (!has(object.spec.bootstrapServers) || string(object.spec.bootstrapServers).matches({{ $bootstrapRE }})))
+      message: {{ printf "piperoom: a KafkaConnect sets only replicas, version, bootstrapServers, tls, authentication, config, build, resources, logging, metricsConfig and jvmOptions (-Xms, -Xmx); no image, template, externalConfiguration or system properties; and its bootstrap is %s-kafka-bootstrap" $kafka | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) ||
+        (object.spec.build.all(k, k in ['output', 'plugins']) && has(object.spec.build.output) &&
+        object.spec.build.output.all(k, k in ['type', 'image', 'pushSecret']) &&
+        has(object.spec.build.output.type) && object.spec.build.output.type == 'docker' &&
+        has(object.spec.build.output.pushSecret) && object.spec.build.output.pushSecret == {{ printf "%s-registry-push" $p | squote }} &&
+        has(object.spec.build.output.image) && string(object.spec.build.output.image).matches({{ printf `r'^(%s)/[a-z0-9._/-]{1,200}:piperoom-%s-[a-z0-9-]{1,60}$'` (join "|" $regs) (regexQuoteMeta $p) }}))
+      message: {{ printf "piperoom: a build pushes a docker image <registry>/<repo>:piperoom-%s-<digest> to one of %s, with %s-registry-push only" $p (join ", " .Values.setup.pipeline.imageRegistries) $p | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.tls) || !has(object.spec.tls.trustedCertificates) ||
+        object.spec.tls.trustedCertificates.all(c, has(c.secretName) && c.secretName == {{ printf "%s-cluster-ca-cert" $kafka | squote }})
+      message: {{ printf "piperoom: spec.tls trusts only the %s-cluster-ca-cert Secret" $kafka | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.authentication) ||
+        (has(object.spec.authentication.type) &&
+        ((object.spec.authentication.type == 'tls' && has(object.spec.authentication.certificateAndKey) &&
+        has(object.spec.authentication.certificateAndKey.secretName) && object.spec.authentication.certificateAndKey.secretName == {{ $connect | squote }}) ||
+        (object.spec.authentication.type == 'scram-sha-512' && has(object.spec.authentication.passwordSecret) &&
+        has(object.spec.authentication.passwordSecret.secretName) && object.spec.authentication.passwordSecret.secretName == {{ $connect | squote }})))
+      message: {{ printf "piperoom: spec.authentication is tls or scram-sha-512 with the %s KafkaUser's Secret only" $connect | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k, k in ['group.id', 'offset.storage.topic', 'config.storage.topic', 'status.storage.topic',
+        'offset.storage.replication.factor', 'config.storage.replication.factor', 'status.storage.replication.factor',
+        'key.converter', 'value.converter', 'key.converter.schemas.enable', 'value.converter.schemas.enable',
+        'key.converter.schema.registry.url', 'value.converter.schema.registry.url', 'config.providers', 'config.providers.secrets.class'] &&
+        !string(object.spec.config[k]).contains('${') && !string(object.spec.config[k]).matches(r'^[\s\pZ]|[\s\pZ]$') &&
+        !string(object.spec.config[k]).matches(r'[\x00-\x1f\x7f-\x9f]') &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(object.spec.config[k]) in [{{ join ", " $regurls }}]) &&
+        (k != 'config.providers' || string(object.spec.config[k]) == 'secrets') &&
+        (k != 'config.providers.secrets.class' || string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider') &&
+        (!(k in ['key.converter', 'value.converter']) || string(object.spec.config[k]) in {{ $converters }}))
+      message: {{ printf "piperoom: the worker config keys are the runner's allow-list, the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider), no value is a reference or has whitespace at an end, the converters are the allow-listed ones and a Schema Registry URL is one of %s" (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
+        object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
+        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
+        has(a.url) && [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
+      message: {{ printf "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
+        (has(object.spec.logging.valueFrom.configMapKeyRef) && has(object.spec.logging.valueFrom.configMapKeyRef.name) &&
+        object.spec.logging.valueFrom.configMapKeyRef.name == {{ printf "%s-connect-logging" $p | squote }})) &&
+        (!has(object.spec.metricsConfig) || !has(object.spec.metricsConfig.valueFrom) ||
+        (has(object.spec.metricsConfig.valueFrom.configMapKeyRef) && has(object.spec.metricsConfig.valueFrom.configMapKeyRef.name) &&
+        object.spec.metricsConfig.valueFrom.configMapKeyRef.name == {{ printf "%s-connect-metrics" $p | squote }})))
+      message: {{ printf "piperoom: logging and metrics read only the %s-connect-logging and %s-connect-metrics ConfigMaps" $p $p | quote }}
+    # ---- KafkaConnector ----
+    # Every value check is an allow-list from the runner's tables (files/):
+    # the keys, the pinned values, the transform classes and keys, the URL
+    # shapes and parameters. Keys and values carry no control character
+    # anywhere (Java's trim() strips every character up to U+0020, so one at
+    # an end is whitespace to the plugin) and no white space at an end. A ${
+    # appears only as a credential key's whole value, naming its own Secret
+    # key (a user key the username, a password key the password), or as a
+    # pinned value (Strimzi's store password).
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
+        (!has(object.spec.tasksMax) || object.spec.tasksMax == 1) &&
+        (!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        variables.cc.all(k,
+        k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
+        !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
+        (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
+        (k in [{{ join ", " $ckeys }}] || k.matches({{ index $pat "transformkey" }})) &&
+        !(k + string(variables.cc[k])).matches(r'[\x00-\x1f\x7f-\x9f]') &&
+        !k.matches(r'^[\s\pZ]|[\s\pZ]$') && !string(variables.cc[k]).matches(r'^[\s\pZ]|[\s\pZ]$') &&
+        (!string(variables.cc[k]).contains('${') ||
+        (k in {{ include "piperoom.celMap" $cred }} && string(variables.cc[k]) == {{ printf "'${secrets:%s/%s-db-credentials:'" $ns $p }} + {{ include "piperoom.celMap" $cred }}[k] + '}') ||
+        (k in {{ include "piperoom.celMap" $exact }} && string(variables.cc[k]) in {{ include "piperoom.celMap" $exact }}[k]))))
+      message: {{ printf "piperoom: a KafkaConnector sets only class (Debezium), tasksMax 1, config and autoRestart; its config keys are the runner's allow-list, no key or value has a control character or white space at an end, and a reference is the whole value of a user or password key naming its own key, ${secrets:%s/%s-db-credentials:username|password}" $ns $p | quote }}
+    # Pinned values, required keys, file keys and database names.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        (variables.cc.all(k,
+        (!(k in {{ include "piperoom.celMap" $exact }}) || string(variables.cc[k]) in {{ include "piperoom.celMap" $exact }}[k]) &&
+        (!(k in {{ include "piperoom.celMap" $fold }}) || string(variables.cc[k]).lowerAscii() in {{ include "piperoom.celMap" $fold }}[k]) &&
+        (!k.matches(r'(^|\.)(ssl\.(keystore|truststore)\.location|sslrootcert|sslcert|sslkey|sslfactory|socketFactory)$') || k in {{ include "piperoom.celMap" $exact }}) &&
+        (!(k in ['database.dbname', 'database.pdb.name']) || string(variables.cc[k]).matches({{ index $pat "dbname" }})) &&
+        (k != 'database.names' || string(variables.cc[k]).split(',').all(n, n.trim().matches({{ index $pat "dbname" }})))) &&
+        (!has(object.spec.class) || !(object.spec.class in {{ include "piperoom.celMap" $reqc }}) ||
+        {{ include "piperoom.celMap" $reqc }}[object.spec.class].all(r, r in variables.cc)) &&
+        (!('schema.history.internal.kafka.topic' in variables.cc || 'schema.history.internal.kafka.bootstrap.servers' in variables.cc) ||
+        ['schema.history.internal.producer.security.protocol', 'schema.history.internal.consumer.security.protocol'].all(r, r in variables.cc)))
+      message: "piperoom: a KafkaConnector's pinned keys hold one of the runner's values (TLS on and verified, the sink's own classes, the allow-listed converters, Strimzi's own stores, the source signal channel), a source sets its TLS key, a schema history uses SSL, and database names are names"
+    # Transforms and predicates: a declared name, a class from the runner's
+    # list (RegexRouter on a JDBC sink only), and each other key one of that
+    # class's keys with one of its values; a key that names a table (the
+    # "nodot" rows: a RegexRouter replacement, a CollectionNameTransformation
+    # prefix or suffix) never names another schema. route.by.field is not in
+    # the key list.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((!('transforms' in variables.cc) || string(variables.cc['transforms']).matches({{ index $pat "transformnames" }})) &&
+        (!('predicates' in variables.cc) || string(variables.cc['predicates']).matches({{ index $pat "transformnames" }})) &&
+        variables.cc.all(k, !k.matches({{ index $pat "transformkey" }}) || (
+        k.split('.')[0] in variables.cc && k.split('.')[1] in string(variables.cc[k.split('.')[0]]).split(',') &&
+        (k == k.split('.')[0] + '.' + k.split('.')[1] + '.type' ?
+        (string(variables.cc[k]) in [{{ join ", " $types }}] || (string(variables.cc[k]) in [{{ join ", " $sinktypes }}] && variables.sink)) :
+        (k == 'transforms.' + k.split('.')[1] + '.predicate' ?
+        ('predicates' in variables.cc && string(variables.cc[k]) in string(variables.cc['predicates']).split(',')) :
+        (k == 'transforms.' + k.split('.')[1] + '.negate' ? string(variables.cc[k]) in ['true', 'false'] :
+        ((k.split('.')[0] + '.' + k.split('.')[1] + '.type') in variables.cc &&
+        (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtkeys }}] &&
+        (!((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtenumkeys }}]) ||
+        (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) + ' ' + string(variables.cc[k])) in [{{ join ", " $smtenum }}]) &&
+        !((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $nodot }}] &&
+        string(variables.cc[k]).contains('.')))))))))
+      message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, and no table name, a RegexRouter replacement or a CollectionNameTransformation prefix or suffix, into another schema)"
+    # Connection URLs: the runner's shape for the dialect (no user info, no
+    # IPv6 literal), every parameter from the dialect's list with a plain or
+    # label value and an allowed value where the runner pins one, no
+    # parameter twice, the dialect's TLS parameter set, and every host one of
+    # setup.pipeline.databaseHosts (the dialect's default port filled in).
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((variables.url == '' || (
+        variables.dialect in { {{- join ", " $shapes -}} } && variables.url.matches({ {{- join ", " $shapes -}} }[variables.dialect]) &&
+        variables.urlParams.all(q, q.split('=').size() == 2 && q.split('=')[0].matches('^[A-Za-z]{1,64}$') &&
+        (q.split('=')[0].lowerAscii() in [{{ join ", " $labels }}] ? q.split('=')[1].replace('%20', ' ').matches({{ index $pat "label" }}) : q.split('=')[1].matches({{ index $pat "value" }})) &&
+        (q.lowerAscii() in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0].lowerAscii() in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
+        variables.urlParams.filter(r, r.split('=')[0].lowerAscii() == q.split('=')[0].lowerAscii()).size() == 1) &&
+        ({{ include "piperoom.celMap" $requ }}[variables.dialect].size() == 0 ||
+        {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0].lowerAscii() == n))) &&
+        (!variables.urlParams.exists(q, q.lowerAscii() == 'allowpublickeyretrieval=true') ||
+        variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
+        variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {{ include "piperoom.celMap" $dport }}[variables.dialect]).lowerAscii() in [{{ join ", " $dbhosts }}] ||
+        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))) &&
+        (variables.mongo == '' || (
+        variables.mongo.matches({{ index $pat "mongodb" }}) &&
+        variables.mongoParams.all(q, q.split('=').size() == 2 && q.split('=')[1].matches({{ index $pat "value" }}) &&
+        (q.lowerAscii() in {{ include "piperoom.celMap" $enum }}['mongodb'] || q.split('=')[0].lowerAscii() in {{ include "piperoom.celMap" $free }}['mongodb'])) &&
+        {{ include "piperoom.celMap" $requ }}['mongodb'].exists(n, variables.mongoParams.exists(q, q.split('=')[0].lowerAscii() == n)) &&
+        variables.mongoHosts.all(h, !h.contains('@') &&
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in [{{ join ", " $dbhosts }}] ||
+        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))))
+      message: {{ printf "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from %s" (join ", " .Values.setup.pipeline.databaseHosts) | quote }}
+    # Topics and where a connector connects: a source's topic.prefix is the
+    # pipeline's, a sink reads topics under it, the dead letter queue and the
+    # schema history follow the kafkatopics rules under it, none is a topic
+    # of the Connect cluster, the schema history reaches this cluster's
+    # bootstrap Service, the source database is one of databaseHosts, and a
+    # Schema Registry URL is one of schemaRegistries.
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) || !has(object.spec.config) ||
+        ((variables.sink ? !('topic.prefix' in variables.cc) :
+        ('topic.prefix' in variables.cc && string(variables.cc['topic.prefix']) == {{ squote $prefix }})) &&
+        (variables.sink || variables.mongo != '' || 'database.hostname' in variables.cc) &&
+        variables.cc.all(k,
+        (k != 'topics' || string(variables.cc[k]).split(',').all(t,
+        t.trim().matches({{ index $pat "topic" }}) && t.trim().startsWith({{ $pdot }}) && t.trim().size() > {{ $plen }} && !t.trim().startsWith({{ $internal }}))) &&
+        (k != 'errors.deadletterqueue.topic.name' || (
+        string(variables.cc[k]).matches({{ index $pat "topic" }}) && string(variables.cc[k]).startsWith({{ $pdot }}) && string(variables.cc[k]).size() > {{ $plen }} &&
+        !string(variables.cc[k]).startsWith({{ $internal }}) &&
+        !(string(variables.cc[k]) in ('topics' in variables.cc ? string(variables.cc['topics']).split(',').map(t, t.trim()) : [])))) &&
+        (k != 'schema.history.internal.kafka.topic' || (string(variables.cc[k]).matches({{ index $pat "topic" }}) &&
+        !string(variables.cc[k]).startsWith({{ $internal }}) &&
+        ((string(variables.cc[k]).startsWith({{ $pdot }}) && string(variables.cc[k]).size() > {{ $plen }}) ||
+        string(variables.cc[k]) == {{ $hist }} || string(variables.cc[k]).startsWith({{ $histdot }})))) &&
+        (k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches({{ $bootstrapRE }})) &&
+        (k != 'database.hostname' ||
+        (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in [{{ join ", " $dbhosts }}] ||
+        string(variables.cc[k]).lowerAscii() in [{{ join ", " $dbhosts }}]) &&
+        (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in [{{ join ", " $regurls }}])))
+      message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s, and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
+    # ---- KafkaTopic ----
+    # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
+    # shell that names no topic yet (the operator would read metadata.name).
+    - expression: >-
+        object.kind != 'KafkaTopic' || !has(object.spec) ||
+        (object.spec.all(k, k in ['topicName', 'partitions', 'replicas', 'config']) &&
+        (!has(object.spec.partitions) || object.spec.partitions == 1) &&
+        (!has(object.spec.replicas) || (object.spec.replicas >= 1 && object.spec.replicas <= 3)) &&
+        (!has(object.spec.config) || object.spec.config.all(k, k in ['cleanup.policy', 'retention.ms'])) &&
+        (has(object.spec.topicName) ?
+        string(object.spec.topicName).matches({{ printf `r'^%s\.[A-Za-z_][A-Za-z0-9_]{0,62}\.piperoom_canary$'` (regexQuoteMeta $prefix) }}) :
+        (has(object.metadata.annotations) && 'strimzi.io/pause-reconciliation' in object.metadata.annotations &&
+        object.metadata.annotations['strimzi.io/pause-reconciliation'] == 'true')))
+      message: {{ printf "piperoom: the KafkaTopic is the canary %s.<schema>.piperoom_canary (one partition, 1 to 3 replicas), or the paused shell" $prefix | quote }}
+    # ---- KafkaUser ----
+    - expression: >-
+        object.kind != 'KafkaUser' || !has(object.spec) ||
+        ((!has(object.spec.authentication) || (!has(object.spec.authentication.password) &&
+        has(object.spec.authentication.type) && object.spec.authentication.type in ['tls', 'scram-sha-512'])) &&
+        (!has(object.spec.authorization) || !has(object.spec.authorization.acls) ||
+        object.spec.authorization.acls.all(a, has(a.resource) && has(a.resource.type) && has(a.resource.name) &&
+        ((a.resource.type == 'topic' &&
+        ((a.resource.name == {{ printf "%s." $prefix | squote }} && has(a.resource.patternType) && a.resource.patternType == 'prefix') ||
+        ((!has(a.resource.patternType) || a.resource.patternType == 'literal') &&
+        a.resource.name in [{{ printf "%s-connect-configs" $connect | squote }}, {{ printf "%s-connect-offsets" $connect | squote }}, {{ printf "%s-connect-status" $connect | squote }}])))
+        || (a.resource.type == 'group' && a.resource.name == {{ $connect | squote }} &&
+        (!has(a.resource.patternType) || a.resource.patternType == 'literal'))) &&
+        has(a.operations) && a.operations.all(o, o in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']) &&
+        (!has(a.operation) || a.operation in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']))))
+      message: {{ printf "piperoom: a KafkaUser has no password source, and its ACLs are the pipeline's own: topics under %s. (prefix), the %s-connect-* internal topics and group %s (literal), with no other resource type or operation (operations or the deprecated operation)" $prefix $connect $connect | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ printf "piperoom-pipeline-%s" $p | quote }}
+  labels:
+    {{- include "piperoom.setupLabels" . | nindent 4 }}
+spec:
+  policyName: {{ printf "piperoom-pipeline-%s" $p | quote }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $ns | quote }}
+    resourceRules:
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnects]
+        resourceNames: [{{ $connect | quote }}]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnectors]
+        resourceNames: [{{ range $i, $c := .Values.setup.pipeline.connectors }}{{ if $i }}, {{ end }}{{ $c | quote }}{{ end }}]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkausers]
+        resourceNames: [{{ $connect | quote }}, {{ $ro | quote }}]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkatopics]
+        resourceNames: [{{ printf "%s-canary" $p | quote }}]
+{{- end }}
+{{- end }}

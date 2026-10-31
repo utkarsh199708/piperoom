@@ -180,7 +180,8 @@ or without an extension), a junction and a reparse point. The runner is built wi
 U1-2 PR.
 
 What `os.Root` does by itself (U1-0, from `go doc os.Root` and `os/root_windows.go`, `os/root_openat.go`,
-`internal/filepathlite/path_windows.go` in Go 1.27.2; spike `cmd/setup-spike/osroot`): on Windows it **refuses**
+`internal/filepathlite/path_windows.go` in Go 1.27.2; the U1-0 spike `cmd/setup-spike/osroot`, deleted by U8-C once
+`internal/setup/ops/paths.go` and its tests carried its cases): on Windows it **refuses**
 drive-relative (`C:foo`) and every path with a colon (so ADS too: `filepathlite.IsLocal` rejects `:`), every path
 starting with a separator (UNC `\\host\share`, `//host/share`, `\\?\`, `\\.\`, `\x`), any `?`, an escape by `..`,
 the reserved names (`CON`, `NUL`, `COM1`, `CONIN$`, with trailing spaces), and a junction (its target is absolute
@@ -326,6 +327,31 @@ The catalogue at the end of U1 (Compose, Postgres), by tier floor:
 | T1 | `compose_write`, `properties_write`, `file_write` (non-executed files only), `file_delete`, `compose_up`, `compose_restart`, `compose_down`, `plugin_install`, `secret_set` |
 | T2 | the Q actions through the remote clients: `connect_create_connector`, `connect_delete_connector` (Q5c), `pg_set_replica_identity` (Q2c, its own name), `source_grant_select`, `source_create_heartbeat_table` (Q2c, Q2d); the setup-only source ops over `SetupSourceWriter` (§4 item 4): `source_create_publication`, `source_create_canary_table`, `source_insert_canary` (the nonce comes from the ladder runner, §3.4), `source_create_read_role` (§3.7) |
 | T3 | `source_alter_system` (allow-list: `wal_level`, `max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`, `wal_sender_timeout`; `pending_restart` in the preview), `source_restart` (only a database this room created, by receipt) |
+
+#### U4-0 ruling: `service_restart` and the SQL Server units (2026-10-30)
+
+The host target accepts only `piperoom-<name>` units (`host.UnitPrefix`), and that prefix is a security property:
+the service ops can never reach another service on the host, so no approved step can become a restart of `sshd` or
+of a database the room does not manage. U4b's Agent check collides with it: on a host target the stopped SQL Server
+Agent's documented fix is a service restart, which the runner refuses today. The ruling:
+
+- **Windows: yes, the Agent services only.** `service_restart` may reach exactly `SQLSERVERAGENT` (the default
+  instance) and `SQLAgent$<instance>` (a named one) beside the `piperoom-` units. The engine services
+  (`MSSQLSERVER`, `MSSQL$<instance>`) stay out: restarting the customer's database engine is never a setup op (the
+  same line §2.5 draws for `source_restart`, which reaches only a database this room created, by receipt). The
+  instance segment is validated against the service-name shape before it reaches the service control manager, and
+  the op still goes through the same manager calls — nothing about the unit's definition is written or changed.
+- **Linux: no; the fix stays an ask.** There is no separate agent unit: the Agent runs inside `mssql-server`, which
+  is the engine, so any restart that helps is an engine restart. The U4b check's ask names the exact commands
+  (`sudo systemctl restart mssql-server`; `sudo /opt/mssql/bin/mssql-conf set sqlagent.enabled true` first when the
+  Agent is disabled) and the room re-reads after the person acts. RDS and the Azure flavours already ask toward the
+  provider's console and are unchanged.
+- **Tier and the list's owner.** The allowed-units list is compile-time in the host driver, extended only by a lead
+  PR against this section — never by a param, a config variable, an owners key or model text. The op keeps its T2
+  floor; the class raises it as usual (T3 on production), and the guard table is unchanged.
+
+Until the Windows allow-list lands (a C19 row; the A10 driver then routes `TargetHost` on Windows to
+`service_restart` and keeps the ask elsewhere), the Agent-stopped fix on every host target stays an ask.
 
 ### 2.6 Targets and reach (S7)
 
@@ -690,10 +716,10 @@ Snapshot gains `setup: {mode: true, runner: {label, connected, tools}, plan_id, 
 
 `U1-0` (done): the protocol's final field list and the compatibility rule (item 1 above); the Windows service API
 (`golang.org/x/sys/windows/svc/mgr`: `Connect`, `CreateService`, `Service.Start`, `Query`, `Control`, `Delete`,
-spike `cmd/setup-spike/winsvc`; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
+the spike `cmd/setup-spike/winsvc`, deleted by U8-C after U8b; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
 and an args slice, so no free-form command line exists; a plain `java.exe` cannot answer the service control
 manager, so U8b's Connect service runs `piperoom-setup` itself as the service (`svc.Run`) supervising the Java child
-by argv); the `os.Root` analysis of §2.3 (spike `cmd/setup-spike/osroot`). `U12-0`: the Strimzi
+by argv); the `os.Root` analysis of §2.3 (the spike `cmd/setup-spike/osroot`, likewise deleted). `U12-0`: the Strimzi
 CRD versions, the in-cluster runner Job and its RBAC, how the pairing code reaches a Job. `U13-0`: the three managed
 clients' auth and operations.
 

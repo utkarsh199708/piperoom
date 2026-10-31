@@ -74,11 +74,48 @@ type PluginResolver func(release, connector string) (PluginArtifact, error)
 // knowledgePlugin is the production resolver: the digest comes from the
 // knowledge index, never from the host that serves the archive (design §2.5).
 func knowledgePlugin(release, connector string) (PluginArtifact, error) {
+	if connector == SinkConnectorJDBC {
+		return knowledgeSinkPlugin(release, jdbcSinkEntry, jdbcSinkDir)
+	}
 	p, err := knowledge.ResolvePlugin(release, connector)
 	if err != nil {
 		return PluginArtifact{}, err
 	}
 	return PluginArtifact{URL: p.ArtifactURL(), Digest: p.Digest, Dir: p.Artifact}, nil
+}
+
+// The sink connectors plugin_install installs (row U3c), by the connector
+// name its params take. Their archives are pinned in the knowledge index's
+// sink entries (index/sink-connect.yaml), not in the source plugin list.
+const (
+	// SinkConnectorJDBC is Debezium's JDBC sink.
+	SinkConnectorJDBC = "jdbc"
+	jdbcSinkEntry     = "debezium-jdbc-sink"
+	// jdbcSinkDir is the archive's one top-level directory, as for the source
+	// connectors (debezium-connector-<name>).
+	jdbcSinkDir = "debezium-connector-jdbc"
+)
+
+// knowledgeSinkPlugin resolves a sink entry's archive for release: its URL
+// and the digest the index pins (an entry marked unpinned has none, so it is
+// refused rather than downloaded unverified).
+func knowledgeSinkPlugin(release, entry, dir string) (PluginArtifact, error) {
+	ix, err := knowledge.LoadIndex()
+	if err != nil {
+		return PluginArtifact{}, err
+	}
+	for _, e := range ix.Entries() {
+		if e.Name != entry {
+			continue
+		}
+		for _, a := range e.Archives {
+			if a.Release == release && a.URL != "" && a.Digest != "" {
+				return PluginArtifact{URL: a.URL, Digest: a.Digest, Dir: dir}, nil
+			}
+		}
+		return PluginArtifact{}, fmt.Errorf("%w: %s has no pinned archive for release %s", knowledge.ErrUnknownRelease, entry, q(release))
+	}
+	return PluginArtifact{}, fmt.Errorf("compose: the knowledge index has no %s entry", entry)
 }
 
 // normalizePluginHosts validates and lower-cases the configured hosts, and

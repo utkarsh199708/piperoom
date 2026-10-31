@@ -1,0 +1,27 @@
+# helm template piperoom-pipeline-orders deploy/helm/piperoom -n data -f this file
+setup:
+  pipeline:
+    enabled: true
+    id: orders
+    kafka: prod-kafka
+    connectors: [orders-src]
+    admissionPolicy: true
+    topicPrefix: pg
+    imageRegistries: [registry.data.svc:5000]
+    databaseHosts: [pg:5432]
+    schemaRegistries: [http://registry.data.svc:8081]
+    networkPolicy:
+      apiServer:
+        to: [{ipBlock: {cidr: 10.96.0.1/32}}]
+      databases:
+        to: [{ipBlock: {cidr: 10.0.5.0/24}}]
+        ports: [5432]
+      schemaRegistries:
+        to: [{ipBlock: {cidr: 10.0.6.10/32}}]
+      build:
+        sources:
+          to: [{ipBlock: {cidr: 199.232.0.0/16}}]
+        registry:
+          to: [{podSelector: {matchLabels: {app: registry}}}]
+networkPolicy:
+  enabled: true

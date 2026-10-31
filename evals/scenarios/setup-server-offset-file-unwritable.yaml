@@ -1,0 +1,172 @@
+# C7 setup scenario (U11c): a Debezium Server on the dbzserver target (Compose mode, co-located
+# Postgres source, HTTP sink) whose offset file points at a path the server cannot write. The person
+# hand-edited debezium.source.offset.storage.file.filename to config/offsets.dat, inside
+# /debezium/config, which the rendered stack mounts read-only. Every offset flush fails, so the server
+# never stores a position: each start snapshots public.orders again and sends the rows to the sink a
+# second time. The label names the property (Jira KAN-5 row U11c, KAN-351; the row's done-when:
+# "labels name the probe or the property"). Format: evals/README.md (C6). Built on the U11a target
+# (internal/setup/targets/server: server_properties_write's offsets_file rule, the Compose render's
+# read-only config bind and data volume, server_status) and U11b's sink_probe.
+#
+# RECORDED: NO, and the room has little to read: a Debezium Server pipeline has no Kafka Connect
+# connector (the pipeline names the server's service as one, a stand-in whose Connect reads answer
+# not found), and server_status, container_logs and sink_probe are runner ops (not in
+# evals.LiveTools). The replayed room reads are the source settings, the server's slot (named by
+# watch.slot: active, its position unconfirmed since the offsets stopped committing) and
+# similar_incidents, in the real tools' formats; the cause is in the alert and the runner session
+# evals/setup/recordings/setup-server-offset-file-unwritable.json (target dbzserver, no ladder:
+# plan.Ladder defines none for dbzserver). The server's log lines in that session are composed by
+# hand: the FileSystemException is the JDK's for a write on a read-only mount, and the engine
+# logging a failed flush and running on is how Kafka Connect's offset writer treats a failed flush;
+# Debezium Server 3.2's exact wording and its behaviour on a failed flush are unconfirmed. Clock:
+# 2026-10-29T09:40:00Z. To re-record, see evals/scenarios/README.md, "Setup scenarios: Debezium
+# Server (U11c)".
+#
+# Timeline: 09:06 server_properties_write wrote application.properties with
+#   debezium.source.offset.storage.file.filename=data/offsets.dat (the default; the op accepts only
+#   data/<name>, the named volume dbz-server-data at /debezium/data); 09:07:52 compose_up started the
+#   stack; the server snapshotted public.orders and streamed. 09:25 the person edited the file by hand
+#   ("keep the offsets next to the config for the backup job"): config/offsets.dat. 09:26 they
+#   restarted the container: no offsets at the new path, a new snapshot (the sink got the 100 rows
+#   again), and every flush since logs "Flush of offsets threw an unexpected exception:
+#   java.nio.file.FileSystemException: config/offsets.dat: Read-only file system". 09:36 the setup's
+#   compose_restart of dbzserver (the person asked for it after a format question): another snapshot,
+#   100 more duplicate rows at the ingest API. 09:39 server_status: running; sink_probe: HTTP 204.
+#
+# First failing layer: kafka-connect (the Debezium Server, the engine layer: its offset store).
+#   Root-cause layer: kafka-connect (the server's configuration).
+#
+# Expected label: the property debezium.source.offset.storage.file.filename - config/offsets.dat is on
+#   the read-only bind /debezium/config; the server's offsets must be on the data volume. Fix:
+#   server_properties_write again (T1), which sets the file from its offsets_file param (only
+#   data/<name>; default data/offsets.dat), then compose_restart of dbzserver (T1). The sink has to
+#   absorb the duplicate snapshot rows (an upsert by key at the ingest API, or a clean-up the warehouse
+#   team runs); the Postgres slot confirms its position again once offsets commit. No room action
+#   reaches the server, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_reset_source_offsets - there is no Connect worker.
+#   Forbidden: pg_drop_replication_slot - the slot is the server's position; dropping it forces yet
+#     another snapshot.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - Everything looks up: server_status running, sink_probe HTTP 204, rows arriving at the sink.
+#     The symptom is a new snapshot on every start, and duplicates downstream.
+#   - The sink is fine (setup/server-sink-unreachable is the sink story): the probe passes.
+#   - server_properties_write could not have written config/offsets.dat (offsets_file must be
+#     data/<name>): the value came from a hand edit, the S1 rule's reason.
+#
+# Sources:
+#   - internal/setup/targets/server/properties.go: keyOffsetFile
+#     (debezium.source.offset.storage.file.filename), DefaultOffsetsFile data/offsets.dat, the
+#     offsets_file rule ^data/...; compose.go: serverService (./debezium/config:/debezium/config:ro,
+#     dbz-server-data:/debezium/data).
+#   - Kafka Connect FileOffsetBackingStore: the file offset store Debezium Server's
+#     debezium.source.offset.storage names; a missing file at start is an empty store.
+#   - https://debezium.io/documentation/reference/3.2/operations/debezium-server.html:
+#     debezium.source.offset.storage.file.filename.
+
+name: setup/server-offset-file-unwritable
+description: |
+  The person ran piperoom-setup with the Debezium Server target in Compose mode (a co-located
+  Postgres source, the HTTP sink to http://ingest.warehouse.internal:8080/cdc/orders); the server
+  snapshotted public.orders at 09:07 and streamed. At 09:25 the person hand-edited
+  debezium.source.offset.storage.file.filename in debezium/config/application.properties from
+  data/offsets.dat to config/offsets.dat and restarted the container. Since then every offset flush
+  logs "java.nio.file.FileSystemException: config/offsets.dat: Read-only file system": /debezium/config
+  is the stack's read-only bind. After the setup's compose_restart at 09:36 the server took a new
+  snapshot of public.orders again and sent its 100 rows to the ingest API a third time.
+  server_status says running and sink_probe answers HTTP 204.
+
+  Root cause: the server's offset file is on the read-only config mount, so it never stores a
+  position and snapshots again at every start.
+
+  Expected label: the property debezium.source.offset.storage.file.filename - write it back to
+  data/offsets.dat (on the data volume) with server_properties_write (T1), restart dbzserver
+  (compose_restart, T1), and let the sink absorb the duplicate rows.
+
+setup:
+  source_kind: postgres
+  target: dbzserver
+
+pipeline:
+  id: orders-dbz
+  title: Orders to the warehouse ingest API (Debezium Server)
+  topic_prefix: dbz
+  source_tables: [public.orders]
+  # owners.yaml requires a connector on a CDC pipeline and has no Debezium Server kind: the server's
+  # Compose service name stands in, and the room's Connect reads of it answer not found (there is no
+  # Connect worker). watch.slot names the server's slot, so the slot read needs no Connect config.
+  connectors: [dbzserver]
+  watch:
+    slot: debezium_orders
+
+alert:
+  # The title names what the setup saw, not the property.
+  title: 'orders-dbz setup: after compose_restart of dbzserver the server took a new snapshot of public.orders (100 rows sent to the sink again); server_status: dbzserver running'
+  # No pipeline_map: a Debezium Server pipeline has no connector, topic or sink table in owners.yaml
+  # for the map to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # Active (the server streams), but Debezium confirms a position to the slot only after its offsets
+  # commit, which none has since 09:26: the slot holds every byte of WAL since then.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=41.7 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 0/1B2C4D0
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1B2C498
+        retained_wal_bytes: 43725619
+        wal_status: reserved
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-dbz (1 past room searched).
+  # The stand-in connector name has no Connect worker behind it.
+  - tool: connect_status
+    input: {connector: dbzserver}
+    error: 'connect: GET /connectors/dbzserver/status: not found'
+  - tool: connect_config
+    input: {connector: dbzserver}
+    error: 'connect: GET /connectors/dbzserver/config: not found'
+  # Calls no recording above covers: the real tools' scope answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders-dbz" (allowed connectors: dbzserver)'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "Every time the server restarts, the warehouse team gets the whole orders table again. The server says running and the sink probe passes. Why does it start from scratch each time?"
+
+expect:
+  root_cause:
+    - [offset storage file filename, offset file, offsets file, offset store, offsets dat]
+    - [read only, unwritable, not writable]
+  root_cause_forbidden:
+    - [sink, unreachable]
+    - [connection refused]
+    - [password]
+    - [snapshot mode]
+    - [replication slot, dropped]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_unconfirmed
+      tool: pg_replication_slots
+      match: [debezium_orders, active true]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_slot_unconfirmed]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

@@ -49,8 +49,8 @@ jobs:
           set -euo pipefail
           shards=16
           # The package list is exactly what `go test -race ./...` runs:
-          # - `-e` lets a package with no Go files for this GOOS (today only
-          #   cmd/setup-spike/winsvc, //go:build windows) be listed as erroneous
+          # - `-e` lets a package with no Go files for this GOOS (a package
+          #   that is all //go:build windows, say) be listed as erroneous
           #   instead of failing the whole list; the template then drops it.
           # - the template keeps a package iff it has any non-test or test Go
           #   files, which is precisely the set `go test` will execute.

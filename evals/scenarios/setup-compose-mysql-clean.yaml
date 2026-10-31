@@ -1,0 +1,280 @@
+# C7 setup scenario (U2c): a clean setup run on the Compose target with the MySQL 8.4 source of the
+# `mysql` dev profile. Every prerequisite check of the U2a MySQL driver passed, the verification
+# ladder is green on rungs 1 to 7 and waits only for the person's own change (rung 8). The room
+# opens on that result before the person hands the pipeline over; nothing is wrong. The label is the
+# outcome: healthy, no fix (Jira KAN-5 row U2c, KAN-333). Format: evals/README.md (C6). The source
+# is the `mysql` profile of dev/docker-compose.yml (dev/mysql/README.md, Q8a): MySQL 8.4.13,
+# database shop, tables shop.orders and shop.order_items (100 rows each), connector user debezium.
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, connect_worker_logs, debezium_metrics, kafkatools, dbtools (the
+# MySQL list: source_settings, source_role_grants, source_table_replication) and mysql_binlog_status
+# code on this branch, composed by hand (the U1-19 approach; this session has no Docker). The runner
+# session is evals/setup/recordings/setup-compose-mysql-clean.json (the eval replay): the U2a
+# driver's reads recorded under the remote clients' op names. Clock: 2026-10-29T09:40:00Z. To
+# re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios: MySQL (U2c)".
+# connect_config shows only the keys the real tool keeps (internal/tools/kafkatools/connect_tools.go,
+# the important list): database.server.id and the schema history keys are set (see the runner
+# session's connect_create_connector) but not shown. The mysql: nodes render "owner " empty, as the
+# topology builder does for a per-pipeline mysql owner (as in the Q8i scenarios).
+#
+# Expected label: outcome healthy. The U2a checks all passed: log_bin ON, binlog_format ROW,
+#   binlog_row_image FULL, gtid ON (advisory), server_id 223344 (non-zero, not the connector's 5401),
+#   binlog_expire_logs_seconds 86400, rds_binlog_retention (not RDS), tables and
+#   table_primary_key (both tables InnoDB with a primary key), read_role (debezium exists, can log in,
+#   REPLICATION SLAVE and REPLICATION CLIENT), read_role_grants (SELECT on both) and
+#   read_role_privileges (RELOAD, SHOW DATABASES). The ladder's rungs 1 to 7 are green (rung 7 not
+#   applicable: no sink); rung 8 waits for the person's INSERT into shop.orders, which is the person's
+#   step, not a fault. Nothing to propose.
+#   Forbidden: every write - connect_restart_task, connect_restart_connector,
+#     connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets,
+#     source_grant_select, schema_register, schema_set_compatibility. A healthy pipeline gets no
+#     proposal.
+#
+# Traps:
+#   - connect_worker_logs returns no line at WARN: that is the normal state, not missing data.
+#   - LOCK TABLES=no in source_role_grants is expected: the driver needs it on RDS/Aurora only.
+#   - Rung 8 "awaiting the person's change" reads like an unfinished step; it is the person's own
+#     confirmation, and the canary already proved capture end to end.
+#
+# Sources:
+#   - internal/setup/sources/mysql/driver.go: the check ids, their descriptions and reads.
+#   - internal/setup/sources/mysql/connector.go: ConnectorConfig (database.include.list derived from
+#     the tables, tasks.max 1, schema-history.<prefix>); writer.go: CanaryTableSQL (nonce primary key).
+#   - dev/docker-compose.yml, dev/mysql/README.md: the profile's command line (--server-id=223344,
+#     ROW, FULL, GTIDs on, 86400 s) and users.
+#   - internal/setup/plan/ladder.go: the rungs and their notes.
+#   - internal/tools/dbtools/source_settings.go, internal/tools/mysqltools/binlog_status.go,
+#     internal/tools/debeziumtools/metrics.go, internal/tools/kafkatools: the summary formats.
+#   - https://debezium.io/documentation/reference/3.2/connectors/mysql.html: topic names
+#     <topic.prefix>.<database>.<table>.
+
+name: setup/compose-mysql-clean
+description: |
+  The person ran piperoom-setup on the Compose target with the MySQL 8.4 container of the mysql
+  profile as the source (database shop, tables shop.orders and shop.order_items, 100 rows each). The
+  run rendered Kafka, Connect and the Schema Registry, created the canary table shop.piperoom_canary
+  and registered orders-mysql as the existing user debezium. Every MySQL prerequisite check passed
+  (binlog ROW and FULL, GTIDs on, server_id 223344, one day of binlogs, both tables keyed, the user's
+  REPLICATION SLAVE, REPLICATION CLIENT and SELECT). The verification ladder is green on rungs 1 to
+  7: the connector and task 0 RUNNING, the canary topic, the snapshot complete, the canary event with
+  the nonce as key on shop.shop.piperoom_canary, its subjects in the registry; no sink was set up.
+  Rung 8 waits for the person's own INSERT into shop.orders.
+
+  Expected label: healthy. Nothing is wrong and nothing needs fixing; the person's change completes
+  rung 8.
+
+setup:
+  source_kind: mysql
+  target: compose
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value, shop.shop.piperoom_canary-key, shop.shop.piperoom_canary-value]
+
+alert:
+  title: 'orders-mysql setup: verification rungs 1-7 green (canary event on shop.shop.piperoom_canary); rung 8 awaiting the person''s change to shop.orders'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] OK tasks_running=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=20m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=20m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] OK tasks_running=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=20m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=20m ago
+        from: connect:orders-mysql
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: orders-mysql
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items,shop.piperoom_canary
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items,shop.piperoom_canary
+      topic.prefix: shop
+  - tool: debezium_metrics
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql: streaming connected=true, 0.0 s behind source, last event 32 s ago, queue 0/8192, 1 events seen; snapshot running=false, completed=true, rows scanned of table shop.order_items 100, shop.orders 100, 200 events seen
+    data:
+      connector: orders-mysql
+      metrics_found: 12
+      rows_scanned_by_table:
+        shop.order_items: 100
+        shop.orders: 100
+      snapshot:
+        SnapshotCompleted: 1
+        SnapshotRunning: 0
+        TotalNumberOfEventsSeen: 200
+      streaming:
+        Connected: 1
+        MilliSecondsBehindSource: 0
+        MilliSecondsSinceLastEvent: 32000
+        QueueRemainingCapacity: 8192
+        QueueTotalCapacity: 8192
+        TotalNumberOfEventsSeen: 1
+      topic_prefix: shop
+  - tool: connect_worker_logs
+    input: {connector: orders-mysql}
+    summary: |-
+      Worker log lines naming orders-mysql at WARN or above, 2026-10-29T08:40:00Z to 2026-10-29T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+    data:
+      bytes: 0
+      connector: orders-mysql
+      lines: []
+      min_level: WARN
+      since: "2026-10-29T08:40:00Z"
+      summary_lines: 0
+      until: "2026-10-29T09:40:00Z"
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–100 (100 records), newest 20 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.order_items}
+    summary: |-
+      partition 0: 0–100 (100 records), newest 20 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.piperoom_canary}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 32 s ago
+  - tool: kafka_find_by_key
+    input: {topic: shop.shop.piperoom_canary}
+    summary: |-
+      found 1 record(s) with key "9c3e71a0f4b85d26e1a7c0d39b4f8e52"
+        partition 0, offset 0, 2026-10-29T09:39:28Z
+    data:
+      found: true
+      key: 9c3e71a0f4b85d26e1a7c0d39b4f8e52
+      records:
+        - key: 9c3e71a0f4b85d26e1a7c0d39b4f8e52
+          offset: 0
+          partition: 0
+          timestamp: "2026-10-29T09:39:28.207Z"
+      topic: shop.shop.piperoom_canary
+  - tool: schema_registry_subjects
+    summary: |-
+      shop.shop.order_items-key
+      shop.shop.order_items-value
+      shop.shop.orders-key
+      shop.shop.orders-value
+      shop.shop.piperoom_canary-key
+      shop.shop.piperoom_canary-value
+  - tool: source_settings
+    summary: |
+      version=8.4.13
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: source_table_replication
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      tables=2 without_primary_key=0 engine_not_innodb=0
+      shop.orders: has_primary_key=yes engine=InnoDB
+      shop.order_items: has_primary_key=yes engine=InnoDB
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000002:48211
+      binlogs kept: 2 files, oldest binlog.000001, newest binlog.000002
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-214
+      gtid_purged: (empty)
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000002:47890 server_id 223344 ts 2026-10-29T09:39:28Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-214
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (0 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-mysql"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+# No input: the person's question (is anything wrong before the hand-over?) is the room's
+# opening; a steer would arrive only after the run's last message in the scripted harness.
+
+expect:
+  outcome: healthy
+  expected_facts:
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_canary_found
+      tool: kafka_find_by_key
+      match: [found 1 record]
+    - id: f_binlog_row
+      tool: source_settings
+      match: [binlog_format row, server_id 223344]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets, source_grant_select, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

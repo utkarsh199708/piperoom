@@ -28,12 +28,34 @@ func validateIdent(name string) (string, error) {
 // interpolates an identifier; the write half (U4a-2) interpolates identifiers
 // and uses this. It lives here, with its tests, so the rule lands with the
 // client.
+//
+// The identRe check is repeated inline (not only through validateIdent) so
+// the guard sits in the same function as the concatenation: identRe admits
+// no "]", so the bracketing cannot be closed early. The quoted text is
+// copied out of identChars byte by byte rather than from name, so the
+// statement is built only from this package's constants: static analysis
+// (CodeQL's go/sql-injection) does not count a regexp match as a sanitiser,
+// and before this it traced the caller's string into ExecContext.
 func quoteIdent(name string) (string, error) {
-	if _, err := validateIdent(name); err != nil {
-		return "", err
+	if !identRe.MatchString(name) {
+		return "", fmt.Errorf("sqlserver: invalid identifier %q", name)
 	}
-	return "[" + name + "]", nil
+	var b strings.Builder
+	b.Grow(len(name) + 2)
+	b.WriteByte('[')
+	for i := 0; i < len(name); i++ {
+		j := strings.IndexByte(identChars, name[i])
+		if j < 0 {
+			return "", fmt.Errorf("sqlserver: invalid identifier %q", name)
+		}
+		b.WriteByte(identChars[j])
+	}
+	b.WriteByte(']')
+	return b.String(), nil
 }
+
+// identChars is every byte identRe admits.
+const identChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
 
 // splitTable validates a "schema.table" identifier and returns the raw parts.
 func splitTable(table string) (string, string, error) {
@@ -55,6 +77,9 @@ func splitTable(table string) (string, string, error) {
 // splitTables validates a list of "schema.table" identifiers, dropping
 // duplicates and returning the unique schema/table pairs in order.
 func splitTables(tables []string) ([][2]string, error) {
+	if len(tables) > MaxTables {
+		return nil, fmt.Errorf("sqlserver: %d tables, at most %d per call", len(tables), MaxTables)
+	}
 	pairs := make([][2]string, 0, len(tables))
 	seen := make(map[string]bool, len(tables))
 	for _, t := range tables {
@@ -72,13 +97,26 @@ func splitTables(tables []string) ([][2]string, error) {
 	return pairs, nil
 }
 
+// MaxTables caps the tables one call may name: two parameters per table
+// must stay under SQL Server's 2100-parameter limit for one request, and a
+// pipeline's source tables are never a catalogue scan (the runner's ops cap
+// requests at the same bound).
+const MaxTables = 1000
+
 // tablePredicate builds "(s.name = @p<n> AND t.name = @p<n+1>) OR ..." for the
 // given pairs, with the positional parameters starting at start (1-based, as
 // go-mssqldb's @pN). The query it is used in must alias the schema as s and
 // the table as t.
-func tablePredicate(start int, pairs [][2]string) (string, []any) {
+//
+// More than MaxTables pairs is an error: the bound is checked here, next to
+// the allocation, as well as in splitTables.
+func tablePredicate(start int, pairs [][2]string) (string, []any, error) {
+	n := len(pairs)
+	if n > MaxTables {
+		return "", nil, fmt.Errorf("sqlserver: %d tables, at most %d per call", n, MaxTables)
+	}
 	var b strings.Builder
-	args := make([]any, 0, 2*len(pairs))
+	args := make([]any, 0, 2*n)
 	for i, p := range pairs {
 		if i > 0 {
 			b.WriteString(" OR ")
@@ -86,7 +124,7 @@ func tablePredicate(start int, pairs [][2]string) (string, []any) {
 		fmt.Fprintf(&b, "(s.name = @p%d AND t.name = @p%d)", start+2*i, start+2*i+1)
 		args = append(args, p[0], p[1])
 	}
-	return b.String(), args
+	return b.String(), args, nil
 }
 
 // ServerInfo reads the server version, edition and product level. It needs no
@@ -185,7 +223,10 @@ func (c *Client) TableCDC(ctx context.Context, tables []string) ([]TableCDC, err
 		return nil, nil
 	}
 
-	pred, args := tablePredicate(1, pairs)
+	pred, args, err := tablePredicate(1, pairs)
+	if err != nil {
+		return nil, err
+	}
 	q := `
 		SELECT s.name, t.name, t.is_tracked_by_cdc,
 		       CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.is_primary_key = 1) THEN 1 ELSE 0 END AS bit)
@@ -258,9 +299,36 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		           JOIN sys.database_principals u ON u.principal_id = rm.member_principal_id
 		           JOIN sys.server_principals sp ON sp.sid = u.sid
 		           WHERE sp.name = @p1
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_principals u
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           WHERE sp.name = @p1
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_permissions p
+		           JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           WHERE sp.name = @p1
+		             AND p.class = 0
+		             AND p.permission_name = N'VIEW DATABASE STATE'
+		             AND p.state IN (N'G', N'W')
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_permissions p
+		           JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           JOIN sys.schemas s ON p.class = 3 AND s.schema_id = p.major_id
+		           WHERE sp.name = @p1
+		             AND s.name = N'cdc'
+		             AND p.permission_name = N'SELECT'
+		             AND p.state IN (N'G', N'W')
 		       ) THEN 1 ELSE 0 END AS int)`
-	var exists, disabled, sysadmin, dbOwner, dataReader int64
-	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner, &dataReader); err != nil {
+	var exists, disabled, sysadmin, dbOwner, dataReader, hasUser, viewState, cdcSelect int64
+	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner, &dataReader, &hasUser, &viewState, &cdcSelect); err != nil {
 		return RoleInfo{}, fmt.Errorf("sqlserver: read role info for %q: %w", login, err)
 	}
 
@@ -271,8 +339,13 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		Sysadmin:   sysadmin == 1,
 		DBOwner:    dbOwner == 1,
 		DataReader: dataReader == 1,
+		HasDBUser:  hasUser == 1,
 		Selectable: make(map[string]bool, len(pairs)),
 	}
+	// Fixed roles imply the cdc-schema read; VIEW DATABASE STATE is implied
+	// by db_owner and sysadmin only (db_datareader reads data, not state).
+	info.CDCSelect = cdcSelect == 1 || info.DBOwner || info.DataReader || info.Sysadmin
+	info.ViewDBState = viewState == 1 || info.DBOwner || info.Sysadmin
 	// A missing login has no database user to hold grants, so there is nothing
 	// to read and no grant query to run.
 	if !info.Exists {
@@ -303,7 +376,10 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 // its table column comes back empty and is expanded to every requested pair in
 // that schema.
 func (c *Client) directSelectGrants(ctx context.Context, login string, pairs [][2]string) (map[string]bool, error) {
-	pred, targs := tablePredicate(2, pairs)
+	pred, targs, err := tablePredicate(2, pairs)
+	if err != nil {
+		return nil, err
+	}
 	args := append([]any{login}, targs...)
 	q := `
 		SELECT s.name, COALESCE(t.name, '')

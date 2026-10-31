@@ -1,0 +1,307 @@
+{
+  "scenario": "setup/server-sink-unreachable",
+  "source": "postgres",
+  "target": "dbzserver",
+  "sink": "none",
+  "recorded_at": "2026-10-29T09:40:00Z",
+  "note": "Composed from the Debezium Server target's ops (internal/setup/targets/server: server_properties_write, server_compose_write, server_status; their summary and Data formats), the Compose driver's compose_up and container_logs (the server runs in Compose mode, so its stack is the Compose driver's to start and read) and U11b's sink_probe (internal/setup/ops/sink_probe.go), on the fixed clock of the U11c scenarios. The container log lines are the server's own messages composed by hand. The session records no ladder: plan.Ladder defines none for target dbzserver (internal/setup/plan/ladder.go: the server's ladder is its own row), so evalsetup.Verify reports the ladder as not defined instead of replaying one. Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC. No Docker session: re-record per evals/scenarios/README.md, Setup scenarios: Debezium Server (U11c).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "linux/amd64; docker on PATH",
+        "data": {
+          "os": "linux",
+          "arch": "amd64",
+          "project_dir": "/home/priya/orders-dbz",
+          "project_files": [],
+          "tools": [
+            "docker"
+          ]
+        },
+        "receipt": {
+          "kind": "",
+          "target": "/home/priya/orders-dbz",
+          "exit_code": 0,
+          "at": "2026-10-29T09:05:01Z",
+          "took_ms": 9,
+          "out_mac": "5b5bcc882c0809408b4daffb022b29911864130a21a9456dce949f7cb31d4650"
+        }
+      }
+    },
+    {
+      "op": "server_properties_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "62e504df8af47db73fdcf5f5c0bffeb0c1ec6ff79d3235272ce4fe5c86585b71",
+      "params": {
+        "sink": "http",
+        "sink_keys": {
+          "debezium.sink.http.url": "http://ingest.warehouse.internal:8080/cdc/orders"
+        },
+        "source": "postgres",
+        "source_keys": {
+          "database.dbname": "orders",
+          "database.hostname": "postgres",
+          "database.port": "5432",
+          "database.user": "piperoom_cdc",
+          "plugin.name": "pgoutput",
+          "publication.name": "dbz_publication",
+          "slot.name": "debezium_orders",
+          "table.include.list": "public.orders",
+          "topic.prefix": "dbz"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote debezium/config/application.properties (postgres -> http, 16 keys)",
+        "data": {
+          "file": "debezium/config/application.properties",
+          "sink": "http",
+          "sink_entry": "server-http",
+          "source": "postgres",
+          "connector_class": "io.debezium.connector.postgresql.PostgresConnector",
+          "keys": [
+            "debezium.format.key",
+            "debezium.format.value",
+            "debezium.sink.http.url",
+            "debezium.sink.type",
+            "debezium.source.connector.class",
+            "debezium.source.database.dbname",
+            "debezium.source.database.hostname",
+            "debezium.source.database.port",
+            "debezium.source.database.user",
+            "debezium.source.offset.storage",
+            "debezium.source.offset.storage.file.filename",
+            "debezium.source.plugin.name",
+            "debezium.source.publication.name",
+            "debezium.source.slot.name",
+            "debezium.source.table.include.list",
+            "debezium.source.topic.prefix"
+          ],
+          "aliases": {},
+          "checks": [
+            "The Content-Type follows debezium.format.value (avro gives avro/bytes, cloudevents gives application/cloudevents+json, otherwise JSON).",
+            "Only 200, 202 and 204 count as delivered; any other answer is retried, retry.interval.ms apart, up to the retries limit."
+          ],
+          "doc": "https://debezium.io/documentation/reference/3.2/operations/debezium-server.html",
+          "index_source": "https://repo1.maven.org/maven2/io/debezium/debezium-server-http/3.2.0.Final/debezium-server-http-3.2.0.Final-sources.jar",
+          "bytes": 921,
+          "changed": true
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "debezium/config/application.properties",
+          "exit_code": 0,
+          "at": "2026-10-29T09:06:12Z",
+          "took_ms": 3,
+          "out_mac": "f24bb14c1c22573ade13d851b45068e6b58a86597f1d6c7b3d5e3e8f7e03f97e"
+        }
+      }
+    },
+    {
+      "op": "server_compose_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "04a3a9e9154bc92c8653833c3edc2887ef0ebdecff46ee26e26365fbde3ed9dd",
+      "params": {
+        "project": "piperoom-orders-dbz"
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote compose.yaml (1288 bytes), services: dbzserver, postgres",
+        "data": {
+          "file": "compose.yaml",
+          "bytes": 1288,
+          "changed": true,
+          "services": [
+            "dbzserver",
+            "postgres"
+          ],
+          "env_keys": [
+            "POSTGRES_DB",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_USER"
+          ]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-29T09:06:40Z",
+          "took_ms": 5,
+          "out_mac": "eab85cbc78614fb5102d574bb79d0268937a215874de423deff0c18fb5845ca8"
+        }
+      }
+    },
+    {
+      "op": "compose_up",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "7aee1569d7549da2e85584d4c8b5c3fd1286f0d0aa40529dc4621faf34d1d06b",
+      "params": {
+        "file": "compose.yaml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "compose up: dbzserver (running), postgres (healthy)",
+        "data": {
+          "project": "piperoom-orders-dbz",
+          "services": [
+            {
+              "service": "dbzserver",
+              "state": "running",
+              "health": ""
+            },
+            {
+              "service": "postgres",
+              "state": "running",
+              "health": "healthy"
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "--project-directory",
+            "/home/priya/orders-dbz",
+            "-f",
+            "compose.yaml",
+            "--env-file",
+            ".env",
+            "up",
+            "-d",
+            "--wait"
+          ],
+          "target": "piperoom-orders-dbz",
+          "exit_code": 0,
+          "at": "2026-10-29T09:07:42Z",
+          "took_ms": 23880,
+          "out_mac": "eb01fc0a1ee2929b53edc1c3be8a7e51ef061ca35df078eba0d4a9c43ac561ce"
+        }
+      }
+    },
+    {
+      "op": "server_status",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "dbzserver has no container: the stack is not running",
+        "data": {
+          "mode": "compose",
+          "file": "compose.yaml",
+          "service": "dbzserver",
+          "installed": true,
+          "running": false,
+          "containers": 0
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "--project-directory",
+            "/home/priya/orders-dbz",
+            "-f",
+            "/home/priya/orders-dbz/compose.yaml",
+            "--env-file",
+            "/home/priya/orders-dbz/.env",
+            "ps",
+            "--format",
+            "json",
+            "dbzserver"
+          ],
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-29T09:08:30Z",
+          "took_ms": 58,
+          "out_mac": "3905b63f1f48e87e376911b7af5dfaacbc9eb43f8a9462a8f2849c0669cd3c90"
+        }
+      }
+    },
+    {
+      "op": "container_logs",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "service": "dbzserver"
+      },
+      "result": {
+        "ok": true,
+        "summary": "dbzserver logs (container 7d1e4b9a0c52): 6 lines, newest last",
+        "data": {
+          "service": "dbzserver",
+          "file": "compose.yaml",
+          "container": "7d1e4b9a0c52",
+          "containers": 1,
+          "lines": [
+            "2026-10-29T09:07:41.802Z INFO  [io.deb.ser.DebeziumServer] Engine executor started",
+            "2026-10-29T09:07:43.117Z INFO  [io.deb.con.pos.PostgresConnectorTask] Snapshot step 1 - Preparing",
+            "2026-10-29T09:07:44.660Z INFO  [io.deb.pip.ChangeEventSourceCoordinator] Snapshot ended with SnapshotResult [status=COMPLETED]",
+            "2026-10-29T09:07:44.931Z WARN  [io.deb.ser.htt.HttpChangeConsumer] Failed to send event to http://ingest.warehouse.internal:8080/cdc/orders: java.net.ConnectException: Connection refused",
+            "2026-10-29T09:07:49.982Z ERROR [io.deb.ser.ConnectorLifecycle] Connector completed: success = 'false', message = 'Stopping connector after error in the application's handler method: java.net.ConnectException: Connection refused', error = 'java.net.ConnectException: Connection refused'",
+            "2026-10-29T09:07:50.211Z INFO  [io.deb.ser.DebeziumServer] Received request to stop the engine"
+          ],
+          "count": 6,
+          "tail": 200
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "logs",
+            "--timestamps",
+            "--tail",
+            "200",
+            "7d1e4b9a0c52"
+          ],
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-29T09:08:41Z",
+          "took_ms": 38,
+          "out_mac": "838473d3153ddccb43a18552d53ab8d1da824e435e2a5a13883af968c9e6083c"
+        }
+      }
+    },
+    {
+      "op": "sink_probe",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "target": "ingest.warehouse.internal:8080"
+      },
+      "result": {
+        "ok": false,
+        "summary": "sink_probe http: HEAD request failed",
+        "data": {
+          "sink": "http",
+          "target": "ingest.warehouse.internal:8080",
+          "method": "HEAD",
+          "reachable": false,
+          "configured": true
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "ingest.warehouse.internal:8080",
+          "exit_code": 0,
+          "at": "2026-10-29T09:09:02Z",
+          "took_ms": 3
+        }
+      }
+    }
+  ]
+}

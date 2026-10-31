@@ -1,0 +1,205 @@
+# C7 setup scenario (U8d): a Kafka Connect worker that the setup run installed on a plain Linux
+# host as the standalone user unit piperoom-connect.service. The person pointed the unit's
+# Environment=JAVA_HOME at the host's Java 11; the project's Kafka 4.1 distribution needs Java 17, so
+# the JVM cannot load the Connect main class and exits, and systemd gives up after five tries. The
+# java on PATH is still 21. The label names the unit's JAVA_HOME and the Java version (Jira KAN-5 row
+# U8d, KAN-346; the row's done-when: "labels name the properties key or the argv"; here the unit's
+# key). Format: evals/README.md (C6). Built on `devctl setup-break java-too-old`
+# (cmd/devctl/setupbreaks_host.go, U8c) and the host target's ops (internal/setup/targets/host, U8a;
+# docs/pilot/host-target.md).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# pipeline_map, connect_worker_logs (not configured), dbtools and kafkatools code on this branch,
+# composed by hand (the U1-19 approach; this session has no Docker, and the fake host's jdk-11 is a
+# shim that only answers `java -version`). The check name and its message are devctl's
+# verifyHostJavaVersion. The journal lines are the JVM's own LinkageError /
+# UnsupportedClassVersionError for a class compiled for Java 17 (class file 61) run on Java 11
+# (55), and systemd's start-limit messages, composed by hand; the project's distribution is taken
+# to be Kafka 4.1.0, the dev stack's release. Clock: 2026-10-29T09:40:00Z. Runner session:
+# evals/setup/recordings/setup-java-too-old.json (target host). To re-record both, see
+# evals/scenarios/README.md, "Setup scenarios: host target (U8d)".
+#
+# Timeline: 09:05 java_version reported java 21.0.8 on PATH; 09:07 service_install rendered the
+#   unit with Environment=JAVA_HOME=/opt/java/openjdk (the JDK 21 that java on PATH resolves to) and
+#   service_restart started it; 09:12 pg-orders-connector registered; 09:22 the first verification
+#   was green. 09:30 the person aligned the unit with the platform runbook ("JVM services use the
+#   platform JDK"): Environment=JAVA_HOME=/opt/piperoom/jdk-11, then daemon-reload and a restart. The
+#   JVM failed to load org.apache.kafka.connect.cli.ConnectStandalone, Restart=on-failure tried every
+#   10 s, and at 09:31:59 systemd stopped with start-limit-hit. 09:39 the re-verification failed at
+#   rung connector_running. 09:40 the re-run of the checks: host-java-version failed; java_version
+#   still says 21.0.8 (it reads PATH, not the unit).
+#
+# First failing layer: kafka-connect (the worker does not run). Root-cause layer: kafka-connect (the
+#   worker's unit: the JDK it pins).
+#
+# Expected label: failing check host-java-version - "JAVA_HOME=/opt/piperoom/jdk-11 reports java
+#   11.0.22; the Debezium 3.2 postgres connector needs Java 17 or newer" (and Kafka 4.x Connect
+#   itself needs 17). Fix: render the unit again with service_install {name: connect, mode:
+#   standalone} (T2): it pins the JDK that java on PATH resolves to (21), never a JAVA_HOME from
+#   model text; then service_restart (T2) and register pg-orders-connector again
+#   (connect_create_connector, T2; standalone keeps REST connectors in memory). None of these is a
+#   room action in evals.LiveActions, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - nothing
+#     answers on 8083.
+#   Forbidden: connect_update_connector_config, connect_reset_source_offsets - the connector is fine.
+#   Forbidden: pg_drop_replication_slot - the slot holds the position.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - java_version says 21.0.8: it reads the java on PATH, while the unit runs JAVA_HOME's java.
+#   - The room sees the same "connection refused" as setup/wrong-standalone-args; the check (in the
+#     alert) and the runner's journal_tail tell the two apart (a class-version error, not a missing
+#     key).
+#   - The fake host's java 11 is a shim; on a real host the JVM's error is the one in the journal.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_host.go: breakHostJavaTooOld (Environment=JAVA_HOME=/opt/piperoom/jdk-11),
+#     verifyHostJavaVersion's details, hostMinJava 17, check name host-java-version.
+#   - dev/host/jdk-11/bin/java: the shim's "openjdk version "11.0.22" 2024-01-16".
+#   - internal/setup/targets/host/unit.go: the unit template pins the detected JDK (JAVA_HOME);
+#     internal/setup/ops/envops.go: java_version reads java on PATH.
+#   - Apache Kafka 4.0 release notes: Kafka Connect and the broker need Java 17.
+#   - https://debezium.io/releases/3.2/: Debezium 3.2 needs Java 17.
+
+name: setup/java-too-old
+description: |
+  The setup run installed a standalone Kafka Connect worker on the person's Linux host as the user
+  unit piperoom-connect.service, pinned to the JDK 21 that java on PATH resolves to, and registered
+  pg-orders-connector; the first verification at 09:22 was green. At 09:30 the person pointed the
+  unit's Environment=JAVA_HOME at /opt/piperoom/jdk-11 (the platform runbook's JDK) and restarted it.
+  The JVM failed to load the Connect main class (UnsupportedClassVersionError: class file version
+  61.0, this runtime recognizes up to 55.0) and systemd stopped retrying after five starts. The
+  re-verification at 09:39 failed at rung connector_running, and the re-run of the checks fails
+  host-java-version: "JAVA_HOME=/opt/piperoom/jdk-11 reports java 11.0.22; the Debezium 3.2 postgres
+  connector needs Java 17 or newer". java_version still reports 21.0.8 on PATH.
+
+  Root cause: the unit's JAVA_HOME pins Java 11, older than the Java 17 the worker and the connector
+  need.
+
+  Expected label: the unit's JAVA_HOME and the Java version - render the unit again with
+  service_install (it pins the JDK 21 on PATH), restart the worker and register pg-orders-connector
+  again.
+
+setup:
+  source_kind: postgres
+  target: host
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+
+resources:
+  # The worker's converters are JsonConverter and the room has no schema registry: no subjects.
+  connectors: [pg-orders-connector]
+
+alert:
+  title: 'orders setup (host): re-verification failed at rung connector_running (the worker REST endpoint refuses connections); prerequisite check host-java-version failed'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=18.6 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] UNKNOWN error=unreachable
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=10m ago
+      from: connect:pg-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=18.6 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] UNKNOWN error=unreachable
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=10m ago
+        from: connect:pg-orders-connector
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/status: Get "http://127.0.0.1:8083/connectors/pg-orders-connector/status": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/config: Get "http://127.0.0.1:8083/connectors/pg-orders-connector/config": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: debezium_metrics
+    summary: |-
+      not configured: set DEBEZIUM_METRICS_URL
+    data:
+      configured: false
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=18.6 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 0/1A3F2C8
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1A3E9F0
+        retained_wal_bytes: 19503513
+        wal_status: reserved
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–112 (112 records), newest 10 min ago
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.piperoom_canary}
+    summary: |-
+      not found: no record with key "8a0f3c6e2d91b74f5e0c8a17d3b2f694" since 2026-10-29T09:30:00Z
+    data:
+      found: false
+      key: 8a0f3c6e2d91b74f5e0c8a17d3b2f694
+      records: null
+      topic: pg.public.piperoom_canary
+      truncated: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (0 past rooms searched).
+  # Calls no recording above covers: the real tools' answers with the worker down.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: Get "http://127.0.0.1:8083/connectors/<name>/status": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I aligned the unit with our platform runbook this morning and restarted it. Since then nothing answers on 127.0.0.1:8083, although java -version on the host says 21. What is wrong with the worker?"
+
+expect:
+  root_cause:
+    - [java 11, jdk 11, 11.0.22, java_home]
+    - [java 17, too old, older, unsupported class version, class file version]
+  root_cause_forbidden:
+    - [plugin path]
+    - [distributed]
+    - [broker*, down]
+    - [password]
+    - [replication slot, lost]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium_orders, active false]
+      required: true
+    - id: f_canary_missing
+      tool: kafka_find_by_key
+      match: [not found, 8a0f3c6e2d91b74f5e0c8a17d3b2f694]
+  claims:
+    - about: root_cause
+      facts: [f_slot_inactive]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

@@ -342,3 +342,106 @@ networkPolicy:
     metadata: null
   # Extra raw egress rules appended as-is.
   extraEgress: []
+
+# Setup on Kubernetes with Strimzi (docs/design/setup-strimzi.md, row U12c).
+# The same chart is installed as two more releases in the target namespace,
+# and a release with either block enabled renders only that block (no server):
+#   piperoom-pipeline-<pipeline>  setup.pipeline.enabled=true: every object the
+#     setup runner will touch, pre-created with chart-fixed names; the Strimzi
+#     CRs are paused shells the runner fills and unpauses. It lives as long as
+#     the pipeline and is never uninstalled by a setup card.
+#   piperoom-setup-<room>  setup.runner.enabled=true: the runner's
+#     ServiceAccount, its Role (no create, every object by name) and the Job.
+#     The room's close card uninstalls it.
+# The pairing code is never a value: create the Secret
+# piperoom-setup-<room>-pairing with your own kubectl (the Set up page shows
+# the commands).
+setup:
+  pipeline:
+    enabled: false
+    id: ""                  # the provisional pipeline id: a DNS label, at most 40 characters
+    kafka: ""               # the Strimzi Kafka CR the pipeline uses, in this namespace
+    connectors: []          # the provisional pipeline's connector names; one paused KafkaConnector each
+    # D11: a ValidatingAdmissionPolicy bound to this pipeline's objects pins
+    # the fields RBAC cannot (spec.image, spec.template, the push Secret, a
+    # KafkaUser's password source and cluster ACLs). Cluster-scoped: needs
+    # cluster-admin at install. Required for the production class.
+    admissionPolicy: false
+    # The pipeline's topic prefix (owners topic_prefix; the setup request's).
+    # Required with admissionPolicy: the policy holds a KafkaUser's topic ACLs
+    # to "<topicPrefix>." and the Connect cluster's own internal topics.
+    topicPrefix: ""
+    # The hosts a KafkaConnect build artifact may come from, as the runner's
+    # PIPEROOM_SETUP_PLUGIN_HOSTS (the policy pins every artifact url to one).
+    pluginHosts: [repo1.maven.org]
+    # The container registries (host[:port]) a KafkaConnect build may push
+    # to: the room's image_registry targets. Required with admissionPolicy:
+    # the policy pins spec.build.output.image to
+    # <registry>/<repo>:piperoom-<id>-<digest> on one of them.
+    imageRegistries: []
+    # The database hosts (lower-case host:port, as the room's source and
+    # sink targets name them) a KafkaConnector may connect to:
+    # database.hostname with database.port, the hosts of a JDBC sink's
+    # connection.url and of mongodb.connection.string (a URL host without a
+    # port is matched at the dialect's default port). An entry without a
+    # port matches only a connector that names none. IPv6 literals are
+    # refused, here and by the runner. Required with admissionPolicy; with
+    # networkPolicy.enabled each port is one of networkPolicy.databases.ports.
+    databaseHosts: []
+    # The Schema Registry URLs (http[s]://host[:port], exactly as the
+    # connectors and the worker name them) the *.converter.schema.registry.url
+    # keys may hold: the room's registry targets. Empty refuses those keys.
+    schemaRegistries: []
+    # The egress policies rendered when networkPolicy.enabled. Every "to"
+    # below is required and non-empty (an empty "to" would open the port to
+    # any destination), so the chart refuses to render without them.
+    # The Connect pods: DNS (networkPolicy.dns), the other Connect workers
+    # on 8083 (REST forwarding to the leader), the Kafka cluster's pods on
+    # kafkaPorts, the API server (the secrets config provider reads the
+    # credentials Secret), the databases, the Schema Registries (ports from
+    # schemaRegistries' URLs), then extraEgress verbatim. kafkaPorts are the
+    # listener ports: with admissionPolicy the policy also refuses a
+    # bootstrap on any other port, so the two cannot drift apart.
+    # The build pod (<connect>-connect-build): DNS, the plugin artifact
+    # hosts (build.sources; ports from pluginHosts, 443 by default) and the
+    # registries it pushes to (build.registry; ports from imageRegistries,
+    # 443 by default). Nothing else: it needs no Kafka and no API server.
+    networkPolicy:
+      kafkaPorts: [9092, 9093]
+      apiServer:
+        to: []
+        ports: [443, 6443]
+      databases:
+        to: []
+        ports: []
+      schemaRegistries:
+        to: []            # required when schemaRegistries is set
+      build:
+        sources:
+          to: []
+        registry:
+          to: []
+      extraEgress: []
+  runner:
+    enabled: false
+    room: ""                # the room id POST /api/setup returned, without its r_ prefix
+    pipeline: ""            # = setup.pipeline.id of the pipeline release
+    kafka: ""               # = setup.pipeline.kafka
+    connectors: []          # = setup.pipeline.connectors
+    serverURL: ""           # the server's public origin (PIPEROOM_PUBLIC_URL); the Job checks the Welcome against it
+    activeDeadlineSeconds: 7200
+    ttlSecondsAfterFinished: 3600
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    # The Job's NetworkPolicy, rendered when networkPolicy.enabled: egress to
+    # DNS (networkPolicy.dns), the API server and the piperoom server only.
+    # Both "to" lists are required and non-empty (an empty one would open the
+    # port to any destination): your API server's and server's addresses.
+    networkPolicy:
+      apiServer:
+        to: []
+        ports: [443, 6443]
+      server:
+        to: []            # the port comes from serverURL (443 for https without one)
+      extraEgress: []     # e.g. the source database when this runner runs the source ops

@@ -742,6 +742,27 @@ privilege, role and table `SELECT` the check reads (not only `LOGMINING`). `no-a
 Unit tests: `go test ./cmd/devctl -run Oracle`. Integration (profile up; reads the checks through the U9a client
 over go-ora): `go test -tags integration ./cmd/devctl -run TestIntegrationOracleSetupBreaks`.
 
+### MySQL setup breaks (profile `mysql`, U2b)
+
+Three prerequisites the U2a MySQL setup driver (`internal/setup/sources/mysql`) checks, broken on the `mysql`
+profile (dev/mysql/README.md, Q8a). Start the profile first (`docker compose -f dev/docker-compose.yml --profile
+mysql up -d --wait mysql`); the commands, the lock and the idempotence are the same as above. devctl runs fixed
+statements as root through `docker exec` (`cmd/devctl/setupbreaks_mysql.go`). Each named check is the driver's own
+check id, so the scenario, the log line and the setup run's failed check name the same thing.
+
+| Scenario | Named check | What the break does | What the check reports |
+|---|---|---|---|
+| `binlog-statement` | `binlog_format` | `SET GLOBAL binlog_format = 'STATEMENT'` | `binlog_format is STATEMENT; Debezium needs ROW` (the driver's `source_settings` read) |
+| `no-replication-grant` | `read_role` | `REVOKE REPLICATION CLIENT ON *.* FROM 'debezium'@'%'` | `'debezium'@'%' is missing REPLICATION CLIENT` (the driver's `source_role_info` read: `Replication` needs both privileges) |
+| `server-id-zero` | `server_id` | `SET GLOBAL server_id = 0` | `server_id is 0; the server refuses every replication connection` |
+
+**Fixes:** `SET GLOBAL binlog_format = 'ROW'`; grant `REPLICATION CLIENT` back; `SET GLOBAL server_id = 223344` (the
+profile's `--server-id`, which a unit test keeps in step with `dev/docker-compose.yml`). The settings are `SET
+GLOBAL`, so a container restart heals every break from the profile's command-line baseline. `no-replication-grant`
+touches `REPLICATION CLIENT`, the incident break `missing-replication-grant` (§26) `REPLICATION SLAVE`, so neither
+undoes the other. Unit tests: `go test ./cmd/devctl -run MySQLSetup`. Integration (profile up; skips when it is
+not): `go test -tags integration ./cmd/devctl -run TestIntegrationMySQLSetupBreaks`.
+
 ## Setup breaks: MongoDB (`mongo` profile)
 
 Two more `setup-break` / `setup-fix` pairs, on the opt-in `mongo` profile (dev/mongo/README.md) instead of the

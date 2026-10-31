@@ -1,0 +1,22 @@
+{
+  "provider": "aws",
+  "name": "describe_plugin_create_failed",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/custom-plugins/arn:aws:kafkaconnect:us-east-1:000000000000:custom-plugin/debezium-pg/9f8e7d6c-5b4a-3210-fedc-ba9876543210-3"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"customPluginArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:custom-plugin/debezium-pg/9f8e7d6c-5b4a-3210-fedc-ba9876543210-3\",\"customPluginState\":\"CREATE_FAILED\",\"latestRevision\":{\"contentType\":\"ZIP\",\"revision\":1},\"name\":\"debezium-pg\",\"stateDescription\":{\"code\":\"ACCESS_DENIED\",\"message\":\"Access denied to S3 object plugins/debezium-connector-postgres-2.7.3.zip\"}}"
+      }
+    }
+  ]
+}

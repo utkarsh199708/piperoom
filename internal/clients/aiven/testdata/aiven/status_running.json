@@ -1,0 +1,22 @@
+{
+  "provider": "aiven",
+  "name": "status_running",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from aiven/aiven-client's client.py paths (read 2026-10-30); response shapes beyond the result keys it names are unconfirmed; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/project/project-0/service/connect-0/connectors/it_orders/status"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"status\":{\"state\":\"RUNNING\",\"tasks\":[{\"id\":0,\"state\":\"RUNNING\",\"trace\":\"\"}]}}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+# C7 setup scenario (U8d): a Kafka Connect worker that the setup run installed on a plain Linux
+# host as the standalone user unit piperoom-connect.service. The person removed plugin.path from
+# connect-standalone.properties by hand; after the restart the worker scans only its own classpath,
+# so it starts but knows no Debezium class, and the setup's registration of pg-orders-connector fails
+# with "Failed to find any class that implements Connector". The label names the properties key (Jira
+# KAN-5 row U8d, KAN-346; the row's done-when: "labels name the properties key or the argv").
+# Format: evals/README.md (C6). Built on `devctl setup-break plugin-path-unset`
+# (cmd/devctl/setupbreaks_host.go, U8c) and the host target's ops (internal/setup/targets/host, U8a;
+# docs/pilot/host-target.md).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# pipeline_map, connect_plugins, connect_worker_logs (not configured: a host target has no Loki),
+# dbtools and kafkatools code on this branch, composed by hand (the U1-19 approach; this session has
+# no Docker, and the fake host runs no worker). connect_plugins lists the classpath connectors and the
+# one converter the worker file names, the convention of plugin-missing-in-image's recording (a real
+# worker also lists its classpath transforms and predicates). The check name and its message are
+# devctl's verifyHostPluginPath. The journal lines and the HTTP 500 are Kafka Connect's own messages,
+# composed by hand. Clock: 2026-10-29T09:40:00Z. Runner session:
+# evals/setup/recordings/setup-plugin-path-unset.json (target host). To re-record both, see
+# evals/scenarios/README.md, "Setup scenarios: host target (U8d)".
+#
+# Timeline: 09:06 properties_write wrote connect-standalone.properties with plugin.path=
+#   /piperoom-host/project/connect-plugins (the Debezium Postgres plugin is there); 09:07
+#   service_install and service_restart; 09:12 pg-orders-connector registered; 09:22 the first
+#   verification was green. 09:29 the person "cleaned up" the worker file in an editor to match the
+#   team's template, which has no plugin.path line. 09:31 the setup restarted the worker on the
+#   person's request (service_restart, T2): it came up active (running), loading plugins from the
+#   classpath only. A standalone worker keeps REST-registered connectors in memory, so
+#   pg-orders-connector was gone; 09:33 the setup registered it again and Connect answered HTTP 500
+#   "Failed to find any class that implements Connector and which name matches
+#   io.debezium.connector.postgresql.PostgresConnector". 09:39 the re-verification failed at rung
+#   connector_running (connector not found). 09:40 the re-run of the checks: host-plugin-path failed.
+#
+# First failing layer: kafka-connect (the worker cannot create the connector). Root-cause layer:
+#   kafka-connect (the worker's properties file).
+#
+# Expected label: failing check host-plugin-path - "connect-standalone.properties has no
+#   plugin.path: the worker scans only the plugins it ships with and reports "Failed to find any class
+#   that implements Connector"". Fix: properties_write of connect-standalone.properties (T1, the
+#   project root), which adds plugin.path=<project>/connect-plugins as a default whenever the entries
+#   leave it out (properties.go prepareProps), then service_restart (T2), then connect_create_connector
+#   of pg-orders-connector (T2): it resumes from connect.offsets and the slot debezium_orders. None of
+#   these is a room action in evals.LiveActions, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - the
+#     connector does not exist on the worker; nothing to restart or resume.
+#   Forbidden: connect_update_connector_config, connect_reset_source_offsets - the connector config
+#     is right; the worker cannot load its class.
+#   Forbidden: pg_drop_replication_slot - the slot holds the position.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - service_status says active (running): the worker is up; its plugin scan is what changed.
+#   - The plugin is installed: connect-plugins/ on the host still holds it (jar_list or a look at the
+#     directory would show it); plugin_install would change nothing.
+#   - "Failed to find any class" also reads like setup/flat-plugin-dir (a plugin laid out flat in
+#     the plugin root); here the worker file names no plugin directory at all.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_host.go: breakHostPluginPathUnset (removes the plugin.path line),
+#     verifyHostPluginPath's details, check name host-plugin-path.
+#   - internal/setup/targets/host/properties.go: prepareProps adds plugin.path, listeners and the
+#     standalone offset file as defaults; ops.go: properties_read's "plugin.path unset" note.
+#   - dev/host/base/connect-standalone.properties: the rendered file the break edits.
+#   - Kafka Connect: plugin.path (worker config), the PluginScanner's "Loading plugin from"
+#     lines, and the REST error for an unknown connector class.
+
+name: setup/plugin-path-unset
+description: |
+  The setup run installed a standalone Kafka Connect worker on the person's Linux host as the user
+  unit piperoom-connect.service, with plugin.path naming the project's connect-plugins directory, and
+  registered pg-orders-connector; the first verification at 09:22 was green. At 09:29 the person
+  cleaned up connect-standalone.properties to match their team's template, which has no plugin.path
+  line, and the setup restarted the worker at 09:31. The worker is active (running), but the
+  connector is gone (a standalone worker keeps REST-registered connectors in memory) and registering it
+  again failed with HTTP 500 "Failed to find any class that implements Connector and which name
+  matches io.debezium.connector.postgresql.PostgresConnector". The re-verification at 09:39 failed at
+  rung connector_running, and the re-run of the checks fails host-plugin-path:
+  "connect-standalone.properties has no plugin.path: the worker scans only the plugins it ships with".
+
+  Root cause: the worker file lost plugin.path, so the worker loads plugins from its classpath only
+  and cannot find the Debezium Postgres connector class, which is still installed in
+  connect-plugins/.
+
+  Expected label: the properties key plugin.path - write connect-standalone.properties again with
+  properties_write (T1; it adds plugin.path=<project>/connect-plugins), restart the worker
+  (service_restart, T2) and register pg-orders-connector again.
+
+setup:
+  source_kind: postgres
+  target: host
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+
+resources:
+  # The worker's converters are JsonConverter and the room has no schema registry: no subjects.
+  connectors: [pg-orders-connector]
+
+alert:
+  title: 'orders setup (host): re-registration of pg-orders-connector failed and re-verification failed at rung connector_running; prerequisite check host-plugin-path failed'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=17.9 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL missing=true
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=11m ago
+      from: connect:pg-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=17.9 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL missing=true
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=11m ago
+        from: connect:pg-orders-connector
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/status: not found'
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/config: not found'
+  - tool: connect_plugins
+    summary: |-
+      Kafka 4.1.0: 4 plugins
+      3 source, 1 converter
+      - source org.apache.kafka.connect.mirror.MirrorCheckpointConnector 4.1.0
+      - source org.apache.kafka.connect.mirror.MirrorHeartbeatConnector 4.1.0
+      - source org.apache.kafka.connect.mirror.MirrorSourceConnector 4.1.0
+      - converter org.apache.kafka.connect.json.JsonConverter 4.1.0
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=17.9 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 0/1A3F2C8
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1A3E9F0
+        retained_wal_bytes: 18769510
+        wal_status: reserved
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–112 (112 records), newest 11 min ago
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.piperoom_canary}
+    summary: |-
+      not found: no record with key "d41f7b0c9e2a83f65c1b0e4d97a2f8c3" since 2026-10-29T09:30:00Z
+    data:
+      found: false
+      key: d41f7b0c9e2a83f65c1b0e4d97a2f8c3
+      records: null
+      topic: pg.public.piperoom_canary
+      truncated: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (0 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I only tidied the worker properties to match our team template and asked you to restart it. Now the connector is gone and putting it back fails. The plugin directory is still there. What did the tidy-up break?"
+
+expect:
+  root_cause:
+    - [plugin path]
+    # Not "missing": the pipeline map's missing=true is the connector's, and a title plus map
+    # that says it must not pass.
+    - [unset, removed, lost, dropped, deleted, absent]
+  root_cause_forbidden:
+    - [distributed]
+    - [java]
+    - [flat, plugin root]
+    - [password]
+    - [broker*, down]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_classpath_only
+      tool: connect_plugins
+      match: [kafka 4 1 0, 3 source, mirror source connector]
+      required: true
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium_orders, active false]
+  claims:
+    - about: root_cause
+      facts: [f_classpath_only]
+  evidence_tools: [connect_plugins]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

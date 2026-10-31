@@ -1,0 +1,233 @@
+{
+  "scenario": "setup/embedded-version-mismatch",
+  "source": "postgres",
+  "target": "embedded",
+  "sink": "none",
+  "recorded_at": "2026-10-30T09:53:00Z",
+  "note": "Every op result is the output of the real embedded ops (internal/setup/ops/embedded_ops.go: project_inspect, embedded_log_read, reference_write; files.go: file_read) run through ops.Registry.Execute over a composed project (the person's pom.xml and log file) on the fixed clock of the U6c scenarios; the receipts' took_ms and out_mac are added by hand (the registry leaves out_mac to the runner's HMAC). The log file's lines are composed by hand: the reference app's own piperoom-reference lines, the NoSuchMethodError (the member it names is made up: the error class and that it comes from debezium-core resolved at 3.2.0.Final under the 2.7.2.Final connector are the point) and the application's other lines, which embedded_log_read drops. Before the last read the person's pom.xml and the log were replaced by their state after the person's fix. The session records no ladder: plan.Ladder defines none for target embedded (plan.EmbeddedLadder is its own row, and the room's ladder runner cannot fill its log path yet), so evalsetup.Verify reports the ladder as not defined. The out_mac and params_hash values are synthetic 64-hex placeholders (sha256 of a label). No session on a real project: re-record per evals/scenarios/README.md, Setup scenarios: embedded (U6c).",
+  "ops": [
+    {
+      "op": "project_inspect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "1 build files (maven); debezium-embedded 3.2.0.Final, kafka none, quarkus none, java 17; 2 findings",
+        "data": {
+          "build_files": [
+            "pom.xml"
+          ],
+          "build_tool": "maven",
+          "findings": [
+            {
+              "Rule": "dbz25-embeddedengine-interface-removed",
+              "Severity": "info",
+              "Message": "debezium-embedded 3.2.0.Final: The deprecated EmbeddedEngine API was removed in 2.5",
+              "Fix": "Build the engine with DebeziumEngine.create(...) from debezium-api; EmbeddedEngine.create() no longer exists.",
+              "Source": "https://debezium.io/releases/2.5/release-notes#release-2.5.0-alpha2",
+              "Issue": "DBZ-7110"
+            },
+            {
+              "Rule": "dbz32-embeddedengine-class-removed",
+              "Severity": "info",
+              "Message": "debezium-embedded 3.2.0.Final: The legacy io.debezium.embedded.EmbeddedEngine class was removed in 3.2",
+              "Fix": "Only the asynchronous engine is left (io.debezium.embedded.async.ConvertingAsyncEngineBuilderFactory, the DebeziumEngine.create default); code that names EmbeddedEngine must move to DebeziumEngine.",
+              "Source": "https://debezium.io/releases/3.2/release-notes#release-3.2.0-alpha1",
+              "Issue": "DBZ-8443"
+            }
+          ],
+          "versions": {
+            "engine": "3.2.0.Final",
+            "java": 17
+          }
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:05Z",
+          "took_ms": 6,
+          "out_mac": "bc51f069dc23eb6cd52a9243d8f17af803bd106da688b46e6427eeb43f75437e"
+        }
+      }
+    },
+    {
+      "op": "file_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "pom.xml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "read pom.xml (1193 bytes)",
+        "data": {
+          "bytes": 1193,
+          "content": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n    <modelVersion>4.0.0</modelVersion>\n    <groupId>com.example.orders</groupId>\n    <artifactId>orders-cdc</artifactId>\n    <version>1.4.0</version>\n\n    <properties>\n        <maven.compiler.release>17</maven.compiler.release>\n        <version.debezium>3.2.0.Final</version.debezium>\n    </properties>\n\n    <dependencies>\n        <dependency>\n            <groupId>io.debezium</groupId>\n            <artifactId>debezium-api</artifactId>\n            <version>${version.debezium}</version>\n        </dependency>\n        <dependency>\n            <groupId>io.debezium</groupId>\n            <artifactId>debezium-embedded</artifactId>\n            <version>${version.debezium}</version>\n        </dependency>\n        <dependency>\n            <groupId>io.debezium</groupId>\n            <artifactId>debezium-connector-postgres</artifactId>\n            <version>2.7.2.Final</version>\n        </dependency>\n        <dependency>\n            <groupId>org.postgresql</groupId>\n            <artifactId>postgresql</artifactId>\n            <version>42.7.4</version>\n        </dependency>\n    </dependencies>\n</project>\n",
+          "path": "pom.xml",
+          "truncated": false
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "pom.xml",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:20Z",
+          "took_ms": 2,
+          "out_mac": "1d3728b09d24986a5891b753cc85acf5b546b2dd26b8599da147a5fb2d5d8753"
+        }
+      }
+    },
+    {
+      "op": "embedded_log_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "logs/orders-cdc.log"
+      },
+      "result": {
+        "ok": true,
+        "summary": "logs/orders-cdc.log: reference app stopped with an error, 0 events after the last start",
+        "data": {
+          "path": "logs/orders-cdc.log",
+          "started": true,
+          "connector": "io.debezium.connector.postgresql.PostgresConnector",
+          "stopped_with_error": true,
+          "error": "Unable to start the connector io.debezium.connector.postgresql.PostgresConnector: java.lang.NoSuchMethodError: 'io.debezium.config.Field io.debezium.config.Field.withValidation(io.debezium.config.Fiel…",
+          "events": 0,
+          "destinations": [],
+          "nonce_seen": false,
+          "events_after_nonce": 0,
+          "lines": [
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference engine stopped with an error: Unable to start the connector io.debezium.connector.postgresql.PostgresConnector: java.lang.NoSuchMethodError: 'io.debezium.config.Field io.debezium.config.Field.withValidation(io.debezium.config.Field$Validator[])'"
+          ],
+          "cut": false
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T09:31:40Z",
+          "took_ms": 3,
+          "out_mac": "57c42b6861014ed70ae3114ea2385f23f9307c8ad4aa745690b92de411c17f94"
+        }
+      }
+    },
+    {
+      "op": "reference_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "b0d9149e59d316b8675a538acabeae1fdf9cb6f891b47d5bbaaab77329b652b3",
+      "params": {
+        "artifact_id": "orders-cdc-reference",
+        "build": "maven",
+        "database": "orders",
+        "group_id": "com.example.orders",
+        "host": "orders-db.internal",
+        "password_secret": "orders_db_password",
+        "port": 5432,
+        "publication_name": "dbz_publication",
+        "release": "3.2.0.Final",
+        "slot_name": "debezium_orders",
+        "source": "postgres",
+        "tables": [
+          "public.orders",
+          "public.piperoom_canary"
+        ],
+        "tls": "verify",
+        "topic_prefix": "pg",
+        "user": "piperoom_cdc"
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote the maven postgres reference project (4 files) under piperoom-reference/; build it with \"mvn -B -q package -DskipTests\" and run it with \"java -jar target/orders-cdc-reference-1.0.0.jar\" yourself",
+        "data": {
+          "build": [
+            "mvn",
+            "-B",
+            "-q",
+            "package",
+            "-DskipTests"
+          ],
+          "dir": "piperoom-reference",
+          "files": [
+            "piperoom-reference/README.md",
+            "piperoom-reference/piperoom-reference.properties",
+            "piperoom-reference/src/main/java/com/example/orders/ReferenceApp.java",
+            "piperoom-reference/pom.xml"
+          ],
+          "run": [
+            "java",
+            "-jar",
+            "target/orders-cdc-reference-1.0.0.jar"
+          ]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "piperoom-reference",
+          "exit_code": 0,
+          "at": "2026-10-30T09:36:10Z",
+          "took_ms": 11,
+          "out_mac": "853b51ec8202d09acef550cb2655ec8fadd1efc9a7ed0b9a3516a6d9192d50ca"
+        }
+      }
+    },
+    {
+      "op": "embedded_log_read",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "nonce": "c4e1a9f2-7b3d-4e0a-9f61-2d8b5c3a7e10",
+        "path": "logs/orders-cdc.log"
+      },
+      "result": {
+        "ok": true,
+        "summary": "logs/orders-cdc.log: reference app started, 13 events after the last start, canary seen true",
+        "data": {
+          "path": "logs/orders-cdc.log",
+          "started": true,
+          "connector": "io.debezium.connector.postgresql.PostgresConnector",
+          "stopped_with_error": false,
+          "events": 13,
+          "destinations": [
+            "pg.public.orders",
+            "pg.public.piperoom_canary"
+          ],
+          "nonce_seen": true,
+          "events_after_nonce": 0,
+          "lines": [
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference engine stopped with an error: Unable to start the connector io.debezium.connector.postgresql.PostgresConnector: java.lang.NoSuchMethodError: 'io.debezium.config.Field io.debezium.config.Field.withValidation(io.debezium.config.Field$Validator[])'",
+            "piperoom-reference started: io.debezium.connector.postgresql.PostgresConnector",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.orders",
+            "piperoom-reference event destination=pg.public.piperoom_canary",
+            "piperoom-reference canary c4e1a9f2-7b3d-4e0a-9f61-2d8b5c3a7e10 seen destination=pg.public.piperoom_canary"
+          ],
+          "cut": false
+        },
+        "receipt": {
+          "kind": "",
+          "target": "",
+          "exit_code": 0,
+          "at": "2026-10-30T09:52:30Z",
+          "took_ms": 3,
+          "out_mac": "3a578a2f4a6a4e346ae283c65f4aacff35877feb388a53ec2c6f4c2b37becde8"
+        }
+      }
+    }
+  ]
+}

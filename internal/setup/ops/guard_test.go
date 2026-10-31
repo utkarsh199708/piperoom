@@ -108,6 +108,8 @@ func TestGuardTable(t *testing.T) {
 	}{
 		{"file_write", protocol.ClassProduction, true},
 		{"file_delete", protocol.ClassProduction, true},
+		{"k8s_delete", protocol.ClassProduction, true},
+		{"k8s_delete", protocol.ClassShared, false},
 		{"file_write", protocol.ClassShared, false},
 		{"file_write", protocol.ClassLocal, false},
 		{"file_delete", protocol.ClassShared, false},

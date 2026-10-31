@@ -59,6 +59,72 @@
         }
       }
     },
+    "setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pipeline": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "id": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$"},
+            "kafka": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?)?$"},
+            "connectors": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?$"}},
+            "admissionPolicy": {"type": "boolean"},
+            "topicPrefix": {"type": "string", "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"},
+            "pluginHosts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
+            "imageRegistries": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
+            "databaseHosts": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
+            "schemaRegistries": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
+            "networkPolicy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kafkaPorts": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
+                "apiServer": {"type": "object", "additionalProperties": false, "properties": {
+                  "to": {"type": "array"},
+                  "ports": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1, "maximum": 65535}}}},
+                "databases": {"type": "object", "additionalProperties": false, "properties": {
+                  "to": {"type": "array"},
+                  "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}}}},
+                "schemaRegistries": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}},
+                "build": {"type": "object", "additionalProperties": false, "properties": {
+                  "sources": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}},
+                  "registry": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}}}},
+                "extraEgress": {"type": "array"}
+              }
+            }
+          }
+        },
+        "runner": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "room": {"type": "string", "pattern": "^([0-9A-Za-z]{26})?$"},
+            "pipeline": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?)?$"},
+            "kafka": {"type": "string", "pattern": "^([a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?)?$"},
+            "connectors": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?$"}},
+            "serverURL": {"type": "string", "pattern": "^(https?://[^\\s/]+)?$"},
+            "activeDeadlineSeconds": {"type": "integer", "minimum": 600, "maximum": 86400},
+            "ttlSecondsAfterFinished": {"type": "integer", "minimum": 0, "maximum": 86400},
+            "resources": {"type": "object"},
+            "networkPolicy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "apiServer": {"type": "object", "additionalProperties": false, "properties": {
+                  "to": {"type": "array"},
+                  "ports": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1, "maximum": 65535}}}},
+                "server": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}},
+                "extraEgress": {"type": "array"}
+              }
+            }
+          }
+        }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "properties": {

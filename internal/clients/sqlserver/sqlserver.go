@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"time"
 
+	"piperoom/internal/clients/sqlserver/sqlservertypes"
+
 	// Blank import registers the "sqlserver" database/sql driver.
 	_ "github.com/microsoft/go-mssqldb"
 )
@@ -65,53 +67,24 @@ func (d sqlDB) QueryRow(ctx context.Context, query string, args ...any) scanner 
 
 func (d sqlDB) Ping(ctx context.Context) error { return d.DB.PingContext(ctx) }
 
-// ServerInfo is the server version and edition.
-type ServerInfo struct {
-	Version      string `json:"version"`       // SERVERPROPERTY('ProductVersion')
-	Edition      string `json:"edition"`       // SERVERPROPERTY('Edition')
-	ProductLevel string `json:"product_level"` // SERVERPROPERTY('ProductLevel'); "" when the server reports none
-}
-
-// AgentState reports whether SQL Server Agent is running.
-type AgentState struct {
-	Running bool   `json:"running"`
-	Status  string `json:"status"` // sys.dm_server_services.status_desc; "Unknown" when neither the service row nor an agent session is seen
-}
-
-// TableCDC reports CDC enablement and the primary key for one table.
-type TableCDC struct {
-	Table         string `json:"table"` // "schema.table" as passed in
-	Exists        bool   `json:"exists"`
-	CDCEnabled    bool   `json:"cdc_enabled"`     // sys.tables.is_tracked_by_cdc
-	HasPrimaryKey bool   `json:"has_primary_key"` // some index has is_primary_key = 1
-}
-
-// RoleInfo reports the capture login's grants in the client's database.
-type RoleInfo struct {
-	Login      string `json:"login"`
-	Exists     bool   `json:"exists"`        // a server principal (login) of that name exists
-	Disabled   bool   `json:"disabled"`      // the login exists but is disabled
-	DBOwner    bool   `json:"db_owner"`      // the login's database user is a member of db_owner
-	DataReader bool   `json:"db_datareader"` // the login's database user is a member of db_datareader
-	Sysadmin   bool   `json:"sysadmin"`      // the login is a member of sysadmin
-	// Selectable maps each table to whether the login's database user has SELECT
-	// (a direct grant, a schema-level grant, or inherited from
-	// db_owner/db_datareader/sysadmin). SELECT granted only through a custom
-	// role is not traced.
-	Selectable map[string]bool `json:"selectable"`
-}
-
-// SettingsReader is the read-only SQL Server client the setup driver (U4b)
-// uses. It is the SQL Server subset of the planned clients.SourceSettingsReader:
-// version and edition, SQL Server Agent state, CDC enablement per database and
-// table, and the capture login's grants.
-type SettingsReader interface {
-	ServerInfo(ctx context.Context) (ServerInfo, error)
-	AgentState(ctx context.Context) (AgentState, error)
-	DatabaseCDC(ctx context.Context, database string) (bool, error)
-	TableCDC(ctx context.Context, tables []string) ([]TableCDC, error)
-	RoleInfo(ctx context.Context, login string, tables []string) (RoleInfo, error)
-}
+// The read client's result types and SettingsReader live in sqlservertypes,
+// which imports no database driver: the server's remote client over the
+// runner (internal/setup/remoteclients) and the runner's ops decode into them
+// without linking go-mssqldb into the server binary. They are aliased here so
+// this package's callers are unchanged.
+type (
+	// ServerInfo is the server version and edition.
+	ServerInfo = sqlservertypes.ServerInfo
+	// AgentState reports whether SQL Server Agent is running.
+	AgentState = sqlservertypes.AgentState
+	// TableCDC reports CDC enablement and the primary key for one table.
+	TableCDC = sqlservertypes.TableCDC
+	// RoleInfo reports the capture login's grants in the client's database.
+	RoleInfo = sqlservertypes.RoleInfo
+	// SettingsReader is the read-only SQL Server client the setup driver
+	// (U4b) uses.
+	SettingsReader = sqlservertypes.SettingsReader
+)
 
 // Client is a read-only SQL Server client.
 type Client struct {
