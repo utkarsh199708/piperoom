@@ -177,10 +177,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     # the other Connect workers' REST API
     - ports:
         - port: 8083
@@ -234,7 +232,8 @@ spec:
 # The KafkaConnect build pod's egress (networkPolicy.enabled): DNS, the
 # plugin artifact hosts (pluginHosts) and the registries the image is pushed
 # to (imageRegistries), on the ports their host[:port] names (443 without
-# one). It needs no Kafka, API server or database.
+# one), and the registry the base image is pulled from (build.baseImage). It
+# needs no Kafka, API server or database.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -255,10 +254,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     # the plugin artifact hosts ({{ join ", " .Values.setup.pipeline.pluginHosts }})
     - ports:
         {{- range (include "piperoom.hostPorts" (dict "hosts" .Values.setup.pipeline.pluginHosts) | fromJsonArray) }}
@@ -275,6 +272,15 @@ spec:
         {{- end }}
       to:
         {{- toYaml $np.build.registry.to | nindent 8 }}
+    # the base image Kaniko builds on (Strimzi's Kafka image for spec.version,
+    # quay.io/strimzi/kafka unless the operator is configured otherwise)
+    - ports:
+        {{- range $np.build.baseImage.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.build.baseImage.to | nindent 8 }}
 {{- end }}
 {{- if .Values.setup.pipeline.admissionPolicy }}
 {{- $prefix := .Values.setup.pipeline.topicPrefix }}
@@ -329,6 +335,13 @@ patterns. The policy matches values against these allow-lists only. */}}
 {{- range (.Files.Lines "files/setup-patterns.txt") }}{{ if . }}{{ $f := splitList "\t" . }}{{ $_ := set $pat (index $f 0) (printf "r'%s'" (index $f 1)) }}{{ end }}{{ end }}
 {{- $shapes := list }}
 {{- range $k, $v := $pat }}{{ if hasPrefix "jdbc." $k }}{{ $shapes = append $shapes (printf "'%s': %s" (trimPrefix "jdbc." $k) $v) }}{{ end }}{{ end }}
+{{- /* A databaseHosts entry without a port admits a connector that names no
+port or the dialect's default one, never another port. */}}
+{{- $srcport := dict }}
+{{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}{{ $f := splitList "\t" . }}
+{{- if eq (index $f 0) "class" }}{{ $d := index $f 2 }}{{ if eq $d "postgres" }}{{ $d = "postgresql" }}{{ end }}
+{{- if and (hasKey $dport $d) (ne $d "jdbc") }}{{ $_ := set $srcport (index $f 1) (get $dport $d) }}{{ end }}{{ end }}
+{{- end }}{{ end }}
 {{- $dbhosts := list }}
 {{- range .Values.setup.pipeline.databaseHosts }}{{ $dbhosts = append $dbhosts (squote (lower .)) }}{{ end }}
 {{- $regurls := list }}
@@ -562,7 +575,8 @@ spec:
         variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
         variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
         ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {{ include "piperoom.celMap" $dport }}[variables.dialect]).lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))) &&
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':' + {{ include "piperoom.celMap" $dport }}[variables.dialect]))))))) &&
         (variables.mongo == '' || (
         variables.mongo.matches({{ index $pat "mongodb" }}) &&
         variables.mongoParams.all(q, q.split('=').size() == 2 && q.split('=')[1].matches({{ index $pat "value" }}) &&
@@ -570,8 +584,9 @@ spec:
         {{ include "piperoom.celMap" $requ }}['mongodb'].exists(n, variables.mongoParams.exists(q, q.split('=')[0].lowerAscii() == n)) &&
         variables.mongoHosts.all(h, !h.contains('@') &&
         ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))))
-      message: {{ printf "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from %s" (join ", " .Values.setup.pipeline.databaseHosts) | quote }}
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':27017'))))))))
+      message: {{ printf "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from %s (an entry without a port admits no port or the dialect's default only)" (join ", " .Values.setup.pipeline.databaseHosts) | quote }}
     # Topics and where a connector connects: a source's topic.prefix is the
     # pipeline's, a sink reads topics under it, the dead letter queue and the
     # schema history follow the kafkatopics rules under it, none is a topic
@@ -597,9 +612,10 @@ spec:
         (k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches({{ $bootstrapRE }})) &&
         (k != 'database.hostname' ||
         (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        string(variables.cc[k]).lowerAscii() in [{{ join ", " $dbhosts }}]) &&
+        (string(variables.cc[k]).lowerAscii() in [{{ join ", " $dbhosts }}] && 'database.port' in variables.cc && has(object.spec.class) &&
+        object.spec.class in {{ include "piperoom.celMap" $srcport }} && string(variables.cc['database.port']) == {{ include "piperoom.celMap" $srcport }}[object.spec.class])) &&
         (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in [{{ join ", " $regurls }}])))
-      message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s, and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
+      message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s (an entry without a port admits no database.port or the dialect's default only), and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
     # ---- KafkaTopic ----
     # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
     # shell that names no topic yet (the operator would read metadata.name).

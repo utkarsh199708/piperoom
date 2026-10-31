@@ -86,7 +86,8 @@ spec:
 # The KafkaConnect build pod's egress (networkPolicy.enabled): DNS, the
 # plugin artifact hosts (pluginHosts) and the registries the image is pushed
 # to (imageRegistries), on the ports their host[:port] names (443 without
-# one). It needs no Kafka, API server or database.
+# one), and the registry the base image is pulled from (build.baseImage). It
+# needs no Kafka, API server or database.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -132,6 +133,14 @@ spec:
         - podSelector:
             matchLabels:
               app: registry
+    # the base image Kaniko builds on (Strimzi's Kafka image for spec.version,
+    # quay.io/strimzi/kafka unless the operator is configured otherwise)
+    - ports:
+        - port: 443
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 54.0.0.0/8
 ---
 # Source: piperoom/templates/setup-pipeline.yaml
 # Empty; k8s_secret_apply fills stringData. A Secret's type is immutable, so no
@@ -544,17 +553,19 @@ spec:
         (!variables.urlParams.exists(q, q.lowerAscii() == 'allowpublickeyretrieval=true') ||
         variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
         variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
-        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {'db2': '50000', 'mariadb': '3306', 'mongodb': '27017', 'mysql': '3306', 'oracle': '1521', 'postgresql': '5432', 'sqlserver': '1433'}[variables.dialect]).lowerAscii() in ['pg:5432'] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432'])))) &&
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {'db2': '50000', 'mariadb': '3306', 'mongodb': '27017', 'mysql': '3306', 'oracle': '1521', 'postgresql': '5432', 'sqlserver': '1433'}[variables.dialect]).lowerAscii() in ['pg:5432', 'legacy-db'] ||
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432', 'legacy-db'] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':' + {'db2': '50000', 'mariadb': '3306', 'mongodb': '27017', 'mysql': '3306', 'oracle': '1521', 'postgresql': '5432', 'sqlserver': '1433'}[variables.dialect]))))))) &&
         (variables.mongo == '' || (
         variables.mongo.matches(r'^mongodb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/?(\?[^?/@]*)?$') &&
         variables.mongoParams.all(q, q.split('=').size() == 2 && q.split('=')[1].matches(r'^[A-Za-z0-9._/+:-]{1,128}$') &&
         (q.lowerAscii() in {'db2': ['sslConnection=true'], 'mariadb': ['rewriteBatchedStatements=false', 'rewriteBatchedStatements=true', 'sslMode=verify-ca', 'sslMode=verify-full'], 'mongodb': ['authmechanism=scram-sha-1', 'authmechanism=scram-sha-256', 'directconnection=false', 'directconnection=true', 'retrywrites=false', 'retrywrites=true', 'ssl=true', 'tls=true'], 'mysql': ['allowPublicKeyRetrieval=false', 'allowPublicKeyRetrieval=true', 'requireSSL=true', 'rewriteBatchedStatements=false', 'rewriteBatchedStatements=true', 'sslMode=verify_ca', 'sslMode=verify_identity', 'useSSL=true', 'useUnicode=false', 'useUnicode=true', 'verifyServerCertificate=true', 'zeroDateTimeBehavior=convert_to_null', 'zeroDateTimeBehavior=converttonull', 'zeroDateTimeBehavior=exception', 'zeroDateTimeBehavior=round'], 'oracle': [], 'postgresql': ['reWriteBatchedInserts=false', 'reWriteBatchedInserts=true', 'ssl=true', 'sslmode=verify-ca', 'sslmode=verify-full', 'stringtype=unspecified', 'stringtype=varchar', 'targetServerType=any', 'targetServerType=master', 'targetServerType=preferprimary', 'targetServerType=prefersecondary', 'targetServerType=primary', 'targetServerType=secondary', 'tcpKeepAlive=false', 'tcpKeepAlive=true'], 'sqlserver': ['encrypt=strict', 'encrypt=true', 'trustServerCertificate=false']}['mongodb'] || q.split('=')[0].lowerAscii() in {'db2': [], 'mariadb': ['connectTimeout', 'socketTimeout'], 'mongodb': ['appname', 'authsource', 'connecttimeoutms', 'maxpoolsize', 'readpreference', 'replicaset', 'serverselectiontimeoutms', 'sockettimeoutms', 'w'], 'mysql': ['characterEncoding', 'connectTimeout', 'serverTimezone', 'socketTimeout'], 'oracle': [], 'postgresql': ['ApplicationName', 'connectTimeout', 'loginTimeout', 'prepareThreshold', 'socketTimeout'], 'sqlserver': ['applicationName', 'databaseName', 'loginTimeout']}['mongodb'])) &&
         {'db2': [], 'mariadb': ['sslMode'], 'mongodb': ['ssl', 'tls'], 'mysql': ['sslMode'], 'oracle': [], 'postgresql': ['sslmode'], 'sqlserver': ['encrypt']}['mongodb'].exists(n, variables.mongoParams.exists(q, q.split('=')[0].lowerAscii() == n)) &&
         variables.mongoHosts.all(h, !h.contains('@') &&
-        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in ['pg:5432'] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432'])))))
-      message: "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from pg:5432"
+        ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in ['pg:5432', 'legacy-db'] ||
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in ['pg:5432', 'legacy-db'] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':27017'))))))))
+      message: "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from pg:5432, legacy-db (an entry without a port admits no port or the dialect's default only)"
     # Topics and where a connector connects: a source's topic.prefix is the
     # pipeline's, a sink reads topics under it, the dead letter queue and the
     # schema history follow the kafkatopics rules under it, none is a topic
@@ -579,10 +590,11 @@ spec:
         string(variables.cc[k]) == 'schemahistory.pg' || string(variables.cc[k]).startsWith('schemahistory.pg.')))) &&
         (k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches(r'^prod-kafka-kafka-bootstrap(\.data(\.svc(\.cluster\.local)?)?)?:(9092|9093)$')) &&
         (k != 'database.hostname' ||
-        (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in ['pg:5432'] ||
-        string(variables.cc[k]).lowerAscii() in ['pg:5432']) &&
+        (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in ['pg:5432', 'legacy-db'] ||
+        (string(variables.cc[k]).lowerAscii() in ['pg:5432', 'legacy-db'] && 'database.port' in variables.cc && has(object.spec.class) &&
+        object.spec.class in {'io.debezium.connector.mongodb.MongoDbConnector': '27017', 'io.debezium.connector.mysql.MySqlConnector': '3306', 'io.debezium.connector.oracle.OracleConnector': '1521', 'io.debezium.connector.postgresql.PostgresConnector': '5432', 'io.debezium.connector.sqlserver.SqlServerConnector': '1433'} && string(variables.cc['database.port']) == {'io.debezium.connector.mongodb.MongoDbConnector': '27017', 'io.debezium.connector.mysql.MySqlConnector': '3306', 'io.debezium.connector.oracle.OracleConnector': '1521', 'io.debezium.connector.postgresql.PostgresConnector': '5432', 'io.debezium.connector.sqlserver.SqlServerConnector': '1433'}[object.spec.class])) &&
         (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in ['http://registry.data.svc:8081'])))
-      message: "piperoom: a source's topic.prefix is pg, a sink's topics, the dead letter queue and the schema history are under it (never a orders-connect-* Connect topic), the schema history reaches prod-kafka-kafka-bootstrap, the database is one of pg:5432, and a Schema Registry URL is one of http://registry.data.svc:8081"
+      message: "piperoom: a source's topic.prefix is pg, a sink's topics, the dead letter queue and the schema history are under it (never a orders-connect-* Connect topic), the schema history reaches prod-kafka-kafka-bootstrap, the database is one of pg:5432, legacy-db (an entry without a port admits no database.port or the dialect's default only), and a Schema Registry URL is one of http://registry.data.svc:8081"
     # ---- KafkaTopic ----
     # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
     # shell that names no topic yet (the operator would read metadata.name).

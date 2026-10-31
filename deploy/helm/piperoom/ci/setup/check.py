@@ -17,8 +17,8 @@ one NetworkPolicy selects the Connect pods and has exactly the egress the
 values ask for (DNS, the other workers on 8083, the Kafka pods, the API
 server, the databases, the Schema Registries, then
 setup.pipeline.networkPolicy.extraEgress), and one selects the build pod
-(DNS, the plugin hosts, the image registries); every "to" but DNS's is
-required. The CEL itself is run by celcheck/.
+(DNS, the plugin hosts, the image registries, the base image's registry);
+every "to" is required. The CEL itself is run by celcheck/.
 runner: the Role grants no create, no escalate/bind/impersonate, no "*", no
 list but on events, every rule but the events ones names its objects, and the
 Secret, KafkaConnect and pod rules grant exactly the verbs the runner sends;
@@ -341,7 +341,7 @@ def check_pipeline_network_policy(docs, values):
             fail("a pipeline NetworkPolicy does not select exactly the %s pods" % name)
         if np["policyTypes"] != ["Egress"] or np.get("ingress"):
             fail("the pipeline NetworkPolicies must govern egress only")
-    dns = egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to"))
+    dns = egress_rule([("UDP", 53), ("TCP", 53)], required_to(values["networkPolicy"]["dns"].get("to"), "DNS"))
     rest = egress_rule([("TCP", 8083)], [{"podSelector": {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": connect}}}])
     kafka = egress_rule([("TCP", p) for p in nv["kafkaPorts"]],
                         [{"podSelector": {"matchLabels": {"strimzi.io/cluster": pv["kafka"], "strimzi.io/kind": "Kafka"}}}])
@@ -361,8 +361,9 @@ def check_pipeline_network_policy(docs, values):
         dns,
         egress_rule([("TCP", p) for p in host_ports(pv["pluginHosts"])], required_to(nv["build"]["sources"].get("to"), "build sources")),
         egress_rule([("TCP", p) for p in host_ports(pv.get("imageRegistries") or ["registry"])], required_to(nv["build"]["registry"].get("to"), "build registry")),
+        egress_rule([("TCP", p) for p in nv["build"]["baseImage"]["ports"]], required_to(nv["build"]["baseImage"].get("to"), "build base image")),
     ]
-    compare_egress(sel[connect + "-build"].get("egress") or [], build, ["DNS", "plugin hosts", "image registries"], "build pod's")
+    compare_egress(sel[connect + "-build"].get("egress") or [], build, ["DNS", "plugin hosts", "image registries", "base image"], "build pod's")
 
 
 def check_network_policy(docs, job, values):
@@ -384,7 +385,7 @@ def check_network_policy(docs, job, values):
     server_port = u.port or (443 if u.scheme == "https" else 80)
 
     want = [
-        egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
+        egress_rule([("UDP", 53), ("TCP", 53)], required_to(values["networkPolicy"]["dns"].get("to"), "Job's DNS")),
         egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], required_to(nv["apiServer"].get("to"), "Job's API server")),
         egress_rule([("TCP", server_port)], required_to(nv["server"].get("to"), "Job's server")),
     ] + list(nv.get("extraEgress") or [])

@@ -246,8 +246,14 @@ connection URL must match its dialect's shape: no userinfo (`@`), no percent esc
 (the runner refuses them too), Db2 as `db:k=v;...;`, MongoDB as plain `mongodb://` (no `+srv`). A source's
 `topic.prefix` is `setup.pipeline.topicPrefix`; a sink's topics, the dead letter queue and the schema history are
 under it and never one of the Connect cluster's own `<connect>-*` topics; database hosts are
-`setup.pipeline.databaseHosts` (`host:port`) and Schema Registry URLs `setup.pipeline.schemaRegistries`, exactly
-(lower case, no path, no trailing `/`).
+`setup.pipeline.databaseHosts` (`host:port`; an entry without a port admits a connector that names no port or the
+dialect's default one only) and Schema Registry URLs `setup.pipeline.schemaRegistries`, exactly
+(lower case, no path, no trailing `/`). A JDBC URL parameter is spelled exactly as its driver reads it
+(`sslmode` for PostgreSQL, `sslMode` for MySQL and MariaDB, `databaseName` for SQL Server, ...; pgjdbc ignores
+`SSLMODE`), and two spellings of one name are refused. `spec.class` is one of the runner's classes exactly
+(PostgreSQL, MySQL, SQL Server, MongoDB, Oracle sources and the JDBC sink). A sink's RegexRouter replacement is a
+literal, or `$N` references over a regex made only of literal characters, `\.` and `([^.]+)` groups. A KafkaConnect
+build artifact is a `tgz` the knowledge index pins, at its pinned sha512 (`files/setup-artifacts.txt`).
 
 **Behaviour changes (round 4).** A source must name a verifying TLS mode (`database.sslmode` `verify-ca` or
 `verify-full` for PostgreSQL, `database.ssl.mode` `verify_ca` or `verify_identity` for MySQL, `database.encrypt=true`
@@ -270,8 +276,11 @@ workers on 8083 (a worker forwards REST writes to the leader), the Kafka cluster
 Secret), the databases (`databases.ports`; each `databaseHosts` port must be one of them), the Schema Registries
 (ports from `schemaRegistries`, peers in `schemaRegistries.to`) and `extraEgress`; ingress stays Strimzi's. It
 also adds one for the KafkaConnect build pod (`<connect>-connect-build`): DNS, the plugin hosts
-(`build.sources.to`, ports from `pluginHosts`) and the image registries (`build.registry.to`, ports from
-`imageRegistries`); it needs nothing else. Every `to` of these policies but DNS's is **required and non-empty**:
+(`build.sources.to`, ports from `pluginHosts`), the image registries (`build.registry.to`, ports from
+`imageRegistries`) and the registry Kaniko pulls the base image from (`build.baseImage.to` and `.ports`: Strimzi's
+Kafka image, `quay.io/strimzi/kafka` unless the operator is configured otherwise; if it is mirrored in one of
+`imageRegistries`, give the same peers as `build.registry.to`); it needs nothing else. Every `to` of these
+policies, `networkPolicy.dns.to` included, is **required and non-empty**:
 the chart refuses to render with an empty one, which would open the port to any destination.
 The runner refuses to patch or delete an object of a chart name that does not carry the pipeline release's
 `app.kubernetes.io/instance` label and Helm's `meta.helm.sh/release-name` annotation naming that release (and, at

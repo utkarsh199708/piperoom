@@ -41,7 +41,10 @@ each value's shape; this checks the combination. */}}
   {{- if not $np.kafkaPorts -}}
   {{- fail "networkPolicy.enabled needs setup.pipeline.networkPolicy.kafkaPorts, the Kafka listener ports" -}}
   {{- end -}}
-  {{- range $name, $to := dict "apiServer" $np.apiServer.to "databases" $np.databases.to "build.sources" $np.build.sources.to "build.registry" $np.build.registry.to -}}
+  {{- if not .Values.networkPolicy.dns.to -}}
+  {{- fail "networkPolicy.enabled needs networkPolicy.dns.to, the DNS servers' peers (an empty one would open port 53 to any destination)" -}}
+  {{- end -}}
+  {{- range $name, $to := dict "apiServer" $np.apiServer.to "databases" $np.databases.to "build.sources" $np.build.sources.to "build.registry" $np.build.registry.to "build.baseImage" $np.build.baseImage.to -}}
   {{- if not $to -}}
   {{- fail (printf "networkPolicy.enabled needs setup.pipeline.networkPolicy.%s.to, a non-empty list of peers (an empty one would open the port to any destination)" $name) -}}
   {{- end -}}
@@ -77,6 +80,9 @@ each value's shape; this checks the combination. */}}
   {{- include "piperoom.setupNames" (list "setup.runner" $s.runner.pipeline $s.runner.kafka $s.runner.connectors) -}}
   {{- if not (regexMatch "^[0-9A-Za-z]{26}$" $s.runner.room) -}}
   {{- fail "setup.runner.room is not a room id (26 letters and digits, without the r_ prefix)" -}}
+  {{- end -}}
+  {{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.dns.to) -}}
+  {{- fail "networkPolicy.enabled needs networkPolicy.dns.to, the DNS servers' peers (an empty one would open port 53 to any destination)" -}}
   {{- end -}}
   {{- if and .Values.networkPolicy.enabled (not $s.runner.networkPolicy.apiServer.to) -}}
   {{- fail "networkPolicy.enabled needs setup.runner.networkPolicy.apiServer.to, a non-empty list of peers (an empty one would open the port to any destination)" -}}
