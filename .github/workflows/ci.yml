@@ -201,7 +201,9 @@ jobs:
           PIPEROOM_IT_MYSQL_WRITE_URL: mysql://piperoom_write:piperoom-dev-write@127.0.0.1:13306/shop
         run: |
           set +e
-          go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
+          # -skip: TestIntegrationMySQLSetupBreaks changes the shared mysql's
+          # globals and grants; it runs alone in the next step.
+          go test -count=1 -timeout 25m -json -tags integration -skip '^TestIntegrationMySQLSetupBreaks$' ./internal/... ./cmd/... > test.json
           rc=$?
           set -e
           # Readable failures in the log: the whole output of every failed
@@ -212,6 +214,22 @@ jobs:
                            and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
             | .Output' test.json | grep -v '^$' || true
           exit "$rc"
+      # cmd/devctl TestIntegrationMySQLSetupBreaks runs SET GLOBAL
+      # binlog_format and server_id and REVOKEs the debezium grants on the
+      # shared mysql profile, which internal/clients/mysql and cmd/discover
+      # read while the main step runs packages in parallel. The main step
+      # skips it (-skip, not a reported skip), and it runs here alone, after
+      # every other MySQL reader; its fixes leave the profile at the
+      # command-line baseline. A skip here fails the step.
+      - name: MySQL setup breaks (alone; they change the shared mysql's globals)
+        run: |
+          set +e
+          go test -count=1 -timeout 10m -json -tags integration -run '^TestIntegrationMySQLSetupBreaks$' ./cmd/devctl/ > mysql-breaks-test.json
+          rc=$?
+          set -e
+          jq -r 'select(.Action == "output" and (.Test // "") != "") | .Output' mysql-breaks-test.json | grep -v '^$' || true
+          [ "$rc" -eq 0 ] || exit "$rc"
+          .github/scripts/fail-on-skips.sh mysql-breaks-test.json /dev/null
       - name: Skipped integration tests are failures
         if: success() || failure()
         run: .github/scripts/fail-on-skips.sh test.json

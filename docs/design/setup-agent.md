@@ -180,7 +180,8 @@ or without an extension), a junction and a reparse point. The runner is built wi
 U1-2 PR.
 
 What `os.Root` does by itself (U1-0, from `go doc os.Root` and `os/root_windows.go`, `os/root_openat.go`,
-`internal/filepathlite/path_windows.go` in Go 1.27.2; spike `cmd/setup-spike/osroot`): on Windows it **refuses**
+`internal/filepathlite/path_windows.go` in Go 1.27.2; the U1-0 spike `cmd/setup-spike/osroot`, deleted by U8-C once
+`internal/setup/ops/paths.go` and its tests carried its cases): on Windows it **refuses**
 drive-relative (`C:foo`) and every path with a colon (so ADS too: `filepathlite.IsLocal` rejects `:`), every path
 starting with a separator (UNC `\\host\share`, `//host/share`, `\\?\`, `\\.\`, `\x`), any `?`, an escape by `..`,
 the reserved names (`CON`, `NUL`, `COM1`, `CONIN$`, with trailing spaces), and a junction (its target is absolute
@@ -715,10 +716,10 @@ Snapshot gains `setup: {mode: true, runner: {label, connected, tools}, plan_id, 
 
 `U1-0` (done): the protocol's final field list and the compatibility rule (item 1 above); the Windows service API
 (`golang.org/x/sys/windows/svc/mgr`: `Connect`, `CreateService`, `Service.Start`, `Query`, `Control`, `Delete`,
-spike `cmd/setup-spike/winsvc`; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
+the spike `cmd/setup-spike/winsvc`, deleted by U8-C after U8b; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
 and an args slice, so no free-form command line exists; a plain `java.exe` cannot answer the service control
 manager, so U8b's Connect service runs `piperoom-setup` itself as the service (`svc.Run`) supervising the Java child
-by argv); the `os.Root` analysis of §2.3 (spike `cmd/setup-spike/osroot`). `U12-0`: the Strimzi
+by argv); the `os.Root` analysis of §2.3 (the spike `cmd/setup-spike/osroot`, likewise deleted). `U12-0`: the Strimzi
 CRD versions, the in-cluster runner Job and its RBAC, how the pairing code reaches a Job. `U13-0`: the three managed
 clients' auth and operations.
 
