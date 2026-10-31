@@ -622,6 +622,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",   // after auth PR 4 also "params_hash"
                         "required_layers": ["schema-registry","kafka-connect"],
                         "approvals": { "schema-registry": "approved", "kafka-connect": "pending" } } ],
+  "last_fix": { "proposal_id": "p_01J...", "seq": 17, "steps": 2, "failed_step": 0, "verification": { "recovered": true, "verdict": "..." } },   // the newest fix whose run ended, absent until one exists; see "Last fix snapshot fields"
   "pending_suggestions": [ { "suggestion_id": "g_01J...", "from": {"id":"kabir","name":"Kabir","verified":true}, "text": "..." } ],
   "members": [ { "id": "priya", "name": "Priya", "verified": true, "role": "watching" } ]
 }
@@ -775,6 +776,26 @@ Additive, same rule: absent until Q7e lands, and an absent field reads as its em
   updated from each `pull_request.updated`; `updated_at` is that event's time (the `action.executed` time before
   the first one). `merged_at` is set once merged. `GET /api/rooms` rows carry none of it.
 
+#### Last fix snapshot fields (KAN-594; implemented by A5)
+
+Additive, same rule: an absent field reads as its empty value. They let a room list say what the newest fix did
+without reading every room's log, because an executed proposal has left `open_proposals`.
+```json
+  "last_fix": { "proposal_id": "p_…", "seq": 17, "steps": 2, "failed_step": 0,
+                "verification": { "recovered": true, "verdict": "recovered: every layer check passed and data is flowing again" } },
+  "open_proposals": [ { "...": "...", "seq": 21 } ]
+```
+- `last_fix`: the newest proposal, by its `proposal.created`, whose run ended: its last step ran or a step failed,
+  the same `action.executed` that takes it out of `open_proposals`. An older fix that finishes later does not replace
+  it. Absent until one exists.
+- `last_fix.seq`, `open_proposals[].seq`: the seq of the proposal's `proposal.created`. Comparing them says whether an
+  open proposal is newer than the fix.
+- `last_fix.failed_step`: the 1-based step whose `action.executed` had `ok: false`, including `outcome_unknown`; `0`
+  when every step ran.
+- `last_fix.verification`: `recovered` and `verdict` of the proposal's newest `agent.verification`. A `repeat` never
+  overwrites a full verdict. Absent before one exists.
+- `GET /api/rooms` rows and `GET /api/rooms/ws` frames carry both fields.
+
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
 ### AgentStats (F11, implemented by A5)
@@ -907,7 +928,7 @@ before X7 has the same JSON and a client that ignores them reads the map as befo
 | GET | `/metrics` | – | Prometheus text format (0.0.4): counters/histogram `piperoom_http_requests_total{method,route,code}`, `piperoom_http_request_duration_seconds{method,route,code}` (histogram); counter `piperoom_sole_member_grants_total` (P2b; driverless alert rooms whose first member this replica made the driver; no labels); counter `piperoom_approvals_total{grant}` (P2b; `grant` = `owner` \| `solo` \| `fallback` \| `policy`, all four series present from start; per replica); gauges `piperoom_ws_connections`, `piperoom_agent_slots_in_use`, `piperoom_agent_rooms_queued`, `piperoom_rooms_open`, `piperoom_goroutines`, `piperoom_uptime_seconds` (all per replica) | R9 (#142). Outside `/api`, **no auth**, skips the Host allow-list like `/healthz` so a scraper can reach pods by IP; a deployment that publishes the server port beyond the cluster restricts `/metrics` at its proxy or ingress. `route` is the chi route pattern (`/api/rooms/{id}`, or `unmatched`), never a concrete path; `code` is the class (`2xx`…`5xx`); no label holds a room or user id. Gauges come from in-memory state (no store call per scrape) |
 | GET | `/api/people` | – | `[{id, name, email?, verified, layers}]` | F9 (implemented by A5): `layers` are the layers the person may approve (`LayersFor`; for IdP members from their session groups), `[]` when none. After auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
 | GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request (for `PIPEROOM_SOLO_USER` it is every entry of `events.Layers`, eight since P0, ten since Q8-0 (`environment`, `mysql`); every layer of the kinds owners.yaml uses, cdc when there are no pipelines (P4a-4)); `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
-| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above). Rows carry `triage` (F6) and `insight` (F11) like `GET /api/rooms/{id}`; the same list is pushed by `GET /api/rooms/ws` (F6, see WebSocket) |
+| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above). Rows carry `triage` (F6), `insight` (F11) and `last_fix` (KAN-594) like `GET /api/rooms/{id}`; the same list is pushed by `GET /api/rooms/ws` (F6, see WebSocket) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; without a valid `pipeline_id` (the `alertin.ValidPipelineID` shape), a top-level string `dag_id` selects the one `kind: batch` pipeline whose `dags` lists it (exact, case-sensitive match; a DAG listed by two pipelines, or by none, is ignored and the body resolves as if it had no `dag_id`), the same rule as the signed routes (P4a-3, P4a-4); the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert, in this order: a `pipeline`/`pipeline_id` label or field; a `dag_id` label (Alertmanager, Grafana) or field (generic) → the one batch pipeline whose `dags` lists it (P4a-3; an unknown id is skipped, a DAG listed by two pipelines is not guessed); the `PAGERDUTY_SERVICES` map; an owners match; or `DEFAULT_ALERT_PIPELINE`. The dev `POST /api/alerts/webhook` maps `pipeline_id` only; the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
@@ -1703,8 +1724,8 @@ Server → client:
 ```
 Client → server: `{ "type": "ping" }` every 20 s (read timeout 60 s). Rules: rooms outside the caller's tenants are
 never sent; a `room` frame is sent only when the room's list-relevant state changed (status, title, severity,
-driver, agent state, triage, hypothesis text and confidence, open proposals and their approvals, pending suggestion
-count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
+driver, agent state, triage, hypothesis text and confidence, open proposals and their approvals, `last_fix`, pending
+suggestion count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
 500 ms; a full send buffer closes the socket with a policy-violation status and the client reconnects (it gets a
 fresh `rooms` frame). Clients fall back to polling `GET /api/rooms` when the socket cannot be opened.
 

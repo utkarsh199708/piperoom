@@ -784,6 +784,8 @@ export interface ProposalSummary {
   rollback: string
   required_layers: string[]
   approvals: Record<string, ApprovalValue>
+  /** KAN-594: the seq of its proposal.created, which orders it against RoomSnapshot.last_fix. Absent on an older server. */
+  seq?: number
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
   /**
@@ -1079,6 +1081,18 @@ export interface PipelineRegisteredPayload {
   watched_by: string
 }
 
+/** RoomSnapshot.last_fix (docs/api.md "Last fix snapshot fields", KAN-594): the newest fix whose run ended. */
+export interface LastFixSummary {
+  proposal_id: string
+  /** The seq of its proposal.created. */
+  seq: number
+  steps: number
+  /** The 1-based step that failed or has an unknown outcome; 0 when every step ran. */
+  failed_step: number
+  /** From its newest agent.verification; absent before one exists. */
+  verification?: { recovered: boolean; verdict: string }
+}
+
 export interface RoomSnapshot {
   id: string
   title: string
@@ -1095,6 +1109,8 @@ export interface RoomSnapshot {
   /** F6: absent on an older server; null until the first agent.triage. */
   triage?: TriageSummary | null
   open_proposals: ProposalSummary[]
+  /** KAN-594: absent until a fix's run ended, and on an older server. */
+  last_fix?: LastFixSummary
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
   /** F8: a room.labelled exists. */

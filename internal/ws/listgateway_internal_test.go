@@ -61,3 +61,29 @@ func TestListConnCoalesces(t *testing.T) {
 		t.Fatalf("deletions sent %d frames", len(c.send))
 	}
 }
+
+// TestListConnSendsLastFix: a fix finishing and its verdict change only
+// last_fix, and the list's Status cell reads it (KAN-594), so each sends a
+// frame. The same state again sends nothing.
+func TestListConnSendsLastFix(t *testing.T) {
+	now := time.Date(2026, 10, 14, 3, 0, 0, 0, time.UTC)
+	svc := room.New(room.Deps{Store: memstore.New()})
+	defer svc.Close()
+	g := &Gateway{svc: svc, now: func() time.Time { return now }}
+	c := &client{send: make(chan []byte, 16)}
+	l := &listConn{g: g, c: c, known: map[string][32]byte{}, sent: map[string]time.Time{}, pending: map[string]*room.RoomSnapshot{}}
+
+	snap := room.NewSnapshot()
+	snap.ID, snap.Status, snap.Title = "r_1", "open", "a"
+	verified := &room.LastFix{ProposalID: "p_1", Seq: 3, Steps: 1, Verification: &room.FixVerification{Recovered: true, Verdict: "recovered: ok"}}
+	for i, fix := range []*room.LastFix{nil, {ProposalID: "p_1", Seq: 3, Steps: 1}, verified, verified} {
+		s := snap
+		s.LastFix = fix
+		l.changed(&s)
+		want := min(i+1, 3)
+		if len(c.send) != want {
+			t.Fatalf("change %d: %d frames, want %d", i, len(c.send), want)
+		}
+		now = now.Add(listCoalesce)
+	}
+}
