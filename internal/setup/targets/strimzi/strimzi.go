@@ -132,6 +132,30 @@ type Driver struct {
 	loaded map[string]bool
 }
 
+// rememberSecret records the values of a db-credentials Secret the runner
+// wrote or read back, by Secret key: every value but a user name's
+// (secretKeyIsUser), which reads mask wherever they appear. A user name is
+// not masked by value: "debezium" would garble io.debezium.connector... in
+// every log line and object (round 6). The line rule still masks it where a
+// credential key names it.
+func (d *Driver) rememberSecret(kv map[string]string) {
+	var vs []string
+	for k, v := range kv {
+		if !secretKeyIsUser(k) {
+			vs = append(vs, v)
+		}
+	}
+	d.rememberWritten(vs)
+}
+
+// secretKeyIsUser reports whether a db-credentials Secret key holds a user
+// name: the key the connector's user keys reference (credentialKeys) or one
+// named for a user.
+func secretKeyIsUser(k string) bool {
+	l := strings.ToLower(k)
+	return l == "username" || l == "user" || strings.HasSuffix(l, "user") || strings.HasSuffix(l, "username")
+}
+
 // rememberWritten records credential values the runner wrote.
 func (d *Driver) rememberWritten(vs []string) {
 	d.writtenMu.Lock()
@@ -158,13 +182,13 @@ func (d *Driver) credentialValues(ctx context.Context, ns string) []string {
 				Data map[string]string `json:"data"`
 			}
 			if json.Unmarshal(body, &sec) == nil {
-				var vs []string
-				for _, b := range sec.Data {
+				kv := map[string]string{}
+				for k, b := range sec.Data {
 					if raw, err := base64.StdEncoding.DecodeString(b); err == nil {
-						vs = append(vs, string(raw))
+						kv[k] = string(raw)
 					}
 				}
-				d.rememberWritten(vs)
+				d.rememberSecret(kv)
 				d.writtenMu.Lock()
 				if d.loaded == nil {
 					d.loaded = map[string]bool{}

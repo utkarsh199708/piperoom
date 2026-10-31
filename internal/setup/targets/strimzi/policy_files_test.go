@@ -135,7 +135,8 @@ func tsv(t *testing.T, rows [][]string) []byte {
 
 // TestPolicyFilesURLParams writes each dialect's URL parameters: free (a
 // plain value), enum (name=value, lower-cased: the runner compares values
-// case-insensitively), the TLS parameter a URL must set (require; for
+// case-insensitively), exactenum (name=value as written, for a parameter in
+// jdbcExactValueParams: the runner compares it exactly), the TLS parameter a URL must set (require; for
 // mongodb any one of them), the label parameters (%20 allowed) and each
 // dialect's default port.
 func TestPolicyFilesURLParams(t *testing.T) {
@@ -152,7 +153,11 @@ func TestPolicyFilesURLParams(t *testing.T) {
 				rows = append(rows, []string{"free", d, k})
 			}
 			for _, v := range vs {
-				rows = append(rows, []string{"enum", d, k + "=" + strings.ToLower(v)})
+				if jdbcExactValueParams[d][k] {
+					rows = append(rows, []string{"exactenum", d, k + "=" + v})
+				} else {
+					rows = append(rows, []string{"enum", d, k + "=" + strings.ToLower(v)})
+				}
 			}
 		}
 	}
@@ -170,7 +175,7 @@ func TestPolicyFilesURLParams(t *testing.T) {
 		rows = append(rows, []string{"label", k})
 	}
 	for _, r := range rows {
-		if r[0] == "free" || r[0] == "enum" {
+		if r[0] == "free" || r[0] == "enum" || r[0] == "exactenum" {
 			for _, bad := range []string{"hostnameincertificate", "allowloadlocalinfile", "socketfactory", "sslfactory", "loggerfile", "autodeserialize", "currentschema"} {
 				if strings.HasPrefix(strings.ToLower(r[2]), bad) {
 					t.Fatalf("the policy URL parameter list would admit %s", bad)

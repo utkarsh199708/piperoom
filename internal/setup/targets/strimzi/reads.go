@@ -1,6 +1,7 @@
 package strimzi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -413,8 +414,32 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 	if err != nil {
 		return nil, path, err
 	}
-	text, _ := redact.Text(maskCredentials(strings.ToValidUTF8(string(body), "?"), d.credentialValues(ctx, ns)))
-	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(body) >= maxLogBytes {
+		// The API cut the log at limitBytes: its last line may end inside a
+		// credential, a prefix no value matches. It is dropped (round 6).
+		if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
+			body = body[:i+1]
+		} else {
+			body = nil
+		}
+	}
+	text := maskCredentials(strings.ToValidUTF8(string(body), "?"), d.credentialValues(ctx, ns))
+	// The masks lengthen the text, and a log near limitBytes would pass
+	// redact's scan limit (redact.MaxScan, the same 64 KiB), which masks
+	// everything after it whole: the tail a reader wants. Only the last
+	// lines that fit under it are redacted (whole, so a secret that spans
+	// lines is still seen) and kept.
+	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, l := range all {
+		all[i] = clipText(l, 1000)
+	}
+	start, size := len(all), 0
+	for start > 0 && len(all)-start < maxLogLines && size+len(all[start-1])+1 <= redact.MaxScan-1024 {
+		start--
+		size += len(all[start]) + 1
+	}
+	text, _ = redact.Text(strings.Join(all[start:], "\n"))
+	raw := strings.Split(text, "\n")
 	lines := make([]string, 0, len(raw))
 	total := 0
 	for i := len(raw) - 1; i >= 0 && len(lines) < maxLogLines; i-- {
@@ -534,43 +559,142 @@ func orDash(s string) string {
 	return s
 }
 
-// credentialLineRE is a line that names a credential-like key and then a
-// value: key=value and key: value (Kafka Connect and Debezium config dumps,
-// a driver's error) and "key":"value" (a JSON log or a REST body). The whole
-// rest of the line after the separator is masked, not one token: a value may
-// be quoted, hold spaces or commas, or be followed by more of a JSON object
-// (round 5).
-var credentialLineRE = regexp.MustCompile(`(?im)("?\b[A-Za-z0-9_.-]*(?:user|username|password|passwd|pwd|secret|credential|token)[A-Za-z0-9_.-]*"?)(\s*[=:]\s*)(\S.*)$`)
+// credentialKey is a key that names a credential: password, passwd, pwd,
+// secret or sasl.jaas.config, alone or as the last part of a dotted,
+// dashed or underscored name (database.password, ssl.keystore.password,
+// client_secret). Other names (user, token, credential, a Java frame such as
+// UserGroupInformation.java:1899) are not keys here: a user name is no secret
+// and a broad match masks lines an operator needs (round 6).
+const credentialKey = `(?:[A-Za-z0-9]+[._-])*(?:password|passwd|pwd|secret|jaas\.config)`
 
-// maskCredentials masks every credential value the runner wrote to the
-// db-credentials Secret, as itself and as its JSON-escaped and URL-encoded
-// copies, then the rest of every credential-named line. A value shorter
-// than 4 characters is not replaced everywhere (it would mangle the text);
-// the line rule covers it where a key names it.
-func maskCredentials(text string, written []string) string {
-	var forms []string
-	for _, v := range written {
-		if len(v) < 4 {
-			continue
-		}
-		j, _ := json.Marshal(v)
-		for _, f := range []string{v, strings.Trim(string(j), `"`), url.QueryEscape(v), url.PathEscape(v)} {
-			if !contains(forms, f) {
-				forms = append(forms, f)
+// credentialLineRE is key=value or key: value (a Kafka Connect or Debezium
+// config dump, a driver's error). The rest of the line after the separator
+// is masked, not one token: a value may be quoted or hold spaces or commas.
+var credentialLineRE = regexp.MustCompile(`(?im)(^|[^A-Za-z0-9_.\-])(` + credentialKey + `)(\s*[=:]\s*)(\S.*)$`)
+
+// credentialJSONRE is "key":"value" in JSON (a JSON log, a REST body), and
+// credentialEscapedJSONRE the same JSON inside a JSON string (\"key\":\"value\").
+// Only the value is masked: the rest of the object (a log's message) stays.
+var (
+	credentialJSONRE        = regexp.MustCompile(`(?i)("` + credentialKey + `"\s*:\s*")((?:[^"\\]|\\.)*)(")`)
+	credentialEscapedJSONRE = regexp.MustCompile(`(?i)(\\"` + credentialKey + `\\"\s*:\s*\\")((?:[^\\]|\\[^"])*)(\\")`)
+)
+
+// keptCredentialValue is a credential value that is not a secret: Kafka's
+// own "[hidden]", a config provider reference (${secrets:ns/name:key}) and
+// MySQL's "(using password: YES)".
+func keptCredentialValue(v string, line bool) bool {
+	t := strings.Trim(v, `"' ,}`)
+	if t == "" || t == "[hidden]" || t == "[masked:credential]" || strings.HasPrefix(t, "${") {
+		return true
+	}
+	if line {
+		u := strings.ToUpper(v)
+		for _, w := range []string{"YES)", "NO)"} {
+			if strings.HasPrefix(u, w) {
+				return true
 			}
 		}
 	}
-	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
-	for _, f := range forms {
-		text = strings.ReplaceAll(text, f, "[masked:credential]")
+	return false
+}
+
+// maskCredentials masks every credential value the runner wrote to the
+// db-credentials Secret (never a user name: see rememberSecret), then the
+// value of every credential key (credentialJSONRE, credentialEscapedJSONRE,
+// credentialLineRE). A written value is found:
+//   - as itself and as its JSON string escapes, Go's (which also escapes
+//     <, > and &) and Java's (Jackson, Log4j: only " and \ and control
+//     characters);
+//   - in a percent-decoded and '+'-decoded copy of the text, the matched
+//     span mapped back: Go's QueryEscape and PathEscape, Java's URLEncoder
+//     (~ as %7E, space as +) and lower-case hex all decode to the value;
+//   - when shorter than 4 characters, only as a whole token (between
+//     non-word characters or quotes), so a short password is masked
+//     without mangling every word that holds it.
+func maskCredentials(text string, written []string) string {
+	var spans [][2]int
+	add := func(a, b int) { spans = append(spans, [2]int{a, b}) }
+	dec, src := percentDecoded(text)
+	for _, v := range written {
+		if v == "" {
+			continue
+		}
+		if len(v) < 4 {
+			for off := 0; ; {
+				i := strings.Index(text[off:], v)
+				if i < 0 {
+					break
+				}
+				a, b := off+i, off+i+len(v)
+				if (a == 0 || !isWordByte(text[a-1])) && (b == len(text) || !isWordByte(text[b])) {
+					add(a, b)
+				}
+				off = a + 1
+			}
+			continue
+		}
+		g, _ := json.Marshal(v)
+		for _, f := range []string{v, strings.Trim(string(g), `"`), javaJSONEscape(v)} {
+			for off := 0; ; {
+				i := strings.Index(text[off:], f)
+				if i < 0 {
+					break
+				}
+				add(off+i, off+i+len(f))
+				off += i + len(f)
+			}
+		}
+		for off := 0; ; {
+			i := strings.Index(dec[off:], v)
+			if i < 0 {
+				break
+			}
+			a, b := off+i, off+i+len(v)
+			add(src[a][0], src[b-1][1])
+			off = b
+		}
 	}
+	if len(spans) > 0 {
+		sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+		var out strings.Builder
+		at := 0
+		for _, sp := range spans {
+			if sp[1] <= at {
+				continue
+			}
+			if sp[0] >= at {
+				// A new span; one that overlaps the last only extends it.
+				out.WriteString(text[at:sp[0]])
+				out.WriteString("[masked:credential]")
+			}
+			at = sp[1]
+		}
+		out.WriteString(text[at:])
+		text = out.String()
+	}
+	for _, re := range []*regexp.Regexp{credentialJSONRE, credentialEscapedJSONRE} {
+		text = re.ReplaceAllStringFunc(text, func(m string) string {
+			sub := re.FindStringSubmatch(m)
+			if keptCredentialValue(sub[2], false) {
+				return m
+			}
+			return sub[1] + "[masked:credential]" + sub[3]
+		})
+	}
+	return maskCredentialLines(text)
+}
+
+// maskCredentialLines applies credentialLineRE. A kept value's line is
+// searched again after the separator, so a later key on that line
+// (password=${secrets:...}, ssl.key.password=x) is still masked.
+func maskCredentialLines(text string) string {
 	return credentialLineRE.ReplaceAllStringFunc(text, func(m string) string {
 		sub := credentialLineRE.FindStringSubmatch(m)
-		// Kafka's own "[hidden]" is already masked.
-		if strings.Trim(sub[3], `", }`) == "[hidden]" {
-			return m
+		if keptCredentialValue(sub[4], true) {
+			return sub[1] + sub[2] + sub[3] + maskCredentialLines(sub[4])
 		}
-		return sub[1] + sub[2] + "[masked:credential]"
+		return sub[1] + sub[2] + sub[3] + "[masked:credential]"
 	})
 }
 
@@ -592,4 +716,81 @@ func maskJSON(v any, written []string) any {
 		return maskCredentials(t, written)
 	}
 	return v
+}
+
+// percentDecoded is text with every %XX (either hex case) decoded to its
+// byte and every '+' to a space, and for each byte of the result the span of
+// text it came from.
+func percentDecoded(text string) (string, [][2]int) {
+	var b strings.Builder
+	src := make([][2]int, 0, len(text))
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case c == '%' && i+2 < len(text) && isHex(text[i+1]) && isHex(text[i+2]):
+			b.WriteByte(unhex(text[i+1])<<4 | unhex(text[i+2]))
+			src = append(src, [2]int{i, i + 3})
+			i += 3
+		case c == '+':
+			b.WriteByte(' ')
+			src = append(src, [2]int{i, i + 1})
+			i++
+		default:
+			b.WriteByte(c)
+			src = append(src, [2]int{i, i + 1})
+			i++
+		}
+	}
+	return b.String(), src
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case c >= 'a':
+		return c - 'a' + 10
+	case c >= 'A':
+		return c - 'A' + 10
+	}
+	return c - '0'
+}
+
+// javaJSONEscape is v as Jackson and Log4j's JSON layout write it inside a
+// string: " and \ escaped, control characters as \n, \t, ... or \u00XX,
+// everything else (<, >, & included) as itself.
+func javaJSONEscape(v string) string {
+	var b strings.Builder
+	for _, r := range v {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		default:
+			if r < 0x20 {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+
+// isWordByte reports whether c continues a token: a letter, digit or '_'.
+func isWordByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_'
 }

@@ -83,4 +83,7 @@
   {{- fail (printf "PIPEROOM_PUBLIC_URL host %q differs from ingress.host %q: add %q to env.PIPEROOM_ALLOWED_HOSTS (the server answers 421 otherwise)" $h .Values.ingress.host .Values.ingress.host) -}}
   {{- end -}}
 {{- end -}}
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.dns.to) -}}
+{{- fail "networkPolicy.enabled needs networkPolicy.dns.to, the DNS servers' peers (an empty one would open port 53 to any destination)" -}}
+{{- end -}}
 {{- end }}

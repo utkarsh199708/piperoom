@@ -22,3 +22,6 @@ for r in pipeline pipeline-sqlserver runner; do
   # which check.py does not read: it is checked against the base values.
   render "$r" | python3 "$here/check.py" "${r%-sqlserver}" "$here/${r%-sqlserver}-values.yaml"
 done
+# The server release's NetworkPolicy (no golden: the server chart is checked
+# by helm lint and kubeconform in CI); check.py checks its DNS rule.
+helm template piperoom "$chart" -f "$here/../oidc-values.yaml" | python3 "$here/check.py" server "$here/../oidc-values.yaml"

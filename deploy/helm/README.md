@@ -154,7 +154,8 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 - **Ingress**: default annotations raise the ingress-nginx proxy timeouts so WebSockets stay up
   (nginx upgrades the connection itself). Other controllers need their own settings.
 - **NetworkPolicy** (`networkPolicy.enabled=true`): ingress only on 8090 from
-  `networkPolicy.ingressFrom` (default: namespace `ingress-nginx`); egress to kube-dns and to the
+  `networkPolicy.ingressFrom` (default: namespace `ingress-nginx`); egress to kube-dns (`networkPolicy.dns.to`,
+  required: an empty one would open port 53 to any address) and to the
   ports for Postgres 5432, Kafka 9092/9093/9094/9096/9098 (plaintext, TLS, MSK TLS, SCRAM and
   IAM), Connect 8083, Schema Registry 8081 and HTTPS 443 (IdP, model API, Slack). An opt-in
   `egress.metadata` group (null by default) opens the cloud metadata server for instance roles
@@ -253,7 +254,8 @@ dialect's default one only) and Schema Registry URLs `setup.pipeline.schemaRegis
 `SSLMODE`), and two spellings of one name are refused. `spec.class` is one of the runner's classes exactly
 (PostgreSQL, MySQL, SQL Server, MongoDB, Oracle sources and the JDBC sink). A sink's RegexRouter replacement is a
 literal, or `$N` references over a regex made only of literal characters, `\.` and `([^.]+)` groups. A KafkaConnect
-build artifact is a `tgz` the knowledge index pins, at its pinned sha512 (`files/setup-artifacts.txt`).
+build artifact is a `tgz` the knowledge index pins, at its pinned sha512 (`files/setup-artifacts.txt`), and sets only
+`type`, `url` and `sha512sum` (no `insecure`).
 
 **Behaviour changes (round 4).** A source must name a verifying TLS mode (`database.sslmode` `verify-ca` or
 `verify-full` for PostgreSQL, `database.ssl.mode` `verify_ca` or `verify_identity` for MySQL, `database.encrypt=true`

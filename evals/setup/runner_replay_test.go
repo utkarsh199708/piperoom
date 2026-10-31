@@ -1,13 +1,12 @@
-package setup
+package setup_test
 
 import (
-	"encoding/json"
 	"slices"
-	"strings"
 	"testing"
 
+	"piperoom/evals"
+	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/events"
-	"piperoom/internal/owners"
 	setupactions "piperoom/internal/setup/actions"
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/targets/strimzi"
@@ -18,13 +17,21 @@ import (
 // server's scope for that action: a recording of a success the runner or
 // the server now refuses (a rule tightened after it was recorded) fails here
 // instead of replaying as if the rule did not exist (round 4 correctness 1).
-// The pipeline is the one the recording names: pipeline orders in namespace
-// data, the topic prefix of its canary topic, the connectors and source
-// tables its connector steps name.
+// The pipeline is the scenario's own (its pipeline: block), not one derived
+// from the recording, so a recording whose topic prefix, connectors or tables
+// differ from the scenario's fails here (round 6, E).
 func TestRecordedStrimziOpsPassTheRunnerAndTheServer(t *testing.T) {
-	recs, err := LoadDir("recordings")
+	recs, err := evalsetup.LoadDir("recordings")
 	if err != nil {
 		t.Fatal(err)
+	}
+	scs, err := evals.LoadScenarios("../scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios := map[string]evals.Scenario{}
+	for _, sc := range scs {
+		scenarios[sc.Name] = sc
 	}
 	specs := map[string]setupactions.Spec{}
 	for _, s := range setupactions.EnvironmentSpecs() {
@@ -35,34 +42,14 @@ func TestRecordedStrimziOpsPassTheRunnerAndTheServer(t *testing.T) {
 		if rec.Target != "strimzi" {
 			continue
 		}
-		pl := owners.Pipeline{ID: "orders"}
-		for _, op := range rec.Ops {
-			var p struct {
-				Template string `json:"template"`
-				Params   struct {
-					Connector   string            `json:"connector"`
-					TopicPrefix string            `json:"topic_prefix"`
-					Config      map[string]string `json:"config"`
-				} `json:"params"`
-			}
-			if op.Op != "k8s_apply" || json.Unmarshal(op.Params, &p) != nil {
-				continue
-			}
-			if p.Params.TopicPrefix != "" {
-				pl.TopicPrefix = p.Params.TopicPrefix
-			}
-			if p.Template == "connector" && !slices.Contains(pl.Connectors, p.Params.Connector) {
-				pl.Connectors = append(pl.Connectors, p.Params.Connector)
-			}
-			for _, tb := range strings.Split(p.Params.Config["table.include.list"], ",") {
-				if tb = strings.TrimSpace(tb); tb != "" && !slices.Contains(pl.SourceTables, tb) {
-					pl.SourceTables = append(pl.SourceTables, tb)
-				}
-			}
+		sc, ok := scenarios[rec.Scenario]
+		if !ok {
+			t.Errorf("%s: no scenario %s in ../scenarios", name, rec.Scenario)
+			continue
 		}
-		connectors := pl.Connectors
-		if len(connectors) == 0 {
-			connectors = []string{"orders-src"}
+		pl := sc.Pipeline
+		if pl.ID == "" || pl.TopicPrefix == "" || len(pl.Connectors) == 0 {
+			t.Fatalf("%s: scenario %s has no pipeline id, topic_prefix or connectors", name, rec.Scenario)
 		}
 		reg, err := ops.New(ops.Config{ProjectDir: t.TempDir()})
 		if err != nil {
@@ -73,7 +60,7 @@ func TestRecordedStrimziOpsPassTheRunnerAndTheServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := reg.Names()
-		if _, err := strimzi.Register(reg, strimzi.Options{Pipeline: "orders", Connectors: connectors, API: api}); err != nil {
+		if _, err := strimzi.Register(reg, strimzi.Options{Pipeline: pl.ID, Connectors: pl.Connectors, API: api}); err != nil {
 			t.Fatal(err)
 		}
 		env := ops.Env{Targets: []events.SetupTarget{

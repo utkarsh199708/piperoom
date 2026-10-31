@@ -27,10 +27,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     {{- range $name, $g := .Values.networkPolicy.egress }}
     {{- if $g }}
     # {{ $name }}
