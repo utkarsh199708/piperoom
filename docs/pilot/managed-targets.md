@@ -33,7 +33,7 @@ The room's target is one `events.SetupTarget` whose address names the account, n
 
 | Target | Kind and address | What you prepare first | Source |
 |---|---|---|---|
-| MSK Connect | `aws`, `<account id>/<region>[/<cluster arn>]` | an MSK cluster with its IAM listener on; the Debezium plugin archive (`.zip` or `.jar`) uploaded by you to an S3 bucket (the runner never uploads); a service execution role that trusts `kafkaconnect.amazonaws.com`; a CloudWatch log group, if you want worker logs | the design §3.1; `internal/setup/targets/managed/msk.go:719-722` (no IAM listener refuses the connector); `internal/clients/mskconnect/validate.go:24-26` (archive key shape) |
+| MSK Connect | `aws`, `<account id>/<region>[/<cluster arn>]` | an MSK cluster with its IAM listener on; the Debezium plugin archive (`.zip` or `.jar`) uploaded by you to an S3 bucket with versioning on (the runner never uploads); a service execution role named `piperoom...` that only `kafkaconnect.amazonaws.com` can assume and that holds no IAM write or `sts:AssumeRole`; a CloudWatch log group, if you want worker logs | the design §3.1; `internal/setup/targets/managed/msk.go:719-722` (no IAM listener refuses the connector); `internal/clients/mskconnect/validate.go:24-26` (archive key shape) |
 | Confluent Cloud | `confluent`, `<environment id>/<cluster id>` | a Kafka cluster; a service account for the setup with a Cloud API key and a cluster API key; the managed connector's own service account | the design §2.2; `internal/setup/targets/managed/confluent.go:78-81` |
 | Aiven | `aiven`, `<project>/<service>` (the Kafka Connect service) | a Kafka service and a Kafka Connect service in one project; an application-user token | the design §2.3; `internal/setup/targets/managed/aiven.go:62-65` |
 
@@ -94,10 +94,10 @@ Each op calls these AWS APIs. The IAM action is the API's name under its service
 | `msk_describe_connector`, `msk_wait` (connector), `msk_delete_connector` | `kafkaconnect:ListConnectors`, `kafkaconnect:DescribeConnector` | `internal/clients/mskconnect/read.go:294-375` |
 | `msk_vpc_check` | `ec2:DescribeSubnets`, `ec2:DescribeSecurityGroups`, `ec2:DescribeRouteTables` | `internal/clients/mskconnect/read.go:397-470` |
 | `msk_role_check` | `iam:GetRole`, `iam:SimulatePrincipalPolicy` | `internal/clients/mskconnect/read.go:517-562` |
-| `msk_plugin_object_check`, `msk_create_plugin` (its object check first) | `s3:GetObject` (HeadObject is authorised by it) | `internal/clients/mskconnect/read.go:566`; `internal/setup/targets/managed/msk.go:683-686` |
+| `msk_plugin_object_check`, `msk_create_plugin` (its object check first) | `s3:GetObject`, and `s3:GetObjectVersion` for a versioned HEAD (which `msk_create_plugin` always is) | `internal/clients/mskconnect/read.go:566`; `internal/setup/targets/managed/msk.go:683-686` |
 | `msk_create_plugin` | `kafkaconnect:CreateCustomPlugin`, `kafkaconnect:TagResource` (tags on create) | `internal/clients/mskconnect/write.go:108-135` |
 | `msk_create_worker_config` | `kafkaconnect:CreateWorkerConfiguration`, `kafkaconnect:TagResource` | `internal/clients/mskconnect/write.go:138-163` |
-| `msk_create_connector` | `kafkaconnect:CreateConnector`, `kafkaconnect:TagResource`, `iam:PassRole` on the service execution role, and `iam:CreateServiceLinkedRole` for `kafkaconnect.amazonaws.com` on an account's first connector | `internal/clients/mskconnect/write.go:213-251`; the design §8 |
+| `msk_create_connector` | `iam:GetRole` and `iam:SimulatePrincipalPolicy` on the service execution role (its checks first), `kafkaconnect:CreateConnector`, `kafkaconnect:TagResource`, `iam:PassRole` on the service execution role, and `iam:CreateServiceLinkedRole` for `kafkaconnect.amazonaws.com` on an account's first connector | `internal/clients/mskconnect/write.go:213-251`; the design §8 |
 | `msk_delete_connector` | `kafkaconnect:ListTagsForResource`, `kafkaconnect:DeleteConnector` | `internal/setup/targets/managed/msk.go:750-777` |
 
 `kafkaconnect:ListTagsForResource` is **not** in the design's §8 list: `msk_delete_connector` reads the tags to refuse a
@@ -108,9 +108,21 @@ done, section 9).
 
 ### The service execution role (the connector runs as it)
 
-`msk_role_check` reads the role and refuses unless its trust policy names `kafkaconnect.amazonaws.com` and IAM's
-simulation allows `kafka-cluster:Connect`, `kafka-cluster:DescribeCluster`, `logs:CreateLogStream` and
-`logs:PutLogEvents` (`internal/setup/targets/managed/msk.go:78`; `internal/clients/mskconnect/read.go:533-538`). The
+`msk_role_check` reads the role and refuses unless:
+
+- **only MSK Connect can assume it**: every Allow statement of its trust policy names the Service principal
+  `kafkaconnect.amazonaws.com` alone and the action `sts:AssumeRole` alone, with no `NotPrincipal` or `NotAction`
+  (conditions such as `aws:SourceAccount` are fine and recommended; `mskconnect.TrustProblem`);
+- **it cannot escalate**: IAM's simulation on any resource denies `iam:AttachRolePolicy`, `iam:PutRolePolicy`,
+  `iam:CreatePolicyVersion`, `iam:UpdateAssumeRolePolicy`, `iam:PassRole`, `iam:CreateAccessKey`, `iam:CreateUser`
+  and `sts:AssumeRole` (`managed.RoleEscalationActions`; the simulation takes action names, so these stand for
+  `iam:*`);
+- **it can do the connector's work**: the simulation allows `kafka-cluster:Connect`, `kafka-cluster:DescribeCluster`,
+  `logs:CreateLogStream` and `logs:PutLogEvents` (`managed.RoleActions`).
+
+`msk_create_connector` repeats the first two checks before it creates anything, so a plan that skips
+`msk_role_check` cannot attach a broader role (`ErrRoleUnsafe`; test
+`internal/setup/targets/managed/msk_test.go`, `TestMSKRoleMustBeNoBroaderThanConnect`). The
 simulation's semantics for the `kafka-cluster:*` actions are not confirmed (the design §3.1). The role also needs to read
 the plugin archive when MSK builds the plugin (`internal/setup/targets/managed/msk.go:614`).
 
@@ -142,10 +154,28 @@ and `secret_set ccloud_connector_service_account` (the managed connector's own a
 `kafka.service.account.id`), as `sa-...` or `User:sa-...`. The runner refuses any other principal, and refuses the op
 when the template's entry is missing (`managed.ErrPrincipal`, `managed.ErrNoPrincipal`;
 `internal/setup/targets/managed/confluent.go`, `checkPrincipal`). These are `ccloud_*` names, so they never come
-through the room. The server cannot bind the principal (it holds no record of your accounts); it binds the rest: the
-topic prefix must be the pipeline's own `topic_prefix`, and the watcher's group a `connect-<connector>` of one of the
-pipeline's connectors or one of its `consumer_groups` (`internal/setup/actions/specs_targets.go`, `scopeCCloudACL`).
-Both sides refuse a prefix shorter than 3 characters or starting with `_` (the cluster's internal topics).
+through the room. They are **settings, not secrets**: an id grants nothing (the API key does), so the runner stores
+only an `sa-...` id under them and leaves the id visible in results, where the agent needs it to write the principal;
+every other `ccloud_*` value stays redacted (`runner.IsPublicSetting`; test
+`internal/setup/runner/secrets_test.go`, `TestServiceAccountSettingsAreNotRedacted`).
+
+The server cannot bind the principal (it holds no record of your accounts); it binds the rest
+(`internal/setup/actions/specs_targets.go`, `scopeCCloudACL`):
+
+- **Topics**: `topic_prefix` must be the pipeline's own `topic_prefix`, and every topic row is `PREFIXED` on
+  `<topic_prefix>.`, the separator included, so a prefix `orders` covers `orders.public.orders` but not `orders2.*` or
+  `orders_archive` (the Strimzi KafkaUser rows do the same). Both sides refuse a prefix shorter than 3 characters,
+  starting with `_` (the cluster's internal topics) or ending in `.`.
+- **The watcher's group**, one of three routes:
+  1. `connect-<connector>` for one of the pipeline's `connectors` (a self-managed Connect sink's group);
+  2. any entry of the pipeline's `consumer_groups` in `owners.yaml`: the route for a consumer group the first two
+     cannot name, such as your own application's;
+  3. `connect-lcc-<connector id>` with `connector` naming one of the pipeline's connectors: a Confluent Cloud
+     **managed** sink consumes as `connect-lcc-<its id>`. The server binds the connector to the pipeline; the runner
+     reads that connector's id (`GET connectors?expand=id`, `confluentcloud.ConnectorID`) and refuses any other
+     `connect-lcc-` group before a row is sent (`managed.ErrGroupNotTheConnectors`; test
+     `internal/setup/targets/managed/confluent_test.go`, `TestACLManagedSinkGroup`). The `expand=id` response shape is
+     from Confluent's API reference, not yet confirmed on a live account.
 
 `ccloud_create_connector` validates the config against the managed plugin first and creates only when validation
 reports no error (`internal/setup/targets/managed/confluent.go:347-372`); a validate result keeps the config names and
@@ -201,11 +231,17 @@ make (`internal/setup/targets/managed/confluent.go:325-340`; the design §3.2).
 - **The service execution role is one made for Piperoom.** `msk_role_check` and `msk_create_connector` accept only a
   role in the target's account whose name starts with `piperoom` (any case, e.g. `PiperoomMSKConnect`), so the model
   cannot name an arbitrary role of the account for the connector to run as (`managed.RolePrefix`; the server checks the
-  same shape).
-- **The plugin archive is the target account's.** The object check sends S3's `ExpectedBucketOwner` with the target
-  account, so a same-named bucket in another account answers 403, and `msk_create_plugin` requires `expected_size`
-  (the archive's size in bytes from the release you downloaded; the knowledge index records digests, not sizes, so the
-  server cannot fill it).
+  same shape). **The prefix is a naming convention only**: anyone who can create roles can create one called
+  `piperoom-admin`. What bounds the role is the trust and escalation checks of section 3 (the role's trust policy
+  admits MSK Connect alone; it holds no IAM write and no `sts:AssumeRole`), which both ops run.
+- **The plugin archive is the target account's, at one version.** The object check sends S3's `ExpectedBucketOwner`
+  with the target account, so a same-named bucket in another account answers 403. `msk_create_plugin` requires the
+  object's **S3 version id** (`version`; turn versioning on for the bucket and read the id from your upload or from
+  `msk_plugin_object_check`): the runner checks that S3 answered that version and passes it to `CreateCustomPlugin` as
+  `ObjectVersion`, so someone with `s3:PutObject` on the key cannot swap the archive between the check and the build
+  (test `internal/setup/targets/managed/msk_test.go`, `TestMSKPluginIsPinnedToAVersion`). It also requires
+  `expected_size`, the archive's size in bytes; that is a consistency check, not an integrity one: the model can read
+  the size from `msk_plugin_object_check`, so compare it with your download yourself.
 - **The worker configuration is templated.** `msk_create_worker_config` renders its properties from a template under a
   key allow-list (converters from a fixed class list, `schemas.enable`, the two offset flush intervals) and refuses
   `config.providers*`, the internal topic settings, `group.id`, `bootstrap.servers`, `plugin.path` and the REST keys by
@@ -238,7 +274,11 @@ At room close, delete the setup key or token and its service account (the design
 - **`msk_vpc_check` reads only the connector's side**: route tables and security group egress. The database's own
   security group, a network ACL and DNS are not read, and a group rule that names another group does not count as
   allowing (`internal/setup/targets/managed/vpc.go:69`; `internal/setup/targets/managed/vpc.go:83-88`).
-- **The plugin archive's digest is not verified**: the object check compares the bucket owner and the size only (S3 exposes no SHA-512;
+- **The plugin archive's digest is not verified**: the object check compares the bucket owner, the version and the
+  size only. The knowledge index pins SHA-512 digests of Debezium's `.tar.gz` plugin archives, and MSK Connect builds
+  from a `.zip` or `.jar`, so there is no pinned digest of the object to compare with, and S3 exposes no SHA-512 (its
+  `ChecksumSHA256` is a different digest, present only when the uploader asked for it, and a composite for multipart
+  uploads;
   `internal/setup/targets/managed/msk.go:618`; the design §3.1).
 - **Confluent and Aiven have no delete op** (section 7), and no Aiven service create, read user or ACL op (the design
   §3.3's additions are not built).
