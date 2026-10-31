@@ -171,6 +171,27 @@ describe('DecisionBar needs-you text fit (KAN-588)', () => {
   })
 })
 
+describe('DecisionBar phone sheet, long Approve label (KAN-595)', () => {
+  // jsdom has no layout: assert the classes. flex-1's basis is 0, but a button is never narrower than its
+  // nowrap label, so a row that may wrap moves "Approve … (will not run)" to its own line when both can't fit.
+  it('lets the action row wrap and keeps the label whole, so "will not run" stays on screen', () => {
+    const state: RoomState = { ...room(prop()), mode: { write: false, solo: false, auto_approve: [] } }
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={state} user={arjun} placement="sheet" />
+      </DecisionHandleContext.Provider>,
+    )
+    const approve = screen.getByRole('button', { name: 'Approve kafka-connect (will not run)' })
+    const row = approve.parentElement as HTMLElement
+    expect(row.className).toContain('flex-wrap')
+    expect(row.className).not.toContain('flex-nowrap')
+    expect(row.className).toContain('w-full')
+    expect(approve.className).toContain('flex-1')
+    expect(approve.className).toContain('whitespace-nowrap')
+    expect(screen.getByRole('button', { name: 'Reject' }).className).toContain('flex-1')
+  })
+})
+
 describe('DecisionBar height variable', () => {
   // On load a finished fix keeps the bar empty while `decision` is set; when a new proposal then
   // needs you, the sheet must publish its height or it covers the composer.
