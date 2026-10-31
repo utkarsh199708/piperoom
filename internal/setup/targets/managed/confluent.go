@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"piperoom/internal/clients"
@@ -29,6 +30,8 @@ type ConfluentAPI interface {
 // cluster API key; *confluentcloud.ACLClient implements it.
 type ACLAPI interface {
 	CreateACL(ctx context.Context, acl confluentcloud.ACL) error
+	TopicExists(ctx context.Context, name string) (bool, error)
+	TopicACLs(ctx context.Context, name string) ([]confluentcloud.ACL, error)
 }
 
 var (
@@ -266,6 +269,11 @@ type ACLParams struct {
 // managedGroupPrefix starts a managed sink connector's consumer group.
 const managedGroupPrefix = "connect-lcc-"
 
+// ErrTopicNotOurs: the topic named exactly <topic_prefix> exists and
+// nothing shows this setup granted it, so the connector template's LITERAL
+// rows on it could hand another application's topic to the connector.
+var ErrTopicNotOurs = errors.New("managed: the topic named topic_prefix exists and is not this setup's")
+
 // ErrGroupNotTheConnectors: a connect-lcc- group that is not the named
 // connector's.
 var ErrGroupNotTheConnectors = errors.New("managed: the group is not the managed connector's consumer group")
@@ -352,6 +360,44 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 		}, nil
 	}
 	return nil, fmt.Errorf("%w: template %q, want watcher or connector", ErrParams, clipText(p.Template, 16))
+}
+
+// checkBareTopic guards the connector template's LITERAL rows on the topic
+// named exactly topic_prefix (the schema-change topic). A topic that does
+// not exist yet is the connector's to create. One that exists must carry
+// this setup's mark: LITERAL ACLs on it, every one for this template's
+// principal, which only an earlier ccloud_acl_create for the same account
+// leaves. Confluent Cloud topics carry no tag the Kafka REST API returns,
+// and the API reports no message count, so an existing topic with no ACLs
+// or with another principal's is refused rather than taken over. A read
+// that fails refuses too.
+func (d *ConfluentDriver) checkBareTopic(ctx context.Context, p ACLParams) (ops.Result, error) {
+	exists, err := d.acl.TopicExists(ctx, p.TopicPrefix)
+	if err != nil {
+		return ops.Result{Summary: "refused ccloud_acl_create: reading topic " + p.TopicPrefix + " failed", Data: ccErr(err)}, err
+	}
+	if !exists {
+		return ops.Result{}, nil
+	}
+	acls, err := d.acl.TopicACLs(ctx, p.TopicPrefix)
+	if err != nil {
+		return ops.Result{Summary: "refused ccloud_acl_create: listing topic " + p.TopicPrefix + "'s ACLs failed", Data: ccErr(err)}, err
+	}
+	var others []string
+	for _, a := range acls {
+		if a.Principal != p.Principal && !slices.Contains(others, a.Principal) {
+			others = append(others, a.Principal)
+		}
+	}
+	if len(acls) > 0 && len(others) == 0 {
+		return ops.Result{}, nil
+	}
+	why := "it has no ACLs, so nothing shows this setup made it"
+	if len(others) > 0 {
+		why = "other principals hold ACLs on it (" + clipText(strings.Join(others, ", "), 200) + ")"
+	}
+	err = fmt.Errorf("%w: topic %s exists and %s; rename the pipeline's topic_prefix, or grant the connector on it yourself if it is the pipeline's", ErrTopicNotOurs, p.TopicPrefix, why)
+	return ops.Result{Summary: "refused ccloud_acl_create: " + err.Error(), Data: map[string]any{"topic": p.TopicPrefix, "other_principals": others}}, err
 }
 
 func ccErr(err error) map[string]any {
@@ -489,6 +535,11 @@ func (d *ConfluentDriver) createACLs(ctx context.Context, raw json.RawMessage) (
 		if p.Group != "connect-"+id {
 			err := fmt.Errorf("%w: connector %s is %s, so its group is connect-%s, not %s", ErrGroupNotTheConnectors, p.Connector, id, id, clipText(p.Group, 64))
 			return ops.Result{Summary: "refused ccloud_acl_create: " + err.Error(), Data: map[string]any{"connector_id": id}}, err
+		}
+	}
+	if p.Template == ACLTemplateConnector {
+		if res, err := d.checkBareTopic(ctx, p); err != nil {
+			return res, err
 		}
 	}
 	var done []confluentcloud.ACL

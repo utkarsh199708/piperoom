@@ -68,8 +68,10 @@ var ccFlows = []ccFlow{
 		responses: []replay.Response{ccJSON(200, `{"name":"PostgresCdcSourceV2","error_count":0,"configs":[]}`), ccJSON(409, `{"error":{"code":409,"message":"Connector it_orders already exists"}}`)},
 		check:     failFlow(confluentcloud.ErrConflict, `"error_class":"conflict"`)}},
 	{acl: true, flow: flow{name: "acl_connector", op: "ccloud_acl_create", params: map[string]any{"template": "connector", "principal": "User:sa-00000", "topic_prefix": "orders"},
-		responses: []replay.Response{{Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}},
-		check:     okFlow("7 ACL rows of the connector template", `"operation":"WRITE"`)}},
+		// The topic named exactly "orders" does not exist yet (round 4).
+		responses: []replay.Response{{Status: 404, Headers: map[string]string{"Content-Type": "application/json"}, Body: `{"error_code":40403,"message":"This server does not host this topic-partition."}`},
+			{Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}},
+		check: okFlow("7 ACL rows of the connector template", `"operation":"WRITE"`)}},
 	{acl: true, flow: flow{name: "acl_watcher_forbidden", op: "ccloud_acl_create", params: map[string]any{"template": "watcher", "principal": "User:sa-00000", "topic_prefix": "orders", "group": "connect-it_orders"},
 		responses: []replay.Response{{Status: 201}, ccJSON(403, `{"error_code":40301,"message":"Request is not authorized"}`)},
 		check:     failFlow(confluentcloud.ErrForbidden, "stopped after 1 of 4 rows")}},
@@ -328,12 +330,69 @@ func TestACLRows(t *testing.T) {
 	}
 }
 
-// countingACL records the rows ccloud_acl_create sends.
-type countingACL struct{ rows []confluentcloud.ACL }
+// countingACL records the rows ccloud_acl_create sends. exists and
+// topicACLs are the bare <topic_prefix> topic's state; topicErr fails its
+// read.
+type countingACL struct {
+	rows      []confluentcloud.ACL
+	exists    bool
+	topicACLs []confluentcloud.ACL
+	topicErr  error
+}
+
+func (a *countingACL) TopicExists(context.Context, string) (bool, error) {
+	return a.exists, a.topicErr
+}
+
+func (a *countingACL) TopicACLs(context.Context, string) ([]confluentcloud.ACL, error) {
+	return a.topicACLs, nil
+}
 
 func (a *countingACL) CreateACL(_ context.Context, acl confluentcloud.ACL) error {
 	a.rows = append(a.rows, acl)
 	return nil
+}
+
+// TestACLBareTopicMustBeOurs (review round 4): the connector template's
+// LITERAL rows on the topic named exactly topic_prefix are granted only
+// when that topic does not exist yet, or exists with LITERAL ACLs for this
+// template's principal alone (an earlier grant by this setup). Another
+// application's topic of that name, one with no ACLs, or a failed read is
+// refused before any row is sent.
+func TestACLBareTopicMustBeOurs(t *testing.T) {
+	principal := func(string) (string, error) { return "sa-00000", nil }
+	ours := confluentcloud.ACL{ResourceType: "TOPIC", ResourceName: "orders", PatternType: "LITERAL", Principal: "User:sa-00000", Host: "*", Operation: "WRITE", Permission: "ALLOW"}
+	theirs := ours
+	theirs.Principal = "User:sa-99999"
+	connector := map[string]any{"template": "connector", "principal": "User:sa-00000", "topic_prefix": "orders"}
+	cases := []struct {
+		name string
+		acl  *countingACL
+		want error
+	}{
+		{"no such topic", &countingACL{}, nil},
+		{"granted earlier by this setup", &countingACL{exists: true, topicACLs: []confluentcloud.ACL{ours}}, nil},
+		{"another application's", &countingACL{exists: true, topicACLs: []confluentcloud.ACL{ours, theirs}}, ErrTopicNotOurs},
+		{"exists with no ACLs", &countingACL{exists: true}, ErrTopicNotOurs},
+		{"the read fails", &countingACL{topicErr: confluentcloud.ErrForbidden}, confluentcloud.ErrForbidden},
+	}
+	for _, c := range cases {
+		reg, _ := ccReg(t, &fakeCC{}, ConfluentOptions{ACL: c.acl, Principal: principal})
+		_, err := exec(t, reg, "ccloud_acl_create", connector)
+		if c.want == nil && err != nil || c.want != nil && !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+		if c.want != nil && len(c.acl.rows) != 0 {
+			t.Errorf("%s: %d rows sent", c.name, len(c.acl.rows))
+		}
+	}
+	// The watcher template grants nothing on the bare topic and does not
+	// look at it.
+	acl := &countingACL{exists: true, topicACLs: []confluentcloud.ACL{theirs}}
+	reg, _ := ccReg(t, &fakeCC{}, ConfluentOptions{ACL: acl, Principal: principal})
+	if _, err := exec(t, reg, "ccloud_acl_create", map[string]any{"template": "watcher", "principal": "User:sa-00000", "topic_prefix": "orders", "group": "connect-it_orders"}); err != nil {
+		t.Errorf("watcher: %v", err)
+	}
 }
 
 // TestACLManagedSinkGroup (review, correctness low): a Confluent Cloud

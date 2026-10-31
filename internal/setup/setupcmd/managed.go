@@ -363,19 +363,41 @@ type storeACL struct {
 }
 
 func (s *storeACL) CreateACL(ctx context.Context, acl confluentcloud.ACL) error {
-	key, kerr := s.open.get(secretCCloudClusterKey)
-	secret, serr := s.open.get(secretCCloudClusterSecret)
-	if kerr != nil || serr != nil {
-		if errors.Is(kerr, errNoCloudCredential) || errors.Is(serr, errNoCloudCredential) {
-			return managed.ErrNoACLKey
-		}
-		return errors.Join(kerr, serr)
-	}
-	c, err := s.client(ctx, key, secret)
+	c, err := s.keyed(ctx)
 	if err != nil {
 		return err
 	}
 	return c.CreateACL(ctx, acl)
+}
+
+func (s *storeACL) TopicExists(ctx context.Context, name string) (bool, error) {
+	c, err := s.keyed(ctx)
+	if err != nil {
+		return false, err
+	}
+	return c.TopicExists(ctx, name)
+}
+
+func (s *storeACL) TopicACLs(ctx context.Context, name string) ([]confluentcloud.ACL, error) {
+	c, err := s.keyed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.TopicACLs(ctx, name)
+}
+
+// keyed is the ACL client under the cluster key the person entered on the
+// runner.
+func (s *storeACL) keyed(ctx context.Context) (*confluentcloud.ACLClient, error) {
+	key, kerr := s.open.get(secretCCloudClusterKey)
+	secret, serr := s.open.get(secretCCloudClusterSecret)
+	if kerr != nil || serr != nil {
+		if errors.Is(kerr, errNoCloudCredential) || errors.Is(serr, errNoCloudCredential) {
+			return nil, managed.ErrNoACLKey
+		}
+		return nil, errors.Join(kerr, serr)
+	}
+	return s.client(ctx, key, secret)
 }
 
 func (s *storeACL) client(ctx context.Context, key, secret string) (*confluentcloud.ACLClient, error) {

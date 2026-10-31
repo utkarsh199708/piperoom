@@ -244,6 +244,28 @@ var ccCases = []ccCase{
 				t.Fatal(err)
 			}
 		}},
+	// TopicExists and TopicACLs read the bare topic's state (round 4).
+	{name: "topic_exists", responses: []replay.Response{jsonResp(200, `{"kind":"KafkaTopic","cluster_id":"lkc-00000","topic_name":"orders","partitions_count":1}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			ok, err := testACL(t, rt).TopicExists(ctx, "orders")
+			if err != nil || !ok {
+				t.Fatalf("TopicExists = %v, %v", ok, err)
+			}
+		}},
+	{name: "topic_missing", responses: []replay.Response{jsonResp(404, `{"error_code":40403,"message":"This server does not host this topic-partition."}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			ok, err := testACL(t, rt).TopicExists(ctx, "orders")
+			if err != nil || ok {
+				t.Fatalf("TopicExists = %v, %v", ok, err)
+			}
+		}},
+	{name: "topic_acls", responses: []replay.Response{jsonResp(200, `{"kind":"KafkaAclList","data":[{"kind":"KafkaAcl","cluster_id":"lkc-00000","resource_type":"TOPIC","resource_name":"orders","pattern_type":"LITERAL","principal":"User:sa-00000","host":"*","operation":"WRITE","permission":"ALLOW"}]}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			acls, err := testACL(t, rt).TopicACLs(ctx, "orders")
+			if err != nil || len(acls) != 1 || acls[0].Principal != "User:sa-00000" || acls[0].Operation != "WRITE" {
+				t.Fatalf("TopicACLs = %+v, %v", acls, err)
+			}
+		}},
 	{name: "acl_create_forbidden", responses: []replay.Response{jsonResp(403, `{"error_code":40301,"message":"Request is not authorized"}`)},
 		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
 			err := testACL(t, rt).CreateACL(ctx, ACL{ResourceType: "GROUP", ResourceName: "connect-it_orders", PatternType: "LITERAL", Principal: tPrincipal, Host: "*", Operation: "DESCRIBE", Permission: "ALLOW"})

@@ -1,0 +1,22 @@
+{
+  "provider": "confluent",
+  "name": "topic_exists",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as this client sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/kafka/v3/clusters/lkc-00000/topics/orders"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"cluster_id\":\"lkc-00000\",\"kind\":\"KafkaTopic\",\"partitions_count\":1,\"topic_name\":\"orders\"}"
+      }
+    }
+  ]
+}

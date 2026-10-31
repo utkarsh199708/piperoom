@@ -2,6 +2,7 @@ package confluentcloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -326,4 +327,42 @@ func (a *ACLClient) CreateACL(ctx context.Context, acl ACL) error {
 		return err
 	}
 	return do(ctx, a.http, a.base, http.MethodPost, "/kafka/v3/clusters/"+url.PathEscape(a.cluster)+"/acls", "", acl, nil, "create ACL")
+}
+
+// TopicExists reports whether the cluster has a topic of that name
+// (getKafkaTopic: 200, or 404 for none).
+func (a *ACLClient) TopicExists(ctx context.Context, name string) (bool, error) {
+	if err := CheckResource(name); err != nil {
+		return false, err
+	}
+	err := do(ctx, a.http, a.base, http.MethodGet, "/kafka/v3/clusters/"+url.PathEscape(a.cluster)+"/topics/"+url.PathEscape(name), "", nil, nil, "read topic")
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrNotFound):
+		return false, nil
+	}
+	return false, err
+}
+
+// maxTopicACLs bounds TopicACLs' answer.
+const maxTopicACLs = 1000
+
+// TopicACLs lists the LITERAL ACLs on exactly one topic (getKafkaAcls with
+// resource_type TOPIC, resource_name and pattern_type LITERAL).
+func (a *ACLClient) TopicACLs(ctx context.Context, name string) ([]ACL, error) {
+	if err := CheckResource(name); err != nil {
+		return nil, err
+	}
+	q := url.Values{"resource_type": {"TOPIC"}, "resource_name": {name}, "pattern_type": {"LITERAL"}}
+	var resp struct {
+		Data []ACL `json:"data"`
+	}
+	if err := do(ctx, a.http, a.base, http.MethodGet, "/kafka/v3/clusters/"+url.PathEscape(a.cluster)+"/acls", q.Encode(), nil, &resp, "list topic ACLs"); err != nil {
+		return nil, err
+	}
+	if len(resp.Data) > maxTopicACLs {
+		return nil, fmt.Errorf("%w: list topic ACLs: more than %d rows", ErrAPI, maxTopicACLs)
+	}
+	return resp.Data, nil
 }

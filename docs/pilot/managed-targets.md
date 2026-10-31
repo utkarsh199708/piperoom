@@ -178,8 +178,14 @@ The server cannot bind the principal (it holds no record of your accounts); it b
   `orders_archive` (the Strimzi KafkaUser rows do the same). The connector template also gets `LITERAL` rows (CREATE,
   WRITE, DESCRIBE) on the one topic named exactly `<topic_prefix>`: Debezium's MySQL, SQL Server and Oracle
   connectors write schema-change events there when `include.schema.changes` is on (Debezium's default; whether
-  Confluent's managed V2 connectors turn it on is not confirmed here). Both sides refuse a prefix shorter than 3
-  characters, starting with `_` (the cluster's internal topics) or ending in `.`.
+  Confluent's managed V2 connectors turn it on is not confirmed here). Before it grants them the runner reads that
+  topic with the setup's cluster key: a topic that does not exist yet is the connector's to create; one that exists
+  must already carry LITERAL ACLs for the connector's own account and no other principal's (an earlier grant by this
+  setup). Confluent Cloud topics carry no tag the Kafka REST API returns and the API reports no message count, so an
+  existing topic with no ACLs or with another principal's is refused (`managed.ErrTopicNotOurs`; test
+  `internal/setup/targets/managed/confluent_test.go`, `TestACLBareTopicMustBeOurs`): rename `topic_prefix`, or grant
+  the connector on it yourself. The read needs the cluster key to describe topics and ACLs. Both sides refuse a
+  prefix shorter than 3 characters, starting with `_` (the cluster's internal topics) or ending in `.`.
 - **The watcher's group**, one of three routes:
   1. `connect-<connector>` for one of the pipeline's `connectors` (a self-managed Connect sink's group);
   2. any entry of the pipeline's `consumer_groups` in `owners.yaml`: the route for a consumer group the first two
