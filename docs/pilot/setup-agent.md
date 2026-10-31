@@ -44,8 +44,23 @@ Use it on a throwaway project directory and a test database until these land.
    `internal/room/runners.go:27-29`). It is a credential: prefer `PIPEROOM_SETUP_CODE` to `--code`, which shell
    history and process lists keep (`internal/config/config.go:355`; Finding 5).
 3. The runner refuses `http://` off loopback and redirects (`internal/setup/runner/loopback.go:83-98`;
-   `internal/setup/runner/runner.go:420-435`). It prints the server origin, the room and its creator and waits for
-   `y` (`internal/setup/runner/confirm.go:54-66`). Answer `N` if you did not just ask for this room.
+   `internal/setup/runner/runner.go:420-435`). It prints the server origin, the room, its pipeline and tenant, its
+   creator, every target the setup may reach (kind, address, which for a managed target is the AWS account and region,
+   the Confluent environment and cluster or the Aiven project and service, and class) and the pairing fingerprint, and
+   waits for `y` (`internal/setup/runner/confirm.go`, `confirm` and `printWelcome`). Compare the fingerprint with the
+   one the room was opened with (`POST /api/setup` returns it as `fingerprint`); answer `N` if they differ or you did
+   not just ask for this room. Nothing of the
+   room's targets runs before your `y`: the target drivers register, and a managed driver loads this machine's AWS
+   credential chain, only after it (`internal/setup/runner/runner.go`, `pair`).
+
+   **The fingerprint needs `PIPEROOM_PUBLIC_URL`.** The server hashes its public origin into the fingerprint
+   (`internal/room/runners.go`, `SetupFingerprint`; `internal/httpapi/runners.go`, `publicOriginString`). Without
+   `PIPEROOM_PUBLIC_URL` the origin is empty: the server's and the runner's fingerprints still match each other,
+   but they no longer bind the server's address, so compare the origin the runner prints with the address you opened
+   instead (the runner says so). The in-cluster runner, which has no terminal, refuses to pair at all unless the
+   Welcome's public origin is the `--server` it dialed (`ErrOriginMismatch`), so a Strimzi setup needs
+   `PIPEROOM_PUBLIC_URL` set to exactly that origin. The web app does not show the fingerprint on the card yet (known
+   gap A6); the `POST /api/setup` answer carries it.
 4. After `y` it stays connected and reconnects with a rotating token for up to 30 minutes per connection; after that,
    or if the code expires unused, nothing issues a new code (`internal/room/runners.go:406-430`;
    `internal/httpapi/server.go:255-270`; Finding 8).

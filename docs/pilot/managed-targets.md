@@ -45,7 +45,14 @@ Confluent or Aiven op its `<a>/<b>` address (`internal/setup/targets/managed/man
 
 - **Cloud setup credentials are entered on the runner's terminal or in its environment, never through the room.** The
   server's secret route refuses the names `ccloud_*`, `aiven_token` and `aws_*`/`AWS_*` with "enter cloud credentials on
-  the runner" (`docs/api.md:1602`; the design §2).
+  the runner" (`docs/api.md:1602`; the design §2; `internal/room/setup_secrets.go`, `isCloudSetupSecretName`), never
+  records them in `setup.secret_set`, and never asks the runner to register one; the runner refuses a whole
+  `register_credentials` request that names one (`internal/setup/runner/secretops.go`) and its store refuses `aws_*`
+  names outright.
+- **A cloud setup credential is never a `${secret:}` value.** A connector config (on both sides), a Kubernetes Secret
+  the in-cluster runner fills and a container environment the runner materialises all refuse a reference to a
+  `ccloud_*`, `aiven_token` or `aws_*` name (`runner.ErrCloudSecretRef`): the managed clients read those keys
+  themselves, and nothing copies one into a config the provider or a cluster stores.
 - **AWS: the SDK's default credential chain** (an SSO profile after `aws sso login`, a named profile, an assumed role,
   an instance role), loaded into one `aws.Config` with the target's region; Piperoom stores no AWS key (the design
   §2.1). The client needs a region and refuses a config without one (`internal/clients/mskconnect/client.go:110-113`).

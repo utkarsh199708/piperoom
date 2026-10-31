@@ -177,7 +177,10 @@ func TestRegisterTargetsAfterConfirmation(t *testing.T) {
 	mu.Lock()
 	out := stdout.String()
 	mu.Unlock()
-	for _, want := range []string{"target aws 123456789012/eu-west-1 (production)", "fingerprint a1b2c3d4e5f6", "pipeline orders, tenant acme", "created by Ada"} {
+	for _, want := range []string{"target aws 123456789012/eu-west-1 (production)", "fingerprint a1b2c3d4e5f6", "pipeline orders, tenant acme", "created by Ada",
+		// The Welcome names no public origin: the runner says the
+		// fingerprint does not bind the server's address (review L7).
+		"no PIPEROOM_PUBLIC_URL"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the terminal block lacks %q:\n%s", want, out)
 		}

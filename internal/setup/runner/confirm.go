@@ -63,10 +63,15 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 		return r.confirmExternal(ctx, welcome, creator)
 	}
 	r.printWelcome(welcome, creator)
-	if welcome.Fingerprint == "" {
-		fmt.Fprintln(r.stdout, "the server sent no fingerprint (it has no PIPEROOM_PUBLIC_URL): compare the origin above with the Set up card instead")
-	} else {
-		fmt.Fprintln(r.stdout, "compare the fingerprint with the room's Set up card before you answer")
+	switch {
+	case welcome.Fingerprint == "":
+		fmt.Fprintln(r.stdout, "the server sent no fingerprint: compare the origin above with the address you opened the room on")
+	case welcome.PublicOrigin == "":
+		// The fingerprint hashes the server's PIPEROOM_PUBLIC_URL; without
+		// one it binds the room but not the server's address.
+		fmt.Fprintln(r.stdout, "the server has no PIPEROOM_PUBLIC_URL, so the fingerprint does not bind its address: check the origin above too")
+	default:
+		fmt.Fprintln(r.stdout, "compare the fingerprint with the one the room was opened with before you answer")
 	}
 	if r.yes {
 		return true, nil
