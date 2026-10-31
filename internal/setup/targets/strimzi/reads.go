@@ -132,6 +132,7 @@ func (o k8sGetOp) Execute(ctx context.Context, params json.RawMessage, env ops.E
 	}
 	stripManaged(obj)
 	obj = getView(p.Kind, obj)
+	obj, _ = maskJSON(obj, o.d.credentialValues(ctx, ns)).(map[string]any)
 	return ops.Result{
 		Summary: fmt.Sprintf("%s %s/%s: %s", p.Kind, ns, p.Name, readySummary(obj)),
 		Data:    obj,
@@ -304,12 +305,13 @@ func (o k8sEventsOp) Execute(ctx context.Context, params json.RawMessage, env op
 		return ops.Result{}, fmt.Errorf("strimzi: decoding events: %w", err)
 	}
 	out := make([]eventLine, 0, len(list.Items))
+	written := o.d.credentialValues(ctx, ns)
 	for _, it := range list.Items {
 		last := it.LastTimestamp
 		if last == "" {
 			last = it.EventTime
 		}
-		msg, _ := redact.Text(it.Message)
+		msg, _ := redact.Text(maskCredentials(it.Message, written))
 		out = append(out, eventLine{Type: clipText(it.Type, 16), Reason: clipText(it.Reason, 64), Message: clipText(msg, 300), Count: it.Count, Last: clipText(last, 40)})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Last < out[j].Last })
@@ -411,7 +413,7 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 	if err != nil {
 		return nil, path, err
 	}
-	text, _ := redact.Text(maskCredentials(strings.ToValidUTF8(string(body), "?"), d.writtenValues()))
+	text, _ := redact.Text(maskCredentials(strings.ToValidUTF8(string(body), "?"), d.credentialValues(ctx, ns)))
 	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	lines := make([]string, 0, len(raw))
 	total := 0
@@ -471,7 +473,7 @@ func (o buildStatusOp) Execute(ctx context.Context, params json.RawMessage, env 
 	conds := conditions(obj)
 	st, _ := obj["status"].(map[string]any)
 	plugins, _ := st["connectorPlugins"].([]any)
-	out := map[string]any{"connect": o.d.connectName(), "conditions": condMaps(conds), "connector_plugins": len(plugins)}
+	out := map[string]any{"connect": o.d.connectName(), "conditions": condMaps(conds, o.d.credentialValues(ctx, ns)), "connector_plugins": len(plugins)}
 	ready, buildFailed := false, false
 	for _, c := range conds {
 		if c.Type == "Ready" && c.Status == "True" {
@@ -516,10 +518,10 @@ func (o buildStatusOp) Execute(ctx context.Context, params json.RawMessage, env 
 	}, nil
 }
 
-func condMaps(cs []condition) []map[string]string {
+func condMaps(cs []condition, written []string) []map[string]string {
 	out := make([]map[string]string, 0, len(cs))
 	for _, c := range cs {
-		msg, _ := redact.Text(c.Message)
+		msg, _ := redact.Text(maskCredentials(c.Message, written))
 		out = append(out, map[string]string{"type": clipText(c.Type, 32), "status": clipText(c.Status, 16), "reason": clipText(c.Reason, 64), "message": clipText(msg, 300)})
 	}
 	return out
@@ -532,26 +534,62 @@ func orDash(s string) string {
 	return s
 }
 
-// credentialLineRE is a config dump line Kafka Connect and Debezium log at
-// start ("database.user = cdc"): the value of a key that names a user,
-// password or secret is masked whatever it is. Connect hides PASSWORD-type
-// values itself; a user name, or a password a misconfigured key carries, it
-// prints.
-var credentialLineRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(user|username|password|passwd|secret|credential|token)[A-Za-z0-9_.-]*)(\s*[=:]\s*)([^\s,]+)`)
+// credentialLineRE is a line that names a credential-like key and then a
+// value: key=value and key: value (Kafka Connect and Debezium config dumps,
+// a driver's error) and "key":"value" (a JSON log or a REST body). The whole
+// rest of the line after the separator is masked, not one token: a value may
+// be quoted, hold spaces or commas, or be followed by more of a JSON object
+// (round 5).
+var credentialLineRE = regexp.MustCompile(`(?im)("?\b[A-Za-z0-9_.-]*(?:user|username|password|passwd|pwd|secret|credential|token)[A-Za-z0-9_.-]*"?)(\s*[=:]\s*)(\S.*)$`)
 
-// maskCredentials masks, in a pod log, every credential value the runner
-// wrote to the db-credentials Secret and the value of every credential-named
-// config line.
+// maskCredentials masks every credential value the runner wrote to the
+// db-credentials Secret, as itself and as its JSON-escaped and URL-encoded
+// copies, then the rest of every credential-named line. A value shorter
+// than 4 characters is not replaced everywhere (it would mangle the text);
+// the line rule covers it where a key names it.
 func maskCredentials(text string, written []string) string {
-	sort.Slice(written, func(i, j int) bool { return len(written[i]) > len(written[j]) })
+	var forms []string
 	for _, v := range written {
-		text = strings.ReplaceAll(text, v, "[masked:credential]")
+		if len(v) < 4 {
+			continue
+		}
+		j, _ := json.Marshal(v)
+		for _, f := range []string{v, strings.Trim(string(j), `"`), url.QueryEscape(v), url.PathEscape(v)} {
+			if !contains(forms, f) {
+				forms = append(forms, f)
+			}
+		}
+	}
+	sort.Slice(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
+	for _, f := range forms {
+		text = strings.ReplaceAll(text, f, "[masked:credential]")
 	}
 	return credentialLineRE.ReplaceAllStringFunc(text, func(m string) string {
 		sub := credentialLineRE.FindStringSubmatch(m)
-		if sub[4] == "[hidden]" || strings.HasPrefix(sub[4], "[masked") || strings.HasPrefix(sub[4], "${") {
+		// Kafka's own "[hidden]" is already masked.
+		if strings.Trim(sub[3], `", }`) == "[hidden]" {
 			return m
 		}
-		return sub[1] + sub[3] + "[masked:credential]"
+		return sub[1] + sub[2] + "[masked:credential]"
 	})
+}
+
+// maskJSON applies maskCredentials to every string of a decoded JSON value
+// (an object a get op returns).
+func maskJSON(v any, written []string) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, x := range t {
+			t[k] = maskJSON(x, written)
+		}
+		return t
+	case []any:
+		for i, x := range t {
+			t[i] = maskJSON(x, written)
+		}
+		return t
+	case string:
+		return maskCredentials(t, written)
+	}
+	return v
 }

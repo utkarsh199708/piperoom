@@ -25,6 +25,9 @@
 package strimzi
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -113,6 +116,9 @@ type Driver struct {
 	// that echoes one is masked (podLog).
 	writtenMu sync.Mutex
 	written   []string
+	// loaded are the namespaces whose db-credentials Secret was read back
+	// (credentialValues): a restarted runner has forgotten what it wrote.
+	loaded map[string]bool
 }
 
 // rememberWritten records credential values the runner wrote.
@@ -120,10 +126,44 @@ func (d *Driver) rememberWritten(vs []string) {
 	d.writtenMu.Lock()
 	defer d.writtenMu.Unlock()
 	for _, v := range vs {
-		if len(v) >= 4 && !contains(d.written, v) {
+		if v != "" && !contains(d.written, v) {
 			d.written = append(d.written, v)
 		}
 	}
+}
+
+// credentialValues is what every read masks: the values remembered, and
+// once per namespace, the db-credentials Secret's values read back (the
+// runner's Role may get it), so a value written before a restart is still
+// masked. A failed read is retried on the next call; meanwhile the line rule
+// alone masks credential-named lines.
+func (d *Driver) credentialValues(ctx context.Context, ns string) []string {
+	d.writtenMu.Lock()
+	done := d.loaded[ns]
+	d.writtenMu.Unlock()
+	if !done {
+		if body, err := d.api.Get(ctx, coreObjectPath(ns, "secrets", d.dbSecretName())); err == nil {
+			var sec struct {
+				Data map[string]string `json:"data"`
+			}
+			if json.Unmarshal(body, &sec) == nil {
+				var vs []string
+				for _, b := range sec.Data {
+					if raw, err := base64.StdEncoding.DecodeString(b); err == nil {
+						vs = append(vs, string(raw))
+					}
+				}
+				d.rememberWritten(vs)
+				d.writtenMu.Lock()
+				if d.loaded == nil {
+					d.loaded = map[string]bool{}
+				}
+				d.loaded[ns] = true
+				d.writtenMu.Unlock()
+			}
+		}
+	}
+	return d.writtenValues()
 }
 
 func (d *Driver) writtenValues() []string {
