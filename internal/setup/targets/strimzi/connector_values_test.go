@@ -412,10 +412,11 @@ func TestUserNameIsNotMaskedByValue(t *testing.T) {
 	}
 }
 
-// The line rule masks only a known credential key's value (round 6, B): a
-// JSON log keeps its other fields and a user key, MySQL's "(using
-// password: YES)", a ${secrets:...} reference, a Java frame and a token's
-// state stay; a later key on a kept line is still masked.
+// The line rule masks only a credential key's value (round 6, B): a JSON
+// log keeps its other fields and a user key, MySQL's "(using password:
+// YES)", a whole ${secrets:...} reference and a Java frame stay. Since round
+// 7 a token key is a credential key again (Token: expired is masked) and an
+// exemption holds only for the exact whole value.
 func TestCredentialLineRule(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{`{"user":"cdc","password":"p w","message":"connector started"}`, `{"user":"cdc","password":"[masked:credential]","message":"connector started"}`},
@@ -424,9 +425,9 @@ func TestCredentialLineRule(t *testing.T) {
 		{`Access denied for user 'cdc'@'10.0.0.4' (using password: YES)`, ""},
 		{`Access denied for user 'cdc'@'10.0.0.4' (using password: NO)`, ""},
 		{`database.password = ${secrets:data/orders-db-credentials:password}`, ""},
-		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=${secrets:data/x:password}, ssl.key.password=[masked:credential]`},
+		{`database.password=${secrets:data/x:password}, ssl.key.password=hunter22`, `database.password=[masked:credential]`},
 		{`at org.apache.hadoop.security.UserGroupInformation.doAs(UserGroupInformation.java:1899)`, ""},
-		{`Token: expired`, ""},
+		{`Token: expired`, `Token: [masked:credential]`},
 		{`database.user: cdc`, ""},
 		{`     database.password = two words, and a comma`, `     database.password = [masked:credential]`},
 		{`client_secret: abc`, `client_secret: [masked:credential]`},
@@ -458,4 +459,89 @@ func TestJDBCParamsRound6(t *testing.T) {
 		"mysql useUnicode":       url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_IDENTITY&useUnicode=true"),
 		"mysql useUnicode false": url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_IDENTITY&useUnicode=false"),
 	})
+}
+
+// Round 7 masking (security re-review of round 6): every form and decoded
+// copy of a written value, short values in decoded copies, token-family and
+// other credential keys, non-string JSON values, exact exemptions.
+func TestMaskCredentialsRound7(t *testing.T) {
+	written := []string{"a+b!c#d", "ab%1", "ab!xy", "q9z", "a&b", "uni\u00e9code"}
+	for _, c := range []struct{ in, want string }{
+		// 1: a path-escaped value with a literal +.
+		{"path a+b%21c%23d end", "path [masked:credential] end"},
+		{"path a%2Bb%21c%23d end", "path [masked:credential] end"},
+		// 2: a stray % ahead of an encoded value.
+		{"pct %ab%21xy end", "pct %[masked:credential] end"},
+		{"x ab%1ab%251 y", "x [masked:credential][masked:credential] y"},
+		// 6: a short value in a decoded copy, at an escape boundary.
+		{"login%20q9z%20failed", "login%20[masked:credential]%20failed"},
+		{"pw%3Dq9z", "pw%3D[masked:credential]"},
+		{`{"msg":"line1\nq9z"}`, `{"msg":"line1\n[masked:credential]"}`},
+		{`{"msg":"a\u0026b"}`, `{"msg":"[masked:credential]"}`},
+		{"with a&b.", "with [masked:credential]."},
+		{"q9zz and aq9z stay", "q9zz and aq9z stay"},
+		{"login with uni\u00e9code and uni%C3%A9code", "login with [masked:credential] and [masked:credential]"},
+	} {
+		if got := maskCredentials(c.in, written); got != c.want {
+			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+	for _, c := range []struct{ in, want string }{
+		// 4: token and the other credential keys.
+		{"token=zz1", "token=[masked:credential]"},
+		{"refresh_token: zz1", "refresh_token: [masked:credential]"},
+		{"X-Auth-Token: zz1", "X-Auth-Token: [masked:credential]"},
+		{"access_token=zz1", "access_token=[masked:credential]"},
+		{"sessionToken=zz1", "sessionToken=[masked:credential]"},
+		{"aws_session_token = zz1", "aws_session_token = [masked:credential]"},
+		{"api_key=zz1 apikey=zz2", "api_key=[masked:credential]"},
+		{"x-api-key: zz1", "x-api-key: [masked:credential]"},
+		{"Authorization: Basic zz1", "Authorization: [masked:credential]"},
+		{"auth=zz1", "auth=[masked:credential]"},
+		{"bearer: zz1", "bearer: [masked:credential]"},
+		{"credentials=zz1", "credentials=[masked:credential]"},
+		{"private_key: zz1", "private_key: [masked:credential]"},
+		{"privateKey: zz1", "privateKey: [masked:credential]"},
+		{"database.user=cdc username: cdc", "database.user=cdc username: cdc"},
+		{"tokenizer=standard", "tokenizer=standard"},
+		// 5: a credential key's non-string JSON value.
+		{`{"password": ["hunter2xyz"], "m":"ok"}`, `{"password": [masked:credential], "m":"ok"}`},
+		{`{"password" : 12345678, "m":"ok"}`, `{"password" : [masked:credential], "m":"ok"}`},
+		{`{"token":{"v":"zz1"},"m":"ok"}`, `{"token":[masked:credential],"m":"ok"}`},
+		{`m="{\"password\":12345678}"`, `m="{\"password\":[masked:credential]}"`},
+		// 8: an exemption holds only for the exact whole value.
+		{"password: YES)hunter2xyz", "password: [masked:credential]"},
+		{"(using password: YES)", "(using password: YES)"},
+		{"(using password: NO) at login", "(using password: NO) at login"},
+		{"password=${a}hunter2xyz", "password=[masked:credential]"},
+		{"password=${secrets:data/x:password} hunter2xyz", "password=[masked:credential]"},
+		{"password = [hidden]zz1", "password = [masked:credential]"},
+		{"password = [hidden]", "password = [hidden]"},
+	} {
+		if got := maskCredentials(c.in, nil); got != c.want {
+			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A redacted token straddling a line's 1000th byte is redacted before the
+// line is clipped (round 7, 3), and a last line without a newline is
+// dropped even when the body is under maxLogBytes (round 7, 7).
+func TestPodLogRound7(t *testing.T) {
+	h := newHarness(t, "", nil)
+	h.d.rememberWritten([]string{"hunter2xyz"})
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Repeat("x", 990) + " AKIAABCDEFGHIJKLMNOP tail\n" +
+		"a cut line ending with hunter2"
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	got := string(b)
+	if strings.Contains(got, "AKIAABCD") {
+		t.Errorf("the clipped line keeps the key's prefix: %s", got[len(got)-200:])
+	}
+	if strings.Contains(got, "a cut line") {
+		t.Errorf("the partial last line is returned: %s", got[len(got)-200:])
+	}
 }
