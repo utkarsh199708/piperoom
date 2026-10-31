@@ -8,3 +8,5 @@ setup:
     kafka: prod-kafka
     connectors: [orders-src, orders-sink]
     serverURL: https://piperoom.example.com
+networkPolicy:
+  enabled: true

@@ -367,6 +367,13 @@ setup:
     # KafkaUser's password source and cluster ACLs). Cluster-scoped: needs
     # cluster-admin at install. Required for the production class.
     admissionPolicy: false
+    # The pipeline's topic prefix (owners topic_prefix; the setup request's).
+    # Required with admissionPolicy: the policy holds a KafkaUser's topic ACLs
+    # to "<topicPrefix>." and the Connect cluster's own internal topics.
+    topicPrefix: ""
+    # The hosts a KafkaConnect build artifact may come from, as the runner's
+    # PIPEROOM_SETUP_PLUGIN_HOSTS (the policy pins every artifact url to one).
+    pluginHosts: [repo1.maven.org]
   runner:
     enabled: false
     room: ""                # the room id POST /api/setup returned, without its r_ prefix
@@ -379,3 +386,14 @@ setup:
     resources:
       requests: {cpu: 100m, memory: 256Mi}
       limits: {memory: 512Mi}
+    # The Job's NetworkPolicy, rendered when networkPolicy.enabled: egress to
+    # DNS (networkPolicy.dns), the API server and the piperoom server only.
+    # An empty "to" opens the port to any destination: narrow it to your API
+    # server's and server's addresses for production.
+    networkPolicy:
+      apiServer:
+        to: []
+        ports: [443, 6443]
+      server:
+        to: []            # the port comes from serverURL (443 for https without one)
+      extraEgress: []     # e.g. the source database when this runner runs the source ops

@@ -147,14 +147,23 @@ subjects:
     name: {{ printf "%s-connect" $connect }}
     namespace: {{ .Release.Namespace }}
 {{- if .Values.setup.pipeline.admissionPolicy }}
+{{- $prefix := .Values.setup.pipeline.topicPrefix }}
+{{- $ro := printf "%s-piperoom-ro" $p }}
+{{- $ns := .Release.Namespace }}
+{{- $hosts := list }}
+{{- range .Values.setup.pipeline.pluginHosts }}{{ $hosts = append $hosts (printf "'https://%s/'" .) }}{{ end }}
 ---
 # D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
-# named objects only, refuses the fields a compromised runner could use to
-# mount any Secret or mint a Kafka superuser.
+# named objects only, mirrors the runner's field allow-list
+# (internal/setup/targets/strimzi allowlist.go, connector_config.go) for the
+# fields a compromised runner could use to mount any Secret, read another
+# Secret through a config provider, pull an unpinned plugin, reach another
+# Kafka cluster or mint a Kafka superuser. Every field is read behind has(),
+# so a field the CRD lacks is absent, never an evaluation error.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: {{ printf "piperoom-pipeline-%s" $p }}
+  name: {{ printf "piperoom-pipeline-%s" $p | quote }}
   labels:
     {{- include "piperoom.setupLabels" . | nindent 4 }}
 spec:
@@ -164,45 +173,103 @@ spec:
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
-        resources: [kafkaconnects, kafkausers]
+        resources: [kafkaconnects, kafkaconnectors, kafkausers]
   validations:
+    # ---- KafkaConnect ----
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         (!has(object.spec.image) && !has(object.spec.template) && !has(object.spec.externalConfiguration) &&
         (!has(object.spec.build) || !has(object.spec.build.output) || !has(object.spec.build.output.pushSecret) ||
-        object.spec.build.output.pushSecret == '{{ printf "%s-registry-push" $p }}'))
-      message: "piperoom: spec.image, spec.template and spec.externalConfiguration are refused, and the build pushes only with {{ printf "%s-registry-push" $p }}"
+        object.spec.build.output.pushSecret == {{ printf "%s-registry-push" $p | squote }}))
+      message: {{ printf "piperoom: spec.image, spec.template and spec.externalConfiguration are refused, and the build pushes only with %s-registry-push" $p | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.tls) || !has(object.spec.tls.trustedCertificates) ||
+        object.spec.tls.trustedCertificates.all(c, has(c.secretName) && c.secretName == {{ printf "%s-cluster-ca-cert" $kafka | squote }})
+      message: {{ printf "piperoom: spec.tls trusts only the %s-cluster-ca-cert Secret" $kafka | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.authentication) ||
+        (has(object.spec.authentication.type) &&
+        ((object.spec.authentication.type == 'tls' && has(object.spec.authentication.certificateAndKey) &&
+        has(object.spec.authentication.certificateAndKey.secretName) && object.spec.authentication.certificateAndKey.secretName == {{ $connect | squote }}) ||
+        (object.spec.authentication.type == 'scram-sha-512' && has(object.spec.authentication.passwordSecret) &&
+        has(object.spec.authentication.passwordSecret.secretName) && object.spec.authentication.passwordSecret.secretName == {{ $connect | squote }})))
+      message: {{ printf "piperoom: spec.authentication is tls or scram-sha-512 with the %s KafkaUser's Secret only" $connect | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k, !k.startsWith('config.providers') ||
+        (k == 'config.providers' && string(object.spec.config[k]) == 'secrets') ||
+        (k == 'config.providers.secrets.class' && string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider'))
+      message: "piperoom: the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider)"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
+        object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
+        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
+        has(a.url) && [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
+      message: {{ printf "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
+        (has(object.spec.logging.valueFrom.configMapKeyRef) && has(object.spec.logging.valueFrom.configMapKeyRef.name) &&
+        object.spec.logging.valueFrom.configMapKeyRef.name == {{ printf "%s-connect-logging" $p | squote }})) &&
+        (!has(object.spec.metricsConfig) || !has(object.spec.metricsConfig.valueFrom) ||
+        (has(object.spec.metricsConfig.valueFrom.configMapKeyRef) && has(object.spec.metricsConfig.valueFrom.configMapKeyRef.name) &&
+        object.spec.metricsConfig.valueFrom.configMapKeyRef.name == {{ printf "%s-connect-metrics" $p | squote }})))
+      message: {{ printf "piperoom: logging and metrics read only the %s-connect-logging and %s-connect-metrics ConfigMaps" $p $p | quote }}
+    # ---- KafkaConnector ----
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        (!has(object.spec.config) || object.spec.config.all(k,
+        k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
+        !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
+        (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
+        (!string(object.spec.config[k]).contains('${') ||
+        string(object.spec.config[k]).matches({{ printf `^([^$]|\\$[^{])*(\\$\\{secrets:%s/%s-db-credentials:[A-Za-z0-9._-]+\\}([^$]|\\$[^{])*)*$` $ns $p | squote }})))))
+      message: {{ printf "piperoom: a KafkaConnector is a Debezium class with no client override, other bootstrap, connect-time SQL or provider, and references only ${secrets:%s/%s-db-credentials:<key>}" $ns $p | quote }}
+    # ---- KafkaUser ----
     - expression: >-
         object.kind != 'KafkaUser' || !has(object.spec) ||
-        ((!has(object.spec.authentication) || !has(object.spec.authentication.password)) &&
+        ((!has(object.spec.authentication) || (!has(object.spec.authentication.password) &&
+        has(object.spec.authentication.type) && object.spec.authentication.type in ['tls', 'scram-sha-512'])) &&
         (!has(object.spec.authorization) || !has(object.spec.authorization.acls) ||
-        object.spec.authorization.acls.all(a, !has(a.resource) || !has(a.resource.type) ||
-        (a.resource.type != 'cluster' && a.resource.type != 'transactionalId'))))
-      message: "piperoom: a KafkaUser's password source and cluster or transactionalId ACLs are refused"
+        object.spec.authorization.acls.all(a, has(a.resource) && has(a.resource.type) && has(a.resource.name) &&
+        ((a.resource.type == 'topic' &&
+        ((a.resource.name == {{ printf "%s." $prefix | squote }} && has(a.resource.patternType) && a.resource.patternType == 'prefix') ||
+        ((!has(a.resource.patternType) || a.resource.patternType == 'literal') &&
+        a.resource.name in [{{ printf "%s-connect-configs" $connect | squote }}, {{ printf "%s-connect-offsets" $connect | squote }}, {{ printf "%s-connect-status" $connect | squote }}])))
+        || (a.resource.type == 'group' && a.resource.name == {{ $connect | squote }} &&
+        (!has(a.resource.patternType) || a.resource.patternType == 'literal'))) &&
+        has(a.operations) && a.operations.all(o, o in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']))))
+      message: {{ printf "piperoom: a KafkaUser has no password source, and its ACLs are the pipeline's own: topics under %s. (prefix), the %s-connect-* internal topics and group %s (literal), with no other resource type or operation" $prefix $connect $connect | quote }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: {{ printf "piperoom-pipeline-%s" $p }}
+  name: {{ printf "piperoom-pipeline-%s" $p | quote }}
   labels:
     {{- include "piperoom.setupLabels" . | nindent 4 }}
 spec:
-  policyName: {{ printf "piperoom-pipeline-%s" $p }}
+  policyName: {{ printf "piperoom-pipeline-%s" $p | quote }}
   validationActions: [Deny]
   matchResources:
     namespaceSelector:
       matchLabels:
-        kubernetes.io/metadata.name: {{ .Release.Namespace }}
+        kubernetes.io/metadata.name: {{ $ns | quote }}
     resourceRules:
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
         resources: [kafkaconnects]
-        resourceNames: [{{ $connect }}]
+        resourceNames: [{{ $connect | quote }}]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnectors]
+        resourceNames: [{{ range $i, $c := .Values.setup.pipeline.connectors }}{{ if $i }}, {{ end }}{{ $c | quote }}{{ end }}]
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
         resources: [kafkausers]
-        resourceNames: [{{ $connect }}, {{ printf "%s-piperoom-ro" $p }}]
+        resourceNames: [{{ $connect | quote }}, {{ $ro | quote }}]
 {{- end }}
 {{- end }}

@@ -1,12 +1,61 @@
 ---
 # Source: piperoom/templates/setup-runner.yaml
+# The Job's egress (networkPolicy.enabled): DNS, the Kubernetes API server and
+# the piperoom server only, and no ingress at all. A runner that also runs the
+# source ops (a source database the room names) needs that database in
+# setup.runner.networkPolicy.extraEgress. An empty "to" opens the port to any
+# destination, because the chart cannot know your API server or server
+# addresses: narrow it for production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
+  labels:
+    helm.sh/chart: piperoom-0.1.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+    app.kubernetes.io/part-of: piperoom-setup
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
+      app.kubernetes.io/part-of: piperoom-setup
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    # the Kubernetes API server
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # the piperoom server (piperoom.example.com)
+    - ports:
+        - port: 443
+          protocol: TCP
+---
+# Source: piperoom/templates/setup-runner.yaml
 # The room release (docs/design/setup-strimzi.md §3, §4): the setup runner of
 # one room, in the target namespace. The close card uninstalls it; nothing the
 # running pipeline needs lives here.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
@@ -16,12 +65,13 @@ automountServiceAccountToken: false
 ---
 # Source: piperoom/templates/setup-runner.yaml
 # No create on anything and no list but events: every object the runner can
-# reach exists before the Job starts, named here. escalate, bind and
-# impersonate are never granted; nothing is cluster-scoped.
+# reach exists before the Job starts, named here, with only the verbs its ops
+# send (internal/setup/targets/strimzi: GET, JSON PATCH and DELETE; no watch).
+# escalate, bind and impersonate are never granted; nothing is cluster-scoped.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
@@ -30,77 +80,68 @@ metadata:
 rules:
   - apiGroups: [kafka.strimzi.io]
     resources: [kafkas]
-    resourceNames: [prod-kafka]
-    verbs: [get, watch]
+    resourceNames: ["prod-kafka"]
+    verbs: [get]
   - apiGroups: [kafka.strimzi.io]
     resources: [kafkaconnects]
-    resourceNames: [orders-connect]
-    verbs: [get, watch, patch]
+    resourceNames: ["orders-connect"]
+    verbs: [get, patch]
   - apiGroups: [kafka.strimzi.io]
     resources: [kafkaconnectors]
-    resourceNames: [orders-src, orders-sink]
-    verbs: [get, watch, patch, delete]
+    resourceNames: ["orders-src", "orders-sink"]
+    verbs: [get, patch, delete]
   - apiGroups: [kafka.strimzi.io]
     resources: [kafkausers]
-    resourceNames: [orders-connect, orders-piperoom-ro]
-    verbs: [get, watch, patch]
+    resourceNames: ["orders-connect", "orders-piperoom-ro"]
+    verbs: [get, patch]
   - apiGroups: [kafka.strimzi.io]
     resources: [kafkatopics]
-    resourceNames: [orders-canary]
-    verbs: [get, watch, patch, delete]
+    resourceNames: ["orders-canary"]
+    verbs: [get, patch, delete]
+  # The pairing code is mounted (the kubelet reads it, not this Role); the
+  # runner deletes it once the Welcome arrives.
   - apiGroups: [""]
     resources: [secrets]
-    resourceNames:
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-0
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-1
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-2
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-3
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-4
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-5
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-6
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-7
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-8
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-9
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-10
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-11
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-0
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-1
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-2
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-3
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-4
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-5
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-6
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-7
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-8
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-9
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-10
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-rollback-11
-      - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm-creds
-      - orders-db-credentials
-      - orders-piperoom-ro
-    verbs: [get, patch, delete]
+    resourceNames: ["piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing"]
+    verbs: [delete]
+  # The person's confirm Secret: read once, then deleted.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: ["piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm"]
+    verbs: [get, delete]
+  # k8s_secret_apply fills the chart's empty Secret and k8s_unapply empties it;
+  # it is never deleted by the runner (helm uninstall of the pipeline release).
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: ["orders-db-credentials"]
+    verbs: [get, patch]
+  # The read KafkaUser's generated credential (design §9): read only.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: ["orders-piperoom-ro"]
+    verbs: [get]
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [orders-connect-logging]
+    resourceNames: ["orders-connect-logging"]
     verbs: [get, patch]
   - apiGroups: [""]
     resources: [configmaps]
-    resourceNames: [orders-connect-metrics]
+    resourceNames: ["orders-connect-metrics"]
     verbs: [get]
   - apiGroups: [""]
     resources: [pods]
-    resourceNames: [orders-connect-connect-0, orders-connect-connect-1, orders-connect-connect-2, orders-connect-connect-build]
-    verbs: [get, watch]
-  - apiGroups: [""]
-    resources: [pods/log]
-    resourceNames: [orders-connect-connect-0, orders-connect-connect-1, orders-connect-connect-2, orders-connect-connect-build]
+    resourceNames: ["orders-connect-connect-0", "orders-connect-connect-1", "orders-connect-connect-2", "orders-connect-connect-build"]
     verbs: [get]
   - apiGroups: [""]
-    resources: [events]
-    verbs: [list]
-  - apiGroups: [events.k8s.io]
+    resources: [pods/log]
+    resourceNames: ["orders-connect-connect-0", "orders-connect-connect-1", "orders-connect-connect-2", "orders-connect-connect-build"]
+    verbs: [get]
+  # The one namespace-wide read: k8s_events lists core events with a
+  # fieldSelector on involvedObject.name, and RBAC cannot scope a list by a
+  # field other than metadata.name, so resourceNames cannot narrow it. The
+  # runner refuses an involvedObject outside the chart's names before the
+  # request; event messages it returns are redacted and capped.
+  - apiGroups: [""]
     resources: [events]
     verbs: [list]
 ---
@@ -108,7 +149,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
@@ -117,17 +158,17 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
 subjects:
   - kind: ServiceAccount
-    name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
-    namespace: data
+    name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
+    namespace: "data"
 ---
 # Source: piperoom/templates/setup-runner.yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
@@ -145,7 +186,7 @@ spec:
         app.kubernetes.io/instance: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
         app.kubernetes.io/part-of: piperoom-setup
     spec:
-      serviceAccountName: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4
+      serviceAccountName: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4"
       # The token comes from the projected volume below (one hour, rotated;
       # the runner re-reads the file per request), not the automount.
       automountServiceAccountToken: false
@@ -165,7 +206,7 @@ spec:
             - --code-file
             - /var/run/piperoom/pairing/code
             - --confirm-secret-prefix
-            - piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm
+            - "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-confirm"
             - --project
             - /work
             - --strimzi-pipeline
@@ -199,7 +240,7 @@ spec:
           projected:
             sources:
               - secret:
-                  name: piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing
+                  name: "piperoom-setup-01jbz3k7q8x9v2m4n6p8r0s2t4-pairing"
                   optional: false
                   items:
                     - key: code

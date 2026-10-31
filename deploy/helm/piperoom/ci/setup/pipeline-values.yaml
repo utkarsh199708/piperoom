@@ -6,3 +6,4 @@ setup:
     kafka: prod-kafka
     connectors: [orders-src]
     admissionPolicy: true
+    topicPrefix: pg

@@ -192,12 +192,16 @@ spec: {}
 ---
 # Source: piperoom/templates/setup-pipeline.yaml
 # D11: RBAC bounds objects, not fields. This policy, bound to this pipeline's
-# named objects only, refuses the fields a compromised runner could use to
-# mount any Secret or mint a Kafka superuser.
+# named objects only, mirrors the runner's field allow-list
+# (internal/setup/targets/strimzi allowlist.go, connector_config.go) for the
+# fields a compromised runner could use to mount any Secret, read another
+# Secret through a config provider, pull an unpinned plugin, reach another
+# Kafka cluster or mint a Kafka superuser. Every field is read behind has(),
+# so a field the CRD lacks is absent, never an evaluation error.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: piperoom-pipeline-orders
+  name: "piperoom-pipeline-orders"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
@@ -210,8 +214,9 @@ spec:
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
-        resources: [kafkaconnects, kafkausers]
+        resources: [kafkaconnects, kafkaconnectors, kafkausers]
   validations:
+    # ---- KafkaConnect ----
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         (!has(object.spec.image) && !has(object.spec.template) && !has(object.spec.externalConfiguration) &&
@@ -219,38 +224,95 @@ spec:
         object.spec.build.output.pushSecret == 'orders-registry-push'))
       message: "piperoom: spec.image, spec.template and spec.externalConfiguration are refused, and the build pushes only with orders-registry-push"
     - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.tls) || !has(object.spec.tls.trustedCertificates) ||
+        object.spec.tls.trustedCertificates.all(c, has(c.secretName) && c.secretName == 'prod-kafka-cluster-ca-cert')
+      message: "piperoom: spec.tls trusts only the prod-kafka-cluster-ca-cert Secret"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.authentication) ||
+        (has(object.spec.authentication.type) &&
+        ((object.spec.authentication.type == 'tls' && has(object.spec.authentication.certificateAndKey) &&
+        has(object.spec.authentication.certificateAndKey.secretName) && object.spec.authentication.certificateAndKey.secretName == 'orders-connect') ||
+        (object.spec.authentication.type == 'scram-sha-512' && has(object.spec.authentication.passwordSecret) &&
+        has(object.spec.authentication.passwordSecret.secretName) && object.spec.authentication.passwordSecret.secretName == 'orders-connect')))
+      message: "piperoom: spec.authentication is tls or scram-sha-512 with the orders-connect KafkaUser's Secret only"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.config) ||
+        object.spec.config.all(k, !k.startsWith('config.providers') ||
+        (k == 'config.providers' && string(object.spec.config[k]) == 'secrets') ||
+        (k == 'config.providers.secrets.class' && string(object.spec.config[k]) == 'io.strimzi.kafka.KubernetesSecretConfigProvider'))
+      message: "piperoom: the only config provider is secrets (io.strimzi.kafka.KubernetesSecretConfigProvider)"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
+        object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
+        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
+        has(a.url) && ['https://repo1.maven.org/'].exists(h, a.url.startsWith(h))))
+      message: "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from repo1.maven.org"
+    - expression: >-
+        object.kind != 'KafkaConnect' || !has(object.spec) ||
+        ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
+        (has(object.spec.logging.valueFrom.configMapKeyRef) && has(object.spec.logging.valueFrom.configMapKeyRef.name) &&
+        object.spec.logging.valueFrom.configMapKeyRef.name == 'orders-connect-logging')) &&
+        (!has(object.spec.metricsConfig) || !has(object.spec.metricsConfig.valueFrom) ||
+        (has(object.spec.metricsConfig.valueFrom.configMapKeyRef) && has(object.spec.metricsConfig.valueFrom.configMapKeyRef.name) &&
+        object.spec.metricsConfig.valueFrom.configMapKeyRef.name == 'orders-connect-metrics')))
+      message: "piperoom: logging and metrics read only the orders-connect-logging and orders-connect-metrics ConfigMaps"
+    # ---- KafkaConnector ----
+    - expression: >-
+        object.kind != 'KafkaConnector' || !has(object.spec) ||
+        ((!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        (!has(object.spec.config) || object.spec.config.all(k,
+        k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
+        !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
+        (!k.endsWith('bootstrap.servers') || k == 'schema.history.internal.kafka.bootstrap.servers') &&
+        (!string(object.spec.config[k]).contains('${') ||
+        string(object.spec.config[k]).matches('^([^$]|\\$[^{])*(\\$\\{secrets:data/orders-db-credentials:[A-Za-z0-9._-]+\\}([^$]|\\$[^{])*)*$')))))
+      message: "piperoom: a KafkaConnector is a Debezium class with no client override, other bootstrap, connect-time SQL or provider, and references only ${secrets:data/orders-db-credentials:<key>}"
+    # ---- KafkaUser ----
+    - expression: >-
         object.kind != 'KafkaUser' || !has(object.spec) ||
-        ((!has(object.spec.authentication) || !has(object.spec.authentication.password)) &&
+        ((!has(object.spec.authentication) || (!has(object.spec.authentication.password) &&
+        has(object.spec.authentication.type) && object.spec.authentication.type in ['tls', 'scram-sha-512'])) &&
         (!has(object.spec.authorization) || !has(object.spec.authorization.acls) ||
-        object.spec.authorization.acls.all(a, !has(a.resource) || !has(a.resource.type) ||
-        (a.resource.type != 'cluster' && a.resource.type != 'transactionalId'))))
-      message: "piperoom: a KafkaUser's password source and cluster or transactionalId ACLs are refused"
+        object.spec.authorization.acls.all(a, has(a.resource) && has(a.resource.type) && has(a.resource.name) &&
+        ((a.resource.type == 'topic' &&
+        ((a.resource.name == 'pg.' && has(a.resource.patternType) && a.resource.patternType == 'prefix') ||
+        ((!has(a.resource.patternType) || a.resource.patternType == 'literal') &&
+        a.resource.name in ['orders-connect-connect-configs', 'orders-connect-connect-offsets', 'orders-connect-connect-status'])))
+        || (a.resource.type == 'group' && a.resource.name == 'orders-connect' &&
+        (!has(a.resource.patternType) || a.resource.patternType == 'literal'))) &&
+        has(a.operations) && a.operations.all(o, o in ['Create', 'Describe', 'Read', 'Write', 'DescribeConfigs']))))
+      message: "piperoom: a KafkaUser has no password source, and its ACLs are the pipeline's own: topics under pg. (prefix), the orders-connect-connect-* internal topics and group orders-connect (literal), with no other resource type or operation"
 ---
 # Source: piperoom/templates/setup-pipeline.yaml
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: piperoom-pipeline-orders
+  name: "piperoom-pipeline-orders"
   labels:
     helm.sh/chart: piperoom-0.1.0
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/instance: piperoom-pipeline-orders
     app.kubernetes.io/part-of: piperoom-setup
 spec:
-  policyName: piperoom-pipeline-orders
+  policyName: "piperoom-pipeline-orders"
   validationActions: [Deny]
   matchResources:
     namespaceSelector:
       matchLabels:
-        kubernetes.io/metadata.name: data
+        kubernetes.io/metadata.name: "data"
     resourceRules:
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
         resources: [kafkaconnects]
-        resourceNames: [orders-connect]
+        resourceNames: ["orders-connect"]
+      - apiGroups: [kafka.strimzi.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [kafkaconnectors]
+        resourceNames: ["orders-src"]
       - apiGroups: [kafka.strimzi.io]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
         resources: [kafkausers]
-        resourceNames: [orders-connect, orders-piperoom-ro]
+        resourceNames: ["orders-connect", "orders-piperoom-ro"]

@@ -215,7 +215,14 @@ The chart refuses a release whose name is not `piperoom-pipeline-<pipeline>` or 
 blocks in one release, and a connector name twice. The runner's Role has **no `create`** and names every object
 (`resourceNames`); `list` only on events; no `escalate`, `bind`, `impersonate` or `*`; nothing cluster-scoped.
 `setup.pipeline.admissionPolicy=true` adds the D11 `ValidatingAdmissionPolicy` and its binding (cluster-scoped:
-cluster-admin at install; required for a `production` target). The close card gives
+cluster-admin at install; required for a `production` target); it needs `setup.pipeline.topicPrefix` (the
+pipeline's topic prefix: a KafkaUser's topic ACLs are held to it) and pins build artifacts to
+`setup.pipeline.pluginHosts` (default `repo1.maven.org`). With `networkPolicy.enabled` the runner release adds a
+NetworkPolicy for the Job: no ingress, egress to DNS, the API server and the server only
+(`setup.runner.networkPolicy`; add the source database to its `extraEgress` when the Job runs the source ops).
+The runner refuses to patch or delete an object of a chart name that does not carry the pipeline release's
+`app.kubernetes.io/instance` label (and, at `helm install` of the runner release, the chart checks the same of
+the KafkaConnect shell). The close card gives
 `helm uninstall piperoom-setup-<room> -n data`; the pipeline release is uninstalled only by the rollback card.
 
 The Job runs `piperoom-setup --code-file ... --confirm-secret-prefix ... --strimzi-pipeline ...`: it reads the
