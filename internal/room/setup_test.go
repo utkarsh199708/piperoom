@@ -344,6 +344,29 @@ func TestCreateSetupRoomPipelineExists(t *testing.T) {
 	wantSetupError(t, err, 409, "pipeline_exists")
 }
 
+// TestSetupConnectorNamesPerTarget: a connector name is checked against the
+// rule of the room's target at creation and when the pipeline grows, and the
+// error names the rule; a compose room keeps the looser Connect rule.
+func TestSetupConnectorNamesPerTarget(t *testing.T) {
+	env := newSetupEnv(t, setupOptions{withTenants: true})
+	ctx := context.Background()
+	req := setupRequest("orders-strimzi")
+	req.Target = "strimzi"
+	req.Connectors = []string{"orders-src"}
+	res := createSetup(t, env, req)
+	_, err := env.svc.ExtendSetupPipeline(ctx, alice(), res.Room.ID, room.SetupPipelineExtension{AddConnectors: []string{"Orders_Sink"}})
+	wantSetupError(t, err, 400, "validation")
+	if err == nil || !strings.Contains(err.Error(), "Kubernetes object name") {
+		t.Fatalf("err = %v, want the Strimzi rule named", err)
+	}
+	if _, err := env.svc.ExtendSetupPipeline(ctx, alice(), res.Room.ID, room.SetupPipelineExtension{AddConnectors: []string{"orders-sink"}}); err != nil {
+		t.Fatalf("a DNS-label connector on a Strimzi room: %v", err)
+	}
+	compose := setupRequest("orders-compose")
+	compose.Connectors = []string{"Orders_Src.v2"}
+	createSetup(t, env, compose)
+}
+
 func TestCreateSetupRoomBadRequest(t *testing.T) {
 	env := newSetupEnv(t, setupOptions{withTenants: true})
 	cases := []struct {
@@ -359,6 +382,13 @@ func TestCreateSetupRoomBadRequest(t *testing.T) {
 		{"bad table", func(r *events.SetupRequest) { r.Tables = []string{"orders"} }, "validation"},
 		{"duplicate table", func(r *events.SetupRequest) { r.Tables = []string{"public.a", "public.a"} }, "validation"},
 		{"bad connector", func(r *events.SetupRequest) { r.Connectors = []string{"has space"} }, "validation"},
+		// A name setupConnectorRe allows that the target's runner refuses.
+		{"strimzi connector uppercase", func(r *events.SetupRequest) { r.Target = "strimzi"; r.Connectors = []string{"Orders-Src"} }, "validation"},
+		{"strimzi connector underscore", func(r *events.SetupRequest) { r.Target = "strimzi"; r.Connectors = []string{"orders_src"} }, "validation"},
+		{"strimzi connector dot", func(r *events.SetupRequest) { r.Target = "strimzi"; r.Connectors = []string{"orders.src"} }, "validation"},
+		{"confluent connector too long", func(r *events.SetupRequest) { r.Target = "confluent"; r.Connectors = []string{strings.Repeat("a", 65)} }, "validation"},
+		{"aiven connector leading underscore", func(r *events.SetupRequest) { r.Target = "aiven"; r.Connectors = []string{"_orders"} }, "validation"},
+		{"msk connector leading underscore", func(r *events.SetupRequest) { r.Target = "msk"; r.Connectors = []string{"_orders"} }, "validation"},
 		{"title", func(r *events.SetupRequest) { r.Title = "" }, "validation"},
 		{"duplicate target", func(r *events.SetupRequest) {
 			r.Targets = []events.SetupTarget{{Kind: "postgres", Address: "db.acme:5432"}, {Kind: "host", Address: "db.acme:5432"}}

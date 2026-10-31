@@ -537,6 +537,17 @@ func setupGuardFacts(op string, params json.RawMessage) plan.StepFacts {
 			return facts
 		}
 		facts.KeepsVolumes = setupKeepsVolumes(obj)
+	case plan.OpK8sUnapply:
+		// The kind the runner's decode binds (rollbackParams.Kind): a key
+		// that folds to "kind" is the one encoding/json decodes, and two
+		// that fold together are refused by setupParamsObject.
+		obj, ok := setupParamsObject(params)
+		if !ok {
+			return facts
+		}
+		if k, ok := obj[foldKey("kind")].(string); ok {
+			facts.Kind = k
+		}
 	}
 	return facts
 }

@@ -63,7 +63,7 @@ func targetSpecs() []Spec {
 			Name:     "k8s_delete",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Roll back a KafkaConnector or the canary KafkaTopic: delete it by its chart-fixed name (the Topic Operator then deletes the topic). Any other kind or name is refused; the topic is kept on a production target.",
+			Describe: "Roll back a KafkaConnector or the canary KafkaTopic: delete it by its chart-fixed name (the Topic Operator then deletes the topic). Any other kind or name is refused, and both kinds are refused on a production target (the topic is data; a connector is deleted by a person).",
 			Schema:   strimziRollbackSchema(strimziDeleteKinds, true),
 			Scope:    strimziDeleteScope,
 			// No PreviewOp until the runner registers preview_k8s_delete:
@@ -74,7 +74,7 @@ func targetSpecs() []Spec {
 			Name:     "k8s_unapply",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Roll back a k8s_apply or k8s_secret_apply: re-pause the KafkaConnect or a KafkaUser (name required) with the chart shell's spec, or patch the db-credentials Secret or the logging ConfigMap back to empty. The KafkaConnect is refused on a production target.",
+			Describe: "Roll back a k8s_apply or k8s_secret_apply: re-pause the KafkaConnect or a KafkaUser (name required) with the chart shell's spec, or patch the db-credentials Secret or the logging ConfigMap back to empty. The KafkaConnect and the Secret are refused on a production target.",
 			Schema:   strimziRollbackSchema(strimziUnapplyKinds, false),
 			Scope:    ScopeFree,
 			// No PreviewOp until the runner registers preview_k8s_unapply:
@@ -332,6 +332,9 @@ func checkStrimziApply(raw json.RawMessage) error {
 }
 
 func checkStrimziSecretApply(raw json.RawMessage) error {
+	if err := refuseCardOnly(raw); err != nil {
+		return err
+	}
 	var p struct {
 		Keys map[string]string `json:"keys"`
 	}
@@ -384,17 +387,99 @@ func checkStrimziRollback(kinds []string, nameRequired bool) func(json.RawMessag
 	}
 }
 
-// strimziApplyScope: a KafkaConnector is one of the pipeline's connectors;
-// every other template names a chart-fixed object of the pipeline.
+// strimziApplyScope binds what a template's params name to the pipeline:
+// the connector is one of its connectors, and every topic prefix a render
+// uses is the pipeline's own (owners.Pipeline.TopicPrefix), so a KafkaUser's
+// ACLs, the canary topic and the connector's topics never reach another
+// pipeline's or an arbitrary prefix. The canary topic's schema is the schema
+// of one of the pipeline's source tables (the room creates the canary table
+// there), or public when none names a schema.
 func strimziApplyScope(pl owners.Pipeline, raw json.RawMessage) error {
 	var p strimziApplyParams
 	if err := json.Unmarshal(paramsOrEmpty(raw), &p); err != nil {
 		return fmt.Errorf("%w: scope: params must be a JSON object", tools.ErrBadInput)
 	}
-	if p.Template != "connector" {
+	params := paramsOrEmpty(p.Params)
+	switch p.Template {
+	case "connector":
+		if err := ScopeConnector()(pl, params); err != nil {
+			return err
+		}
+		return strimziConnectorScope(pl, params)
+	case "canary-topic":
+		var tp struct {
+			TopicPrefix string `json:"topic_prefix"`
+			Schema      string `json:"schema"`
+		}
+		if err := json.Unmarshal(params, &tp); err != nil {
+			return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
+		}
+		if err := strimziPrefixScope(pl, tp.TopicPrefix); err != nil {
+			return err
+		}
+		if !slices.Contains(strimziCanarySchemas(pl), tp.Schema) {
+			return fmt.Errorf("%w: schema %q is not the schema of a source table of pipeline %q", tools.ErrOutOfScope, clipText(tp.Schema), clipText(pl.ID))
+		}
+	case "connect-user", "read-user":
+		var up struct {
+			TopicPrefix string `json:"topic_prefix"`
+		}
+		if err := json.Unmarshal(params, &up); err != nil {
+			return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
+		}
+		return strimziPrefixScope(pl, up.TopicPrefix)
+	}
+	return nil
+}
+
+// strimziPrefixScope refuses a topic prefix other than the pipeline's.
+func strimziPrefixScope(pl owners.Pipeline, prefix string) error {
+	if pl.TopicPrefix == "" {
+		return fmt.Errorf("%w: pipeline %q has no topic_prefix", tools.ErrOutOfScope, clipText(pl.ID))
+	}
+	if prefix != pl.TopicPrefix {
+		return fmt.Errorf("%w: topic_prefix %q is not pipeline %q's (%s)", tools.ErrOutOfScope, clipText(prefix), clipText(pl.ID), clipText(pl.TopicPrefix))
+	}
+	return nil
+}
+
+// strimziCanarySchemas are the schemas the canary table may be in: those of
+// the pipeline's source tables, or public when none names one.
+func strimziCanarySchemas(pl owners.Pipeline) []string {
+	var out []string
+	for _, t := range pl.SourceTables {
+		if i := strings.LastIndex(t, "."); i > 0 && !slices.Contains(out, t[:i]) {
+			out = append(out, t[:i])
+		}
+	}
+	if len(out) == 0 {
+		out = []string{"public"}
+	}
+	return out
+}
+
+// strimziConnectorScope binds a connector config's topics to the pipeline:
+// a source's topic.prefix is the pipeline's (and required), and a JDBC sink's
+// topics each carry it (topics.regex is refused by the runner's allow-list).
+func strimziConnectorScope(pl owners.Pipeline, params json.RawMessage) error {
+	var cp struct {
+		Plugin string            `json:"plugin"`
+		Config map[string]string `json:"config"`
+	}
+	if err := json.Unmarshal(params, &cp); err != nil {
+		return fmt.Errorf("%w: scope: params must be the template's params object", tools.ErrBadInput)
+	}
+	if cp.Plugin == "jdbc" {
+		topics := strings.Split(cp.Config["topics"], ",")
+		for _, t := range topics {
+			t = strings.TrimSpace(t)
+			if pl.TopicPrefix == "" || !strings.HasPrefix(t, pl.TopicPrefix+".") {
+				return fmt.Errorf("%w: sink topic %q is not a topic of pipeline %q", tools.ErrOutOfScope, clipText(t), clipText(pl.ID))
+			}
+		}
 		return nil
 	}
-	return ScopeConnector()(pl, paramsOrEmpty(p.Params))
+	return strimziPrefixScope(pl, cp.Config["topic.prefix"])
 }
 
 // strimziDeleteScope: a KafkaConnector deleted is one of the pipeline's

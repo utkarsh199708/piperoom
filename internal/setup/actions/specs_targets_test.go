@@ -275,9 +275,10 @@ func TestStrimziCardOnlyFieldIsNotTheModels(t *testing.T) {
 	env := ops.Env{Targets: testTargets}
 	specs := specsByName()
 	for name, p := range map[string]string{
-		"k8s_apply":   `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"pg","schema":"public","table":"t"},"admission_policy_confirmed":true}`,
-		"k8s_delete":  `{"kind":"KafkaConnector","name":"orders-src","admission_policy_confirmed":true}`,
-		"k8s_unapply": `{"kind":"Secret","admission_policy_confirmed":true}`,
+		"k8s_apply":        `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"pg","schema":"public","table":"piperoom_canary"},"admission_policy_confirmed":true}`,
+		"k8s_delete":       `{"kind":"KafkaConnector","name":"orders-src","admission_policy_confirmed":true}`,
+		"k8s_unapply":      `{"kind":"Secret","admission_policy_confirmed":true}`,
+		"k8s_secret_apply": `{"keys":{"password":"${secret:pw}"},"admission_policy_confirmed":true}`,
 	} {
 		op, _ := reg.Get(name)
 		if err := op.Validate(json.RawMessage(p), env); err != nil {
@@ -296,15 +297,28 @@ func TestStrimziCardOnlyFieldIsNotTheModels(t *testing.T) {
 // TestTargetSpecScopes: a connector a target write names is one of the
 // pipeline's; the chart-fixed Strimzi objects need no scope.
 func TestTargetSpecScopes(t *testing.T) {
-	pl := owners.Pipeline{ID: "orders", TopicPrefix: "orders", Connectors: []string{"orders-src"}, ConsumerGroups: []string{"orders-sink"}}
+	pl := owners.Pipeline{ID: "orders", TopicPrefix: "orders", SourceTables: []string{"public.orders", "sales.items"}, Connectors: []string{"orders-src"}, ConsumerGroups: []string{"orders-sink"}}
 	specs := specsByName()
 	cases := []struct {
 		op, params string
 		inScope    bool
 	}{
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{}}}`, true},
-		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"payments-src","plugin":"postgres","config":{}}}`, false},
-		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"pg","schema":"public","table":"t"}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"orders"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"payments-src","plugin":"postgres","config":{"topic.prefix":"orders"}}}`, false},
+		// The topic prefix every render uses is the pipeline's own.
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"postgres","config":{"topic.prefix":"payments"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,orders.sales.items"}}}`, true},
+		{"k8s_apply", `{"kind":"KafkaConnector","template":"connector","params":{"connector":"orders-src","plugin":"jdbc","config":{"topics":"orders.public.orders,payments.public.x"}}}`, false},
+		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"public","table":"piperoom_canary"}}`, true},
+		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"sales","table":"piperoom_canary"}}`, true},
+		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"payments","schema":"public","table":"piperoom_canary"}}`, false},
+		{"k8s_apply", `{"kind":"KafkaTopic","template":"canary-topic","params":{"topic_prefix":"orders","schema":"other","table":"piperoom_canary"}}`, false},
+		{"k8s_apply", `{"kind":"KafkaUser","template":"connect-user","params":{"topic_prefix":"orders","auth":"tls"}}`, true},
+		{"k8s_apply", `{"kind":"KafkaUser","template":"read-user","params":{"topic_prefix":"orders","auth":"tls"}}`, true},
+		{"k8s_apply", `{"kind":"KafkaUser","template":"connect-user","params":{"topic_prefix":"_","auth":"tls"}}`, false},
+		{"k8s_apply", `{"kind":"KafkaUser","template":"read-user","params":{"topic_prefix":"payments","auth":"tls"}}`, false},
+		{"k8s_apply", `{"kind":"KafkaConnect","template":"connect","params":{}}`, true},
 		{"k8s_delete", `{"kind":"KafkaConnector","name":"orders-src"}`, true},
 		{"k8s_delete", `{"kind":"KafkaConnector","name":"payments-src"}`, false},
 		{"k8s_delete", `{"kind":"KafkaTopic","name":"orders-canary"}`, true},
