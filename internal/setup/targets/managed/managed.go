@@ -122,6 +122,23 @@ func deriveClass(person string, patterns []string, subject string) (string, erro
 	return plan.Raise(class, person)
 }
 
+// guardForbidden is the managed ops' ops.ClassGuarder: the server's guard
+// table (plan.Forbidden) on the higher of the runner's class for the request
+// and the driver's own derived class. An unknown or empty runner class never
+// lowers the driver's. Every managed delete must have a plan guard row
+// (plan/guard.go), so the runner refuses it on production whatever the
+// Welcome said and whatever tiers it allows.
+func guardForbidden(op, runnerClass, driverClass string) bool {
+	class := driverClass
+	if r, ok := plan.ClassRank(runnerClass); ok {
+		if d, _ := plan.ClassRank(driverClass); r > d {
+			class = runnerClass
+		}
+	}
+	_, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: class})
+	return forbidden
+}
+
 // writeTier is the tier of a write op: T2, T3 on production.
 func writeTier(class string) string {
 	if class == protocol.ClassProduction {

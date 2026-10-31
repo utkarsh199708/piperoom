@@ -202,6 +202,9 @@ func (o mskOp) Tier() string {
 	return protocol.TierT0
 }
 
+// GuardForbidden is ops.ClassGuarder over the driver's derived class.
+func (o mskOp) GuardForbidden(class string) bool { return guardForbidden(o.name, class, o.d.class) }
+
 // TierFor raises a write to T3 on a production target; it does no I/O and
 // depends only on the class derived at registration.
 func (o mskOp) TierFor(json.RawMessage) (string, error) {

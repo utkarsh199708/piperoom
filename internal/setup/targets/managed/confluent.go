@@ -145,6 +145,9 @@ func (o simpleOp) Layer() string                { return connectLayer }
 func (o simpleOp) Describe() string             { return o.describe }
 func (o simpleOp) ParamsSchema() map[string]any { return o.schema }
 
+// GuardForbidden is ops.ClassGuarder over the driver's derived class.
+func (o simpleOp) GuardForbidden(class string) bool { return guardForbidden(o.name, class, o.class()) }
+
 func (o simpleOp) Tier() string {
 	if o.write {
 		return protocol.TierT2

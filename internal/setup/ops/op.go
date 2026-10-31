@@ -139,6 +139,18 @@ type ParamTargeter interface {
 	ParamTarget(params json.RawMessage, env Env) string
 }
 
+// ClassGuarder is implemented by an op whose driver derives its target's
+// class itself (the managed drivers: the account, environment or project
+// against PIPEROOM_SETUP_PROD_PATTERNS, at registration). GuardForbidden
+// reports whether the guard forbids the op on the higher of class (the
+// request's, raised to the runner's Welcome floors) and the driver's own
+// class, so a production delete is refused even when the server under-classes
+// the target or never named it, and whatever tier the runner allows
+// (Options.AllowT3).
+type ClassGuarder interface {
+	GuardForbidden(class string) bool
+}
+
 // ParamTierer is implemented by an op whose tier for one step depends on its
 // params (host properties_write: T1 for a worker file at the project root, T2
 // for one outside the project directory). TierFor must do no I/O and must not
@@ -424,9 +436,17 @@ func (r *Registry) Target(req protocol.OpRequest) string {
 // is already raised to the runner's own floor. The table is deliberately
 // short here: this catalogue has no T2 or T3 op, and the one destructive
 // class it has (local file writes) is refused on a production target.
+//
+// An op that implements ClassGuarder is asked as well, with the same class:
+// its driver's own classification can only add a refusal, never lift one.
 func (r *Registry) GuardForbidden(op, class string) bool {
 	for _, forbidden := range guardTable[op] {
 		if class == forbidden {
+			return true
+		}
+	}
+	if o, ok := r.Get(op); ok {
+		if g, ok := o.(ClassGuarder); ok && g.GuardForbidden(class) {
 			return true
 		}
 	}
