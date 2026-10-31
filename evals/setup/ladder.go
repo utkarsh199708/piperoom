@@ -245,12 +245,19 @@ func (l *FakeLadder) Verify(ctx context.Context) (events.SetupVerifiedPayload, e
 	return out, nil
 }
 
-// ladderFor is the server's choice of ladder: plan.Ladder for the targets
-// with a Connect REST endpoint, managed.Ladder for the managed services
-// (U13b2, U13c, U13d), whose rungs 1 and 2 read the provider's own status op
-// because plan.Ladder refuses them by design.
+// ladderFor is the server's choice of ladder (internal/room
+// setupLadderRungs): plan.Ladder for the targets with a Connect REST endpoint,
+// plan.StrimziLadder for Strimzi, whose rungs 1 and 2 read the KafkaConnector
+// CR (k8s_get), and managed.Ladder for the managed services (U13b2, U13c,
+// U13d), whose rungs 1 and 2 read the provider's own status op because
+// plan.Ladder refuses them by design.
 func ladderFor(source, target, sink string) ([]plan.Rung, error) {
 	switch target {
+	case "strimzi":
+		// The room's choice (internal/room setupLadderRungs): a Strimzi
+		// Connect cluster is a ClusterIP service the server cannot reach,
+		// so rungs 1 and 2 read the KafkaConnector CR through k8s_get.
+		return plan.StrimziLadder(source, sink)
 	case "msk", "confluent", "aiven":
 		return managed.Ladder(target, source, sink)
 	}

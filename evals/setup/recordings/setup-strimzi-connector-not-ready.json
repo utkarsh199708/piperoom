@@ -4,7 +4,7 @@
   "target": "strimzi",
   "sink": "none",
   "recorded_at": "2026-10-30T09:36:00Z",
-  "note": "Composed from the Strimzi driver's ops (internal/setup/targets/strimzi: k8s_apply's and k8s_secret_apply's summaries and receipts, strimzi_build_status's and k8s_get's Summary and Data, the connect, canary-topic and connector templates' render) on the fixed clock of the U12d scenarios. The KafkaConnector's NotReady condition (the operator's ConnectRestException for Connect's 500 on PUT /connectors/pg-orders-connector/config) and the config provider's message inside it are composed by hand, not read from a cluster. The session has no k8s_secret_apply before the connector (the person declined that card), which is the cause. Data is as the runner's finish() sends it: redact.JSONStats masks the value of the secret key (the Secret's name) as [redacted 24] and keeps the ${secrets:...} reference of database.password, which is no credential. The ladder is plan.Ladder's strimzi ladder, which reads connect_status (the runner's in-cluster Connect client reaches orders-connect-connect-api:8083); plan.StrimziLadder's k8s_get rungs are not what evalsetup's FakeLadder runs. The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders (sha256 of a label), not real MACs or hashes. No cluster session: re-record per evals/scenarios/README.md, Setup scenarios: Strimzi (U12d).",
+  "note": "Composed from the Strimzi driver's ops (internal/setup/targets/strimzi: k8s_apply's and k8s_secret_apply's summaries and receipts, strimzi_build_status's and k8s_get's Summary and Data, the connect, canary-topic and connector templates' render) on the fixed clock of the U12d scenarios. The KafkaConnector's NotReady condition (the operator's ConnectRestException for Connect's 500 on PUT /connectors/pg-orders-connector/config) and the config provider's message inside it are composed by hand, not read from a cluster. The session has no k8s_secret_apply before the connector (the person declined that card), which is the cause. Data is as the runner's finish() sends it: redact.JSONStats masks the value of the secret key (the Secret's name) as [redacted 24] and keeps the ${secrets:...} reference of database.password, which is no credential. The ladder is plan.StrimziLadder, the room's choice: rungs 1 and 2 read the KafkaConnector CR with k8s_get through the runner (the Connect REST API is a ClusterIP service the server cannot reach); that CR's status (conditions and connectorStatus) is composed by hand in the shape the Strimzi operator writes. The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders (sha256 of a label), not real MACs or hashes. No cluster session: re-record per evals/scenarios/README.md, Setup scenarios: Strimzi (U12d).",
   "ops": [
     {
       "op": "k8s_apply",
@@ -241,13 +241,37 @@
     "nonce_hash": "6c7d2ab080f85ac1a12e151d985dbd9ccf058a410d50c5fe5a83ccf09d2ae205",
     "reads": [
       {
-        "tool": "connect_status",
-        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "tool": "k8s_get",
+        "data": {
+          "apiVersion": "kafka.strimzi.io/v1",
+          "kind": "KafkaConnector",
+          "metadata": {"name": "pg-orders-connector", "namespace": "data", "generation": 2, "resourceVersion": "4480117", "labels": {"strimzi.io/cluster": "orders-connect", "app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "piperoom-pipeline-orders"}},
+          "spec": {"class": "io.debezium.connector.postgresql.PostgresConnector", "tasksMax": 1, "autoRestart": {"enabled": true, "maxRestarts": 3}},
+          "status": {
+            "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-10-30T09:33:44.018Z"}],
+            "connectorStatus": {"name": "pg-orders-connector", "connector": {"state": "RUNNING", "worker_id": "10.244.1.17:8083"}, "tasks": [{"id": 0, "state": "RUNNING", "worker_id": "10.244.1.17:8083"}], "type": "source"},
+            "observedGeneration": 2,
+            "tasksMax": 1,
+            "topics": ["pg.public.orders", "pg.public.piperoom_canary"]
+          }
+        },
         "at": "2026-10-30T09:35:40Z"
       },
       {
-        "tool": "connect_status",
-        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "tool": "k8s_get",
+        "data": {
+          "apiVersion": "kafka.strimzi.io/v1",
+          "kind": "KafkaConnector",
+          "metadata": {"name": "pg-orders-connector", "namespace": "data", "generation": 2, "resourceVersion": "4480117", "labels": {"strimzi.io/cluster": "orders-connect", "app.kubernetes.io/managed-by": "Helm", "app.kubernetes.io/instance": "piperoom-pipeline-orders"}},
+          "spec": {"class": "io.debezium.connector.postgresql.PostgresConnector", "tasksMax": 1, "autoRestart": {"enabled": true, "maxRestarts": 3}},
+          "status": {
+            "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-10-30T09:33:44.018Z"}],
+            "connectorStatus": {"name": "pg-orders-connector", "connector": {"state": "RUNNING", "worker_id": "10.244.1.17:8083"}, "tasks": [{"id": 0, "state": "RUNNING", "worker_id": "10.244.1.17:8083"}], "type": "source"},
+            "observedGeneration": 2,
+            "tasksMax": 1,
+            "topics": ["pg.public.orders", "pg.public.piperoom_canary"]
+          }
+        },
         "at": "2026-10-30T09:35:40Z"
       },
       {
@@ -273,8 +297,8 @@
     ],
     "verified": {
       "rungs": [
-        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
-        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "connector_running", "ok": true, "note": "the KafkaConnector is Ready and the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "all 1 tasks are RUNNING"},
         {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
         {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
         {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
