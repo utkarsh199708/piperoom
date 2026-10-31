@@ -150,7 +150,9 @@ export function DecisionBar({
           <div
             className={cn(
               "flex flex-wrap items-center gap-2",
-              sheet && kind === "needs-you" ? "w-full flex-nowrap" : "shrink-0",
+              // The sheet's two buttons share a row until a long Approve label can't fit: a button is
+              // never narrower than its label, so that one then takes a row of its own (KAN-595).
+              sheet && kind === "needs-you" ? "w-full" : "shrink-0",
             )}
           >
             {actions}
