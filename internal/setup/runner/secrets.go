@@ -82,6 +82,9 @@ var (
 	ErrSecretLong = errors.New("setup: secret value is too long")
 	// ErrSecretMissing: the store has no value under that name.
 	ErrSecretMissing = errors.New("setup: no such secret")
+	// ErrSettingValue: a public setting (IsPublicSetting) given a value of
+	// the wrong shape.
+	ErrSettingValue = errors.New("setup: invalid setting value")
 	// ErrCloudSecretRef: a ${secret:} reference names a cloud setup
 	// credential (IsCloudSetupSecret). Those keys authenticate the runner to
 	// the cloud provider; they are never materialised into a connector
@@ -490,6 +493,27 @@ func (s *Store) materialisedPath() string {
 	return filepath.Join(s.dir, materialisedFileName)
 }
 
+// The service account ids of the Confluent ACL templates. They name an
+// account, they grant nothing (an API key does), and the agent needs to see
+// them to write ccloud_acl_create's principal, so they are settings the
+// person types on the runner rather than secrets: Set accepts only a
+// service account id under these names, and Redact leaves their values in
+// the text. Like every ccloud_* name they are refused from the server
+// (IsCloudSetupSecret), so only the person sets them.
+const (
+	SettingCCloudWatcherSA   = "ccloud_watcher_service_account"
+	SettingCCloudConnectorSA = "ccloud_connector_service_account"
+)
+
+// serviceAccountRE is a Confluent service account id, bare or as a principal.
+var serviceAccountRE = regexp.MustCompile(`^(User:)?sa-[a-z0-9]{3,16}$`)
+
+// IsPublicSetting reports whether name holds a non-secret runner setting
+// whose value Redact keeps.
+func IsPublicSetting(name string) bool {
+	return name == SettingCCloudWatcherSA || name == SettingCCloudConnectorSA
+}
+
 // Set stores (or replaces) one named value. A replacement is a normal upsert:
 // rotating a generated password must not need a delete. The file is rewritten
 // atomically before Set returns; a write failure leaves the old value in
@@ -506,6 +530,10 @@ func (s *Store) Set(name, value string) error {
 		// (docs/design/setup-managed.md §2): an AWS key in this file would be
 		// a second, unaudited one.
 		return fmt.Errorf("%w: %q: AWS credentials come from the AWS SDK chain on this machine (aws sso login, a profile, an instance role), never from the secret store", ErrSecretName, scrub(name, MaxSecretNameBytes))
+	}
+	if IsPublicSetting(name) && !serviceAccountRE.MatchString(value) {
+		// Redact keeps this value, so nothing but an id may be stored here.
+		return fmt.Errorf("%w: %s holds a service account id (sa-... or User:sa-...)", ErrSettingValue, name)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -792,6 +820,11 @@ func (s *Store) redactions() []redaction {
 	defer s.mu.Unlock()
 	out := make([]redaction, 0, len(s.values)+1)
 	for name, value := range s.values {
+		if IsPublicSetting(name) && serviceAccountRE.MatchString(value) {
+			// An id, not a secret; a value of another shape (a store
+			// written before this rule) is still redacted.
+			continue
+		}
 		out = append(out, redaction{name: name, value: value})
 	}
 	out = append(out, redaction{name: ReceiptKeyName, value: hex.EncodeToString(s.key)})

@@ -615,3 +615,43 @@ func TestStoreRefusesAWSNames(t *testing.T) {
 		}
 	}
 }
+
+// TestServiceAccountSettingsAreNotRedacted (review, correctness low): the
+// Confluent service account ids are what the agent writes as
+// ccloud_acl_create's principal, and they grant nothing, so SanitizeResult
+// keeps them; only an id may be stored under their names, so nothing secret
+// escapes through the exemption. Other ccloud_* values stay redacted.
+func TestServiceAccountSettingsAreNotRedacted(t *testing.T) {
+	st := mustStore(t, t.TempDir())
+	if err := st.Set(runner.SettingCCloudWatcherSA, "sa-abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set(runner.SettingCCloudConnectorSA, "User:sa-def456"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set("ccloud_api_secret", "cc-secret-value-123"); err != nil {
+		t.Fatal(err)
+	}
+	res := st.SanitizeResult(protocol.OpResult{OK: true,
+		Summary: "4 ACL rows for User:sa-abc123 and User:sa-def456 with cc-secret-value-123",
+		Data:    json.RawMessage(`{"principal":"User:sa-abc123"}`)})
+	for _, w := range []string{"User:sa-abc123", "User:sa-def456", "${secret:ccloud_api_secret}"} {
+		if !strings.Contains(res.Summary, w) {
+			t.Errorf("summary %q lacks %s", res.Summary, w)
+		}
+	}
+	if strings.Contains(res.Summary, "cc-secret-value-123") {
+		t.Errorf("the API secret reached the summary: %q", res.Summary)
+	}
+	if string(res.Data) != `{"principal":"User:sa-abc123"}` || res.Redacted {
+		t.Errorf("data = %s (redacted %v)", res.Data, res.Redacted)
+	}
+	for _, v := range []string{"cc-secret-value-123", "sa-ABCDEF", "User:sa-abc123 x"} {
+		if err := st.Set(runner.SettingCCloudWatcherSA, v); !errors.Is(err, runner.ErrSettingValue) {
+			t.Errorf("Set(watcher, %q) = %v, want ErrSettingValue", v, err)
+		}
+	}
+	if v, _ := st.Get(runner.SettingCCloudWatcherSA); v != "sa-abc123" {
+		t.Errorf("a refused Set replaced the id: %q", v)
+	}
+}

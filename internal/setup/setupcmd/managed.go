@@ -54,8 +54,8 @@ const (
 	// template, entered by the person on the runner's terminal
 	// (secret_set; a ccloud_* name never comes through the room). The
 	// op refuses any other principal.
-	secretCCloudWatcherSA   = "ccloud_watcher_service_account"
-	secretCCloudConnectorSA = "ccloud_connector_service_account"
+	secretCCloudWatcherSA   = runner.SettingCCloudWatcherSA
+	secretCCloudConnectorSA = runner.SettingCCloudConnectorSA
 )
 
 // awsCredentialTimeout bounds the one credential fetch at registration
