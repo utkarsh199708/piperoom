@@ -253,6 +253,55 @@ that slipped past the rule is visible before the click.
   output is not a guessing oracle; a dispute is settled by the person re-running the receipt on the runner, which
   recomputes the MAC.
 
+#### Design ruling needed: how the runner opens its source connection (U4e follow-up, 2026-10-31)
+
+**Open; nothing is implemented.** The source ops exist and are tested (`internal/setup/ops/source_ops.go` for
+Postgres, `RegisterSQLServerSource` in `sqlserver_ops.go`; the MySQL, MongoDB and Oracle clients have their setup
+writers), but `internal/setup/setupcmd` opens no source connection for any source kind: `ops.Config.Source` is never
+set and `RegisterSQLServerSource` is never called, so every source read and write answers `not_supported` on a real
+runner. This design says the runner *holds* the database passwords (§7) and that `Env` carries a reader over "a
+connection the runner opened, never its DSN" (`ops.Env`), but not **where the runner gets the address, database,
+login and password from, or when it opens the connection**. Three ways it could; the leads pick one.
+
+| | A. Typed parts from the room, credentials from the store (recommended) | B. One DSN secret | C. A runner flag or environment variable |
+|---|---|---|---|
+| Address | the room's registered source target (`SetupRequest.Targets`, `setup.target_registered`): already denylisted on the server and classed, and the runner's dial hook checks it again | inside the DSN | inside the DSN |
+| Database | a new person-typed `SetupRequest` field (contract change below) | inside the DSN | inside the DSN |
+| Login, password | two `${secret:}` names in the runner's store (`source_admin_user`, `source_admin_password`), set by `secret_set` on the terminal or through `POST /api/rooms/{id}/setup/secret`, like every other secret | one name (`source_admin_dsn`) holding the whole DSN | `--source-dsn` or `PIPEROOM_SETUP_SOURCE_DSN` read once at start |
+| How the driver gets it | the runner builds the driver's config struct itself (`pgx.ParseConfig` of a URL it assembles from `url.URL` parts, `mysql.Config`, `go-mssqldb`'s URL form, MongoDB `options.Client().SetHosts/SetAuth`, `go-ora`'s `BuildUrl`), with TLS verification fixed on; no parameter comes from the person or the model | the person's text is parsed by each driver, parameters included | the same as B |
+| Fits AGENTS.md §4 rule 6 ("never a DSN parameter from configuration passed to the driver", MySQL) | yes | no | no |
+| Bound to the room's target | yes: a connection can only reach the address the room registered | no: the DSN may name any host, and the runner's dial hook is then the only check | no, and one runner process serves one source only |
+| Visible elsewhere | nowhere: the values are in the store, which no op can read back (§2.4) | the same | `ps`, `/proc/<pid>/environ`, shell history |
+
+**Recommendation: A.** It is the only option that keeps the database address on the same server-checked path as
+every other target, and the only one that never hands a driver a string the person or the model wrote. It also
+gives the SQL Server canary topic (`<prefix>.<db>.<schema>.piperoom_canary`) and `database.names` the database name
+from a typed field instead of model text.
+
+What A needs, in order:
+
+1. **Contract change (leads):** `events.SetupRequest` gains ``SourceDatabase string `json:"source_database,omitempty"` ``
+   (required for `sqlserver`, `mysql` with one database, `oracle` as the PDB or service name; optional for
+   `postgres`, default the login's database; absent for `mongodb`), `docs/api.md`'s `POST /api/setup` row names it,
+   and `protocol.Welcome` gains `SourceKind` and `SourceDatabase` so the runner knows which driver to build without
+   asking the model. The server validates the name with the rule 6 identifier shape (64 characters, and `-` for
+   Oracle service names) before it is stored.
+2. **Runner (A9, `internal/setup/setupcmd`):** after the pairing confirmation, alongside `RegisterTargets`, register
+   the source ops of `Welcome.SourceKind` with a lazily opened connection: the first source op dials the room's
+   single source target through the runner's dial hook, with the login and password materialised from the store
+   at that moment and kept only in the driver's config. No store entry, no source op: the op answers
+   `not_supported` naming the two secret names to set, never a prompt. A second source target, or a target whose
+   class is above the room's floor for it, is a refusal, not a choice. The connection closes with the runner.
+3. **Per driver (A3 Postgres, A8 MySQL, A10 SQL Server, MongoDB, Oracle):** a `Open<Kind>Source(ctx, target,
+   database, user, password)` constructor in each client package returning the reader and setup writer the ops
+   take; the read pool is read-only where the driver allows it (`default_transaction_read_only` on Postgres,
+   `ApplicationIntent=ReadOnly` is **not** used for SQL Server, whose setup writes go through the same login).
+4. **Tests:** setupcmd registers exactly the Welcome's source kind; a missing secret name answers `not_supported`
+   without dialing; a DSN-shaped value in `source_admin_user` is refused; the dial hook refuses an address that is
+   not the registered target.
+
+Until the leads rule, the PR that raised this (the U-wave follow-up stacked on #1114) implements none of it.
+
 ### 2.5 Catalogue rules and artifact validators (S1)
 
 Every op is a Go value implementing:
