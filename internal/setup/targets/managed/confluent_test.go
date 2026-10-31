@@ -241,6 +241,35 @@ func TestConfluentNeedsTheRoomTarget(t *testing.T) {
 	}
 }
 
+// TestACLTopicRowsEndWithTheSeparator: a PREFIXED row on "orders" would
+// also cover orders2.public.x and orders_archive, so every topic row is on
+// "orders." (review M4).
+func TestACLTopicRowsEndWithTheSeparator(t *testing.T) {
+	for _, tmpl := range []string{ACLTemplateWatcher, ACLTemplateConnector} {
+		p := ACLParams{Template: tmpl, Principal: "User:sa-00000", TopicPrefix: "orders"}
+		if tmpl == ACLTemplateWatcher {
+			p.Group = "connect-it_orders"
+		}
+		rows, err := ACLRows(p)
+		if err != nil {
+			t.Fatalf("%s: %v", tmpl, err)
+		}
+		topics := 0
+		for _, r := range rows {
+			if r.ResourceType != "TOPIC" {
+				continue
+			}
+			topics++
+			if r.ResourceName != "orders." || r.PatternType != "PREFIXED" {
+				t.Errorf("%s: topic row on %q (%s), want PREFIXED orders.", tmpl, r.ResourceName, r.PatternType)
+			}
+		}
+		if topics == 0 {
+			t.Errorf("%s: no topic rows", tmpl)
+		}
+	}
+}
+
 func TestACLRows(t *testing.T) {
 	rows, err := ACLRows(ACLParams{Template: ACLTemplateWatcher, Principal: "User:sa-00000", TopicPrefix: "orders", Group: "connect-it_orders"})
 	if err != nil || len(rows) != 4 {
@@ -265,6 +294,7 @@ func TestACLRows(t *testing.T) {
 		"one-character prefix":    {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "o"},
 		"two-character prefix":    {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "or"},
 		"internal topics prefix":  {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "_confluent"},
+		"a trailing separator":    {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "orders."},
 	} {
 		if _, err := ACLRows(p); !errors.Is(err, ops.ErrParams) {
 			t.Errorf("%s: %v", name, err)

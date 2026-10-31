@@ -267,7 +267,8 @@ func checkACLParams(raw json.RawMessage) error {
 	return err
 }
 
-// ACLRows returns the fixed rows of a template. The watcher's rows are
+// ACLRows returns the fixed rows of a template. Every topic row is
+// PREFIXED on "<topic_prefix>.". The watcher's rows are
 // design §2.2's: DESCRIBE and READ on the topics with the prefix,
 // DESCRIBE_CONFIGS on them, DESCRIBE on the connector's group. The
 // connector's rows let a source connector's service account write its
@@ -285,6 +286,13 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 		// _confluent-...); no template grants on them.
 		return nil, fmt.Errorf("%w: topic_prefix %q must be at least %d characters and must not start with _", ErrParams, clipText(p.TopicPrefix, 32), minACLPrefix)
 	}
+	if strings.HasSuffix(p.TopicPrefix, ".") {
+		return nil, fmt.Errorf("%w: topic_prefix %q is the pipeline's topic_prefix, without the trailing .", ErrParams, clipText(p.TopicPrefix, 32))
+	}
+	// The topic rows grant on "<topic_prefix>.", the separator included,
+	// as the Strimzi driver's KafkaUser rows do: a PREFIXED row on
+	// "orders" alone would also cover orders2.* and orders_archive.
+	topics := p.TopicPrefix + "."
 	row := func(rt, name, pattern, op string) confluentcloud.ACL {
 		return confluentcloud.ACL{ResourceType: rt, ResourceName: name, PatternType: pattern, Principal: p.Principal, Host: "*", Operation: op, Permission: "ALLOW"}
 	}
@@ -294,9 +302,9 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 			return nil, fmt.Errorf("%w: the watcher template needs the connector's group: %v", ErrParams, err)
 		}
 		return []confluentcloud.ACL{
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "DESCRIBE"),
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "READ"),
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "DESCRIBE_CONFIGS"),
+			row("TOPIC", topics, "PREFIXED", "DESCRIBE"),
+			row("TOPIC", topics, "PREFIXED", "READ"),
+			row("TOPIC", topics, "PREFIXED", "DESCRIBE_CONFIGS"),
 			row("GROUP", p.Group, "LITERAL", "DESCRIBE"),
 		}, nil
 	case ACLTemplateConnector:
@@ -304,9 +312,9 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 			return nil, fmt.Errorf("%w: the connector template takes no group", ErrParams)
 		}
 		return []confluentcloud.ACL{
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "CREATE"),
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "WRITE"),
-			row("TOPIC", p.TopicPrefix, "PREFIXED", "DESCRIBE"),
+			row("TOPIC", topics, "PREFIXED", "CREATE"),
+			row("TOPIC", topics, "PREFIXED", "WRITE"),
+			row("TOPIC", topics, "PREFIXED", "DESCRIBE"),
 			row("CLUSTER", "kafka-cluster", "LITERAL", "DESCRIBE"),
 		}, nil
 	}
@@ -449,5 +457,5 @@ func (d *ConfluentDriver) createACLs(ctx context.Context, raw json.RawMessage) (
 		}
 		done = append(done, row)
 	}
-	return ops.Result{Summary: fmt.Sprintf("%d ACL rows of the %s template for %s on %s*", len(done), p.Template, p.Principal, p.TopicPrefix), Data: map[string]any{"created": done}}, nil
+	return ops.Result{Summary: fmt.Sprintf("%d ACL rows of the %s template for %s on %s.*", len(done), p.Template, p.Principal, p.TopicPrefix), Data: map[string]any{"created": done}}, nil
 }

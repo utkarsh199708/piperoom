@@ -9,8 +9,8 @@
       "request": {
         "method": "POST",
         "path": "/kafka/v3/clusters/lkc-00000/acls",
-        "body": "{\"host\":\"*\",\"operation\":\"CREATE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
-        "body_sha256": "648b50a0bfdd5a76f63d13e0e21501fb144e55ef7de3c6c0d0e8a71d38e4469d",
+        "body": "{\"host\":\"*\",\"operation\":\"CREATE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "9b8c2cb8ebf81c326ecfd8349c37f997821eae9c47629d6156f6f9e82d161889",
         "headers": {
           "Content-Type": "application/json"
         }
@@ -24,8 +24,8 @@
       "request": {
         "method": "POST",
         "path": "/kafka/v3/clusters/lkc-00000/acls",
-        "body": "{\"host\":\"*\",\"operation\":\"WRITE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
-        "body_sha256": "f31c00293c220c072de717d36302ef6b3833e230477c106e15db8857e7906828",
+        "body": "{\"host\":\"*\",\"operation\":\"WRITE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "4d368445dc358f36a3e3038b3bf8057d93317e55c1875ff92e459522ff1681fa",
         "headers": {
           "Content-Type": "application/json"
         }
@@ -39,8 +39,8 @@
       "request": {
         "method": "POST",
         "path": "/kafka/v3/clusters/lkc-00000/acls",
-        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
-        "body_sha256": "4b3e9e99fd537bcbb7a9233247acd87b5c1d239ea51d12e26ba4460acd5ecd59",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "8ef82c13bb335a9cf512611b2034a9b2d311a0ee497aaf07c68421a87d307629",
         "headers": {
           "Content-Type": "application/json"
         }

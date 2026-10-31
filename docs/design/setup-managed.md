@@ -104,7 +104,7 @@ Two kinds of key, two scopes, both **basic auth over https only** (`netsec`'s ru
   API key with a read-only role on the cluster, **unverified** which: `Operator` or a viewer role is the
   hypothesis), the person types the four values on the runner's terminal (`secret_set`), and the runner applies the
   ACLs with `ccloud_acl_create` using the setup account's cluster key: `DESCRIBE` and `READ` on topics
-  `<topic_prefix>` (prefixed), `DESCRIBE` on the connector's consumer group, `DESCRIBE_CONFIGS` on the topics. Those
+  `<topic_prefix>.` (prefixed, separator included), `DESCRIBE` on the connector's consumer group, `DESCRIBE_CONFIGS` on the topics. Those
   four values are what **Register read credentials** sends later (§7).
 
 ### 2.3 Aiven: tokens

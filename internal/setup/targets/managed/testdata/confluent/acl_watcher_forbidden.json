@@ -9,8 +9,8 @@
       "request": {
         "method": "POST",
         "path": "/kafka/v3/clusters/lkc-00000/acls",
-        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
-        "body_sha256": "4b3e9e99fd537bcbb7a9233247acd87b5c1d239ea51d12e26ba4460acd5ecd59",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "8ef82c13bb335a9cf512611b2034a9b2d311a0ee497aaf07c68421a87d307629",
         "headers": {
           "Content-Type": "application/json"
         }
@@ -24,8 +24,8 @@
       "request": {
         "method": "POST",
         "path": "/kafka/v3/clusters/lkc-00000/acls",
-        "body": "{\"host\":\"*\",\"operation\":\"READ\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders\",\"resource_type\":\"TOPIC\"}",
-        "body_sha256": "c3510508994a43bade92826f517ca1fa212bbcbc03fe07796c4619ae6373572e",
+        "body": "{\"host\":\"*\",\"operation\":\"READ\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "ee6f9f0dccea65e63e86bc67ae055d61e8911d26dcafc5f16f586d38ebf5e2aa",
         "headers": {
           "Content-Type": "application/json"
         }
