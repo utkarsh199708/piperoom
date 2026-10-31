@@ -112,7 +112,9 @@ type Options struct {
 	// Welcome's targets. An error fails the handshake for good
 	// (ErrRegisterTargets, not retried), because a runner without the
 	// room's target driver would refuse every step the plan sends; the
-	// callee is idempotent across reconnects.
+	// callee is idempotent across reconnects and retries a transient
+	// failure of its own (setupcmd retries an inner AWS timeout once)
+	// before it returns one.
 	RegisterTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
 	// Confirm replaces the terminal y/N for a runner that has no terminal
 	// (the in-cluster Job, docs/design/setup-strimzi.md §3.2): it is called

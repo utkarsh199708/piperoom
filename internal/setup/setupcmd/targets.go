@@ -28,9 +28,12 @@ type targetRegistrar struct {
 	done bool
 	// err is the first Welcome's registration error, returned again on a
 	// reconnect: a half-registered catalogue is never registered into twice.
-	// A cancelled or timed-out ctx is not cached when it left the catalogue
-	// untouched (the AWS chain is loaded before anything registers), so a
-	// later Apply may try again.
+	// An inner timeout (the AWS credential fetch's own deadline, while the
+	// runner's ctx is alive) that left the catalogue untouched is retried
+	// once inside Apply, because the runner treats any registration error
+	// as terminal (runner.ErrRegisterTargets) and never calls Apply again
+	// for that pairing. Only an error after the runner's own ctx ended is
+	// not cached: the runner is stopping.
 	err error
 	// room is the room the drivers were registered for: they tag what they
 	// create with it, so an Apply for another room is refused
@@ -86,9 +89,15 @@ func (t *targetRegistrar) Apply(ctx context.Context, roomID string, targets []ev
 		return t.err
 	}
 	before := len(t.cat.Names())
+	untouched := func() bool { return len(t.cat.Names()) == before }
 	err := t.apply(ctx, roomID, targets)
-	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && len(t.cat.Names()) == before {
-		// Nothing registered: the next Welcome may try again.
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && untouched() {
+		// One retry: a slow first credential refresh (SSO, IMDS) is the
+		// usual cause, and the runner will not ask again.
+		err = t.apply(ctx, roomID, targets)
+	}
+	if err != nil && ctx.Err() != nil && untouched() {
+		// The runner is stopping; nothing registered, nothing to cache.
 		return err
 	}
 	t.err, t.done, t.room = err, true, roomID

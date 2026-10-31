@@ -35,6 +35,7 @@ type managedCalls struct {
 	confluent []string
 	aiven     []string
 	mskErr    error
+	mskFails  int // how many loads fail with mskErr; negative is every one
 }
 
 func (c *managedCalls) total() int {
@@ -54,7 +55,8 @@ func fakeManagedRegistrar(t *testing.T, cat *ops.Registry) (*targetRegistrar, *m
 			calls.mu.Lock()
 			defer calls.mu.Unlock()
 			calls.regions = append(calls.regions, region)
-			if calls.mskErr != nil {
+			if calls.mskErr != nil && calls.mskFails != 0 {
+				calls.mskFails--
 				return nil, calls.mskErr
 			}
 			return fakeMSK{}, nil
@@ -196,7 +198,7 @@ func TestRegistrarNoManagedTarget(t *testing.T) {
 func TestRegistrarManagedErrors(t *testing.T) {
 	cat := newCatalogue(t)
 	reg, calls := fakeManagedRegistrar(t, cat)
-	calls.mskErr = errors.New("no credentials")
+	calls.mskErr, calls.mskFails = errors.New("no credentials"), -1
 	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
 	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, calls.mskErr) {
 		t.Fatalf("Apply = %v, want the credential error", err)
@@ -380,28 +382,52 @@ func TestStoreAdaptersRefuseCloudReferences(t *testing.T) {
 	}
 }
 
-// TestRegistrarRetriesAfterACancelledLoad: a cancelled or timed-out AWS load
-// registered nothing, so it is not cached: the next Apply loads again and
-// registers. Any other failure stays cached (TestRegistrarManagedErrors).
-func TestRegistrarRetriesAfterACancelledLoad(t *testing.T) {
+// TestRegistrarRetriesAnInnerTimeoutOnce (review, correctness low): the
+// runner treats a registration error as terminal and never calls Apply
+// again for the pairing, so an inner timeout of the AWS credential fetch is
+// retried once inside Apply; a second timeout is the answer, cached. Only an
+// error after the runner's own ctx ended is not cached.
+func TestRegistrarRetriesAnInnerTimeoutOnce(t *testing.T) {
+	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
+	timeout := fmt.Errorf("setup: retrieving AWS credentials: %w", context.DeadlineExceeded)
+
 	cat := newCatalogue(t)
 	reg, calls := fakeManagedRegistrar(t, cat)
-	calls.mskErr = fmt.Errorf("setup: retrieving AWS credentials: %w", context.DeadlineExceeded)
-	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
-	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Apply = %v, want the deadline", err)
-	}
-	calls.mu.Lock()
-	calls.mskErr = nil
-	calls.mu.Unlock()
+	calls.mskErr, calls.mskFails = timeout, 1
 	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
-		t.Fatalf("second Apply = %v, want a fresh registration", err)
+		t.Fatalf("Apply after one slow fetch = %v, want the retry to register", err)
 	}
 	if len(calls.regions) != 2 {
 		t.Errorf("the AWS chain was loaded %d times, want twice", len(calls.regions))
 	}
 	if in, _ := registered(cat, mskOps); len(in) != len(mskOps) {
 		t.Errorf("registered %v, want every MSK op", in)
+	}
+
+	reg, calls = fakeManagedRegistrar(t, newCatalogue(t))
+	calls.mskErr, calls.mskFails = timeout, -1
+	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Apply = %v, want the deadline", err)
+	}
+	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Apply = %v, want the cached deadline", err)
+	}
+	if len(calls.regions) != 2 {
+		t.Errorf("the AWS chain was loaded %d times, want twice (one retry, then cached)", len(calls.regions))
+	}
+
+	reg, calls = fakeManagedRegistrar(t, newCatalogue(t))
+	calls.mskErr, calls.mskFails = context.Canceled, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := reg.Apply(ctx, "room-1", aws); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply on a stopped runner = %v, want Canceled", err)
+	}
+	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+		t.Fatalf("Apply after a stop = %v, want a fresh registration", err)
+	}
+	if len(calls.regions) != 2 {
+		t.Errorf("the AWS chain was loaded %d times, want once per Apply", len(calls.regions))
 	}
 }
 
