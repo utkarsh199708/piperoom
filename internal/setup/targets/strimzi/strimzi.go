@@ -182,7 +182,7 @@ func (d *Driver) ops() []ops.Op {
 	return []ops.Op{
 		k8sGetOp{d: d}, k8sEventsOp{d: d}, k8sLogsOp{d: d}, buildStatusOp{d: d},
 		k8sApplyOp{d: d}, previewApplyOp{d: d}, k8sSecretApplyOp{d: d}, previewSecretApplyOp{d: d},
-		k8sDeleteOp{d: d}, k8sUnapplyOp{d: d},
+		k8sDeleteOp{d: d}, k8sUnapplyOp{d: d}, previewDeleteOp{d: d}, previewUnapplyOp{d: d},
 	}
 }
 
@@ -230,6 +230,8 @@ func (o k8sSecretApplyOp) GuardForbidden(c string) bool     { return o.d.classGu
 func (o previewSecretApplyOp) GuardForbidden(c string) bool { return o.d.classGuard(o.Name(), c) }
 func (o k8sDeleteOp) GuardForbidden(c string) bool          { return o.d.classGuard(o.Name(), c) }
 func (o k8sUnapplyOp) GuardForbidden(c string) bool         { return o.d.classGuard(o.Name(), c) }
+func (o previewDeleteOp) GuardForbidden(c string) bool      { return o.d.classGuard(o.Name(), c) }
+func (o previewUnapplyOp) GuardForbidden(c string) bool     { return o.d.classGuard(o.Name(), c) }
 
 // ---- names (§3, §4) ----
 
