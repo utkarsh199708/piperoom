@@ -104,10 +104,8 @@ export function RoomHeader({
   const roomy = useMediaQuery('(min-width: 768px)')
   const status = roomStatus(statusInputFromState(state))
   // A finished or held-back fix gives the badge and the pill one sentence (KAN-600): the pill is then
-  // not drawn and the badge takes its tooltip. Compared by sentence, so "Executing fix" next to
-  // "Executing fix · 1 of 2" still shows both.
-  const pill = agentPill(state)
-  const pillRepeatsBadge = state.status === 'open' && pill.text === status.label
+  // not drawn. Compared by sentence, so "Executing fix" next to "Executing fix · 1 of 2" still shows both.
+  const pillRepeatsBadge = state.status === 'open' && agentPill(state).text === status.label
   // Hand-off needs someone to take it (P2): RoomScreen's count of targets, else the people shown here.
   const peopleHere = handoffTargets ?? roomPeopleCount(state, members.map((m) => m.id), user.id)
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
@@ -167,7 +165,7 @@ export function RoomHeader({
             <VerifiedBadge verification={alertVerification(state.alert.alert_source)} />
           </span>
         )}
-        <Badge variant="outline" title={pillRepeatsBadge ? pill.title : undefined}>
+        <Badge variant="outline">
           <StatusDot tone={status.tone} />
           {status.label}
         </Badge>

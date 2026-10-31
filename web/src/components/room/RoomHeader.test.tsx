@@ -153,8 +153,8 @@ describe('room header status sentence (KAN-600)', () => {
     const pill = pillOf(container)
     expect(pill).toHaveClass('sr-only')
     expect(pill.querySelector('[aria-live="polite"]')).toHaveTextContent(sentence)
-    // The agent's detail line moves to the badge's tooltip.
-    expect(screen.getByText(sentence, { selector: '[data-slot="badge"]' })).toHaveAttribute('title', 'waiting on the schema layer')
+    // The agent's last detail line is stale by now ("layer x approved your proposal"), so it isn't kept as a tooltip.
+    expect(screen.getByText(sentence, { selector: '[data-slot="badge"]' })).not.toHaveAttribute('title')
   })
 
   it('a room waiting for approval shows the badge and the pill, each with its own sentence', () => {
