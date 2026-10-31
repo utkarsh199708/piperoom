@@ -273,3 +273,60 @@ func TestSetupRollbackFillsLegacyKafkaTopicPrefix(t *testing.T) {
 		t.Fatalf("index = %d, want 0: the replayed undo of a legacy record undoes it", i)
 	}
 }
+
+// TestSetupRollbackOfTargetPreviews: the previews the Strimzi and managed
+// drivers now record. A managed connector create records its delete, which
+// the walk turns into an undo step and which, once run, undoes the step; a
+// rollback op's own preview (k8s_delete, k8s_unapply) and a managed write
+// nothing undoes are not reversible, so the walk keeps the step with no
+// rollback and the derivation names it instead of running prose.
+func TestSetupRollbackOfTargetPreviews(t *testing.T) {
+	evs := []events.Event{
+		walkEvent(t, 1, events.SetupPlan, events.SetupPlanPayload{PlanID: "pl_1", Phases: []events.SetupPlanPhase{{
+			Name: "managed", Steps: []events.SetupPlanStep{
+				{Index: 0, Op: "msk_create_connector", Target: "000000000000/us-east-1"},
+				{Index: 1, Op: "msk_create_worker_config", Target: "000000000000/us-east-1"},
+			},
+		}}}),
+		walkEvent(t, 2, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_conn", Steps: []events.ProposalStep{walkStep("msk_create_connector", `{"name":"it_orders"}`)}}),
+		walkEvent(t, 3, events.ProposalPreviewed, walkPreview("p_conn", true, `msk_delete_connector {"name":"it_orders"}`)),
+		walkEvent(t, 4, events.ActionExecuted, walkExecuted("p_conn", intp(0), true, false)),
+		walkEvent(t, 5, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_wc", Steps: []events.ProposalStep{walkStep("msk_create_worker_config", `{"name":"w"}`)}}),
+		walkEvent(t, 6, events.ProposalPreviewed, walkPreview("p_wc", false,
+			"not undone automatically: the runner has no op that deletes a worker configuration; delete w in the MSK Connect console (kafkaconnect:DeleteWorkerConfiguration) once no connector uses it")),
+		walkEvent(t, 7, events.ActionExecuted, walkExecuted("p_wc", intp(1), true, false)),
+	}
+	ran, executed := setupWalkRan(evs, "orders")
+	if executed != 2 || len(ran) != 2 {
+		t.Fatalf("executed %d, ran %+v", executed, ran)
+	}
+	op, params, err := setupRollbackOf(ran[0], "orders")
+	if err != nil || op != "msk_delete_connector" || string(params) != `{"name":"it_orders"}` {
+		t.Fatalf("connector rollback = %q %s, %v", op, params, err)
+	}
+	if _, _, err := setupRollbackOf(ran[1], "orders"); err == nil || !strings.Contains(err.Error(), "no rollback") {
+		t.Fatalf("worker config rollback err = %v, want no recorded rollback", err)
+	}
+
+	// The undo, run outside the plan, undoes the connector step only.
+	evs = append(evs,
+		walkEvent(t, 8, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_undo", Steps: []events.ProposalStep{walkStep("msk_delete_connector", `{"name":"it_orders"}`)}}),
+		// The undo's own preview is not reversible.
+		walkEvent(t, 9, events.ProposalPreviewed, walkPreview("p_undo", false, "a rollback is not undone automatically: create the connector again with its msk_create_connector step in a new setup plan")),
+		walkEvent(t, 10, events.ActionExecuted, walkExecuted("p_undo", nil, true, false)),
+	)
+	ran, _ = setupWalkRan(evs, "orders")
+	if len(ran) != 1 || ran[0].Action != "msk_create_worker_config" {
+		t.Fatalf("after the undo ran = %+v, want the worker config step only", ran)
+	}
+
+	// The Strimzi rollback ops' previews record prose only.
+	for _, rec := range []string{
+		"a rollback is not undone automatically: apply the KafkaConnector again with its k8s_apply step in a new setup plan",
+		"a rollback is not undone automatically: refill the Secret with its k8s_secret_apply step in a new setup plan",
+	} {
+		if _, _, err := parseSetupRollback(rec); err == nil {
+			t.Errorf("%q parsed as an action and params", rec)
+		}
+	}
+}

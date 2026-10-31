@@ -29,7 +29,10 @@ import (
 // region, the MSK worker property values, a template's own params). The
 // external round-trip test (specs_targets_test.go) keeps the two in step.
 
-// targetSpecs are the T2 writes of the Strimzi and managed drivers. A runner
+// targetSpecs are the T2 writes of the Strimzi and managed drivers. Each
+// names its runner preview op (preview_<op>, T0), whose Data is the
+// events.PreviewResult with the rollback the room records, or the reason a
+// person undoes the step by hand. A runner
 // whose room has another target does not register these ops and refuses them
 // as unknown.
 func targetSpecs() []Spec {
@@ -67,8 +70,9 @@ func targetSpecs() []Spec {
 			Describe: "Roll back a KafkaConnector or the canary KafkaTopic: delete it by its chart-fixed name (the Topic Operator then deletes the topic). Any other kind or name is refused, and both kinds are refused on a production target (the topic is data; a connector is deleted by a person).",
 			Schema:   strimziRollbackSchema(strimziDeleteKinds, true),
 			Scope:    strimziDeleteScope,
-			// No PreviewOp until the runner registers preview_k8s_delete:
-			// Preview answers "no preview" without a runner round trip.
+			// preview_k8s_delete reads the object with the delete's checks;
+			// a rollback records itself as not reversible.
+			PreviewOp:   "preview_k8s_delete",
 			CheckParams: checkStrimziRollback(strimziDeleteKinds, true),
 		},
 		{
@@ -78,17 +82,18 @@ func targetSpecs() []Spec {
 			Describe: "Roll back a k8s_apply or k8s_secret_apply: re-pause the KafkaConnect or a KafkaUser (name required) with the chart shell's spec, or patch the db-credentials Secret or the logging ConfigMap back to empty. The KafkaConnect and the Secret are refused on a production target.",
 			Schema:   strimziRollbackSchema(strimziUnapplyKinds, false),
 			Scope:    ScopeFree,
-			// No PreviewOp until the runner registers preview_k8s_unapply:
-			// Preview answers "no preview" without a runner round trip.
+			// preview_k8s_unapply sends the rollback patch with dryRun=All.
+			PreviewOp:   "preview_k8s_unapply",
 			CheckParams: checkStrimziRollback(strimziUnapplyKinds, false),
 		},
 
 		// ---- AWS MSK Connect (row U13b2) ----
 		{
-			Name:     "msk_create_plugin",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 in the target's account pinned to the object's S3 version id, required (versioning must be on for the bucket), so the object the runner checks is the object MSK builds; the runner checks the bucket's owner, that that version exists and that its size is expected_size, required, first; the digest is not verified; asynchronous, follow with msk_wait.",
+			Name:      "msk_create_plugin",
+			PreviewOp: PreviewOpName("msk_create_plugin"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 in the target's account pinned to the object's S3 version id, required (versioning must be on for the bucket), so the object the runner checks is the object MSK builds; the runner checks the bucket's owner, that that version exists and that its size is expected_size, required, first; the digest is not verified; asynchronous, follow with msk_wait.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "bucket": mskString(), "key": mskString(), "version": mskString(),
 				"content_type":  map[string]any{"type": "string", "enum": []string{"ZIP", "JAR"}},
@@ -96,13 +101,13 @@ func targetSpecs() []Spec {
 			}, "name", "bucket", "key", "version", "content_type", "expected_size"),
 			Scope:       ScopeFree,
 			CheckParams: checkMSKCreatePlugin,
-			// No PreviewOp: the runner registers no preview_msk_* op.
 		},
 		{
-			Name:     "msk_create_worker_config",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Create an MSK Connect worker configuration rendered from the runner's template; entries are allow-listed worker keys with enumerated or bounded values, never a credential.",
+			Name:      "msk_create_worker_config",
+			PreviewOp: PreviewOpName("msk_create_worker_config"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Create an MSK Connect worker configuration rendered from the runner's template; entries are allow-listed worker keys with enumerated or bounded values, never a credential.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "entries": stringMapSchema(),
 			}, "name", "entries"),
@@ -110,10 +115,11 @@ func targetSpecs() []Spec {
 			CheckParams: checkMSKWorker,
 		},
 		{
-			Name:     "msk_create_connector",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Create the MSK Connect connector (1 MCU, 1 worker, IAM auth, TLS) in the target's account; a config value under a secret-looking key is a ${secret:name} reference the runner materialises. Asynchronous, follow with msk_wait.",
+			Name:      "msk_create_connector",
+			PreviewOp: PreviewOpName("msk_create_connector"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Create the MSK Connect connector (1 MCU, 1 worker, IAM auth, TLS) in the target's account; a config value under a secret-looking key is a ${secret:name} reference the runner materialises. Asynchronous, follow with msk_wait.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "kafka_connect_version": mskString(), "cluster_arn": mskString(),
 				"subnets": stringListSchema(), "security_groups": stringListSchema(), "plugin_arn": mskString(),
@@ -126,12 +132,13 @@ func targetSpecs() []Spec {
 			CheckParams: checkMSKCreateConnector,
 		},
 		{
-			Name:     "msk_delete_connector",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Delete an MSK Connect connector this room created (tagged with its room id); the runner refuses any other connector on every class.",
-			Schema:   objectSchema(map[string]any{"name": mskString()}, "name"),
-			Scope:    scopeConnectorName,
+			Name:      "msk_delete_connector",
+			PreviewOp: PreviewOpName("msk_delete_connector"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Delete an MSK Connect connector this room created (tagged with its room id); the runner refuses any other connector on every class.",
+			Schema:    objectSchema(map[string]any{"name": mskString()}, "name"),
+			Scope:     scopeConnectorName,
 			CheckParams: func(raw json.RawMessage) error {
 				var p struct {
 					Name string `json:"name"`
@@ -145,10 +152,11 @@ func targetSpecs() []Spec {
 
 		// ---- Confluent Cloud (row U13c) ----
 		{
-			Name:     "ccloud_create_connector",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Validate a managed connector's config against the Confluent Cloud plugin, then create it only if validation found no errors; a config value under a secret-looking key is a ${secret:name} reference the runner materialises.",
+			Name:      "ccloud_create_connector",
+			PreviewOp: PreviewOpName("ccloud_create_connector"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Validate a managed connector's config against the Confluent Cloud plugin, then create it only if validation found no errors; a config value under a secret-looking key is a ${secret:name} reference the runner materialises.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "plugin": mskString(), "config": stringMapSchema(),
 			}, "name", "plugin", "config"),
@@ -156,10 +164,11 @@ func targetSpecs() []Spec {
 			CheckParams: checkCCloudCreate,
 		},
 		{
-			Name:     "ccloud_acl_create",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Create a template's fixed ACL rows for one Confluent service account. watcher: read the topics, describe group (connect-<connector>, a consumer_groups entry, or connect-lcc-<id> with connector naming a managed sink, whose id the runner checks). connector: create, write, describe the topics and the schema-change topic named exactly topic_prefix. Topic rows are PREFIXED on <topic_prefix>. (the pipeline's). principal: the account the person entered on the runner.",
+			Name:      "ccloud_acl_create",
+			PreviewOp: PreviewOpName("ccloud_acl_create"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Create a template's fixed ACL rows for one Confluent service account. watcher: read the topics, describe group (connect-<connector>, a consumer_groups entry, or connect-lcc-<id> with connector naming a managed sink, whose id the runner checks). connector: create, write, describe the topics and the schema-change topic named exactly topic_prefix. Topic rows are PREFIXED on <topic_prefix>. (the pipeline's). principal: the account the person entered on the runner.",
 			Schema: objectSchema(map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{"watcher", "connector"}},
 				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(), "connector": mskString(),
@@ -170,10 +179,11 @@ func targetSpecs() []Spec {
 
 		// ---- Aiven (row U13d) ----
 		{
-			Name:     "aiven_create_connector",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Create a connector on the Aiven Kafka Connect service after the runner checks its connector.class is an available plugin; a config value under a secret-looking key is a ${secret:name} reference the runner materialises.",
+			Name:      "aiven_create_connector",
+			PreviewOp: PreviewOpName("aiven_create_connector"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Create a connector on the Aiven Kafka Connect service after the runner checks its connector.class is an available plugin; a config value under a secret-looking key is a ${secret:name} reference the runner materialises.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "config": stringMapSchema(),
 			}, "name", "config"),
@@ -181,12 +191,13 @@ func targetSpecs() []Spec {
 			CheckParams: checkAivenCreate,
 		},
 		{
-			Name:     "aiven_integration_create",
-			Tier:     "T2",
-			Layer:    "kafka-connect",
-			Describe: "Join a Kafka service of the project to the Aiven Kafka Connect service (integration type kafka_connect); the runner refuses a source service that is not Kafka.",
-			Schema:   objectSchema(map[string]any{"source_service": mskString()}, "source_service"),
-			Scope:    ScopeFree,
+			Name:      "aiven_integration_create",
+			PreviewOp: PreviewOpName("aiven_integration_create"),
+			Tier:      "T2",
+			Layer:     "kafka-connect",
+			Describe:  "Join a Kafka service of the project to the Aiven Kafka Connect service (integration type kafka_connect); the runner refuses a source service that is not Kafka.",
+			Schema:    objectSchema(map[string]any{"source_service": mskString()}, "source_service"),
+			Scope:     ScopeFree,
 			CheckParams: func(raw json.RawMessage) error {
 				var p struct {
 					SourceService string `json:"source_service"`

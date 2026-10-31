@@ -235,7 +235,11 @@ func TestTargetSpecsMatchTheRunnerOps(t *testing.T) {
 		switch {
 		case spec.PreviewOp == "" && registered:
 			t.Errorf("%s: the runner registers %s; set PreviewOp", name, preview)
-		case spec.PreviewOp != "":
+		case spec.PreviewOp == "":
+			// Every target write previews, so the room records its
+			// rollback or why a person undoes it.
+			t.Errorf("%s: no preview op", name)
+		default:
 			if f, ok := reg.Floor(spec.PreviewOp); !ok || f != protocol.TierT0 {
 				t.Errorf("%s: preview op %q floor %q (registered %v), want T0", name, spec.PreviewOp, f, ok)
 			}
