@@ -43,10 +43,19 @@ spec:
           protocol: TCP
         - port: 6443
           protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
     # the piperoom server (piperoom.example.com)
     - ports:
         - port: 443
           protocol: TCP
+    - ports:
+      - port: 5432
+        protocol: TCP
+      to:
+      - ipBlock:
+          cidr: 10.0.5.0/24
 ---
 # Source: piperoom/templates/setup-runner.yaml
 # The room release (docs/design/setup-strimzi.md §3, §4): the setup runner of

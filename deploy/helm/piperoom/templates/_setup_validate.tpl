@@ -25,6 +25,14 @@ each value's shape; this checks the combination. */}}
   {{- fail (printf "setup.pipeline.pluginHosts: %q is not a host[:port]" .) -}}
   {{- end -}}
   {{- end -}}
+  {{- if and $s.pipeline.admissionPolicy (not $s.pipeline.imageRegistries) -}}
+  {{- fail "setup.pipeline.admissionPolicy needs setup.pipeline.imageRegistries, the registries (host[:port]) a KafkaConnect build may push to" -}}
+  {{- end -}}
+  {{- range $s.pipeline.imageRegistries -}}
+  {{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$" .) -}}
+  {{- fail (printf "setup.pipeline.imageRegistries: %q is not a host[:port]" .) -}}
+  {{- end -}}
+  {{- end -}}
 {{- end -}}
 {{- if $s.runner.enabled -}}
   {{- if or (not $s.runner.room) (not $s.runner.pipeline) (not $s.runner.kafka) (not $s.runner.connectors) (not $s.runner.serverURL) -}}

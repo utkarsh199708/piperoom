@@ -478,6 +478,7 @@ jobs:
         # they are skipped there; check.py and the golden files cover them.
         run: |
           deploy/helm/piperoom/ci/setup/golden.sh
+          (cd deploy/helm/piperoom/ci/setup/celcheck && go run . ../pipeline.golden.yaml cases.json)
           helm lint deploy/helm/piperoom -f deploy/helm/piperoom/ci/setup/pipeline-values.yaml
           helm template piperoom-pipeline-orders deploy/helm/piperoom -n data -f deploy/helm/piperoom/ci/setup/pipeline-values.yaml \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0

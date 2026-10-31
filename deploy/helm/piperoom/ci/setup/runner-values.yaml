@@ -8,5 +8,11 @@ setup:
     kafka: prod-kafka
     connectors: [orders-src, orders-sink]
     serverURL: https://piperoom.example.com
+    networkPolicy:
+      apiServer:
+        to: [{ipBlock: {cidr: 10.96.0.1/32}}]
+      extraEgress:
+        - to: [{ipBlock: {cidr: 10.0.5.0/24}}]
+          ports: [{port: 5432, protocol: TCP}]
 networkPolicy:
   enabled: true

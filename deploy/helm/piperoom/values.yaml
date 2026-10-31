@@ -374,6 +374,11 @@ setup:
     # The hosts a KafkaConnect build artifact may come from, as the runner's
     # PIPEROOM_SETUP_PLUGIN_HOSTS (the policy pins every artifact url to one).
     pluginHosts: [repo1.maven.org]
+    # The container registries (host[:port]) a KafkaConnect build may push
+    # to: the room's image_registry targets. Required with admissionPolicy:
+    # the policy pins spec.build.output.image to
+    # <registry>/<repo>:piperoom-<id>-<digest> on one of them.
+    imageRegistries: []
   runner:
     enabled: false
     room: ""                # the room id POST /api/setup returned, without its r_ prefix

@@ -216,13 +216,18 @@ blocks in one release, and a connector name twice. The runner's Role has **no `c
 (`resourceNames`); `list` only on events; no `escalate`, `bind`, `impersonate` or `*`; nothing cluster-scoped.
 `setup.pipeline.admissionPolicy=true` adds the D11 `ValidatingAdmissionPolicy` and its binding (cluster-scoped:
 cluster-admin at install; required for a `production` target); it needs `setup.pipeline.topicPrefix` (the
-pipeline's topic prefix: a KafkaUser's topic ACLs are held to it) and pins build artifacts to
-`setup.pipeline.pluginHosts` (default `repo1.maven.org`). With `networkPolicy.enabled` the runner release adds a
+pipeline's topic prefix: a KafkaUser's topic ACLs and the canary KafkaTopic are held to it) and
+`setup.pipeline.imageRegistries` (the registries a KafkaConnect build may push to), and pins build artifacts to
+`setup.pipeline.pluginHosts` (default `repo1.maven.org`). The policy also holds the KafkaConnect's bootstrap to the
+Kafka CR's in-cluster bootstrap Service (an external listener is refused), refuses JVM system properties, a
+KafkaConnector's `state`, `alterOffsets` and `listOffsets`, any `${...}` reference but the db-credentials Secret's
+(and Strimzi's own store password for the schema history clients), scripting and routing transforms and TLS
+downgrades. `ci/setup/celcheck` runs its CEL over the golden render. With `networkPolicy.enabled` the runner release adds a
 NetworkPolicy for the Job: no ingress, egress to DNS, the API server and the server only
 (`setup.runner.networkPolicy`; add the source database to its `extraEgress` when the Job runs the source ops).
 The runner refuses to patch or delete an object of a chart name that does not carry the pipeline release's
-`app.kubernetes.io/instance` label (and, at `helm install` of the runner release, the chart checks the same of
-the KafkaConnect shell). The close card gives
+`app.kubernetes.io/instance` label and Helm's `meta.helm.sh/release-name` annotation naming that release (and, at
+`helm install` of the runner release, the chart checks the same of the KafkaConnect shell). The close card gives
 `helm uninstall piperoom-setup-<room> -n data`; the pipeline release is uninstalled only by the rollback card.
 
 The Job runs `piperoom-setup --code-file ... --confirm-secret-prefix ... --strimzi-pipeline ...`: it reads the

@@ -7,3 +7,4 @@ setup:
     connectors: [orders-src]
     admissionPolicy: true
     topicPrefix: pg
+    imageRegistries: [registry.data.svc:5000]

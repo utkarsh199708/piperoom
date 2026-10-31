@@ -16,5 +16,5 @@ for r in pipeline runner; do
   else
     diff -u "$here/$r.golden.yaml" <(render "$r")
   fi
-  render "$r" | python3 "$here/check.py" "$r"
+  render "$r" | python3 "$here/check.py" "$r" "$here/$r-values.yaml"
 done
