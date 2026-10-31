@@ -608,6 +608,19 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
+	// The preview refuses what Execute would (round 8, S5): a credential
+	// under minCredentialLen. The value is read on the runner and only its
+	// length is used.
+	if o.d.secret != nil {
+		for k, ref := range p.Keys {
+			name := secretRefRE.FindStringSubmatch(ref)[1]
+			if v, ok := o.d.secret(name); ok {
+				if err := checkCredentialLen(k, name, v); err != nil {
+					return events.PreviewResult{}, err
+				}
+			}
+		}
+	}
 	path := coreObjectPath(ns, "secrets", o.d.dbSecretName())
 	body, err := o.d.api.Get(ctx, path)
 	if err != nil {

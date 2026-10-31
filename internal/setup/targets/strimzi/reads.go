@@ -7,13 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 
 	"piperoom/internal/events"
 	"piperoom/internal/redact"
@@ -135,10 +131,14 @@ func (o k8sGetOp) Execute(ctx context.Context, params json.RawMessage, env ops.E
 		return ops.Result{}, fmt.Errorf("strimzi: decoding %s %s: %w", p.Kind, p.Name, err)
 	}
 	stripManaged(obj)
+	// Every string is masked with the union (maskCredentials: written
+	// values, the key rule and redact over the same text) before getView,
+	// whose redact.JSON then only adds masks (rounds 8 and 10).
+	written := o.d.credentialValues(ctx, ns)
+	obj, _ = maskJSON(obj, written).(map[string]any)
 	obj = getView(p.Kind, obj)
-	obj, _ = maskJSON(obj, o.d.credentialValues(ctx, ns)).(map[string]any)
 	return ops.Result{
-		Summary: fmt.Sprintf("%s %s/%s: %s", p.Kind, ns, p.Name, readySummary(obj)),
+		Summary: fmt.Sprintf("%s %s/%s: %s", p.Kind, ns, p.Name, readySummary(obj)) + shortCredentialWarning(written),
 		Data:    obj,
 		Receipt: httpReceipt("GET", path),
 	}, nil
@@ -315,7 +315,7 @@ func (o k8sEventsOp) Execute(ctx context.Context, params json.RawMessage, env op
 		if last == "" {
 			last = it.EventTime
 		}
-		msg, _ := redact.Text(maskCredentials(it.Message, written))
+		msg := maskCredentials(it.Message, written)
 		out = append(out, eventLine{Type: clipText(it.Type, 16), Reason: clipText(it.Reason, 64), Message: clipText(msg, 300), Count: it.Count, Last: clipText(last, 40)})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Last < out[j].Last })
@@ -329,7 +329,7 @@ func (o k8sEventsOp) Execute(ctx context.Context, params json.RawMessage, env op
 		}
 	}
 	return ops.Result{
-		Summary: fmt.Sprintf("%d events of %s (%d warnings), newest last", len(out), p.Involved, warnings),
+		Summary: fmt.Sprintf("%d events of %s (%d warnings), newest last", len(out), p.Involved, warnings) + shortCredentialWarning(written),
 		Data:    map[string]any{"involved": p.Involved, "events": out},
 		Receipt: httpReceipt("GET", path),
 	}, nil
@@ -394,7 +394,7 @@ func (o k8sLogsOp) Execute(ctx context.Context, params json.RawMessage, env ops.
 		return ops.Result{Receipt: httpReceipt("GET", path)}, err
 	}
 	return ops.Result{
-		Summary: fmt.Sprintf("%s logs: %d lines, newest last", p.Pod, len(lines)),
+		Summary: fmt.Sprintf("%s logs: %d lines, newest last", p.Pod, len(lines)) + shortCredentialWarning(o.d.credentialValues(ctx, ns)),
 		Data:    map[string]any{"pod": p.Pod, "lines": lines, "count": len(lines)},
 		Receipt: httpReceipt("GET", path),
 	}, nil
@@ -441,15 +441,13 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 			body = nil
 		}
 	}
-	// The whole body is redacted first (round 7): it is at most
-	// maxLogBytes, within redact's scan limit (redact.MaxScan), so a
-	// multi-line secret (a PEM block's base64 body) is seen whole wherever
-	// it starts. Redacting after the masks, which lengthen the text, made
-	// a window that could start inside a PEM block; clipping lines first
-	// left the prefix of a token across the clip. The credential masks
-	// follow, then each line is clipped.
-	text, _ := redact.Text(strings.ToValidUTF8(string(body), "?"))
-	text = maskCredentials(text, d.credentialValues(ctx, ns))
+	// One union of spans over the whole body (maskCredentials): the
+	// written values, the key rule and redact each find their ranges in
+	// the same text, so no layer's rewrite hides a secret from another
+	// (round 10). The body is at most maxLogBytes, within redact's scan
+	// limit (redact.MaxScan), so a PEM block is seen whole wherever it
+	// starts. Lines are clipped after.
+	text := maskCredentials(string(body), d.credentialValues(ctx, ns))
 	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	if len(raw) == 1 && raw[0] == "" {
 		raw = nil
@@ -560,7 +558,7 @@ func (o buildStatusOp) Execute(ctx context.Context, params json.RawMessage, env 
 	}
 	out["state"] = state
 	return ops.Result{
-		Summary: fmt.Sprintf("KafkaConnect %s: %s; %d connector plugins in the image; build pod %s", o.d.connectName(), state, len(plugins), orDash(phase)),
+		Summary: fmt.Sprintf("KafkaConnect %s: %s; %d connector plugins in the image; build pod %s", o.d.connectName(), state, len(plugins), orDash(phase)) + shortCredentialWarning(o.d.credentialValues(ctx, ns)),
 		Data:    out,
 		Receipt: httpReceipt("GET", path),
 	}, nil
@@ -569,7 +567,7 @@ func (o buildStatusOp) Execute(ctx context.Context, params json.RawMessage, env 
 func condMaps(cs []condition, written []string) []map[string]string {
 	out := make([]map[string]string, 0, len(cs))
 	for _, c := range cs {
-		msg, _ := redact.Text(maskCredentials(c.Message, written))
+		msg := maskCredentials(c.Message, written)
 		out = append(out, map[string]string{"type": clipText(c.Type, 32), "status": clipText(c.Status, 16), "reason": clipText(c.Reason, 64), "message": clipText(msg, 300)})
 	}
 	return out
@@ -580,447 +578,4 @@ func orDash(s string) string {
 		return "absent"
 	}
 	return s
-}
-
-// credentialKeywords are the key names (lower-cased, separators removed)
-// whose value is a credential, matched as a whole key or as its last part:
-// a dotted, dashed or underscored segment (database.password, X-Auth-Token,
-// aws_session_token), the last two segments joined (api_key, private-key)
-// or a camelCase tail (sessionToken, clientSecret). A user name's key is not
-// one: a user name is no secret (round 6), and a key like
-// UserGroupInformation.java is not either.
-var credentialKeywords = map[string]bool{
-	"password": true, "passwd": true, "pwd": true, "secret": true, "token": true,
-	"apikey": true, "auth": true, "authorization": true, "bearer": true,
-	"credential": true, "credentials": true, "privatekey": true,
-}
-
-// isCredentialKey reports whether a key names a credential
-// (credentialKeywords, or sasl.jaas.config).
-func isCredentialKey(key string) bool {
-	l := strings.ToLower(key)
-	if l == "jaas.config" || strings.HasSuffix(l, ".jaas.config") {
-		return true
-	}
-	segs := strings.FieldsFunc(key, func(r rune) bool { return r == '.' || r == '_' || r == '-' })
-	if len(segs) == 0 {
-		return false
-	}
-	last := segs[len(segs)-1]
-	ll := strings.ToLower(last)
-	if ll == "pwd" {
-		// Lower-case only: PWD=/opt/kafka is the shell's working
-		// directory, not a password (round 7, C4).
-		return last == "pwd"
-	}
-	if credentialKeywords[ll] {
-		return true
-	}
-	if len(segs) > 1 && credentialKeywords[strings.ToLower(segs[len(segs)-2])+ll] {
-		return true
-	}
-	for kw := range credentialKeywords {
-		if n := len(last) - len(kw); n > 0 && strings.HasSuffix(ll, kw) && 'A' <= last[n] && last[n] <= 'Z' {
-			// A camelCase tail; pwd only as Pwd (dbPwd), not dbPWD.
-			return kw != "pwd" || last[n:] == "Pwd"
-		}
-	}
-	return false
-}
-
-// credentialKeyRE is a key and its separator on a line: key=value or key:
-// value (a Kafka Connect or Debezium config dump, a driver's error, an HTTP
-// header). isCredentialKey picks the credential ones; the rest of the line
-// after a credential key's separator is masked, since a value may be quoted
-// or hold spaces or commas.
-var credentialKeyRE = regexp.MustCompile(`([A-Za-z0-9._-]+)([ \t]*[=:][ \t]*)`)
-
-// credentialJSONKeyRE is a JSON object key and its colon, plain
-// ("key": ...) or inside a JSON string (\"key\": ...).
-var credentialJSONKeyRE = regexp.MustCompile(`(\\?")([A-Za-z0-9._-]+)(\\?"\s*:\s*)`)
-
-// keptRefRE is a value that is one config provider reference and nothing
-// else (${secrets:ns/name:key}).
-var keptRefRE = regexp.MustCompile(`^\$\{[^{}\s]*\}$`)
-
-// runnerSecretNameRE is the name of the runner's own db-credentials Secret
-// object (dbSecretName: <pipeline>-db-credentials), optionally quoted: a
-// secret: or "secret": key naming it names no credential (round 7, C4). A
-// written value of that shape is still masked by value first.
-var runnerSecretNameRE = regexp.MustCompile(`^"?[a-z0-9]([a-z0-9-]*[a-z0-9])?-db-credentials"?$`)
-
-// keptCredentialValue reports whether a credential key's whole value is no
-// secret: Kafka's own "[hidden]", one ${...} reference, the runner's own
-// Secret object's name (runnerSecretNameRE), and MySQL's
-// "(using password: YES)" (YES) or NO) at the end of the line or before
-// whitespace). Each must be the exact value (round 7): YES)hunter2 or
-// ${a}hunter2 is masked.
-func keptCredentialValue(v string) bool {
-	t := strings.TrimRight(v, " \t\r")
-	if t == "[hidden]" || t == "[masked:credential]" || keptRefRE.MatchString(t) || runnerSecretNameRE.MatchString(t) {
-		return true
-	}
-	for _, w := range []string{"YES)", "NO)"} {
-		if strings.HasPrefix(v, w) && (len(v) == len(w) || v[len(w)] == ' ' || v[len(w)] == '\t' || v[len(w)] == '\r') {
-			return true
-		}
-	}
-	return false
-}
-
-// textCopy is a decoded copy of a text: for each of its bytes, the span of
-// the text it came from.
-type textCopy struct {
-	s   string
-	src [][2]int
-}
-
-// decodedCopy decodes text: %XX (either hex case) to its byte when pct, '+'
-// to a space when plus, JSON string escapes (\" \\ \/ \b \f \n \r \t
-// \uXXXX) when jsonEsc.
-func decodedCopy(text string, pct, plus, jsonEsc bool) textCopy {
-	var b strings.Builder
-	src := make([][2]int, 0, len(text))
-	put := func(s string, a, z int) {
-		for i := 0; i < len(s); i++ {
-			b.WriteByte(s[i])
-			src = append(src, [2]int{a, z})
-		}
-	}
-	for i := 0; i < len(text); {
-		c := text[i]
-		switch {
-		case pct && c == '%' && i+2 < len(text) && isHex(text[i+1]) && isHex(text[i+2]):
-			put(string([]byte{unhex(text[i+1])<<4 | unhex(text[i+2])}), i, i+3)
-			i += 3
-		case plus && c == '+':
-			put(" ", i, i+1)
-			i++
-		case jsonEsc && c == '\\' && i+1 < len(text):
-			if r, n := jsonEscape(text[i:]); n > 0 {
-				put(r, i, i+n)
-				i += n
-				continue
-			}
-			put(`\`, i, i+1)
-			i++
-		default:
-			// One byte, not string(c): that would be c's rune, two
-			// bytes for a byte of a multi-byte character.
-			b.WriteByte(c)
-			src = append(src, [2]int{i, i + 1})
-			i++
-		}
-	}
-	return textCopy{b.String(), src}
-}
-
-// jsonEscape decodes the JSON string escape at the start of s, returning
-// its text and length (0 when it is none).
-func jsonEscape(s string) (string, int) {
-	switch s[1] {
-	case '"', '\\', '/':
-		return s[1:2], 2
-	case 'b':
-		return "\b", 2
-	case 'f':
-		return "\f", 2
-	case 'n':
-		return "\n", 2
-	case 'r':
-		return "\r", 2
-	case 't':
-		return "\t", 2
-	case 'u':
-		if len(s) < 6 {
-			return "", 0
-		}
-		r, err := strconv.ParseUint(s[2:6], 16, 32)
-		if err != nil {
-			return "", 0
-		}
-		if utf16.IsSurrogate(rune(r)) && len(s) >= 12 && s[6] == '\\' && s[7] == 'u' {
-			if r2, err := strconv.ParseUint(s[8:12], 16, 32); err == nil {
-				if p := utf16.DecodeRune(rune(r), rune(r2)); p != utf8.RuneError {
-					return string(p), 12
-				}
-			}
-		}
-		return string(rune(r)), 6
-	}
-	return "", 0
-}
-
-var upperHexRE = regexp.MustCompile(`%[0-9A-F]{2}`)
-
-// credentialForms are the ways a value is written into a text: itself, its
-// JSON string escapes (Go's, which also escapes <, > and &, and Java's:
-// Jackson, Log4j), and its URL encodings (Go's QueryEscape and PathEscape,
-// Java's URLEncoder: ~ as %7E, * kept), each also with lower-case hex.
-func credentialForms(v string) []string {
-	g, _ := json.Marshal(v)
-	java := strings.ReplaceAll(strings.ReplaceAll(url.QueryEscape(v), "~", "%7E"), "%2A", "*")
-	forms := []string{v, strings.Trim(string(g), `"`), javaJSONEscape(v)}
-	for _, f := range []string{url.QueryEscape(v), url.PathEscape(v), java} {
-		forms = append(forms, f, upperHexRE.ReplaceAllStringFunc(f, strings.ToLower))
-	}
-	slices.Sort(forms)
-	return slices.Compact(forms)
-}
-
-// maskCredentials masks every credential value the runner wrote to the
-// db-credentials Secret (never a user name: see rememberSecret), then the
-// value of every credential key (maskCredentialKeys). A written value is
-// searched in every form it may be written in (credentialForms) and in
-// several copies of the text, the matched span mapped back to the text:
-// the text itself, with %XX decoded, with %XX and '+' decoded, and with
-// JSON string escapes decoded. One copy alone misses a value: decoding '+'
-// breaks a path-escaped a+b, a stray % breaks the decoding after it
-// (round 7). A value shorter than 4 characters is not masked by value: it
-// would garble every "task 1 of 3"; k8s_secret_apply refuses a password
-// under 8 characters (minCredentialLen), and the key rule still masks a
-// short value where a credential key names it.
-func maskCredentials(text string, written []string) string {
-	var spans [][2]int
-	copies := []textCopy{
-		decodedCopy(text, false, false, false),
-		decodedCopy(text, true, false, false),
-		decodedCopy(text, true, true, false),
-		decodedCopy(text, false, false, true),
-	}
-	for _, v := range written {
-		if len(v) < 4 {
-			continue
-		}
-		for _, f := range credentialForms(v) {
-			for _, c := range copies {
-				for off := 0; ; {
-					i := strings.Index(c.s[off:], f)
-					if i < 0 {
-						break
-					}
-					a, b := off+i, off+i+len(f)
-					spans = append(spans, [2]int{c.src[a][0], c.src[b-1][1]})
-					off = a + 1
-				}
-			}
-		}
-	}
-	return maskCredentialKeys(maskSpans(text, spans))
-}
-
-// maskSpans replaces each span of text (merged where they overlap) with
-// [masked:credential].
-func maskSpans(text string, spans [][2]int) string {
-	if len(spans) == 0 {
-		return text
-	}
-	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
-	var out strings.Builder
-	at := 0
-	for _, sp := range spans {
-		if sp[1] <= at {
-			continue
-		}
-		if sp[0] >= at {
-			out.WriteString(text[at:sp[0]])
-			out.WriteString("[masked:credential]")
-		}
-		// A span that overlaps the last only extends it.
-		at = sp[1]
-	}
-	out.WriteString(text[at:])
-	return out.String()
-}
-
-// maskCredentialKeys masks the value of every credential key: a JSON
-// object key's whole value, whatever its type (a string, number, array or
-// object: round 7), and, on each line, the rest of the line after a
-// key=value or key: value's separator. The rest of a JSON object (a log's
-// message) and every other key stay.
-func maskCredentialKeys(text string) string {
-	var spans [][2]int
-	for _, m := range credentialJSONKeyRE.FindAllStringSubmatchIndex(text, -1) {
-		if !isCredentialKey(text[m[4]:m[5]]) {
-			continue
-		}
-		a := m[1]
-		b := jsonValueEnd(text, a, m[3]-m[2] == 2)
-		inner := text[a:b]
-		if q := text[m[2]:m[3]]; strings.HasPrefix(inner, q) && strings.HasSuffix(inner, q) && len(inner) >= 2*len(q) {
-			inner = inner[len(q) : len(inner)-len(q)]
-			a, b = a+len(q), b-len(q)
-		}
-		if b > a && !keptCredentialValue(inner) {
-			spans = append(spans, [2]int{a, b})
-		}
-	}
-	text = maskSpans(text, spans)
-	spans = spans[:0]
-	for ls := 0; ls < len(text); {
-		le := strings.IndexByte(text[ls:], '\n')
-		if le < 0 {
-			le = len(text)
-		} else {
-			le += ls
-		}
-		line := text[ls:le]
-		for _, m := range credentialKeyRE.FindAllStringSubmatchIndex(line, -1) {
-			v := strings.TrimRight(line[m[1]:], "\r")
-			if v == "" || !isCredentialKey(line[m[2]:m[3]]) {
-				continue
-			}
-			if keptCredentialValue(v) {
-				// The kept value is the whole rest of the line: a key
-				// inside it (the reference's ns/name:key) is no key.
-				break
-			}
-			spans = append(spans, [2]int{ls + m[1], ls + m[1] + len(v)})
-			break
-		}
-		ls = le + 1
-	}
-	return maskSpans(text, spans)
-}
-
-// jsonValueEnd is the end of the JSON value that starts at text[a]: a
-// string, or an array or object to its matching close (strings inside
-// skipped), or a bare number or literal up to the next , } ] or space. In
-// a JSON string (escaped), its quotes are \". A value cut off ends at the
-// end of its line.
-func jsonValueEnd(text string, a int, escaped bool) int {
-	lineEnd := strings.IndexByte(text[a:], '\n')
-	if lineEnd < 0 {
-		lineEnd = len(text)
-	} else {
-		lineEnd += a
-	}
-	q := `"`
-	if escaped {
-		q = `\"`
-	}
-	if strings.HasPrefix(text[a:], q) {
-		for i := a + len(q); i < lineEnd; i++ {
-			if escaped {
-				if strings.HasPrefix(text[i:], `\\`) {
-					i++
-					continue
-				}
-				if strings.HasPrefix(text[i:], q) {
-					return i + len(q)
-				}
-				continue
-			}
-			switch text[i] {
-			case '\\':
-				i++
-			case '"':
-				return i + 1
-			}
-		}
-		return lineEnd
-	}
-	if a < len(text) && (text[a] == '[' || text[a] == '{') {
-		depth, inStr := 0, false
-		for i := a; i < lineEnd; i++ {
-			c := text[i]
-			switch {
-			case inStr && c == '\\':
-				i++
-			case c == '"':
-				inStr = !inStr
-			case inStr:
-			case c == '[' || c == '{':
-				depth++
-			case c == ']' || c == '}':
-				depth--
-				if depth == 0 {
-					return i + 1
-				}
-			}
-		}
-		return lineEnd
-	}
-	for i := a; i < lineEnd; i++ {
-		switch text[i] {
-		case ',', '}', ']', ' ', '\t', '\r':
-			return i
-		case '\\':
-			if escaped {
-				return i
-			}
-		}
-	}
-	return lineEnd
-}
-
-// maskJSON applies maskCredentials to every string of a decoded JSON value
-// (an object a get op returns).
-func maskJSON(v any, written []string) any {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, x := range t {
-			t[k] = maskJSON(x, written)
-		}
-		return t
-	case []any:
-		for i, x := range t {
-			t[i] = maskJSON(x, written)
-		}
-		return t
-	case string:
-		return maskCredentials(t, written)
-	}
-	return v
-}
-
-func isHex(c byte) bool {
-	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
-}
-
-func unhex(c byte) byte {
-	switch {
-	case c >= 'a':
-		return c - 'a' + 10
-	case c >= 'A':
-		return c - 'A' + 10
-	}
-	return c - '0'
-}
-
-// javaJSONEscape is v as Jackson and Log4j's JSON layout write it inside a
-// string: " and \ escaped, control characters as \n, \t, ... or \u00XX,
-// everything else (<, >, & included) as itself.
-func javaJSONEscape(v string) string {
-	var b strings.Builder
-	for _, r := range v {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		case '\b':
-			b.WriteString(`\b`)
-		case '\f':
-			b.WriteString(`\f`)
-		default:
-			if r < 0x20 {
-				fmt.Fprintf(&b, `\u%04x`, r)
-			} else {
-				b.WriteRune(r)
-			}
-		}
-	}
-	return b.String()
-}
-
-// isWordByte reports whether c continues a token: a letter, digit or '_'.
-func isWordByte(c byte) bool {
-	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_'
 }

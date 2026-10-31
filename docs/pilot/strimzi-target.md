@@ -162,7 +162,10 @@ Rules that hold for every render:
 - **Credentials are references.** A connector config value that looks like a credential must be a
   `${secrets:<ns>/<pipeline>-db-credentials:<key>}` reference (Strimzi's `KubernetesSecretConfigProvider`, the only
   config provider the `KafkaConnect` may enable). `k8s_secret_apply` writes that Secret's keys from the runner's
-  secret store; the values never reach the server.
+  secret store; the values never reach the server. It and its preview refuse a credential (any key but a user
+  name's) shorter than **8 characters**, before anything is written: the runner masks credential values wherever its
+  reads return them, and a shorter one cannot be masked without garbling the logs. An existing Secret with a shorter
+  credential still works; its reads carry a warning to rotate it.
 - **The field allow-list** refuses `spec.image`, `spec.template`, `spec.externalConfiguration`, a push Secret other
   than `<pipeline>-registry-push`, a `KafkaUser` password source and `cluster` or `transactionalId` ACLs, among others
   (`internal/setup/targets/strimzi/allowlist.go`).
