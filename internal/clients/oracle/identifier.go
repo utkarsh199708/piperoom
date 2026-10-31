@@ -26,17 +26,35 @@ func validateIdent(name string) (string, error) {
 // plain names so the statement is never built from an untrusted fragment; note
 // that a quoted identifier is case-sensitive, so callers pass names exactly as
 // the dictionary stores them (uppercase for identifiers created without
-// quotes). Embedded double quotes are doubled, as Oracle requires, though the
-// validation regexp never admits one.
+// quotes). The validation regexp admits no double quote, so the quoting
+// cannot be closed early.
 //
-// The oracleIdentRe check is inline (not only through validateIdent) so the
-// guard sits in the same function as the concatenation that relies on it.
+// The quoted text is copied out of identChars byte by byte rather than from
+// name: the statement is built only from this package's constants, and a
+// byte of name that oracleIdentRe admitted but identChars lacks (none can)
+// would be refused. Static analysis (CodeQL's go/sql-injection) does not
+// count a regexp match as a sanitiser, so before this it traced the
+// caller's string into ExecContext; the copy cuts that trace for real.
 func quoteIdent(name string) (string, error) {
 	if !oracleIdentRe.MatchString(name) {
 		return "", fmt.Errorf("oracle: invalid identifier %q", name)
 	}
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
+	var b strings.Builder
+	b.Grow(len(name) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(name); i++ {
+		j := strings.IndexByte(identChars, name[i])
+		if j < 0 {
+			return "", fmt.Errorf("oracle: invalid identifier %q", name)
+		}
+		b.WriteByte(identChars[j])
+	}
+	b.WriteByte('"')
+	return b.String(), nil
 }
+
+// identChars is every byte oracleIdentRe admits.
+const identChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$#"
 
 // quoteTable quotes an "owner.table" name into two quoted identifiers. Every
 // part must pass the rule 6 check; anything else is refused.
