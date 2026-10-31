@@ -158,10 +158,10 @@ func targetSpecs() []Spec {
 			Name:     "ccloud_acl_create",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create the fixed ACL rows of a template for one Confluent service account: watcher (read the topics and describe the connector's group, group required) or connector (create, write and describe the topics). topic_prefix is the pipeline's; every topic row is PREFIXED on <topic_prefix>. (separator included). principal must be the account the person entered on the runner for that template (ccloud_watcher_service_account or ccloud_connector_service_account); the runner checks it.",
+			Describe: "Create a template's fixed ACL rows for one Confluent service account. watcher: read the topics, describe group (connect-<connector>, a consumer_groups entry, or connect-lcc-<id> with connector naming a managed sink, whose id the runner checks). connector: create, write, describe the topics. Topic rows are PREFIXED on <topic_prefix>. (the pipeline's). principal must be the account the person entered on the runner for the template; the runner checks it.",
 			Schema: objectSchema(map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{"watcher", "connector"}},
-				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(),
+				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(), "connector": mskString(),
 			}, "template", "principal", "topic_prefix"),
 			Scope:       scopeCCloudACL,
 			CheckParams: checkCCloudACL,
@@ -748,11 +748,15 @@ func checkCCloudCreate(raw json.RawMessage) error {
 // minCCloudACLPrefix mirrors the managed driver's minACLPrefix.
 const minCCloudACLPrefix = 3
 
+// ccManagedGroupRE is a Confluent Cloud managed sink's consumer group.
+var ccManagedGroupRE = regexp.MustCompile(`^connect-lcc-[a-z0-9]{1,32}$`)
+
 // scopeCCloudACL binds ccloud_acl_create to the pipeline: topic_prefix is
 // the pipeline's own topic_prefix (a pipeline without one gets no ACL), and
 // the watcher's group is the consumer group of one of the pipeline's
-// connectors (connect-<connector>, Confluent's sink group naming) or one of
-// its declared consumer_groups. The principal is not the server's to bind:
+// connectors (connect-<connector>, a self-managed sink's group naming), one
+// of its declared consumer_groups, or, with connector naming one of its
+// connectors, a managed sink's connect-lcc-<id>. The principal is not the server's to bind:
 // the server holds no record of the person's service accounts, so the
 // runner refuses any principal other than the one the person entered on its
 // terminal for the template (managed.ConfluentOptions.Principal).
@@ -761,6 +765,7 @@ func scopeCCloudACL(p owners.Pipeline, raw json.RawMessage) error {
 		Template    string `json:"template"`
 		TopicPrefix string `json:"topic_prefix"`
 		Group       string `json:"group"`
+		Connector   string `json:"connector"`
 	}
 	if err := json.Unmarshal(paramsOrEmpty(raw), &q); err != nil {
 		return fmt.Errorf("%w: scope: params must be a JSON object", tools.ErrBadInput)
@@ -769,6 +774,19 @@ func scopeCCloudACL(p owners.Pipeline, raw json.RawMessage) error {
 		return fmt.Errorf("%w: topic_prefix %q is not pipeline %q's topic_prefix", tools.ErrOutOfScope, clipText(q.TopicPrefix), clipText(p.ID))
 	}
 	if q.Template != "watcher" {
+		return nil
+	}
+	if q.Connector != "" {
+		// A managed sink's group is connect-lcc-<its id>. The server holds
+		// no record of Confluent's ids; it binds the connector to the
+		// pipeline and the runner reads that connector's id and refuses a
+		// group that is not connect-<id> (managed.ACLParams).
+		if !slices.Contains(p.Connectors, q.Connector) {
+			return fmt.Errorf("%w: connector %q is not a connector of pipeline %q", tools.ErrOutOfScope, clipText(q.Connector), clipText(p.ID))
+		}
+		if !ccManagedGroupRE.MatchString(q.Group) {
+			return fmt.Errorf("%w: group %q is not a managed connector's connect-lcc-<id> group", tools.ErrOutOfScope, clipText(q.Group))
+		}
 		return nil
 	}
 	groups := append([]string{}, p.ConsumerGroups...)
@@ -787,9 +805,18 @@ func checkCCloudACL(raw json.RawMessage) error {
 		Principal   string `json:"principal"`
 		TopicPrefix string `json:"topic_prefix"`
 		Group       string `json:"group,omitempty"`
+		Connector   string `json:"connector,omitempty"`
 	}
 	if err := decodeStrict(raw, &p); err != nil {
 		return err
+	}
+	if p.Connector != "" {
+		if p.Template != "watcher" {
+			return errors.New("only the watcher template takes a connector")
+		}
+		if err := matchOrErr(ccNameRE, "connector", p.Connector); err != nil {
+			return err
+		}
 	}
 	if err := matchOrErr(ccPrincipalRE, "principal", p.Principal); err != nil {
 		return err

@@ -150,6 +150,24 @@ var ccCases = []ccCase{
 				t.Fatal(err)
 			}
 		}},
+	// ConnectorID reads the lcc- id a managed sink's group is named after.
+	{name: "connector_id_ok", responses: []replay.Response{jsonResp(200, `{"it_orders":{"id":{"id":"lcc-00000","id_type":"ID"}},"other":{"id":{"id":"lcc-zzz9","id_type":"ID"}}}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			id, err := testClient(t, rt).ConnectorID(ctx, "it_orders")
+			if err != nil || id != "lcc-00000" { // the scrubber's placeholder id
+				t.Fatalf("ConnectorID = %q, %v", id, err)
+			}
+		}},
+	{name: "connector_id_missing", responses: []replay.Response{jsonResp(200, `{"other":{"id":{"id":"lcc-zzz9","id_type":"ID"}}}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			_, err := testClient(t, rt).ConnectorID(ctx, "it_orders")
+			wantErr(t, err, ErrNotFound)
+		}},
+	{name: "connector_id_not_an_id", responses: []replay.Response{jsonResp(200, `{"it_orders":{"id":{"id":"../x","id_type":"ID"}}}`)},
+		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
+			_, err := testClient(t, rt).ConnectorID(ctx, "it_orders")
+			wantErr(t, err, ErrAPI)
+		}},
 	{name: "status_throttled", responses: []replay.Response{throttled(), throttled(), throttled(), throttled()},
 		run: func(t *testing.T, ctx context.Context, rt http.RoundTripper) {
 			_, err := testClient(t, rt).Status(ctx, "it_orders")

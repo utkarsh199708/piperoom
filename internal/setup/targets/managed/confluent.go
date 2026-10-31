@@ -21,6 +21,7 @@ type ConfluentAPI interface {
 	Validate(ctx context.Context, plugin string, cfg map[string]string) (confluentcloud.Validation, error)
 	CreateConnector(ctx context.Context, name string, cfg map[string]string) (confluentcloud.Created, error)
 	Status(ctx context.Context, name string) (clients.ConnectorStatus, error)
+	ConnectorID(ctx context.Context, name string) (string, error)
 	Cluster(ctx context.Context) (confluentcloud.Cluster, error)
 }
 
@@ -141,10 +142,10 @@ func (d *ConfluentDriver) ops() []ops.Op {
 		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_create_connector", write: true, describe: "validate the connector config against the managed plugin, then create the connector only if validation has no errors (Connect v1 validate, create)",
 			schema: objectSchema([]string{"name", "plugin", "config"}, map[string]any{"name": stringSchema(""), "plugin": stringSchema(""), "config": stringMapSchema()}),
 			check:  checkCCCreate, run: d.createConnector, class: d.Class},
-		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_acl_create", write: true, describe: "create the fixed ACL rows of a template (watcher: read the pipeline's topics and the connector's group; connector: write the pipeline's topics) for one service account (Kafka REST v3 acls)",
+		simpleOp{kind: KindConfluent, addr: d.address(), name: "ccloud_acl_create", write: true, describe: "create the fixed ACL rows of a template (watcher: read the pipeline's topics and the connector's group, connect-<name> or, for a managed sink, connect-lcc-<id> with connector naming it, which the runner checks; connector: write the pipeline's topics) for one service account (Kafka REST v3 acls)",
 			schema: objectSchema([]string{"template", "principal", "topic_prefix"}, map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{ACLTemplateWatcher, ACLTemplateConnector}},
-				"principal": stringSchema(""), "topic_prefix": stringSchema(""), "group": stringSchema("")}),
+				"principal": stringSchema(""), "topic_prefix": stringSchema(""), "group": stringSchema(""), "connector": stringSchema("")}),
 			check: checkACLParams, run: d.createACLs, class: d.Class},
 	}
 }
@@ -250,13 +251,24 @@ const (
 )
 
 // ACLParams are ccloud_acl_create's. Group is the connector's consumer
-// group, required for the watcher template.
+// group, required for the watcher template. A Confluent Cloud managed sink
+// consumes as connect-lcc-<connector id>: such a group needs Connector, the
+// connector's name, and the runner reads that connector's id and refuses a
+// group that is not connect-<its id>.
 type ACLParams struct {
 	Template    string `json:"template"`
 	Principal   string `json:"principal"`
 	TopicPrefix string `json:"topic_prefix"`
 	Group       string `json:"group,omitempty"`
+	Connector   string `json:"connector,omitempty"`
 }
+
+// managedGroupPrefix starts a managed sink connector's consumer group.
+const managedGroupPrefix = "connect-lcc-"
+
+// ErrGroupNotTheConnectors: a connect-lcc- group that is not the named
+// connector's.
+var ErrGroupNotTheConnectors = errors.New("managed: the group is not the managed connector's consumer group")
 
 func checkACLParams(raw json.RawMessage) error {
 	var p ACLParams
@@ -301,6 +313,16 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 		if err := confluentcloud.CheckResource(p.Group); err != nil {
 			return nil, fmt.Errorf("%w: the watcher template needs the connector's group: %v", ErrParams, err)
 		}
+		if p.Connector != "" {
+			if err := confluentcloud.CheckName(p.Connector); err != nil {
+				return nil, paramErr(err)
+			}
+			if !strings.HasPrefix(p.Group, managedGroupPrefix) {
+				return nil, fmt.Errorf("%w: connector names a managed sink, whose group is %s<connector id>", ErrParams, managedGroupPrefix)
+			}
+		} else if strings.HasPrefix(p.Group, managedGroupPrefix) {
+			return nil, fmt.Errorf("%w: group %s is a managed connector's: name the connector (connector) so the runner can check its id", ErrParams, clipText(p.Group, 64))
+		}
 		return []confluentcloud.ACL{
 			row("TOPIC", topics, "PREFIXED", "DESCRIBE"),
 			row("TOPIC", topics, "PREFIXED", "READ"),
@@ -308,8 +330,8 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 			row("GROUP", p.Group, "LITERAL", "DESCRIBE"),
 		}, nil
 	case ACLTemplateConnector:
-		if p.Group != "" {
-			return nil, fmt.Errorf("%w: the connector template takes no group", ErrParams)
+		if p.Group != "" || p.Connector != "" {
+			return nil, fmt.Errorf("%w: the connector template takes no group and no connector", ErrParams)
 		}
 		return []confluentcloud.ACL{
 			row("TOPIC", topics, "PREFIXED", "CREATE"),
@@ -447,6 +469,16 @@ func (d *ConfluentDriver) createACLs(ctx context.Context, raw json.RawMessage) (
 	}
 	if err := d.checkPrincipal(p); err != nil {
 		return ops.Result{Summary: "refused ccloud_acl_create: " + err.Error()}, err
+	}
+	if p.Connector != "" {
+		id, err := d.api.ConnectorID(ctx, p.Connector)
+		if err != nil {
+			return ops.Result{Summary: "refused ccloud_acl_create: reading connector " + p.Connector + "'s id failed", Data: ccErr(err)}, err
+		}
+		if p.Group != "connect-"+id {
+			err := fmt.Errorf("%w: connector %s is %s, so its group is connect-%s, not %s", ErrGroupNotTheConnectors, p.Connector, id, id, clipText(p.Group, 64))
+			return ops.Result{Summary: "refused ccloud_acl_create: " + err.Error(), Data: map[string]any{"connector_id": id}}, err
+		}
 	}
 	var done []confluentcloud.ACL
 	for _, row := range rows {

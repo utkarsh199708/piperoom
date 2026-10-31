@@ -132,7 +132,7 @@ var targetCases = map[string]struct{ good, bad []string }{
 			`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.password":"${secret:AWS_SECRET_ACCESS_KEY}"}}`},
 	},
 	"ccloud_acl_create": {
-		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`},
+		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-orders-src"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3","connector":"orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`},
 		bad: []string{`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders","group":"x"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders"}`, `{"template":"admin","principal":"User:sa-abc123","topic_prefix":"orders"}`,
 			// A one- or two-character prefix covers most of a cluster; "_"
 			// starts its internal topics (M2).
@@ -141,7 +141,10 @@ var targetCases = map[string]struct{ good, bad []string }{
 			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"_confluent"}`,
 			// The runner grants on "<topic_prefix>."; the prefix is the
 			// pipeline's, without the separator (M4).
-			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders."}`},
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders."}`,
+			// connector names a managed sink for the watcher's group only.
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders","connector":"orders-src"}`,
+			`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1","connector":"bad name"}`},
 	},
 	"aiven_create_connector": {
 		good: []string{`{"name":"orders-src","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector"}}`},
@@ -338,6 +341,12 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-orders-src"}`, true},
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"orders-sink"}`, true},
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-payments-src"}`, false},
+		// A managed sink's group is connect-lcc-<id>: the connector must be
+		// the pipeline's, and the runner checks the id (correctness low).
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3","connector":"orders-src"}`, true},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3","connector":"payments-src"}`, false},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3"}`, false},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"orders-sink","connector":"orders-src"}`, false},
 	}
 	for _, c := range cases {
 		a, err := setupactions.New(specs[c.op], setupactions.Deps{})

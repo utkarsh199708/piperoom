@@ -124,6 +124,16 @@ func TestConfluentFlows(t *testing.T) {
 type fakeCC struct {
 	validated, created []map[string]string
 	errors             int
+	ids                map[string]string // ConnectorID by name
+	idReads            int
+}
+
+func (f *fakeCC) ConnectorID(_ context.Context, name string) (string, error) {
+	f.idReads++
+	if id, ok := f.ids[name]; ok {
+		return id, nil
+	}
+	return "", confluentcloud.ErrNotFound
 }
 
 func (f *fakeCC) Plugins(context.Context) ([]confluentcloud.Plugin, error) { return nil, nil }
@@ -312,6 +322,50 @@ type countingACL struct{ rows []confluentcloud.ACL }
 func (a *countingACL) CreateACL(_ context.Context, acl confluentcloud.ACL) error {
 	a.rows = append(a.rows, acl)
 	return nil
+}
+
+// TestACLManagedSinkGroup (review, correctness low): a Confluent Cloud
+// managed sink consumes as connect-lcc-<connector id>. The watcher may be
+// granted that group only with the connector named; the runner reads the
+// connector's id and refuses any other connect-lcc- group, before a row is
+// sent.
+func TestACLManagedSinkGroup(t *testing.T) {
+	principal := func(string) (string, error) { return "sa-00000", nil }
+	watcher := func(group, connector string) map[string]any {
+		p := map[string]any{"template": "watcher", "principal": "User:sa-00000", "topic_prefix": "orders", "group": group}
+		if connector != "" {
+			p["connector"] = connector
+		}
+		return p
+	}
+	cc := &fakeCC{ids: map[string]string{"orders-sink": "lcc-a1b2c3"}}
+	acl := &countingACL{}
+	reg, _ := ccReg(t, cc, ConfluentOptions{ACL: acl, Principal: principal})
+	if _, err := exec(t, reg, "ccloud_acl_create", watcher("connect-lcc-a1b2c3", "orders-sink")); err != nil {
+		t.Fatalf("the sink's own group: %v", err)
+	}
+	if len(acl.rows) != 4 || acl.rows[3].ResourceName != "connect-lcc-a1b2c3" {
+		t.Fatalf("rows = %+v", acl.rows)
+	}
+	acl.rows = nil
+	if _, err := exec(t, reg, "ccloud_acl_create", watcher("connect-lcc-zzz999", "orders-sink")); !errors.Is(err, ErrGroupNotTheConnectors) {
+		t.Errorf("another connector's id: %v, want ErrGroupNotTheConnectors", err)
+	}
+	if _, err := exec(t, reg, "ccloud_acl_create", watcher("connect-lcc-a1b2c3", "")); !errors.Is(err, ops.ErrParams) {
+		t.Errorf("a connect-lcc- group without the connector: %v, want ErrParams", err)
+	}
+	if _, err := exec(t, reg, "ccloud_acl_create", watcher("connect-orders-sink", "orders-sink")); !errors.Is(err, ops.ErrParams) {
+		t.Errorf("a connector with a non-managed group: %v, want ErrParams", err)
+	}
+	if _, err := exec(t, reg, "ccloud_acl_create", watcher("connect-lcc-a1b2c3", "missing-sink")); !errors.Is(err, confluentcloud.ErrNotFound) {
+		t.Errorf("an unknown connector: %v, want ErrNotFound", err)
+	}
+	if len(acl.rows) != 0 {
+		t.Errorf("a refused grant sent %d rows", len(acl.rows))
+	}
+	if cc.idReads != 3 {
+		t.Errorf("%d id reads, want 3 (the refusals in the check read nothing)", cc.idReads)
+	}
 }
 
 // TestACLPrincipalIsThePersons (review M2): the principal is bound to the

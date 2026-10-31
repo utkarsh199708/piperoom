@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"piperoom/internal/actions"
@@ -122,6 +124,37 @@ func (c *Client) ListConnectors(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// connectorIDRE is a managed connector's id, "lcc-" and a short lowercase
+// suffix.
+var connectorIDRE = regexp.MustCompile(`^lcc-[a-z0-9]{1,32}$`)
+
+// ConnectorID reads a connector's id (lcc-...), the suffix of the consumer
+// group a managed sink connector consumes as (connect-lcc-<id>), from
+// listConnectv1ConnectorsWithExpansions (GET connectors?expand=id): a map of
+// connector name to {"id": {"id": "lcc-...", "id_type": "ID"}}. The shape is
+// from Confluent's API reference, not confirmed against a live account.
+func (c *Client) ConnectorID(ctx context.Context, name string) (string, error) {
+	if err := CheckName(name); err != nil {
+		return "", err
+	}
+	var resp map[string]struct {
+		ID struct {
+			ID string `json:"id"`
+		} `json:"id"`
+	}
+	if err := do(ctx, c.http, c.base, http.MethodGet, c.connectPath("connectors"), "expand=id", nil, &resp, "read connector ids"); err != nil {
+		return "", err
+	}
+	e, ok := resp[name]
+	if !ok {
+		return "", fmt.Errorf("%w: read connector ids: no connector %s", ErrNotFound, strconv.Quote(clip(name, 64)))
+	}
+	if !connectorIDRE.MatchString(e.ID.ID) {
+		return "", fmt.Errorf("%w: read connector ids: connector %s has no lcc- id", ErrAPI, strconv.Quote(clip(name, 64)))
+	}
+	return e.ID.ID, nil
 }
 
 // Status reads a connector's status (readConnectv1ConnectorStatus): the

@@ -323,6 +323,14 @@ func (s *storeConfluent) CreateConnector(ctx context.Context, name string, cfg m
 	return c.CreateConnector(ctx, name, cfg)
 }
 
+func (s *storeConfluent) ConnectorID(ctx context.Context, name string) (string, error) {
+	c, err := s.client()
+	if err != nil {
+		return "", err
+	}
+	return c.ConnectorID(ctx, name)
+}
+
 func (s *storeConfluent) Status(ctx context.Context, name string) (clients.ConnectorStatus, error) {
 	c, err := s.client()
 	if err != nil {
