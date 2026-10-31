@@ -117,7 +117,7 @@ def check_policy(docs, values):
                          "string(object.spec.build.output.image).matches(", "'config.providers.secrets.class']",
                          "!string(object.spec.config[k]).contains('${')", "pushSecret ==", "-cluster-ca-cert'",
                          "certificateAndKey.secretName ==", "passwordSecret.secretName ==", "config.providers",
-                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.sha512sum.matches", "a.url.startsWith(h)",
+                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.type == 'tgz'", "(a.url + ' ' + a.sha512sum) in [", "a.url.startsWith(h)",
                          "logging.valueFrom.configMapKeyRef.name ==", "metricsConfig.valueFrom.configMapKeyRef.name =="],
         "KafkaConnector": ["override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
@@ -195,6 +195,10 @@ def check_policy(docs, values):
         # Every copy of the map in the rules is the whole map.
         if whole not in exprs or exprs.count(whole) != exprs.count(whole.split("], ", 1)[0] + "], "):
             fail("the KafkaConnector rules do not hold the runner's %s map from files/%s whole" % (kind, fname))
+    # A build artifact is one the knowledge index pins, at its digest.
+    arts = "[%s]" % ", ".join("'%s %s'" % (r[1], r[2]) for r in rows("setup-artifacts.txt"))
+    if not rows("setup-artifacts.txt") or "(a.url + ' ' + a.sha512sum) in %s" % arts not in exprs:
+        fail("the build artifact rule does not pin the runner's artifacts (files/setup-artifacts.txt)")
     # spec.class is exactly one of the runner's classes, never a prefix.
     classes = "object.spec.class in [%s]" % ", ".join("'%s'" % r[1] for r in rows("setup-connector-values.txt") if r[0] == "class")
     if classes not in exprs or "object.spec.class.startsWith(" in exprs:

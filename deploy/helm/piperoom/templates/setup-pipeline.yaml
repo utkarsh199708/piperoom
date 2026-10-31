@@ -292,6 +292,8 @@ dialect, the transform and predicate classes and keys, and the runner's
 patterns. The policy matches values against these allow-lists only. */}}
 {{- $ckeys := list }}
 {{- range (.Files.Lines "files/setup-connector-keys.txt") }}{{ if . }}{{ $ckeys = append $ckeys (squote .) }}{{ end }}{{ end }}
+{{- $artifacts := list }}
+{{- range (.Files.Lines "files/setup-artifacts.txt") }}{{ if . }}{{ $f := splitList "\t" . }}{{ $artifacts = append $artifacts (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}{{ end }}
 {{- $classes := list }}{{ $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
 {{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}{{ $k := index $f 1 }}{{ $v := squote (index $f 2) }}
@@ -457,9 +459,10 @@ spec:
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
         object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
-        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
-        has(a.url) && [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
-      message: {{ printf "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
+        has(a.type) && a.type == 'tgz' && has(a.sha512sum) && has(a.url) &&
+        (a.url + ' ' + a.sha512sum) in [{{ join ", " $artifacts }}] &&
+        [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
+      message: {{ printf "piperoom: every build artifact is a plugin archive the knowledge index pins (files/setup-artifacts.txt), at its pinned sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||

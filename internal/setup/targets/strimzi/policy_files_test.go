@@ -386,3 +386,21 @@ func TestPolicyFilesRenders(t *testing.T) {
 }
 
 var policyKeyRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// TestPolicyFilesArtifacts writes the build archives the knowledge index
+// pins (url and sha512): the policy admits a KafkaConnect build artifact
+// only when it is one of them (round 5).
+func TestPolicyFilesArtifacts(t *testing.T) {
+	var rows [][]string
+	for a := range knownArtifacts() {
+		u, sha, _ := strings.Cut(a, " ")
+		if !strings.HasPrefix(u, "https://") || !sha512HexRE.MatchString(sha) {
+			t.Fatalf("artifact %q is not an https URL with a sha512", a)
+		}
+		rows = append(rows, []string{"artifact", u, sha})
+	}
+	if len(rows) == 0 {
+		t.Fatal("the knowledge index pins no artifact")
+	}
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-artifacts.txt"), tsv(t, rows))
+}
