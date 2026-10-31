@@ -192,6 +192,40 @@ describe('DecisionBar phone sheet, long Approve label (KAN-595)', () => {
   })
 })
 
+describe('DecisionBar needs-you headline on a narrow desktop column (KAN-593)', () => {
+  const showBar = (state: RoomState, placement: 'sheet' | 'top') =>
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={state} user={arjun} placement={placement} />
+      </DecisionHandleContext.Provider>,
+    )
+
+  // jsdom has no layout: assert the classes. A wrapping flex line counts each item at its basis, so
+  // without one the headline counts as 0 and the buttons never leave its row.
+  it('gives the top bar a headline basis, so the buttons wrap below it, in the same order', () => {
+    showBar(room(prop()), 'top')
+    const wrapper = screen.getByText(/Needs your approval/).parentElement as HTMLElement
+    expect(wrapper.className).toContain('basis-80')
+    expect(wrapper.className).toContain('flex-1')
+    expect(wrapper.className).toContain('min-w-0')
+    const row = screen.getByRole('button', { name: /^Reject/ }).parentElement as HTMLElement
+    expect(row.className).toContain('flex-wrap')
+    expect(row.className).toContain('max-w-full')
+    const names = Array.from(row.querySelectorAll('button')).map((b) => b.textContent)
+    expect(names[0]).toMatch(/^Reject/)
+    expect(names[1]).toMatch(/^Approve kafka-connect/)
+    expect(names[2]).toMatch(/^View steps/)
+  })
+
+  it('leaves the phone sheet and the other decisions without the basis', () => {
+    const { unmount } = showBar(room(prop()), 'sheet')
+    expect((screen.getByText(/Needs your approval/).parentElement as HTMLElement).className).not.toContain('basis-80')
+    unmount()
+    showBar(room(prop({ approvals: { 'schema-registry': 'pending', 'kafka-connect': 'approved' } })), 'top')
+    expect((screen.getByText(/Waiting for/).parentElement as HTMLElement).className).not.toContain('basis-80')
+  })
+})
+
 describe('DecisionBar height variable', () => {
   // On load a finished fix keeps the bar empty while `decision` is set; when a new proposal then
   // needs you, the sheet must publish its height or it covers the composer.
