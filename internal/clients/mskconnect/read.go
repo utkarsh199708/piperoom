@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -561,9 +562,19 @@ func (c *Client) SimulateRole(ctx context.Context, arn string, actionNames []str
 	return ds, nil
 }
 
+// expectedOwnerRE is an AWS account id, the only ExpectedBucketOwner S3
+// takes.
+var expectedOwnerRE = regexp.MustCompile(`^[0-9]{12}$`)
+
 // HeadObject reads the plugin archive's size and version. It never reads
-// the object.
-func (c *Client) HeadObject(ctx context.Context, bucket, key, version string) (Object, error) {
+// the object. expectedOwner is the account the bucket must belong to (S3's
+// ExpectedBucketOwner, required): a bucket of the same name in another
+// account answers 403 instead of handing that account's archive to the
+// plugin check.
+func (c *Client) HeadObject(ctx context.Context, bucket, key, version, expectedOwner string) (Object, error) {
+	if !expectedOwnerRE.MatchString(expectedOwner) {
+		return Object{}, fmt.Errorf("%w: the expected bucket owner must be a 12-digit account id", ErrInvalid)
+	}
 	if err := CheckBucket(bucket); err != nil {
 		return Object{}, err
 	}
@@ -573,7 +584,7 @@ func (c *Client) HeadObject(ctx context.Context, bucket, key, version string) (O
 	if err := CheckObjectVersion(version); err != nil {
 		return Object{}, err
 	}
-	in := &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}
+	in := &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), ExpectedBucketOwner: aws.String(expectedOwner)}
 	if version != "" {
 		in.VersionId = aws.String(version)
 	}

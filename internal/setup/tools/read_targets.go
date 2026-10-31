@@ -115,14 +115,14 @@ func targetReadSpecs() []readSpec {
 		},
 		{
 			name:   "msk_role_check",
-			desc:   "Check the MSK Connect service execution role: its trust in kafkaconnect.amazonaws.com and the simulated MSK IAM and log actions. MSK target only.",
+			desc:   "Check the MSK Connect service execution role (its name must start with piperoom): its trust in kafkaconnect.amazonaws.com and the simulated MSK IAM and log actions. MSK target only.",
 			op:     "msk_role_check",
 			schema: objectSchema(map[string]any{"role_arn": stringType()}, "role_arn"),
 			params: requiredMatch("role_arn", mskRoleARNRE),
 		},
 		{
 			name: "msk_plugin_object_check",
-			desc: "Check the plugin archive the person uploaded to S3 (a .zip or .jar): it exists and, with expected_size, its size matches. The digest is not verified. MSK target only.",
+			desc: "Check the plugin archive the person uploaded to S3 (a .zip or .jar): the bucket belongs to the target's account, the object exists and, with expected_size, its size matches. The digest is not verified. MSK target only.",
 			op:   "msk_plugin_object_check",
 			schema: objectSchema(map[string]any{
 				"bucket": stringType(), "key": stringType(), "version": stringType(),
@@ -314,7 +314,7 @@ var (
 	mskNameRE        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	mskResourceARNRE = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:kafkaconnect:[a-z]{2}(-[a-z]+)+-[0-9]:[0-9]{12}:(connector|custom-plugin|worker-configuration)/[A-Za-z0-9_.-]{1,128}/[A-Za-z0-9-]{1,64}$`)
 	mskClusterARNRE  = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:kafka:[a-z]{2}(-[a-z]+)+-[0-9]:[0-9]{12}:cluster/[A-Za-z0-9-]{1,64}/[A-Za-z0-9-]{1,64}$`)
-	mskRoleARNRE     = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:iam::[0-9]{12}:role/([A-Za-z0-9+=,.@_-]{1,64}/){0,4}[A-Za-z0-9+=,.@_-]{1,64}$`)
+	mskRoleARNRE     = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:iam::[0-9]{12}:role/([A-Za-z0-9+=,.@_-]{1,64}/){0,4}(?i:piperoom)[A-Za-z0-9+=,.@_-]{0,56}$`) // the role's name starts with piperoom (any case), the runner's managed.RolePrefix
 	mskBucketRE      = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 	mskObjectKeyRE   = regexp.MustCompile(`^([A-Za-z0-9_.-]{1,100}/){0,8}[A-Za-z0-9_.-]{1,128}\.(zip|jar)$`)
 	mskObjectVerRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,8 +121,10 @@ func TestValidationRefusesBeforeAnyRequest(t *testing.T) {
 		{"no subnet", func() error { _, err := c.DescribeNetwork(ctx, nil, nil); return err }},
 		{"group", func() error { _, err := c.DescribeNetwork(ctx, []string{tSubnetA}, []string{"default"}); return err }},
 		{"role", func() error { _, err := c.GetRole(ctx, "arn:aws:iam::000000000000:user/u"); return err }},
-		{"object key", func() error { _, err := c.HeadObject(ctx, tBucket, "../etc/passwd", ""); return err }},
-		{"bucket", func() error { _, err := c.HeadObject(ctx, "Bad_Bucket", tKey, ""); return err }},
+		{"object key", func() error { _, err := c.HeadObject(ctx, tBucket, "../etc/passwd", "", tAccount); return err }},
+		{"bucket", func() error { _, err := c.HeadObject(ctx, "Bad_Bucket", tKey, "", tAccount); return err }},
+		{"no expected bucket owner", func() error { _, err := c.HeadObject(ctx, tBucket, tKey, "", ""); return err }},
+		{"expected bucket owner not an account", func() error { _, err := c.HeadObject(ctx, tBucket, tKey, "", "acme"); return err }},
 		{"plugin content type", func() error {
 			_, err := c.CreatePlugin(ctx, PluginSpec{Name: "p", ContentType: "TAR", BucketArn: tBucketARN, FileKey: tKey})
 			return err
@@ -209,5 +212,31 @@ func TestMapStateAndPrincipal(t *testing.T) {
 	}
 	if AccountOfARN(tConnector) != tAccount || RegionOfARN(tConnector) != tRegion {
 		t.Errorf("AccountOfARN/RegionOfARN of %s", tConnector)
+	}
+}
+
+// headerTap answers every request with 200 and keeps the last request's
+// headers.
+type headerTap struct{ got http.Header }
+
+func (h *headerTap) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.got = req.Header.Clone()
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Length": {"10"}}, Body: http.NoBody, Request: req}, nil
+}
+
+// TestHeadObjectSendsTheExpectedOwner (review M3): HeadObject names the
+// target's account as the bucket's expected owner, so S3 refuses a bucket of
+// the same name in another account.
+func TestHeadObjectSendsTheExpectedOwner(t *testing.T) {
+	tap := &headerTap{}
+	c, err := New(testConfig(tap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.HeadObject(context.Background(), tBucket, tKey, "", "123456789012"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tap.got.Get("X-Amz-Expected-Bucket-Owner"); got != "123456789012" {
+		t.Fatalf("x-amz-expected-bucket-owner = %q, want the target account", got)
 	}
 }

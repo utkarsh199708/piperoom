@@ -77,7 +77,7 @@ var targetReadCases = map[string]struct{ good, bad []string }{
 	"msk_list_plugins":        {good: []string{`{}`, `{"name_prefix":"debezium"}`}, bad: []string{`{"name_prefix":"-x"}`}},
 	"msk_describe_connector":  {good: []string{`{"name":"orders-src"}`}, bad: []string{`{"name":""}`, `{"name":"a b"}`}},
 	"msk_vpc_check":           {good: []string{`{"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],"database_ip":"10.0.1.5","database_port":5432}`}, bad: []string{`{"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],"database_ip":"db.internal","database_port":5432}`}},
-	"msk_role_check":          {good: []string{`{"role_arn":"arn:aws:iam::123456789012:role/msk-connect"}`}, bad: []string{`{"role_arn":"msk-connect"}`}},
+	"msk_role_check":          {good: []string{`{"role_arn":"arn:aws:iam::123456789012:role/piperoom-msk-connect"}`}, bad: []string{`{"role_arn":"msk-connect"}`, `{"role_arn":"arn:aws:iam::123456789012:role/AdminRole"}`}},
 	"msk_plugin_object_check": {good: []string{`{"bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip"}`}, bad: []string{`{"bucket":"orders-plugins","key":"debezium/../pg.zip"}`, `{"bucket":"orders-plugins","key":"pg.tgz"}`}},
 	"msk_wait":                {good: []string{`{"kind":"plugin","arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234"}`}, bad: []string{`{"kind":"connector","arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234"}`, `{"kind":"cluster","arn":"x"}`}},
 	"ccloud_list_plugins":     {good: []string{`{}`}, bad: []string{`{"x":1}`}},

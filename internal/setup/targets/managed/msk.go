@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"piperoom/internal/clients/mskconnect"
@@ -27,7 +28,7 @@ type MSKAPI interface {
 	DescribeNetwork(ctx context.Context, subnets, groups []string) (mskconnect.Network, error)
 	GetRole(ctx context.Context, arn string) (mskconnect.Role, error)
 	SimulateRole(ctx context.Context, arn string, actions []string) ([]mskconnect.Decision, error)
-	HeadObject(ctx context.Context, bucket, key, version string) (mskconnect.Object, error)
+	HeadObject(ctx context.Context, bucket, key, version, expectedOwner string) (mskconnect.Object, error)
 	CreatePlugin(ctx context.Context, s mskconnect.PluginSpec) (mskconnect.Created, error)
 	CreateWorkerConfig(ctx context.Context, s mskconnect.WorkerConfigSpec) (mskconnect.WorkerConfig, error)
 	CreateConnector(ctx context.Context, s mskconnect.ConnectorSpec) (mskconnect.Created, error)
@@ -68,6 +69,51 @@ type MSKDriver struct {
 	room      string
 	secrets   Materialiser
 	pollEvery time.Duration
+
+	// createdMu guards created: the ARNs of the connectors this driver
+	// (this runner process, bound to one room) created. msk_delete_connector
+	// deletes only one of them, on top of the room tag, so a tag copied
+	// onto another connector by anyone with kafkaconnect:TagResource does
+	// not make it deletable. The set is not persisted: after a runner
+	// restart the room's connectors are deleted by hand.
+	createdMu sync.Mutex
+	created   map[string]bool
+}
+
+// RolePrefix is the name prefix (case-insensitive) of the IAM roles the MSK
+// ops accept as a service execution role (msk_role_check,
+// msk_create_connector's service_role_arn): a connector runs as a role made
+// for it, never as an arbitrary role of the account the model named.
+const RolePrefix = "piperoom"
+
+// checkRoleName refuses a role ARN whose role name (the last path segment)
+// does not start with RolePrefix.
+func checkRoleName(arn string) error {
+	name := arn[strings.LastIndexByte(arn, '/')+1:]
+	if !strings.HasPrefix(strings.ToLower(name), RolePrefix) {
+		return fmt.Errorf("%w: role %s: the service execution role's name must start with %q (create it for the connector, e.g. PiperoomMSKConnect)", ErrParams, clipText(name, 64), RolePrefix)
+	}
+	return nil
+}
+
+// noteCreated records a connector this driver created.
+func (d *MSKDriver) noteCreated(arn string) {
+	if arn == "" {
+		return
+	}
+	d.createdMu.Lock()
+	defer d.createdMu.Unlock()
+	if d.created == nil {
+		d.created = map[string]bool{}
+	}
+	d.created[arn] = true
+}
+
+// createdHere reports whether this driver created the connector arn.
+func (d *MSKDriver) createdHere(arn string) bool {
+	d.createdMu.Lock()
+	defer d.createdMu.Unlock()
+	return d.created[arn]
 }
 
 // Class is the target's derived class.
@@ -132,9 +178,9 @@ func (d *MSKDriver) ops() []ops.Op {
 				"subnets": stringListSchema(""), "security_groups": stringListSchema(""), "database_ip": stringSchema(""),
 				"database_port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535}}),
 			run: d.vpcCheck, check: d.checkVPCParams},
-		mskOp{d: d, name: "msk_role_check", describe: "check the service execution role: trust in kafkaconnect.amazonaws.com and the simulated MSK IAM and log actions (iam GetRole, SimulatePrincipalPolicy)",
+		mskOp{d: d, name: "msk_role_check", describe: "check the service execution role (its name must start with piperoom): trust in kafkaconnect.amazonaws.com and the simulated MSK IAM and log actions (iam GetRole, SimulatePrincipalPolicy)",
 			schema: objectSchema([]string{"role_arn"}, map[string]any{"role_arn": stringSchema("")}), run: d.roleCheck, check: d.checkRoleParams},
-		mskOp{d: d, name: "msk_plugin_object_check", describe: "check the plugin archive the person uploaded to S3: it exists and its size matches (s3 HeadObject; the digest is not verified)",
+		mskOp{d: d, name: "msk_plugin_object_check", describe: "check the plugin archive the person uploaded to S3: the bucket is the target account's, the object exists and its size matches expected_size when given (s3 HeadObject with ExpectedBucketOwner; the digest is not verified)",
 			schema: objectSchema([]string{"bucket", "key"}, map[string]any{"bucket": stringSchema(""), "key": stringSchema(""), "version": stringSchema(""),
 				"expected_size": map[string]any{"type": "integer", "minimum": 1}}),
 			run: d.pluginObjectCheck, check: d.checkObjectParams},
@@ -142,7 +188,7 @@ func (d *MSKDriver) ops() []ops.Op {
 			schema: objectSchema([]string{"kind", "arn"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"plugin", "connector"}}, "arn": stringSchema("")}),
 			run:    d.wait, check: d.checkWaitParams, deadline: WaitDeadline},
 		mskOp{d: d, name: "msk_create_plugin", write: true, describe: "create an MSK Connect custom plugin from the archive the person uploaded to S3 (kafkaconnect:CreateCustomPlugin); asynchronous, follow with msk_wait",
-			schema: objectSchema([]string{"name", "bucket", "key", "content_type"}, map[string]any{"name": stringSchema(""), "bucket": stringSchema(""), "key": stringSchema(""),
+			schema: objectSchema([]string{"name", "bucket", "key", "content_type", "expected_size"}, map[string]any{"name": stringSchema(""), "bucket": stringSchema(""), "key": stringSchema(""),
 				"version": stringSchema(""), "content_type": map[string]any{"type": "string", "enum": []string{mskconnect.ContentZIP, mskconnect.ContentJAR}},
 				"expected_size": map[string]any{"type": "integer", "minimum": 1}}),
 			run: d.createPlugin, check: d.checkCreatePlugin, preview: d.previewPlugin},
@@ -410,7 +456,10 @@ func (d *MSKDriver) checkRoleParams(raw json.RawMessage) error {
 	if err := decode(raw, &p); err != nil {
 		return err
 	}
-	return d.checkARN(p.RoleArn, mskconnect.CheckRoleARN)
+	if err := d.checkARN(p.RoleArn, mskconnect.CheckRoleARN); err != nil {
+		return err
+	}
+	return checkRoleName(p.RoleArn)
 }
 
 func (d *MSKDriver) checkObjectParams(raw json.RawMessage) error {
@@ -463,6 +512,12 @@ func (d *MSKDriver) checkCreatePlugin(raw json.RawMessage) error {
 	if p.ContentType != mskconnect.ContentZIP && p.ContentType != mskconnect.ContentJAR {
 		return fmt.Errorf("%w: content_type %q, want ZIP or JAR", ErrParams, clipText(p.ContentType, 16))
 	}
+	if p.ExpectedSize <= 0 {
+		// The plugin runs inside the account's Connect workers: the
+		// archive's size is the one check S3 allows without reading it
+		// (the digest is unverified), so a create never skips it.
+		return fmt.Errorf("%w: expected_size is required: the archive's size in bytes, from the release you downloaded", ErrParams)
+	}
 	return checkObject(p.Bucket, p.Key, p.Version, p.ExpectedSize)
 }
 
@@ -514,6 +569,9 @@ func (d *MSKDriver) checkCreateConnector(raw json.RawMessage) error {
 		}
 	}
 	if err := d.checkARN(p.ServiceRoleArn, mskconnect.CheckRoleARN); err != nil {
+		return err
+	}
+	if err := checkRoleName(p.ServiceRoleArn); err != nil {
 		return err
 	}
 	if p.LogGroup != "" {
@@ -624,19 +682,25 @@ func (d *MSKDriver) pluginObjectCheck(ctx context.Context, raw json.RawMessage) 
 }
 
 func (d *MSKDriver) objectCheck(ctx context.Context, bucket, key, version string, size int64) (ops.Result, error) {
-	o, err := d.api.HeadObject(ctx, bucket, key, version)
+	// The bucket must be the target account's own (ExpectedBucketOwner): a
+	// same-named bucket elsewhere answers 403 rather than vouching for an
+	// archive another account controls.
+	o, err := d.api.HeadObject(ctx, bucket, key, version, d.account)
 	if err != nil {
 		data := errData(err)
 		data["hint"] = "the runner's identity needs s3:GetObject on the plugin object, and so does the MSK Connect service when it builds the plugin"
 		return d.result("", data), err
 	}
 	matches := size == 0 || o.Size == size
-	data := map[string]any{"object": o, "size_matches": matches, "digest": "unverified: S3 exposes no SHA-512 of the object (design §3.1)"}
+	data := map[string]any{"object": o, "size_matches": matches, "bucket_owner": d.account, "digest": "unverified: S3 exposes no SHA-512 of the object (design §3.1)"}
 	if !matches {
-		return d.result(fmt.Sprintf("s3://%s/%s is %d bytes, the index says %d", bucket, key, o.Size, size), data),
-			fmt.Errorf("%w: the object's size does not match the index", ErrCheckFailed)
+		return d.result(fmt.Sprintf("s3://%s/%s is %d bytes, the expected size is %d", bucket, key, o.Size, size), data),
+			fmt.Errorf("%w: the object's size is not the expected size", ErrCheckFailed)
 	}
-	return d.result(fmt.Sprintf("s3://%s/%s exists, %d bytes; size matches the index; digest unverified", bucket, key, o.Size), data), nil
+	if size == 0 {
+		return d.result(fmt.Sprintf("s3://%s/%s exists in account %s, %d bytes; no expected size given; digest unverified", bucket, key, d.account, o.Size), data), nil
+	}
+	return d.result(fmt.Sprintf("s3://%s/%s exists in account %s, %d bytes; size matches; digest unverified", bucket, key, d.account, o.Size), data), nil
 }
 
 // wait polls until a terminal state or until the op's deadline is too close
@@ -757,6 +821,7 @@ func (d *MSKDriver) createConnector(ctx context.Context, raw json.RawMessage) (o
 	if err != nil {
 		return d.result("", errData(err)), err
 	}
+	d.noteCreated(created.Arn)
 	// Data carries the config as the person wrote it: references, never the
 	// materialised values.
 	return d.result(fmt.Sprintf("MSK connector %s is %s; MSK provisions it for 5 to 15 minutes, wait with msk_wait", created.Name, created.State),
@@ -769,6 +834,13 @@ func (d *MSKDriver) deleteConnector(ctx context.Context, raw json.RawMessage) (o
 	arn, err := d.api.FindConnector(ctx, p.Name)
 	if err != nil {
 		return d.result("", errData(err)), err
+	}
+	if !d.createdHere(arn) {
+		// The tag alone is not proof: anyone with kafkaconnect:TagResource
+		// in the account can copy it. The connector must be one this
+		// runner created for this room.
+		return d.result("refused msk_delete_connector: "+p.Name+" was not created by this runner for this room", map[string]any{"name": p.Name}),
+			fmt.Errorf("%w: connector %s is not one this runner created (after a runner restart, delete it by hand)", ErrNotCreatedByRoom, p.Name)
 	}
 	tags, err := d.api.ConnectorTags(ctx, arn)
 	if err != nil {
@@ -797,7 +869,7 @@ func (d *MSKDriver) previewPlugin(raw json.RawMessage) (events.PreviewResult, er
 		return events.PreviewResult{}, err
 	}
 	return events.PreviewResult{
-		Expected:   fmt.Sprintf("custom plugin %s from s3://%s/%s (%s); size checked against the index, digest unverified", p.Name, p.Bucket, p.Key, p.ContentType),
+		Expected:   fmt.Sprintf("custom plugin %s from s3://%s/%s (%s) in account %s; size checked against %d bytes, digest unverified", p.Name, p.Bucket, p.Key, p.ContentType, d.account, p.ExpectedSize),
 		Reversible: false,
 	}, nil
 }
@@ -832,7 +904,7 @@ func (d *MSKDriver) previewDelete(raw json.RawMessage) (events.PreviewResult, er
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
-	return events.PreviewResult{Current: "connector " + p.Name, Expected: "connector " + p.Name + " deleted (only if this room created it)", Reversible: false}, nil
+	return events.PreviewResult{Current: "connector " + p.Name, Expected: "connector " + p.Name + " deleted (only if this runner created it for this room)", Reversible: false}, nil
 }
 
 // errData is the Data of a failed provider call: the error class, never the

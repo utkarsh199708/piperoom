@@ -87,12 +87,12 @@ func targetSpecs() []Spec {
 			Name:     "msk_create_plugin",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 (the runner checks it exists and its size first); asynchronous, follow with msk_wait.",
+			Describe: "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 in the target's account (the runner checks the bucket's owner, that the object exists and that its size is expected_size, required, first; the digest is not verified); asynchronous, follow with msk_wait.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "bucket": mskString(), "key": mskString(), "version": mskString(),
 				"content_type":  map[string]any{"type": "string", "enum": []string{"ZIP", "JAR"}},
 				"expected_size": map[string]any{"type": "integer", "minimum": 1},
-			}, "name", "bucket", "key", "content_type"),
+			}, "name", "bucket", "key", "content_type", "expected_size"),
 			Scope:       ScopeFree,
 			CheckParams: checkMSKCreatePlugin,
 			// No PreviewOp: the runner registers no preview_msk_* op.
@@ -420,7 +420,7 @@ var (
 	mskNameRE          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	mskResourceARNRE   = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:kafkaconnect:[a-z]{2}(-[a-z]+)+-[0-9]:[0-9]{12}:(connector|custom-plugin|worker-configuration)/[A-Za-z0-9_.-]{1,128}/[A-Za-z0-9-]{1,64}$`)
 	mskClusterARNRE    = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:kafka:[a-z]{2}(-[a-z]+)+-[0-9]:[0-9]{12}:cluster/[A-Za-z0-9-]{1,64}/[A-Za-z0-9-]{1,64}$`)
-	mskRoleARNRE       = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:iam::[0-9]{12}:role/([A-Za-z0-9+=,.@_-]{1,64}/){0,4}[A-Za-z0-9+=,.@_-]{1,64}$`)
+	mskRoleARNRE       = regexp.MustCompile(`^arn:aws[a-z-]{0,12}:iam::[0-9]{12}:role/([A-Za-z0-9+=,.@_-]{1,64}/){0,4}(?i:piperoom)[A-Za-z0-9+=,.@_-]{0,56}$`) // the role's name starts with piperoom (any case), the runner's managed.RolePrefix
 	mskBucketRE        = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 	mskObjectKeyRE     = regexp.MustCompile(`^([A-Za-z0-9_.-]{1,100}/){0,8}[A-Za-z0-9_.-]{1,128}\.(zip|jar)$`)
 	mskObjectVersionRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
@@ -540,8 +540,8 @@ func checkMSKCreatePlugin(raw json.RawMessage) error {
 	if p.ContentType != "ZIP" && p.ContentType != "JAR" {
 		return fmt.Errorf("content_type %q, want ZIP or JAR", clipText(p.ContentType))
 	}
-	if p.ExpectedSize < 0 {
-		return errors.New("expected_size below zero")
+	if p.ExpectedSize <= 0 {
+		return errors.New("expected_size is required: the archive's size in bytes")
 	}
 	return checkMSKObject(p.Bucket, p.Key, p.Version)
 }

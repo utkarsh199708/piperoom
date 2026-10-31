@@ -26,6 +26,7 @@ type fakeMSK struct {
 	calls     int
 	tags      map[string]string
 	bootstrap string
+	owners    []string
 }
 
 func newFake() *fakeMSK {
@@ -61,7 +62,8 @@ func (f *fakeMSK) GetRole(context.Context, string) (mskconnect.Role, error) {
 func (f *fakeMSK) SimulateRole(context.Context, string, []string) ([]mskconnect.Decision, error) {
 	return nil, nil
 }
-func (f *fakeMSK) HeadObject(context.Context, string, string, string) (mskconnect.Object, error) {
+func (f *fakeMSK) HeadObject(_ context.Context, _, _, _, owner string) (mskconnect.Object, error) {
+	f.owners = append(f.owners, owner)
 	return mskconnect.Object{Size: 10}, nil
 }
 func (f *fakeMSK) CreatePlugin(context.Context, mskconnect.PluginSpec) (mskconnect.Created, error) {
@@ -73,7 +75,7 @@ func (f *fakeMSK) CreateWorkerConfig(_ context.Context, s mskconnect.WorkerConfi
 }
 func (f *fakeMSK) CreateConnector(_ context.Context, s mskconnect.ConnectorSpec) (mskconnect.Created, error) {
 	f.created = append(f.created, s)
-	return mskconnect.Created{Name: s.Name, State: "CREATING"}, nil
+	return mskconnect.Created{Arn: mConnector, Name: s.Name, State: "CREATING"}, nil
 }
 func (f *fakeMSK) DeleteConnector(_ context.Context, arn, _ string) (mskconnect.Created, error) {
 	f.deleted = append(f.deleted, arn)
@@ -240,13 +242,68 @@ func TestMSKRefusesForeignARNs(t *testing.T) {
 func TestMSKDeleteOnlyWhatTheRoomCreated(t *testing.T) {
 	f := newFake()
 	f.tags = map[string]string{}
-	reg, _ := newMSK(t, f, protocol.ClassProduction, nil)
+	reg, _ := newMSK(t, f, protocol.ClassShared, nil)
+	// Tagged with the room but not created by this runner (review L3): a
+	// copied tag is not proof.
+	f.tags = map[string]string{TagRoom: mRoom}
 	if _, err := exec(t, reg, "msk_delete_connector", map[string]any{"name": "it_orders"}); !errors.Is(err, ErrNotCreatedByRoom) || len(f.deleted) != 0 {
-		t.Fatalf("untagged: %v, deleted %v", err, f.deleted)
+		t.Fatalf("tagged, not created here: %v, deleted %v", err, f.deleted)
+	}
+	if _, err := exec(t, reg, "msk_create_connector", connectorParams()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	f.tags = map[string]string{}
+	if _, err := exec(t, reg, "msk_delete_connector", map[string]any{"name": "it_orders"}); !errors.Is(err, ErrNotCreatedByRoom) || len(f.deleted) != 0 {
+		t.Fatalf("created here, untagged: %v, deleted %v", err, f.deleted)
 	}
 	f.tags = map[string]string{TagRoom: mRoom}
 	if _, err := exec(t, reg, "msk_delete_connector", map[string]any{"name": "it_orders"}); err != nil || len(f.deleted) != 1 {
-		t.Fatalf("tagged: %v, deleted %v", err, f.deleted)
+		t.Fatalf("created here and tagged: %v, deleted %v", err, f.deleted)
+	}
+}
+
+// TestMSKRoleMustBeAPiperoomRole (review M3, L5): msk_role_check and
+// msk_create_connector accept only a service execution role whose name
+// starts with RolePrefix, in the target's account.
+func TestMSKRoleMustBeAPiperoomRole(t *testing.T) {
+	f := newFake()
+	reg, _ := newMSK(t, f, "", nil)
+	other := "arn:aws:iam::" + mAccount + ":role/AdminRole"
+	if _, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": other}); !errors.Is(err, ops.ErrParams) {
+		t.Errorf("role_check on %s: %v, want ErrParams", other, err)
+	}
+	p := connectorParams()
+	p["service_role_arn"] = other
+	if _, err := exec(t, reg, "msk_create_connector", p); !errors.Is(err, ops.ErrParams) || len(f.created) != 0 {
+		t.Errorf("create with %s: %v, created %d", other, err, len(f.created))
+	}
+	for _, ok := range []string{"arn:aws:iam::" + mAccount + ":role/PiperoomMSKConnect", "arn:aws:iam::" + mAccount + ":role/service/piperoom-orders"} {
+		if _, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": ok}); errors.Is(err, ops.ErrParams) {
+			t.Errorf("role_check on %s: %v", ok, err)
+		}
+	}
+}
+
+// TestMSKPluginNeedsSizeAndOwner (review M3): msk_create_plugin requires
+// expected_size, and every object check names the target account as the
+// bucket's expected owner.
+func TestMSKPluginNeedsSizeAndOwner(t *testing.T) {
+	f := newFake()
+	reg, _ := newMSK(t, f, "", nil)
+	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP"}); !errors.Is(err, ops.ErrParams) {
+		t.Errorf("create without expected_size: %v, want ErrParams", err)
+	}
+	if len(f.owners) != 0 {
+		t.Fatalf("a refused create read the bucket")
+	}
+	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP", "expected_size": 10}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := exec(t, reg, "msk_plugin_object_check", map[string]any{"bucket": mBucket, "key": mKey}); err != nil {
+		t.Fatalf("object check: %v", err)
+	}
+	if len(f.owners) != 2 || f.owners[0] != mAccount || f.owners[1] != mAccount {
+		t.Fatalf("expected bucket owners = %v, want the target account twice", f.owners)
 	}
 }
 
@@ -304,7 +361,7 @@ func TestMSKRoleCheckFailsOnTrust(t *testing.T) {
 func TestMSKPluginObjectSizeMismatch(t *testing.T) {
 	reg, _ := newMSK(t, newFake(), "", nil)
 	res, err := exec(t, reg, "msk_plugin_object_check", map[string]any{"bucket": mBucket, "key": mKey, "expected_size": 11})
-	if !errors.Is(err, ErrCheckFailed) || !strings.Contains(res.Summary, "the index says 11") {
+	if !errors.Is(err, ErrCheckFailed) || !strings.Contains(res.Summary, "the expected size is 11") {
 		t.Errorf("err = %v, %s", err, res.Summary)
 	}
 }

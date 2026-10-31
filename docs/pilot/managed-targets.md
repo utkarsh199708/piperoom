@@ -179,10 +179,26 @@ make (`internal/setup/targets/managed/confluent.go:325-340`; the design §3.2).
 - **A T2 step** needs an approver of the parent design's §3.6 (an overlapping pipeline's owners, else a tenant admin;
   the driver in solo or standalone mode); **a T3 step** adds the typed confirm and the runner's terminal "y" (the
   design §4).
-- **Deletes reach only what this room created.** The create ops tag what they create with `piperoom-room=<room id>` and
-  `piperoom-created-by=piperoom-setup`; `msk_delete_connector` refuses a connector without this room's tag, on every
-  class (`internal/setup/targets/managed/managed.go:66-68`; `internal/setup/targets/managed/msk.go:761-764`; test
-  `internal/setup/targets/managed/msk_test.go:240`).
+- **Deletes reach only what this runner created for this room.** The create ops tag what they create with
+  `piperoom-room=<room id>` and `piperoom-created-by=piperoom-setup`; `msk_delete_connector` refuses a connector unless
+  this runner process created it (its ARN is in the driver's in-memory record of `msk_create_connector` results) **and**
+  it carries this room's tag, on every class. The tag alone is not proof: anyone with `kafkaconnect:TagResource` in the
+  account could copy it. The record is not persisted: after a runner restart, delete the room's connectors by hand
+  (`internal/setup/targets/managed/msk.go`, `deleteConnector`, `noteCreated`; test
+  `internal/setup/targets/managed/msk_test.go`, `TestMSKDeleteOnlyWhatTheRoomCreated`).
+- **The runner guards production itself.** Besides the classes the server sends, the runner's guard asks each managed
+  op with the class its driver derived (account, environment or project against `PIPEROOM_SETUP_PROD_PATTERNS`, or
+  your floor): a delete with a guard row (`msk_delete_connector`) is refused on a production target even when the room
+  under-classes it and the runner allows T3 (`ops.ClassGuarder`; test
+  `internal/setup/runner/managed_guard_test.go`).
+- **The service execution role is one made for Piperoom.** `msk_role_check` and `msk_create_connector` accept only a
+  role in the target's account whose name starts with `piperoom` (any case, e.g. `PiperoomMSKConnect`), so the model
+  cannot name an arbitrary role of the account for the connector to run as (`managed.RolePrefix`; the server checks the
+  same shape).
+- **The plugin archive is the target account's.** The object check sends S3's `ExpectedBucketOwner` with the target
+  account, so a same-named bucket in another account answers 403, and `msk_create_plugin` requires `expected_size`
+  (the archive's size in bytes from the release you downloaded; the knowledge index records digests, not sizes, so the
+  server cannot fill it).
 - **The worker configuration is templated.** `msk_create_worker_config` renders its properties from a template under a
   key allow-list (converters from a fixed class list, `schemas.enable`, the two offset flush intervals) and refuses
   `config.providers*`, the internal topic settings, `group.id`, `bootstrap.servers`, `plugin.path` and the REST keys by
@@ -215,7 +231,7 @@ At room close, delete the setup key or token and its service account (the design
 - **`msk_vpc_check` reads only the connector's side**: route tables and security group egress. The database's own
   security group, a network ACL and DNS are not read, and a group rule that names another group does not count as
   allowing (`internal/setup/targets/managed/vpc.go:69`; `internal/setup/targets/managed/vpc.go:83-88`).
-- **The plugin archive's digest is not verified**: the object check compares size only (S3 exposes no SHA-512;
+- **The plugin archive's digest is not verified**: the object check compares the bucket owner and the size only (S3 exposes no SHA-512;
   `internal/setup/targets/managed/msk.go:618`; the design §3.1).
 - **Confluent and Aiven have no delete op** (section 7), and no Aiven service create, read user or ACL op (the design
   §3.3's additions are not built).

@@ -72,7 +72,7 @@ func readInputs() map[string]json.RawMessage {
 		"msk_list_plugins":        json.RawMessage(`{"name_prefix":"debezium"}`),
 		"msk_describe_connector":  json.RawMessage(`{"name":"orders-src"}`),
 		"msk_vpc_check":           json.RawMessage(`{"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],"database_ip":"10.0.1.5","database_port":5432}`),
-		"msk_role_check":          json.RawMessage(`{"role_arn":"arn:aws:iam::123456789012:role/msk-connect"}`),
+		"msk_role_check":          json.RawMessage(`{"role_arn":"arn:aws:iam::123456789012:role/piperoom-msk-connect"}`),
 		"msk_plugin_object_check": json.RawMessage(`{"bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","expected_size":1024}`),
 		"msk_wait":                json.RawMessage(`{"kind":"connector","arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:connector/orders-src/abcd-1234"}`),
 		"ccloud_list_plugins":     json.RawMessage(`{}`),

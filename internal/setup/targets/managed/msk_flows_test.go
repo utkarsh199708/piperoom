@@ -261,7 +261,12 @@ func TestMSKFlows(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reg, _ := newMSK(t, c, "", nil)
+			reg, d := newMSK(t, c, "", nil)
+			if f.op == "msk_delete_connector" {
+				// The cassettes start at the delete: the connector was
+				// created earlier in this runner's session.
+				d.noteCreated(mConnector)
+			}
 			res, err := exec(t, reg, f.op, f.params)
 			f.check(t, res, err)
 			if strings.Contains(res.Summary+string(res.Data), "pw-live-1") {

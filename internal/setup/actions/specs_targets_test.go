@@ -90,7 +90,9 @@ var targetCases = map[string]struct{ good, bad []string }{
 	},
 	"msk_create_plugin": {
 		good: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","content_type":"ZIP","expected_size":1024}`},
-		bad:  []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg.zip","content_type":"TAR"}`, `{"name":"debezium-pg","bucket":"orders-plugins","key":"../pg.zip","content_type":"ZIP"}`},
+		bad: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg.zip","content_type":"TAR"}`, `{"name":"debezium-pg","bucket":"orders-plugins","key":"../pg.zip","content_type":"ZIP"}`,
+			// expected_size is required (M3).
+			`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","content_type":"ZIP"}`},
 	},
 	"msk_create_worker_config": {
 		good: []string{`{"name":"piperoom-worker","entries":{"key.converter.schemas.enable":"false"}}`},
@@ -100,15 +102,20 @@ var targetCases = map[string]struct{ good, bad []string }{
 		good: []string{`{"name":"orders-src","kafka_connect_version":"3.7.x","cluster_arn":"arn:aws:kafka:eu-west-1:123456789012:cluster/orders/abcd-1234",` +
 			`"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],` +
 			`"plugin_arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234",` +
-			`"service_role_arn":"arn:aws:iam::123456789012:role/msk-connect",` +
+			`"service_role_arn":"arn:aws:iam::123456789012:role/piperoom-msk-connect",` +
 			`"config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector","database.password":"${secret:pg_password}"}}`},
 		bad: []string{`{"name":"orders-src","kafka_connect_version":"3.7.x","subnets":["subnet-xyz"],"security_groups":["sg-0123456789abcdef0"],` +
 			`"plugin_arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234",` +
-			`"service_role_arn":"arn:aws:iam::123456789012:role/msk-connect","config":{"a":"b"}}`,
+			`"service_role_arn":"arn:aws:iam::123456789012:role/piperoom-msk-connect","config":{"a":"b"}}`,
 			`{"name":"orders-src","kafka_connect_version":"3.7.x","cluster_arn":"arn:aws:kafka:eu-west-1:123456789012:cluster/orders/abcd-1234",` +
 				`"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],` +
 				`"plugin_arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234",` +
-				`"service_role_arn":"arn:aws:iam::123456789012:role/msk-connect","config":{"database.password":"hunter2"}}`},
+				`"service_role_arn":"arn:aws:iam::123456789012:role/piperoom-msk-connect","config":{"database.password":"hunter2"}}`,
+			// The service execution role must be one made for piperoom (M3).
+			`{"name":"orders-src","kafka_connect_version":"3.7.x","cluster_arn":"arn:aws:kafka:eu-west-1:123456789012:cluster/orders/abcd-1234",` +
+				`"subnets":["subnet-0123456789abcdef0"],"security_groups":["sg-0123456789abcdef0"],` +
+				`"plugin_arn":"arn:aws:kafkaconnect:eu-west-1:123456789012:custom-plugin/debezium-pg/abcd-1234",` +
+				`"service_role_arn":"arn:aws:iam::123456789012:role/AdminRole","config":{"connector.class":"x"}}`},
 	},
 	"msk_delete_connector": {
 		good: []string{`{"name":"orders-src"}`},

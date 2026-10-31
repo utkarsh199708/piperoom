@@ -532,7 +532,7 @@ var mskCases = []mskCase{
 		name:      "head_object_ok",
 		responses: []replay.Response{{Status: 200, Headers: map[string]string{"Content-Length": "48213977", "Content-Type": "application/zip", "X-Amz-Version-Id": "v-0001", "Etag": `"0123456789abcdef0123456789abcdef"`}}},
 		run: func(t *testing.T, ctx context.Context, c *Client) {
-			o, err := c.HeadObject(ctx, tBucket, tKey, "")
+			o, err := c.HeadObject(ctx, tBucket, tKey, "", tAccount)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -545,7 +545,7 @@ var mskCases = []mskCase{
 		name:      "head_object_forbidden",
 		responses: []replay.Response{{Status: 403}},
 		run: func(t *testing.T, ctx context.Context, c *Client) {
-			_, err := c.HeadObject(ctx, tBucket, tKey, "")
+			_, err := c.HeadObject(ctx, tBucket, tKey, "", tAccount)
 			wantErr(t, err, ErrForbidden)
 		},
 	},
@@ -553,7 +553,7 @@ var mskCases = []mskCase{
 		name:      "head_object_not_found",
 		responses: []replay.Response{{Status: 404}},
 		run: func(t *testing.T, ctx context.Context, c *Client) {
-			_, err := c.HeadObject(ctx, tBucket, tKey, "")
+			_, err := c.HeadObject(ctx, tBucket, tKey, "", tAccount)
 			wantErr(t, err, ErrNotFound)
 		},
 	},
