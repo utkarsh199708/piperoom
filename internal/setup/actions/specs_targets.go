@@ -87,12 +87,12 @@ func targetSpecs() []Spec {
 			Name:     "msk_create_plugin",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 in the target's account (the runner checks the bucket's owner, that the object exists and that its size is expected_size, required, first; the digest is not verified); asynchronous, follow with msk_wait.",
+			Describe: "Create an MSK Connect custom plugin from the .zip or .jar archive the person uploaded to S3 in the target's account pinned to the object's S3 version id, required (versioning must be on for the bucket), so the object the runner checks is the object MSK builds; the runner checks the bucket's owner, that that version exists and that its size is expected_size, required, first; the digest is not verified; asynchronous, follow with msk_wait.",
 			Schema: objectSchema(map[string]any{
 				"name": mskString(), "bucket": mskString(), "key": mskString(), "version": mskString(),
 				"content_type":  map[string]any{"type": "string", "enum": []string{"ZIP", "JAR"}},
 				"expected_size": map[string]any{"type": "integer", "minimum": 1},
-			}, "name", "bucket", "key", "content_type", "expected_size"),
+			}, "name", "bucket", "key", "version", "content_type", "expected_size"),
 			Scope:       ScopeFree,
 			CheckParams: checkMSKCreatePlugin,
 			// No PreviewOp: the runner registers no preview_msk_* op.
@@ -158,7 +158,7 @@ func targetSpecs() []Spec {
 			Name:     "ccloud_acl_create",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create the fixed ACL rows of a template for one Confluent service account: watcher (read the topics under topic_prefix and describe the connector's group, group required) or connector (create, write and describe the topics under topic_prefix). topic_prefix is the pipeline's topic_prefix; principal must be the service account the person entered on the runner for that template (ccloud_watcher_service_account or ccloud_connector_service_account), which the runner checks.",
+			Describe: "Create the fixed ACL rows of a template for one Confluent service account: watcher (read the topics and describe the connector's group, group required) or connector (create, write and describe the topics). topic_prefix is the pipeline's; every topic row is PREFIXED on <topic_prefix>. (separator included). principal must be the account the person entered on the runner for that template (ccloud_watcher_service_account or ccloud_connector_service_account); the runner checks it.",
 			Schema: objectSchema(map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{"watcher", "connector"}},
 				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(),
@@ -625,6 +625,9 @@ func checkMSKCreatePlugin(raw json.RawMessage) error {
 	if p.ContentType != "ZIP" && p.ContentType != "JAR" {
 		return fmt.Errorf("content_type %q, want ZIP or JAR", clipText(p.ContentType))
 	}
+	if p.Version == "" {
+		return errors.New("version is required: the archive's S3 version id, which pins the object the runner checks to the object MSK builds")
+	}
 	if p.ExpectedSize <= 0 {
 		return errors.New("expected_size is required: the archive's size in bytes")
 	}
@@ -796,6 +799,10 @@ func checkCCloudACL(raw json.RawMessage) error {
 	}
 	if len(p.TopicPrefix) < minCCloudACLPrefix || strings.HasPrefix(p.TopicPrefix, "_") {
 		return fmt.Errorf("topic_prefix %q must be at least %d characters and must not start with _", clipText(p.TopicPrefix), minCCloudACLPrefix)
+	}
+	if strings.HasSuffix(p.TopicPrefix, ".") {
+		// The runner grants on "<topic_prefix>.", the separator included.
+		return fmt.Errorf("topic_prefix %q is the pipeline's topic_prefix, without the trailing .", clipText(p.TopicPrefix))
 	}
 	switch p.Template {
 	case "watcher":

@@ -89,10 +89,13 @@ var targetCases = map[string]struct{ good, bad []string }{
 		bad:  []string{`{"kind":"KafkaUser"}`, `{"kind":"KafkaTopic"}`, `{"kind":"Secret","data":{}}`},
 	},
 	"msk_create_plugin": {
-		good: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","content_type":"ZIP","expected_size":1024}`},
-		bad: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg.zip","content_type":"TAR"}`, `{"name":"debezium-pg","bucket":"orders-plugins","key":"../pg.zip","content_type":"ZIP"}`,
+		good: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","version":"3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY","content_type":"ZIP","expected_size":1024}`},
+		bad: []string{`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg.zip","version":"v1","content_type":"TAR","expected_size":1024}`, `{"name":"debezium-pg","bucket":"orders-plugins","key":"../pg.zip","version":"v1","content_type":"ZIP","expected_size":1024}`,
 			// expected_size is required (M3).
-			`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","content_type":"ZIP"}`},
+			`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","version":"v1","content_type":"ZIP"}`,
+			// The S3 version id is required: it pins the object checked
+			// to the object built (L10).
+			`{"name":"debezium-pg","bucket":"orders-plugins","key":"debezium/pg-3.2.0.zip","content_type":"ZIP","expected_size":1024}`},
 	},
 	"msk_create_worker_config": {
 		good: []string{`{"name":"piperoom-worker","entries":{"key.converter.schemas.enable":"false"}}`},
@@ -129,13 +132,16 @@ var targetCases = map[string]struct{ good, bad []string }{
 			`{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"database.password":"${secret:AWS_SECRET_ACCESS_KEY}"}}`},
 	},
 	"ccloud_acl_create": {
-		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg.","group":"connect-orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg."}`},
-		bad: []string{`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg.","group":"x"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg."}`, `{"template":"admin","principal":"User:sa-abc123","topic_prefix":"pg."}`,
+		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`},
+		bad: []string{`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders","group":"x"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders"}`, `{"template":"admin","principal":"User:sa-abc123","topic_prefix":"orders"}`,
 			// A one- or two-character prefix covers most of a cluster; "_"
 			// starts its internal topics (M2).
 			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"o"}`,
 			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg"}`,
-			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"_confluent"}`},
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"_confluent"}`,
+			// The runner grants on "<topic_prefix>."; the prefix is the
+			// pipeline's, without the separator (M4).
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders."}`},
 	},
 	"aiven_create_connector": {
 		good: []string{`{"name":"orders-src","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector"}}`},
