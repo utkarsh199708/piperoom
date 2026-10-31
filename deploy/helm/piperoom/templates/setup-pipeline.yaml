@@ -177,10 +177,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     # the other Connect workers' REST API
     - ports:
         - port: 8083
@@ -234,7 +232,8 @@ spec:
 # The KafkaConnect build pod's egress (networkPolicy.enabled): DNS, the
 # plugin artifact hosts (pluginHosts) and the registries the image is pushed
 # to (imageRegistries), on the ports their host[:port] names (443 without
-# one). It needs no Kafka, API server or database.
+# one), and the registry the base image is pulled from (build.baseImage). It
+# needs no Kafka, API server or database.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -255,10 +254,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     # the plugin artifact hosts ({{ join ", " .Values.setup.pipeline.pluginHosts }})
     - ports:
         {{- range (include "piperoom.hostPorts" (dict "hosts" .Values.setup.pipeline.pluginHosts) | fromJsonArray) }}
@@ -275,6 +272,15 @@ spec:
         {{- end }}
       to:
         {{- toYaml $np.build.registry.to | nindent 8 }}
+    # the base image Kaniko builds on (Strimzi's Kafka image for spec.version,
+    # quay.io/strimzi/kafka unless the operator is configured otherwise)
+    - ports:
+        {{- range $np.build.baseImage.ports }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      to:
+        {{- toYaml $np.build.baseImage.to | nindent 8 }}
 {{- end }}
 {{- if .Values.setup.pipeline.admissionPolicy }}
 {{- $prefix := .Values.setup.pipeline.topicPrefix }}
@@ -297,13 +303,16 @@ dialect, the transform and predicate classes and keys, and the runner's
 patterns. The policy matches values against these allow-lists only. */}}
 {{- $ckeys := list }}
 {{- range (.Files.Lines "files/setup-connector-keys.txt") }}{{ if . }}{{ $ckeys = append $ckeys (squote .) }}{{ end }}{{ end }}
-{{- $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
+{{- $artifacts := list }}
+{{- range (.Files.Lines "files/setup-artifacts.txt") }}{{ if . }}{{ $f := splitList "\t" . }}{{ $artifacts = append $artifacts (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}{{ end }}
+{{- $classes := list }}{{ $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
 {{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}{{ $k := index $f 1 }}{{ $v := squote (index $f 2) }}
 {{- if eq (index $f 0) "exact" }}{{ $_ := set $exact $k (append (get $exact $k | default (list)) $v) }}{{ end }}
 {{- if eq (index $f 0) "fold" }}{{ $_ := set $fold $k (append (get $fold $k | default (list)) $v) }}{{ end }}
 {{- if eq (index $f 0) "cred" }}{{ $_ := set $cred $k $v }}{{ end }}
 {{- if eq (index $f 0) "require" }}{{ $_ := set $reqc $k (append (get $reqc $k | default (list)) $v) }}{{ end }}
+{{- if eq (index $f 0) "class" }}{{ $classes = append $classes (squote $k) }}{{ end }}
 {{- end }}{{ end }}
 {{- $free := dict }}{{ $enum := dict }}{{ $requ := dict }}{{ $dport := dict }}{{ $labels := list }}
 {{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
@@ -331,6 +340,13 @@ patterns. The policy matches values against these allow-lists only. */}}
 {{- range (.Files.Lines "files/setup-patterns.txt") }}{{ if . }}{{ $f := splitList "\t" . }}{{ $_ := set $pat (index $f 0) (printf "r'%s'" (index $f 1)) }}{{ end }}{{ end }}
 {{- $shapes := list }}
 {{- range $k, $v := $pat }}{{ if hasPrefix "jdbc." $k }}{{ $shapes = append $shapes (printf "'%s': %s" (trimPrefix "jdbc." $k) $v) }}{{ end }}{{ end }}
+{{- /* A databaseHosts entry without a port admits a connector that names no
+port or the dialect's default one, never another port. */}}
+{{- $srcport := dict }}
+{{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}{{ $f := splitList "\t" . }}
+{{- if eq (index $f 0) "class" }}{{ $d := index $f 2 }}{{ if eq $d "postgres" }}{{ $d = "postgresql" }}{{ end }}
+{{- if and (hasKey $dport $d) (ne $d "jdbc") }}{{ $_ := set $srcport (index $f 1) (get $dport $d) }}{{ end }}{{ end }}
+{{- end }}{{ end }}
 {{- $dbhosts := list }}
 {{- range .Values.setup.pipeline.databaseHosts }}{{ $dbhosts = append $dbhosts (squote (lower .)) }}{{ end }}
 {{- $regurls := list }}
@@ -461,9 +477,10 @@ spec:
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) || !has(object.spec.build) || !has(object.spec.build.plugins) ||
         object.spec.build.plugins.all(pl, has(pl.artifacts) && pl.artifacts.all(a,
-        has(a.type) && a.type in ['tgz', 'jar', 'zip'] && has(a.sha512sum) && a.sha512sum.matches('^[0-9a-f]{128}$') &&
-        has(a.url) && [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
-      message: {{ printf "piperoom: every build artifact is a tgz, jar or zip with a sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
+        has(a.type) && a.type == 'tgz' && has(a.sha512sum) && has(a.url) &&
+        (a.url + ' ' + a.sha512sum) in [{{ join ", " $artifacts }}] &&
+        [{{ join ", " $hosts }}].exists(h, a.url.startsWith(h))))
+      message: {{ printf "piperoom: every build artifact is a plugin archive the knowledge index pins (files/setup-artifacts.txt), at its pinned sha512sum, from %s" (join ", " .Values.setup.pipeline.pluginHosts) | quote }}
     - expression: >-
         object.kind != 'KafkaConnect' || !has(object.spec) ||
         ((!has(object.spec.logging) || !has(object.spec.logging.valueFrom) ||
@@ -486,7 +503,7 @@ spec:
         object.kind != 'KafkaConnector' || !has(object.spec) ||
         (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
         (!has(object.spec.tasksMax) || object.spec.tasksMax == 1) &&
-        (!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        (!has(object.spec.class) || object.spec.class in [{{ join ", " $classes }}]) &&
         variables.cc.all(k,
         k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
         !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
@@ -516,7 +533,9 @@ spec:
     # list (RegexRouter on a JDBC sink only), and each other key one of that
     # class's keys with one of its values; a key that names a table (the
     # "nodot" rows: a RegexRouter replacement, a CollectionNameTransformation
-    # prefix or suffix) never names another schema. route.by.field is not in
+    # prefix or suffix) never names another schema, and a RegexRouter
+    # replacement is a literal or $N references over a regex whose groups are
+    # all ([^.]+) (a group can capture a '.' too). route.by.field is not in
     # the key list.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
@@ -533,13 +552,19 @@ spec:
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtkeys }}] &&
         (!((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtenumkeys }}]) ||
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) + ' ' + string(variables.cc[k])) in [{{ join ", " $smtenum }}]) &&
+        (!(string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) == 'org.apache.kafka.connect.transforms.RegexRouter' &&
+        k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) == 'replacement') ||
+        string(variables.cc[k]).matches({{ index $pat "routeliteral" }}) ||
+        (string(variables.cc[k]).matches({{ index $pat "routeref" }}) && (k.split('.')[0] + '.' + k.split('.')[1] + '.regex') in variables.cc &&
+        string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.regex']).matches({{ index $pat "routeregex" }}))) &&
         !((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $nodot }}] &&
         string(variables.cc[k]).contains('.')))))))))
       message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, and no table name, a RegexRouter replacement or a CollectionNameTransformation prefix or suffix, into another schema)"
     # Connection URLs: the runner's shape for the dialect (no user info, no
     # IPv6 literal), every parameter from the dialect's list with a plain or
-    # label value and an allowed value where the runner pins one, no
-    # parameter twice, the dialect's TLS parameter set, and every host one of
+    # label value and an allowed value where the runner pins one, each JDBC
+    # name spelled exactly as the driver reads it (pgjdbc and Connector/J
+    # ignore SSLMODE), no parameter twice in any spelling, the dialect's TLS parameter set, and every host one of
     # setup.pipeline.databaseHosts (the dialect's default port filled in).
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
@@ -547,15 +572,16 @@ spec:
         variables.dialect in { {{- join ", " $shapes -}} } && variables.url.matches({ {{- join ", " $shapes -}} }[variables.dialect]) &&
         variables.urlParams.all(q, q.split('=').size() == 2 && q.split('=')[0].matches('^[A-Za-z]{1,64}$') &&
         (q.split('=')[0].lowerAscii() in [{{ join ", " $labels }}] ? q.split('=')[1].replace('%20', ' ').matches({{ index $pat "label" }}) : q.split('=')[1].matches({{ index $pat "value" }})) &&
-        (q.lowerAscii() in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0].lowerAscii() in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
+        ((q.split('=')[0] + '=' + q.split('=')[1].lowerAscii()) in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0] in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
         variables.urlParams.filter(r, r.split('=')[0].lowerAscii() == q.split('=')[0].lowerAscii()).size() == 1) &&
         ({{ include "piperoom.celMap" $requ }}[variables.dialect].size() == 0 ||
-        {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0].lowerAscii() == n))) &&
+        {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0] == n))) &&
         (!variables.urlParams.exists(q, q.lowerAscii() == 'allowpublickeyretrieval=true') ||
         variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
         variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
         ((h.matches(r':[0-9]{1,5}$') ? h : h + ':' + {{ include "piperoom.celMap" $dport }}[variables.dialect]).lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))) &&
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':' + {{ include "piperoom.celMap" $dport }}[variables.dialect]))))))) &&
         (variables.mongo == '' || (
         variables.mongo.matches({{ index $pat "mongodb" }}) &&
         variables.mongoParams.all(q, q.split('=').size() == 2 && q.split('=')[1].matches({{ index $pat "value" }}) &&
@@ -563,8 +589,9 @@ spec:
         {{ include "piperoom.celMap" $requ }}['mongodb'].exists(n, variables.mongoParams.exists(q, q.split('=')[0].lowerAscii() == n)) &&
         variables.mongoHosts.all(h, !h.contains('@') &&
         ((h.matches(r':[0-9]{1,5}$') ? h : h + ':27017').lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        (h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}])))))
-      message: {{ printf "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from %s" (join ", " .Values.setup.pipeline.databaseHosts) | quote }}
+        ((h.matches(r':[0-9]{1,5}$') ? h.substring(0, h.lastIndexOf(':')) : h).lowerAscii() in [{{ join ", " $dbhosts }}] &&
+        (!h.matches(r':[0-9]{1,5}$') || h.endsWith(':27017'))))))))
+      message: {{ printf "piperoom: a connection URL has the runner's shape for its dialect (no user info), only the dialect's parameters and values, each once, TLS on and verified, and hosts from %s (an entry without a port admits no port or the dialect's default only)" (join ", " .Values.setup.pipeline.databaseHosts) | quote }}
     # Topics and where a connector connects: a source's topic.prefix is the
     # pipeline's, a sink reads topics under it, the dead letter queue and the
     # schema history follow the kafkatopics rules under it, none is a topic
@@ -590,9 +617,10 @@ spec:
         (k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches({{ $bootstrapRE }})) &&
         (k != 'database.hostname' ||
         (string(variables.cc[k]) + ('database.port' in variables.cc ? ':' + string(variables.cc['database.port']) : '')).lowerAscii() in [{{ join ", " $dbhosts }}] ||
-        string(variables.cc[k]).lowerAscii() in [{{ join ", " $dbhosts }}]) &&
+        (string(variables.cc[k]).lowerAscii() in [{{ join ", " $dbhosts }}] && 'database.port' in variables.cc && has(object.spec.class) &&
+        object.spec.class in {{ include "piperoom.celMap" $srcport }} && string(variables.cc['database.port']) == {{ include "piperoom.celMap" $srcport }}[object.spec.class])) &&
         (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in [{{ join ", " $regurls }}])))
-      message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s, and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
+      message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s (an entry without a port admits no database.port or the dialect's default only), and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
     # ---- KafkaTopic ----
     # The canary only: <topicPrefix>.<schema>.piperoom_canary (with a SQL
     # Server source, <topicPrefix>.<sourceDatabase>.<schema>.piperoom_canary),

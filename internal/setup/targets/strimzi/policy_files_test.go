@@ -142,8 +142,11 @@ func TestPolicyFilesURLParams(t *testing.T) {
 	var rows [][]string
 	add := func(d string, params map[string][]string) {
 		for k, vs := range params {
-			if !regexp.MustCompile(`^[a-z]{1,64}$`).MatchString(k) {
-				t.Fatalf("%s parameter %q is not a lower-case name", d, k)
+			if !regexp.MustCompile(`^[A-Za-z]{1,64}$`).MatchString(k) {
+				t.Fatalf("%s parameter %q is not a name", d, k)
+			}
+			if d == "mongodb" && k != strings.ToLower(k) {
+				t.Fatalf("mongodb option %q: the policy compares MongoDB options lower-cased (the driver reads them case-insensitively)", k)
 			}
 			if vs == nil {
 				rows = append(rows, []string{"free", d, k})
@@ -169,7 +172,7 @@ func TestPolicyFilesURLParams(t *testing.T) {
 	for _, r := range rows {
 		if r[0] == "free" || r[0] == "enum" {
 			for _, bad := range []string{"hostnameincertificate", "allowloadlocalinfile", "socketfactory", "sslfactory", "loggerfile", "autodeserialize", "currentschema"} {
-				if strings.HasPrefix(r[2], bad) {
+				if strings.HasPrefix(strings.ToLower(r[2]), bad) {
 					t.Fatalf("the policy URL parameter list would admit %s", bad)
 				}
 			}
@@ -208,6 +211,12 @@ func TestPolicyFilesConnectorValues(t *testing.T) {
 	}
 	for k, sk := range credentialKeys {
 		rows = append(rows, []string{"cred", k, sk})
+	}
+	// The connector classes a KafkaConnector may name: exactly the runner's
+	// (round 5: a prefix check admitted MariaDbConnector, Db2Connector and
+	// InformixConnector, which no TLS rule covers).
+	for plugin, cls := range sourceClasses {
+		rows = append(rows, []string{"class", cls, plugin})
 	}
 	for plugin, k := range requiredSourceKeys {
 		rows = append(rows, []string{"require", sourceClasses[plugin], k})
@@ -269,6 +278,9 @@ func TestPolicyFilesPatterns(t *testing.T) {
 		{"transformnames", transformNamesRE.String()},
 		{"topic", kafkatopics.NamePattern},
 		{"dbname", dbNameRE.String()},
+		{"routeliteral", routeLiteralRE.String()},
+		{"routeref", routeRefRE.String()},
+		{"routeregex", routeRegexRE.String()},
 	}
 	for d, re := range jdbcURLShapes {
 		rows = append(rows, []string{"jdbc." + d, re.String()})
@@ -374,3 +386,21 @@ func TestPolicyFilesRenders(t *testing.T) {
 }
 
 var policyKeyRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// TestPolicyFilesArtifacts writes the build archives the knowledge index
+// pins (url and sha512): the policy admits a KafkaConnect build artifact
+// only when it is one of them (round 5).
+func TestPolicyFilesArtifacts(t *testing.T) {
+	var rows [][]string
+	for a := range knownArtifacts() {
+		u, sha, _ := strings.Cut(a, " ")
+		if !strings.HasPrefix(u, "https://") || !sha512HexRE.MatchString(sha) {
+			t.Fatalf("artifact %q is not an https URL with a sha512", a)
+		}
+		rows = append(rows, []string{"artifact", u, sha})
+	}
+	if len(rows) == 0 {
+		t.Fatal("the knowledge index pins no artifact")
+	}
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-artifacts.txt"), tsv(t, rows))
+}

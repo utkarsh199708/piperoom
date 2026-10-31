@@ -8,7 +8,7 @@ setup:
     admissionPolicy: true
     topicPrefix: pg
     imageRegistries: [registry.data.svc:5000]
-    databaseHosts: [pg:5432]
+    databaseHosts: [pg:5432, legacy-db]
     schemaRegistries: [http://registry.data.svc:8081]
     networkPolicy:
       apiServer:
@@ -23,5 +23,7 @@ setup:
           to: [{ipBlock: {cidr: 199.232.0.0/16}}]
         registry:
           to: [{podSelector: {matchLabels: {app: registry}}}]
+        baseImage:
+          to: [{ipBlock: {cidr: 54.0.0.0/8}}]
 networkPolicy:
   enabled: true

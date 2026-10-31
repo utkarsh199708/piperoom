@@ -1,8 +1,10 @@
 package strimzi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -274,4 +276,69 @@ func TestSinkWithoutTopicPrefixNamesTheParam(t *testing.T) {
 	checkConfigs(t, "jdbc", false, map[string]map[string]any{
 		"a topic off the prefix": {"topics": "orders-connect-connect-configs"},
 	})
+}
+
+// Every read masks credentials (round 5): a restarted runner reads the
+// values back from the db-credentials Secret, the JSON-escaped and
+// URL-encoded copies of a value are masked, the line rule masks the whole
+// rest of a key=value, key: value or JSON "key":"value" line (quoted,
+// spaced, comma values, a short value), and k8s_get, k8s_events and
+// strimzi_build_status mask as k8s_logs does.
+func TestReadsMaskCredentials(t *testing.T) {
+	h := newHarness(t, "", nil) // a fresh driver: nothing remembered
+	secret := `Re/st"rt Pw1`
+	sp := coreObjectPath(testNS, "secrets", h.d.dbSecretName())
+	h.api.objects[sp] = map[string]any{"metadata": map[string]any{"name": h.d.dbSecretName()}, "data": map[string]any{
+		"password": base64.StdEncoding.EncodeToString([]byte(secret)), "username": base64.StdEncoding.EncodeToString([]byte("ab"))}}
+	h.api.allow(sp)
+	j, _ := json.Marshal(secret)
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Join([]string{
+		"connected with " + secret + " to pg",
+		`{"config":{"database.password":` + string(j) + `,"database.hostname":"pg"}}`,
+		"jdbc:postgresql://pg/w?password=" + url.QueryEscape(secret),
+		"path /" + url.PathEscape(secret),
+		`     database.password = "two words, and a comma"`,
+		`{"connection.password": "x y"}`,
+		"     database.user: ab",
+		"     database.password = [hidden]",
+		"     database.hostname = pg",
+	}, "\n") + "\n"
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	for _, leak := range []string{"st\\\"rt", "Re%2Fst", "two words", "and a comma", "x y", ": ab"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("the log returns %q: %s", leak, b)
+		}
+	}
+	for _, keep := range []string{"database.hostname = pg"} {
+		if !strings.Contains(string(b), keep) {
+			t.Errorf("the log lost %q: %s", keep, b)
+		}
+	}
+
+	h.api.allowed["events"] = true
+	h.api.objects["events"] = map[string]any{"items": []any{
+		map[string]any{"type": "Warning", "reason": "Failed", "message": "login failed with " + secret, "lastTimestamp": "2026-10-30T10:00:00Z"},
+	}}
+	cp := h.shell("KafkaConnect", "orders-connect", map[string]any{})
+	h.api.allow(cp)
+	h.api.allow("/api/v1/namespaces/data/pods/orders-connect-connect-build")
+	obj := h.api.objects[cp]
+	obj["status"] = map[string]any{"conditions": []any{map[string]any{"type": "NotReady", "status": "True", "message": "connection.password=" + secret + " refused"}}}
+	for op, params := range map[string]map[string]any{
+		"k8s_events":           {"involved": "orders-connect-connect-0"},
+		"k8s_get":              {"kind": "KafkaConnect", "name": "orders-connect"},
+		"strimzi_build_status": {},
+	} {
+		res, err := run(t, h, op, params)
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		if b, _ := json.Marshal(res.Data); strings.Contains(string(b), "st\\\"rt") || strings.Contains(string(b), "Re/st") {
+			t.Errorf("%s returns the credential: %s", op, b)
+		}
+	}
 }

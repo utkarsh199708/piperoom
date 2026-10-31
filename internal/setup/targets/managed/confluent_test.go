@@ -332,12 +332,13 @@ func TestACLRows(t *testing.T) {
 
 // countingACL records the rows ccloud_acl_create sends. exists and
 // topicACLs are the bare <topic_prefix> topic's state; topicErr fails its
-// read.
+// existence read and aclErr its ACL listing.
 type countingACL struct {
 	rows      []confluentcloud.ACL
 	exists    bool
 	topicACLs []confluentcloud.ACL
 	topicErr  error
+	aclErr    error
 }
 
 func (a *countingACL) TopicExists(context.Context, string) (bool, error) {
@@ -345,7 +346,7 @@ func (a *countingACL) TopicExists(context.Context, string) (bool, error) {
 }
 
 func (a *countingACL) TopicACLs(context.Context, string) ([]confluentcloud.ACL, error) {
-	return a.topicACLs, nil
+	return a.topicACLs, a.aclErr
 }
 
 func (a *countingACL) CreateACL(_ context.Context, acl confluentcloud.ACL) error {
@@ -375,6 +376,9 @@ func TestACLBareTopicMustBeOurs(t *testing.T) {
 		{"another application's", &countingACL{exists: true, topicACLs: []confluentcloud.ACL{ours, theirs}}, ErrTopicNotOurs},
 		{"exists with no ACLs", &countingACL{exists: true}, ErrTopicNotOurs},
 		{"the read fails", &countingACL{topicErr: confluentcloud.ErrForbidden}, confluentcloud.ErrForbidden},
+		// The topic exists but its ACLs cannot be listed: refused too,
+		// never granted on a guess (round 5 correctness).
+		{"the ACL listing fails", &countingACL{exists: true, topicACLs: []confluentcloud.ACL{ours}, aclErr: confluentcloud.ErrForbidden}, confluentcloud.ErrForbidden},
 	}
 	for _, c := range cases {
 		reg, _ := ccReg(t, &fakeCC{}, ConfluentOptions{ACL: c.acl, Principal: principal})

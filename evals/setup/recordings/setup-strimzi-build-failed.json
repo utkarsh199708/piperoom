@@ -223,7 +223,7 @@
       "proposal_id": "p_setup_4",
       "step_index": 0,
       "params_hash": "c43bf0d6b066523d69db572c5b8fe3f03caa3f4abc69ecb7d0adcb00c7fe9b0c",
-      "params": {"kind": "KafkaConnector", "template": "connector", "params": {"connector": "pg-orders-connector", "plugin": "postgres", "config": {"database.hostname": "orders-db.data.svc", "database.port": "5432", "database.user": "piperoom_cdc", "database.password": "${secrets:data/orders-db-credentials:password}", "database.dbname": "orders", "plugin.name": "pgoutput", "slot.name": "debezium_orders", "publication.name": "dbz_publication", "table.include.list": "public.orders,public.piperoom_canary", "topic.prefix": "pg"}}},
+      "params": {"kind": "KafkaConnector", "template": "connector", "params": {"connector": "pg-orders-connector", "plugin": "postgres", "topic_prefix": "pg", "config": {"database.hostname": "orders-db.data.svc", "database.port": "5432", "database.user": "piperoom_cdc", "database.password": "${secrets:data/orders-db-credentials:password}", "database.dbname": "orders", "plugin.name": "pgoutput", "slot.name": "debezium_orders", "publication.name": "dbz_publication", "table.include.list": "public.orders,public.piperoom_canary", "topic.prefix": "pg", "database.sslmode": "verify-full"}}},
       "result": {
         "ok": true,
         "summary": "KafkaConnector data/pg-orders-connector written from template connector and unpaused",

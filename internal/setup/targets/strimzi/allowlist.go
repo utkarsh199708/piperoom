@@ -3,6 +3,7 @@ package strimzi
 import (
 	"fmt"
 	"piperoom/internal/setup/kafkatopics"
+	"piperoom/internal/setup/knowledge"
 	"regexp"
 	"sort"
 	"strings"
@@ -326,13 +327,16 @@ func (d *Driver) validateBuild(v any) error {
 			if err := keysOnly(ap, am, "type", "url", "sha512sum"); err != nil {
 				return err
 			}
-			switch t, _ := asString(am["type"]); t {
-			case "tgz", "jar", "zip":
-			default:
-				return refuse(ap+".type", "must be tgz, jar or zip (maven carries no checksum)")
+			if t, _ := asString(am["type"]); t != "tgz" {
+				return refuse(ap+".type", "must be tgz: the knowledge index pins plugin archives")
 			}
-			if s, _ := asString(am["sha512sum"]); !sha512HexRE.MatchString(s) {
-				return refuse(ap+".sha512sum", "the knowledge index's digest is required")
+			u, _ := asString(am["url"])
+			sha, _ := asString(am["sha512sum"])
+			if !sha512HexRE.MatchString(sha) || !knownArtifacts()[u+" "+sha] {
+				// Any jar on an allowed host with a digest of its own
+				// choosing would run in the worker: only an archive the
+				// index pins, at its pinned digest (round 5).
+				return refuse(ap, "an archive the knowledge index pins, with its pinned sha512sum")
 			}
 		}
 	}
@@ -340,6 +344,22 @@ func (d *Driver) validateBuild(v any) error {
 }
 
 var sha512HexRE = regexp.MustCompile(`^[0-9a-f]{128}$`)
+
+// knownArtifacts is every build archive the knowledge index pins, as
+// "<url> <sha512 hex>": each release's source connector plugins and its
+// JDBC sink archive. The admission policy reads the same set
+// (files/setup-artifacts.txt, written by policy_files_test.go).
+func knownArtifacts() map[string]bool {
+	out := map[string]bool{}
+	for _, r := range knowledge.Releases() {
+		for _, c := range append(knowledge.Connectors(r), "jdbc") {
+			if _, u, sha, err := pluginArtifact(r, c); err == nil && sha != "" {
+				out[u+" "+sha] = true
+			}
+		}
+	}
+	return out
+}
 
 // credentialKeys are the only config keys whose value may be a reference to
 // the db-credentials Secret. Anywhere else a reference would carry the

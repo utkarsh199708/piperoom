@@ -17,8 +17,8 @@ one NetworkPolicy selects the Connect pods and has exactly the egress the
 values ask for (DNS, the other workers on 8083, the Kafka pods, the API
 server, the databases, the Schema Registries, then
 setup.pipeline.networkPolicy.extraEgress), and one selects the build pod
-(DNS, the plugin hosts, the image registries); every "to" but DNS's is
-required. The CEL itself is run by celcheck/.
+(DNS, the plugin hosts, the image registries, the base image's registry);
+every "to" is required. The CEL itself is run by celcheck/.
 runner: the Role grants no create, no escalate/bind/impersonate, no "*", no
 list but on events, every rule but the events ones names its objects, and the
 Secret, KafkaConnect and pod rules grant exactly the verbs the runner sends;
@@ -117,9 +117,9 @@ def check_policy(docs, values):
                          "string(object.spec.build.output.image).matches(", "'config.providers.secrets.class']",
                          "!string(object.spec.config[k]).contains('${')", "pushSecret ==", "-cluster-ca-cert'",
                          "certificateAndKey.secretName ==", "passwordSecret.secretName ==", "config.providers",
-                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.sha512sum.matches", "a.url.startsWith(h)",
+                         "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.type == 'tgz'", "(a.url + ' ' + a.sha512sum) in [", "a.url.startsWith(h)",
                          "logging.valueFrom.configMapKeyRef.name ==", "metricsConfig.valueFrom.configMapKeyRef.name =="],
-        "KafkaConnector": ["object.spec.class.startsWith('io.debezium.connector.')", "override", "initial.statements",
+        "KafkaConnector": ["override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
                            "object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart'])", "object.spec.tasksMax == 1",
                            "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
@@ -166,7 +166,7 @@ def check_policy(docs, values):
     if not keys or "[%s]" % ", ".join("'%s'" % i for i in keys) not in exprs:
         fail("the KafkaConnector rules do not hold the runner's connector key list (files/setup-connector-keys.txt)")
     tokens = {
-        "setup-connector-values.txt": lambda r: ["'%s': '%s'" % (r[1], r[2])] if r[0] == "cred" else (["'%s'" % r[2]] if r[0] in ("exact", "fold") else ["'%s'" % r[1], "'%s'" % r[2]]),
+        "setup-connector-values.txt": lambda r: ["'%s': '%s'" % (r[1], r[2])] if r[0] == "cred" else (["'%s'" % r[2]] if r[0] in ("exact", "fold") else (["'%s'" % r[1]] if r[0] == "class" else ["'%s'" % r[1], "'%s'" % r[2]])),
         "setup-url-params.txt": lambda r: ["'%s'" % (r[1] if r[0] == "label" else r[2])],
         "setup-smt.txt": lambda r: ["'%s'" % " ".join(r[1:])],
         "setup-patterns.txt": lambda r: ["r'%s'" % r[1]],
@@ -195,6 +195,14 @@ def check_policy(docs, values):
         # Every copy of the map in the rules is the whole map.
         if whole not in exprs or exprs.count(whole) != exprs.count(whole.split("], ", 1)[0] + "], "):
             fail("the KafkaConnector rules do not hold the runner's %s map from files/%s whole" % (kind, fname))
+    # A build artifact is one the knowledge index pins, at its digest.
+    arts = "[%s]" % ", ".join("'%s %s'" % (r[1], r[2]) for r in rows("setup-artifacts.txt"))
+    if not rows("setup-artifacts.txt") or "(a.url + ' ' + a.sha512sum) in %s" % arts not in exprs:
+        fail("the build artifact rule does not pin the runner's artifacts (files/setup-artifacts.txt)")
+    # spec.class is exactly one of the runner's classes, never a prefix.
+    classes = "object.spec.class in [%s]" % ", ".join("'%s'" % r[1] for r in rows("setup-connector-values.txt") if r[0] == "class")
+    if classes not in exprs or "object.spec.class.startsWith(" in exprs:
+        fail("the KafkaConnector rules do not pin spec.class to the runner's classes (files/setup-connector-values.txt class rows)")
     want_vars = ["cc", "sink", "url", "mongo", "dialect", "urlRest", "oracleAddr", "urlParams", "urlHosts", "mongoParams", "mongoHosts"]
     if [v["name"] for v in spec.get("variables") or []] != want_vars:
         fail("the policy's variables are %s, want %s" % ([v["name"] for v in spec.get("variables") or []], want_vars))
@@ -333,7 +341,7 @@ def check_pipeline_network_policy(docs, values):
             fail("a pipeline NetworkPolicy does not select exactly the %s pods" % name)
         if np["policyTypes"] != ["Egress"] or np.get("ingress"):
             fail("the pipeline NetworkPolicies must govern egress only")
-    dns = egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to"))
+    dns = egress_rule([("UDP", 53), ("TCP", 53)], required_to(values["networkPolicy"]["dns"].get("to"), "DNS"))
     rest = egress_rule([("TCP", 8083)], [{"podSelector": {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": connect}}}])
     kafka = egress_rule([("TCP", p) for p in nv["kafkaPorts"]],
                         [{"podSelector": {"matchLabels": {"strimzi.io/cluster": pv["kafka"], "strimzi.io/kind": "Kafka"}}}])
@@ -353,8 +361,9 @@ def check_pipeline_network_policy(docs, values):
         dns,
         egress_rule([("TCP", p) for p in host_ports(pv["pluginHosts"])], required_to(nv["build"]["sources"].get("to"), "build sources")),
         egress_rule([("TCP", p) for p in host_ports(pv.get("imageRegistries") or ["registry"])], required_to(nv["build"]["registry"].get("to"), "build registry")),
+        egress_rule([("TCP", p) for p in nv["build"]["baseImage"]["ports"]], required_to(nv["build"]["baseImage"].get("to"), "build base image")),
     ]
-    compare_egress(sel[connect + "-build"].get("egress") or [], build, ["DNS", "plugin hosts", "image registries"], "build pod's")
+    compare_egress(sel[connect + "-build"].get("egress") or [], build, ["DNS", "plugin hosts", "image registries", "base image"], "build pod's")
 
 
 def check_network_policy(docs, job, values):
@@ -376,7 +385,7 @@ def check_network_policy(docs, job, values):
     server_port = u.port or (443 if u.scheme == "https" else 80)
 
     want = [
-        egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
+        egress_rule([("UDP", 53), ("TCP", 53)], required_to(values["networkPolicy"]["dns"].get("to"), "Job's DNS")),
         egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], required_to(nv["apiServer"].get("to"), "Job's API server")),
         egress_rule([("TCP", server_port)], required_to(nv["server"].get("to"), "Job's server")),
     ] + list(nv.get("extraEgress") or [])
