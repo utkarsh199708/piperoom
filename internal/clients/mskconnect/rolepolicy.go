@@ -145,32 +145,38 @@ func policyText(raw string) (string, error) {
 	return doc, nil
 }
 
-// EscalationActions are the concrete IAM and STS actions a service
-// execution role must not be granted: each lets the role grant itself or
-// another principal more, or step into another role. EscalationGrants also
-// refuses every iam:Put*, Attach*, Create*, Update*, Pass*, Add* and Set*
-// action by its verb, so this list need not be complete for them.
+// EscalationActions are concrete IAM and STS actions the simulation tests
+// a service execution role against. The policy read (EscalationGrants) is
+// broader: it refuses every iam: and sts: action, so this list only needs
+// to name the ones a role is most likely to hold on one ARN.
 var EscalationActions = []string{
 	"iam:PutRolePolicy", "iam:PutUserPolicy", "iam:PutGroupPolicy", "iam:PutRolePermissionsBoundary",
-	"iam:AttachRolePolicy", "iam:AttachUserPolicy", "iam:AttachGroupPolicy",
+	"iam:DeleteRolePermissionsBoundary", "iam:DeleteRolePolicy",
+	"iam:AttachRolePolicy", "iam:AttachUserPolicy", "iam:AttachGroupPolicy", "iam:DetachRolePolicy",
 	"iam:CreatePolicyVersion", "iam:SetDefaultPolicyVersion",
 	"iam:CreateAccessKey", "iam:CreateUser", "iam:CreateRole", "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
-	"iam:UpdateAssumeRolePolicy", "iam:PassRole", "iam:AddUserToGroup",
+	"iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:PassRole", "iam:AddUserToGroup",
+	"iam:TagRole", "iam:UntagRole", "iam:UploadSSHPublicKey",
+	"iam:CreateServiceSpecificCredential", "iam:ResetServiceSpecificCredential",
 	"sts:AssumeRole",
 }
 
-// escalationVerbs are the IAM action verbs EscalationGrants refuses on any
-// resource.
-var escalationVerbs = []string{"put", "attach", "create", "update", "pass", "add", "set"}
+// identityReadAllow are the iam: and sts: actions a service execution role
+// may hold. MSK Connect needs none (its workers authenticate with the
+// role's own session; kafka-cluster:*, logs:* and s3:GetObject are not
+// iam or sts actions), so the list is empty: any iam or sts action in a
+// role's policy is refused. An allow-list rather than a deny-list, so an
+// action this package has never heard of is refused too.
+var identityReadAllow = []string{}
 
 // EscalationGrants reads one policy document and returns, for each Allow
-// statement that could grant an escalation, a short description: an action
-// pattern that matches any of EscalationActions (iam:*, iam:Put*, *, ...),
-// a literal iam action with one of escalationVerbs, any sts:AssumeRole*,
-// or a NotAction (which allows everything it does not name). Resource and
-// Condition are ignored and Deny statements are not credited: the read
-// fails closed, so a policy that allows iam:* and narrows it with a Deny is
-// still reported. A document that cannot be parsed is reported too.
+// statement that grants an iam: or sts: action outside identityReadAllow,
+// a short description: a literal action, a pattern that could match one
+// (iam:*, iam:Put*, *, *:*, i*, ...), or a NotAction (which allows
+// everything it does not name). Resource and Condition are ignored and
+// Deny statements are not credited: the read fails closed, so a policy
+// that allows iam:* and narrows it with a Deny is still reported. A
+// document that cannot be parsed is reported too.
 func EscalationGrants(doc string) []string {
 	var pol struct {
 		Statement json.RawMessage `json:"Statement"`
@@ -203,7 +209,7 @@ func EscalationGrants(doc string) []string {
 			continue
 		}
 		for _, a := range actions {
-			if escalates(a) {
+			if grantsIdentity(a) {
 				out = append(out, fmt.Sprintf("statement %d allows %s", i+1, clip(a, 64)))
 			}
 		}
@@ -211,44 +217,35 @@ func EscalationGrants(doc string) []string {
 	return out
 }
 
-// escalates reports whether an IAM action pattern could grant an
-// escalation.
-func escalates(pattern string) bool {
+// grantsIdentity reports whether an IAM action pattern could match an iam:
+// or sts: action that identityReadAllow does not list.
+func grantsIdentity(pattern string) bool {
 	p := strings.ToLower(pattern)
-	for _, a := range EscalationActions {
-		if globMatch(p, strings.ToLower(a)) {
-			return true
+	if !globPrefix(p, "iam:") && !globPrefix(p, "sts:") {
+		return false
+	}
+	for _, a := range identityReadAllow {
+		if p == strings.ToLower(a) {
+			return false
 		}
 	}
-	if strings.HasPrefix(p, "sts:assumerole") {
-		return true
-	}
-	if verb, ok := strings.CutPrefix(p, "iam:"); ok {
-		for _, v := range escalationVerbs {
-			if strings.HasPrefix(verb, v) {
-				return true
-			}
-		}
-	}
-	return false
+	return true
 }
 
-// globMatch matches an IAM action pattern (* any run, ? one character)
-// against a lowercase action name.
-func globMatch(pattern, name string) bool {
+// globPrefix reports whether an IAM action pattern (* any run, ? one
+// character) can match some name that starts with prefix.
+func globPrefix(pattern, prefix string) bool {
+	if prefix == "" {
+		return true
+	}
 	if pattern == "" {
-		return name == ""
+		return false
 	}
 	switch pattern[0] {
 	case '*':
-		for i := 0; i <= len(name); i++ {
-			if globMatch(pattern[1:], name[i:]) {
-				return true
-			}
-		}
-		return false
+		return globPrefix(pattern[1:], prefix) || globPrefix(pattern, prefix[1:])
 	case '?':
-		return name != "" && globMatch(pattern[1:], name[1:])
+		return globPrefix(pattern[1:], prefix[1:])
 	}
-	return name != "" && pattern[0] == name[0] && globMatch(pattern[1:], name[1:])
+	return pattern[0] == prefix[0] && globPrefix(pattern[1:], prefix[1:])
 }

@@ -461,6 +461,9 @@ func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
 		"an inline policy assuming one admin role": func(f *fakeMSK) {
 			f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "hop", Document: `{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"arn:aws:iam::000000000000:role/Admin"}]}`}}
 		},
+		"an inline policy with iam:TagRole": func(f *fakeMSK) {
+			f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "tag", Document: `{"Statement":[{"Effect":"Allow","Action":"iam:TagRole","Resource":"*"}]}`}}
+		},
 		"an attached policy with iam:Put*": func(f *fakeMSK) {
 			f.policies = []mskconnect.PolicyDocument{{Kind: "attached", Name: "p", Document: `{"Statement":{"Effect":"Allow","Action":["logs:PutLogEvents","iam:Put*"],"Resource":"arn:aws:iam::000000000000:role/piperoom-msk"}}`}}
 		},
@@ -497,14 +500,16 @@ func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
 		t.Errorf("simulated on %v, want %v", f.resources, want)
 	}
 	for _, a := range []string{"iam:PutUserPolicy", "iam:AttachUserPolicy", "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
-		"iam:SetDefaultPolicyVersion", "iam:AddUserToGroup", "iam:PassRole", "iam:CreatePolicyVersion"} {
+		"iam:SetDefaultPolicyVersion", "iam:AddUserToGroup", "iam:PassRole", "iam:CreatePolicyVersion",
+		"iam:DeleteRolePermissionsBoundary", "iam:DetachRolePolicy", "iam:TagRole", "iam:UntagRole",
+		"iam:UploadSSHPublicKey", "iam:ResetServiceSpecificCredential"} {
 		if !slices.Contains(RoleEscalationActions, a) {
 			t.Errorf("RoleEscalationActions lacks %s", a)
 		}
 	}
 	// A role whose own policies grant only what the connector needs passes.
 	f = newFake()
-	f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "connect", Document: `{"Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","logs:PutLogEvents","s3:GetObject","iam:GetRole"],"Resource":"*"}]}`}}
+	f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "connect", Document: `{"Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","logs:PutLogEvents","s3:GetObject"],"Resource":"*"}]}`}}
 	reg, _ = newMSK(t, f, "", nil)
 	if _, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": mRole}); err != nil {
 		t.Errorf("a connector-only policy: %v", err)

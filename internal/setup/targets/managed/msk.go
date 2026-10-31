@@ -131,8 +131,8 @@ var RoleActions = []string{"kafka-cluster:Connect", "kafka-cluster:DescribeClust
 // other roles (mskconnect.EscalationActions). roleSafety simulates them on
 // "*" and on the role, user and policy ARNs of the account
 // (escalationResources), and refuses a role whose own policies grant any
-// of them, or any iam:Put*/Attach*/Create*/Update*/Pass*/Add*/Set*, on any
-// resource (mskconnect.EscalationGrants). msk_role_check and
+// iam: or sts: action at all, on any resource (mskconnect.EscalationGrants:
+// MSK Connect's role needs none). msk_role_check and
 // msk_create_connector both refuse a role allowed any of them.
 var RoleEscalationActions = mskconnect.EscalationActions
 

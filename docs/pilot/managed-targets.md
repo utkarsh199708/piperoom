@@ -114,17 +114,20 @@ done, section 9).
   `kafkaconnect.amazonaws.com` alone and the action `sts:AssumeRole` alone, with no `NotPrincipal` or `NotAction`
   (conditions such as `aws:SourceAccount` are fine and recommended; `mskconnect.TrustProblem`);
 - **it cannot escalate**, checked two ways:
-  - IAM's simulation denies `managed.RoleEscalationActions` (`iam:PutRolePolicy`, `PutUserPolicy`, `PutGroupPolicy`,
-    `PutRolePermissionsBoundary`, `AttachRolePolicy`, `AttachUserPolicy`, `AttachGroupPolicy`, `CreatePolicyVersion`,
+  - IAM's simulation denies `managed.RoleEscalationActions` (the IAM writes `Put*Policy`, `PutRolePermissionsBoundary`,
+    `DeleteRolePermissionsBoundary`, `DeleteRolePolicy`, `Attach*Policy`, `DetachRolePolicy`, `CreatePolicyVersion`,
     `SetDefaultPolicyVersion`, `CreateAccessKey`, `CreateUser`, `CreateRole`, `CreateLoginProfile`, `UpdateLoginProfile`,
-    `UpdateAssumeRolePolicy`, `PassRole`, `AddUserToGroup`, and `sts:AssumeRole`) on `*`, on the role's own ARN and on
-    `arn:aws:iam::<account>:role/*`, `user/*` and `policy/*`. The simulation tests only the resource strings it is
-    given, so a grant on one specific ARN (an admin role to assume) is not visible to it;
-  - so the runner also reads every inline and attached policy of the role (default version) and refuses one whose
-    Allow statement grants `*`, `iam:*`, any `iam:Put*`/`Attach*`/`Create*`/`Update*`/`Pass*`/`Add*`/`Set*`, any
-    `sts:AssumeRole*`, or a `NotAction`, on any resource (`mskconnect.EscalationGrants`). Resource and conditions are
-    ignored and Deny statements are not credited, so this can refuse a role a Deny makes safe: split such a role. If a
-    policy cannot be read the check fails closed (`ErrRoleUnsafe`);
+    `UpdateAssumeRolePolicy`, `UpdateRole`, `PassRole`, `AddUserToGroup`, `TagRole`, `UntagRole`, `UploadSSHPublicKey`,
+    `CreateServiceSpecificCredential`, `ResetServiceSpecificCredential`, and `sts:AssumeRole`) on `*`, on the role's own
+    ARN and on `arn:aws:iam::<account>:role/*`, `user/*` and `policy/*`. The simulation tests only the action names and
+    resource strings it is given, so it is the second check, not the first;
+  - the runner reads every inline and attached policy of the role (default version) and refuses one whose Allow
+    statement grants **any `iam:` or `sts:` action** (MSK Connect's role needs none: the read-only allow-list is
+    empty), a pattern that could match one (`*`, `*:*`, `iam:*`, `i*`, ...), or a `NotAction`, on any resource
+    (`mskconnect.EscalationGrants`). An allow-list, so an IAM action added later is refused too. Resource and
+    conditions are ignored and Deny statements are not credited, so this can refuse a role a Deny makes safe, or one
+    with an AWS managed policy that holds an IAM action: give the role a policy of its own. If a policy cannot be
+    read the check fails closed (`ErrRoleUnsafe`);
 - **it can do the connector's work**: the simulation allows `kafka-cluster:Connect`, `kafka-cluster:DescribeCluster`,
   `logs:CreateLogStream` and `logs:PutLogEvents` (`managed.RoleActions`).
 

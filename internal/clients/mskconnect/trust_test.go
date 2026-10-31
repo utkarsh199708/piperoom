@@ -53,13 +53,26 @@ func TestEscalationGrants(t *testing.T) {
 		"sts:AssumeRoleWith*":    `{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRoleWithWebIdentity","Resource":"*"}]}`,
 		"a Deny is not credited": `{"Statement":[{"Effect":"Allow","Action":"iam:*","Resource":"*"},{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`,
 		"not JSON":               `iam`,
+		// Review round 4: the verbs a deny-list missed, and any other iam
+		// or sts action (MSK Connect's role needs none).
+		"DeleteRolePermissionsBoundary":  `{"Statement":[{"Effect":"Allow","Action":"iam:DeleteRolePermissionsBoundary","Resource":"*"}]}`,
+		"DetachRolePolicy":               `{"Statement":[{"Effect":"Allow","Action":"iam:DetachRolePolicy","Resource":"*"}]}`,
+		"TagRole":                        `{"Statement":[{"Effect":"Allow","Action":["iam:TagRole","iam:UntagRole"],"Resource":"*"}]}`,
+		"UploadSSHPublicKey":             `{"Statement":[{"Effect":"Allow","Action":"iam:UploadSSHPublicKey","Resource":"*"}]}`,
+		"ResetServiceSpecificCredential": `{"Statement":[{"Effect":"Allow","Action":"iam:ResetServiceSpecificCredential","Resource":"*"}]}`,
+		"an iam read":                    `{"Statement":[{"Effect":"Allow","Action":"iam:GetRole","Resource":"*"}]}`,
+		"an sts call":                    `{"Statement":[{"Effect":"Allow","Action":"sts:GetFederationToken","Resource":"*"}]}`,
+		"*:*":                            `{"Statement":[{"Effect":"Allow","Action":"*:*","Resource":"*"}]}`,
+		"i*":                             `{"Statement":[{"Effect":"Allow","Action":"i*","Resource":"*"}]}`,
+		"s*:Get (could be sts)":          `{"Statement":[{"Effect":"Allow","Action":"s*:GetObject","Resource":"*"}]}`,
+		"?am:x":                          `{"Statement":[{"Effect":"Allow","Action":"?am:List*","Resource":"*"}]}`,
 	}
 	for name, doc := range bad {
 		if len(EscalationGrants(doc)) == 0 {
 			t.Errorf("%s: no grant found in %s", name, doc)
 		}
 	}
-	ok := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","kafka-cluster:DescribeCluster","logs:CreateLogStream","logs:PutLogEvents","s3:GetObject","iam:GetRole","iam:ListRoles"],"Resource":"*"},{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`
+	ok := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","kafka-cluster:DescribeCluster","logs:CreateLogStream","logs:PutLogEvents","s3:GetObject","kafka:DescribeCluster","ec2:Describe*","s3:Get*"],"Resource":"*"},{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`
 	if g := EscalationGrants(ok); len(g) != 0 {
 		t.Errorf("a connector-only policy: %v", g)
 	}
