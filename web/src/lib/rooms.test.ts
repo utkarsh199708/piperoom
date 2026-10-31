@@ -195,6 +195,11 @@ describe('status and agent cells', () => {
     const driven = { ...r, driver: { id: 'k', name: 'K' } }
     expect(roomStatusCell({ ...driven, agent_status: { state: 'working' } })).toMatchObject({ dot: 'agent', label: 'Investigating' })
     expect(roomStatusCell(driven).label).toBe('Idle · waiting for a steer')
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    expect(roomStatusCell({ ...driven, last_fix: { proposal_id: 'p', seq: 5, steps: 1, failed_step: 0, verification } })).toMatchObject({
+      dot: 'ok',
+      label: 'Fix ran · recovered',
+    })
     expect(roomStatusCell(r).label).toMatch(/^No driver · /)
   })
   it('agent cell', () => {

@@ -207,6 +207,12 @@ describe('statusInputFromSnapshot with last_fix (KAN-594)', () => {
     expect(cell(snap({ last_fix: fix({ verification }), open_proposals: [open(3, { a: 'pending' })] })).label).toBe('Fix ran · recovered')
   })
 
+  it('places the fix after an older proposal and before a newer one', () => {
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    const both = [open(3, { a: 'pending' }), open(9, { a: 'pending' })]
+    expect(cell(snap({ last_fix: fix({ verification }), open_proposals: both })).kind).toBe('needs-approval')
+  })
+
   it('does not call the room fixed while a newer proposal, every layer approved, runs', () => {
     const verification = { recovered: true, verdict: 'recovered: all good' }
     expect(cell(snap({ last_fix: fix({ verification }), open_proposals: [open(9, { a: 'approved' })] })).label).toBe('Idle · waiting for a steer')

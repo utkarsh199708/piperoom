@@ -793,7 +793,7 @@ without reading every room's log, because an executed proposal has left `open_pr
 - `last_fix.failed_step`: the 1-based step whose `action.executed` had `ok: false`, including `outcome_unknown`; `0`
   when every step ran.
 - `last_fix.verification`: `recovered` and `verdict` of the proposal's newest `agent.verification`. A `repeat` never
-  overwrites a full verdict. Absent before one exists, and a failed step never gets one.
+  overwrites a full verdict. Absent before one exists.
 - `GET /api/rooms` rows and `GET /api/rooms/ws` frames carry both fields.
 
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
