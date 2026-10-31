@@ -417,38 +417,50 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 	if err != nil {
 		return nil, path, err
 	}
+	cut := false
+	if len(body) > maxLogBytes {
+		// More than asked for: only the last maxLogBytes, from a line start,
+		// so the whole body fits redact's scan limit (below).
+		body = body[len(body)-maxLogBytes:]
+		if i := bytes.IndexByte(body, '\n'); i >= 0 {
+			body = body[i+1:]
+		} else {
+			body, cut = nil, true
+		}
+	}
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		// The API may have cut the log at limitBytes, at or a little under
 		// it: a last line with no newline may end inside a credential, a
 		// prefix no value matches. It is dropped (round 7: not only at
-		// maxLogBytes); a log that was not cut loses one partial line.
+		// maxLogBytes; a log that was not cut loses one partial line) and
+		// the reply says so.
+		cut = true
 		if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
 			body = body[:i+1]
 		} else {
 			body = nil
 		}
 	}
-	text := maskCredentials(strings.ToValidUTF8(string(body), "?"), d.credentialValues(ctx, ns))
-	// The masks lengthen the text, and a log near limitBytes would pass
-	// redact's scan limit (redact.MaxScan, the same 64 KiB), which masks
-	// everything after it whole: the tail a reader wants. Only the last
-	// lines that fit under it are redacted (whole, so a secret that spans
-	// lines is still seen) and kept.
-	// Lines are redacted whole and clipped after (round 7): a token
-	// straddling the clip would leave its prefix, which redact no longer
-	// knows. The last line is redacted even past the scan limit, which
-	// then masks its tail whole.
-	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	start, size := len(all), 0
-	for start > 0 && len(all)-start < maxLogLines && (start == len(all) || size+len(all[start-1])+1 <= redact.MaxScan-1024) {
-		start--
-		size += len(all[start]) + 1
+	// The whole body is redacted first (round 7): it is at most
+	// maxLogBytes, within redact's scan limit (redact.MaxScan), so a
+	// multi-line secret (a PEM block's base64 body) is seen whole wherever
+	// it starts. Redacting after the masks, which lengthen the text, made
+	// a window that could start inside a PEM block; clipping lines first
+	// left the prefix of a token across the clip. The credential masks
+	// follow, then each line is clipped.
+	text, _ := redact.Text(strings.ToValidUTF8(string(body), "?"))
+	text = maskCredentials(text, d.credentialValues(ctx, ns))
+	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(raw) == 1 && raw[0] == "" {
+		raw = nil
 	}
-	text, _ = redact.Text(strings.Join(all[start:], "\n"))
-	raw := strings.Split(text, "\n")
-	lines := make([]string, 0, len(raw))
+	limit := maxLogLines
+	if cut {
+		limit-- // room for the marker
+	}
+	lines := make([]string, 0, len(raw)+1)
 	total := 0
-	for i := len(raw) - 1; i >= 0 && len(lines) < maxLogLines; i-- {
+	for i := len(raw) - 1; i >= 0 && len(lines) < limit; i-- {
 		l := clipText(raw[i], 1000)
 		if total+len(l) > maxLogBytes {
 			break
@@ -459,11 +471,16 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
 		lines[i], lines[j] = lines[j], lines[i]
 	}
-	if len(lines) == 1 && lines[0] == "" {
-		lines = []string{}
+	if cut {
+		lines = append(lines, logTruncatedMarker)
 	}
 	return lines, path, nil
 }
+
+// logTruncatedMarker ends a pod log whose last, partial line was dropped
+// (round 7), so a log of one long line without a newline is not returned
+// as zero lines with no word why.
+const logTruncatedMarker = "[log truncated: last partial line dropped]"
 
 // ---- strimzi_build_status (T0) ----
 
@@ -591,6 +608,11 @@ func isCredentialKey(key string) bool {
 	}
 	last := segs[len(segs)-1]
 	ll := strings.ToLower(last)
+	if ll == "pwd" {
+		// Lower-case only: PWD=/opt/kafka is the shell's working
+		// directory, not a password (round 7, C4).
+		return last == "pwd"
+	}
 	if credentialKeywords[ll] {
 		return true
 	}
@@ -599,7 +621,8 @@ func isCredentialKey(key string) bool {
 	}
 	for kw := range credentialKeywords {
 		if n := len(last) - len(kw); n > 0 && strings.HasSuffix(ll, kw) && 'A' <= last[n] && last[n] <= 'Z' {
-			return true
+			// A camelCase tail; pwd only as Pwd (dbPwd), not dbPWD.
+			return kw != "pwd" || last[n:] == "Pwd"
 		}
 	}
 	return false
@@ -620,14 +643,21 @@ var credentialJSONKeyRE = regexp.MustCompile(`(\\?")([A-Za-z0-9._-]+)(\\?"\s*:\s
 // else (${secrets:ns/name:key}).
 var keptRefRE = regexp.MustCompile(`^\$\{[^{}\s]*\}$`)
 
+// runnerSecretNameRE is the name of the runner's own db-credentials Secret
+// object (dbSecretName: <pipeline>-db-credentials), optionally quoted: a
+// secret: or "secret": key naming it names no credential (round 7, C4). A
+// written value of that shape is still masked by value first.
+var runnerSecretNameRE = regexp.MustCompile(`^"?[a-z0-9]([a-z0-9-]*[a-z0-9])?-db-credentials"?$`)
+
 // keptCredentialValue reports whether a credential key's whole value is no
-// secret: Kafka's own "[hidden]", one ${...} reference, and MySQL's
+// secret: Kafka's own "[hidden]", one ${...} reference, the runner's own
+// Secret object's name (runnerSecretNameRE), and MySQL's
 // "(using password: YES)" (YES) or NO) at the end of the line or before
 // whitespace). Each must be the exact value (round 7): YES)hunter2 or
 // ${a}hunter2 is masked.
 func keptCredentialValue(v string) bool {
 	t := strings.TrimRight(v, " \t\r")
-	if t == "[hidden]" || t == "[masked:credential]" || keptRefRE.MatchString(t) {
+	if t == "[hidden]" || t == "[masked:credential]" || keptRefRE.MatchString(t) || runnerSecretNameRE.MatchString(t) {
 		return true
 	}
 	for _, w := range []string{"YES)", "NO)"} {
@@ -738,26 +768,6 @@ func credentialForms(v string) []string {
 	return slices.Compact(forms)
 }
 
-// tokenStart and tokenEnd report whether s[a:b] stands as a whole token in
-// s: between non-word bytes, the text's ends, or an escape sequence (\n,
-// &, %20) that ends just before it or starts just after it.
-func tokenStart(s string, a int) bool {
-	if a == 0 || !isWordByte(s[a-1]) {
-		return true
-	}
-	if a >= 2 && s[a-2] == '\\' {
-		return true
-	}
-	if a >= 3 && s[a-3] == '%' && isHex(s[a-2]) && isHex(s[a-1]) {
-		return true
-	}
-	return a >= 6 && s[a-6] == '\\' && s[a-5] == 'u' && isHex(s[a-4]) && isHex(s[a-3]) && isHex(s[a-2]) && isHex(s[a-1])
-}
-
-func tokenEnd(s string, b int) bool {
-	return b == len(s) || !isWordByte(s[b])
-}
-
 // maskCredentials masks every credential value the runner wrote to the
 // db-credentials Secret (never a user name: see rememberSecret), then the
 // value of every credential key (maskCredentialKeys). A written value is
@@ -766,9 +776,10 @@ func tokenEnd(s string, b int) bool {
 // the text itself, with %XX decoded, with %XX and '+' decoded, and with
 // JSON string escapes decoded. One copy alone misses a value: decoding '+'
 // breaks a path-escaped a+b, a stray % breaks the decoding after it
-// (round 7). A value shorter than 4 characters is masked only as a whole
-// token in the copy it is found in, so a short password is masked without
-// mangling every word that holds it.
+// (round 7). A value shorter than 4 characters is not masked by value: it
+// would garble every "task 1 of 3"; k8s_secret_apply refuses a password
+// under 8 characters (minCredentialLen), and the key rule still masks a
+// short value where a credential key names it.
 func maskCredentials(text string, written []string) string {
 	var spans [][2]int
 	copies := []textCopy{
@@ -778,10 +789,9 @@ func maskCredentials(text string, written []string) string {
 		decodedCopy(text, false, false, true),
 	}
 	for _, v := range written {
-		if v == "" {
+		if len(v) < 4 {
 			continue
 		}
-		short := len(v) < 4
 		for _, f := range credentialForms(v) {
 			for _, c := range copies {
 				for off := 0; ; {
@@ -790,9 +800,7 @@ func maskCredentials(text string, written []string) string {
 						break
 					}
 					a, b := off+i, off+i+len(f)
-					if !short || (tokenStart(c.s, a) && tokenEnd(c.s, b)) {
-						spans = append(spans, [2]int{c.src[a][0], c.src[b-1][1]})
-					}
+					spans = append(spans, [2]int{c.src[a][0], c.src[b-1][1]})
 					off = a + 1
 				}
 			}

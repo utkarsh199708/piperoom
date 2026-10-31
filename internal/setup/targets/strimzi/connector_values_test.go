@@ -4,11 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
 
 	"piperoom/internal/events"
+	"piperoom/internal/redact"
 )
 
 // Review round 3: values the runner refuses whatever key they sit in, and
@@ -348,20 +350,16 @@ func TestReadsMaskCredentials(t *testing.T) {
 }
 
 // Round 6 masking: Java's URLEncoder form (~ as %7E, space as +) and
-// lower-case percent hex, Java's JSON escaping (only " and \ escaped), a
-// short password as a whole token only, and a log cut at limitBytes whose
-// last line ends inside a credential.
+// lower-case percent hex, Java's JSON escaping (only " and \ escaped), and
+// a log cut at limitBytes whose last line ends inside a credential.
 func TestPodLogMasksRound6(t *testing.T) {
 	h := newHarness(t, "", nil)
 	pw := `Ab~c d<e>&"f`
-	h.d.rememberSecret(map[string]string{"password": pw, "pin": "x7q"})
+	h.d.rememberSecret(map[string]string{"password": pw})
 	lines := []string{
 		"url password=Ab%7Ec+d%3Ce%3E%26%22f done",
 		"url lower Ab%7ec+d%3ce%3e%26%22f done",
 		`log {"msg":"login with Ab~c d<e>&\"f failed"}`,
-		`FATAL: login with "x7q" refused`,
-		"connecting with x7q.",
-		"x7qx and ax7q stay",
 	}
 	// The kept tail is the last 200 lines: the cases come last, after
 	// enough filler for the body to reach limitBytes.
@@ -378,25 +376,21 @@ func TestPodLogMasksRound6(t *testing.T) {
 	}
 	b, _ := json.Marshal(res.Data)
 	got := string(b)
-	for _, leak := range []string{"Ab%7Ec", "Ab%7ec", `Ab~c`, `"x7q"`, "with x7q.", "a cut line"} {
+	for _, leak := range []string{"Ab%7Ec", "Ab%7ec", `Ab~c`, "a cut line"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("the log returns %q", leak)
 		}
 	}
-	if !strings.Contains(got, "x7qx and ax7q stay") {
-		t.Errorf("a short value was masked inside a longer word: %s", got[len(got)-600:])
-	}
 }
 
 // A user name is never masked by value, at any length: "debezium" would
-// garble io.debezium.connector in every line. A short password is masked
-// as a whole token (round 6, A).
+// garble io.debezium.connector in every line (round 6, A).
 func TestUserNameIsNotMaskedByValue(t *testing.T) {
 	h := newHarness(t, "", nil)
-	h.d.rememberSecret(map[string]string{"username": "debezium", "password": "q9z"})
+	h.d.rememberSecret(map[string]string{"username": "debezium", "password": "q9zLongPw8"})
 	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Join([]string{
 		"INFO io.debezium.connector.postgresql.PostgresConnectorTask started as debezium",
-		"login with q9z refused",
+		"login with q9zLongPw8 refused",
 	}, "\n") + "\n"
 	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
 	if err != nil {
@@ -407,8 +401,8 @@ func TestUserNameIsNotMaskedByValue(t *testing.T) {
 	if !strings.Contains(got, "io.debezium.connector.postgresql.PostgresConnectorTask started as debezium") {
 		t.Errorf("the user name was masked: %s", got)
 	}
-	if strings.Contains(got, "q9z") {
-		t.Errorf("the short password is returned: %s", got)
+	if strings.Contains(got, "q9zLongPw8") {
+		t.Errorf("the password is returned: %s", got)
 	}
 }
 
@@ -462,10 +456,11 @@ func TestJDBCParamsRound6(t *testing.T) {
 }
 
 // Round 7 masking (security re-review of round 6): every form and decoded
-// copy of a written value, short values in decoded copies, token-family and
-// other credential keys, non-string JSON values, exact exemptions.
+// copy of a written value, no value masking under 4 characters (C5),
+// token-family and other credential keys, non-string JSON values, exact
+// exemptions, and no masking of the runner's Secret name or PWD= (C4).
 func TestMaskCredentialsRound7(t *testing.T) {
-	written := []string{"a+b!c#d", "ab%1", "ab!xy", "q9z", "a&b", "uni\u00e9code"}
+	written := []string{"a+b!c#d", "ab%1", "ab!xy", "uni\u00e9code", "1", "ab"}
 	for _, c := range []struct{ in, want string }{
 		// 1: a path-escaped value with a literal +.
 		{"path a+b%21c%23d end", "path [masked:credential] end"},
@@ -473,13 +468,8 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		// 2: a stray % ahead of an encoded value.
 		{"pct %ab%21xy end", "pct %[masked:credential] end"},
 		{"x ab%1ab%251 y", "x [masked:credential][masked:credential] y"},
-		// 6: a short value in a decoded copy, at an escape boundary.
-		{"login%20q9z%20failed", "login%20[masked:credential]%20failed"},
-		{"pw%3Dq9z", "pw%3D[masked:credential]"},
-		{`{"msg":"line1\nq9z"}`, `{"msg":"line1\n[masked:credential]"}`},
-		{`{"msg":"a\u0026b"}`, `{"msg":"[masked:credential]"}`},
-		{"with a&b.", "with [masked:credential]."},
-		{"q9zz and aq9z stay", "q9zz and aq9z stay"},
+		// C5: a value under 4 characters is not masked by value.
+		{"task 1 of 3 at ab", "task 1 of 3 at ab"},
 		{"login with uni\u00e9code and uni%C3%A9code", "login with [masked:credential] and [masked:credential]"},
 	} {
 		if got := maskCredentials(c.in, written); got != c.want {
@@ -517,6 +507,13 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"password=${secrets:data/x:password} hunter2xyz", "password=[masked:credential]"},
 		{"password = [hidden]zz1", "password = [masked:credential]"},
 		{"password = [hidden]", "password = [hidden]"},
+		// C4: the runner's own Secret object's name, and the shell's PWD.
+		{"secret: orders-db-credentials", "secret: orders-db-credentials"},
+		{`{"secret":"orders-db-credentials","m":"ok"}`, `{"secret":"orders-db-credentials","m":"ok"}`},
+		{"secret: orders-db-credentials2", "secret: [masked:credential]"},
+		{"PWD=/opt/kafka", "PWD=/opt/kafka"},
+		{"pwd=zz1 dbPwd=zz2", "pwd=[masked:credential]"},
+		{"dbPwd=zz2", "dbPwd=[masked:credential]"},
 	} {
 		if got := maskCredentials(c.in, nil); got != c.want {
 			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
@@ -543,5 +540,93 @@ func TestPodLogRound7(t *testing.T) {
 	}
 	if strings.Contains(got, "a cut line") {
 		t.Errorf("the partial last line is returned: %s", got[len(got)-200:])
+	}
+}
+
+// The whole pod log is redacted before the credential masks lengthen it
+// (round 7, C1): a PEM private key early in a ~51 KB log whose later lines
+// hold many masked values came back with its base64 body when the redact
+// window, chosen after the masks, started inside the block.
+func TestPodLogRedactsAPEMBlockBeforeTheMasks(t *testing.T) {
+	if maxLogBytes > redact.MaxScan {
+		t.Fatalf("maxLogBytes %d > redact.MaxScan %d: a whole log no longer fits one redact scan", maxLogBytes, redact.MaxScan)
+	}
+	h := newHarness(t, "", nil)
+	pw := "Wq7xPw"
+	h.d.rememberWritten([]string{pw})
+	var pem []string
+	pem = append(pem, "-----BEGIN PRIVATE KEY-----")
+	for i := 0; i < 26; i++ {
+		pem = append(pem, base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("private key body line %02d of the test key, 48 bytes", i)))[:64])
+	}
+	pem = append(pem, "-----END PRIVATE KEY-----")
+	head := "2026-10-31 INFO starting the connect worker with its key material from the mounted file\n"
+	block := strings.Join(pem, "\n") + "\n"
+	line := "2026-10-31 WARN task retry" + strings.Repeat(" login "+pw+" refused, retrying", 6) + strings.Repeat(".", 120) + "\n"
+	masked := len(line) + 6*(len("[masked:credential]")-len(pw))
+	// Enough masked lines that the masked tail alone nearly fills the old
+	// window (redact.MaxScan-1024), so it started inside the PEM block.
+	n := 0
+	for (n+1)*masked < redact.MaxScan-1024-len(block)/2 {
+		n++
+	}
+	body := head + block + strings.Repeat(line, n)
+	if len(body) > maxLogBytes || strings.Count(body, "\n") >= maxLogLines {
+		t.Fatalf("the test log is %d bytes, %d lines: over the caps", len(body), strings.Count(body, "\n"))
+	}
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = body
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	got := string(b)
+	for _, l := range pem[1 : len(pem)-1] {
+		if strings.Contains(got, l[:24]) {
+			t.Fatalf("the PEM body is returned (%d-byte log, %d lines): %q", len(body), strings.Count(body, "\n"), l)
+		}
+	}
+	if strings.Contains(got, pw) {
+		t.Errorf("the password is returned")
+	}
+}
+
+// A log of one line without a newline (64 KiB or more) is not returned as
+// zero lines with no word why (round 7, C3).
+func TestPodLogMarksADroppedLine(t *testing.T) {
+	h := newHarness(t, "", nil)
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Repeat("y", maxLogBytes+10)
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	if !strings.Contains(string(b), logTruncatedMarker) {
+		t.Errorf("no truncation marker: %s", b)
+	}
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = "one\ntwo\n"
+	res, _ = run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if b, _ := json.Marshal(res.Data); strings.Contains(string(b), logTruncatedMarker) {
+		t.Errorf("a marker on a whole log: %s", b)
+	}
+}
+
+// k8s_secret_apply refuses a credential under 8 characters before it
+// remembers or writes anything; a short user name is fine (round 7, C5).
+func TestSecretApplyRefusesAShortCredential(t *testing.T) {
+	h := newHarness(t, "", map[string]string{"short": "1234567", "ok": "12345678", "u": "cdc"})
+	path := coreObjectPath(testNS, "secrets", "orders-db-credentials")
+	h.api.put(path, map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": "orders-db-credentials"}})
+	_, err := run(t, h, "k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:short}", "username": "${secret:u}"}})
+	if !errors.Is(err, ErrParams) || !strings.Contains(err.Error(), "at least 8") || strings.Contains(err.Error(), "1234567") {
+		t.Fatalf("a 7-character password: err = %v", err)
+	}
+	for _, r := range h.api.requests {
+		if strings.HasPrefix(r, "PATCH") {
+			t.Fatalf("a write reached the API: %s", r)
+		}
+	}
+	if _, err := run(t, h, "k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:ok}", "username": "${secret:u}"}}); err != nil {
+		t.Fatalf("an 8-character password with a short user name: %v", err)
 	}
 }

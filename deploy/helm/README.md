@@ -242,6 +242,11 @@ objects the runner writes for the CI values):
   replacement without `.`), their keys and enumerated values; aliases and `route.by.field` are refused.
 - `setup-patterns.txt`: the per-dialect URL shapes and the name patterns.
 
+**Breaking:** `k8s_secret_apply` now refuses a credential (any db-credentials key but a user name's)
+shorter than 8 characters, with an error naming the key, before it writes anything. The runner masks credential
+values wherever they appear in what it reads back, and a shorter one cannot be masked without garbling the logs.
+An install whose database password has fewer than 8 characters must rotate it before setup fills the Secret.
+
 No key or value may hold a control character (Java's `trim()` strips them) or start or end in whitespace. A
 connection URL must match its dialect's shape: no userinfo (`@`), no percent escape but `%20`, **no IPv6 literal**
 (the runner refuses them too), Db2 as `db:k=v;...;`, MongoDB as plain `mongodb://` (no `+srv`). A source's
