@@ -732,13 +732,32 @@ func TestCredentialKeysRound8(t *testing.T) {
 
 // The JSON key scan is one pass (round 8, item 4): a long line of
 // unclosed credential values took quadratic time.
+// The check compares how the time grows from 64 KiB to 256 KiB rather than
+// a wall-clock ceiling: the race detector slows the scan about tenfold, and
+// a fixed ceiling flaked there at 2.4s while the scan stayed linear. Linear
+// work grows about 4x over a 4x longer line and quadratic work about 16x, so
+// a ratio above 10 fails; each size takes the best of three runs to damp
+// scheduler noise. The absolute bound only guards against a hang.
 func TestCredentialKeysLinear(t *testing.T) {
+	best := func(line string) time.Duration {
+		var min time.Duration
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			maskCredentials(line, nil)
+			if d := time.Since(start); i == 0 || d < min {
+				min = d
+			}
+		}
+		return min
+	}
 	for _, unit := range []string{`"token":[`, `"token":1,`, `\"token\":\"x`} {
-		line := strings.Repeat(unit, (256<<10)/len(unit))
-		start := time.Now()
-		maskCredentials(line, nil)
-		if d := time.Since(start); d > time.Second {
-			t.Errorf("%q x %d: %v", unit, len(line)/len(unit), d)
+		small := best(strings.Repeat(unit, (64<<10)/len(unit)))
+		large := best(strings.Repeat(unit, (256<<10)/len(unit)))
+		if small < time.Millisecond {
+			small = time.Millisecond
+		}
+		if ratio := float64(large) / float64(small); ratio > 10 || large > 30*time.Second {
+			t.Errorf("%q: 64 KiB %v, 256 KiB %v (x%.1f): not linear", unit, small, large, ratio)
 		}
 	}
 }
