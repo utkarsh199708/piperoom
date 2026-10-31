@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -67,8 +68,8 @@ var ccFlows = []ccFlow{
 		responses: []replay.Response{ccJSON(200, `{"name":"PostgresCdcSourceV2","error_count":0,"configs":[]}`), ccJSON(409, `{"error":{"code":409,"message":"Connector it_orders already exists"}}`)},
 		check:     failFlow(confluentcloud.ErrConflict, `"error_class":"conflict"`)}},
 	{acl: true, flow: flow{name: "acl_connector", op: "ccloud_acl_create", params: map[string]any{"template": "connector", "principal": "User:sa-00000", "topic_prefix": "orders"},
-		responses: []replay.Response{{Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}},
-		check:     okFlow("4 ACL rows of the connector template", `"operation":"WRITE"`)}},
+		responses: []replay.Response{{Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}, {Status: 201}},
+		check:     okFlow("7 ACL rows of the connector template", `"operation":"WRITE"`)}},
 	{acl: true, flow: flow{name: "acl_watcher_forbidden", op: "ccloud_acl_create", params: map[string]any{"template": "watcher", "principal": "User:sa-00000", "topic_prefix": "orders", "group": "connect-it_orders"},
 		responses: []replay.Response{{Status: 201}, ccJSON(403, `{"error_code":40301,"message":"Request is not authorized"}`)},
 		check:     failFlow(confluentcloud.ErrForbidden, "stopped after 1 of 4 rows")}},
@@ -265,17 +266,28 @@ func TestACLTopicRowsEndWithTheSeparator(t *testing.T) {
 			t.Fatalf("%s: %v", tmpl, err)
 		}
 		topics := 0
+		var literal []string
 		for _, r := range rows {
 			if r.ResourceType != "TOPIC" {
 				continue
 			}
 			topics++
-			if r.ResourceName != "orders." || r.PatternType != "PREFIXED" {
-				t.Errorf("%s: topic row on %q (%s), want PREFIXED orders.", tmpl, r.ResourceName, r.PatternType)
+			ok := r.ResourceName == "orders." && r.PatternType == "PREFIXED"
+			if tmpl == ACLTemplateConnector && r.ResourceName == "orders" && r.PatternType == "LITERAL" {
+				ok = true
+				literal = append(literal, r.Operation)
+			}
+			if !ok {
+				t.Errorf("%s: topic row on %q (%s), want PREFIXED orders. or the connector's LITERAL orders", tmpl, r.ResourceName, r.PatternType)
 			}
 		}
 		if topics == 0 {
 			t.Errorf("%s: no topic rows", tmpl)
+		}
+		// The connector writes the schema-change topic named exactly
+		// "orders" (review round 3); the watcher does not need it.
+		if want := map[string][]string{ACLTemplateConnector: {"CREATE", "WRITE", "DESCRIBE"}}[tmpl]; !slices.Equal(literal, want) {
+			t.Errorf("%s: LITERAL orders rows %v, want %v", tmpl, literal, want)
 		}
 	}
 }
@@ -391,8 +403,8 @@ func TestACLPrincipalIsThePersons(t *testing.T) {
 			t.Fatalf("%v: %v", p["template"], err)
 		}
 	}
-	if len(acl.rows) != 8 {
-		t.Fatalf("%d rows sent, want 8", len(acl.rows))
+	if len(acl.rows) != 11 {
+		t.Fatalf("%d rows sent, want 11", len(acl.rows))
 	}
 
 	acl.rows = nil

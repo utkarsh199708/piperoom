@@ -172,12 +172,16 @@ The server cannot bind the principal (it holds no record of your accounts); it b
 
 - **Topics**: `topic_prefix` must be the pipeline's own `topic_prefix`, and every topic row is `PREFIXED` on
   `<topic_prefix>.`, the separator included, so a prefix `orders` covers `orders.public.orders` but not `orders2.*` or
-  `orders_archive` (the Strimzi KafkaUser rows do the same). Both sides refuse a prefix shorter than 3 characters,
-  starting with `_` (the cluster's internal topics) or ending in `.`.
+  `orders_archive` (the Strimzi KafkaUser rows do the same). The connector template also gets `LITERAL` rows (CREATE,
+  WRITE, DESCRIBE) on the one topic named exactly `<topic_prefix>`: Debezium's MySQL, SQL Server and Oracle
+  connectors write schema-change events there when `include.schema.changes` is on (Debezium's default; whether
+  Confluent's managed V2 connectors turn it on is not confirmed here). Both sides refuse a prefix shorter than 3
+  characters, starting with `_` (the cluster's internal topics) or ending in `.`.
 - **The watcher's group**, one of three routes:
   1. `connect-<connector>` for one of the pipeline's `connectors` (a self-managed Connect sink's group);
   2. any entry of the pipeline's `consumer_groups` in `owners.yaml`: the route for a consumer group the first two
-     cannot name, such as your own application's;
+     cannot name, such as your own application's. A `connect-lcc-` group never takes this route, even when declared:
+     it needs route 3, the only one whose id the runner can check;
   3. `connect-lcc-<connector id>` with `connector` naming one of the pipeline's connectors: a Confluent Cloud
      **managed** sink consumes as `connect-lcc-<its id>`. The server binds the connector to the pipeline; the runner
      reads that connector's id (`GET connectors?expand=id`, `confluentcloud.ConnectorID`) and refuses any other

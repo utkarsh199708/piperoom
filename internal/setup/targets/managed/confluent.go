@@ -279,8 +279,9 @@ func checkACLParams(raw json.RawMessage) error {
 	return err
 }
 
-// ACLRows returns the fixed rows of a template. Every topic row is
-// PREFIXED on "<topic_prefix>.". The watcher's rows are
+// ACLRows returns the fixed rows of a template. Every PREFIXED topic row is
+// on "<topic_prefix>."; the connector template adds LITERAL rows on the
+// topic named exactly <topic_prefix> (the schema-change topic). The watcher's rows are
 // design §2.2's: DESCRIBE and READ on the topics with the prefix,
 // DESCRIBE_CONFIGS on them, DESCRIBE on the connector's group. The
 // connector's rows let a source connector's service account write its
@@ -333,10 +334,20 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 		if p.Group != "" || p.Connector != "" {
 			return nil, fmt.Errorf("%w: the connector template takes no group and no connector", ErrParams)
 		}
+		// The topic named exactly <topic_prefix> is the source's
+		// schema-change topic: Debezium's MySQL, SQL Server and Oracle
+		// connectors write it when include.schema.changes is on (Debezium's
+		// default; whether Confluent's managed V2 connectors default it on
+		// is unconfirmed). PREFIXED "<prefix>." does not cover it, so it
+		// gets LITERAL rows: that one topic, nothing that merely starts
+		// with the prefix.
 		return []confluentcloud.ACL{
 			row("TOPIC", topics, "PREFIXED", "CREATE"),
 			row("TOPIC", topics, "PREFIXED", "WRITE"),
 			row("TOPIC", topics, "PREFIXED", "DESCRIBE"),
+			row("TOPIC", p.TopicPrefix, "LITERAL", "CREATE"),
+			row("TOPIC", p.TopicPrefix, "LITERAL", "WRITE"),
+			row("TOPIC", p.TopicPrefix, "LITERAL", "DESCRIBE"),
 			row("CLUSTER", "kafka-cluster", "LITERAL", "DESCRIBE"),
 		}, nil
 	}

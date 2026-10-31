@@ -306,7 +306,7 @@ func TestStrimziCardOnlyFieldIsNotTheModels(t *testing.T) {
 // TestTargetSpecScopes: a connector a target write names is one of the
 // pipeline's; the chart-fixed Strimzi objects need no scope.
 func TestTargetSpecScopes(t *testing.T) {
-	pl := owners.Pipeline{ID: "orders", TopicPrefix: "orders", SourceTables: []string{"public.orders", "sales.items"}, Connectors: []string{"orders-src"}, ConsumerGroups: []string{"orders-sink"}}
+	pl := owners.Pipeline{ID: "orders", TopicPrefix: "orders", SourceTables: []string{"public.orders", "sales.items"}, Connectors: []string{"orders-src"}, ConsumerGroups: []string{"orders-sink", "connect-lcc-a1b2c3"}}
 	specs := specsByName()
 	cases := []struct {
 		op, params string
@@ -352,6 +352,9 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3","connector":"payments-src"}`, false},
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3"}`, false},
 		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"orders-sink","connector":"orders-src"}`, false},
+		// A connect-lcc- group needs connector even when consumer_groups
+		// declares it: the runner refuses it otherwise (review round 3).
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-lcc-a1b2c3"}`, false},
 	}
 	for _, c := range cases {
 		a, err := setupactions.New(specs[c.op], setupactions.Deps{})

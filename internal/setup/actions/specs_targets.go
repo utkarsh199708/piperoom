@@ -158,7 +158,7 @@ func targetSpecs() []Spec {
 			Name:     "ccloud_acl_create",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create a template's fixed ACL rows for one Confluent service account. watcher: read the topics, describe group (connect-<connector>, a consumer_groups entry, or connect-lcc-<id> with connector naming a managed sink, whose id the runner checks). connector: create, write, describe the topics. Topic rows are PREFIXED on <topic_prefix>. (the pipeline's). principal must be the account the person entered on the runner for the template; the runner checks it.",
+			Describe: "Create a template's fixed ACL rows for one Confluent service account. watcher: read the topics, describe group (connect-<connector>, a consumer_groups entry, or connect-lcc-<id> with connector naming a managed sink, whose id the runner checks). connector: create, write, describe the topics and the schema-change topic named exactly topic_prefix. Topic rows are PREFIXED on <topic_prefix>. (the pipeline's). principal: the account the person entered on the runner.",
 			Schema: objectSchema(map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{"watcher", "connector"}},
 				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(), "connector": mskString(),
@@ -795,6 +795,12 @@ func scopeCCloudACL(p owners.Pipeline, raw json.RawMessage) error {
 			return fmt.Errorf("%w: group %q is not a managed connector's connect-lcc-<id> group", tools.ErrOutOfScope, clipText(q.Group))
 		}
 		return nil
+	}
+	if strings.HasPrefix(q.Group, "connect-lcc-") {
+		// A managed sink's group is only checkable against its connector
+		// (the route above); the runner refuses it without one, and so does
+		// the server, whatever consumer_groups declares.
+		return fmt.Errorf("%w: group %q is a managed connector's: name the connector (connector) so the runner can check its id", tools.ErrOutOfScope, clipText(q.Group))
 	}
 	groups := append([]string{}, p.ConsumerGroups...)
 	for _, c := range p.Connectors {
