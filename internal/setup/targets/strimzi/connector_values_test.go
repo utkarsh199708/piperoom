@@ -433,8 +433,8 @@ func TestCredentialLineRule(t *testing.T) {
 		if want == "" {
 			want = c.in
 		}
-		if got := maskCredentials(c.in, nil); got != want {
-			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, want)
+		if got := maskOwn(c.in, nil); got != want {
+			t.Errorf("maskOwn(%q)\n got %q\nwant %q", c.in, got, want)
 		}
 	}
 }
@@ -476,8 +476,8 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"task 12 of 31 at abc", "task 12 of 31 at abc"},
 		{"login with uni\u00e9code and uni%C3%A9code", "login with [masked:credential] and [masked:credential]"},
 	} {
-		if got := maskCredentials(c.in, written); got != c.want {
-			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		if got := maskOwn(c.in, written); got != c.want {
+			t.Errorf("maskOwn(%q)\n got %q\nwant %q", c.in, got, c.want)
 		}
 	}
 	for _, c := range []struct{ in, want string }{
@@ -496,7 +496,7 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"private_key: zz1", "private_key: [masked:credential]"},
 		{"privateKey: zz1", "privateKey: [masked:credential]"},
 		{"database.user=cdc username: cdc", "database.user=cdc username: cdc"},
-		{"tokenizer=standard", "tokenizer=standard"},
+		{"tokenizer=standard", "tokenizer=[masked:credential]"}, // round 10: an exempt name keeps only a boolean, number, none or null
 		// 5: a credential key's non-string JSON value.
 		{`{"password": ["hunter2xyz"], "m":"ok"}`, `{"password": [masked:credential], "m":"ok"}`},
 		{`{"password" : 12345678, "m":"ok"}`, `{"password" : [masked:credential], "m":"ok"}`},
@@ -518,8 +518,8 @@ func TestMaskCredentialsRound7(t *testing.T) {
 		{"pwd=zz1 dbPwd=zz2", "pwd=[masked:credential]"},
 		{"dbPwd=zz2", "dbPwd=[masked:credential]"},
 	} {
-		if got := maskCredentials(c.in, nil); got != c.want {
-			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		if got := maskOwn(c.in, nil); got != c.want {
+			t.Errorf("maskOwn(%q)\n got %q\nwant %q", c.in, got, c.want)
 		}
 	}
 }
@@ -697,8 +697,10 @@ func TestSecretApplyRefusesAShortCredential(t *testing.T) {
 func TestCredentialKeysRound8(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"NOAUTH Authentication required", ""},
-		{"OAUTH: enabled", ""},
-		{"useBasicAuth=true requireAuth: true auth=x", "useBasicAuth=true requireAuth: true auth=[masked:credential]"}, // round 9, F2
+		{"OAUTH: enabled", "OAUTH: [masked:credential]"}, // round 10
+		{"OAUTH: true", ""},
+		{"useBasicAuth=true requireAuth: true auth=x", "useBasicAuth=[masked:credential]"}, // round 10: the whole rest is no boolean
+		{"useBasicAuth=true", ""},
 		{"resumeToken=8263A1B2C3", ""},
 		{"resume_token: 8263A1B2C3", ""},
 		{"Debezium resume token: 8263A1B2C3", ""},
@@ -724,8 +726,8 @@ func TestCredentialKeysRound8(t *testing.T) {
 		if want == "" {
 			want = c.in
 		}
-		if got := maskCredentials(c.in, nil); got != want {
-			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, want)
+		if got := maskOwn(c.in, nil); got != want {
+			t.Errorf("maskOwn(%q)\n got %q\nwant %q", c.in, got, want)
 		}
 	}
 }
@@ -778,8 +780,8 @@ func TestCredentialValueCopies(t *testing.T) {
 		{`{"m":"x\ud83d\ude00yzab"}`, `{"m":"[masked:credential]"}`},
 		{`{"m":"\u00G1b12x \u12"}`, `{"m":"\u00G1b12x \u12"}`},
 	} {
-		if got := maskCredentials(c.in, written); got != c.want {
-			t.Errorf("maskCredentials(%q)\n got %q\nwant %q", c.in, got, c.want)
+		if got := maskOwn(c.in, written); got != c.want {
+			t.Errorf("maskOwn(%q)\n got %q\nwant %q", c.in, got, c.want)
 		}
 	}
 }
@@ -922,8 +924,8 @@ func TestReadsKeyRuleRound9(t *testing.T) {
 	}
 	// PWD=/opt/kafka is kept by the key rule (TestMaskCredentialsRound7);
 	// redact's own rule masks it after, so it is not checked here.
-	for _, keep := range []string{"OAUTH: enabled now", "resumeToken=8263A1 B2", "resume_token: 8263A1 B2", "tokenizer=standard x",
-		"nexttoken=AbC123 x", "pagetoken: AbC123 x", "continuationtoken=AbC123 x", "next_page_token: AbC123 x", "NEXTTOKEN=AbC123 x",
+	for _, keep := range []string{"OAUTH: true", "tokenizer=1", "resumeToken=8263A1", "resume_token: 8263A1", "Debezium resume token: 8263A1",
+		"nexttoken=AbC123", "pagetoken: AbC123", "continuationtoken=AbC123", "next_page_token: AbC123", "NEXTTOKEN=AbC123", "nextPageToken=AbC123",
 		"useBasicAuth=true", "requireAuth: false", "httpAuth=false", "httpAuth: none", "basicAuth: null", "Token: expired"} {
 		// "(using password: YES)" is kept by the key rule
 		// (TestCredentialLineRule) but redact's own rule masks it after.
@@ -989,7 +991,12 @@ func TestShortCredentialWarningRound9(t *testing.T) {
 			t.Errorf("%s summary: %q", op, s)
 		}
 	}
-	if got := readsOf(t, []string{"\u00e9\u00e9\u00e9"}, "task \u00e9\u00e9\u00e9 and x\u00e9\u00e9\u00e9x")["k8s_logs"]; !strings.Contains(got, "x\u00e9\u00e9\u00e9x") || strings.Contains(got, "task \u00e9") {
-		t.Errorf("a 3-rune value (6 bytes) is not masked as a whole token only: %s", got)
+	// Round 10, C7: a 3-rune value holding a non-ASCII rune is masked
+	// wherever it appears; a 3-character ASCII one only as a token.
+	if got := readsOf(t, []string{"\u00e9\u00e9\u00e9"}, "task \u00e9\u00e9\u00e9 and x\u00e9\u00e9\u00e9x")["k8s_logs"]; strings.Contains(got, "\u00e9") {
+		t.Errorf("a 3-rune non-ASCII value leaks: %s", got)
+	}
+	if got := readsOf(t, []string{"q9z"}, "task q9z and xq9zx")["k8s_logs"]; !strings.Contains(got, "xq9zx") || strings.Contains(got, "task q9z") {
+		t.Errorf("a 3-character ASCII value is not masked as a whole token only: %s", got)
 	}
 }
