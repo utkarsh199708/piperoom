@@ -145,6 +145,7 @@ type Role struct {
 // Decision is one action's result of iam.SimulatePrincipalPolicy.
 type Decision struct {
 	Action   string `json:"action"`
+	Resource string `json:"resource,omitempty"`
 	Decision string `json:"decision"` // allowed | explicitDeny | implicitDeny
 }
 
@@ -543,27 +544,52 @@ func (c *Client) GetRole(ctx context.Context, arn string) (Role, error) {
 	return r, nil
 }
 
-// SimulateRole asks IAM whether the role may perform actions (on any
-// resource). The semantics of the simulation for the MSK IAM actions are
-// not confirmed on a sandbox (design §3.1).
-func (c *Client) SimulateRole(ctx context.Context, arn string, actionNames []string) ([]Decision, error) {
+// maxSimulatedResources bounds SimulateRole's resource list.
+const maxSimulatedResources = 8
+
+// SimulateRole asks IAM whether the role may perform actions on resources
+// ("*" when resources is empty). IAM's simulation tests the resource
+// strings it is given and nothing else: a statement granting an action on
+// one specific ARN is "implicitDeny" against "*", so a caller looking for
+// what a role must not do names the resources too. A decision is reported
+// for every action-resource pair IAM returns, from EvalDecision and from
+// each ResourceSpecificResults entry, so an "allowed" anywhere in the
+// answer is never lost. The semantics of the simulation for the MSK IAM
+// actions are not confirmed on a sandbox (design §3.1).
+func (c *Client) SimulateRole(ctx context.Context, arn string, actionNames, resources []string) ([]Decision, error) {
 	if err := CheckRoleARN(arn); err != nil {
 		return nil, err
 	}
-	if len(actionNames) == 0 || len(actionNames) > 16 {
-		return nil, fmt.Errorf("%w: 1 to 16 actions", ErrInvalid)
+	if len(actionNames) == 0 || len(actionNames) > 32 {
+		return nil, fmt.Errorf("%w: 1 to 32 actions", ErrInvalid)
 	}
-	out, err := call(ctx, c, "simulate principal policy", func(ctx context.Context) (*iam.SimulatePrincipalPolicyOutput, error) {
-		return c.iam.SimulatePrincipalPolicy(ctx, &iam.SimulatePrincipalPolicyInput{PolicySourceArn: aws.String(arn), ActionNames: actionNames})
-	})
-	if err != nil {
-		return nil, err
+	if len(resources) > maxSimulatedResources {
+		return nil, fmt.Errorf("%w: at most %d resources", ErrInvalid, maxSimulatedResources)
 	}
-	ds := make([]Decision, 0, len(out.EvaluationResults))
-	for _, r := range out.EvaluationResults {
-		ds = append(ds, Decision{Action: str(r.EvalActionName), Decision: string(r.EvalDecision)})
+	in := &iam.SimulatePrincipalPolicyInput{PolicySourceArn: aws.String(arn), ActionNames: actionNames}
+	if len(resources) > 0 {
+		in.ResourceArns = resources
 	}
-	return ds, nil
+	var ds []Decision
+	for page := 0; page < maxPages; page++ {
+		out, err := call(ctx, c, "simulate principal policy", func(ctx context.Context) (*iam.SimulatePrincipalPolicyOutput, error) {
+			return c.iam.SimulatePrincipalPolicy(ctx, in)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range out.EvaluationResults {
+			ds = append(ds, Decision{Action: str(r.EvalActionName), Resource: str(r.EvalResourceName), Decision: string(r.EvalDecision)})
+			for _, rs := range r.ResourceSpecificResults {
+				ds = append(ds, Decision{Action: str(r.EvalActionName), Resource: str(rs.EvalResourceName), Decision: string(rs.EvalResourceDecision)})
+			}
+		}
+		if !out.IsTruncated || out.Marker == nil {
+			return ds, nil
+		}
+		in.Marker = out.Marker
+	}
+	return nil, fmt.Errorf("%w: simulate principal policy: more than %d pages", ErrAWS, maxPages)
 }
 
 // expectedOwnerRE is an AWS account id, the only ExpectedBucketOwner S3

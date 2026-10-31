@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,8 @@ type MSKAPI interface {
 	ConnectorTags(ctx context.Context, arn string) (map[string]string, error)
 	DescribeNetwork(ctx context.Context, subnets, groups []string) (mskconnect.Network, error)
 	GetRole(ctx context.Context, arn string) (mskconnect.Role, error)
-	SimulateRole(ctx context.Context, arn string, actions []string) ([]mskconnect.Decision, error)
+	SimulateRole(ctx context.Context, arn string, actions, resources []string) ([]mskconnect.Decision, error)
+	RolePolicies(ctx context.Context, arn string) ([]mskconnect.PolicyDocument, error)
 	HeadObject(ctx context.Context, bucket, key, version, expectedOwner string) (mskconnect.Object, error)
 	CreatePlugin(ctx context.Context, s mskconnect.PluginSpec) (mskconnect.Created, error)
 	CreateWorkerConfig(ctx context.Context, s mskconnect.WorkerConfigSpec) (mskconnect.WorkerConfig, error)
@@ -124,15 +126,27 @@ func (d *MSKDriver) Class() string { return d.class }
 var RoleActions = []string{"kafka-cluster:Connect", "kafka-cluster:DescribeCluster", "logs:CreateLogStream", "logs:PutLogEvents"}
 
 // RoleEscalationActions are what the service execution role must not be
-// allowed on any resource: IAM writes that grant it or another principal
-// more (what iam:* includes), and sts:AssumeRole, which would make it a
-// stepping stone to every role that trusts the account. IAM's simulation
-// takes action names, not wildcards, so these stand for iam:*.
-// msk_role_check and msk_create_connector both refuse a role allowed any of
-// them.
-var RoleEscalationActions = []string{
-	"iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:CreatePolicyVersion", "iam:UpdateAssumeRolePolicy",
-	"iam:PassRole", "iam:CreateAccessKey", "iam:CreateUser", "sts:AssumeRole",
+// allowed: IAM writes that grant it or another principal more (what iam:*
+// includes), and sts:AssumeRole, which would make it a stepping stone to
+// other roles (mskconnect.EscalationActions). roleSafety simulates them on
+// "*" and on the role, user and policy ARNs of the account
+// (escalationResources), and refuses a role whose own policies grant any
+// of them, or any iam:Put*/Attach*/Create*/Update*/Pass*/Add*/Set*, on any
+// resource (mskconnect.EscalationGrants). msk_role_check and
+// msk_create_connector both refuse a role allowed any of them.
+var RoleEscalationActions = mskconnect.EscalationActions
+
+// escalationResources are the resources roleSafety simulates
+// RoleEscalationActions on. The simulation tests exactly these strings, so
+// a grant on one specific ARN (an admin role to assume, another policy) is
+// caught by reading the policies, not by the simulation.
+func escalationResources(roleArn string) []string {
+	f := strings.SplitN(roleArn, ":", 6)
+	if len(f) < 6 {
+		return []string{"*"}
+	}
+	base := "arn:" + f[1] + ":iam::" + f[4] + ":"
+	return []string{"*", roleArn, base + "role/*", base + "user/*", base + "policy/*"}
 }
 
 // ErrRoleUnsafe is a service execution role that something other than MSK
@@ -682,7 +696,7 @@ func (d *MSKDriver) roleCheck(ctx context.Context, raw json.RawMessage) (ops.Res
 	if res, err := roleRefusal(role, unsafe); err != nil {
 		return d.result(res.Summary, res.Data), err
 	}
-	ds, err := d.api.SimulateRole(ctx, p.RoleArn, RoleActions)
+	ds, err := d.api.SimulateRole(ctx, p.RoleArn, RoleActions, nil)
 	if err != nil {
 		return d.result("", errData(err)), err
 	}
@@ -699,23 +713,43 @@ func (d *MSKDriver) roleCheck(ctx context.Context, raw json.RawMessage) (ops.Res
 	return d.result("role "+role.Name+" is trusted by MSK Connect alone, has no IAM write or sts:AssumeRole, and is allowed the connector's actions", data), nil
 }
 
-// roleSafety reads the role's trust policy and simulates
-// RoleEscalationActions on it; unsafe lists the escalation actions IAM
-// allows. The role's name prefix (RolePrefix) is a naming convention only:
-// these two checks are what bound what the role can do.
+// roleSafety reads the role's trust policy, simulates
+// RoleEscalationActions on escalationResources, and reads the role's
+// inline and attached policies for an escalation grant. unsafe lists what
+// it found, as "<action> on <resource>" for the simulation and
+// "<policy>: <statement>" for the policies. A policy that cannot be read
+// fails closed: the error wraps ErrRoleUnsafe. The role's name prefix
+// (RolePrefix) is a naming convention only: these checks are what bound
+// what the role can do.
 func (d *MSKDriver) roleSafety(ctx context.Context, arn string) (mskconnect.Role, []string, error) {
 	role, err := d.api.GetRole(ctx, arn)
 	if err != nil {
 		return role, nil, err
 	}
-	ds, err := d.api.SimulateRole(ctx, arn, RoleEscalationActions)
+	ds, err := d.api.SimulateRole(ctx, arn, RoleEscalationActions, escalationResources(arn))
 	if err != nil {
 		return role, nil, err
 	}
 	var unsafe []string
 	for _, x := range ds {
 		if x.Decision == "allowed" {
-			unsafe = append(unsafe, x.Action)
+			on := x.Resource
+			if on == "" {
+				on = "*"
+			}
+			if u := x.Action + " on " + on; !slices.Contains(unsafe, u) {
+				unsafe = append(unsafe, u)
+			}
+		}
+	}
+	pols, err := d.api.RolePolicies(ctx, arn)
+	if err != nil {
+		return role, nil, fmt.Errorf("%w: its permissions policies could not all be read, so an escalation grant cannot be ruled out: %w", ErrRoleUnsafe, err)
+	}
+	for _, p := range pols {
+		name := p.Kind + " policy " + p.Name
+		for _, g := range mskconnect.EscalationGrants(p.Document) {
+			unsafe = append(unsafe, name+": "+g)
 		}
 	}
 	return role, unsafe, nil
@@ -730,8 +764,8 @@ func roleRefusal(role mskconnect.Role, unsafe []string) (ops.Result, error) {
 		return ops.Result{Summary: "role " + role.Name + " is not trusted by MSK Connect alone: " + role.TrustProblem, Data: data},
 			fmt.Errorf("%w: its trust policy %s; it must allow only %s to sts:AssumeRole", ErrRoleUnsafe, role.TrustProblem, mskconnect.KafkaConnectService)
 	case len(unsafe) > 0:
-		return ops.Result{Summary: "role " + role.Name + " is allowed " + strings.Join(unsafe, ", ") + " on any resource", Data: data},
-			fmt.Errorf("%w: it is allowed %s; a connector's role needs no IAM writes and no sts:AssumeRole", ErrRoleUnsafe, strings.Join(unsafe, ", "))
+		return ops.Result{Summary: "role " + role.Name + " can escalate: " + clipText(strings.Join(unsafe, "; "), 400), Data: data},
+			fmt.Errorf("%w: %s; a connector's role needs no IAM writes and no sts:AssumeRole", ErrRoleUnsafe, clipText(strings.Join(unsafe, "; "), 400))
 	}
 	return ops.Result{}, nil
 }

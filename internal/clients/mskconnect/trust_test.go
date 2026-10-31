@@ -35,3 +35,32 @@ func TestTrustProblem(t *testing.T) {
 		}
 	}
 }
+
+// TestEscalationGrants (review round 3): a policy statement that could let
+// the role grant itself more or assume another role is reported, whatever
+// its resource; one that grants only the connector's actions is not.
+func TestEscalationGrants(t *testing.T) {
+	bad := map[string]string{
+		"iam:*":                  `{"Statement":[{"Effect":"Allow","Action":"iam:*","Resource":"*"}]}`,
+		"*":                      `{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`,
+		"PutRolePolicy on self":  `{"Statement":[{"Effect":"Allow","Action":"iam:PutRolePolicy","Resource":"arn:aws:iam::000000000000:role/piperoom-msk"}]}`,
+		"AssumeRole on an admin": `{"Statement":{"Effect":"Allow","Action":["logs:PutLogEvents","sts:AssumeRole"],"Resource":"arn:aws:iam::000000000000:role/Admin"}}`,
+		"a glob":                 `{"Statement":[{"Effect":"Allow","Action":"iam:Attach*","Resource":"*"}]}`,
+		"a ? glob":               `{"Statement":[{"Effect":"Allow","Action":"iam:PassRol?","Resource":"*"}]}`,
+		"lower case":             `{"Statement":[{"Effect":"Allow","Action":"IAM:createloginprofile","Resource":"*"}]}`,
+		"a Create verb":          `{"Statement":[{"Effect":"Allow","Action":"iam:CreateInstanceProfile","Resource":"*"}]}`,
+		"NotAction":              `{"Statement":[{"Effect":"Allow","NotAction":"s3:*","Resource":"*"}]}`,
+		"sts:AssumeRoleWith*":    `{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRoleWithWebIdentity","Resource":"*"}]}`,
+		"a Deny is not credited": `{"Statement":[{"Effect":"Allow","Action":"iam:*","Resource":"*"},{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`,
+		"not JSON":               `iam`,
+	}
+	for name, doc := range bad {
+		if len(EscalationGrants(doc)) == 0 {
+			t.Errorf("%s: no grant found in %s", name, doc)
+		}
+	}
+	ok := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","kafka-cluster:DescribeCluster","logs:CreateLogStream","logs:PutLogEvents","s3:GetObject","iam:GetRole","iam:ListRoles"],"Resource":"*"},{"Effect":"Deny","Action":"iam:*","Resource":"*"}]}`
+	if g := EscalationGrants(ok); len(g) != 0 {
+		t.Errorf("a connector-only policy: %v", g)
+	}
+}

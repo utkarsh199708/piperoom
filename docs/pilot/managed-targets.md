@@ -93,11 +93,11 @@ Each op calls these AWS APIs. The IAM action is the API's name under its service
 | `msk_wait` (plugin) | `kafkaconnect:DescribeCustomPlugin` | `internal/clients/mskconnect/read.go:265` |
 | `msk_describe_connector`, `msk_wait` (connector), `msk_delete_connector` | `kafkaconnect:ListConnectors`, `kafkaconnect:DescribeConnector` | `internal/clients/mskconnect/read.go:294-375` |
 | `msk_vpc_check` | `ec2:DescribeSubnets`, `ec2:DescribeSecurityGroups`, `ec2:DescribeRouteTables` | `internal/clients/mskconnect/read.go:397-470` |
-| `msk_role_check` | `iam:GetRole`, `iam:SimulatePrincipalPolicy` | `internal/clients/mskconnect/read.go:517-562` |
+| `msk_role_check` | `iam:GetRole`, `iam:SimulatePrincipalPolicy`, and to read the role's own policies `iam:ListRolePolicies`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies`, `iam:GetPolicy`, `iam:GetPolicyVersion` (on the role and its attached policies) | `internal/clients/mskconnect/read.go:517-562` |
 | `msk_plugin_object_check`, `msk_create_plugin` (its object check first) | `s3:GetObject`, and `s3:GetObjectVersion` for a versioned HEAD (which `msk_create_plugin` always is) | `internal/clients/mskconnect/read.go:566`; `internal/setup/targets/managed/msk.go:683-686` |
 | `msk_create_plugin` | `kafkaconnect:CreateCustomPlugin`, `kafkaconnect:TagResource` (tags on create) | `internal/clients/mskconnect/write.go:108-135` |
 | `msk_create_worker_config` | `kafkaconnect:CreateWorkerConfiguration`, `kafkaconnect:TagResource` | `internal/clients/mskconnect/write.go:138-163` |
-| `msk_create_connector` | `iam:GetRole` and `iam:SimulatePrincipalPolicy` on the service execution role (its checks first), `kafkaconnect:CreateConnector`, `kafkaconnect:TagResource`, `iam:PassRole` on the service execution role, and `iam:CreateServiceLinkedRole` for `kafkaconnect.amazonaws.com` on an account's first connector | `internal/clients/mskconnect/write.go:213-251`; the design §8 |
+| `msk_create_connector` | the same IAM reads as `msk_role_check` on the service execution role (its checks first), `kafkaconnect:CreateConnector`, `kafkaconnect:TagResource`, `iam:PassRole` on the service execution role, and `iam:CreateServiceLinkedRole` for `kafkaconnect.amazonaws.com` on an account's first connector | `internal/clients/mskconnect/write.go:213-251`; the design §8 |
 | `msk_delete_connector` | `kafkaconnect:ListTagsForResource`, `kafkaconnect:DeleteConnector` | `internal/setup/targets/managed/msk.go:750-777` |
 
 `kafkaconnect:ListTagsForResource` is **not** in the design's §8 list: `msk_delete_connector` reads the tags to refuse a
@@ -113,10 +113,18 @@ done, section 9).
 - **only MSK Connect can assume it**: every Allow statement of its trust policy names the Service principal
   `kafkaconnect.amazonaws.com` alone and the action `sts:AssumeRole` alone, with no `NotPrincipal` or `NotAction`
   (conditions such as `aws:SourceAccount` are fine and recommended; `mskconnect.TrustProblem`);
-- **it cannot escalate**: IAM's simulation on any resource denies `iam:AttachRolePolicy`, `iam:PutRolePolicy`,
-  `iam:CreatePolicyVersion`, `iam:UpdateAssumeRolePolicy`, `iam:PassRole`, `iam:CreateAccessKey`, `iam:CreateUser`
-  and `sts:AssumeRole` (`managed.RoleEscalationActions`; the simulation takes action names, so these stand for
-  `iam:*`);
+- **it cannot escalate**, checked two ways:
+  - IAM's simulation denies `managed.RoleEscalationActions` (`iam:PutRolePolicy`, `PutUserPolicy`, `PutGroupPolicy`,
+    `PutRolePermissionsBoundary`, `AttachRolePolicy`, `AttachUserPolicy`, `AttachGroupPolicy`, `CreatePolicyVersion`,
+    `SetDefaultPolicyVersion`, `CreateAccessKey`, `CreateUser`, `CreateRole`, `CreateLoginProfile`, `UpdateLoginProfile`,
+    `UpdateAssumeRolePolicy`, `PassRole`, `AddUserToGroup`, and `sts:AssumeRole`) on `*`, on the role's own ARN and on
+    `arn:aws:iam::<account>:role/*`, `user/*` and `policy/*`. The simulation tests only the resource strings it is
+    given, so a grant on one specific ARN (an admin role to assume) is not visible to it;
+  - so the runner also reads every inline and attached policy of the role (default version) and refuses one whose
+    Allow statement grants `*`, `iam:*`, any `iam:Put*`/`Attach*`/`Create*`/`Update*`/`Pass*`/`Add*`/`Set*`, any
+    `sts:AssumeRole*`, or a `NotAction`, on any resource (`mskconnect.EscalationGrants`). Resource and conditions are
+    ignored and Deny statements are not credited, so this can refuse a role a Deny makes safe: split such a role. If a
+    policy cannot be read the check fails closed (`ErrRoleUnsafe`);
 - **it can do the connector's work**: the simulation allows `kafka-cluster:Connect`, `kafka-cluster:DescribeCluster`,
   `logs:CreateLogStream` and `logs:PutLogEvents` (`managed.RoleActions`).
 

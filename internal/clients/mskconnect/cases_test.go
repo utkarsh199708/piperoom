@@ -512,7 +512,7 @@ var mskCases = []mskCase{
 			if !r.TrustsKafkaConnect || r.TrustProblem != "" || r.Name != "PiperoomMSKConnect" {
 				t.Errorf("Role = %+v", r)
 			}
-			ds, err := c.SimulateRole(ctx, tRole, []string{"kafka-cluster:Connect", "logs:PutLogEvents"})
+			ds, err := c.SimulateRole(ctx, tRole, []string{"kafka-cluster:Connect", "logs:PutLogEvents"}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -537,6 +537,67 @@ var mskCases = []mskCase{
 			}
 			if !r.TrustsKafkaConnect || r.TrustProblem == "" {
 				t.Errorf("Role = %+v, want a trust problem", r)
+			}
+		},
+	},
+	{
+		// SimulateRole names the resources and reports every
+		// resource-specific decision: a grant on the role's own ARN is
+		// implicitDeny against "*" and allowed on the ARN (review round 3).
+		name: "simulate_on_resources",
+		responses: []replay.Response{
+			xmlOK(`<SimulatePrincipalPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults>` +
+				`<member><EvalActionName>iam:PutRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision>` +
+				`<ResourceSpecificResults><member><EvalResourceName>` + tRole + `</EvalResourceName><EvalResourceDecision>allowed</EvalResourceDecision></member></ResourceSpecificResults></member>` +
+				`</EvaluationResults></SimulatePrincipalPolicyResult></SimulatePrincipalPolicyResponse>`),
+		},
+		run: func(t *testing.T, ctx context.Context, c *Client) {
+			ds, err := c.SimulateRole(ctx, tRole, []string{"iam:PutRolePolicy"}, []string{"*", tRole})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ds) != 2 || ds[1].Resource != tRole || ds[1].Decision != "allowed" {
+				t.Errorf("decisions = %+v", ds)
+			}
+		},
+	},
+	{
+		// RolePolicies reads the inline and the attached policies.
+		name: "role_policies_ok",
+		responses: []replay.Response{
+			xmlOK(`<ListRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><ListRolePoliciesResult><IsTruncated>false</IsTruncated><PolicyNames><member>connect</member></PolicyNames></ListRolePoliciesResult></ListRolePoliciesResponse>`),
+			xmlOK(`<GetRolePolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetRolePolicyResult><RoleName>PiperoomMSKConnect</RoleName><PolicyName>connect</PolicyName><PolicyDocument>` +
+				url.QueryEscape(`{"Statement":[{"Effect":"Allow","Action":"kafka-cluster:Connect","Resource":"*"}]}`) + `</PolicyDocument></GetRolePolicyResult></GetRolePolicyResponse>`),
+			xmlOK(`<ListAttachedRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><ListAttachedRolePoliciesResult><IsTruncated>false</IsTruncated><AttachedPolicies><member><PolicyName>hop</PolicyName><PolicyArn>arn:aws:iam::000000000000:policy/hop</PolicyArn></member></AttachedPolicies></ListAttachedRolePoliciesResult></ListAttachedRolePoliciesResponse>`),
+			xmlOK(`<GetPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetPolicyResult><Policy><PolicyName>hop</PolicyName><Arn>arn:aws:iam::000000000000:policy/hop</Arn><DefaultVersionId>v2</DefaultVersionId></Policy></GetPolicyResult></GetPolicyResponse>`),
+			xmlOK(`<GetPolicyVersionResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetPolicyVersionResult><PolicyVersion><VersionId>v2</VersionId><IsDefaultVersion>true</IsDefaultVersion><Document>` +
+				url.QueryEscape(`{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"arn:aws:iam::000000000000:role/Admin"}]}`) + `</Document></PolicyVersion></GetPolicyVersionResult></GetPolicyVersionResponse>`),
+		},
+		run: func(t *testing.T, ctx context.Context, c *Client) {
+			ps, err := c.RolePolicies(ctx, tRole)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ps) != 2 || ps[0].Kind != "inline" || ps[1].Kind != "attached" || ps[1].Arn != "arn:aws:iam::000000000000:policy/hop" {
+				t.Fatalf("policies = %+v", ps)
+			}
+			if len(EscalationGrants(ps[0].Document)) != 0 || len(EscalationGrants(ps[1].Document)) == 0 {
+				t.Errorf("grants: inline %v, attached %v", EscalationGrants(ps[0].Document), EscalationGrants(ps[1].Document))
+			}
+		},
+	},
+	{
+		// A policy that cannot be read fails the whole read (fail closed).
+		name: "role_policies_denied",
+		responses: []replay.Response{
+			xmlOK(`<ListRolePoliciesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><ListRolePoliciesResult><IsTruncated>false</IsTruncated><PolicyNames></PolicyNames></ListRolePoliciesResult></ListRolePoliciesResponse>`),
+			iamErr(403, "AccessDenied", "User is not authorized to perform: iam:ListAttachedRolePolicies"),
+		},
+		run: func(t *testing.T, ctx context.Context, c *Client) {
+			ps, err := c.RolePolicies(ctx, tRole)
+			wantErr(t, err, ErrForbidden)
+			if ps != nil {
+				t.Errorf("a failed read returned %+v", ps)
 			}
 		},
 	},

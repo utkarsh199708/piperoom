@@ -29,11 +29,16 @@ type fakeMSK struct {
 	bootstrap string
 	owners    []string
 	// trustProblem is GetRole's TrustProblem; escalate lists the
-	// RoleEscalationActions SimulateRole allows (the rest are denied, every
-	// other action is allowed).
+	// RoleEscalationActions SimulateRole allows, as "<action>" (on every
+	// resource) or "<action>@<resource>" (on that one only); the rest are
+	// denied, every other action is allowed. policies and policyErr are
+	// RolePolicies' answer.
 	trustProblem string
 	escalate     []string
 	simulated    [][]string
+	resources    [][]string
+	policies     []mskconnect.PolicyDocument
+	policyErr    error
 	plugins      []mskconnect.PluginSpec
 	object       mskconnect.Object
 }
@@ -68,17 +73,26 @@ func (f *fakeMSK) DescribeNetwork(context.Context, []string, []string) (mskconne
 func (f *fakeMSK) GetRole(context.Context, string) (mskconnect.Role, error) {
 	return mskconnect.Role{Name: "r", TrustsKafkaConnect: f.trustProblem == "", TrustProblem: f.trustProblem}, nil
 }
-func (f *fakeMSK) SimulateRole(_ context.Context, _ string, actions []string) ([]mskconnect.Decision, error) {
+func (f *fakeMSK) SimulateRole(_ context.Context, _ string, actions, resources []string) ([]mskconnect.Decision, error) {
 	f.simulated = append(f.simulated, actions)
-	ds := make([]mskconnect.Decision, 0, len(actions))
+	f.resources = append(f.resources, resources)
+	if len(resources) == 0 {
+		resources = []string{"*"}
+	}
+	var ds []mskconnect.Decision
 	for _, a := range actions {
-		d := "allowed"
-		if slices.Contains(RoleEscalationActions, a) && !slices.Contains(f.escalate, a) {
-			d = "implicitDeny"
+		for _, r := range resources {
+			d := "allowed"
+			if slices.Contains(RoleEscalationActions, a) && !slices.Contains(f.escalate, a) && !slices.Contains(f.escalate, a+"@"+r) {
+				d = "implicitDeny"
+			}
+			ds = append(ds, mskconnect.Decision{Action: a, Resource: r, Decision: d})
 		}
-		ds = append(ds, mskconnect.Decision{Action: a, Decision: d})
 	}
 	return ds, nil
+}
+func (f *fakeMSK) RolePolicies(context.Context, string) ([]mskconnect.PolicyDocument, error) {
+	return f.policies, f.policyErr
 }
 func (f *fakeMSK) HeadObject(_ context.Context, _, _, version, owner string) (mskconnect.Object, error) {
 	f.owners = append(f.owners, owner)
@@ -433,6 +447,24 @@ func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
 		"trusted by another account": func(f *fakeMSK) { f.trustProblem = "statement 1 trusts a principal of type AWS" },
 		"allowed iam writes":         func(f *fakeMSK) { f.escalate = []string{"iam:AttachRolePolicy", "iam:PassRole"} },
 		"allowed sts:AssumeRole":     func(f *fakeMSK) { f.escalate = []string{"sts:AssumeRole"} },
+		// Review round 3: a grant on one ARN is implicitDeny against "*".
+		"PutRolePolicy on its own ARN": func(f *fakeMSK) { f.escalate = []string{"iam:PutRolePolicy@" + mRole} },
+		"PassRole on the account's roles": func(f *fakeMSK) {
+			f.escalate = []string{"iam:PassRole@arn:aws:iam::000000000000:role/*"}
+		},
+		"CreateLoginProfile on the account's users": func(f *fakeMSK) {
+			f.escalate = []string{"iam:CreateLoginProfile@arn:aws:iam::000000000000:user/*"}
+		},
+		"SetDefaultPolicyVersion on the account's policies": func(f *fakeMSK) {
+			f.escalate = []string{"iam:SetDefaultPolicyVersion@arn:aws:iam::000000000000:policy/*"}
+		},
+		"an inline policy assuming one admin role": func(f *fakeMSK) {
+			f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "hop", Document: `{"Statement":[{"Effect":"Allow","Action":"sts:AssumeRole","Resource":"arn:aws:iam::000000000000:role/Admin"}]}`}}
+		},
+		"an attached policy with iam:Put*": func(f *fakeMSK) {
+			f.policies = []mskconnect.PolicyDocument{{Kind: "attached", Name: "p", Document: `{"Statement":{"Effect":"Allow","Action":["logs:PutLogEvents","iam:Put*"],"Resource":"arn:aws:iam::000000000000:role/piperoom-msk"}}`}}
+		},
+		"unreadable policies": func(f *fakeMSK) { f.policyErr = mskconnect.ErrForbidden },
 	}
 	for name, set := range cases {
 		for _, op := range []string{"msk_role_check", "msk_create_connector"} {
@@ -459,6 +491,23 @@ func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
 	}
 	if len(f.simulated) != 1 || !slices.Equal(f.simulated[0], RoleEscalationActions) {
 		t.Errorf("create simulated %v, want the escalation actions once", f.simulated)
+	}
+	want := []string{"*", mRole, "arn:aws:iam::000000000000:role/*", "arn:aws:iam::000000000000:user/*", "arn:aws:iam::000000000000:policy/*"}
+	if len(f.resources) != 1 || !slices.Equal(f.resources[0], want) {
+		t.Errorf("simulated on %v, want %v", f.resources, want)
+	}
+	for _, a := range []string{"iam:PutUserPolicy", "iam:AttachUserPolicy", "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
+		"iam:SetDefaultPolicyVersion", "iam:AddUserToGroup", "iam:PassRole", "iam:CreatePolicyVersion"} {
+		if !slices.Contains(RoleEscalationActions, a) {
+			t.Errorf("RoleEscalationActions lacks %s", a)
+		}
+	}
+	// A role whose own policies grant only what the connector needs passes.
+	f = newFake()
+	f.policies = []mskconnect.PolicyDocument{{Kind: "inline", Name: "connect", Document: `{"Statement":[{"Effect":"Allow","Action":["kafka-cluster:Connect","logs:PutLogEvents","s3:GetObject","iam:GetRole"],"Resource":"*"}]}`}}
+	reg, _ = newMSK(t, f, "", nil)
+	if _, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": mRole}); err != nil {
+		t.Errorf("a connector-only policy: %v", err)
 	}
 }
 

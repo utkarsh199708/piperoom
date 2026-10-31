@@ -1,0 +1,99 @@
+{
+  "provider": "aws",
+  "name": "role_policies_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "05fea88b5383f26d0c46be6a160cab888ec81ba8afb6b89800c52e7d0aee6f9d",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ListRolePoliciesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><ListRolePoliciesResult><IsTruncated>false</IsTruncated><PolicyNames><member>connect</member></PolicyNames></ListRolePoliciesResult></ListRolePoliciesResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetRolePolicy&PolicyName=connect&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "cc5cf6aeac3f16bb31ec50919beca1d25241bacca6fd715ecf3b30959e3e26d0",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetRolePolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetRolePolicyResult><RoleName>PiperoomMSKConnect</RoleName><PolicyName>connect</PolicyName><PolicyDocument>%7B%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22kafka-cluster%3AConnect%22%2C%22Resource%22%3A%22%2A%22%7D%5D%7D</PolicyDocument></GetRolePolicyResult></GetRolePolicyResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListAttachedRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "e7d39b64c421c29421f819c4c48433b85b18f02cbbe68446908ee38254e86370",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ListAttachedRolePoliciesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><ListAttachedRolePoliciesResult><IsTruncated>false</IsTruncated><AttachedPolicies><member><PolicyName>hop</PolicyName><PolicyArn>arn:aws:iam::000000000000:policy/hop</PolicyArn></member></AttachedPolicies></ListAttachedRolePoliciesResult></ListAttachedRolePoliciesResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetPolicy&PolicyArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Apolicy%2Fhop&Version=2010-05-08",
+        "body_sha256": "2dec7b206d92763b6ea048785902b3ba2284c204c98b252eaa7194d6f47ccce4",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetPolicyResult><Policy><PolicyName>hop</PolicyName><Arn>arn:aws:iam::000000000000:policy/hop</Arn><DefaultVersionId>v2</DefaultVersionId></Policy></GetPolicyResult></GetPolicyResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetPolicyVersion&PolicyArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Apolicy%2Fhop&Version=2010-05-08&VersionId=v2",
+        "body_sha256": "c05d5244aed8298e10987d9943677dfb61e24f89f96520e425b7565beaef2132",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetPolicyVersionResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetPolicyVersionResult><PolicyVersion><VersionId>v2</VersionId><IsDefaultVersion>true</IsDefaultVersion><Document>%7B%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22sts%3AAssumeRole%22%2C%22Resource%22%3A%22arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FAdmin%22%7D%5D%7D</Document></PolicyVersion></GetPolicyVersionResult></GetPolicyVersionResponse>"
+      }
+    }
+  ]
+}
