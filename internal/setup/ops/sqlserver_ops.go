@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/sqlserver"
+	sqlserver "piperoom/internal/clients/sqlserver/sqlservertypes"
 	"piperoom/internal/events"
 	"piperoom/internal/setup/errcode"
 	"piperoom/internal/setup/protocol"
@@ -75,10 +75,10 @@ type SQLServerSource struct {
 	Writer clients.SetupSourceWriter
 }
 
-var (
-	_ sqlserver.SettingsReader  = (*sqlserver.Client)(nil)
-	_ clients.SetupSourceWriter = (*sqlserver.SetupWriter)(nil)
-)
+// The real client and writer satisfy SettingsReader and
+// clients.SetupSourceWriter: sqlserver_ops_test.go asserts it, so this file
+// does not import internal/clients/sqlserver (and go-mssqldb with it) into
+// every binary that links the catalogue, the server among them.
 
 // RegisterSQLServerSource adds the SQL Server source ops to r: the five T0
 // reads and the four T2 setup writes (their U1-2b floors).

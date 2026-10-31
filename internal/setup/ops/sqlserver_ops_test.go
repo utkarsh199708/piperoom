@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"piperoom/internal/clients"
+	mssqlclient "piperoom/internal/clients/sqlserver"
+	"piperoom/internal/clients/sqlserver/sqlservertypes"
 	"piperoom/internal/events"
 	"piperoom/internal/setup/protocol"
 )
@@ -126,3 +129,11 @@ func TestSQLServerOpsValidate(t *testing.T) {
 		t.Errorf("CheckTarget(with target) = %q, want none", got)
 	}
 }
+
+// The real SQL Server client and setup writer satisfy the interfaces the ops
+// take (asserted here, not in sqlserver_ops.go, so the catalogue does not
+// link go-mssqldb into the server).
+var (
+	_ sqlservertypes.SettingsReader = (*mssqlclient.Client)(nil)
+	_ clients.SetupSourceWriter     = (*mssqlclient.SetupWriter)(nil)
+)

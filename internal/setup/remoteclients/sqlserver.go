@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/sqlserver"
+	sqlserver "piperoom/internal/clients/sqlserver/sqlservertypes"
 	"piperoom/internal/setup/protocol"
 )
 
