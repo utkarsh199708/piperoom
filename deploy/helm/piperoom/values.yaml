@@ -379,21 +379,33 @@ setup:
     # the policy pins spec.build.output.image to
     # <registry>/<repo>:piperoom-<id>-<digest> on one of them.
     imageRegistries: []
-    # The database hosts (lower-case names, no port) a KafkaConnector may
-    # connect to: database.hostname, the hosts of a JDBC sink's
-    # connection.url and of mongodb.connection.string. The room's source and
-    # sink targets. Required with admissionPolicy.
+    # The database hosts (lower-case host:port, as the room's source and
+    # sink targets name them) a KafkaConnector may connect to:
+    # database.hostname with database.port, the hosts of a JDBC sink's
+    # connection.url and of mongodb.connection.string (a URL host without a
+    # port is matched at the dialect's default port). An entry without a
+    # port matches only a connector that names none. IPv6 literals are
+    # refused, here and by the runner. Required with admissionPolicy; with
+    # networkPolicy.enabled each port is one of networkPolicy.databases.ports.
     databaseHosts: []
     # The Schema Registry URLs (http[s]://host[:port], exactly as the
     # connectors and the worker name them) the *.converter.schema.registry.url
     # keys may hold: the room's registry targets. Empty refuses those keys.
     schemaRegistries: []
-    # The Connect pods' egress, rendered when networkPolicy.enabled: DNS
-    # (networkPolicy.dns), the Kafka cluster's pods on kafkaPorts, the API
-    # server (the secrets config provider reads the credentials Secret), the
-    # databases, then extraEgress verbatim (e.g. the Schema Registry). An
-    # empty "to" opens the port to any destination: narrow it for
-    # production. databases.ports is required when the policy renders.
+    # The egress policies rendered when networkPolicy.enabled. Every "to"
+    # below is required and non-empty (an empty "to" would open the port to
+    # any destination), so the chart refuses to render without them.
+    # The Connect pods: DNS (networkPolicy.dns), the other Connect workers
+    # on 8083 (REST forwarding to the leader), the Kafka cluster's pods on
+    # kafkaPorts, the API server (the secrets config provider reads the
+    # credentials Secret), the databases, the Schema Registries (ports from
+    # schemaRegistries' URLs), then extraEgress verbatim. kafkaPorts are the
+    # listener ports: with admissionPolicy the policy also refuses a
+    # bootstrap on any other port, so the two cannot drift apart.
+    # The build pod (<connect>-connect-build): DNS, the plugin artifact
+    # hosts (build.sources; ports from pluginHosts, 443 by default) and the
+    # registries it pushes to (build.registry; ports from imageRegistries,
+    # 443 by default). Nothing else: it needs no Kafka and no API server.
     networkPolicy:
       kafkaPorts: [9092, 9093]
       apiServer:
@@ -402,6 +414,13 @@ setup:
       databases:
         to: []
         ports: []
+      schemaRegistries:
+        to: []            # required when schemaRegistries is set
+      build:
+        sources:
+          to: []
+        registry:
+          to: []
       extraEgress: []
   runner:
     enabled: false
@@ -417,8 +436,8 @@ setup:
       limits: {memory: 512Mi}
     # The Job's NetworkPolicy, rendered when networkPolicy.enabled: egress to
     # DNS (networkPolicy.dns), the API server and the piperoom server only.
-    # An empty "to" opens the port to any destination: narrow it to your API
-    # server's and server's addresses for production.
+    # Both "to" lists are required and non-empty (an empty one would open the
+    # port to any destination): your API server's and server's addresses.
     networkPolicy:
       apiServer:
         to: []

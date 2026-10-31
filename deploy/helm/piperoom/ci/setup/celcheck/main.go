@@ -33,25 +33,36 @@ type tc struct {
 func main() {
 	raw, _ := os.ReadFile(os.Args[1])
 	var exprs []string
+	type variable struct{ name, expr string }
+	var vars []variable
 	for _, doc := range strings.Split(string(raw), "\n---\n") {
 		var d map[string]any
 		if yaml.Unmarshal([]byte(doc), &d) != nil || d["kind"] != "ValidatingAdmissionPolicy" {
 			continue
 		}
-		for _, v := range d["spec"].(map[string]any)["validations"].([]any) {
+		spec := d["spec"].(map[string]any)
+		for _, v := range spec["validations"].([]any) {
 			exprs = append(exprs, v.(map[string]any)["expression"].(string))
+		}
+		if vs, ok := spec["variables"].([]any); ok {
+			for _, v := range vs {
+				m := v.(map[string]any)
+				vars = append(vars, variable{m["name"].(string), m["expression"].(string)})
+			}
 		}
 	}
 	if len(exprs) == 0 {
 		fmt.Println("no ValidatingAdmissionPolicy validations in", os.Args[1])
 		os.Exit(1)
 	}
-	env, err := cel.NewEnv(cel.Variable("object", cel.DynType), ext.Strings(ext.StringsVersion(2)))
+	// spec.variables are evaluated in order, each seeing the ones before it
+	// as variables.<name>, as the API server does; one that fails to
+	// evaluate is left out, so a validation that reads it errors (denies).
+	env, err := cel.NewEnv(cel.Variable("object", cel.DynType), cel.Variable("variables", cel.MapType(cel.StringType, cel.DynType)), ext.Strings(ext.StringsVersion(2)))
 	if err != nil {
 		panic(err)
 	}
-	var progs []cel.Program
-	for i, e := range exprs {
+	compile := func(i int, e string) cel.Program {
 		ast, iss := env.Compile(e)
 		if iss.Err() != nil {
 			fmt.Printf("COMPILE %d: %v\n", i, iss.Err())
@@ -61,7 +72,25 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		progs = append(progs, p)
+		return p
+	}
+	varProgs := make([]cel.Program, len(vars))
+	for i, v := range vars {
+		varProgs[i] = compile(-1-i, v.expr)
+	}
+	var progs []cel.Program
+	for i, e := range exprs {
+		progs = append(progs, compile(i, e))
+	}
+	evalVars := func(obj map[string]any) map[string]any {
+		out := map[string]any{}
+		for i, v := range vars {
+			r, _, err := varProgs[i].Eval(map[string]any{"object": obj, "variables": out})
+			if err == nil {
+				out[v.name] = r
+			}
+		}
+		return out
 	}
 	fmt.Printf("%d expressions compile\n", len(progs))
 	var cases []tc
@@ -81,8 +110,9 @@ func main() {
 		c.Obj = ints(c.Obj).(map[string]any)
 		allowed := true
 		var why []string
+		vs := evalVars(c.Obj)
 		for i, p := range progs {
-			out, _, err := p.Eval(map[string]any{"object": c.Obj})
+			out, _, err := p.Eval(map[string]any{"object": c.Obj, "variables": vs})
 			if err != nil {
 				allowed = false
 				why = append(why, fmt.Sprintf("#%d error %v", i, err))

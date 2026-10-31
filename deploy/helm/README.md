@@ -222,20 +222,55 @@ pipeline's topic prefix: a KafkaUser's topic ACLs and the canary KafkaTopic are 
 targets), and pins build artifacts to `setup.pipeline.pluginHosts` (default `repo1.maven.org`) and Schema
 Registry URLs to `setup.pipeline.schemaRegistries` (empty refuses the `*.converter.schema.registry.url` keys).
 The policy also holds the KafkaConnect's and the schema history's bootstrap to the Kafka CR's in-cluster bootstrap
-Service (an external listener is refused), refuses JVM system properties, a KafkaConnector's `state`,
-`alterOffsets` and `listOffsets`, any config key outside the runner's list (`files/setup-connector-keys.txt`), any
-value with whitespace at an end, a `${...}` reference anywhere but as the whole value of a user or password key
-naming the db-credentials Secret (and Strimzi's own store password for the schema history clients), scripting and
-routing transforms (RegexRouter is allowed on a JDBC sink), TLS modes outside the verifying ones, and a connection
-URL with a percent escape (but `%20`) or a parameter outside the runner's list (`files/setup-url-params.txt`).
-The two files are the runner's (`internal/setup/targets/strimzi`'s tests fail when they drift), and
-`ci/setup/celcheck` runs the CEL over the golden render with `cases.json` and `renders.json`, the objects the
-runner writes for the CI values. With `networkPolicy.enabled` the runner release adds a NetworkPolicy for the Job:
-no ingress, egress to DNS, the API server and the server only (`setup.runner.networkPolicy`; add the source
-database to its `extraEgress` when the Job runs the source ops), and the pipeline release adds one for the Connect
-pods: egress to DNS, the Kafka cluster's pods (`setup.pipeline.networkPolicy.kafkaPorts`), the API server (the
-secrets config provider reads the credentials Secret), the databases (`databases.ports` is required,
-`databases.to` should be set) and `extraEgress` (for example the Schema Registry); ingress stays Strimzi's.
+Service (an external listener is refused; with `networkPolicy.enabled` the port is one of
+`setup.pipeline.networkPolicy.kafkaPorts`, so the egress policy and the bootstrap cannot drift apart), and refuses
+JVM system properties and a KafkaConnector's `state`, `alterOffsets` and `listOffsets`. Every connector value check
+is an **allow-list that mirrors the runner**, generated from it into `files/` (the runner's
+`policy_files_test.go` fails when a file drifts; `celcheck_parity_test.go` runs every celcheck case through the
+runner too; `ci/setup/celcheck` runs the CEL over the golden render with `cases.json` and `renders.json`, the
+objects the runner writes for the CI values):
+
+- `setup-connector-keys.txt`: the config keys any plugin admits; any other key is refused.
+- `setup-connector-values.txt`: keys pinned to exact or case-folded values (TLS modes, converters, naming
+  strategies, the connection provider, `signal.enabled.channels`, the schema history's SSL client settings), the
+  credential keys (a user key must be exactly `${secrets:<ns>/<pipeline>-db-credentials:username}`, a password key
+  `...:password`; no other `${...}` anywhere), and the TLS key each source dialect must set.
+- `setup-url-params.txt`: per JDBC dialect and for MongoDB, the free parameters, the enumerated `name=value` pairs,
+  the required TLS parameter and the default port.
+- `setup-smt.txt`: the transform and predicate classes (and the RegexRouter, only on a JDBC sink, with a
+  replacement without `.`), their keys and enumerated values; aliases and `route.by.field` are refused.
+- `setup-patterns.txt`: the per-dialect URL shapes and the name patterns.
+
+No key or value may hold a control character (Java's `trim()` strips them) or start or end in whitespace. A
+connection URL must match its dialect's shape: no userinfo (`@`), no percent escape but `%20`, **no IPv6 literal**
+(the runner refuses them too), Db2 as `db:k=v;...;`, MongoDB as plain `mongodb://` (no `+srv`). A source's
+`topic.prefix` is `setup.pipeline.topicPrefix`; a sink's topics, the dead letter queue and the schema history are
+under it and never one of the Connect cluster's own `<connect>-*` topics; database hosts are
+`setup.pipeline.databaseHosts` (`host:port`) and Schema Registry URLs `setup.pipeline.schemaRegistries`, exactly
+(lower case, no path, no trailing `/`).
+
+**Behaviour changes (round 4).** A source must name a verifying TLS mode (`database.sslmode` `verify-ca` or
+`verify-full` for PostgreSQL, `database.ssl.mode` `verify_ca` or `verify_identity` for MySQL, `database.encrypt=true`
+for SQL Server), and a JDBC sink URL must carry its dialect's (`sslmode=verify-ca` or `verify-full` for PostgreSQL and MariaDB,
+`sslmode=VERIFY_CA` or `VERIFY_IDENTITY` for MySQL, `encrypt=true` for SQL Server; `allowPublicKeyRetrieval` only with a verifying mode): a plaintext database
+or `require` (TLS without verification) is refused where it was allowed. The schema history clients must use
+`SSL` (no `PLAINTEXT` or `SASL_*`). Oracle and Db2 have no URL parameter that pins certificate verification, so
+the chart cannot require one (Db2 `sslConnection=true` is allowed, not required): their TLS is the database's
+configuration. A JDBC sink's table and schema are not bound (`table.name.format` and `currentSchema` are refused);
+the **sink database's grants** for the connector's user are the boundary for what it may write.
+
+The runner and the server both require a connector step's `topic_prefix` param to be the pipeline's. With
+`networkPolicy.enabled` the runner release adds a NetworkPolicy for the Job: no ingress, egress to DNS, the API
+server and the server only (`setup.runner.networkPolicy`; add the source database to its `extraEgress` when the
+Job runs the source ops). The pipeline release adds one for the Connect pods: egress to DNS, the other Connect
+workers on 8083 (a worker forwards REST writes to the leader), the Kafka cluster's pods
+(`setup.pipeline.networkPolicy.kafkaPorts`), the API server (the secrets config provider reads the credentials
+Secret), the databases (`databases.ports`; each `databaseHosts` port must be one of them), the Schema Registries
+(ports from `schemaRegistries`, peers in `schemaRegistries.to`) and `extraEgress`; ingress stays Strimzi's. It
+also adds one for the KafkaConnect build pod (`<connect>-connect-build`): DNS, the plugin hosts
+(`build.sources.to`, ports from `pluginHosts`) and the image registries (`build.registry.to`, ports from
+`imageRegistries`); it needs nothing else. Every `to` of these policies but DNS's is **required and non-empty**:
+the chart refuses to render with an empty one, which would open the port to any destination.
 The runner refuses to patch or delete an object of a chart name that does not carry the pipeline release's
 `app.kubernetes.io/instance` label and Helm's `meta.helm.sh/release-name` annotation naming that release (and, at
 `helm install` of the runner release, the chart checks the same of the KafkaConnect shell). That check catches

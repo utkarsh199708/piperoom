@@ -164,7 +164,6 @@ snapshot.mode
 status.update.interval.ms
 table.exclude.list
 table.include.list
-table.name.format
 table.naming.strategy
 time.precision.mode
 tombstones.on.delete

@@ -3,9 +3,9 @@
 # The Job's egress (networkPolicy.enabled): DNS, the Kubernetes API server and
 # the piperoom server only, and no ingress at all. A runner that also runs the
 # source ops (a source database the room names) needs that database in
-# setup.runner.networkPolicy.extraEgress. An empty "to" opens the port to any
-# destination, because the chart cannot know your API server or server
-# addresses: narrow it for production.
+# setup.runner.networkPolicy.extraEgress. apiServer.to and server.to are
+# required and non-empty (piperoom.setupValidate): an empty "to" would open
+# the port to any destination.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -50,6 +50,9 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 203.0.113.10/32
     - ports:
       - port: 5432
         protocol: TCP

@@ -75,7 +75,7 @@
             "topicPrefix": {"type": "string", "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,63})?$"},
             "pluginHosts": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
             "imageRegistries": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
-            "databaseHosts": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$"}},
+            "databaseHosts": {"type": "array", "maxItems": 16, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
             "schemaRegistries": {"type": "array", "maxItems": 8, "items": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$"}},
             "networkPolicy": {
               "type": "object",
@@ -88,6 +88,10 @@
                 "databases": {"type": "object", "additionalProperties": false, "properties": {
                   "to": {"type": "array"},
                   "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}}}},
+                "schemaRegistries": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}},
+                "build": {"type": "object", "additionalProperties": false, "properties": {
+                  "sources": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}},
+                  "registry": {"type": "object", "additionalProperties": false, "properties": {"to": {"type": "array"}}}}},
                 "extraEgress": {"type": "array"}
               }
             }

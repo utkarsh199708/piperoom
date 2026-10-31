@@ -14,8 +14,11 @@ holds each rule the runner's allow-list holds, and pins the values' topic
 prefix, registries, plugin hosts, database hosts, Schema Registry URLs and
 the runner's key and URL parameter lists (files/). With networkPolicy.enabled
 one NetworkPolicy selects the Connect pods and has exactly the egress the
-values ask for (DNS, the Kafka pods, the API server, the databases, then
-setup.pipeline.networkPolicy.extraEgress). The CEL itself is run by celcheck/.
+values ask for (DNS, the other workers on 8083, the Kafka pods, the API
+server, the databases, the Schema Registries, then
+setup.pipeline.networkPolicy.extraEgress), and one selects the build pod
+(DNS, the plugin hosts, the image registries); every "to" but DNS's is
+required. The CEL itself is run by celcheck/.
 runner: the Role grants no create, no escalate/bind/impersonate, no "*", no
 list but on events, every rule but the events ones names its objects, and the
 Secret, KafkaConnect and pod rules grant exactly the verbs the runner sends;
@@ -23,8 +26,8 @@ the RoleBinding binds the Role to the Job's ServiceAccount only; a
 NetworkPolicy (when rendered) selects the Job's pod, admits nothing, and has
 exactly the egress rules the values ask for: DNS (port 53, to
 networkPolicy.dns.to), the API server (its ports, to apiServer.to) and the
-server (serverURL's port, to server.to), each "to" exactly the values' (open
-only when the values leave it empty), then extraEgress verbatim, and no
+server (serverURL's port, to server.to), each "to" exactly the values' and
+required (never open), then extraEgress verbatim, and no
 other rule.
 The golden files pin the full render; these checks say why it must look so.
 """
@@ -119,12 +122,12 @@ def check_policy(docs, values):
         "KafkaConnector": ["object.spec.class.startsWith('io.debezium.connector.')", "override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
                            "object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart'])", "object.spec.tasksMax == 1",
-                           r"r'^\$\{secrets:", "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
-                           "'org.apache.kafka.connect.transforms.RegexRouter'", "'io.debezium.transforms.Filter'", "trustservercertificate=true",
-                           "hostnameincertificate", r"!string(object.spec.config[k]).matches(r'^\s|\s$')", ".replace('%20', '').contains('%')",
-                           "object.spec.class.startsWith('io.debezium.connector.jdbc.')", ".split('$')[0]",
-                           "(k != 'database.sslmode' || string(object.spec.config[k]).lowerAscii() in ['require', 'verify-ca', 'verify-full'])",
-                           "(k != 'schema.history.internal.kafka.bootstrap.servers' || string(object.spec.config[k]).matches(r'^"],
+                           "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
+                           "'org.apache.kafka.connect.transforms.RegexRouter'",
+                           r"matches(r'[\x00-\x1f\x7f-\x9f]')", r"[\s\pZ]",
+                           "variables.dialect in {", "variables.url.matches({", "variables.urlParams.all(q,",
+                           "variables.mongoParams", "variables.mongoHosts", "variables.urlHosts",
+                           "(k != 'schema.history.internal.kafka.bootstrap.servers' || string(variables.cc[k]).matches(r'^"],
         "KafkaTopic": ["piperoom_canary$'", "'strimzi.io/pause-reconciliation' in object.metadata.annotations", "object.spec.partitions == 1"],
         "KafkaUser": ["!has(object.spec.authentication.password)", "a.resource.type == 'topic'", "patternType == 'prefix'",
                       "a.resource.type == 'group'", "a.operations.all(", "a.operation in ["],
@@ -149,19 +152,66 @@ def check_policy(docs, values):
     regs = "|".join(quote_meta(r) for r in pv["imageRegistries"])
     if not regs or "matches(r'^(%s)/" % regs not in exprs:
         fail("the build output rule does not pin the values' imageRegistries")
-    # The lists the runner owns (files/, synced by the runner's tests) are
-    # in the key and URL parameter rules whole.
+    # The lists the runner owns (files/, written and kept equal to the
+    # runner by its policy_files_test.go): the key allow-list is in the key
+    # rule whole, and every allowed value, parameter, transform and pattern
+    # of the other files is in the rules (the policy only allow-lists).
     chart = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-    for fname, what in (("setup-connector-keys.txt", "connector key"), ("setup-url-params.txt", "URL parameter")):
+
+    def rows(fname):
         with open(os.path.join(chart, "files", fname)) as f:
-            items = [l.strip() for l in f if l.strip()]
-        if not items or "[%s]" % ", ".join("'%s'" % i for i in items) not in exprs:
-            fail("the KafkaConnector rules do not hold the runner's %s list (files/%s)" % (what, fname))
+            return [l.rstrip("\n").split("\t") for l in f if l.strip()]
+
+    keys = [r[0] for r in rows("setup-connector-keys.txt")]
+    if not keys or "[%s]" % ", ".join("'%s'" % i for i in keys) not in exprs:
+        fail("the KafkaConnector rules do not hold the runner's connector key list (files/setup-connector-keys.txt)")
+    tokens = {
+        "setup-connector-values.txt": lambda r: ["'%s': '%s'" % (r[1], r[2])] if r[0] == "cred" else (["'%s'" % r[2]] if r[0] in ("exact", "fold") else ["'%s'" % r[1], "'%s'" % r[2]]),
+        "setup-url-params.txt": lambda r: ["'%s'" % (r[1] if r[0] == "label" else r[2])],
+        "setup-smt.txt": lambda r: ["'%s'" % " ".join(r[1:])],
+        "setup-patterns.txt": lambda r: ["r'%s'" % r[1]],
+    }
+    for fname, tok in tokens.items():
+        rs = rows(fname)
+        if not rs:
+            fail("files/%s is empty" % fname)
+        for r in rs:
+            for t in tok(r):
+                if t not in exprs:
+                    fail("the KafkaConnector rules do not hold %s from files/%s" % (t, fname))
+    # The per-key and per-dialect value sets are in the rules as whole
+    # maps (piperoom.celMap: keys sorted, values in file order), so a value
+    # cannot move from one key's or dialect's set into another's.
+    def cel_map(kind, fname, key_col, val_col):
+        # The chart seeds the URL maps with every dialect that
+        # has a default port, so a dialect without a value has [].
+        m = {r[1]: [] for r in rows(fname) if r[0] == "port"}
+        for r in rows(fname):
+            if r[0] == kind:
+                m.setdefault(r[key_col], []).append(r[val_col])
+        return "{%s}" % ", ".join("'%s': [%s]" % (k, ", ".join("'%s'" % v for v in m[k])) for k in sorted(m))
+    for kind, fname in (("exact", "setup-connector-values.txt"), ("fold", "setup-connector-values.txt"), ("enum", "setup-url-params.txt")):
+        whole = cel_map(kind, fname, 1, 2)
+        # Every copy of the map in the rules is the whole map.
+        if whole not in exprs or exprs.count(whole) != exprs.count(whole.split("], ", 1)[0] + "], "):
+            fail("the KafkaConnector rules do not hold the runner's %s map from files/%s whole" % (kind, fname))
+    want_vars = ["cc", "sink", "url", "mongo", "dialect", "urlRest", "oracleAddr", "urlParams", "urlHosts", "mongoParams", "mongoHosts"]
+    if [v["name"] for v in spec.get("variables") or []] != want_vars:
+        fail("the policy's variables are %s, want %s" % ([v["name"] for v in spec.get("variables") or []], want_vars))
+    connect = "%s-connect" % pv["id"]
+    if "string(variables.cc['topic.prefix']) == '%s'" % prefix not in exprs:
+        fail("a source's topic.prefix is not pinned to the values' topicPrefix")
+    if "startsWith('%s-')" % connect not in exprs:
+        fail("the connector topic rules do not refuse the Connect cluster's internal topics")
+    if values["networkPolicy"]["enabled"]:
+        ports = "|".join(str(p) for p in pv["networkPolicy"]["kafkaPorts"])
+        if exprs.count("-kafka-bootstrap(\\.") < 2 or exprs.count(")?)?)?:(%s)$'" % ports) < 2:
+            fail("the bootstrap rules do not pin the port to networkPolicy.kafkaPorts")
     hosts = "[%s]" % ", ".join("'%s'" % h.lower() for h in pv["databaseHosts"])
     if not pv["databaseHosts"] or exprs.count("in %s" % hosts) < 2:
         fail("the KafkaConnector rules do not pin database.hostname and the URL hosts to the values' databaseHosts")
     regurls = "[%s]" % ", ".join("'%s'" % u for u in pv.get("schemaRegistries") or [])
-    if exprs.count("string(object.spec.config[k]) in %s" % regurls) != 2:
+    if exprs.count("string(object.spec.config[k]) in %s" % regurls) != 1 or exprs.count("string(variables.cc[k]) in %s" % regurls) != 1:
         fail("the worker and connector rules do not pin the Schema Registry URLs to the values' schemaRegistries")
 
 
@@ -232,33 +282,79 @@ def compare_egress(got, want, names, who):
         fail("the %s NetworkPolicy has %d egress rules, the values ask for %d" % (who, len(got), len(want)))
 
 
+def host_ports(hosts):
+    """The ports of host[:port] entries (443 without one), unique, in order."""
+    out = []
+    for h in hosts:
+        p = int(h.rsplit(":", 1)[1]) if ":" in h else 443
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def url_ports(urls):
+    out = []
+    for u in urls:
+        s = urlsplit(u)
+        p = s.port or (443 if s.scheme == "https" else 80)
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def required_to(to, what):
+    """Every setup egress "to" is required: an empty one opens the port to
+    any destination."""
+    if not to:
+        fail("the %s egress has no \"to\": the chart must refuse to render it" % what)
+    return to
+
+
 def check_pipeline_network_policy(docs, values):
-    """The Connect pods' egress: DNS, the Kafka cluster's pods, the API
-    server, the databases, then extraEgress, and nothing else; ingress is
-    Strimzi's."""
+    """The Connect pods' egress: DNS, the other workers' REST API, the Kafka
+    cluster's pods, the API server, the databases, the Schema Registries,
+    then extraEgress, and nothing else (ingress is Strimzi's); the build
+    pod's: DNS, the plugin hosts and the image registries."""
     nps = by_kind(docs, "NetworkPolicy")
     if not values["networkPolicy"]["enabled"]:
         if nps:
             fail("a NetworkPolicy rendered with networkPolicy.enabled false")
         return
-    if len(nps) != 1:
-        fail("the pipeline release renders %d NetworkPolicies, want one" % len(nps))
+    if len(nps) != 2:
+        fail("the pipeline release renders %d NetworkPolicies, want two (the Connect pods and the build pod)" % len(nps))
     pv = values["setup"]["pipeline"]
     nv = pv["networkPolicy"]
-    np = nps[0]["spec"]
-    if np["podSelector"] != {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": "%s-connect-connect" % pv["id"]}}:
-        fail("the pipeline NetworkPolicy does not select exactly the Connect pods")
-    if np["policyTypes"] != ["Egress"] or np.get("ingress"):
-        fail("the pipeline NetworkPolicy must govern egress only")
+    connect = "%s-connect-connect" % pv["id"]
+    sel = {n["spec"]["podSelector"]["matchLabels"].get("strimzi.io/name"): n["spec"] for n in nps}
+    if set(sel) != {connect, connect + "-build"}:
+        fail("the pipeline NetworkPolicies select %s, want the Connect pods and the build pod" % sorted(sel))
+    for name, np in sel.items():
+        if np["podSelector"] != {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": name}}:
+            fail("a pipeline NetworkPolicy does not select exactly the %s pods" % name)
+        if np["policyTypes"] != ["Egress"] or np.get("ingress"):
+            fail("the pipeline NetworkPolicies must govern egress only")
+    dns = egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to"))
+    rest = egress_rule([("TCP", 8083)], [{"podSelector": {"matchLabels": {"strimzi.io/kind": "KafkaConnect", "strimzi.io/name": connect}}}])
     kafka = egress_rule([("TCP", p) for p in nv["kafkaPorts"]],
                         [{"podSelector": {"matchLabels": {"strimzi.io/cluster": pv["kafka"], "strimzi.io/kind": "Kafka"}}}])
     want = [
-        egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
-        kafka,
-        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], nv["apiServer"].get("to")),
-        egress_rule([("TCP", p) for p in nv["databases"]["ports"]], nv["databases"].get("to")),
-    ] + list(nv.get("extraEgress") or [])
-    compare_egress(np.get("egress") or [], want, ["DNS", "Kafka", "API server", "databases"], "Connect pods'")
+        dns, rest, kafka,
+        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], required_to(nv["apiServer"].get("to"), "API server")),
+        egress_rule([("TCP", p) for p in nv["databases"]["ports"]], required_to(nv["databases"].get("to"), "databases")),
+    ]
+    names = ["DNS", "Connect REST", "Kafka", "API server", "databases"]
+    if pv.get("schemaRegistries"):
+        want.append(egress_rule([("TCP", p) for p in url_ports(pv["schemaRegistries"])],
+                                required_to(nv["schemaRegistries"].get("to"), "Schema Registry")))
+        names.append("Schema Registry")
+    want += list(nv.get("extraEgress") or [])
+    compare_egress(sel[connect].get("egress") or [], want, names, "Connect pods'")
+    build = [
+        dns,
+        egress_rule([("TCP", p) for p in host_ports(pv["pluginHosts"])], required_to(nv["build"]["sources"].get("to"), "build sources")),
+        egress_rule([("TCP", p) for p in host_ports(pv.get("imageRegistries") or ["registry"])], required_to(nv["build"]["registry"].get("to"), "build registry")),
+    ]
+    compare_egress(sel[connect + "-build"].get("egress") or [], build, ["DNS", "plugin hosts", "image registries"], "build pod's")
 
 
 def check_network_policy(docs, job, values):
@@ -281,8 +377,8 @@ def check_network_policy(docs, job, values):
 
     want = [
         egress_rule([("UDP", 53), ("TCP", 53)], values["networkPolicy"]["dns"].get("to")),
-        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], nv["apiServer"].get("to")),
-        egress_rule([("TCP", server_port)], nv["server"].get("to")),
+        egress_rule([("TCP", p) for p in nv["apiServer"]["ports"]], required_to(nv["apiServer"].get("to"), "Job's API server")),
+        egress_rule([("TCP", server_port)], required_to(nv["server"].get("to"), "Job's server")),
     ] + list(nv.get("extraEgress") or [])
     compare_egress(np.get("egress") or [], want, ["DNS", "API server", "server"], "Job's")
 

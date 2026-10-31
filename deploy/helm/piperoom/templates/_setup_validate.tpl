@@ -31,8 +31,32 @@ each value's shape; this checks the combination. */}}
   {{- if and $s.pipeline.admissionPolicy (not $s.pipeline.databaseHosts) -}}
   {{- fail "setup.pipeline.admissionPolicy needs setup.pipeline.databaseHosts, the database hosts a KafkaConnector may connect to (the room's source and sink targets)" -}}
   {{- end -}}
-  {{- if and .Values.networkPolicy.enabled (not $s.pipeline.networkPolicy.databases.ports) -}}
-  {{- fail "networkPolicy.enabled needs setup.pipeline.networkPolicy.databases.ports, the database ports the Connect pods dial (and databases.to, their addresses, for production)" -}}
+  {{- if .Values.networkPolicy.enabled -}}
+  {{- /* Every egress "to" is required and non-empty: an empty "to" opens
+  the port to any destination. */ -}}
+  {{- $np := $s.pipeline.networkPolicy -}}
+  {{- if not $np.databases.ports -}}
+  {{- fail "networkPolicy.enabled needs setup.pipeline.networkPolicy.databases.ports, the database ports the Connect pods dial" -}}
+  {{- end -}}
+  {{- if not $np.kafkaPorts -}}
+  {{- fail "networkPolicy.enabled needs setup.pipeline.networkPolicy.kafkaPorts, the Kafka listener ports" -}}
+  {{- end -}}
+  {{- range $name, $to := dict "apiServer" $np.apiServer.to "databases" $np.databases.to "build.sources" $np.build.sources.to "build.registry" $np.build.registry.to -}}
+  {{- if not $to -}}
+  {{- fail (printf "networkPolicy.enabled needs setup.pipeline.networkPolicy.%s.to, a non-empty list of peers (an empty one would open the port to any destination)" $name) -}}
+  {{- end -}}
+  {{- end -}}
+  {{- if and $s.pipeline.schemaRegistries (not $np.schemaRegistries.to) -}}
+  {{- fail "networkPolicy.enabled with setup.pipeline.schemaRegistries needs setup.pipeline.networkPolicy.schemaRegistries.to, the registries' peers" -}}
+  {{- end -}}
+  {{- $dbports := list -}}
+  {{- range $np.databases.ports }}{{ $dbports = append $dbports (toString .) }}{{ end -}}
+  {{- range $s.pipeline.databaseHosts -}}
+  {{- $hp := splitList ":" . -}}
+  {{- if and (eq (len $hp) 2) (not (has (index $hp 1) $dbports)) -}}
+  {{- fail (printf "setup.pipeline.databaseHosts: %q's port is not in setup.pipeline.networkPolicy.databases.ports" .) -}}
+  {{- end -}}
+  {{- end -}}
   {{- end -}}
   {{- range $s.pipeline.imageRegistries -}}
   {{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$" .) -}}
@@ -53,6 +77,12 @@ each value's shape; this checks the combination. */}}
   {{- include "piperoom.setupNames" (list "setup.runner" $s.runner.pipeline $s.runner.kafka $s.runner.connectors) -}}
   {{- if not (regexMatch "^[0-9A-Za-z]{26}$" $s.runner.room) -}}
   {{- fail "setup.runner.room is not a room id (26 letters and digits, without the r_ prefix)" -}}
+  {{- end -}}
+  {{- if and .Values.networkPolicy.enabled (not $s.runner.networkPolicy.apiServer.to) -}}
+  {{- fail "networkPolicy.enabled needs setup.runner.networkPolicy.apiServer.to, a non-empty list of peers (an empty one would open the port to any destination)" -}}
+  {{- end -}}
+  {{- if and .Values.networkPolicy.enabled (not $s.runner.networkPolicy.server.to) -}}
+  {{- fail "networkPolicy.enabled needs setup.runner.networkPolicy.server.to, the piperoom server's peers (an empty one would open the port to any destination)" -}}
   {{- end -}}
   {{- if not (regexMatch `^https?://[^\s/@]+$` $s.runner.serverURL) -}}
   {{- fail "setup.runner.serverURL is not an origin (http[s]://host[:port], no path)" -}}
@@ -89,4 +119,45 @@ never carry YAML or another name. Args: the block, pipeline, kafka, connectors. 
 {{- fail (printf "%s.connectors: %q is not a Kubernetes object name" $block .) -}}
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+
+{{/* A CEL map literal of a dict of string to a CEL value (a quoted string or
+a list of quoted strings), keys sorted. */}}
+{{- define "piperoom.celMap" -}}
+{{- $m := . -}}
+{{- $out := list -}}
+{{- range $k := keys $m | sortAlpha -}}
+{{- $v := get $m $k -}}
+{{- if kindIs "slice" $v -}}
+{{- $out = append $out (printf "'%s': [%s]" $k (join ", " $v)) -}}
+{{- else -}}
+{{- $out = append $out (printf "'%s': %s" $k $v) -}}
+{{- end -}}
+{{- end -}}
+{ {{- join ", " $out -}} }
+{{- end }}
+
+
+{{/* The TCP ports of a list of host[:port] (443 without one), unique, as a
+JSON list: dict "hosts" <list>. */}}
+{{- define "piperoom.hostPorts" -}}
+{{- $out := list -}}
+{{- range .hosts -}}
+{{- $hp := splitList ":" . -}}
+{{- if eq (len $hp) 2 }}{{ $out = append $out (atoi (index $hp 1)) }}{{ else }}{{ $out = append $out 443 }}{{ end -}}
+{{- end -}}
+{{- $out | uniq | toJson -}}
+{{- end }}
+
+{{/* The TCP ports of a list of http[s]://host[:port] URLs (80 or 443
+without one), unique, as a JSON list: dict "urls" <list>. */}}
+{{- define "piperoom.urlPorts" -}}
+{{- $out := list -}}
+{{- range .urls -}}
+{{- $u := urlParse . -}}
+{{- $hp := splitList ":" $u.host -}}
+{{- if eq (len $hp) 2 }}{{ $out = append $out (atoi (index $hp 1)) }}{{ else if eq $u.scheme "https" }}{{ $out = append $out 443 }}{{ else }}{{ $out = append $out 80 }}{{ end -}}
+{{- end -}}
+{{- $out | uniq | toJson -}}
 {{- end }}

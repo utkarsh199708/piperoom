@@ -1,0 +1,209 @@
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	array.encoding	array
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	array.encoding	document
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.handling.mode	drop
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.handling.mode	none
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.handling.mode	rewrite
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode	delete-to-tombstone
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode	drop
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode	rewrite
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode	rewrite-with-tombstone
+enum	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode	tombstone
+enum	io.debezium.transforms.ExtractNewRecordState	delete.handling.mode	drop
+enum	io.debezium.transforms.ExtractNewRecordState	delete.handling.mode	none
+enum	io.debezium.transforms.ExtractNewRecordState	delete.handling.mode	rewrite
+enum	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode	delete-to-tombstone
+enum	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode	drop
+enum	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode	rewrite
+enum	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode	rewrite-with-tombstone
+enum	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode	tombstone
+enum	io.debezium.transforms.ExtractNewRecordState	drop.fields.from.key	false
+enum	io.debezium.transforms.ExtractNewRecordState	drop.fields.from.key	true
+enum	io.debezium.transforms.ExtractNewRecordState	drop.fields.keep.schema.compatible	false
+enum	io.debezium.transforms.ExtractNewRecordState	drop.fields.keep.schema.compatible	true
+enum	io.debezium.transforms.HeaderToValue	operation	copy
+enum	io.debezium.transforms.HeaderToValue	operation	move
+enum	org.apache.kafka.connect.transforms.ExtractField$Key	field.syntax.version	V1
+enum	org.apache.kafka.connect.transforms.ExtractField$Key	field.syntax.version	V2
+enum	org.apache.kafka.connect.transforms.ExtractField$Value	field.syntax.version	V1
+enum	org.apache.kafka.connect.transforms.ExtractField$Value	field.syntax.version	V2
+enum	org.apache.kafka.connect.transforms.HeaderFrom$Key	operation	copy
+enum	org.apache.kafka.connect.transforms.HeaderFrom$Key	operation	move
+enum	org.apache.kafka.connect.transforms.HeaderFrom$Value	operation	copy
+enum	org.apache.kafka.connect.transforms.HeaderFrom$Value	operation	move
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type	Date
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type	Time
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type	Timestamp
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type	string
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type	unix
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	unix.precision	microseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	unix.precision	milliseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	unix.precision	nanoseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Key	unix.precision	seconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type	Date
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type	Time
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type	Timestamp
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type	string
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type	unix
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	unix.precision	microseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	unix.precision	milliseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	unix.precision	nanoseconds
+enum	org.apache.kafka.connect.transforms.TimestampConverter$Value	unix.precision	seconds
+key	io.debezium.connector.jdbc.transforms.CollectionNameTransformation	collection.naming.prefix
+key	io.debezium.connector.jdbc.transforms.CollectionNameTransformation	collection.naming.style
+key	io.debezium.connector.jdbc.transforms.CollectionNameTransformation	collection.naming.suffix
+key	io.debezium.connector.jdbc.transforms.FieldNameTransformation	column.naming.prefix
+key	io.debezium.connector.jdbc.transforms.FieldNameTransformation	column.naming.style
+key	io.debezium.connector.jdbc.transforms.FieldNameTransformation	column.naming.suffix
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	array.encoding
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.handling.mode
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	delete.tombstone.handling.mode.rewrite-with-id
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	drop.tombstones
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	flatten.struct
+key	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState	flatten.struct.delimiter
+key	io.debezium.connector.postgresql.transforms.DecodeLogicalDecodingMessageContent	fields.null.include
+key	io.debezium.transforms.ExtractChangedRecordState	header.changed.name
+key	io.debezium.transforms.ExtractChangedRecordState	header.unchanged.name
+key	io.debezium.transforms.ExtractNewRecordState	add.fields
+key	io.debezium.transforms.ExtractNewRecordState	add.fields.prefix
+key	io.debezium.transforms.ExtractNewRecordState	add.headers
+key	io.debezium.transforms.ExtractNewRecordState	add.headers.prefix
+key	io.debezium.transforms.ExtractNewRecordState	delete.handling.mode
+key	io.debezium.transforms.ExtractNewRecordState	delete.tombstone.handling.mode
+key	io.debezium.transforms.ExtractNewRecordState	drop.fields.from.key
+key	io.debezium.transforms.ExtractNewRecordState	drop.fields.header.name
+key	io.debezium.transforms.ExtractNewRecordState	drop.fields.keep.schema.compatible
+key	io.debezium.transforms.ExtractNewRecordState	drop.tombstones
+key	io.debezium.transforms.ExtractNewRecordState	replace.null.with.default
+key	io.debezium.transforms.HeaderToValue	fields
+key	io.debezium.transforms.HeaderToValue	headers
+key	io.debezium.transforms.HeaderToValue	operation
+key	io.debezium.transforms.SchemaChangeEventFilter	schema.change.event.exclude.list
+key	io.debezium.transforms.TimezoneConverter	converted.timezone
+key	io.debezium.transforms.TimezoneConverter	exclude.list
+key	io.debezium.transforms.TimezoneConverter	include.list
+key	io.debezium.transforms.partitions.PartitionRouting	partition.hash.function
+key	io.debezium.transforms.partitions.PartitionRouting	partition.payload.fields
+key	io.debezium.transforms.partitions.PartitionRouting	partition.topic.num
+key	io.debezium.transforms.tracing.ActivateTracingSpan	tracing.operation.name
+key	io.debezium.transforms.tracing.ActivateTracingSpan	tracing.span.context.field
+key	io.debezium.transforms.tracing.ActivateTracingSpan	tracing.with.context.field.only
+key	org.apache.kafka.connect.transforms.Cast$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.Cast$Key	spec
+key	org.apache.kafka.connect.transforms.Cast$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.Cast$Value	spec
+key	org.apache.kafka.connect.transforms.DropHeaders	headers
+key	org.apache.kafka.connect.transforms.ExtractField$Key	field
+key	org.apache.kafka.connect.transforms.ExtractField$Key	field.syntax.version
+key	org.apache.kafka.connect.transforms.ExtractField$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.ExtractField$Value	field
+key	org.apache.kafka.connect.transforms.ExtractField$Value	field.syntax.version
+key	org.apache.kafka.connect.transforms.ExtractField$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.Filter	negate
+key	org.apache.kafka.connect.transforms.Filter	predicate
+key	org.apache.kafka.connect.transforms.Flatten$Key	delimiter
+key	org.apache.kafka.connect.transforms.Flatten$Value	delimiter
+key	org.apache.kafka.connect.transforms.HeaderFrom$Key	fields
+key	org.apache.kafka.connect.transforms.HeaderFrom$Key	headers
+key	org.apache.kafka.connect.transforms.HeaderFrom$Key	operation
+key	org.apache.kafka.connect.transforms.HeaderFrom$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.HeaderFrom$Value	fields
+key	org.apache.kafka.connect.transforms.HeaderFrom$Value	headers
+key	org.apache.kafka.connect.transforms.HeaderFrom$Value	operation
+key	org.apache.kafka.connect.transforms.HeaderFrom$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.HoistField$Key	field
+key	org.apache.kafka.connect.transforms.HoistField$Value	field
+key	org.apache.kafka.connect.transforms.InsertField$Key	offset.field
+key	org.apache.kafka.connect.transforms.InsertField$Key	partition.field
+key	org.apache.kafka.connect.transforms.InsertField$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.InsertField$Key	static.field
+key	org.apache.kafka.connect.transforms.InsertField$Key	static.value
+key	org.apache.kafka.connect.transforms.InsertField$Key	timestamp.field
+key	org.apache.kafka.connect.transforms.InsertField$Key	topic.field
+key	org.apache.kafka.connect.transforms.InsertField$Value	offset.field
+key	org.apache.kafka.connect.transforms.InsertField$Value	partition.field
+key	org.apache.kafka.connect.transforms.InsertField$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.InsertField$Value	static.field
+key	org.apache.kafka.connect.transforms.InsertField$Value	static.value
+key	org.apache.kafka.connect.transforms.InsertField$Value	timestamp.field
+key	org.apache.kafka.connect.transforms.InsertField$Value	topic.field
+key	org.apache.kafka.connect.transforms.InsertHeader	header
+key	org.apache.kafka.connect.transforms.InsertHeader	value.literal
+key	org.apache.kafka.connect.transforms.MaskField$Key	fields
+key	org.apache.kafka.connect.transforms.MaskField$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.MaskField$Key	replacement
+key	org.apache.kafka.connect.transforms.MaskField$Value	fields
+key	org.apache.kafka.connect.transforms.MaskField$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.MaskField$Value	replacement
+key	org.apache.kafka.connect.transforms.RegexRouter	regex
+key	org.apache.kafka.connect.transforms.RegexRouter	replacement
+key	org.apache.kafka.connect.transforms.ReplaceField$Key	exclude
+key	org.apache.kafka.connect.transforms.ReplaceField$Key	include
+key	org.apache.kafka.connect.transforms.ReplaceField$Key	renames
+key	org.apache.kafka.connect.transforms.ReplaceField$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.ReplaceField$Value	exclude
+key	org.apache.kafka.connect.transforms.ReplaceField$Value	include
+key	org.apache.kafka.connect.transforms.ReplaceField$Value	renames
+key	org.apache.kafka.connect.transforms.ReplaceField$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Key	schema.name
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Key	schema.version
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Value	schema.name
+key	org.apache.kafka.connect.transforms.SetSchemaMetadata$Value	schema.version
+key	org.apache.kafka.connect.transforms.TimestampConverter$Key	field
+key	org.apache.kafka.connect.transforms.TimestampConverter$Key	format
+key	org.apache.kafka.connect.transforms.TimestampConverter$Key	replace.null.with.default
+key	org.apache.kafka.connect.transforms.TimestampConverter$Key	target.type
+key	org.apache.kafka.connect.transforms.TimestampConverter$Key	unix.precision
+key	org.apache.kafka.connect.transforms.TimestampConverter$Value	field
+key	org.apache.kafka.connect.transforms.TimestampConverter$Value	format
+key	org.apache.kafka.connect.transforms.TimestampConverter$Value	replace.null.with.default
+key	org.apache.kafka.connect.transforms.TimestampConverter$Value	target.type
+key	org.apache.kafka.connect.transforms.TimestampConverter$Value	unix.precision
+key	org.apache.kafka.connect.transforms.ValueToKey	fields
+key	org.apache.kafka.connect.transforms.ValueToKey	replace.null.with.default
+key	org.apache.kafka.connect.transforms.predicates.HasHeaderKey	name
+key	org.apache.kafka.connect.transforms.predicates.TopicNameMatches	pattern
+sinktype	org.apache.kafka.connect.transforms.RegexRouter
+type	io.debezium.connector.jdbc.transforms.CollectionNameTransformation
+type	io.debezium.connector.jdbc.transforms.FieldNameTransformation
+type	io.debezium.connector.mongodb.transforms.ExtractNewDocumentState
+type	io.debezium.connector.mysql.transforms.ReadToInsertEvent
+type	io.debezium.connector.postgresql.transforms.DecodeLogicalDecodingMessageContent
+type	io.debezium.transforms.ExtractChangedRecordState
+type	io.debezium.transforms.ExtractNewRecordState
+type	io.debezium.transforms.ExtractSchemaToNewRecord
+type	io.debezium.transforms.HeaderToValue
+type	io.debezium.transforms.SchemaChangeEventFilter
+type	io.debezium.transforms.TimezoneConverter
+type	io.debezium.transforms.VectorToJsonConverter
+type	io.debezium.transforms.partitions.PartitionRouting
+type	io.debezium.transforms.tracing.ActivateTracingSpan
+type	org.apache.kafka.connect.transforms.Cast$Key
+type	org.apache.kafka.connect.transforms.Cast$Value
+type	org.apache.kafka.connect.transforms.DropHeaders
+type	org.apache.kafka.connect.transforms.ExtractField$Key
+type	org.apache.kafka.connect.transforms.ExtractField$Value
+type	org.apache.kafka.connect.transforms.Filter
+type	org.apache.kafka.connect.transforms.Flatten$Key
+type	org.apache.kafka.connect.transforms.Flatten$Value
+type	org.apache.kafka.connect.transforms.HeaderFrom$Key
+type	org.apache.kafka.connect.transforms.HeaderFrom$Value
+type	org.apache.kafka.connect.transforms.HoistField$Key
+type	org.apache.kafka.connect.transforms.HoistField$Value
+type	org.apache.kafka.connect.transforms.InsertField$Key
+type	org.apache.kafka.connect.transforms.InsertField$Value
+type	org.apache.kafka.connect.transforms.InsertHeader
+type	org.apache.kafka.connect.transforms.MaskField$Key
+type	org.apache.kafka.connect.transforms.MaskField$Value
+type	org.apache.kafka.connect.transforms.ReplaceField$Key
+type	org.apache.kafka.connect.transforms.ReplaceField$Value
+type	org.apache.kafka.connect.transforms.SetSchemaMetadata$Key
+type	org.apache.kafka.connect.transforms.SetSchemaMetadata$Value
+type	org.apache.kafka.connect.transforms.TimestampConverter$Key
+type	org.apache.kafka.connect.transforms.TimestampConverter$Value
+type	org.apache.kafka.connect.transforms.ValueToKey
+type	org.apache.kafka.connect.transforms.predicates.HasHeaderKey
+type	org.apache.kafka.connect.transforms.predicates.RecordIsTombstone
+type	org.apache.kafka.connect.transforms.predicates.TopicNameMatches
