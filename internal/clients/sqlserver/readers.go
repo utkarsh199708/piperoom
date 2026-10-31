@@ -28,9 +28,14 @@ func validateIdent(name string) (string, error) {
 // interpolates an identifier; the write half (U4a-2) interpolates identifiers
 // and uses this. It lives here, with its tests, so the rule lands with the
 // client.
+//
+// The identRe check is repeated inline (not only through validateIdent) so
+// the guard that makes the concatenation safe sits in the same function as
+// the concatenation: identRe admits no "]", so the bracketing cannot be
+// closed early.
 func quoteIdent(name string) (string, error) {
-	if _, err := validateIdent(name); err != nil {
-		return "", err
+	if !identRe.MatchString(name) {
+		return "", fmt.Errorf("sqlserver: invalid identifier %q", name)
 	}
 	return "[" + name + "]", nil
 }
@@ -55,6 +60,9 @@ func splitTable(table string) (string, string, error) {
 // splitTables validates a list of "schema.table" identifiers, dropping
 // duplicates and returning the unique schema/table pairs in order.
 func splitTables(tables []string) ([][2]string, error) {
+	if len(tables) > MaxTables {
+		return nil, fmt.Errorf("sqlserver: %d tables, at most %d per call", len(tables), MaxTables)
+	}
 	pairs := make([][2]string, 0, len(tables))
 	seen := make(map[string]bool, len(tables))
 	for _, t := range tables {
@@ -72,13 +80,26 @@ func splitTables(tables []string) ([][2]string, error) {
 	return pairs, nil
 }
 
+// MaxTables caps the tables one call may name: two parameters per table
+// must stay under SQL Server's 2100-parameter limit for one request, and a
+// pipeline's source tables are never a catalogue scan (the runner's ops cap
+// requests at the same bound).
+const MaxTables = 1000
+
 // tablePredicate builds "(s.name = @p<n> AND t.name = @p<n+1>) OR ..." for the
 // given pairs, with the positional parameters starting at start (1-based, as
 // go-mssqldb's @pN). The query it is used in must alias the schema as s and
 // the table as t.
-func tablePredicate(start int, pairs [][2]string) (string, []any) {
+//
+// More than MaxTables pairs is an error: the bound is checked here, next to
+// the allocation, as well as in splitTables.
+func tablePredicate(start int, pairs [][2]string) (string, []any, error) {
+	n := len(pairs)
+	if n > MaxTables {
+		return "", nil, fmt.Errorf("sqlserver: %d tables, at most %d per call", n, MaxTables)
+	}
 	var b strings.Builder
-	args := make([]any, 0, 2*len(pairs))
+	args := make([]any, 0, 2*n)
 	for i, p := range pairs {
 		if i > 0 {
 			b.WriteString(" OR ")
@@ -86,7 +107,7 @@ func tablePredicate(start int, pairs [][2]string) (string, []any) {
 		fmt.Fprintf(&b, "(s.name = @p%d AND t.name = @p%d)", start+2*i, start+2*i+1)
 		args = append(args, p[0], p[1])
 	}
-	return b.String(), args
+	return b.String(), args, nil
 }
 
 // ServerInfo reads the server version, edition and product level. It needs no
@@ -185,7 +206,10 @@ func (c *Client) TableCDC(ctx context.Context, tables []string) ([]TableCDC, err
 		return nil, nil
 	}
 
-	pred, args := tablePredicate(1, pairs)
+	pred, args, err := tablePredicate(1, pairs)
+	if err != nil {
+		return nil, err
+	}
 	q := `
 		SELECT s.name, t.name, t.is_tracked_by_cdc,
 		       CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.is_primary_key = 1) THEN 1 ELSE 0 END AS bit)
@@ -335,7 +359,10 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 // its table column comes back empty and is expanded to every requested pair in
 // that schema.
 func (c *Client) directSelectGrants(ctx context.Context, login string, pairs [][2]string) (map[string]bool, error) {
-	pred, targs := tablePredicate(2, pairs)
+	pred, targs, err := tablePredicate(2, pairs)
+	if err != nil {
+		return nil, err
+	}
 	args := append([]any{login}, targs...)
 	q := `
 		SELECT s.name, COALESCE(t.name, '')

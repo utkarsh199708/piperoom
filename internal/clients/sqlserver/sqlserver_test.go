@@ -594,3 +594,29 @@ func TestCallsHaveDeadline(t *testing.T) {
 		t.Fatal("test took too long")
 	}
 }
+
+// TestTablesAreBounded: more than MaxTables tables is refused before any
+// statement or allocation sized by the caller's list (CodeQL's allocation
+// overflow alert on tablePredicate), and quoteIdent refuses a name that could
+// close its brackets.
+func TestTablesAreBounded(t *testing.T) {
+	many := make([]string, MaxTables+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("dbo.t%d", i)
+	}
+	if _, err := splitTables(many); err == nil {
+		t.Fatal("splitTables accepted more than MaxTables tables")
+	}
+	pairs := make([][2]string, MaxTables+1)
+	if _, _, err := tablePredicate(1, pairs); err == nil {
+		t.Fatal("tablePredicate accepted more than MaxTables pairs")
+	}
+	if _, _, err := tablePredicate(1, pairs[:MaxTables]); err != nil {
+		t.Fatalf("tablePredicate(MaxTables) = %v", err)
+	}
+	for _, bad := range []string{"a]b", "x]; DROP TABLE y--", "", "1a"} {
+		if _, err := quoteIdent(bad); err == nil {
+			t.Errorf("quoteIdent(%q) accepted", bad)
+		}
+	}
+}

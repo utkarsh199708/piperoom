@@ -28,9 +28,12 @@ func validateIdent(name string) (string, error) {
 // the dictionary stores them (uppercase for identifiers created without
 // quotes). Embedded double quotes are doubled, as Oracle requires, though the
 // validation regexp never admits one.
+//
+// The oracleIdentRe check is inline (not only through validateIdent) so the
+// guard sits in the same function as the concatenation that relies on it.
 func quoteIdent(name string) (string, error) {
-	if _, err := validateIdent(name); err != nil {
-		return "", err
+	if !oracleIdentRe.MatchString(name) {
+		return "", fmt.Errorf("oracle: invalid identifier %q", name)
 	}
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
 }
