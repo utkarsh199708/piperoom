@@ -81,3 +81,97 @@ describe("SetupPairingCard after pairing", () => {
     ).toBeNull();
   });
 });
+
+describe("SetupPairingCard fingerprint and Strimzi", () => {
+  const strimzi = {
+    context: "kind-test",
+    namespace: "data",
+    kafka: "prod-kafka",
+    pipeline: "orders",
+    connectors: ["orders-src", "orders-sink"],
+    room: "01jbx0setup",
+    server: "https://piperoom.example.com",
+    code: "ABCD2345",
+    registry: "registry.example.com",
+  };
+
+  it("shows the fingerprint next to the laptop command", () => {
+    rememberSetupPairing(SETUP_ROOM_ID, {
+      command,
+      fingerprint: "3fa9c1d2e4b5",
+      target: "compose",
+    });
+    render(<SetupPairingCard state={setupState()} />);
+    expect(screen.getByLabelText("Pairing fingerprint")).toHaveTextContent(
+      "3fa9c1d2e4b5",
+    );
+    expect(screen.getByLabelText("Pairing command")).toHaveTextContent(command);
+  });
+
+  it("drops a stored fingerprint that is not 12 hex characters", () => {
+    rememberSetupPairing(SETUP_ROOM_ID, { command, fingerprint: "<b>x</b>" });
+    render(<SetupPairingCard state={setupState()} />);
+    expect(screen.queryByLabelText("Pairing fingerprint")).toBeNull();
+  });
+
+  it("for strimzi lists the in-cluster commands in order, ending with the confirm Secret", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    rememberSetupPairing(SETUP_ROOM_ID, {
+      command: "piperoom-setup --server https://piperoom.example.com --code ABCD2345",
+      fingerprint: "3fa9c1d2e4b5",
+      target: "strimzi",
+      strimzi,
+    });
+    render(<SetupPairingCard state={setupState()} />);
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(6);
+    expect(items[0]).toHaveTextContent(
+      "kubectl --context kind-test -n data create secret docker-registry orders-registry-push --docker-server=registry.example.com",
+    );
+    expect(items[1]).toHaveTextContent(
+      "helm upgrade --install --kube-context kind-test piperoom-pipeline-orders deploy/helm/piperoom -n data --set setup.pipeline.enabled=true --set setup.pipeline.id=orders --set setup.pipeline.kafka=prod-kafka --set 'setup.pipeline.connectors={orders-src,orders-sink}'",
+    );
+    expect(items[2]).toHaveTextContent(
+      "create secret generic piperoom-setup-01jbx0setup-pairing --from-literal=code=ABCD2345",
+    );
+    expect(items[3]).toHaveTextContent(
+      "piperoom-setup-01jbx0setup deploy/helm/piperoom -n data --set setup.runner.enabled=true --set setup.runner.room=01jbx0setup --set setup.runner.pipeline=orders --set setup.runner.kafka=prod-kafka --set 'setup.runner.connectors={orders-src,orders-sink}' --set setup.runner.serverURL=https://piperoom.example.com",
+    );
+    expect(items[4]).toHaveTextContent(
+      "kubectl --context kind-test -n data logs job/piperoom-setup-01jbx0setup",
+    );
+    expect(items[5]).toHaveTextContent(
+      "create secret generic piperoom-setup-01jbx0setup-confirm --from-literal=fingerprint=3fa9c1d2e4b5",
+    );
+    // The laptop line is not offered: the Job is the runner.
+    expect(screen.queryByLabelText("Pairing command")).toBeNull();
+    expect(screen.getByLabelText("Pairing fingerprint")).toHaveTextContent(
+      "3fa9c1d2e4b5",
+    );
+    const buttons = screen.getAllByRole("button", { name: /^Copy / });
+    expect(buttons).toHaveLength(6);
+    fireEvent.click(buttons[5]);
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        "kubectl --context kind-test -n data create secret generic piperoom-setup-01jbx0setup-confirm --from-literal=fingerprint=3fa9c1d2e4b5",
+      ),
+    );
+  });
+
+  it("for strimzi without usable targets keeps the laptop line and points at the guide", () => {
+    rememberSetupPairing(SETUP_ROOM_ID, {
+      command,
+      fingerprint: "3fa9c1d2e4b5",
+      target: "strimzi",
+    });
+    render(<SetupPairingCard state={setupState()} />);
+    expect(screen.getByLabelText("Pairing command")).toHaveTextContent(command);
+    expect(
+      screen.getByRole("region", { name: "Pair a runner" }),
+    ).toHaveTextContent("docs/pilot/strimzi-target.md");
+  });
+});

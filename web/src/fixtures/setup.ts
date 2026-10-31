@@ -153,6 +153,7 @@ export function setupCreateResponse(): CreateSetupResponse {
     code: 'ABCD2345',
     expires_at: '2026-10-22T10:10:00Z',
     command: 'piperoom-setup --server http://127.0.0.1:8090 --code ABCD2345',
+    fingerprint: '3fa9c1d2e4b5',
   }
 }
 
