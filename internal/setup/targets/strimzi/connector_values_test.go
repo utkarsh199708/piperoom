@@ -441,3 +441,21 @@ func TestCredentialLineRule(t *testing.T) {
 		}
 	}
 }
+
+// pgjdbc parses targetServerType with an enum's valueOf, so its value must
+// be the exact camelCase spelling; useUnicode is not a Connector/J 8 or 9
+// property (round 6, D and F).
+func TestJDBCParamsRound6(t *testing.T) {
+	url := func(u string) map[string]any { return map[string]any{"connection.url": u} }
+	pg := "jdbc:postgresql://pg:5432/w?sslmode=verify-full&targetServerType="
+	checkConfigs(t, "jdbc", true, map[string]map[string]any{
+		"preferSecondary": url(pg + "preferSecondary"),
+		"primary":         url(pg + "primary"),
+	})
+	checkConfigs(t, "jdbc", false, map[string]map[string]any{
+		"PRIMARY":                url(pg + "PRIMARY"),
+		"prefersecondary":        url(pg + "prefersecondary"),
+		"mysql useUnicode":       url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_IDENTITY&useUnicode=true"),
+		"mysql useUnicode false": url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_IDENTITY&useUnicode=false"),
+	})
+}

@@ -309,17 +309,18 @@ patterns. The policy matches values against these allow-lists only. */}}
 {{- if eq (index $f 0) "require" }}{{ $_ := set $reqc $k (append (get $reqc $k | default (list)) $v) }}{{ end }}
 {{- if eq (index $f 0) "class" }}{{ $classes = append $classes (squote $k) }}{{ end }}
 {{- end }}{{ end }}
-{{- $free := dict }}{{ $enum := dict }}{{ $requ := dict }}{{ $dport := dict }}{{ $labels := list }}
+{{- $free := dict }}{{ $enum := dict }}{{ $exactenum := dict }}{{ $requ := dict }}{{ $dport := dict }}{{ $labels := list }}
 {{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}
 {{- if eq (index $f 0) "port" }}{{ $_ := set $dport (index $f 1) (squote (index $f 2)) }}{{ end }}
 {{- if eq (index $f 0) "label" }}{{ $labels = append $labels (squote (index $f 1)) }}{{ end }}
 {{- end }}{{ end }}
-{{- range $d, $_ := $dport }}{{ $_ := set $free $d (list) }}{{ $_ := set $enum $d (list) }}{{ $_ := set $requ $d (list) }}{{ end }}
+{{- range $d, $_ := $dport }}{{ $_ := set $free $d (list) }}{{ $_ := set $enum $d (list) }}{{ $_ := set $exactenum $d (list) }}{{ $_ := set $requ $d (list) }}{{ end }}
 {{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}
 {{- if eq (index $f 0) "free" }}{{ $_ := set $free (index $f 1) (append (get $free (index $f 1)) (squote (index $f 2))) }}{{ end }}
 {{- if eq (index $f 0) "enum" }}{{ $_ := set $enum (index $f 1) (append (get $enum (index $f 1)) (squote (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "exactenum" }}{{ $_ := set $exactenum (index $f 1) (append (get $exactenum (index $f 1)) (squote (index $f 2))) }}{{ end }}
 {{- if eq (index $f 0) "require" }}{{ $_ := set $requ (index $f 1) (append (get $requ (index $f 1)) (squote (index $f 2))) }}{{ end }}
 {{- end }}{{ end }}
 {{- $types := list }}{{ $sinktypes := list }}{{ $smtkeys := list }}{{ $smtenumkeys := list }}{{ $smtenum := list }}{{ $nodot := list }}
@@ -568,7 +569,7 @@ spec:
         variables.dialect in { {{- join ", " $shapes -}} } && variables.url.matches({ {{- join ", " $shapes -}} }[variables.dialect]) &&
         variables.urlParams.all(q, q.split('=').size() == 2 && q.split('=')[0].matches('^[A-Za-z]{1,64}$') &&
         (q.split('=')[0].lowerAscii() in [{{ join ", " $labels }}] ? q.split('=')[1].replace('%20', ' ').matches({{ index $pat "label" }}) : q.split('=')[1].matches({{ index $pat "value" }})) &&
-        ((q.split('=')[0] + '=' + q.split('=')[1].lowerAscii()) in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0] in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
+        ((q.split('=')[0] + '=' + q.split('=')[1].lowerAscii()) in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q in {{ include "piperoom.celMap" $exactenum }}[variables.dialect] || q.split('=')[0] in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
         variables.urlParams.filter(r, r.split('=')[0].lowerAscii() == q.split('=')[0].lowerAscii()).size() == 1) &&
         ({{ include "piperoom.celMap" $requ }}[variables.dialect].size() == 0 ||
         {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0] == n))) &&

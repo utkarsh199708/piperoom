@@ -706,7 +706,7 @@ var jdbcDialects = map[string]struct {
 	}},
 	"mysql": {"3306", map[string][]string{
 		"sslMode": {"VERIFY_CA", "VERIFY_IDENTITY"}, "useSSL": {"true"}, "requireSSL": {"true"}, "verifyServerCertificate": {"true"},
-		"connectTimeout": nil, "socketTimeout": nil, "serverTimezone": nil, "characterEncoding": nil, "useUnicode": {"true", "false"},
+		"connectTimeout": nil, "socketTimeout": nil, "serverTimezone": nil, "characterEncoding": nil,
 		"rewriteBatchedStatements": {"true", "false"}, "zeroDateTimeBehavior": {"EXCEPTION", "ROUND", "CONVERT_TO_NULL", "convertToNull"},
 		// true only with a verified TLS mode (parseJDBCURL): the RSA key is
 		// then the verified server's.
@@ -756,6 +756,15 @@ var jdbcRequiredParams = map[string]string{
 // written as itself or %20, is allowed inside it (never at an end), and no
 // other percent escape.
 var jdbcLabelParams = map[string]bool{"applicationname": true}
+
+// jdbcExactValueParams are the parameters whose value the driver parses
+// case-sensitively: pgjdbc reads targetServerType with an enum's valueOf, so
+// targetServerType=PRIMARY fails to connect and preferSecondary must be
+// camelCase. Their values are compared exactly; every other enum value
+// case-insensitively, as the drivers read them (round 6).
+var jdbcExactValueParams = map[string]map[string]bool{
+	"postgresql": {"targetServerType": true},
+}
 
 var (
 	jdbcValueRE  = regexp.MustCompile(`^[A-Za-z0-9._/+:-]{1,128}$`)
@@ -897,6 +906,9 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 				}
 			} else if !jdbcValueRE.MatchString(v) {
 				return u, fmt.Errorf("URL parameter %s: a plain value", clipText(k, 40))
+			}
+			if allowed != nil && jdbcExactValueParams[u.dialect][canon] && !containsKey(allowed, v) {
+				return u, fmt.Errorf("URL parameter %s: exactly one of %s (the driver reads its value case-sensitively)", clipText(k, 40), strings.Join(allowed, ", "))
 			}
 			if allowed != nil && !containsFold(allowed, v) {
 				return u, fmt.Errorf("URL parameter %s: one of %s (TLS is never turned off or left unverified where the driver can verify)", clipText(k, 40), strings.Join(allowed, ", "))
