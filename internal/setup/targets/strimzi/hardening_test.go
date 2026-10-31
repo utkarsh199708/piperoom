@@ -171,9 +171,9 @@ func TestConnectorBoundToRoomTargets(t *testing.T) {
 		"mongo on the source": {"mongodb", map[string]string{"mongodb.connection.string": "mongodb://pg:5432/?replicaSet=rs0", "topic.prefix": "pg"}, true},
 		"mongo elsewhere":     {"mongodb", map[string]string{"mongodb.connection.string": "mongodb://pg:5432,evil:27017/", "topic.prefix": "pg"}, false},
 		"history on the listener": {"mysql", map[string]string{"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.server.id": "1",
-			"schema.history.internal.kafka.topic": "h", "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"}, true},
+			"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"}, true},
 		"history elsewhere": {"mysql", map[string]string{"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.server.id": "1",
-			"schema.history.internal.kafka.topic": "h", "schema.history.internal.kafka.bootstrap.servers": "evil.example:9092"}, false},
+			"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "evil.example:9092"}, false},
 	} {
 		h := newHarness(t, "", nil)
 		withConnectFacts(h)

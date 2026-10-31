@@ -1,6 +1,8 @@
 package strimzi
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"regexp"
@@ -40,7 +42,11 @@ var commonSourceKeys = []string{
 
 // schemaHistoryKeys are the schema history keys of the sources that keep one
 // (MySQL, SQL Server, Oracle). Its bootstrap must be the room's Kafka cluster
-// (resolveFacts checks it against the Kafka CR's listeners).
+// (resolveFacts checks it against the Kafka CR's listeners), and its topic is
+// under the connector's topic.prefix. A TLS listener needs the clients'
+// stores: only the ones Strimzi itself writes in the Connect pod
+// (strimziTrustStore, strimziKeyStore) with the store password Strimzi keeps
+// in the pod's environment (strimziStorePassword).
 var schemaHistoryKeys = []string{
 	"schema.history.internal.kafka.topic", "schema.history.internal.kafka.bootstrap.servers",
 	"schema.history.internal.store.only.captured.tables.ddl", "schema.history.internal.store.only.captured.databases.ddl",
@@ -48,6 +54,56 @@ var schemaHistoryKeys = []string{
 	"schema.history.internal.producer.security.protocol", "schema.history.internal.consumer.security.protocol",
 	"schema.history.internal.producer.sasl.mechanism", "schema.history.internal.consumer.sasl.mechanism",
 	"schema.history.internal.producer.sasl.jaas.config", "schema.history.internal.consumer.sasl.jaas.config",
+	"schema.history.internal.producer.ssl.truststore.location", "schema.history.internal.consumer.ssl.truststore.location",
+	"schema.history.internal.producer.ssl.truststore.type", "schema.history.internal.consumer.ssl.truststore.type",
+	"schema.history.internal.producer.ssl.truststore.password", "schema.history.internal.consumer.ssl.truststore.password",
+	"schema.history.internal.producer.ssl.keystore.location", "schema.history.internal.consumer.ssl.keystore.location",
+	"schema.history.internal.producer.ssl.keystore.type", "schema.history.internal.consumer.ssl.keystore.type",
+	"schema.history.internal.producer.ssl.keystore.password", "schema.history.internal.consumer.ssl.keystore.password",
+}
+
+// The stores Strimzi writes in every Connect pod when spec.tls or TLS client
+// authentication is set (kafka_connect_tls_prepare_certificates.sh: the
+// cluster CA as a PKCS12 truststore, the KafkaUser's certificate and key as
+// a PKCS12 keystore), and the reference to the random store password it
+// keeps in the pod's environment through its own strimzienv provider (the
+// worker's config.providers always carries it). These are the only store
+// paths and the only non-secrets reference a connector may name.
+const (
+	strimziTrustStore    = "/tmp/kafka/cluster.truststore.p12"
+	strimziKeyStore      = "/tmp/kafka/cluster.keystore.p12"
+	strimziStorePassword = "${strimzienv:CERTS_STORE_PASSWORD}"
+)
+
+// schemaHistoryTLS is the fixed value, or the value set, of each schema
+// history client's TLS key (producer and consumer alike).
+var schemaHistoryTLS = map[string][]string{
+	"security.protocol":       {"SSL", "SASL_SSL", "PLAINTEXT", "SASL_PLAINTEXT"},
+	"ssl.truststore.location": {strimziTrustStore},
+	"ssl.keystore.location":   {strimziKeyStore},
+	"ssl.truststore.type":     {"PKCS12", "JKS"},
+	"ssl.keystore.type":       {"PKCS12", "JKS"},
+}
+
+// historyClientKey is the client key of a schema history producer or
+// consumer key ("ssl.truststore.location"), or "".
+func historyClientKey(k string) string {
+	for _, c := range []string{"schema.history.internal.producer.", "schema.history.internal.consumer."} {
+		if rest, ok := strings.CutPrefix(k, c); ok {
+			return rest
+		}
+	}
+	return ""
+}
+
+// storePasswordKey reports whether k is a schema history client's store
+// password, the one place strimziStorePassword may appear.
+func storePasswordKey(k string) bool {
+	switch historyClientKey(k) {
+	case "ssl.truststore.password", "ssl.keystore.password":
+		return true
+	}
+	return false
 }
 
 // databaseKeys are the connection keys of the relational sources: the host
@@ -83,6 +139,18 @@ var pluginKeys = map[string][]string{
 	},
 }
 
+// jdbcClassKeys are the JDBC sink keys whose value is a class Connect loads:
+// only the sink's own classes, never one a config names.
+var jdbcClassKeys = map[string][]string{
+	"connection.provider": {"org.hibernate.c3p0.internal.C3P0ConnectionProvider"},
+	"collection.naming.strategy": {"io.debezium.sink.naming.DefaultCollectionNamingStrategy",
+		"io.debezium.connector.jdbc.naming.DefaultCollectionNamingStrategy", "io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy"},
+	"table.naming.strategy": {"io.debezium.connector.jdbc.naming.DefaultTableNamingStrategy",
+		"io.debezium.sink.naming.DefaultCollectionNamingStrategy"},
+	"column.naming.strategy": {"io.debezium.connector.jdbc.naming.DefaultColumnNamingStrategy",
+		"io.debezium.sink.naming.DefaultColumnNamingStrategy"},
+}
+
 // jdbcSinkExtraKeys are the JDBC sink's keys beyond its index entry's.
 var jdbcSinkExtraKeys = []string{
 	"topics", "errors.tolerance", "errors.log.enable", "errors.log.include.messages",
@@ -110,7 +178,39 @@ var refusedKeyRules = []struct {
 	{regexp.MustCompile(`bootstrap\.servers$`), "a Kafka bootstrap is the room's cluster, never a param"},
 	{regexp.MustCompile(`initial\.statements$`), "SQL run on connect is never set by a setup"},
 	{regexp.MustCompile(`^config\.providers`), "the config providers are the Connect worker's (the secrets provider only)"},
-	{regexp.MustCompile(`(^|\.)(ssl\.(keystore|truststore)\.location|sslrootcert|sslcert|sslkey)$`), "a file path in the Connect pod is never set by a setup"},
+	{regexp.MustCompile(`(^|\.)(ssl\.(keystore|truststore)\.location|sslrootcert|sslcert|sslkey|sslfactory|socketFactory)$`), "a file path or a class in the Connect pod is never set by a setup (but Strimzi's own stores for the schema history clients)"},
+}
+
+// The SMT rules (design §6). A transform runs inside the Connect worker on
+// every record, so its class and every key it reads are reviewed here:
+// deniedSMTClasses are index SMTs a setup never names, and every other key
+// of a transform or predicate must be one of its index entry's keys.
+var deniedSMTClasses = map[string]string{
+	"io.debezium.transforms.Filter":                                       "a scripting SMT runs code (jsr223, wasm) the validator cannot read",
+	"io.debezium.transforms.ContentBasedRouter":                           "a scripting SMT runs code (jsr223, wasm) the validator cannot read",
+	"io.debezium.transforms.ByLogicalTableRouter":                         "a router can send records to a topic outside the pipeline's prefix",
+	"io.debezium.transforms.outbox.EventRouter":                           "a router can send records to a topic outside the pipeline's prefix",
+	"io.debezium.connector.mongodb.transforms.outbox.MongoEventRouter":    "a router can send records to a topic outside the pipeline's prefix",
+	"org.apache.kafka.connect.transforms.RegexRouter":                     "a router can send records to a topic outside the pipeline's prefix",
+	"org.apache.kafka.connect.transforms.TimestampRouter":                 "a router can send records to a topic outside the pipeline's prefix",
+	"io.debezium.connector.postgresql.transforms.timescaledb.TimescaleDb": "it routes records to its own target.topic.prefix",
+}
+
+// deniedSMTKeys are index keys of an allowed SMT a setup never sets.
+var deniedSMTKeys = map[string]map[string]string{
+	"io.debezium.transforms.ExtractNewRecordState": {"route.by.field": "it routes each record to the topic a field names"},
+}
+
+// smtValueRE is the shape of a transform or predicate value: no reference,
+// no control character, bounded.
+var smtValueRE = regexp.MustCompile(`^[^\x00-\x1f$]{0,256}$`)
+
+// smtBaseClass is a class without its $Key or $Value variant.
+func smtBaseClass(c string) string {
+	if i := strings.IndexByte(c, '$'); i >= 0 {
+		return c[:i]
+	}
+	return c
 }
 
 // allowedConverters are the converter classes a connector may name.
@@ -128,9 +228,10 @@ var (
 
 var (
 	indexOnce    sync.Once
-	indexClasses map[string]bool            // SMT and predicate classes (and their variants)
-	indexTuning  map[string]map[string]bool // plugin -> connector-scope tuning keys
-	indexJDBC    map[string]bool            // the JDBC sink entry's keys
+	indexClasses map[string]bool                     // SMT and predicate classes (and their variants)
+	indexSMTKeys map[string]map[string]knowledge.Key // SMT or predicate class (and variants) -> its keys
+	indexTuning  map[string]map[string]bool          // plugin -> connector-scope tuning keys
+	indexJDBC    map[string]bool                     // the JDBC sink entry's keys
 	indexErr     error
 )
 
@@ -144,16 +245,23 @@ func loadIndexTables() error {
 			return
 		}
 		indexClasses = map[string]bool{}
+		indexSMTKeys = map[string]map[string]knowledge.Key{}
 		indexTuning = map[string]map[string]bool{}
 		indexJDBC = map[string]bool{}
 		for _, e := range ix.Entries() {
 			switch {
 			case (e.Kind == knowledge.KindSMT || e.Kind == knowledge.KindPredicate) && e.Runtime == knowledge.RuntimeConnect && e.Class != "":
+				keys := map[string]knowledge.Key{}
+				for _, k := range e.Keys {
+					keys[k.Name] = k
+				}
 				if len(e.Variants) == 0 {
 					indexClasses[e.Class] = true
+					indexSMTKeys[e.Class] = keys
 				}
 				for _, v := range e.Variants {
 					indexClasses[e.Class+"$"+v] = true
+					indexSMTKeys[e.Class+"$"+v] = keys
 				}
 			case e.Kind == knowledge.KindTuning && e.Runtime == knowledge.RuntimeConnect && e.Scope == "connector":
 				for plugin := range pluginKeys {
@@ -254,24 +362,23 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 		if why, ok := neverKeys[k]; ok {
 			return refuse(path, why)
 		}
+		historyClient := historyClientKey(k) != "" && allowedKey(plugin, k)
 		for _, r := range refusedKeyRules {
-			if r.re.MatchString(k) && !(k == "schema.history.internal.kafka.bootstrap.servers" && allowedKey(plugin, k)) {
+			if r.re.MatchString(k) && !(k == "schema.history.internal.kafka.bootstrap.servers" && allowedKey(plugin, k)) && !historyClient {
 				return refuse(path, r.why)
 			}
 		}
+		if historyClient {
+			if want, ok := schemaHistoryTLS[historyClientKey(k)]; ok && !containsKey(want, v) {
+				return refuse(path, "one of "+strings.Join(want, ", ")+" (Strimzi's own stores in the Connect pod)")
+			}
+			if storePasswordKey(k) && v != strimziStorePassword {
+				return refuse(path, "the store password is "+strimziStorePassword+", the one Strimzi keeps for its own stores")
+			}
+		}
 		if m := transformKeyRE.FindStringSubmatch(k); m != nil {
-			set := transforms
-			if m[1] == "predicates" {
-				set = predicates
-			}
-			if !set[m[2]] {
-				return refuse(path, m[2]+" is not listed in "+m[1])
-			}
-			if m[3] == "type" && !indexClasses[v] {
-				return refuse(path, "a transform or predicate class from the knowledge index only")
-			}
-			if strings.HasSuffix(m[3], ".class") || strings.HasSuffix(m[3], "converter") {
-				return refuse(path, "a class inside a transform is never set by a setup")
+			if err := checkTransformKey(cfg, path, m[1], m[2], m[3], v, transforms, predicates); err != nil {
+				return err
 			}
 			continue
 		}
@@ -295,17 +402,287 @@ func validateConnectorConfig(plugin string, cfg map[string]any) error {
 			if strings.EqualFold(v, "false") {
 				return refuse(path, "TLS to the source is never turned off by a setup")
 			}
+		case "database.trustServerCertificate":
+			if !strings.EqualFold(v, "false") {
+				return refuse(path, "the source's certificate is always verified")
+			}
+		case "database.dbname", "database.pdb.name":
+			if !dbNameRE.MatchString(v) {
+				return refuse(path, "a database name: letters, digits, _ and -, up to 63")
+			}
+		case "database.names":
+			for _, n := range strings.Split(v, ",") {
+				if !dbNameRE.MatchString(strings.TrimSpace(n)) {
+					return refuse(path, "a comma list of database names: letters, digits, _ and -, up to 63 each")
+				}
+			}
 		case "mongodb.ssl.enabled":
 			// false is the plugin's default; the rule refuses only what turns
 			// a check off, and this key has none to turn off.
-		case "connection.url", "mongodb.connection.string":
+		case "connection.url":
 			if credentialsInURL(v) {
 				return refuse(path, "credentials belong in the user and password keys as ${secrets:} references, never in the URL")
+			}
+			if _, err := parseJDBCURL(v); err != nil {
+				return refuse(path, err.Error())
+			}
+		case "mongodb.connection.string":
+			if credentialsInURL(v) {
+				return refuse(path, "credentials belong in the user and password keys as ${secrets:} references, never in the URL")
+			}
+			if err := checkMongoParams(v); err != nil {
+				return refuse(path, err.Error())
 			}
 		case "schema.history.internal.kafka.bootstrap.servers":
 			if !bootstrapRE.MatchString(v) {
 				return refuse(path, "must be host:port entries of the room's Kafka listener")
 			}
+		case "schema.history.internal.kafka.topic":
+			pfx, _ := asString(cfg["topic.prefix"])
+			if pfx == "" || !strings.HasPrefix(v, pfx+".") || !topicNameRE.MatchString(v) {
+				return refuse(path, "a topic under the connector's topic.prefix (<topic.prefix>.<name>)")
+			}
+		case "errors.deadletterqueue.topic.name":
+			if err := checkDeadLetterTopic(cfg, v); err != nil {
+				return refuse(path, err.Error())
+			}
+		}
+		if want, ok := jdbcClassKeys[k]; ok && plugin == "jdbc" && !containsKey(want, v) {
+			return refuse(path, "only the sink's own class ("+strings.Join(want, ", ")+")")
+		}
+	}
+	return nil
+}
+
+var (
+	dbNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,62}$`)
+	topicNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
+)
+
+// checkTransformKey is the rule over one transforms.<name>.<sub> or
+// predicates.<name>.<sub> key: the name is declared, the type is an index
+// class a setup may name, and every other key is one of that class's index
+// keys with a plain value (one of the key's values when the index lists
+// them). A reference in a value would copy a credential into the records.
+func checkTransformKey(cfg map[string]any, path, list, name, sub, v string, transforms, predicates map[string]bool) error {
+	set := transforms
+	if list == "predicates" {
+		set = predicates
+	}
+	if !set[name] {
+		return refuse(path, name+" is not listed in "+list)
+	}
+	cls, _ := asString(cfg[list+"."+name+".type"])
+	if sub != "type" && !smtValueRE.MatchString(v) {
+		return refuse(path, "a plain value: no reference, no control character, up to 256")
+	}
+	if sub == "type" {
+		if !indexClasses[v] {
+			return refuse(path, "a transform or predicate class from the knowledge index only")
+		}
+		if why, ok := deniedSMTClasses[smtBaseClass(v)]; ok {
+			return refuse(path, why)
+		}
+		return nil
+	}
+	if list == "transforms" {
+		switch sub {
+		case "predicate":
+			if !predicates[v] {
+				return refuse(path, "a predicate listed in predicates")
+			}
+			return nil
+		case "negate":
+			if v != "true" && v != "false" {
+				return refuse(path, "true or false")
+			}
+			return nil
+		}
+	}
+	if cls == "" || !indexClasses[cls] {
+		return refuse(path, "set "+list+"."+name+".type to an index class first")
+	}
+	key, ok := indexSMTKeys[cls][sub]
+	if !ok {
+		return refuse(path, "not a key of "+smtBaseClass(cls)+" in the knowledge index")
+	}
+	if why, ok := deniedSMTKeys[smtBaseClass(cls)][sub]; ok && v != "" {
+		return refuse(path, why)
+	}
+	if len(key.Values) > 0 && !containsKey(key.Values, v) {
+		return refuse(path, "one of "+strings.Join(key.Values, ", "))
+	}
+	return nil
+}
+
+// checkDeadLetterTopic: the JDBC sink's dead letter queue is a topic under
+// the prefix its topics share, never one of the topics it reads.
+func checkDeadLetterTopic(cfg map[string]any, v string) error {
+	ts, _ := asString(cfg["topics"])
+	first, _, _ := strings.Cut(strings.TrimSpace(strings.Split(ts, ",")[0]), ".")
+	if first == "" || !strings.HasPrefix(v, first+".") || !topicNameRE.MatchString(v) {
+		return errors.New("a topic under the prefix of the sink's topics (<prefix>.<name>)")
+	}
+	for _, t := range strings.Split(ts, ",") {
+		if strings.TrimSpace(t) == v {
+			return errors.New("the dead letter queue is never a topic the sink reads")
+		}
+	}
+	return nil
+}
+
+// jdbcURL is a parsed JDBC sink connection.url.
+type jdbcURL struct {
+	dialect string
+	hosts   []string // host:port, the dialect's default port filled in
+	params  map[string]string
+}
+
+// jdbcDialects are the JDBC sink's databases: their default port and their
+// URL parameter allow-list (lower-cased name -> allowed values, nil meaning a
+// plain bounded value). A parameter outside the list is refused: drivers
+// load classes and files from parameters (socketFactory, sslfactory,
+// autoDeserialize, allowLoadLocalInfile, loggerFile), and the TLS ones are
+// pinned to modes that encrypt (the plugin defaults that do not verify are
+// a documented gap: the room's targets say nothing of TLS).
+var jdbcDialects = map[string]struct {
+	port   string
+	params map[string][]string
+}{
+	"postgresql": {"5432", map[string][]string{
+		"sslmode": {"require", "verify-ca", "verify-full"}, "ssl": {"true"},
+		"connecttimeout": nil, "sockettimeout": nil, "logintimeout": nil, "applicationname": nil, "currentschema": nil,
+		"rewritebatchedinserts": {"true", "false"}, "tcpkeepalive": {"true", "false"}, "stringtype": {"unspecified", "varchar"},
+	}},
+	"mysql": {"3306", map[string][]string{
+		"sslmode": {"required", "verify_ca", "verify_identity"}, "usessl": {"true"}, "requiressl": {"true"}, "verifyservercertificate": {"true"},
+		"connecttimeout": nil, "sockettimeout": nil, "servertimezone": nil, "characterencoding": nil, "useunicode": {"true", "false"},
+		"rewritebatchedstatements": {"true", "false"},
+	}},
+	"mariadb": {"3306", map[string][]string{
+		"sslmode": {"verify-ca", "verify-full"}, "connecttimeout": nil, "sockettimeout": nil, "rewritebatchedstatements": {"true", "false"},
+	}},
+	"sqlserver": {"1433", map[string][]string{
+		"databasename": nil, "encrypt": {"true", "strict"}, "trustservercertificate": {"false"}, "hostnameincertificate": nil,
+		"logintimeout": nil, "applicationname": nil,
+	}},
+	"oracle": {"1521", map[string][]string{}},
+}
+
+var (
+	jdbcValueRE = regexp.MustCompile(`^[A-Za-z0-9._/+:-]{1,128}$`)
+	jdbcHostRE  = regexp.MustCompile(`^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$`)
+)
+
+// parseJDBCURL parses a JDBC sink URL of one of jdbcDialects:
+// jdbc:<postgresql|mysql|mariadb>://h[:p][,h[:p]]/db[?k=v&...],
+// jdbc:sqlserver://h[:p][;k=v;...] or jdbc:oracle:thin:@//h[:p]/service.
+// Every parameter is in the dialect's allow-list.
+func parseJDBCURL(s string) (jdbcURL, error) {
+	var u jdbcURL
+	rest, ok := strings.CutPrefix(s, "jdbc:")
+	if !ok {
+		return u, errors.New("a jdbc: URL")
+	}
+	var hostPart, query string
+	sep := "&"
+	switch {
+	case strings.HasPrefix(rest, "oracle:thin:@//"):
+		u.dialect = "oracle"
+		hostPart, _, _ = strings.Cut(strings.TrimPrefix(rest, "oracle:thin:@//"), "/")
+		if strings.ContainsAny(rest, "?;()") {
+			return u, errors.New("an Oracle URL is jdbc:oracle:thin:@//host:port/service, with no parameters")
+		}
+	case strings.HasPrefix(rest, "sqlserver://"):
+		u.dialect = "sqlserver"
+		hostPart, query, _ = strings.Cut(strings.TrimPrefix(rest, "sqlserver://"), ";")
+		sep = ";"
+	default:
+		d, r, ok := strings.Cut(rest, "://")
+		if _, known := jdbcDialects[d]; !ok || !known || d == "sqlserver" || d == "oracle" {
+			return u, errors.New("a PostgreSQL, MySQL, MariaDB, SQL Server or Oracle (thin, //) JDBC URL")
+		}
+		u.dialect = d
+		var path string
+		hostPart, path, _ = strings.Cut(r, "/")
+		path, query, _ = strings.Cut(path, "?")
+		if path != "" && !dbNameRE.MatchString(path) {
+			return u, errors.New("the database in the URL path is a database name")
+		}
+	}
+	dia := jdbcDialects[u.dialect]
+	if hostPart == "" {
+		return u, errors.New("the URL names no host")
+	}
+	for _, h := range strings.Split(hostPart, ",") {
+		if !jdbcHostRE.MatchString(h) {
+			return u, errors.New("hosts are host[:port] entries")
+		}
+		if _, _, err := net.SplitHostPort(h); err != nil {
+			h = net.JoinHostPort(strings.Trim(h, "[]"), dia.port)
+		}
+		u.hosts = append(u.hosts, h)
+	}
+	u.params = map[string]string{}
+	if query != "" {
+		for _, kv := range strings.Split(query, sep) {
+			if kv == "" {
+				continue
+			}
+			k, v, _ := strings.Cut(kv, "=")
+			lk := strings.ToLower(k)
+			allowed, ok := dia.params[lk]
+			if !ok {
+				return u, fmt.Errorf("URL parameter %s is not in the %s allow-list", clipText(k, 40), u.dialect)
+			}
+			if !jdbcValueRE.MatchString(v) {
+				return u, fmt.Errorf("URL parameter %s: a plain value", clipText(k, 40))
+			}
+			if allowed != nil && !containsFold(allowed, v) {
+				return u, fmt.Errorf("URL parameter %s: one of %s (TLS is never turned off or left unverified where the driver can verify)", clipText(k, 40), strings.Join(allowed, ", "))
+			}
+			if _, dup := u.params[lk]; dup {
+				return u, fmt.Errorf("URL parameter %s is set twice", clipText(k, 40))
+			}
+			u.params[lk] = v
+		}
+	}
+	return u, nil
+}
+
+func containsFold(list []string, v string) bool {
+	for _, x := range list {
+		if strings.EqualFold(x, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// mongoParams is the mongodb:// option allow-list (lower-cased); nil means a
+// plain bounded value. The TLS options only turn TLS on: tls=false,
+// tlsInsecure and the tlsAllowInvalid* options are not in the list, and a
+// file option (tlsCAFile, tlsCertificateKeyFile) is never a param.
+var mongoParams = map[string][]string{
+	"replicaset": nil, "authsource": nil, "authmechanism": {"SCRAM-SHA-256", "SCRAM-SHA-1"}, "tls": {"true"}, "ssl": {"true"},
+	"retrywrites": {"true", "false"}, "w": nil, "readpreference": nil, "connecttimeoutms": nil, "sockettimeoutms": nil,
+	"serverselectiontimeoutms": nil, "maxpoolsize": nil, "appname": nil, "directconnection": {"true", "false"},
+}
+
+// checkMongoParams checks the options of a mongodb:// connection string.
+func checkMongoParams(s string) error {
+	_, q, ok := strings.Cut(s, "?")
+	if !ok || q == "" {
+		return nil
+	}
+	for _, kv := range strings.Split(q, "&") {
+		k, v, _ := strings.Cut(kv, "=")
+		allowed, ok := mongoParams[strings.ToLower(k)]
+		if !ok {
+			return fmt.Errorf("option %s is not in the mongodb option allow-list (TLS is never turned off or left unverified)", clipText(k, 40))
+		}
+		if !jdbcValueRE.MatchString(v) || (allowed != nil && !containsFold(allowed, v)) {
+			return fmt.Errorf("option %s: a plain value from its allow-list", clipText(k, 40))
 		}
 	}
 	return nil

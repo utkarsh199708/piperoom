@@ -97,6 +97,11 @@ func (d *Driver) validate(r rendered, kafka, ns string) error {
 // setupLadderCanaryName): the canary-topic template renders only
 // "<topic_prefix>.<schema>.piperoom_canary", so a KafkaTopic the runner fills
 // can never name, and on rollback delete, a pipeline topic or any other topic.
+//
+// Known gap: SQL Server names its topics <prefix>.<database>.<schema>.<table>,
+// so a SQL Server source's canary topic has a database segment this template
+// (and the admission policy's canary pin) does not render; the ladder's
+// canary rung on a SQL Server source over Strimzi needs that segment first.
 const CanaryTable = "piperoom_canary"
 
 type topicParams struct {

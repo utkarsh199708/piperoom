@@ -291,7 +291,7 @@ const targetPostgres = "postgres"
 // source host and port (database.hostname and database.port, or the hosts of
 // mongodb.connection.string) must be a source target of the room, and a
 // schema history bootstrap must be one of the room Kafka CR's listeners. The
-// JDBC sink names no source.
+// JDBC sink's connection.url hosts are bound the same way.
 func (d *Driver) connectorFacts(ctx context.Context, r rendered, ns, kafka string, env ops.Env) error {
 	cfg, _ := asMap(r.value["config"])
 	type hp struct{ host, port string }
@@ -317,6 +317,19 @@ func (d *Driver) connectorFacts(ctx context.Context, r rendered, ns, kafka strin
 	plugin, _ := pluginOf(cls)
 	switch plugin {
 	case "jdbc":
+		// The sink database is a target of the room like the source
+		// (every database kind registers as targetPostgres).
+		raw, _ := asString(cfg["connection.url"])
+		u, err := parseJDBCURL(raw)
+		if err != nil {
+			return refuse("spec.config.connection.url", "a JDBC URL naming the room's sink target is required: "+err.Error())
+		}
+		for _, h := range u.hosts {
+			host, port, _ := net.SplitHostPort(h)
+			if !match(host, port) {
+				return fmt.Errorf("%w: connection.url names %s, which is not a database target of the room", ErrTarget, clipText(h, 64))
+			}
+		}
 	case "mongodb":
 		cs, _ := asString(cfg["mongodb.connection.string"])
 		hosts := mongoHosts(cs)

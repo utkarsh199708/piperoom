@@ -349,6 +349,11 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns string) error {
 		if k == "connector.class" {
 			return refuse("spec.config.connector.class", "the class is spec.class")
 		}
+		if storePasswordKey(k) && s == strimziStorePassword {
+			// Strimzi's own store password (connector_config.go); the
+			// per-plugin rule pins the key to it.
+			continue
+		}
 		for i := strings.Index(s, "${"); i >= 0; i = strings.Index(s, "${") {
 			if !strings.HasPrefix(s[i:], allowedRef) {
 				return refuse("spec.config."+k, "only ${secrets:"+ns+"/"+d.dbSecretName()+":<key>} references are allowed")
