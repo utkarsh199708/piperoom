@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // The field allow-list of design §6. Validate runs with no I/O on every
@@ -163,8 +164,8 @@ func (d *Driver) ValidateConnect(spec map[string]any, kafka, ns string) error {
 				return refuse("spec.config."+k, "not in the worker key allow-list")
 			}
 			s := fmt.Sprint(v)
-			if strings.TrimSpace(s) != s || strings.Contains(s, "${") {
-				return refuse("spec.config."+k, "a plain value: no reference, no whitespace at either end")
+			if strings.TrimSpace(s) != s || strings.Contains(s, "${") || strings.IndexFunc(s, unicode.IsControl) >= 0 {
+				return refuse("spec.config."+k, "a plain value: no reference, no control character, no whitespace at either end")
 			}
 			switch k {
 			case "key.converter", "value.converter":
@@ -343,10 +344,13 @@ var sha512HexRE = regexp.MustCompile(`^[0-9a-f]{128}$`)
 // the db-credentials Secret. Anywhere else a reference would carry the
 // credential to wherever that key points: a JAAS line to another listener,
 // a URL to another host, a transform into the records.
-var credentialKeys = map[string]bool{
-	"database.user": true, "database.password": true,
-	"connection.username": true, "connection.password": true,
-	"mongodb.user": true, "mongodb.password": true,
+// Each names the Secret key it may reference: a user key the username, a
+// password key the password. Debezium logs a user key's value at start, so a
+// password referenced from a user key would land in the pod log.
+var credentialKeys = map[string]string{
+	"database.user": "username", "database.password": "password",
+	"connection.username": "username", "connection.password": "password",
+	"mongodb.user": "username", "mongodb.password": "password",
 }
 
 // ValidateConnector validates a KafkaConnector spec for the pipeline's topic
@@ -370,7 +374,7 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns, kafka, topicPrefix s
 		return refuse("spec.tasksMax", "a Debezium source runs one task")
 	}
 	cfg, _ := asMap(spec["config"])
-	refRE := regexp.MustCompile(`^\$\{secrets:` + regexp.QuoteMeta(ns+"/"+d.dbSecretName()) + `:[A-Za-z0-9._-]{1,253}\}$`)
+	ref := func(key string) string { return "${secrets:" + ns + "/" + d.dbSecretName() + ":" + key + "}" }
 	keys := make([]string, 0, len(cfg))
 	for k := range cfg {
 		keys = append(keys, k)
@@ -381,6 +385,11 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns, kafka, topicPrefix s
 		path := "spec.config." + k
 		if k == "connector.class" {
 			return refuse(path, "the class is spec.class")
+		}
+		if strings.IndexFunc(k+s, unicode.IsControl) >= 0 {
+			// Java's trim() strips every character up to U+0020, so a
+			// control character at an end is whitespace to the plugin.
+			return refuse(path, "no control character in a key or value")
 		}
 		if strings.TrimSpace(k) != k || strings.TrimSpace(s) != s {
 			// A connector trims some values and not others: " disable" may
@@ -393,11 +402,12 @@ func (d *Driver) ValidateConnector(spec map[string]any, ns, kafka, topicPrefix s
 			// per-plugin rule pins the key to it.
 			continue
 		case strings.Contains(s, "${"):
-			if !credentialKeys[k] {
+			want, ok := credentialKeys[k]
+			if !ok {
 				return refuse(path, "a ${...} reference only in a user or password key (database.password, connection.password, ...), never here")
 			}
-			if !refRE.MatchString(s) {
-				return refuse(path, "exactly one ${secrets:"+ns+"/"+d.dbSecretName()+":<key>} reference")
+			if s != ref(want) {
+				return refuse(path, "exactly "+ref(want)+": a user key references the username, a password key the password")
 			}
 		case looksSecretKey(k):
 			return refuse(path, "a credential is a ${secrets:} reference in a user or password key, never a value")

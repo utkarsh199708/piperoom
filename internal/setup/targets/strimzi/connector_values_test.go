@@ -1,7 +1,9 @@
 package strimzi
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"piperoom/internal/events"
@@ -40,11 +42,14 @@ func TestConnectorValueShape(t *testing.T) {
 		"a bootstrap list":                     {"schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093,evil:9093"},
 		"a jaas config":                        {"schema.history.internal.producer.sasl.jaas.config": "x"},
 	})
+	ssl := func(k, v string) map[string]any {
+		return map[string]any{k: v, "schema.history.internal.producer.security.protocol": "SSL", "schema.history.internal.consumer.security.protocol": "SSL"}
+	}
 	checkConfigs(t, "mysql", true, map[string]map[string]any{
-		"the bootstrap Service":             {"schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"},
-		"the short bootstrap Service":       {"schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap:9093"},
-		"schemahistory.<prefix>":            {"schema.history.internal.kafka.topic": "schemahistory.pg"},
-		"schemahistory.<prefix>.<database>": {"schema.history.internal.kafka.topic": "schemahistory.pg.inventory"},
+		"the bootstrap Service":             ssl("schema.history.internal.kafka.bootstrap.servers", "prod-kafka-kafka-bootstrap.data.svc:9093"),
+		"the short bootstrap Service":       ssl("schema.history.internal.kafka.bootstrap.servers", "prod-kafka-kafka-bootstrap:9093"),
+		"schemahistory.<prefix>":            ssl("schema.history.internal.kafka.topic", "schemahistory.pg"),
+		"schemahistory.<prefix>.<database>": ssl("schema.history.internal.kafka.topic", "schemahistory.pg.inventory"),
 	})
 }
 
@@ -55,14 +60,14 @@ func TestJDBCSinkParamsRound3(t *testing.T) {
 	url := func(u string) map[string]any { return map[string]any{"connection.url": u} }
 	checkConfigs(t, "jdbc", true, map[string]map[string]any{
 		"pg targetServerType":          url("jdbc:postgresql://pg:5432/w?sslmode=verify-full&targetServerType=primary"),
-		"pg prepareThreshold":          url("jdbc:postgresql://pg:5432/w?prepareThreshold=0"),
-		"an application name space":    url("jdbc:postgresql://pg:5432/w?ApplicationName=pipe%20room"),
+		"pg prepareThreshold":          url("jdbc:postgresql://pg:5432/w?sslmode=verify-full&prepareThreshold=0"),
+		"an application name space":    url("jdbc:postgresql://pg:5432/w?sslmode=verify-full&ApplicationName=pipe%20room"),
 		"mysql zeroDateTimeBehavior":   url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_IDENTITY&zeroDateTimeBehavior=CONVERT_TO_NULL"),
 		"mysql public key with verify": url("jdbc:mysql://pg:3306/w?sslMode=VERIFY_CA&allowPublicKeyRetrieval=true"),
 		"oracle ezconnect without //":  url("jdbc:oracle:thin:@pg:1521/ORCLPDB1"),
 		"oracle sid":                   url("jdbc:oracle:thin:@pg:1521:ORCL"),
 		"db2":                          url("jdbc:db2://pg:50000/WAREHSE"),
-		"a digit-led db name":          url("jdbc:postgresql://pg:5432/2024sales"),
+		"a digit-led db name":          url("jdbc:postgresql://pg:5432/2024sales?sslmode=verify-full"),
 	})
 	checkConfigs(t, "jdbc", false, map[string]map[string]any{
 		"a percent-encoded param name":    url("jdbc:mysql://pg:3306/w?allow%4CoadLocalInfile=true"),
@@ -130,7 +135,7 @@ func TestRegistryURLBoundToTheRoom(t *testing.T) {
 		h.shell("KafkaConnector", "orders-src", map[string]any{})
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
 			"connector": "orders-src", "plugin": "postgres", "config": map[string]string{
-				"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg",
+				"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.sslmode": "verify-full",
 				"value.converter": "io.confluent.connect.avro.AvroConverter", "value.converter.schema.registry.url": c.url},
 		}})
 		if c.ok != (err == nil) {
@@ -149,8 +154,8 @@ func TestJDBCSinkToAHostTarget(t *testing.T) {
 	h.env.Targets = append(h.env.Targets, events.SetupTarget{Kind: targetHost, Address: "warehouse.example:5432"})
 	h.shell("KafkaConnector", "orders-src", map[string]any{})
 	for u, ok := range map[string]bool{
-		"jdbc:postgresql://warehouse.example:5432/w": true,
-		"jdbc:postgresql://warehouse.example:6432/w": false,
+		"jdbc:postgresql://warehouse.example:5432/w?sslmode=verify-full": true,
+		"jdbc:postgresql://warehouse.example:6432/w?sslmode=verify-full": false,
 	} {
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
 			"connector": "orders-src", "plugin": "jdbc", "topic_prefix": "pg", "config": map[string]string{"connection.url": u, "topics": "pg.public.orders"},
@@ -202,5 +207,71 @@ func TestUnwrapDropFieldsKeys(t *testing.T) {
 		"drop fields": {"transforms": "unwrap", "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
 			"transforms.unwrap.drop.fields.header.name": "drop", "transforms.unwrap.drop.fields.from.key": "true",
 			"transforms.unwrap.drop.fields.keep.schema.compatible": "false"},
+	})
+}
+
+// A user key may reference only the username and a password key only the
+// password: Debezium logs a user key's value, so a password behind it would
+// reach the pod log (round 4, item 6).
+func TestCredentialReferencesMatchTheirKey(t *testing.T) {
+	r := func(k string) string { return "${secrets:" + testNS + "/orders-db-credentials:" + k + "}" }
+	checkConfigs(t, "postgres", false, map[string]map[string]any{
+		"the password behind a user key": {"database.user": r("password")},
+		"the username behind a password": {"database.password": r("username")},
+		"another secret key":             {"database.password": r("token")},
+	})
+	checkConfigs(t, "jdbc", false, map[string]map[string]any{
+		"the password behind connection.username": {"connection.username": r("password")},
+	})
+	checkConfigs(t, "postgres", true, map[string]map[string]any{
+		"each key its own": {"database.user": r("username"), "database.password": r("password")},
+	})
+}
+
+// Pod logs mask the credential values the runner wrote and the value of any
+// credential-named config line, which the generic redactor leaves alone
+// (round 4, item 6).
+func TestPodLogMasksCredentials(t *testing.T) {
+	h := newHarness(t, "", nil)
+	h.d.rememberWritten([]string{"Xk9pQ2mL7vRt"})
+	h.api.logs["/api/v1/namespaces/data/pods/orders-connect-connect-0/log"] = strings.Join([]string{
+		"2026-10-31 INFO     database.user = Xk9pQ2mL7vRt",
+		"     database.user = hunter2-Summer2026!",
+		"     connection.username = Tr0ub4dor&3",
+		"     database.password = [hidden]",
+		"connected as Xk9pQ2mL7vRt to pg",
+		"     database.hostname = pg",
+	}, "\n") + "\n"
+	res, err := run(t, h, "k8s_logs", map[string]any{"pod": "orders-connect-connect-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(res.Data)
+	for _, leak := range []string{"Xk9pQ2mL7vRt", "hunter2-Summer2026", "Tr0ub4dor"} {
+		if strings.Contains(string(b), leak) {
+			t.Errorf("the log returns %q: %s", leak, b)
+		}
+	}
+	if !strings.Contains(string(b), "database.hostname = pg") {
+		t.Errorf("a plain line was masked: %s", b)
+	}
+}
+
+// A sink's topics and dead letter queue need the pipeline's topic prefix:
+// without the topic_prefix param the runner refuses and names it (round 4
+// review, correctness 1; the server always sets it).
+func TestSinkWithoutTopicPrefixNamesTheParam(t *testing.T) {
+	h := newHarness(t, "", nil)
+	for name, cfg := range map[string]map[string]any{
+		"topics": {"topics": "pg.public.orders", "connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full"},
+		"a dlq":  {"errors.deadletterqueue.topic.name": "pg.dlq", "connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full"},
+	} {
+		err := h.d.ValidateConnector(connectorSpec("jdbc", cfg), testNS, testKafka, "")
+		if !errors.Is(err, ErrField) || !strings.Contains(err.Error(), "topic_prefix param") {
+			t.Errorf("%s: err = %v, want a refusal naming topic_prefix", name, err)
+		}
+	}
+	checkConfigs(t, "jdbc", false, map[string]map[string]any{
+		"a topic off the prefix": {"topics": "orders-connect-connect-configs"},
 	})
 }

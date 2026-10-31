@@ -108,6 +108,28 @@ type Driver struct {
 	classMu sync.Mutex
 	class   string
 	plugins []string
+	// written are the credential values k8s_secret_apply put in the
+	// db-credentials Secret: the Connect workers resolve them, and a pod log
+	// that echoes one is masked (podLog).
+	writtenMu sync.Mutex
+	written   []string
+}
+
+// rememberWritten records credential values the runner wrote.
+func (d *Driver) rememberWritten(vs []string) {
+	d.writtenMu.Lock()
+	defer d.writtenMu.Unlock()
+	for _, v := range vs {
+		if len(v) >= 4 && !contains(d.written, v) {
+			d.written = append(d.written, v)
+		}
+	}
+}
+
+func (d *Driver) writtenValues() []string {
+	d.writtenMu.Lock()
+	defer d.writtenMu.Unlock()
+	return append([]string(nil), d.written...)
 }
 
 // pluginHosts are the allowed build artifact hosts.

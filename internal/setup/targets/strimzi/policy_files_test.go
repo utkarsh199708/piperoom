@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"piperoom/internal/events"
+	"piperoom/internal/setup/kafkatopics"
 )
 
 // The chart's admission policy (deploy/helm/piperoom
@@ -109,22 +110,179 @@ func TestPolicyFilesConnectorKeys(t *testing.T) {
 	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-connector-keys.txt"), lines(keys))
 }
 
+// tsv writes rows of tab-separated fields, sorted, one per line. A field
+// must be a plain CEL string literal body: no quote, backslash, tab or
+// newline.
+func tsv(t *testing.T, rows [][]string) []byte {
+	t.Helper()
+	out := make([]string, 0, len(rows))
+	seen := map[string]bool{}
+	for _, r := range rows {
+		for _, f := range r {
+			if f == "" || strings.ContainsAny(f, "'\"\\\t\n") {
+				t.Fatalf("row %q: field %q cannot be written into a CEL string literal", r, f)
+			}
+		}
+		l := strings.Join(r, "\t")
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	sort.Strings(out)
+	return []byte(strings.Join(out, "\n") + "\n")
+}
+
+// TestPolicyFilesURLParams writes each dialect's URL parameters: free (a
+// plain value), enum (name=value, lower-cased: the runner compares values
+// case-insensitively), the TLS parameter a URL must set (require; for
+// mongodb any one of them), the label parameters (%20 allowed) and each
+// dialect's default port.
 func TestPolicyFilesURLParams(t *testing.T) {
-	params := map[string]bool{}
-	for _, d := range jdbcDialects {
-		for k := range d.params {
-			params[k] = true
+	var rows [][]string
+	add := func(d string, params map[string][]string) {
+		for k, vs := range params {
+			if !regexp.MustCompile(`^[a-z]{1,64}$`).MatchString(k) {
+				t.Fatalf("%s parameter %q is not a lower-case name", d, k)
+			}
+			if vs == nil {
+				rows = append(rows, []string{"free", d, k})
+			}
+			for _, v := range vs {
+				rows = append(rows, []string{"enum", d, k + "=" + strings.ToLower(v)})
+			}
 		}
 	}
-	for k := range mongoParams {
-		params[k] = true
+	for d, dia := range jdbcDialects {
+		add(d, dia.params)
+		rows = append(rows, []string{"port", d, dia.port})
 	}
-	for _, k := range []string{"hostnameincertificate", "allowloadlocalinfile", "socketfactory", "sslfactory", "loggerfile", "autodeserialize"} {
-		if params[k] {
-			t.Fatalf("the policy URL parameter list would admit %s", k)
+	add("mongodb", mongoParams)
+	rows = append(rows, []string{"port", "mongodb", "27017"})
+	for d, k := range jdbcRequiredParams {
+		rows = append(rows, []string{"require", d, k})
+	}
+	rows = append(rows, []string{"require", "mongodb", "tls"}, []string{"require", "mongodb", "ssl"})
+	for k := range jdbcLabelParams {
+		rows = append(rows, []string{"label", k})
+	}
+	for _, r := range rows {
+		if r[0] == "free" || r[0] == "enum" {
+			for _, bad := range []string{"hostnameincertificate", "allowloadlocalinfile", "socketfactory", "sslfactory", "loggerfile", "autodeserialize", "currentschema"} {
+				if strings.HasPrefix(r[2], bad) {
+					t.Fatalf("the policy URL parameter list would admit %s", bad)
+				}
+			}
 		}
 	}
-	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-url-params.txt"), lines(params))
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-url-params.txt"), tsv(t, rows))
+}
+
+// TestPolicyFilesConnectorValues writes the keys the runner pins to a set of
+// values (exact, or fold: compared lower-cased), the Secret key each
+// credential key may reference, and the keys each connector class must set.
+func TestPolicyFilesConnectorValues(t *testing.T) {
+	var rows [][]string
+	pin := func(k string, fold bool, vs []string) {
+		for _, v := range vs {
+			if fold {
+				rows = append(rows, []string{"fold", k, strings.ToLower(v)})
+			} else {
+				rows = append(rows, []string{"exact", k, v})
+			}
+		}
+	}
+	for k, pv := range pinnedValues {
+		pin(k, pv.fold, pv.values)
+	}
+	for k, vs := range jdbcClassKeys {
+		pin(k, false, vs)
+	}
+	for _, c := range []string{"producer", "consumer"} {
+		for k, vs := range schemaHistoryTLS {
+			pin("schema.history.internal."+c+"."+k, false, vs)
+		}
+		for _, k := range []string{"ssl.truststore.password", "ssl.keystore.password"} {
+			pin("schema.history.internal."+c+"."+k, false, []string{strimziStorePassword})
+		}
+	}
+	for k, sk := range credentialKeys {
+		rows = append(rows, []string{"cred", k, sk})
+	}
+	for plugin, k := range requiredSourceKeys {
+		rows = append(rows, []string{"require", sourceClasses[plugin], k})
+	}
+	rows = append(rows, []string{"require", sourceClasses["mongodb"], "mongodb.connection.string"},
+		[]string{"require", sourceClasses["jdbc"], "connection.url"})
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-connector-values.txt"), tsv(t, rows))
+}
+
+// TestPolicyFilesSMT writes the transform and predicate classes a config
+// may name (sinktype: a JDBC sink only), each class's keys and the values of
+// the keys the index lists them for.
+func TestPolicyFilesSMT(t *testing.T) {
+	if err := loadIndexTables(); err != nil {
+		t.Fatal(err)
+	}
+	var rows [][]string
+	for cls := range indexClasses {
+		_, denied := deniedSMTClasses[smtBaseClass(cls)]
+		switch {
+		case !denied:
+			rows = append(rows, []string{"type", cls})
+		case sinkOnlySMTs[cls]:
+			rows = append(rows, []string{"sinktype", cls})
+		}
+		if denied && !sinkOnlySMTs[cls] {
+			continue
+		}
+		for sub, key := range indexSMTKeys[cls] {
+			if _, no := deniedSMTKeys[smtBaseClass(cls)][sub]; no {
+				continue
+			}
+			rows = append(rows, []string{"key", cls, sub})
+			for _, v := range key.Values {
+				rows = append(rows, []string{"enum", cls, sub, v})
+			}
+		}
+	}
+	for _, r := range rows {
+		if r[0] == "key" && r[2] == "route.by.field" {
+			t.Fatal("route.by.field is in the SMT key list")
+		}
+	}
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-smt.txt"), tsv(t, rows))
+}
+
+// TestPolicyFilesPatterns writes the runner's patterns the policy matches
+// with: the JDBC URL shapes per dialect, the MongoDB string, a parameter
+// value and label, a transform key and name list, a topic name.
+func TestPolicyFilesPatterns(t *testing.T) {
+	rows := [][]string{
+		{"mongodb", mongoURLRE.String()},
+		{"value", jdbcValueRE.String()},
+		{"label", jdbcLabelRE.String()},
+		{"transformkey", transformKeyRE.String()},
+		{"transformnames", transformNamesRE.String()},
+		{"topic", kafkatopics.NamePattern},
+		{"dbname", dbNameRE.String()},
+	}
+	for d, re := range jdbcURLShapes {
+		rows = append(rows, []string{"jdbc." + d, re.String()})
+	}
+	for _, r := range rows {
+		if strings.Contains(r[1], "'") {
+			t.Fatalf("pattern %s cannot be a CEL raw string", r[0])
+		}
+	}
+	// tsv refuses a backslash; a pattern needs them, and a CEL raw string
+	// r'...' keeps them as written.
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r[0]+"\t"+r[1])
+	}
+	sort.Strings(out)
+	compareOrUpdate(t, filepath.Join(chartDir, "files/setup-patterns.txt"), []byte(strings.Join(out, "\n")+"\n"))
 }
 
 // TestPolicyFilesRenders writes what the runner sends for the chart's CI

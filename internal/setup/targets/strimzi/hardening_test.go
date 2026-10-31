@@ -93,7 +93,7 @@ func TestConnectorConfigAllowList(t *testing.T) {
 	good := map[string]any{
 		"database.hostname": "pg", "database.port": "5432", "database.user": "cdc", "database.password": ref,
 		"database.dbname": "orders", "plugin.name": "pgoutput", "slot.name": "s", "publication.name": "p",
-		"table.include.list": "public.orders", "topic.prefix": "pg", "database.sslmode": "require",
+		"table.include.list": "public.orders", "topic.prefix": "pg", "database.sslmode": "verify-ca",
 		"max.batch.size": "2048", // a connector-scope key of the knowledge index's tuning entries
 		"transforms":     "unwrap", "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
 		"transforms.unwrap.drop.tombstones": "false",
@@ -102,7 +102,8 @@ func TestConnectorConfigAllowList(t *testing.T) {
 	if err := h.d.ValidateConnector(connectorSpec("postgres", good), testNS, testKafka, ""); err != nil {
 		t.Fatalf("a good postgres config was refused: %v", err)
 	}
-	mysql := map[string]any{"database.hostname": "pg", "database.port": "3306", "database.server.id": "1", "topic.prefix": "pg",
+	mysql := map[string]any{"database.hostname": "pg", "database.port": "3306", "database.server.id": "1", "topic.prefix": "pg", "database.ssl.mode": "verify_identity",
+		"schema.history.internal.producer.security.protocol": "SSL", "schema.history.internal.consumer.security.protocol": "SSL",
 		"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"}
 	if err := h.d.ValidateConnector(connectorSpec("mysql", mysql), testNS, testKafka, ""); err != nil {
 		t.Fatalf("a good mysql config was refused: %v", err)
@@ -163,14 +164,15 @@ func TestConnectorBoundToRoomTargets(t *testing.T) {
 		cfg    map[string]string
 		ok     bool
 	}{
-		"the room's source":   {"postgres", map[string]string{"database.hostname": "pg", "database.port": "5432", "database.password": ref, "topic.prefix": "pg"}, true},
-		"case of the host":    {"postgres", map[string]string{"database.hostname": "PG", "database.port": "5432", "topic.prefix": "pg"}, true},
+		"the room's source":   {"postgres", map[string]string{"database.hostname": "pg", "database.port": "5432", "database.password": ref, "topic.prefix": "pg", "database.sslmode": "verify-full"}, true},
+		"case of the host":    {"postgres", map[string]string{"database.hostname": "PG", "database.port": "5432", "topic.prefix": "pg", "database.sslmode": "verify-full"}, true},
 		"another host":        {"postgres", map[string]string{"database.hostname": "evil.example", "database.port": "5432", "topic.prefix": "pg"}, false},
 		"another port":        {"postgres", map[string]string{"database.hostname": "pg", "database.port": "6432", "topic.prefix": "pg"}, false},
 		"no host":             {"postgres", map[string]string{"topic.prefix": "pg"}, false},
-		"mongo on the source": {"mongodb", map[string]string{"mongodb.connection.string": "mongodb://pg:5432/?replicaSet=rs0", "topic.prefix": "pg"}, true},
+		"mongo on the source": {"mongodb", map[string]string{"mongodb.connection.string": "mongodb://pg:5432/?replicaSet=rs0&tls=true", "topic.prefix": "pg"}, true},
 		"mongo elsewhere":     {"mongodb", map[string]string{"mongodb.connection.string": "mongodb://pg:5432,evil:27017/", "topic.prefix": "pg"}, false},
-		"history on the listener": {"mysql", map[string]string{"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.server.id": "1",
+		"history on the listener": {"mysql", map[string]string{"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.server.id": "1", "database.ssl.mode": "verify_identity",
+			"schema.history.internal.producer.security.protocol": "SSL", "schema.history.internal.consumer.security.protocol": "SSL",
 			"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "prod-kafka-kafka-bootstrap.data.svc:9093"}, true},
 		"history elsewhere": {"mysql", map[string]string{"database.hostname": "pg", "database.port": "5432", "topic.prefix": "pg", "database.server.id": "1",
 			"schema.history.internal.kafka.topic": "pg.history", "schema.history.internal.kafka.bootstrap.servers": "evil.example:9092"}, false},

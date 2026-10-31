@@ -551,6 +551,13 @@ func (o k8sSecretApplyOp) Execute(ctx context.Context, params json.RawMessage, e
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	vs := make([]string, 0, len(values))
+	for _, v := range values {
+		vs = append(vs, v)
+	}
+	// Remembered before the write: a write that fails half-way may still
+	// have stored them.
+	o.d.rememberWritten(vs)
 	path := coreObjectPath(ns, "secrets", o.d.dbSecretName())
 	rec := httpReceipt("PATCH", path)
 	body, err := o.d.api.Get(ctx, path)

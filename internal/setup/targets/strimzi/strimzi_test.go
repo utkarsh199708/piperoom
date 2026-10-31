@@ -253,7 +253,7 @@ func TestUserAndConnectorAllowList(t *testing.T) {
 		}
 	}
 	good := map[string]any{"class": "io.debezium.connector.postgresql.PostgresConnector", "tasksMax": 1, "config": map[string]any{
-		"database.password": "${secrets:data/orders-db-credentials:password}", "topic.prefix": "pg"}}
+		"database.password": "${secrets:data/orders-db-credentials:password}", "topic.prefix": "pg", "database.sslmode": "verify-full"}}
 	if err := h.d.ValidateConnector(good, testNS, testKafka, ""); err != nil {
 		t.Fatalf("a good connector was refused: %v", err)
 	}

@@ -30,10 +30,11 @@ func TestTopicRulesMatchTheServer(t *testing.T) {
 	h := newHarness(t, "", nil)
 	for _, c := range cases {
 		plugin := "mysql"
-		cfg := map[string]any{"topic.prefix": c.Prefix, c.Key: c.Topic}
+		cfg := map[string]any{"topic.prefix": c.Prefix, c.Key: c.Topic, "database.ssl.mode": "verify_identity",
+			"schema.history.internal.producer.security.protocol": "SSL", "schema.history.internal.consumer.security.protocol": "SSL"}
 		if c.Key == "errors.deadletterqueue.topic.name" {
 			plugin = "jdbc"
-			cfg = map[string]any{c.Key: c.Topic}
+			cfg = map[string]any{c.Key: c.Topic, "connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full"}
 			if c.Topics != "" {
 				cfg["topics"] = c.Topics
 			}

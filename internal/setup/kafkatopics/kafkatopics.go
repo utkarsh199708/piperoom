@@ -11,9 +11,12 @@ import (
 	"strings"
 )
 
+// NamePattern is a Kafka topic name (the admission policy reads it too).
+const NamePattern = `^[A-Za-z0-9._-]{1,249}$`
+
 // nameRE is a Kafka topic name: at most 249 of letters, digits, '.', '_'
 // and '-'.
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
+var nameRE = regexp.MustCompile(NamePattern)
 
 // Errors name the rule a topic broke.
 var (

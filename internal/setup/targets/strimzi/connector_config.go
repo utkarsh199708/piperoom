@@ -91,11 +91,14 @@ const (
 // schemaHistoryTLS is the fixed value, or the value set, of each schema
 // history client's TLS key (producer and consumer alike).
 var schemaHistoryTLS = map[string][]string{
-	"security.protocol":       {"SSL", "SASL_SSL", "PLAINTEXT", "SASL_PLAINTEXT"},
+	// TLS only: SASL needs a JAAS line (refused), and a plain listener
+	// would carry the history unencrypted. validateConnectorConfig also
+	// requires the protocol of both clients when a history is configured.
+	"security.protocol":       {"SSL"},
 	"ssl.truststore.location": {strimziTrustStore},
 	"ssl.keystore.location":   {strimziKeyStore},
-	"ssl.truststore.type":     {"PKCS12", "JKS"},
-	"ssl.keystore.type":       {"PKCS12", "JKS"},
+	"ssl.truststore.type":     {"PKCS12"},
+	"ssl.keystore.type":       {"PKCS12"},
 }
 
 // historyClientKey is the client key of a schema history producer or
@@ -179,6 +182,37 @@ var neverKeys = map[string]string{
 	"heartbeat.action.query": "SQL the connector runs on the source is never set by a setup",
 	"tasks.max":              "the task count is spec.tasksMax",
 	"connector.class":        "the class is spec.class",
+	// A literal table name sends every topic into one table the setup did
+	// not create; the sink's tables are the topics' (RegexRouter may rename
+	// them, never into another schema).
+	"table.name.format": "the sink's table is its topic's name (RegexRouter may rename it), never a literal",
+}
+
+// pinnedValues are the keys a setup may set only to one of a fixed set of
+// values (fold: compared case-insensitively, as the plugin reads them). The
+// admission policy reads the same table (files/setup-connector-values.txt,
+// written by policy_files_test.go).
+var pinnedValues = map[string]struct {
+	fold   bool
+	values []string
+	why    string
+}{
+	"database.sslmode":                {true, []string{"verify-ca", "verify-full"}, "verify-ca or verify-full: TLS to the source is always on and verified"},
+	"database.ssl.mode":               {true, []string{"verify_ca", "verify_identity"}, "verify_ca or verify_identity: TLS to the source is always on and verified"},
+	"database.encrypt":                {true, []string{"true"}, "true: TLS to the source is never turned off by a setup"},
+	"database.trustServerCertificate": {true, []string{"false"}, "the source's certificate is always verified"},
+	"signal.enabled.channels":         {false, []string{"source"}, "the source channel only (a signal table in the database): a kafka or jmx channel takes snapshots on whoever writes to it"},
+	"key.converter":                   {false, converterList(), "a converter class from the allow-list only (JsonConverter, StringConverter, the Avro converters)"},
+	"value.converter":                 {false, converterList(), "a converter class from the allow-list only (JsonConverter, StringConverter, the Avro converters)"},
+}
+
+// requiredSourceKeys are the keys a source must set: TLS to the database,
+// on and verified, is never the plugin's default (Oracle has no such key: a
+// documented gap).
+var requiredSourceKeys = map[string]string{
+	"postgres":  "database.sslmode",
+	"mysql":     "database.ssl.mode",
+	"sqlserver": "database.encrypt",
 }
 
 // refusedKeyRE are key shapes refused whatever the plugin (the why names the
@@ -214,6 +248,10 @@ var deniedSMTKeys = map[string]map[string]string{
 	"io.debezium.transforms.ExtractNewRecordState": {"route.by.field": "it routes each record to the topic a field names"},
 }
 
+// regexRouter is the one router a sink may use (sinkOnlySMTs); its
+// replacement names a table and never another schema.
+const regexRouter = "org.apache.kafka.connect.transforms.RegexRouter"
+
 // smtValueRE is the shape of a transform or predicate value: no control
 // character, bounded. A "$" is fine (a predicate's ^...$, a RegexRouter's
 // $1 replacement); a "${" reference is refused for every key outside
@@ -239,6 +277,15 @@ var allowedConverters = map[string]bool{
 	"org.apache.kafka.connect.storage.StringConverter":   true,
 	"io.confluent.connect.avro.AvroConverter":            true,
 	"io.apicurio.registry.utils.converter.AvroConverter": true,
+}
+
+func converterList() []string {
+	out := make([]string, 0, len(allowedConverters))
+	for c := range allowedConverters {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }
 
 var (
@@ -405,27 +452,12 @@ func validateConnectorConfig(plugin string, cfg map[string]any, kafka, ns, prefi
 		if !allowedKey(plugin, k) {
 			return refuse(path, "not in the "+plugin+" connector's key allow-list")
 		}
+		if pv, ok := pinnedValues[k]; ok {
+			if (pv.fold && !containsFold(pv.values, v)) || (!pv.fold && !containsKey(pv.values, v)) {
+				return refuse(path, pv.why)
+			}
+		}
 		switch k {
-		case "key.converter", "value.converter":
-			if !allowedConverters[v] {
-				return refuse(path, "a converter class from the allow-list only (JsonConverter, StringConverter, the Avro converters)")
-			}
-		case "database.sslmode":
-			if !containsFold([]string{"require", "verify-ca", "verify-full"}, v) {
-				return refuse(path, "require, verify-ca or verify-full: TLS to the source is never turned off or made optional by a setup")
-			}
-		case "database.ssl.mode":
-			if !containsFold([]string{"required", "verify_ca", "verify_identity"}, v) {
-				return refuse(path, "required, verify_ca or verify_identity: TLS to the source is never turned off or made optional by a setup")
-			}
-		case "database.encrypt":
-			if !strings.EqualFold(v, "true") {
-				return refuse(path, "true: TLS to the source is never turned off by a setup")
-			}
-		case "database.trustServerCertificate":
-			if !strings.EqualFold(v, "false") {
-				return refuse(path, "the source's certificate is always verified")
-			}
 		case "database.dbname", "database.pdb.name":
 			if !dbNameRE.MatchString(v) {
 				return refuse(path, "a database name: letters, digits, _ and -, up to 63")
@@ -459,12 +491,21 @@ func validateConnectorConfig(plugin string, cfg map[string]any, kafka, ns, prefi
 			}
 		case "schema.history.internal.kafka.topic":
 			if err := kafkatopics.SchemaHistory(prefix, v); err != nil {
-				return refuse(path, err.Error())
+				return refuse(path, topicErr(err))
 			}
 		case "errors.deadletterqueue.topic.name":
 			ts, _ := asString(cfg["topics"])
 			if err := kafkatopics.DeadLetter(prefix, v, ts); err != nil {
-				return refuse(path, err.Error())
+				return refuse(path, topicErr(err))
+			}
+		case "topics":
+			for _, t := range strings.Split(v, ",") {
+				if prefix == "" {
+					return refuse(path, topicErr(kafkatopics.ErrNoPrefix))
+				}
+				if !kafkatopics.Under(prefix, strings.TrimSpace(t)) {
+					return refuse(path, "each topic is under the pipeline's topic prefix ("+prefix+".<name>)")
+				}
 			}
 		case "key.converter.schema.registry.url", "value.converter.schema.registry.url":
 			if _, _, err := registryURL(v); err != nil {
@@ -473,6 +514,31 @@ func validateConnectorConfig(plugin string, cfg map[string]any, kafka, ns, prefi
 		}
 		if want, ok := jdbcClassKeys[k]; ok && plugin == "jdbc" && !containsKey(want, v) {
 			return refuse(path, "only the sink's own class ("+strings.Join(want, ", ")+")")
+		}
+	}
+	if k, ok := requiredSourceKeys[plugin]; ok {
+		if _, set := cfg[k]; !set {
+			return refuse("spec.config."+k, "required: TLS to the source is always on and verified, never the plugin's default")
+		}
+	}
+	if plugin == "mongodb" {
+		if _, set := cfg["mongodb.connection.string"]; !set {
+			return refuse("spec.config.mongodb.connection.string", "required, with tls=true")
+		}
+	}
+	if plugin == "jdbc" {
+		if _, set := cfg["connection.url"]; !set {
+			return refuse("spec.config.connection.url", "required: the sink's database, with TLS on and verified")
+		}
+	}
+	_, topic := cfg["schema.history.internal.kafka.topic"]
+	_, boot := cfg["schema.history.internal.kafka.bootstrap.servers"]
+	if topic || boot {
+		for _, c := range []string{"producer", "consumer"} {
+			k := "schema.history.internal." + c + ".security.protocol"
+			if _, set := cfg[k]; !set {
+				return refuse("spec.config."+k, "required with a schema history: SSL to the Kafka cluster's TLS listener")
+			}
 		}
 	}
 	return nil
@@ -529,11 +595,14 @@ func checkTransformKey(plugin string, cfg map[string]any, path, list, name, sub,
 	if !ok {
 		return refuse(path, "not a key of "+smtBaseClass(cls)+" in the knowledge index")
 	}
-	if why, ok := deniedSMTKeys[smtBaseClass(cls)][sub]; ok && v != "" {
+	if why, ok := deniedSMTKeys[smtBaseClass(cls)][sub]; ok {
 		return refuse(path, why)
 	}
 	if len(key.Values) > 0 && !containsKey(key.Values, v) {
 		return refuse(path, "one of "+strings.Join(key.Values, ", "))
+	}
+	if smtBaseClass(cls) == regexRouter && sub == "replacement" && strings.Contains(v, ".") {
+		return refuse(path, "a table name: a replacement never names another schema (no '.')")
 	}
 	return nil
 }
@@ -548,12 +617,15 @@ func kafkaBootstrapRE(kafka, ns string) *regexp.Regexp {
 }
 
 // registryURL is a Schema Registry URL's host and port: http(s)://host[:port]
-// with an optional trailing "/", and nothing else (no user, path, query or
+// and nothing else (no user, path, query or
 // fragment). connectorFacts binds it to a registry target of the room.
 func registryURL(s string) (string, string, error) {
 	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.Contains(s, "%") {
-		return "", "", errors.New("a Schema Registry URL http(s)://host[:port] of the room's registry target")
+	// The canonical form only (lower case, no trailing "/"): the admission
+	// policy compares the URL with setup.pipeline.schemaRegistries exactly.
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.Contains(s, "%") ||
+		s != strings.ToLower(s) || s != u.Scheme+"://"+u.Host || strings.Contains(u.Host, "[") {
+		return "", "", errors.New("a Schema Registry URL http(s)://host[:port], lower case with no trailing /, of the room's registry target")
 	}
 	port := u.Port()
 	if port == "" {
@@ -581,13 +653,13 @@ var jdbcDialects = map[string]struct {
 	params map[string][]string
 }{
 	"postgresql": {"5432", map[string][]string{
-		"sslmode": {"require", "verify-ca", "verify-full"}, "ssl": {"true"},
-		"connecttimeout": nil, "sockettimeout": nil, "logintimeout": nil, "applicationname": nil, "currentschema": nil,
+		"sslmode": {"verify-ca", "verify-full"}, "ssl": {"true"},
+		"connecttimeout": nil, "sockettimeout": nil, "logintimeout": nil, "applicationname": nil,
 		"rewritebatchedinserts": {"true", "false"}, "tcpkeepalive": {"true", "false"}, "stringtype": {"unspecified", "varchar"},
 		"targetservertype": {"any", "primary", "master", "secondary", "preferSecondary", "preferPrimary"}, "preparethreshold": nil,
 	}},
 	"mysql": {"3306", map[string][]string{
-		"sslmode": {"required", "verify_ca", "verify_identity"}, "usessl": {"true"}, "requiressl": {"true"}, "verifyservercertificate": {"true"},
+		"sslmode": {"verify_ca", "verify_identity"}, "usessl": {"true"}, "requiressl": {"true"}, "verifyservercertificate": {"true"},
 		"connecttimeout": nil, "sockettimeout": nil, "servertimezone": nil, "characterencoding": nil, "useunicode": {"true", "false"},
 		"rewritebatchedstatements": {"true", "false"}, "zerodatetimebehavior": {"EXCEPTION", "ROUND", "CONVERT_TO_NULL", "convertToNull"},
 		// true only with a verified TLS mode (parseJDBCURL): the RSA key is
@@ -604,7 +676,21 @@ var jdbcDialects = map[string]struct {
 		"logintimeout": nil, "applicationname": nil,
 	}},
 	"oracle": {"1521", map[string][]string{}},
-	"db2":    {"50000", map[string][]string{}},
+	// Db2 properties follow the database name (db:k=v;k=v;). sslConnection
+	// turns TLS on; there is no URL property that pins hostname
+	// verification, and TLS is not required (a documented gap, as Oracle).
+	"db2": {"50000", map[string][]string{"sslconnection": {"true"}}},
+}
+
+// jdbcRequiredParams are the parameters a dialect's URL must set: TLS on
+// and verified (sqlserver's trustServerCertificate defaults to false).
+// Oracle thin and Db2 have no URL parameter that pins a verified TLS mode:
+// their TLS is a documented gap.
+var jdbcRequiredParams = map[string]string{
+	"postgresql": "sslmode",
+	"mysql":      "sslmode",
+	"mariadb":    "sslmode",
+	"sqlserver":  "encrypt",
 }
 
 // jdbcLabelParams are the parameters whose value is a free label: a space,
@@ -616,8 +702,36 @@ var (
 	jdbcValueRE  = regexp.MustCompile(`^[A-Za-z0-9._/+:-]{1,128}$`)
 	jdbcLabelRE  = regexp.MustCompile(`^[A-Za-z0-9._/+:-]([A-Za-z0-9._/+: -]{0,126}[A-Za-z0-9._/+:-])?$`)
 	oracleNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
-	jdbcHostRE   = regexp.MustCompile(`^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$`)
+	// No IPv6 literal: the admission policy's databaseHosts names hosts and
+	// IPv4 addresses only, so a bracketed address is refused on both sides
+	// (a documented limit: name the database by DNS).
+	jdbcHostRE = regexp.MustCompile(`^[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?$`)
 )
+
+// jdbcURLShapes are the whole-URL shapes parseJDBCURL accepts, per dialect,
+// built from the piece patterns above: hosts with no user info, a database
+// or service name, and the parameter section (each parameter is then checked
+// against the dialect's list). The admission policy matches the same
+// patterns (files/setup-patterns.txt, written by policy_files_test.go).
+var jdbcURLShapes = func() map[string]*regexp.Regexp {
+	h := body(jdbcHostRE)
+	hs := h + `(,` + h + `)*`
+	db := body(dbNameRE)
+	ora := body(oracleNameRE)
+	out := map[string]*regexp.Regexp{}
+	for _, d := range []string{"postgresql", "mysql", "mariadb"} {
+		out[d] = regexp.MustCompile(`^jdbc:` + d + `://` + hs + `(/(` + db + `)?(\?[^?]*)?)?$`)
+	}
+	out["sqlserver"] = regexp.MustCompile(`^jdbc:sqlserver://` + hs + `(;[^;]*)*$`)
+	out["oracle"] = regexp.MustCompile(`^jdbc:oracle:thin:@(//)?(` + hs + `/` + ora + `|[A-Za-z0-9.-]{1,253}:[0-9]{1,5}:` + ora + `)$`)
+	out["db2"] = regexp.MustCompile(`^jdbc:db2://` + hs + `/` + db + `(:([^;]*;)*)?$`)
+	return out
+}()
+
+// body is a pattern without its ^ and $ anchors.
+func body(re *regexp.Regexp) string {
+	return strings.TrimSuffix(strings.TrimPrefix(re.String(), "^"), "$")
+}
 
 // parseJDBCURL parses a JDBC sink URL of one of jdbcDialects:
 // jdbc:<postgresql|mysql|mariadb>://h[:p][,h[:p]]/db[?k=v&...],
@@ -664,13 +778,30 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 		u.dialect = d
 		var path string
 		hostPart, path, _ = strings.Cut(r, "/")
-		path, query, _ = strings.Cut(path, "?")
-		if path != "" && !dbNameRE.MatchString(path) {
-			return u, errors.New("the database in the URL path is a database name")
+		if d == "db2" {
+			// jdbc:db2://host[:port]/database[:k=v;...;]: the properties
+			// follow the name after a colon, each ended by ';'.
+			if strings.Contains(path, "?") {
+				return u, errors.New("a Db2 URL is jdbc:db2://host[:port]/database[:property=value;...]")
+			}
+			path, query, _ = strings.Cut(path, ":")
+			if query != "" && !strings.HasSuffix(query, ";") {
+				return u, errors.New("each Db2 URL property ends with ';'")
+			}
+			query = strings.TrimSuffix(query, ";")
+			sep = ";"
+			if !dbNameRE.MatchString(path) {
+				return u, errors.New("a Db2 URL names its database: jdbc:db2://host[:port]/database")
+			}
+		} else {
+			path, query, _ = strings.Cut(path, "?")
+			if path != "" && !dbNameRE.MatchString(path) {
+				return u, errors.New("the database in the URL path is a database name")
+			}
 		}
-		if d == "db2" && query != "" {
-			return u, errors.New("a Db2 URL is jdbc:db2://host[:port]/database, with no parameters")
-		}
+	}
+	if shape, ok := jdbcURLShapes[u.dialect]; !ok || !shape.MatchString(s) {
+		return u, errors.New("a JDBC URL of the dialect's shape: hosts with no user info, then the database (or service) and its parameters")
 	}
 	dia := jdbcDialects[u.dialect]
 	if hostPart == "" {
@@ -713,6 +844,11 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 			u.params[lk] = v
 		}
 	}
+	if want, ok := jdbcRequiredParams[u.dialect]; ok {
+		if _, set := u.params[want]; !set {
+			return u, fmt.Errorf("a %s URL sets %s: TLS to the sink is always on and verified, never the driver's default", u.dialect, want)
+		}
+	}
 	if strings.EqualFold(u.params["allowpublickeyretrieval"], "true") && !containsFold([]string{"verify_ca", "verify_identity"}, u.params["sslmode"]) {
 		return u, errors.New("allowPublicKeyRetrieval=true needs sslMode=VERIFY_CA or VERIFY_IDENTITY: the key is then the verified server's")
 	}
@@ -740,10 +876,11 @@ var mongoParams = map[string][]string{
 
 // checkMongoParams checks the options of a mongodb:// connection string.
 func checkMongoParams(s string) error {
-	_, q, ok := strings.Cut(s, "?")
-	if !ok || q == "" {
-		return nil
+	if !mongoURLRE.MatchString(s) {
+		return errors.New("a mongodb://host[:port][,host[:port]...]/[?options] string: no mongodb+srv (its hosts come from DNS), no user, no database path")
 	}
+	_, q, _ := strings.Cut(s, "?")
+	tls := false
 	for _, kv := range strings.Split(q, "&") {
 		if kv == "" {
 			continue // a trailing or doubled &
@@ -756,9 +893,19 @@ func checkMongoParams(s string) error {
 		if !jdbcValueRE.MatchString(v) || (allowed != nil && !containsFold(allowed, v)) {
 			return fmt.Errorf("option %s: a plain value from its allow-list", clipText(k, 40))
 		}
+		if lk := strings.ToLower(k); lk == "tls" || lk == "ssl" {
+			tls = true
+		}
+	}
+	if !tls {
+		return errors.New("tls=true is required: TLS to the source is never the driver's default (off)")
 	}
 	return nil
 }
+
+// mongoURLRE is a mongodb:// string the runner reads: hosts (no user info),
+// an optional "/" and options.
+var mongoURLRE = regexp.MustCompile(`^mongodb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/?(\?[^?/@]*)?$`)
 
 // credentialsInURL reports whether a URL or DSN carries a user, a password or
 // a password-like query parameter, or a secret the redactor masks.
@@ -821,4 +968,13 @@ func mongoHosts(s string) []string {
 		rest = rest[at+1:]
 	}
 	return strings.Split(rest, ",")
+}
+
+// topicErr names the op param a topic rule needs when it is missing: the
+// server sets k8s_apply's topic_prefix to the pipeline's for every connector.
+func topicErr(err error) string {
+	if errors.Is(err, kafkatopics.ErrNoPrefix) {
+		return err.Error() + ": the connector template's topic_prefix param is missing (the server sets it to the pipeline's topic_prefix)"
+	}
+	return err.Error()
 }

@@ -13,8 +13,14 @@ func checkConfigs(t *testing.T, plugin string, ok bool, cases map[string]map[str
 	h := newHarness(t, "", nil)
 	for name, cfg := range cases {
 		full := map[string]any{"topic.prefix": "pg"}
-		if plugin == "jdbc" {
-			full = map[string]any{"topics": "pg.public.orders"}
+		switch plugin {
+		case "jdbc":
+			full = map[string]any{"topics": "pg.public.orders", "connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full"}
+		case "mongodb":
+			full["mongodb.connection.string"] = "mongodb://pg:27017/?tls=true"
+		}
+		if k, ok := requiredSourceKeys[plugin]; ok {
+			full[k] = pinnedValues[k].values[len(pinnedValues[k].values)-1]
 		}
 		for k, v := range cfg {
 			full[k] = v
@@ -71,13 +77,13 @@ func TestJDBCSinkConfig(t *testing.T) {
 	url := func(u string) map[string]any { return map[string]any{"connection.url": u} }
 	checkConfigs(t, "jdbc", true, map[string]map[string]any{
 		"postgres verify-full":   url("jdbc:postgresql://pg:5432/warehouse?sslmode=verify-full&ApplicationName=piperoom"),
-		"postgres no params":     url("jdbc:postgresql://pg/warehouse"),
+		"postgres no params":     url("jdbc:postgresql://pg/warehouse?sslmode=verify-full"),
 		"mysql verify":           url("jdbc:mysql://pg:3306/warehouse?sslMode=VERIFY_IDENTITY"),
 		"sqlserver encrypted":    url("jdbc:sqlserver://pg:1433;databaseName=warehouse;encrypt=true;trustServerCertificate=false"),
 		"oracle thin":            url("jdbc:oracle:thin:@//pg:1521/ORCLPDB1"),
-		"the default provider":   {"connection.url": "jdbc:postgresql://pg:5432/w", "connection.provider": "org.hibernate.c3p0.internal.C3P0ConnectionProvider"},
-		"the default naming":     {"connection.url": "jdbc:postgresql://pg:5432/w", "collection.naming.strategy": "io.debezium.sink.naming.DefaultCollectionNamingStrategy"},
-		"a dlq under the prefix": {"connection.url": "jdbc:postgresql://pg:5432/w", "errors.deadletterqueue.topic.name": "pg.dlq"},
+		"the default provider":   {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "connection.provider": "org.hibernate.c3p0.internal.C3P0ConnectionProvider"},
+		"the default naming":     {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "collection.naming.strategy": "io.debezium.sink.naming.DefaultCollectionNamingStrategy"},
+		"a dlq under the prefix": {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "errors.deadletterqueue.topic.name": "pg.dlq"},
 	})
 	checkConfigs(t, "jdbc", false, map[string]map[string]any{
 		"sslmode disable":           url("jdbc:postgresql://pg:5432/w?sslmode=disable"),
@@ -100,11 +106,11 @@ func TestJDBCSinkConfig(t *testing.T) {
 		"oracle with params":        url("jdbc:oracle:thin:@//pg:1521/s?x=1"),
 		"an oracle descriptor":      url("jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(HOST=evil)))"),
 		"no host":                   url("jdbc:postgresql:///w"),
-		"another provider":          {"connection.url": "jdbc:postgresql://pg:5432/w", "connection.provider": "com.evil.Provider"},
-		"another naming strategy":   {"connection.url": "jdbc:postgresql://pg:5432/w", "collection.naming.strategy": "com.evil.Naming"},
-		"another table strategy":    {"connection.url": "jdbc:postgresql://pg:5432/w", "table.naming.strategy": "com.evil.Naming"},
-		"a dlq off the prefix":      {"connection.url": "jdbc:postgresql://pg:5432/w", "errors.deadletterqueue.topic.name": "payments.dlq"},
-		"a dlq that is a topic":     {"connection.url": "jdbc:postgresql://pg:5432/w", "errors.deadletterqueue.topic.name": "pg.public.orders"},
+		"another provider":          {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "connection.provider": "com.evil.Provider"},
+		"another naming strategy":   {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "collection.naming.strategy": "com.evil.Naming"},
+		"another table strategy":    {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "table.naming.strategy": "com.evil.Naming"},
+		"a dlq off the prefix":      {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "errors.deadletterqueue.topic.name": "payments.dlq"},
+		"a dlq that is a topic":     {"connection.url": "jdbc:postgresql://pg:5432/w?sslmode=verify-full", "errors.deadletterqueue.topic.name": "pg.public.orders"},
 	})
 }
 
@@ -183,17 +189,17 @@ func TestSchemaHistoryTLS(t *testing.T) {
 // write like a source's.
 func TestJDBCSinkBoundToRoomTargets(t *testing.T) {
 	for u, ok := range map[string]bool{
-		"jdbc:postgresql://pg:5432/w?sslmode=verify-full": true,
-		"jdbc:postgresql://pg/w":                          true,
-		"jdbc:postgresql://evil.example:5432/w":           false,
-		"jdbc:postgresql://pg:6432/w":                     false,
-		"jdbc:postgresql://pg:5432,evil:5432/w":           false,
+		"jdbc:postgresql://pg:5432/w?sslmode=verify-full":           true,
+		"jdbc:postgresql://pg/w?sslmode=verify-full":                true,
+		"jdbc:postgresql://evil.example:5432/w?sslmode=verify-full": false,
+		"jdbc:postgresql://pg:6432/w?sslmode=verify-full":           false,
+		"jdbc:postgresql://pg:5432,evil:5432/w?sslmode=verify-full": false,
 	} {
 		h := newHarness(t, "", nil)
 		withConnectFacts(h)
 		h.shell("KafkaConnector", "orders-src", map[string]any{})
 		_, err := run(t, h, "k8s_apply", map[string]any{"kind": "KafkaConnector", "template": "connector", "params": map[string]any{
-			"connector": "orders-src", "plugin": "jdbc", "config": map[string]string{"connection.url": u, "topics": "pg.public.orders"},
+			"connector": "orders-src", "plugin": "jdbc", "topic_prefix": "pg", "config": map[string]string{"connection.url": u, "topics": "pg.public.orders"},
 		}})
 		if ok != (err == nil) {
 			t.Errorf("%s: err = %v, want ok %v", u, err, ok)

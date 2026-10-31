@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -410,7 +411,7 @@ func (d *Driver) podLog(ctx context.Context, ns, pod, container string, tail int
 	if err != nil {
 		return nil, path, err
 	}
-	text, _ := redact.Text(strings.ToValidUTF8(string(body), "?"))
+	text, _ := redact.Text(maskCredentials(strings.ToValidUTF8(string(body), "?"), d.writtenValues()))
 	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	lines := make([]string, 0, len(raw))
 	total := 0
@@ -529,4 +530,28 @@ func orDash(s string) string {
 		return "absent"
 	}
 	return s
+}
+
+// credentialLineRE is a config dump line Kafka Connect and Debezium log at
+// start ("database.user = cdc"): the value of a key that names a user,
+// password or secret is masked whatever it is. Connect hides PASSWORD-type
+// values itself; a user name, or a password a misconfigured key carries, it
+// prints.
+var credentialLineRE = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(user|username|password|passwd|secret|credential|token)[A-Za-z0-9_.-]*)(\s*[=:]\s*)([^\s,]+)`)
+
+// maskCredentials masks, in a pod log, every credential value the runner
+// wrote to the db-credentials Secret and the value of every credential-named
+// config line.
+func maskCredentials(text string, written []string) string {
+	sort.Slice(written, func(i, j int) bool { return len(written[i]) > len(written[j]) })
+	for _, v := range written {
+		text = strings.ReplaceAll(text, v, "[masked:credential]")
+	}
+	return credentialLineRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := credentialLineRE.FindStringSubmatch(m)
+		if sub[4] == "[hidden]" || strings.HasPrefix(sub[4], "[masked") || strings.HasPrefix(sub[4], "${") {
+			return m
+		}
+		return sub[1] + sub[3] + "[masked:credential]"
+	})
 }
