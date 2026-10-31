@@ -51,9 +51,19 @@ func (f *fakeAPI) put(path string, obj map[string]any) {
 	}
 	md["resourceVersion"] = strconv.Itoa(f.rv)
 	if _, set := md["labels"]; !set {
-		// The pipeline release's labels, as the chart renders them; a test
-		// of the ownership check sets labels itself.
+		// The pipeline release's labels and Helm's release annotations, as
+		// an install writes them; a test of the ownership check sets labels
+		// (and annotations) itself.
 		md["labels"] = map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-" + testPipeline, "app.kubernetes.io/managed-by": "Helm"}
+		ann, _ := md["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			md["annotations"] = ann
+		}
+		if _, ok := ann["meta.helm.sh/release-name"]; !ok {
+			ann["meta.helm.sh/release-name"] = "piperoom-pipeline-" + testPipeline
+			ann["meta.helm.sh/release-namespace"] = testNS
+		}
 	}
 	f.objects[path] = obj
 	f.allowed[path] = true

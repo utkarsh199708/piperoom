@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -90,7 +91,7 @@ func (o k8sDeleteOp) decode(params json.RawMessage) (rollbackParams, error) {
 	if !contains(o.d.allowedNames(p.Kind, ""), p.Name) {
 		return p, fmt.Errorf("%w: %s %q", ErrName, p.Kind, clipText(p.Name, 64))
 	}
-	if o.d.class == protocol.ClassProduction {
+	if o.d.production() {
 		if p.Kind == "KafkaTopic" {
 			return p, fmt.Errorf("%w: the canary topic is data and is kept", ErrProduction)
 		}
@@ -137,11 +138,16 @@ func (o k8sDeleteOp) Execute(ctx context.Context, params json.RawMessage, env op
 		return ops.Result{Receipt: httpReceipt("GET", path)}, err
 	}
 	if p.Kind == "KafkaTopic" {
-		// Only the canary is deleted: the Topic Operator deletes the Kafka
-		// topic the CR manages, so a CR that manages another topic is kept.
-		st, _ := obj["status"].(map[string]any)
-		if tn, _ := st["topicName"].(string); tn != "" && !strings.HasSuffix(tn, "."+CanaryTable) {
-			return ops.Result{Receipt: httpReceipt("GET", path)}, fmt.Errorf("%w: KafkaTopic %s manages topic %s, not a canary", ErrField, p.Name, clipText(tn, 128))
+		if canaryNeverApplied(obj) {
+			// The paused shell names no topic and the operator reports none:
+			// no Kafka topic exists for it, which is the state the rollback
+			// wants, and deleting the shell would only let the operator read
+			// metadata.name as a topic once a person unpauses it.
+			data["deleted"] = false
+			return ops.Result{Summary: fmt.Sprintf("KafkaTopic %s/%s was never applied (paused, no topic); kept", ns, p.Name), Data: data, Receipt: httpReceipt("GET", path)}, nil
+		}
+		if err := checkCanaryTopic(obj, p.Name); err != nil {
+			return ops.Result{Receipt: httpReceipt("GET", path)}, err
 		}
 	}
 	if err := o.d.api.Delete(ctx, path); err != nil {
@@ -211,7 +217,7 @@ func (o k8sUnapplyOp) decode(params json.RawMessage) (rollbackParams, unapplyTar
 	if !contains(names, name) {
 		return p, unapplyTarget{}, fmt.Errorf("%w: %s %q", ErrName, p.Kind, clipText(name, 64))
 	}
-	if o.d.class == protocol.ClassProduction {
+	if o.d.production() {
 		switch p.Kind {
 		case "KafkaConnect":
 			return p, unapplyTarget{}, fmt.Errorf("%w: stopping a Connect cluster on production is a person's change", ErrProduction)
@@ -398,10 +404,49 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 		Reversible: true,
 		Rollback:   rollbackRecord("k8s_unapply", "Secret", o.d.dbSecretName()),
 	}
-	if o.d.class == protocol.ClassProduction {
+	if o.d.production() {
 		// k8s_unapply refuses the Secret on production (§7).
 		pr.Reversible = false
 		pr.Rollback = "emptying the db-credentials Secret on a production target is a person's change: kubectl edit, or helm uninstall of the pipeline release"
 	}
 	return pr, nil
+}
+
+// checkCanaryTopic: only the canary is deleted, since the Topic Operator
+// deletes the Kafka topic the CR manages. The topic the CR names
+// (spec.topicName, or metadata.name when that is unset, as the operator
+// reads it) must be a canary topic name exactly, and the topic the operator
+// reports it manages (status.topicName) must be the same one; when the
+// operator has reported nothing yet, the spec alone decides. Anything that
+// differs keeps the CR.
+func checkCanaryTopic(obj map[string]any, name string) error {
+	spec, _ := obj["spec"].(map[string]any)
+	md, _ := obj["metadata"].(map[string]any)
+	st, _ := obj["status"].(map[string]any)
+	named, _ := spec["topicName"].(string)
+	if named == "" {
+		named, _ = md["name"].(string)
+	}
+	if !canaryTopicRE.MatchString(named) {
+		return fmt.Errorf("%w: KafkaTopic %s names topic %s, not a canary", ErrField, name, clipText(named, 128))
+	}
+	if tn, _ := st["topicName"].(string); tn != "" && tn != named {
+		return fmt.Errorf("%w: KafkaTopic %s manages topic %s, not the canary %s it names", ErrField, name, clipText(tn, 128), clipText(named, 128))
+	}
+	return nil
+}
+
+// canaryTopicRE is the canary topic name: <topic prefix>.<schema>.piperoom_canary.
+var canaryTopicRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}\.[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
+
+// canaryNeverApplied: the KafkaTopic is the chart's paused shell, with no
+// spec.topicName and no topic in its status.
+func canaryNeverApplied(obj map[string]any) bool {
+	spec, _ := obj["spec"].(map[string]any)
+	md, _ := obj["metadata"].(map[string]any)
+	st, _ := obj["status"].(map[string]any)
+	ann, _ := md["annotations"].(map[string]any)
+	named, _ := spec["topicName"].(string)
+	tn, _ := st["topicName"].(string)
+	return named == "" && tn == "" && ann[PauseAnnotation] == "true"
 }

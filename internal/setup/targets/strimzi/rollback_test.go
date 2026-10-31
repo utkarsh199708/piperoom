@@ -29,9 +29,12 @@ func TestRollbackFloors(t *testing.T) {
 }
 
 func TestK8sDelete(t *testing.T) {
-	for _, tc := range []struct{ kind, name string }{{"KafkaConnector", "orders-src"}, {"KafkaTopic", "orders-canary"}} {
+	for _, tc := range []struct {
+		kind, name string
+		spec       map[string]any
+	}{{"KafkaConnector", "orders-src", map[string]any{}}, {"KafkaTopic", "orders-canary", map[string]any{"topicName": "pg.public.piperoom_canary"}}} {
 		h := newHarness(t, "", nil)
-		path := h.shell(tc.kind, tc.name, map[string]any{})
+		path := h.shell(tc.kind, tc.name, tc.spec)
 		res, err := run(t, h, "k8s_delete", map[string]any{"kind": tc.kind, "name": tc.name})
 		if err != nil {
 			t.Fatalf("%s: k8s_delete: %v", tc.kind, err)
@@ -137,19 +140,68 @@ func TestRollbackRefusesUnownedObjects(t *testing.T) {
 	}
 }
 
-// Only a canary KafkaTopic is deleted: one whose status says it manages
-// another topic is kept.
+// Only a canary KafkaTopic is deleted: the topic its spec names (or its
+// metadata.name, when the spec names none) must be a canary name exactly,
+// and the topic its status reports the same one. Anything that differs
+// keeps the CR; a paused shell that never named a topic is kept as is.
 func TestK8sDeleteKeepsANonCanaryTopic(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec, status map[string]any
+		paused       bool
+	}{
+		"status names a pipeline topic":    {map[string]any{"topicName": "pg.public.piperoom_canary"}, map[string]any{"topicName": "pg.public.orders"}, false},
+		"status names a canary suffix":     {map[string]any{"topicName": "pg.public.piperoom_canary"}, map[string]any{"topicName": "x.pg.public.piperoom_canary"}, false},
+		"spec names a pipeline topic":      {map[string]any{"topicName": "pg.public.orders"}, nil, false},
+		"an unpaused CR with no topicName": {map[string]any{}, nil, false},
+		"status only, spec empty":          {map[string]any{}, map[string]any{"topicName": "pg.public.piperoom_canary"}, false},
+	} {
+		h := newHarness(t, "", nil)
+		path := h.shell("KafkaTopic", "orders-canary", tc.spec)
+		obj := h.api.get(path)
+		if tc.status != nil {
+			obj["status"] = tc.status
+		}
+		if !tc.paused {
+			delete(obj["metadata"].(map[string]any)["annotations"].(map[string]any), PauseAnnotation)
+		}
+		h.api.put(path, obj)
+		if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"}); !errors.Is(err, ErrField) {
+			t.Errorf("%s: err = %v, want ErrField", name, err)
+		}
+		if h.api.get(path) == nil {
+			t.Errorf("%s: a non-canary topic was deleted", name)
+		}
+	}
 	h := newHarness(t, "", nil)
 	path := h.shell("KafkaTopic", "orders-canary", map[string]any{})
-	obj := h.api.get(path)
-	obj["status"] = map[string]any{"topicName": "pg.public.orders"}
-	h.api.put(path, obj)
-	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"}); !errors.Is(err, ErrField) {
-		t.Fatalf("err = %v, want ErrField", err)
+	res, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaTopic", "name": "orders-canary"})
+	if err != nil || !strings.Contains(res.Summary, "never applied") || h.api.get(path) == nil {
+		t.Fatalf("an unapplied shell: %q, %v (deleted %v)", res.Summary, err, h.api.get(path) == nil)
 	}
-	if h.api.get(path) == nil {
-		t.Fatal("a non-canary topic was deleted")
+	for _, r := range h.api.requests {
+		if strings.HasPrefix(r, "DELETE") {
+			t.Fatalf("an unapplied shell was deleted: %s", r)
+		}
+	}
+}
+
+// The ownership check needs Helm's release annotation: the instance label
+// alone, which anyone who can create the object can copy, is not enough.
+func TestCheckOwnedNeedsTheHelmAnnotation(t *testing.T) {
+	h := newHarness(t, "", nil)
+	label := map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-" + testPipeline}
+	for name, md := range map[string]map[string]any{
+		"the label alone":      {"labels": label},
+		"another namespace":    {"namespace": testNS, "labels": label, "annotations": map[string]any{helmReleaseName: "piperoom-pipeline-" + testPipeline, helmReleaseNamespace: "other"}},
+		"a non-string release": {"labels": label, "annotations": map[string]any{helmReleaseName: 1}},
+	} {
+		if err := h.d.checkOwned(map[string]any{"metadata": md}, "KafkaConnector", "orders-src"); !errors.Is(err, ErrNotOwned) {
+			t.Errorf("%s: err = %v, want ErrNotOwned", name, err)
+		}
+	}
+	ok := map[string]any{"namespace": testNS, "labels": label, "annotations": map[string]any{helmReleaseName: "piperoom-pipeline-" + testPipeline, helmReleaseNamespace: testNS}}
+	if err := h.d.checkOwned(map[string]any{"metadata": ok}, "KafkaConnector", "orders-src"); err != nil {
+		t.Fatalf("the release's object was refused: %v", err)
 	}
 }
 
@@ -424,5 +476,43 @@ func TestSecretApplyOnProduction(t *testing.T) {
 	keys["admission_policy_confirmed"] = true
 	if _, err := run(t, h, "k8s_secret_apply", keys); err != nil {
 		t.Fatalf("k8s_secret_apply on production with the card: %v", err)
+	}
+}
+
+// The driver's class follows the runner's: a target registered shared and
+// raised to production later is guarded as production at once. The runner's
+// guard refuses k8s_delete and the Strimzi ops' ClassGuarder raises the
+// driver's class, so the production refusals Execute holds (an unapply of
+// the KafkaConnect or the Secret, the card for the rest) follow the raise. A
+// lower class never lowers it.
+func TestClassGuardFollowsRaises(t *testing.T) {
+	h := newHarness(t, "", nil)
+	if h.reg.GuardForbidden("k8s_delete", protocol.ClassShared) {
+		t.Fatal("k8s_delete refused on shared")
+	}
+	if _, err := run(t, h, "k8s_unapply", map[string]any{"kind": "Secret"}); errors.Is(err, ErrProduction) {
+		t.Fatalf("a shared Secret unapply was refused as production: %v", err)
+	}
+	h.api.requests = nil
+	if !h.reg.GuardForbidden("k8s_delete", protocol.ClassProduction) {
+		t.Fatal("k8s_delete allowed on production")
+	}
+	if h.reg.GuardForbidden("k8s_unapply", protocol.ClassProduction) {
+		t.Fatal("k8s_unapply refused outright: its production row depends on the kind")
+	}
+	// A later request on a lower class does not lower the driver's.
+	h.reg.GuardForbidden("k8s_get", protocol.ClassShared)
+	for _, p := range []map[string]any{{"kind": "KafkaConnect"}, {"kind": "Secret"}} {
+		if _, err := run(t, h, "k8s_unapply", p); !errors.Is(err, ErrProduction) {
+			t.Errorf("%v after the raise: %v, want ErrProduction", p, err)
+		}
+	}
+	if _, err := run(t, h, "k8s_delete", map[string]any{"kind": "KafkaConnector", "name": "orders-src"}); !errors.Is(err, ErrProduction) {
+		t.Errorf("k8s_delete after the raise: %v, want ErrProduction", err)
+	}
+	for _, r := range h.api.requests {
+		if !strings.HasPrefix(r, "GET ") {
+			t.Errorf("a write reached the API after the raise: %s", r)
+		}
 	}
 }

@@ -315,7 +315,8 @@ func (f *fakeSecretAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"kind": "Secret", "metadata": map[string]any{"name": "orders-db-credentials", "resourceVersion": "7",
-			"labels": map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-orders"}}, "data": f.data,
+			"labels":      map[string]any{"app.kubernetes.io/instance": "piperoom-pipeline-orders"},
+			"annotations": map[string]any{"meta.helm.sh/release-name": "piperoom-pipeline-orders"}}, "data": f.data,
 	})
 }
 

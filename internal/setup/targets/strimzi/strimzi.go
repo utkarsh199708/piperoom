@@ -29,9 +29,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -98,9 +100,14 @@ type Driver struct {
 	api        *API
 	pipeline   string
 	connectors []string
-	class      string
 	secret     func(string) (string, bool)
-	plugins    []string
+	// class is the Kubernetes target's class: Options.Class at
+	// registration, raised (never lowered) by every guard check to the
+	// runner's class for the request (classGuard), so a target the room
+	// raises to production later gets the production refusals at once.
+	classMu sync.Mutex
+	class   string
+	plugins []string
 }
 
 // pluginHosts are the allowed build artifact hosts.
@@ -138,6 +145,9 @@ func Register(r *ops.Registry, o Options) (*Driver, error) {
 		return nil, fmt.Errorf("%w: unknown class %q", ErrParams, clipText(o.Class, 32))
 	}
 	d := &Driver{api: o.API, pipeline: o.Pipeline, connectors: append([]string(nil), o.Connectors...), class: o.Class, secret: o.Secret, plugins: o.PluginHosts}
+	if d.class == "" {
+		d.class = protocol.ClassShared
+	}
 	for _, op := range d.ops() {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("strimzi: registering %s: %w", op.Name(), err)
@@ -153,6 +163,51 @@ func (d *Driver) ops() []ops.Op {
 		k8sDeleteOp{d: d}, k8sUnapplyOp{d: d},
 	}
 }
+
+// currentClass is the target's class now.
+func (d *Driver) currentClass() string {
+	d.classMu.Lock()
+	defer d.classMu.Unlock()
+	return d.class
+}
+
+// production reports whether the target is production now.
+func (d *Driver) production() bool { return d.currentClass() == protocol.ClassProduction }
+
+// classGuard is every Strimzi op's ops.ClassGuarder: it raises the driver's
+// class to the runner's class for the request (an unknown class changes
+// nothing; a class only rises), then asks the server's guard table
+// (plan.Forbidden) on the result. k8s_unapply's production row depends on
+// the kind it unapplies, which this check cannot see: Execute refuses those
+// kinds itself on the raised class (rollback.go), as it does for every other
+// production refusal.
+func (d *Driver) classGuard(op, class string) bool {
+	d.classMu.Lock()
+	if r, ok := plan.ClassRank(class); ok {
+		if cur, _ := plan.ClassRank(d.class); r > cur {
+			d.class = class
+		}
+	}
+	cur := d.class
+	d.classMu.Unlock()
+	if op == plan.OpK8sUnapply {
+		return false
+	}
+	_, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: cur})
+	return forbidden
+}
+
+// GuardForbidden is ops.ClassGuarder for each Strimzi op.
+func (o k8sGetOp) GuardForbidden(c string) bool             { return o.d.classGuard(o.Name(), c) }
+func (o k8sEventsOp) GuardForbidden(c string) bool          { return o.d.classGuard(o.Name(), c) }
+func (o k8sLogsOp) GuardForbidden(c string) bool            { return o.d.classGuard(o.Name(), c) }
+func (o buildStatusOp) GuardForbidden(c string) bool        { return o.d.classGuard(o.Name(), c) }
+func (o k8sApplyOp) GuardForbidden(c string) bool           { return o.d.classGuard(o.Name(), c) }
+func (o previewApplyOp) GuardForbidden(c string) bool       { return o.d.classGuard(o.Name(), c) }
+func (o k8sSecretApplyOp) GuardForbidden(c string) bool     { return o.d.classGuard(o.Name(), c) }
+func (o previewSecretApplyOp) GuardForbidden(c string) bool { return o.d.classGuard(o.Name(), c) }
+func (o k8sDeleteOp) GuardForbidden(c string) bool          { return o.d.classGuard(o.Name(), c) }
+func (o k8sUnapplyOp) GuardForbidden(c string) bool         { return o.d.classGuard(o.Name(), c) }
 
 // ---- names (§3, §4) ----
 

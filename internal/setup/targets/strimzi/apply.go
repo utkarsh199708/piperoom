@@ -122,7 +122,7 @@ func canonical(v any) []byte {
 // card confirmation; a 404, a binding to another policy, a binding without
 // Deny or a policy that fails open refuses. Any other error refuses too.
 func (d *Driver) productionGate(ctx context.Context, confirmed bool) error {
-	if d.class != protocol.ClassProduction {
+	if !d.production() {
 		return nil
 	}
 	name := "piperoom-pipeline-" + d.pipeline
@@ -192,9 +192,12 @@ var ErrNotOwned = errors.New("strimzi: the object is not the pipeline release's"
 
 // checkOwned is the ownership check before every patch or delete: the object
 // carries the chart's app.kubernetes.io/instance label naming the pipeline
-// release and, when Helm recorded one, the same meta.helm.sh/release-name
-// annotation. A same-named object a person or another release created is
-// refused before any write.
+// release and the meta.helm.sh/release-name annotation Helm writes on every
+// object it installs, naming the same release (and, when Helm recorded it,
+// the object's own namespace as the release's). A label alone is a string
+// anyone who can create the object can copy; the annotation is what Helm
+// itself checks before it adopts an object. A same-named object a person or
+// another release created is refused before any write.
 func (d *Driver) checkOwned(obj map[string]any, kind, name string) error {
 	md, _ := obj["metadata"].(map[string]any)
 	labels, _ := md["labels"].(map[string]any)
@@ -203,11 +206,26 @@ func (d *Driver) checkOwned(obj map[string]any, kind, name string) error {
 	if fmt.Sprint(labels["app.kubernetes.io/instance"]) != want {
 		return fmt.Errorf("%w: %s %s has no app.kubernetes.io/instance=%s label", ErrNotOwned, kind, name, want)
 	}
-	if rel, ok := ann["meta.helm.sh/release-name"]; ok && fmt.Sprint(rel) != want {
-		return fmt.Errorf("%w: %s %s belongs to Helm release %s, not %s", ErrNotOwned, kind, name, clipText(fmt.Sprint(rel), 64), want)
+	rel, ok := ann[helmReleaseName].(string)
+	if !ok {
+		return fmt.Errorf("%w: %s %s has no %s annotation: Helm did not install it", ErrNotOwned, kind, name, helmReleaseName)
+	}
+	if rel != want {
+		return fmt.Errorf("%w: %s %s belongs to Helm release %s, not %s", ErrNotOwned, kind, name, clipText(rel, 64), want)
+	}
+	if relNS, ok := ann[helmReleaseNamespace].(string); ok {
+		if ns, _ := md["namespace"].(string); ns != "" && relNS != ns {
+			return fmt.Errorf("%w: %s %s belongs to a release in namespace %s", ErrNotOwned, kind, name, clipText(relNS, 64))
+		}
 	}
 	return nil
 }
+
+// The annotations Helm writes on every object of a release.
+const (
+	helmReleaseName      = "meta.helm.sh/release-name"
+	helmReleaseNamespace = "meta.helm.sh/release-namespace"
+)
 
 // ---- k8s_apply (T2) ----
 
@@ -395,7 +413,7 @@ func (o k8sApplyOp) Preview(ctx context.Context, params json.RawMessage, env ops
 // are not reversible by the runner: the canary topic is kept, and deleting the
 // KafkaConnector or stopping the KafkaConnect is a person's change.
 func (d *Driver) applyRollback(r rendered) (bool, string) {
-	prod := d.class == protocol.ClassProduction
+	prod := d.production()
 	switch r.kind {
 	case "KafkaTopic":
 		if prod {

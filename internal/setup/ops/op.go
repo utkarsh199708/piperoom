@@ -455,9 +455,16 @@ func (r *Registry) GuardForbidden(op, class string) bool {
 
 // guardTable is the runner's side of design §3.5 / plan §3.6: op -> classes
 // it must not run on. Every entry has a test.
+//
+// k8s_delete is the Strimzi driver's (registered into this catalogue in the
+// in-cluster Job): refused on production whatever the driver's class says.
+// k8s_unapply has no row here: its production row allows a KafkaUser or the
+// logging ConfigMap, a kind this table cannot see, so the driver's
+// ClassGuarder raises its class and its Execute refuses the other kinds.
 var guardTable = map[string][]string{
 	"file_write":  {protocol.ClassProduction},
 	"file_delete": {protocol.ClassProduction},
+	"k8s_delete":  {protocol.ClassProduction},
 }
 
 // StepAction returns the proposal-step action name op executes. The runner's
