@@ -37,6 +37,7 @@ const DOT: Record<Health, string> = {
 // row while that filter is on screen.
 // Polling is kept small on purpose, there is one topology call per pipeline:
 //  - a pipeline that only closed rooms mention is not fetched at all (unknown dot);
+//  - nor one whose open rooms are all setup rooms: it is not registered yet (KAN-601);
 //  - the pipeline of the room on screen is not polled here, the room screen already polls
 //    it; this row refetches once per navigation instead.
 function PipelineItem({
@@ -54,7 +55,7 @@ function PipelineItem({
   current: boolean
   onNavigate?: () => void
 }) {
-  const { topology } = useTopology(pipeline.open > 0 ? pipeline.id : '', {
+  const { topology } = useTopology(pipeline.open > 0 && !pipeline.provisional ? pipeline.id : '', {
     active: !quiet,
     refreshKey: navKey,
   })
