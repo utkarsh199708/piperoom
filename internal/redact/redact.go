@@ -517,15 +517,19 @@ func isPlaceholder(v string) bool {
 }
 
 // bracketPlaceholder reports a value a rule ended before its closing
-// bracket that is a placeholder in brackets: Kafka's own "[hidden]" for a
-// password config it will not print, or the Strimzi reads' own mask
-// "[masked:credential]" (exactly). Masking it would leave the "]" behind.
+// bracket that is exactly "[hidden]" (Kafka's own, for a password config
+// it will not print), "[redacted]" or the Strimzi reads' own mask
+// "[masked:credential]". Masking it would leave the "]" behind. Nothing
+// else in brackets is kept (round 12: not "[${...").
 func bracketPlaceholder(s string, g0, g1 int) bool {
 	if s[g0] != '[' || g1 >= len(s) || s[g1] != ']' {
 		return false
 	}
-	in := s[g0+1 : g1]
-	return isPlaceholder(in) || in == "masked:credential"
+	switch s[g0+1 : g1] {
+	case "hidden", "redacted", "masked:credential":
+		return true
+	}
+	return false
 }
 
 func mask(v string, style maskStyle) string {

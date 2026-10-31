@@ -97,11 +97,16 @@ func perByteFFFD(s string) string {
 func maskPlan(raw string, written []string) (string, []maskSpan) {
 	t := sanitizeText(raw)
 	n := min(len(t), redact.MaxScan)
+	// redact's cut may fall before MaxScan, inside a value that runs
+	// past it: the written values are searched far enough past MaxScan to
+	// hold the longest form of one, and the key rule a window more, so a
+	// value straddling the cut is found whole (round 12, F1).
+	nv, nk := min(len(t), n+maxFormLen(written)), min(len(t), n+keyStraddle)
 	var spans []maskSpan
-	for _, sp := range credentialValueSpans(raw[:n], t[:n], written) {
+	for _, sp := range credentialValueSpans(raw[:nv], t[:nv], written) {
 		spans = append(spans, maskSpan{sp[0], sp[1], ""})
 	}
-	for _, sp := range credentialKeySpans(t[:n]) {
+	for _, sp := range credentialKeySpans(t[:nk]) {
 		spans = append(spans, maskSpan{sp[0], sp[1], ""})
 	}
 	tailMasked := n == len(t)
@@ -115,6 +120,21 @@ func maskPlan(raw string, written []string) (string, []maskSpan) {
 		spans = append(spans, maskSpan{n, len(t), ""})
 	}
 	return t, spans
+}
+
+// keyStraddle is how far past redact.MaxScan the key rule reads, so a
+// value that starts before the cut is judged whole.
+const keyStraddle = 4096
+
+// maxFormLen bounds the length of any form credentialValueSpans searches
+// for a written value: at most 9 bytes per byte (an invalid byte as
+// U+FFFD, percent-encoded), and a little more.
+func maxFormLen(written []string) int {
+	n := 0
+	for _, w := range written {
+		n = max(n, 9*len(w)+16)
+	}
+	return n
 }
 
 // renderSpans writes t with each merged group of spans (overlapping or
@@ -295,6 +315,9 @@ const (
 	credResume
 	// credPath: pwd, PWD, OLDPWD: also an absolute path.
 	credPath
+	// credPass: the bare key pass (a test runner's "pass: 3 fail: 0"):
+	// also a number (round 12).
+	credPass
 )
 
 // credentialSuffixes end a credential key's last segment, or its last two
@@ -310,7 +333,7 @@ var credentialSuffixes = []string{
 	// Round 11.
 	"passphrase", "passcode", "secretkey", "secretaccesskey", "accountkey", "sharedaccesskey",
 	"sharedaccesssignature", "signingkey", "hmackey", "encryptionkey", "keystorekey",
-	"jwt", "session", "sessionid", "cookie", "userinfo",
+	"jwt", "cookie", "userinfo",
 }
 
 // wholeSegmentKeys name a credential only as a whole last segment (round
@@ -341,15 +364,19 @@ func credentialKeyKind(key string) keyKind {
 	if len(key) > 2 && strings.HasPrefix(key, "-D") {
 		key = key[2:] // a Java system property: -Dpassword=
 	}
+	// A flag's one or two dashes are no part of the key; a key with more
+	// is never an exempt name (round 12, F5).
+	key = strings.TrimPrefix(strings.TrimPrefix(key, "-"), "-")
+	exempt := !strings.HasPrefix(key, "-")
 	key = strings.TrimLeft(key, "-")
 	l := strings.ToLower(key)
 	norm := keySeparators.Replace(l)
 	switch {
-	case cursorKeys[norm]:
+	case exempt && cursorKeys[norm]:
 		return credCursor
-	case switchKeys[norm]:
+	case exempt && switchKeys[norm]:
 		return credSwitch
-	case norm == "resumetoken":
+	case exempt && norm == "resumetoken":
 		return credResume
 	case l == "jaas.config" || strings.HasSuffix(l, ".jaas.config"):
 		return credPlain
@@ -371,6 +398,9 @@ func credentialKeyKind(key string) keyKind {
 	}
 	if (strings.HasSuffix(last, "Pw") || strings.HasSuffix(last, "PW")) && len(last) > 2 {
 		return credPlain // dbPw, DBPW
+	}
+	if cands[0] == "pass" && len(segs) == 1 {
+		return credPass
 	}
 	if wholeSegmentKeys[cands[0]] {
 		return credPlain
@@ -404,10 +434,15 @@ var credentialKeyRE = regexp.MustCompile(`([A-Za-z0-9._-]+)(["']?[ \t]*(?:=>|:=|
 
 // keyValueStartRE is a key and an = or : at the start of a text: what may
 // follow a kept value (cleanAfter).
-var keyValueStartRE = regexp.MustCompile(`^[A-Za-z0-9._-]+["']?[ \t]*(?:=>|:=|=|:)`)
+var keyValueStartRE = regexp.MustCompile(`^["']?[A-Za-z0-9._-]+["']?[ \t]*(?:=>|:=|=|:)`)
+
+// lowerWordRE is a -p "value" that is the rest of an option word:
+// -partition=3, -position=154, -port (round 12). A password made of
+// lower-case letters alone is not told apart from one.
+var lowerWordRE = regexp.MustCompile(`^[a-z]{2,}([-=]|$)`)
 
 // mysqlPasswordRE is a mysql client's -p<password> on its command line.
-var mysqlPasswordRE = regexp.MustCompile(`(?i)\bmysql[a-z]*\b[^\n]*?\s-p([^\s'"]+)`)
+var mysqlPasswordRE = regexp.MustCompile(`(?i)\bmysql[a-z]*\b[^\n]*?\s-p(?:'([^'\n]*)'|"([^"\n]*)"|([^\s'"]+))`)
 
 // credentialJSONKeyRE is a JSON object key and its colon at any escaping
 // level: "key":, \"key\": (JSON in a JSON string), \\\"key\\\": (JSON in
@@ -439,9 +474,13 @@ var keptIsWords = map[string]bool{
 	"required": true, "missing": true, "invalid": true, "incorrect": true, "wrong": true, "expired": true,
 	"empty": true, "not": true, "too": true, "set": true, "unset": true, "null": true, "none": true, "blank": true,
 	"correct": true, "valid": true, "ok": true, "mandatory": true, "optional": true, "configured": true,
-	"present": true, "absent": true, "being": true, "now": true, "no": true, "a": true, "an": true, "the": true,
+	"present": true, "absent": true, "closed": true, "being": true, "now": true, "no": true, "a": true, "an": true, "the": true,
 	"stored": true, "provided": true, "given": true, "changed": true, "rotated": true, "deprecated": true,
 }
+
+// existingMaskRE is a mask redact wrote: a read of text already masked
+// leaves it as it is (round 12).
+var existingMaskRE = regexp.MustCompile(`^\[redacted( [0-9]+| private key [0-9]+)?\]$`)
 
 var (
 	numberRE      = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
@@ -469,7 +508,7 @@ func keptValue(kind keyKind, v string) bool {
 		t = t[1 : len(t)-1]
 	}
 	lt := strings.ToLower(t)
-	if t == "[hidden]" || keptRefRE.MatchString(t) || runnerSecretNameRE.MatchString(t) {
+	if t == "[hidden]" || t == credentialMask || existingMaskRE.MatchString(t) || keptRefRE.MatchString(t) || runnerSecretNameRE.MatchString(t) {
 		return true
 	}
 	switch kind {
@@ -483,6 +522,8 @@ func keptValue(kind keyKind, v string) bool {
 		return keptLiterals[lt] || lt == "true" || lt == "false" || lt == "enabled" || lt == "disabled" || authMechanisms[lt]
 	case credPath:
 		return keptLiterals[lt] || absPathRE.MatchString(t)
+	case credPass:
+		return keptLiterals[lt] || numberRE.MatchString(t)
 	}
 	return keptLiterals[lt]
 }
@@ -496,22 +537,38 @@ const (
 )
 
 // findKey is credentialKeyRE's first match in s at or after off, its
-// indices into s, searched keyWindow bytes at a time. A key longer than
-// keyOverlap may be found as its tail (a suffix still names the kind).
+// indices into s, searched keyWindow bytes at a time: a window that
+// starts inside a key goes back to the key's start, and one that ends
+// inside a match is widened.
 func findKey(s string, off int) []int {
+	win := keyWindow
 	for off < len(s) {
-		end := min(len(s), off+keyWindow)
+		end := min(len(s), off+win)
 		m := credentialKeyRE.FindStringSubmatchIndex(s[off:end])
 		if m == nil {
 			if end == len(s) {
 				return nil
 			}
-			off = end - keyOverlap
+			off, win = end-keyOverlap, keyWindow
 			continue
 		}
-		if m[1] == end-off && end < len(s) && m[0] > 0 {
-			// The match may go on past the window: search from its start.
+		if start := off + m[0]; start > 0 && isKeyByte(s[start-1]) {
+			// The window began inside a longer key: classify it from
+			// its real start (round 12, F5: not ---...nexttoken's tail).
+			for start > 0 && isKeyByte(s[start-1]) {
+				start--
+			}
+			// The window from there must reach past this match.
+			win = max(win, off+m[1]-start+keyWindow)
+			off = start
+			continue
+		}
+		if m[1] == end-off && end < len(s) {
+			// The match may go on past the window (a long key, or blanks
+			// before its value): search again from its start, wider
+			// (round 12, F4).
 			off += m[0]
+			win *= 2
 			continue
 		}
 		for i := range m {
@@ -522,6 +579,11 @@ func findKey(s string, off int) []int {
 		return m
 	}
 	return nil
+}
+
+// isKeyByte reports whether c may be part of a key (credentialKeyRE).
+func isKeyByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '.' || c == '_' || c == '-'
 }
 
 // credentialKeyIn is the offset in s of the first credential key followed
@@ -591,7 +653,7 @@ func keySepForm(sep string) sepForm {
 // before keys are matched, and the ranges mapped back onto t (round 11).
 func credentialKeySpans(t string) [][2]int {
 	s, pos := stripFormatChars(t)
-	ks := &keyScan{t: s, kinds: map[string]keyKind{}}
+	ks := &keyScan{t: s, pos: pos, kinds: map[string]keyKind{}}
 	ks.linePass(ks.jsonPass())
 	if pos != nil {
 		for i, sp := range ks.spans {
@@ -609,7 +671,7 @@ func stripFormatChars(t string) (string, []int) {
 		return t, nil
 	}
 	var b strings.Builder
-	pos := make([]int, 0, len(t)+1)
+	pos := make([]int, 0, min(len(t), redact.MaxScan)+1)
 	for i := 0; i < len(t); {
 		r, n := utf8.DecodeRuneInString(t[i:])
 		if isKeyNoise(r, n) {
@@ -651,11 +713,16 @@ func hasFormatChar(t string) bool {
 // keyScan is one credentialKeySpans pass over t.
 type keyScan struct {
 	t     string
+	pos   []int // stripFormatChars' map back onto the text, or nil
 	spans [][2]int
 	kinds map[string]keyKind
 	// maskedLine and maskedTo: the start of the line a continued value was
 	// masked from, and its end; the lines in between need no scan.
 	maskedLine, maskedTo int
+	// csvCol, csvFields and csvKind: the credential column of the last
+	// CSV header seen, its field count and its key's kind (csvLine).
+	csvCol, csvFields int
+	csvKind           keyKind
 	// stopFrom, stopAt, stopLe cache tokenAt: the first stop byte at or
 	// after any offset in [stopFrom, stopAt] of the line ending at stopLe
 	// is at stopAt (round 11: pw=pw=pw=... scans the line once).
@@ -683,6 +750,23 @@ func (ks *keyScan) kind(key string) keyKind {
 	return k
 }
 
+// kindAt is the kind of the key t[a:b]. A key that had a format character
+// removed from it is never an exempt or partly exempt name: a credential
+// key of any kind is a plain one (round 12, F6: page\u200btoken is no
+// cursor).
+func (ks *keyScan) kindAt(key string, a, b int) keyKind {
+	k := ks.kind(key)
+	if k != notCredential && ks.stripped(a, b) {
+		return credPlain
+	}
+	return k
+}
+
+// stripped reports whether a format character was removed from t[a:b].
+func (ks *keyScan) stripped(a, b int) bool {
+	return ks.pos != nil && b > a && ks.pos[b-1]-ks.pos[a] != b-1-a
+}
+
 func (ks *keyScan) add(a, b int) {
 	if b > a {
 		ks.spans = append(ks.spans, [2]int{a, b})
@@ -706,7 +790,7 @@ func (ks *keyScan) jsonPass() [][2]int {
 			continue
 		}
 		key := t[m[4]:m[5]]
-		kind := ks.kind(key)
+		kind := ks.kindAt(key, m[4], m[5])
 		isName := kind == notCredential && strings.EqualFold(key, "name")
 		if kind == notCredential && !isName {
 			continue
@@ -766,6 +850,7 @@ func (ks *keyScan) linePass(values [][2]int) {
 	t := ks.t
 	env := envName{line: -2}
 	ks.maskedLine, ks.maskedTo = -1, -1
+	ks.csvCol = -1
 	for ls, n := 0, 0; ls < len(t); n++ {
 		le := strings.IndexByte(t[ls:], '\n')
 		if le < 0 {
@@ -796,9 +881,14 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 	line := t[ls:le]
 	if strings.Contains(line, " -p") {
 		if m := mysqlPasswordRE.FindStringSubmatchIndex(line); m != nil {
-			ks.add(ls+m[2], ls+m[3])
+			for g := 2; g <= 6; g += 2 {
+				if m[g] >= 0 && (g < 6 || !lowerWordRE.MatchString(line[m[g]:m[g+1]])) {
+					ks.add(ls+m[g], ls+m[g+1])
+				}
+			}
 		}
 	}
+	ks.csvLine(ls, le)
 	for pos := 0; pos < len(line); {
 		m := findKey(line, pos)
 		if m == nil {
@@ -812,8 +902,8 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 			// value, which the JSON pass already decided.
 			continue
 		}
-		kind := ks.kind(key)
-		if strings.EqualFold(key, "token") && form == formNormal && strings.Contains(sep, ":") && resumeBefore(line, m[2]) {
+		kind := ks.kindAt(key, ls+m[2], ls+m[3])
+		if strings.EqualFold(key, "token") && form == formNormal && strings.Contains(sep, ":") && resumeBefore(line, m[2]) && !ks.stripped(ls+max(0, m[2]-7), ls+m[3]) {
 			kind = credResume // "resume token: <position>"
 		}
 		if kind == notCredential {
@@ -852,32 +942,81 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 			pos = vs + c + 1
 			continue
 		case formCSV:
-			if (m[2] > 0 && line[m[2]-1] != ',') || vs >= len(line) || strings.IndexByte(" \t\r,", line[vs]) >= 0 {
-				continue
-			}
-			e := strings.IndexByte(line[vs:], ',')
-			if e < 0 {
-				e = len(line) - vs
-			}
-			if v := strings.TrimRight(line[vs:vs+e], "\r"); !keptValue(kind, v) {
-				ks.add(ls+vs, ls+vs+len(v))
-			}
-			pos = vs + e
+			// A CSV header's credential column is masked in the rows
+			// under it (csvLine), not in the header (round 12).
 			continue
 		case formSpace:
 			if !strings.HasPrefix(key, "-") {
 				continue
 			}
 		case formQuote:
+			if strings.EqualFold(key, "token") && jacksonTokenRE.MatchString(line) {
+				// A parser's "Unrecognized token 'abc': was expecting
+				// ... token 'null'" (round 12).
+				continue
+			}
 			vs-- // the value starts at its quote
 		}
-		next, stop := ks.keyValue(kind, ls, le, vs, form == formNormal && strings.Contains(sep, ":"))
+		yaml := form == formNormal && strings.Contains(sep, ":") && !strings.Contains(sep, "=") && yamlKeyStart(line[:m[2]])
+		next, stop := ks.keyValue(kind, ls, le, vs, yaml)
 		if stop {
 			return
 		}
 		pos = next
 	}
 }
+
+// jacksonTokenRE is a parser's error about a token it could not parse
+// ("Unrecognized token 'abc'"): its quoted tokens are no credential
+// (round 12).
+var jacksonTokenRE = regexp.MustCompile(`(?i)\b(?:unrecognized|unexpected|invalid|illegal) token ["']`)
+
+// csvHeaderFieldRE is a CSV header cell: a name.
+var csvHeaderFieldRE = regexp.MustCompile(`^["']?[A-Za-z0-9._: -]+["']?$`)
+
+// csvLine masks, in a row under a CSV header with a credential column
+// (user,password,host), that row's cell of the column: a row has as many
+// fields as the header, and any other line ends the table. A header is a
+// line of names, one of them a credential key (round 12).
+func (ks *keyScan) csvLine(ls, le int) {
+	line := strings.TrimRight(ks.t[ls:le], "\r")
+	if strings.IndexByte(line, ',') < 0 || len(line) > 4096 {
+		ks.csvCol = -1
+		return
+	}
+	fields := strings.Split(line, ",")
+	if ks.csvCol >= 0 && len(fields) == ks.csvFields {
+		a := ls
+		for _, f := range fields[:ks.csvCol] {
+			a += len(f) + 1
+		}
+		if v := fields[ks.csvCol]; strings.TrimSpace(v) != "" && !keptValue(ks.csvKind, strings.TrimSpace(v)) {
+			ks.add(a, a+len(v))
+		}
+		return
+	}
+	ks.csvCol = -1
+	for i, f := range fields {
+		if !csvHeaderFieldRE.MatchString(strings.TrimSpace(f)) {
+			ks.csvCol = -1
+			return
+		}
+		if k := ks.kind(strings.Trim(strings.TrimSpace(f), `"'`)); k != notCredential && ks.csvCol < 0 {
+			ks.csvCol, ks.csvFields, ks.csvKind = i, len(fields), k
+		}
+	}
+}
+
+// yamlKeyStart reports whether the text before a key is a YAML line's
+// indentation (and a list item's "- ", or outer keys): the key starts a
+// YAML mapping entry, not a message ending in "token:" (round 12).
+func yamlKeyStart(before string) bool {
+	return yamlPrefixRE.MatchString(before)
+}
+
+// yamlPrefixRE is what may come before a YAML key on its line:
+// indentation, a list item's "- ", and outer keys ("build: password:").
+var yamlPrefixRE = regexp.MustCompile(`^ *(?:- +|[A-Za-z0-9._-]+: +)*$`)
 
 // resumeBefore reports whether "resume " (a word: not "presume") ends
 // line[:i].
@@ -935,6 +1074,8 @@ func (ks *keyScan) keyValue(kind keyKind, ls, le, vs int, yaml bool) (int, bool)
 			return 0, true
 		}
 		tok = v[:j+1]
+	} else if j := strings.IndexByte(v, ']'); v[0] == '[' && j > 0 && keptValue(kind, v[:j+1]) {
+		tok = v[:j+1] // [hidden], or a mask already in the text (round 12)
 	} else if j := strings.IndexByte(v, '}'); strings.HasPrefix(v, "${") && j > 0 {
 		tok = v[:j+1] // a reference: keptValue judges it whole
 	} else {
@@ -985,20 +1126,23 @@ func closingQuote(v string, q byte) int {
 }
 
 // cleanAfter reports whether r, the text after a judged token, starts a
-// new item: the line's end, a list separator, another key= or key: (after
-// blanks, or right away when the token was cut before it), or closing
-// brackets and quotes followed by one of those.
+// new item: closing brackets and quotes, then the line's end or another
+// key= or key: (right away when the token was cut before it, or after
+// blanks or one list separator and blanks). A separator followed by
+// anything else is more of the value (round 12, F2: null,Zq9...).
 func cleanAfter(r string) bool {
 	r = strings.TrimRight(r, "\r")
 	r = strings.TrimLeft(r, ")]}\"'")
-	if r == "" || strings.IndexByte(",;&|", r[0]) >= 0 || keyValueStartRE.MatchString(r) {
+	if r == "" || keyValueStartRE.MatchString(r) {
 		return true
 	}
-	if r[0] != ' ' && r[0] != '\t' {
+	if strings.IndexByte(",;&|", r[0]) >= 0 {
+		r = r[1:]
+	} else if r[0] != ' ' && r[0] != '\t' {
 		return false
 	}
 	r = strings.TrimLeft(r, " \t")
-	return r == "" || strings.IndexByte(",;&|)]}", r[0]) >= 0 || keyValueStartRE.MatchString(r)
+	return r == "" || keyValueStartRE.MatchString(r) || strings.IndexByte(")]}", r[0]) >= 0
 }
 
 // maskRest masks t[a:] to the end of its value (continuedEnd) from the
@@ -1026,10 +1170,15 @@ func (ks *keyScan) yamlBlock(ls, le int) {
 		}
 		l := strings.TrimRight(t[p:q], "\r")
 		if strings.TrimSpace(l) != "" {
-			if indent(l) <= ind {
+			// YAML indents with spaces only; a stack trace's frames
+			// (\tat ..., "    at ...") are no scalar block (round 12).
+			if indent(l) <= ind || strings.Contains(l[:indent(l)], "\t") {
 				break
 			}
 			if first < 0 {
+				if c := strings.TrimLeft(l, " "); strings.HasPrefix(c, "at ") || strings.HasPrefix(c, "... ") || strings.HasPrefix(c, "Caused by") {
+					break
+				}
 				first = p + indent(l)
 			}
 			last = p + len(l)

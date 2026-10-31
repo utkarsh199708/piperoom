@@ -34,6 +34,9 @@ type corpusCase struct {
 	line    string
 	written []string
 	markers []string
+	// keep, when set, must come back from every read as it is (round
+	// 12: an over-masking case).
+	keep string
 }
 
 // corpusKeys are the credential key spellings the corpus writes values
@@ -380,7 +383,7 @@ func decodedStrings(doc string) []string {
 // and the totals to that file instead of failing (to count leaks at
 // older commits).
 func TestMaskingCorpus(t *testing.T) {
-	cases := append(corpusCases(corpusPEMs(t)), reviewCases()...)
+	cases := append(append(append(corpusCases(corpusPEMs(t)), reviewCases()...), round12Cases()...), round12KeepCases()...)
 	if len(cases) < 5000 {
 		t.Fatalf("the corpus has %d inputs, want at least 5000", len(cases))
 	}
@@ -396,12 +399,17 @@ func TestMaskingCorpus(t *testing.T) {
 		}
 		var bad []string
 		for op, doc := range outs {
+			kept := false
 			for _, s := range append(decodedStrings(doc), doc) {
 				for _, m := range c.markers {
 					if strings.Contains(s, m) {
 						bad = append(bad, op+": "+m)
 					}
 				}
+				kept = kept || (c.keep != "" && strings.Contains(s, c.keep))
+			}
+			if c.keep != "" && !kept {
+				bad = append(bad, op+": over-masks "+c.keep)
 			}
 		}
 		if len(bad) == 0 {
@@ -608,6 +616,10 @@ func reviewGap(name string) string {
 	switch {
 	case len(f) == 3 && f[0] == "kf" && map[string]bool{"pin": true, "connection.uri": true, "connectionString": true, "DATABASE_URL": true, "dsn": true, "mongodb.connection.string": true, "pgpass": true}[f[1]]:
 		return "no credential key: a connection string's userinfo is redact's; pin and pgpass name no secret often enough"
+	case len(f) == 3 && f[0] == "kf" && f[2] == "csv":
+		return "a credential key in a CSV line with no rows under it is a header (round 12): its column is masked in the rows"
+	case len(f) == 3 && f[0] == "kf" && (f[1] == "session" || f[1] == "sessionid"):
+		return "session ids are Kafka's fetch-session diagnostics (round 12)"
 	case len(f) == 3 && f[0] == "kf" && (f[2] == "xml" || f[2] == "xml-entry"):
 		return "XML elements are redact's XML rules, which know fewer keys"
 	case strings.HasPrefix(name, "mb inkey") && strings.ContainsAny(name, "é€日\U0001F512\u0301"):

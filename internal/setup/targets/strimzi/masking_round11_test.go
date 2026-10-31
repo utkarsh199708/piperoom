@@ -143,12 +143,12 @@ func TestContinuedValuesRound11(t *testing.T) {
 }
 
 // Round 11, item 6: the forms and keys that leaked before, through every
-// read, and the messages around them that stay. (A CSV header,
-// user,password,host, reads as a row: its next field is masked.)
+// read, and the messages around them that stay. (Round 12: a CSV
+// credential column is masked in the rows under its header.)
 func TestCredentialFormsRound11(t *testing.T) {
 	m := corpusMarker
 	for _, line := range []string{
-		"password [" + m + "]", "password is " + m, "password\t" + m, "u,password," + m, "ALTER USER app WITH password '" + m + "';",
+		"password [" + m + "]", "password is " + m, "password\t" + m, "user,password,host\nu," + m + ",h", "ALTER USER app WITH password '" + m + "';",
 		"password: |\n  " + m + "\n", "password:\n  " + m + "\n", "password: >-\n  a\n\n  " + m + "\nnext: 1",
 		"{'user': 'u', 'password': '" + m + "'}", "{'sasl.jaas.config': '" + m + "'}",
 		`{"name":"DB_PASSWORD","value":"` + m + `"}`, `env=[{"name":"SECRET_KEY", "value": "` + m + `"}]`,
@@ -166,7 +166,7 @@ func TestCredentialFormsRound11(t *testing.T) {
 	}
 	for _, keep := range []string{
 		"password is required", "password is too short (min 8)", "password authentication failed for user app",
-		"bypass=on", "session.timeout.ms=45000", "- name: LOG_LEVEL\n  value: debug",
+		"bypass=on", "session.timeout.ms=45000", "- name: LOG_LEVEL\n  value: debug", "user,password,host",
 		"credentials:\nnext: 1",
 	} {
 		got := readsOf(t, nil, keep)["k8s_logs"]
@@ -222,7 +222,7 @@ func TestMaskingCostIsBounded(t *testing.T) {
 		written []string
 	}{
 		{"a=", nil}, {"pw=", nil}, {"nextToken=a&", nil}, {"password=x\\\n", nil}, {"password=\"x\n", nil},
-		{"password: |\n  x\n", nil}, {"u,password,", nil}, {"password is x ", nil}, {"pass\u200b", nil},
+		{"password: |\n  x\n", nil}, {"user,password\nu,", nil}, {"password is x ", nil}, {"pass\u200b", nil},
 		{"\xff", []string{"\xff\xff\xff\xff\xff\xff\xff\xff"}}, {"a", []string{"aaaaaaaa"}}, {`A`, []string{"AAAAAAAA"}},
 	} {
 		small := best(func() { maskCredentials(fill(g.unit, 16<<10), g.written) })
