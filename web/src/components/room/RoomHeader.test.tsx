@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import type { Event } from '@/api/types'
 import { applyEvent } from '@/state/reducer'
 import { emptyRoomState } from '@/state/types'
-import type { RoomState } from '@/state/types'
+import type { ProposalState, RoomState } from '@/state/types'
 import { RoomHeader } from './RoomHeader'
 import { setupState, pairedEvents } from '@/test/setupRoom'
 
@@ -90,5 +90,96 @@ describe('room header alert badge', () => {
     setWidth(1280)
     header(roomTitled('Manual room'))
     expect(screen.queryByText(/^alert/)).not.toBeInTheDocument()
+  })
+})
+
+describe('room header status sentence (KAN-600)', () => {
+  const step = { id: 's1', title: 't', tool_calls: [], messages: [] }
+  const steps = (n: number): ProposalState['steps'] => Array.from({ length: n }, () => ({ action: 'a', layer: 'kafka-connect', params: {}, description: 'd' }))
+  const ran = (...oks: boolean[]): ProposalState['executed'] => oks.map((ok, i) => ({ proposal_id: 'p1', step_index: i, ok, output: '' }))
+  const proposal = (over: Partial<ProposalState>): ProposalState => ({
+    proposal_id: 'p1',
+    title: 'fix',
+    steps: [],
+    risk: 'low',
+    rollback: 'undo',
+    required_layers: ['kafka-connect'],
+    approvals: { 'kafka-connect': 'approved' },
+    decisions: {},
+    params_hash: '',
+    status: 'approved',
+    executed: [],
+    ...over,
+  })
+  const room = (over: Partial<RoomState>): RoomState => ({
+    ...roomTitled('Orders stalled'),
+    status: 'open',
+    opened_at: '2026-10-21T11:20:00Z',
+    agent_status: { state: 'waiting_approval', detail: 'waiting on the schema layer' },
+    ...over,
+  })
+  const visibleCount = (text: string) => screen.queryAllByText(text).filter((el) => !el.closest('.sr-only')).length
+  const pillOf = (container: HTMLElement) => container.querySelector('[data-tone]') as HTMLElement
+
+  it.each([
+    [
+      'a fix that ran and recovered',
+      room({
+        proposals: [
+          proposal({
+            steps: steps(2),
+            executed: ran(true, true),
+            verification: { proposal_id: 'p1', checks: [], recovered: true, verdict: 'recovered: all good' },
+          }),
+        ],
+      }),
+      'Fix ran · recovered',
+    ],
+    [
+      'a fix that failed at a step',
+      room({ proposals: [proposal({ steps: steps(1), executed: ran(false) })] }),
+      'Fix failed · step 1',
+    ],
+    [
+      'an approved proposal held back by write mode',
+      room({ proposals: [proposal({ blocked: 'write_mode_off' })] }),
+      'Approved · waiting for write mode',
+    ],
+  ])('%s shows its sentence once, and the pill keeps its live region', (_, state, sentence) => {
+    setWidth(1280)
+    const { container } = header(state)
+    expect(visibleCount(sentence)).toBe(1)
+    // The announcement stays: the pill is visually hidden, not removed.
+    const pill = pillOf(container)
+    expect(pill).toHaveClass('sr-only')
+    expect(pill.querySelector('[aria-live="polite"]')).toHaveTextContent(sentence)
+    // The agent's detail line moves to the badge's tooltip.
+    expect(screen.getByText(sentence, { selector: '[data-slot="badge"]' })).toHaveAttribute('title', 'waiting on the schema layer')
+  })
+
+  it('a room waiting for approval shows the badge and the pill, each with its own sentence', () => {
+    setWidth(1280)
+    const open = proposal({ status: 'open', approvals: { 'kafka-connect': 'pending' } })
+    const { container } = header(room({ proposals: [open] }))
+    expect(screen.getByText(/^Needs approval/)).toBeInTheDocument()
+    expect(screen.getByText('Agent waiting · 0 of 1 approvals')).toBeInTheDocument()
+    expect(pillOf(container)).not.toHaveClass('sr-only')
+  })
+
+  it('an agent at work shows the badge and the pill', () => {
+    setWidth(1280)
+    const { container } = header(room({ agent_status: { state: 'working' }, steps: [step], driver: { id: 'kabir', name: 'Kabir', kind: 'human' } as RoomState['driver'] }))
+    expect(screen.getByText('Investigating · step 1')).toBeInTheDocument()
+    expect(screen.getByText('Agent working')).toBeInTheDocument()
+    expect(pillOf(container)).not.toHaveClass('sr-only')
+  })
+
+  it('"Executing fix" in the pill is not hidden by "Executing fix · 1 of 2" in the badge', () => {
+    setWidth(1280)
+    const running = proposal({ steps: steps(2), executed: ran(true) })
+    const { container } = header(room({ proposals: [running] }))
+    expect(screen.getByText('Executing fix · 2 of 2')).toBeInTheDocument()
+    expect(screen.getByText('Executing fix')).toBeInTheDocument()
+    expect(pillOf(container)).not.toHaveClass('sr-only')
   })
 })
