@@ -50,6 +50,12 @@ const (
 	secretCCloudClusterKey    = "ccloud_cluster_key"
 	secretCCloudClusterSecret = "ccloud_cluster_secret"
 	secretAivenToken          = "aiven_token"
+	// The service accounts ccloud_acl_create may grant to, one per
+	// template, entered by the person on the runner's terminal
+	// (secret_set; a ccloud_* name never comes through the room). The
+	// op refuses any other principal.
+	secretCCloudWatcherSA   = "ccloud_watcher_service_account"
+	secretCCloudConnectorSA = "ccloud_connector_service_account"
 )
 
 // awsCredentialTimeout bounds the one credential fetch at registration
@@ -105,6 +111,18 @@ func (o storeOpener) lookup(name string) (string, bool) {
 	}
 	v, err := st.LookupRef(name)
 	return v, err == nil
+}
+
+// aclPrincipal is the Confluent driver's Principal: the service account the
+// person entered on the runner for an ACL template.
+func (o storeOpener) aclPrincipal(template string) (string, error) {
+	switch template {
+	case managed.ACLTemplateWatcher:
+		return o.get(secretCCloudWatcherSA)
+	case managed.ACLTemplateConnector:
+		return o.get(secretCCloudConnectorSA)
+	}
+	return "", fmt.Errorf("setup: no service account name for ACL template %q", template)
 }
 
 // storeMaterialiser is the managed drivers' Secrets: the runner's store,
@@ -225,6 +243,7 @@ func (t *targetRegistrar) registerManaged(ctx context.Context, roomID string, ta
 		api, acl := t.clients.confluent(env, cluster, t.secrets)
 		if _, err := managed.RegisterConfluent(t.cat, managed.ConfluentOptions{
 			Client: api, ACL: acl, Target: tg, ProdPatterns: t.prodPatterns, Secrets: secrets,
+			Principal: t.secrets.aclPrincipal,
 		}); err != nil {
 			return false, fmt.Errorf("setup: registering the Confluent Cloud target: %w", err)
 		}

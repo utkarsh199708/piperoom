@@ -158,12 +158,12 @@ func targetSpecs() []Spec {
 			Name:     "ccloud_acl_create",
 			Tier:     "T2",
 			Layer:    "kafka-connect",
-			Describe: "Create the fixed ACL rows of a template for one Confluent service account: watcher (read the topics under topic_prefix and describe the connector's group, group required) or connector (create, write and describe the topics under topic_prefix).",
+			Describe: "Create the fixed ACL rows of a template for one Confluent service account: watcher (read the topics under topic_prefix and describe the connector's group, group required) or connector (create, write and describe the topics under topic_prefix). topic_prefix is the pipeline's topic_prefix; principal must be the service account the person entered on the runner for that template (ccloud_watcher_service_account or ccloud_connector_service_account), which the runner checks.",
 			Schema: objectSchema(map[string]any{
 				"template":  map[string]any{"type": "string", "enum": []string{"watcher", "connector"}},
 				"principal": mskString(), "topic_prefix": mskString(), "group": mskString(),
 			}, "template", "principal", "topic_prefix"),
-			Scope:       ScopeFree,
+			Scope:       scopeCCloudACL,
 			CheckParams: checkCCloudACL,
 		},
 
@@ -657,6 +657,42 @@ func checkCCloudCreate(raw json.RawMessage) error {
 	return checkManagedConfig(p.Config)
 }
 
+// minCCloudACLPrefix mirrors the managed driver's minACLPrefix.
+const minCCloudACLPrefix = 3
+
+// scopeCCloudACL binds ccloud_acl_create to the pipeline: topic_prefix is
+// the pipeline's own topic_prefix (a pipeline without one gets no ACL), and
+// the watcher's group is the consumer group of one of the pipeline's
+// connectors (connect-<connector>, Confluent's sink group naming) or one of
+// its declared consumer_groups. The principal is not the server's to bind:
+// the server holds no record of the person's service accounts, so the
+// runner refuses any principal other than the one the person entered on its
+// terminal for the template (managed.ConfluentOptions.Principal).
+func scopeCCloudACL(p owners.Pipeline, raw json.RawMessage) error {
+	var q struct {
+		Template    string `json:"template"`
+		TopicPrefix string `json:"topic_prefix"`
+		Group       string `json:"group"`
+	}
+	if err := json.Unmarshal(paramsOrEmpty(raw), &q); err != nil {
+		return fmt.Errorf("%w: scope: params must be a JSON object", tools.ErrBadInput)
+	}
+	if p.TopicPrefix == "" || q.TopicPrefix != p.TopicPrefix {
+		return fmt.Errorf("%w: topic_prefix %q is not pipeline %q's topic_prefix", tools.ErrOutOfScope, clipText(q.TopicPrefix), clipText(p.ID))
+	}
+	if q.Template != "watcher" {
+		return nil
+	}
+	groups := append([]string{}, p.ConsumerGroups...)
+	for _, c := range p.Connectors {
+		groups = append(groups, "connect-"+c)
+	}
+	if !slices.Contains(groups, q.Group) {
+		return fmt.Errorf("%w: group %q is not a consumer group of pipeline %q", tools.ErrOutOfScope, clipText(q.Group), clipText(p.ID))
+	}
+	return nil
+}
+
 func checkCCloudACL(raw json.RawMessage) error {
 	var p struct {
 		Template    string `json:"template"`
@@ -672,6 +708,9 @@ func checkCCloudACL(raw json.RawMessage) error {
 	}
 	if err := matchOrErr(ccResourceRE, "topic_prefix", p.TopicPrefix); err != nil {
 		return err
+	}
+	if len(p.TopicPrefix) < minCCloudACLPrefix || strings.HasPrefix(p.TopicPrefix, "_") {
+		return fmt.Errorf("topic_prefix %q must be at least %d characters and must not start with _", clipText(p.TopicPrefix), minCCloudACLPrefix)
 	}
 	switch p.Template {
 	case "watcher":

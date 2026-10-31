@@ -123,7 +123,12 @@ var targetCases = map[string]struct{ good, bad []string }{
 	},
 	"ccloud_acl_create": {
 		good: []string{`{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg.","group":"connect-orders-src"}`, `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg."}`},
-		bad:  []string{`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg.","group":"x"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg."}`, `{"template":"admin","principal":"User:sa-abc123","topic_prefix":"pg."}`},
+		bad: []string{`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg.","group":"x"}`, `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"pg."}`, `{"template":"admin","principal":"User:sa-abc123","topic_prefix":"pg."}`,
+			// A one- or two-character prefix covers most of a cluster; "_"
+			// starts its internal topics (M2).
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"o"}`,
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"pg"}`,
+			`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"_confluent"}`},
 	},
 	"aiven_create_connector": {
 		good: []string{`{"name":"orders-src","config":{"connector.class":"io.debezium.connector.postgresql.PostgresConnector"}}`},
@@ -284,7 +289,7 @@ func TestStrimziCardOnlyFieldIsNotTheModels(t *testing.T) {
 // TestTargetSpecScopes: a connector a target write names is one of the
 // pipeline's; the chart-fixed Strimzi objects need no scope.
 func TestTargetSpecScopes(t *testing.T) {
-	pl := owners.Pipeline{ID: "orders", Connectors: []string{"orders-src"}}
+	pl := owners.Pipeline{ID: "orders", TopicPrefix: "orders", Connectors: []string{"orders-src"}, ConsumerGroups: []string{"orders-sink"}}
 	specs := specsByName()
 	cases := []struct {
 		op, params string
@@ -299,6 +304,13 @@ func TestTargetSpecScopes(t *testing.T) {
 		{"msk_delete_connector", `{"name":"payments-src"}`, false},
 		{"ccloud_create_connector", `{"name":"orders-src","plugin":"PostgresCdcSourceV2","config":{"a":"b"}}`, true},
 		{"aiven_create_connector", `{"name":"payments-src","config":{"connector.class":"x"}}`, false},
+		// ccloud_acl_create grants on the pipeline's own prefix and groups only (M2).
+		{"ccloud_acl_create", `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`, true},
+		{"ccloud_acl_create", `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"payments"}`, false},
+		{"ccloud_acl_create", `{"template":"connector","principal":"User:sa-abc123","topic_prefix":"ord"}`, false},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-orders-src"}`, true},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"orders-sink"}`, true},
+		{"ccloud_acl_create", `{"template":"watcher","principal":"User:sa-abc123","topic_prefix":"orders","group":"connect-payments-src"}`, false},
 	}
 	for _, c := range cases {
 		a, err := setupactions.New(specs[c.op], setupactions.Deps{})
@@ -312,5 +324,18 @@ func TestTargetSpecScopes(t *testing.T) {
 		if !c.inScope && !errors.Is(err, tools.ErrOutOfScope) {
 			t.Errorf("%s %s: err = %v, want ErrOutOfScope", c.op, c.params, err)
 		}
+	}
+}
+
+// TestCCloudACLScopeNeedsATopicPrefix: a pipeline without a topic_prefix
+// gets no ACL at all: there is no prefix to bind the rows to.
+func TestCCloudACLScopeNeedsATopicPrefix(t *testing.T) {
+	a, err := setupactions.New(specsByName()["ccloud_acl_create"], setupactions.Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = a.CheckScope(owners.Pipeline{ID: "orders"}, json.RawMessage(`{"template":"connector","principal":"User:sa-abc123","topic_prefix":"orders"}`))
+	if !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("CheckScope = %v, want ErrOutOfScope", err)
 	}
 }

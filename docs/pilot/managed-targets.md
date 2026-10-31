@@ -129,6 +129,17 @@ unverified too (`Operator` or a viewer role, the design §2.2). No op creates se
 the design §3.2). ACL rows are limited to a closed set: ALLOW only, host `*`, a `User:sa-...` principal, no wildcard
 resource (`internal/clients/confluentcloud/api.go:224-260`).
 
+**Who an ACL can be granted to.** `ccloud_acl_create` grants only to a service account **you entered on the runner's
+terminal**, one per template: `secret_set ccloud_watcher_service_account` (the read account you created from the card)
+and `secret_set ccloud_connector_service_account` (the managed connector's own account, its
+`kafka.service.account.id`), as `sa-...` or `User:sa-...`. The runner refuses any other principal, and refuses the op
+when the template's entry is missing (`managed.ErrPrincipal`, `managed.ErrNoPrincipal`;
+`internal/setup/targets/managed/confluent.go`, `checkPrincipal`). These are `ccloud_*` names, so they never come
+through the room. The server cannot bind the principal (it holds no record of your accounts); it binds the rest: the
+topic prefix must be the pipeline's own `topic_prefix`, and the watcher's group a `connect-<connector>` of one of the
+pipeline's connectors or one of its `consumer_groups` (`internal/setup/actions/specs_targets.go`, `scopeCCloudACL`).
+Both sides refuse a prefix shorter than 3 characters or starting with `_` (the cluster's internal topics).
+
 `ccloud_create_connector` validates the config against the managed plugin first and creates only when validation
 reports no error (`internal/setup/targets/managed/confluent.go:347-372`); a validate result keeps the config names and
 error messages, never the echoed values (`internal/clients/confluentcloud/api.go:52-90`). A connection-refused or

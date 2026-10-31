@@ -89,7 +89,10 @@ func newConfluent(t *testing.T, connect, acl http.RoundTripper) *ops.Registry {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	if _, err := RegisterConfluent(reg, ConfluentOptions{Client: c, ACL: a, Target: ccTarget, Secrets: fakeStore{}}); err != nil {
+	// The flows' principal (sa-00000) is the one entered on the runner for
+	// both templates.
+	principal := func(string) (string, error) { return "sa-00000", nil }
+	if _, err := RegisterConfluent(reg, ConfluentOptions{Client: c, ACL: a, Target: ccTarget, Secrets: fakeStore{}, Principal: principal}); err != nil {
 		t.Fatal(err)
 	}
 	return reg
@@ -259,6 +262,9 @@ func TestACLRows(t *testing.T) {
 		"wildcard prefix":         {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "*"},
 		"unknown template":        {Template: "admin", Principal: "User:sa-00000", TopicPrefix: "orders"},
 		"a principal that is not": {Template: ACLTemplateConnector, Principal: "sa-00000", TopicPrefix: "orders"},
+		"one-character prefix":    {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "o"},
+		"two-character prefix":    {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "or"},
+		"internal topics prefix":  {Template: ACLTemplateConnector, Principal: "User:sa-00000", TopicPrefix: "_confluent"},
 	} {
 		if _, err := ACLRows(p); !errors.Is(err, ops.ErrParams) {
 			t.Errorf("%s: %v", name, err)
@@ -267,5 +273,62 @@ func TestACLRows(t *testing.T) {
 	reg, _ := ccReg(t, &fakeCC{}, ConfluentOptions{})
 	if _, err := exec(t, reg, "ccloud_acl_create", map[string]any{"template": "connector", "principal": "User:sa-00000", "topic_prefix": "orders"}); !errors.Is(err, ErrNoACLKey) {
 		t.Errorf("no ACL client: %v", err)
+	}
+}
+
+// countingACL records the rows ccloud_acl_create sends.
+type countingACL struct{ rows []confluentcloud.ACL }
+
+func (a *countingACL) CreateACL(_ context.Context, acl confluentcloud.ACL) error {
+	a.rows = append(a.rows, acl)
+	return nil
+}
+
+// TestACLPrincipalIsThePersons (review M2): the principal is bound to the
+// service account the person entered on the runner for the template; a
+// model-chosen principal, a missing entry and a runner without the source
+// are refused before any ACL row is sent.
+func TestACLPrincipalIsThePersons(t *testing.T) {
+	entered := map[string]string{ACLTemplateWatcher: "sa-00001", ACLTemplateConnector: "User:sa-00000"}
+	principal := func(tpl string) (string, error) {
+		v, ok := entered[tpl]
+		if !ok {
+			return "", errors.New("not entered")
+		}
+		return v, nil
+	}
+	watcher := map[string]any{"template": "watcher", "principal": "User:sa-00001", "topic_prefix": "orders", "group": "connect-it_orders"}
+	connector := map[string]any{"template": "connector", "principal": "User:sa-00000", "topic_prefix": "orders"}
+
+	acl := &countingACL{}
+	reg, _ := ccReg(t, &fakeCC{}, ConfluentOptions{ACL: acl, Principal: principal})
+	for _, p := range []map[string]any{watcher, connector} {
+		if _, err := exec(t, reg, "ccloud_acl_create", p); err != nil {
+			t.Fatalf("%v: %v", p["template"], err)
+		}
+	}
+	if len(acl.rows) != 8 {
+		t.Fatalf("%d rows sent, want 8", len(acl.rows))
+	}
+
+	acl.rows = nil
+	other := map[string]any{"template": "connector", "principal": "User:sa-99999", "topic_prefix": "orders"}
+	if _, err := exec(t, reg, "ccloud_acl_create", other); !errors.Is(err, ErrPrincipal) {
+		t.Errorf("a principal the person did not enter: %v, want ErrPrincipal", err)
+	}
+	swapped := map[string]any{"template": "watcher", "principal": "User:sa-00000", "topic_prefix": "orders", "group": "connect-it_orders"}
+	if _, err := exec(t, reg, "ccloud_acl_create", swapped); !errors.Is(err, ErrPrincipal) {
+		t.Errorf("the connector's account on the watcher template: %v, want ErrPrincipal", err)
+	}
+	delete(entered, ACLTemplateConnector)
+	if _, err := exec(t, reg, "ccloud_acl_create", connector); !errors.Is(err, ErrNoPrincipal) {
+		t.Errorf("no entered account: %v, want ErrNoPrincipal", err)
+	}
+	none, _ := ccReg(t, &fakeCC{}, ConfluentOptions{ACL: acl})
+	if _, err := exec(t, none, "ccloud_acl_create", watcher); !errors.Is(err, ErrNoPrincipal) {
+		t.Errorf("no principal source: %v, want ErrNoPrincipal", err)
+	}
+	if len(acl.rows) != 0 {
+		t.Errorf("%d rows sent for refused principals", len(acl.rows))
 	}
 }

@@ -423,3 +423,28 @@ func TestRegistrarRefusesAnotherRoom(t *testing.T) {
 		t.Fatalf("Apply(room-1) again = %v", err)
 	}
 }
+
+// TestACLPrincipalFromTheStore: the Confluent driver's principal source is
+// the runner's store, one ccloud_* name per template (entered on the
+// terminal only); a missing one names itself.
+func TestACLPrincipalFromTheStore(t *testing.T) {
+	st, open := openTestStore(t)
+	if _, err := open.aclPrincipal(managed.ACLTemplateWatcher); !errors.Is(err, errNoCloudCredential) || !strings.Contains(err.Error(), secretCCloudWatcherSA) {
+		t.Fatalf("no entry: %v", err)
+	}
+	if err := st.Set(secretCCloudWatcherSA, "sa-00001"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set(secretCCloudConnectorSA, "sa-00000"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := open.aclPrincipal(managed.ACLTemplateWatcher); err != nil || v != "sa-00001" {
+		t.Fatalf("watcher = %q, %v", v, err)
+	}
+	if v, err := open.aclPrincipal(managed.ACLTemplateConnector); err != nil || v != "sa-00000" {
+		t.Fatalf("connector = %q, %v", v, err)
+	}
+	if _, err := open.aclPrincipal("admin"); err == nil {
+		t.Fatal("an unknown template has a principal")
+	}
+}

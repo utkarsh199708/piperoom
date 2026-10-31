@@ -49,10 +49,31 @@ type ConfluentOptions struct {
 	Class        string
 	ProdPatterns []string
 	Secrets      Materialiser
+	// Principal returns the service account the person entered on the
+	// runner's terminal for an ACL template (ACLTemplateWatcher: the read
+	// account they created from the card; ACLTemplateConnector: the managed
+	// connector's own account), as "sa-..." or "User:sa-...". The model's
+	// principal param must be that account: ccloud_acl_create never grants
+	// a principal the person did not name on the runner. nil, or an error,
+	// refuses the op with ErrNoPrincipal.
+	Principal func(template string) (string, error)
 }
 
 // ErrNoACLKey: the runner holds no cluster API key for ACLs.
 var ErrNoACLKey = errors.New("managed: no cluster API key on the runner (${secret:ccloud_cluster_key} and _secret)")
+
+// ErrNoPrincipal: the person has not entered the template's service account
+// on the runner, so no ACL row is created for any principal.
+var ErrNoPrincipal = errors.New("managed: no service account for this ACL template on the runner")
+
+// ErrPrincipal: the principal param is not the service account the person
+// entered on the runner for the template.
+var ErrPrincipal = errors.New("managed: the principal is not the service account entered on the runner for this template")
+
+// minACLPrefix is the shortest topic prefix an ACL template grants on. A
+// PREFIXED row on one or two characters covers most of a cluster's topics;
+// the server binds the prefix to the pipeline's topic_prefix as well.
+const minACLPrefix = 3
 
 // ConfluentDriver holds the Confluent target's ids and class.
 type ConfluentDriver struct {
@@ -62,6 +83,8 @@ type ConfluentDriver struct {
 	cluster string
 	class   string
 	secrets Materialiser
+	// principal is ConfluentOptions.Principal.
+	principal func(template string) (string, error)
 }
 
 // Class is the target's derived class.
@@ -79,7 +102,7 @@ func RegisterConfluent(r *ops.Registry, o ConfluentOptions) (*ConfluentDriver, e
 	if len(parts) != 2 || confluentcloud.CheckEnvironment(parts[0]) != nil || confluentcloud.CheckCluster(parts[1]) != nil {
 		return nil, fmt.Errorf("managed: the confluent target address %q is not <environment id>/<cluster id>", clipText(o.Target.Address, 80))
 	}
-	d := &ConfluentDriver{api: o.Client, acl: o.ACL, env: parts[0], cluster: parts[1], secrets: o.Secrets}
+	d := &ConfluentDriver{api: o.Client, acl: o.ACL, env: parts[0], cluster: parts[1], secrets: o.Secrets, principal: o.Principal}
 	person := o.Class
 	if person == "" {
 		person = o.Target.Class
@@ -257,6 +280,11 @@ func ACLRows(p ACLParams) ([]confluentcloud.ACL, error) {
 	if err := confluentcloud.CheckResource(p.TopicPrefix); err != nil {
 		return nil, paramErr(err)
 	}
+	if len(p.TopicPrefix) < minACLPrefix || strings.HasPrefix(p.TopicPrefix, "_") {
+		// "_" starts the cluster's internal topics (_schemas,
+		// _confluent-...); no template grants on them.
+		return nil, fmt.Errorf("%w: topic_prefix %q must be at least %d characters and must not start with _", ErrParams, clipText(p.TopicPrefix, 32), minACLPrefix)
+	}
 	row := func(rt, name, pattern, op string) confluentcloud.ACL {
 		return confluentcloud.ACL{ResourceType: rt, ResourceName: name, PatternType: pattern, Principal: p.Principal, Host: "*", Operation: op, Permission: "ALLOW"}
 	}
@@ -377,12 +405,40 @@ func (d *ConfluentDriver) createConnector(ctx context.Context, raw json.RawMessa
 		Data: map[string]any{"connector": created.Name, "type": created.Type, "config": p.Config, "created": true}}, nil
 }
 
+// checkPrincipal binds the principal param to the service account the
+// person entered on the runner for the template (ConfluentOptions.Principal).
+// The model names the principal, but it cannot choose it: a row for any
+// other account is refused before the first ACL call.
+func (d *ConfluentDriver) checkPrincipal(p ACLParams) error {
+	if d.principal == nil {
+		return fmt.Errorf("%w (%s)", ErrNoPrincipal, p.Template)
+	}
+	want, err := d.principal(p.Template)
+	if err != nil {
+		return fmt.Errorf("%w (%s): %w", ErrNoPrincipal, p.Template, err)
+	}
+	want = strings.TrimSpace(want)
+	if !strings.HasPrefix(want, "User:") {
+		want = "User:" + want
+	}
+	if confluentcloud.CheckPrincipal(want) != nil {
+		return fmt.Errorf("%w (%s): the entered value is not a service account id (sa-...)", ErrNoPrincipal, p.Template)
+	}
+	if p.Principal != want {
+		return fmt.Errorf("%w (%s)", ErrPrincipal, p.Template)
+	}
+	return nil
+}
+
 func (d *ConfluentDriver) createACLs(ctx context.Context, raw json.RawMessage) (ops.Result, error) {
 	var p ACLParams
 	_ = decode(raw, &p)
 	rows, _ := ACLRows(p)
 	if d.acl == nil {
 		return ops.Result{Summary: "refused ccloud_acl_create: " + ErrNoACLKey.Error()}, ErrNoACLKey
+	}
+	if err := d.checkPrincipal(p); err != nil {
+		return ops.Result{Summary: "refused ccloud_acl_create: " + err.Error()}, err
 	}
 	var done []confluentcloud.ACL
 	for _, row := range rows {
