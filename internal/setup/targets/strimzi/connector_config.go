@@ -186,6 +186,8 @@ var neverKeys = map[string]string{
 	// not create; the sink's tables are the topics' (RegexRouter may rename
 	// them, never into another schema).
 	"table.name.format": "the sink's table is its topic's name (RegexRouter may rename it), never a literal",
+	// Its successor since 3.0.2.Final.
+	"collection.name.format": "the sink's table is its topic's name (RegexRouter may rename it), never a literal",
 }
 
 // pinnedValues are the keys a setup may set only to one of a fixed set of
@@ -601,10 +603,20 @@ func checkTransformKey(plugin string, cfg map[string]any, path, list, name, sub,
 	if len(key.Values) > 0 && !containsKey(key.Values, v) {
 		return refuse(path, "one of "+strings.Join(key.Values, ", "))
 	}
-	if smtBaseClass(cls) == regexRouter && sub == "replacement" && strings.Contains(v, ".") {
-		return refuse(path, "a table name: a replacement never names another schema (no '.')")
+	if tableNameSMTKeys[smtBaseClass(cls)][sub] && strings.Contains(v, ".") {
+		return refuse(path, "a table name or part of one: never another schema (no '.')")
 	}
 	return nil
+}
+
+// tableNameSMTKeys are the transform keys whose value becomes (part of) a
+// sink's table name: a '.' there would name another schema. The sink's
+// tables are otherwise unbound (the sink database's grants are the
+// boundary), so the setup never steers them out of the default schema.
+// The admission policy reads the same table (files/setup-smt.txt "nodot").
+var tableNameSMTKeys = map[string]map[string]bool{
+	regexRouter: {"replacement": true},
+	"io.debezium.connector.jdbc.transforms.CollectionNameTransformation": {"collection.naming.prefix": true, "collection.naming.suffix": true},
 }
 
 // kafkaBootstrapRE is the Kafka cluster's in-cluster bootstrap Service, the

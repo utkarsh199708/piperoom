@@ -241,6 +241,9 @@ func TestPolicyFilesSMT(t *testing.T) {
 				continue
 			}
 			rows = append(rows, []string{"key", cls, sub})
+			if tableNameSMTKeys[smtBaseClass(cls)][sub] {
+				rows = append(rows, []string{"nodot", cls, sub})
+			}
 			for _, v := range key.Values {
 				rows = append(rows, []string{"enum", cls, sub, v})
 			}

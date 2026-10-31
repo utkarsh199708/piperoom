@@ -313,12 +313,13 @@ patterns. The policy matches values against these allow-lists only. */}}
 {{- if eq (index $f 0) "enum" }}{{ $_ := set $enum (index $f 1) (append (get $enum (index $f 1)) (squote (index $f 2))) }}{{ end }}
 {{- if eq (index $f 0) "require" }}{{ $_ := set $requ (index $f 1) (append (get $requ (index $f 1)) (squote (index $f 2))) }}{{ end }}
 {{- end }}{{ end }}
-{{- $types := list }}{{ $sinktypes := list }}{{ $smtkeys := list }}{{ $smtenumkeys := list }}{{ $smtenum := list }}
+{{- $types := list }}{{ $sinktypes := list }}{{ $smtkeys := list }}{{ $smtenumkeys := list }}{{ $smtenum := list }}{{ $nodot := list }}
 {{- range (.Files.Lines "files/setup-smt.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}
 {{- if eq (index $f 0) "type" }}{{ $types = append $types (squote (index $f 1)) }}{{ end }}
 {{- if eq (index $f 0) "sinktype" }}{{ $sinktypes = append $sinktypes (squote (index $f 1)) }}{{ end }}
 {{- if eq (index $f 0) "key" }}{{ $smtkeys = append $smtkeys (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}
+{{- if eq (index $f 0) "nodot" }}{{ $nodot = append $nodot (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ end }}
 {{- if eq (index $f 0) "enum" }}{{ $smtenumkeys = append $smtenumkeys (squote (printf "%s %s" (index $f 1) (index $f 2))) }}{{ $smtenum = append $smtenum (squote (printf "%s %s %s" (index $f 1) (index $f 2) (index $f 3))) }}{{ end }}
 {{- end }}{{ end }}
 {{- $pat := dict }}
@@ -508,8 +509,10 @@ spec:
       message: "piperoom: a KafkaConnector's pinned keys hold one of the runner's values (TLS on and verified, the sink's own classes, the allow-listed converters, Strimzi's own stores, the source signal channel), a source sets its TLS key, a schema history uses SSL, and database names are names"
     # Transforms and predicates: a declared name, a class from the runner's
     # list (RegexRouter on a JDBC sink only), and each other key one of that
-    # class's keys with one of its values; a RegexRouter replacement names a
-    # table, never another schema. route.by.field is not in the key list.
+    # class's keys with one of its values; a key that names a table (the
+    # "nodot" rows: a RegexRouter replacement, a CollectionNameTransformation
+    # prefix or suffix) never names another schema. route.by.field is not in
+    # the key list.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
         ((!('transforms' in variables.cc) || string(variables.cc['transforms']).matches({{ index $pat "transformnames" }})) &&
@@ -525,9 +528,9 @@ spec:
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtkeys }}] &&
         (!((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtenumkeys }}]) ||
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) + ' ' + string(variables.cc[k])) in [{{ join ", " $smtenum }}]) &&
-        !(string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) == 'org.apache.kafka.connect.transforms.RegexRouter' &&
-        k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) == 'replacement' && string(variables.cc[k]).contains('.')))))))))
-      message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, no RegexRouter replacement into another schema)"
+        !((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $nodot }}] &&
+        string(variables.cc[k]).contains('.')))))))))
+      message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, and no table name, a RegexRouter replacement or a CollectionNameTransformation prefix or suffix, into another schema)"
     # Connection URLs: the runner's shape for the dialect (no user info, no
     # IPv6 literal), every parameter from the dialect's list with a plain or
     # label value and an allowed value where the runner pins one, no

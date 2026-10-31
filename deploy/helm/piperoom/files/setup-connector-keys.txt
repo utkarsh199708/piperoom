@@ -5,7 +5,6 @@ binary.handling.mode
 capture.mode
 collection.exclude.list
 collection.include.list
-collection.name.format
 collection.naming.strategy
 column.exclude.list
 column.include.list

@@ -165,6 +165,9 @@ key	org.apache.kafka.connect.transforms.ValueToKey	fields
 key	org.apache.kafka.connect.transforms.ValueToKey	replace.null.with.default
 key	org.apache.kafka.connect.transforms.predicates.HasHeaderKey	name
 key	org.apache.kafka.connect.transforms.predicates.TopicNameMatches	pattern
+nodot	io.debezium.connector.jdbc.transforms.CollectionNameTransformation	collection.naming.prefix
+nodot	io.debezium.connector.jdbc.transforms.CollectionNameTransformation	collection.naming.suffix
+nodot	org.apache.kafka.connect.transforms.RegexRouter	replacement
 sinktype	org.apache.kafka.connect.transforms.RegexRouter
 type	io.debezium.connector.jdbc.transforms.CollectionNameTransformation
 type	io.debezium.connector.jdbc.transforms.FieldNameTransformation

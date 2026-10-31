@@ -256,8 +256,10 @@ for SQL Server), and a JDBC sink URL must carry its dialect's (`sslmode=verify-c
 or `require` (TLS without verification) is refused where it was allowed. The schema history clients must use
 `SSL` (no `PLAINTEXT` or `SASL_*`). Oracle and Db2 have no URL parameter that pins certificate verification, so
 the chart cannot require one (Db2 `sslConnection=true` is allowed, not required): their TLS is the database's
-configuration. A JDBC sink's table and schema are not bound (`table.name.format` and `currentSchema` are refused);
-the **sink database's grants** for the connector's user are the boundary for what it may write.
+configuration. A JDBC sink's table and schema are not bound to a list: `table.name.format`, `collection.name.format` and
+`currentSchema` are refused, and a RegexRouter replacement or CollectionNameTransformation prefix or suffix may not
+hold a `.`, so tables stay in the connection's default schema, but the **sink database's grants** for the
+connector's user are the boundary for what it may write.
 
 The runner and the server both require a connector step's `topic_prefix` param to be the pipeline's. With
 `networkPolicy.enabled` the runner release adds a NetworkPolicy for the Job: no ingress, egress to DNS, the API
