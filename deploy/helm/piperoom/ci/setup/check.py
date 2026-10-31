@@ -119,7 +119,7 @@ def check_policy(docs, values):
                          "certificateAndKey.secretName ==", "passwordSecret.secretName ==", "config.providers",
                          "io.strimzi.kafka.KubernetesSecretConfigProvider", "a.sha512sum.matches", "a.url.startsWith(h)",
                          "logging.valueFrom.configMapKeyRef.name ==", "metricsConfig.valueFrom.configMapKeyRef.name =="],
-        "KafkaConnector": ["object.spec.class.startsWith('io.debezium.connector.')", "override", "initial.statements",
+        "KafkaConnector": ["override", "initial.statements",
                            "bootstrap.servers", "heartbeat.action.query", "-db-credentials:",
                            "object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart'])", "object.spec.tasksMax == 1",
                            "'${strimzienv:CERTS_STORE_PASSWORD}'", "'/tmp/kafka/cluster.truststore.p12'",
@@ -166,7 +166,7 @@ def check_policy(docs, values):
     if not keys or "[%s]" % ", ".join("'%s'" % i for i in keys) not in exprs:
         fail("the KafkaConnector rules do not hold the runner's connector key list (files/setup-connector-keys.txt)")
     tokens = {
-        "setup-connector-values.txt": lambda r: ["'%s': '%s'" % (r[1], r[2])] if r[0] == "cred" else (["'%s'" % r[2]] if r[0] in ("exact", "fold") else ["'%s'" % r[1], "'%s'" % r[2]]),
+        "setup-connector-values.txt": lambda r: ["'%s': '%s'" % (r[1], r[2])] if r[0] == "cred" else (["'%s'" % r[2]] if r[0] in ("exact", "fold") else (["'%s'" % r[1]] if r[0] == "class" else ["'%s'" % r[1], "'%s'" % r[2]])),
         "setup-url-params.txt": lambda r: ["'%s'" % (r[1] if r[0] == "label" else r[2])],
         "setup-smt.txt": lambda r: ["'%s'" % " ".join(r[1:])],
         "setup-patterns.txt": lambda r: ["r'%s'" % r[1]],
@@ -195,6 +195,10 @@ def check_policy(docs, values):
         # Every copy of the map in the rules is the whole map.
         if whole not in exprs or exprs.count(whole) != exprs.count(whole.split("], ", 1)[0] + "], "):
             fail("the KafkaConnector rules do not hold the runner's %s map from files/%s whole" % (kind, fname))
+    # spec.class is exactly one of the runner's classes, never a prefix.
+    classes = "object.spec.class in [%s]" % ", ".join("'%s'" % r[1] for r in rows("setup-connector-values.txt") if r[0] == "class")
+    if classes not in exprs or "object.spec.class.startsWith(" in exprs:
+        fail("the KafkaConnector rules do not pin spec.class to the runner's classes (files/setup-connector-values.txt class rows)")
     want_vars = ["cc", "sink", "url", "mongo", "dialect", "urlRest", "oracleAddr", "urlParams", "urlHosts", "mongoParams", "mongoHosts"]
     if [v["name"] for v in spec.get("variables") or []] != want_vars:
         fail("the policy's variables are %s, want %s" % ([v["name"] for v in spec.get("variables") or []], want_vars))

@@ -188,10 +188,11 @@ type connectorParams struct {
 	Connector string            `json:"connector"` // one of the chart's connector names
 	Plugin    string            `json:"plugin"`    // postgres, mysql, ..., jdbc
 	Config    map[string]string `json:"config"`
-	// TopicPrefix is the pipeline's topic prefix (the server's scope binds
-	// it to owners topic_prefix): a sink's dead letter queue and a source's
-	// schema history are held under it. Empty falls back to a source's
-	// topic.prefix; a sink that names a dead letter queue needs it.
+	// TopicPrefix is the pipeline's topic prefix (the server's scope
+	// requires it and binds it to owners topic_prefix): a source's
+	// topic.prefix, a sink's topics and dead letter queue and a source's
+	// schema history are held under it. It is required: there is no
+	// fallback to the config's topic.prefix (ValidateConnector).
 	TopicPrefix string `json:"topic_prefix,omitempty"`
 }
 

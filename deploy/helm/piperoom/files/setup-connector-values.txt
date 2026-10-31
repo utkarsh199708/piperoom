@@ -1,3 +1,9 @@
+class	io.debezium.connector.jdbc.JdbcSinkConnector	jdbc
+class	io.debezium.connector.mongodb.MongoDbConnector	mongodb
+class	io.debezium.connector.mysql.MySqlConnector	mysql
+class	io.debezium.connector.oracle.OracleConnector	oracle
+class	io.debezium.connector.postgresql.PostgresConnector	postgres
+class	io.debezium.connector.sqlserver.SqlServerConnector	sqlserver
 cred	connection.password	password
 cred	connection.username	username
 cred	database.password	password

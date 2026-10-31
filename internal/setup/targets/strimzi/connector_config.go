@@ -606,7 +606,38 @@ func checkTransformKey(plugin string, cfg map[string]any, path, list, name, sub,
 	if tableNameSMTKeys[smtBaseClass(cls)][sub] && strings.Contains(v, ".") {
 		return refuse(path, "a table name or part of one: never another schema (no '.')")
 	}
+	if smtBaseClass(cls) == regexRouter && sub == "replacement" {
+		regex, _ := asString(cfg[list+"."+name+".regex"])
+		if err := checkSinkRoute(regex, v); err != nil {
+			return refuse(path, err.Error())
+		}
+	}
 	return nil
+}
+
+// A sink's RegexRouter names the table a topic is written to, so its output
+// never holds a '.' (another schema). A literal '.' is not the only way: a
+// group can capture one ("pg\.([^.]+\.[^.]+)" with "$1", or "(\.)" with
+// "admin$1users"). Rather than reason about arbitrary regexes, the setup
+// allows two shapes: a literal replacement with no '$' or '.', or a
+// replacement of $N references and literal characters over a regex built
+// only from literal characters, "\." and ([^.]+) groups, none of which can
+// capture a dot (round 5). The admission policy matches the same patterns
+// (files/setup-patterns.txt route*).
+var (
+	routeLiteralRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	routeRefRE     = regexp.MustCompile(`^([A-Za-z0-9_-]|\$[1-9]){1,128}$`)
+	routeRegexRE   = regexp.MustCompile(`^\^?([A-Za-z0-9_-]|\\\.|\(\[\^\.\]\+\)){1,64}\$?$`)
+)
+
+func checkSinkRoute(regex, replacement string) error {
+	if routeLiteralRE.MatchString(replacement) {
+		return nil
+	}
+	if routeRefRE.MatchString(replacement) && routeRegexRE.MatchString(regex) {
+		return nil
+	}
+	return errors.New(`a table name: a literal (letters, digits, _ and -), or $N references over a regex of literal characters, \. and ([^.]+) groups only, so the table never names another schema`)
 }
 
 // tableNameSMTKeys are the transform keys whose value becomes (part of) a
@@ -654,45 +685,61 @@ type jdbcURL struct {
 }
 
 // jdbcDialects are the JDBC sink's databases: their default port and their
-// URL parameter allow-list (lower-cased name -> allowed values, nil meaning a
-// plain bounded value). A parameter outside the list is refused: drivers
-// load classes and files from parameters (socketFactory, sslfactory,
-// autoDeserialize, allowLoadLocalInfile, loggerFile), and the TLS ones are
-// pinned to modes that encrypt (the plugin defaults that do not verify are
-// a documented gap: the room's targets say nothing of TLS).
+// URL parameter allow-list (the driver's own spelling of each name -> allowed
+// values, nil meaning a plain bounded value). A parameter outside the list is
+// refused: drivers load classes and files from parameters (socketFactory,
+// sslfactory, autoDeserialize, allowLoadLocalInfile, loggerFile), and the TLS
+// ones are pinned to modes that encrypt and verify. A name must be spelled
+// exactly as here: pgjdbc and Connector/J read their properties by exact
+// name, so ?SSLMODE=verify-full would look like TLS to a case-insensitive
+// check while the driver ignores it and falls back to its default
+// (round 5). Two spellings of one name are refused as a duplicate.
 var jdbcDialects = map[string]struct {
 	port   string
 	params map[string][]string
 }{
 	"postgresql": {"5432", map[string][]string{
 		"sslmode": {"verify-ca", "verify-full"}, "ssl": {"true"},
-		"connecttimeout": nil, "sockettimeout": nil, "logintimeout": nil, "applicationname": nil,
-		"rewritebatchedinserts": {"true", "false"}, "tcpkeepalive": {"true", "false"}, "stringtype": {"unspecified", "varchar"},
-		"targetservertype": {"any", "primary", "master", "secondary", "preferSecondary", "preferPrimary"}, "preparethreshold": nil,
+		"connectTimeout": nil, "socketTimeout": nil, "loginTimeout": nil, "ApplicationName": nil,
+		"reWriteBatchedInserts": {"true", "false"}, "tcpKeepAlive": {"true", "false"}, "stringtype": {"unspecified", "varchar"},
+		"targetServerType": {"any", "primary", "master", "secondary", "preferSecondary", "preferPrimary"}, "prepareThreshold": nil,
 	}},
 	"mysql": {"3306", map[string][]string{
-		"sslmode": {"verify_ca", "verify_identity"}, "usessl": {"true"}, "requiressl": {"true"}, "verifyservercertificate": {"true"},
-		"connecttimeout": nil, "sockettimeout": nil, "servertimezone": nil, "characterencoding": nil, "useunicode": {"true", "false"},
-		"rewritebatchedstatements": {"true", "false"}, "zerodatetimebehavior": {"EXCEPTION", "ROUND", "CONVERT_TO_NULL", "convertToNull"},
+		"sslMode": {"VERIFY_CA", "VERIFY_IDENTITY"}, "useSSL": {"true"}, "requireSSL": {"true"}, "verifyServerCertificate": {"true"},
+		"connectTimeout": nil, "socketTimeout": nil, "serverTimezone": nil, "characterEncoding": nil, "useUnicode": {"true", "false"},
+		"rewriteBatchedStatements": {"true", "false"}, "zeroDateTimeBehavior": {"EXCEPTION", "ROUND", "CONVERT_TO_NULL", "convertToNull"},
 		// true only with a verified TLS mode (parseJDBCURL): the RSA key is
 		// then the verified server's.
-		"allowpublickeyretrieval": {"true", "false"},
+		"allowPublicKeyRetrieval": {"true", "false"},
 	}},
 	"mariadb": {"3306", map[string][]string{
-		"sslmode": {"verify-ca", "verify-full"}, "connecttimeout": nil, "sockettimeout": nil, "rewritebatchedstatements": {"true", "false"},
+		"sslMode": {"verify-ca", "verify-full"}, "connectTimeout": nil, "socketTimeout": nil, "rewriteBatchedStatements": {"true", "false"},
 	}},
 	// No hostNameInCertificate: it would let the certificate name another
 	// host than the one dialed.
 	"sqlserver": {"1433", map[string][]string{
-		"databasename": nil, "encrypt": {"true", "strict"}, "trustservercertificate": {"false"},
-		"logintimeout": nil, "applicationname": nil,
+		"databaseName": nil, "encrypt": {"true", "strict"}, "trustServerCertificate": {"false"},
+		"loginTimeout": nil, "applicationName": nil,
 	}},
 	"oracle": {"1521", map[string][]string{}},
 	// Db2 properties follow the database name (db:k=v;k=v;). sslConnection
 	// turns TLS on; there is no URL property that pins hostname
 	// verification, and TLS is not required (a documented gap, as Oracle).
-	"db2": {"50000", map[string][]string{"sslconnection": {"true"}}},
+	"db2": {"50000", map[string][]string{"sslConnection": {"true"}}},
 }
+
+// jdbcCanonical maps each dialect's lower-cased parameter name to its
+// spelling in jdbcDialects.
+var jdbcCanonical = func() map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for d, dia := range jdbcDialects {
+		out[d] = map[string]string{}
+		for k := range dia.params {
+			out[d][strings.ToLower(k)] = k
+		}
+	}
+	return out
+}()
 
 // jdbcRequiredParams are the parameters a dialect's URL must set: TLS on
 // and verified (sqlserver's trustServerCertificate defaults to false).
@@ -700,8 +747,8 @@ var jdbcDialects = map[string]struct {
 // their TLS is a documented gap.
 var jdbcRequiredParams = map[string]string{
 	"postgresql": "sslmode",
-	"mysql":      "sslmode",
-	"mariadb":    "sslmode",
+	"mysql":      "sslMode",
+	"mariadb":    "sslMode",
 	"sqlserver":  "encrypt",
 }
 
@@ -836,10 +883,14 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 			}
 			k, v, _ := strings.Cut(kv, "=")
 			lk := strings.ToLower(k)
-			allowed, ok := dia.params[lk]
+			canon, ok := jdbcCanonical[u.dialect][lk]
 			if !ok || strings.Contains(k, "%") {
 				return u, fmt.Errorf("URL parameter %s is not in the %s allow-list", clipText(k, 40), u.dialect)
 			}
+			if k != canon {
+				return u, fmt.Errorf("URL parameter %s is spelled %s: the driver reads it by its exact name and would ignore another spelling", clipText(k, 40), canon)
+			}
+			allowed := dia.params[canon]
 			if jdbcLabelParams[lk] {
 				if !jdbcLabelRE.MatchString(strings.ReplaceAll(v, "%20", " ")) {
 					return u, fmt.Errorf("URL parameter %s: a label (letters, digits, ._/+:- and inner spaces as %%20)", clipText(k, 40))
@@ -857,7 +908,7 @@ func parseJDBCURL(s string) (jdbcURL, error) {
 		}
 	}
 	if want, ok := jdbcRequiredParams[u.dialect]; ok {
-		if _, set := u.params[want]; !set {
+		if _, set := u.params[strings.ToLower(want)]; !set {
 			return u, fmt.Errorf("a %s URL sets %s: TLS to the sink is always on and verified, never the driver's default", u.dialect, want)
 		}
 	}

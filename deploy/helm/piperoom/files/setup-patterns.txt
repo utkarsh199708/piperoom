@@ -7,6 +7,9 @@ jdbc.postgresql	^jdbc:postgresql://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-
 jdbc.sqlserver	^jdbc:sqlserver://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*(;[^;]*)*$
 label	^[A-Za-z0-9._/+:-]([A-Za-z0-9._/+: -]{0,126}[A-Za-z0-9._/+:-])?$
 mongodb	^mongodb://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(,[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?)*/?(\?[^?/@]*)?$
+routeliteral	^[A-Za-z0-9_-]{1,128}$
+routeref	^([A-Za-z0-9_-]|\$[1-9]){1,128}$
+routeregex	^\^?([A-Za-z0-9_-]|\\\.|\(\[\^\.\]\+\)){1,64}\$?$
 topic	^[A-Za-z0-9._-]{1,249}$
 transformkey	^(transforms|predicates)\.([A-Za-z][A-Za-z0-9_-]{0,31})\.([A-Za-z0-9_.-]{1,64})$
 transformnames	^[A-Za-z][A-Za-z0-9_-]{0,31}(,[A-Za-z][A-Za-z0-9_-]{0,31}){0,15}$

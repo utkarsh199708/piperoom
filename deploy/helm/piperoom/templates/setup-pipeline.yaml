@@ -292,13 +292,14 @@ dialect, the transform and predicate classes and keys, and the runner's
 patterns. The policy matches values against these allow-lists only. */}}
 {{- $ckeys := list }}
 {{- range (.Files.Lines "files/setup-connector-keys.txt") }}{{ if . }}{{ $ckeys = append $ckeys (squote .) }}{{ end }}{{ end }}
-{{- $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
+{{- $classes := list }}{{ $exact := dict }}{{ $fold := dict }}{{ $cred := dict }}{{ $reqc := dict }}
 {{- range (.Files.Lines "files/setup-connector-values.txt") }}{{ if . }}
 {{- $f := splitList "\t" . }}{{ $k := index $f 1 }}{{ $v := squote (index $f 2) }}
 {{- if eq (index $f 0) "exact" }}{{ $_ := set $exact $k (append (get $exact $k | default (list)) $v) }}{{ end }}
 {{- if eq (index $f 0) "fold" }}{{ $_ := set $fold $k (append (get $fold $k | default (list)) $v) }}{{ end }}
 {{- if eq (index $f 0) "cred" }}{{ $_ := set $cred $k $v }}{{ end }}
 {{- if eq (index $f 0) "require" }}{{ $_ := set $reqc $k (append (get $reqc $k | default (list)) $v) }}{{ end }}
+{{- if eq (index $f 0) "class" }}{{ $classes = append $classes (squote $k) }}{{ end }}
 {{- end }}{{ end }}
 {{- $free := dict }}{{ $enum := dict }}{{ $requ := dict }}{{ $dport := dict }}{{ $labels := list }}
 {{- range (.Files.Lines "files/setup-url-params.txt") }}{{ if . }}
@@ -481,7 +482,7 @@ spec:
         object.kind != 'KafkaConnector' || !has(object.spec) ||
         (object.spec.all(k, k in ['class', 'tasksMax', 'config', 'autoRestart']) &&
         (!has(object.spec.tasksMax) || object.spec.tasksMax == 1) &&
-        (!has(object.spec.class) || object.spec.class.startsWith('io.debezium.connector.')) &&
+        (!has(object.spec.class) || object.spec.class in [{{ join ", " $classes }}]) &&
         variables.cc.all(k,
         k != 'connector.class' && k != 'heartbeat.action.query' && k != 'tasks.max' &&
         !k.startsWith('config.providers') && !k.matches('(^|\\.)override\\.') && !k.endsWith('initial.statements') &&
@@ -511,7 +512,9 @@ spec:
     # list (RegexRouter on a JDBC sink only), and each other key one of that
     # class's keys with one of its values; a key that names a table (the
     # "nodot" rows: a RegexRouter replacement, a CollectionNameTransformation
-    # prefix or suffix) never names another schema. route.by.field is not in
+    # prefix or suffix) never names another schema, and a RegexRouter
+    # replacement is a literal or $N references over a regex whose groups are
+    # all ([^.]+) (a group can capture a '.' too). route.by.field is not in
     # the key list.
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
@@ -528,13 +531,19 @@ spec:
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtkeys }}] &&
         (!((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $smtenumkeys }}]) ||
         (string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) + ' ' + string(variables.cc[k])) in [{{ join ", " $smtenum }}]) &&
+        (!(string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) == 'org.apache.kafka.connect.transforms.RegexRouter' &&
+        k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2) == 'replacement') ||
+        string(variables.cc[k]).matches({{ index $pat "routeliteral" }}) ||
+        (string(variables.cc[k]).matches({{ index $pat "routeref" }}) && (k.split('.')[0] + '.' + k.split('.')[1] + '.regex') in variables.cc &&
+        string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.regex']).matches({{ index $pat "routeregex" }}))) &&
         !((string(variables.cc[k.split('.')[0] + '.' + k.split('.')[1] + '.type']) + ' ' + k.substring(k.split('.')[0].size() + k.split('.')[1].size() + 2)) in [{{ join ", " $nodot }}] &&
         string(variables.cc[k]).contains('.')))))))))
       message: "piperoom: every transform and predicate is declared, its class is on the runner's list (RegexRouter on a JDBC sink only), and its keys and values are the class's own (no route.by.field, and no table name, a RegexRouter replacement or a CollectionNameTransformation prefix or suffix, into another schema)"
     # Connection URLs: the runner's shape for the dialect (no user info, no
     # IPv6 literal), every parameter from the dialect's list with a plain or
-    # label value and an allowed value where the runner pins one, no
-    # parameter twice, the dialect's TLS parameter set, and every host one of
+    # label value and an allowed value where the runner pins one, each JDBC
+    # name spelled exactly as the driver reads it (pgjdbc and Connector/J
+    # ignore SSLMODE), no parameter twice in any spelling, the dialect's TLS parameter set, and every host one of
     # setup.pipeline.databaseHosts (the dialect's default port filled in).
     - expression: >-
         object.kind != 'KafkaConnector' || !has(object.spec) ||
@@ -542,10 +551,10 @@ spec:
         variables.dialect in { {{- join ", " $shapes -}} } && variables.url.matches({ {{- join ", " $shapes -}} }[variables.dialect]) &&
         variables.urlParams.all(q, q.split('=').size() == 2 && q.split('=')[0].matches('^[A-Za-z]{1,64}$') &&
         (q.split('=')[0].lowerAscii() in [{{ join ", " $labels }}] ? q.split('=')[1].replace('%20', ' ').matches({{ index $pat "label" }}) : q.split('=')[1].matches({{ index $pat "value" }})) &&
-        (q.lowerAscii() in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0].lowerAscii() in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
+        ((q.split('=')[0] + '=' + q.split('=')[1].lowerAscii()) in {{ include "piperoom.celMap" $enum }}[variables.dialect] || q.split('=')[0] in {{ include "piperoom.celMap" $free }}[variables.dialect]) &&
         variables.urlParams.filter(r, r.split('=')[0].lowerAscii() == q.split('=')[0].lowerAscii()).size() == 1) &&
         ({{ include "piperoom.celMap" $requ }}[variables.dialect].size() == 0 ||
-        {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0].lowerAscii() == n))) &&
+        {{ include "piperoom.celMap" $requ }}[variables.dialect].exists(n, variables.urlParams.exists(q, q.split('=')[0] == n))) &&
         (!variables.urlParams.exists(q, q.lowerAscii() == 'allowpublickeyretrieval=true') ||
         variables.urlParams.exists(q, q.lowerAscii() in ['sslmode=verify_ca', 'sslmode=verify_identity'])) &&
         variables.urlHosts.all(h, !h.contains('@') && !h.contains('[') &&
