@@ -36,6 +36,8 @@ const (
 	mVPC       = "vpc-0a1b2c3d4e5f60001"
 	mLogGroup  = "/piperoom/it_orders"
 	mRoom      = "room-1"
+	// mObjectVersion is the plugin archive's S3 version id.
+	mObjectVersion = "3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY"
 )
 
 var mskTarget = events.SetupTarget{Kind: KindAWS, Address: mAccount + "/us-east-1/" + mCluster}
@@ -124,6 +126,21 @@ func routes() replay.Response {
 		`</routeTableSet></DescribeRouteTablesResponse>`)
 }
 
+// roleOK is GetRole on the MSK Connect role: trusted by kafkaconnect alone.
+var roleOK = xmlOK(`<GetRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>` + mRole + `</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate>` +
+	`<AssumeRolePolicyDocument>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22kafkaconnect.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>`)
+
+// escalationDenied is the simulation of RoleEscalationActions on that role:
+// every one implicitly denied.
+func escalationDenied() replay.Response {
+	var b strings.Builder
+	for _, a := range RoleEscalationActions {
+		b.WriteString(`<member><EvalActionName>` + a + `</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member>`)
+	}
+	return xmlOK(`<SimulatePrincipalPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults>` +
+		b.String() + `</EvaluationResults></SimulatePrincipalPolicyResult></SimulatePrincipalPolicyResponse>`)
+}
+
 func connectorParams() map[string]any {
 	return map[string]any{
 		"name": "it_orders", "kafka_connect_version": "2.7.1", "subnets": []string{mSubnetA, mSubnetB}, "security_groups": []string{mGroup},
@@ -187,9 +204,7 @@ var mskFlows = []flow{
 	{name: "vpc_check_no_route", op: "msk_vpc_check", params: map[string]any{"subnets": []string{mSubnetA, mSubnetB}, "security_groups": []string{mGroup}, "database_ip": "172.31.5.10", "database_port": 5432},
 		responses: []replay.Response{stsOK, subnets(), groups(), routes()}, check: failFlow(ErrCheckFailed, `"verdict":"no_route"`, "no route from subnet-0a1b2c3d4e5f60001 to 172.31.5.10")},
 	{name: "role_check_ok", op: "msk_role_check", params: map[string]any{"role_arn": mRole},
-		responses: []replay.Response{stsOK,
-			xmlOK(`<GetRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>` + mRole + `</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate>` +
-				`<AssumeRolePolicyDocument>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22kafkaconnect.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>`),
+		responses: []replay.Response{stsOK, roleOK, escalationDenied(),
 			xmlOK(`<SimulatePrincipalPolicyResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults>` +
 				`<member><EvalActionName>kafka-cluster:Connect</EvalActionName><EvalDecision>allowed</EvalDecision></member><member><EvalActionName>kafka-cluster:DescribeCluster</EvalActionName><EvalDecision>allowed</EvalDecision></member>` +
 				`<member><EvalActionName>logs:CreateLogStream</EvalActionName><EvalDecision>allowed</EvalDecision></member><member><EvalActionName>logs:PutLogEvents</EvalActionName><EvalDecision>allowed</EvalDecision></member>` +
@@ -197,8 +212,8 @@ var mskFlows = []flow{
 		check: okFlow(`"ok":true`)},
 	{name: "plugin_object_denied", op: "msk_plugin_object_check", params: map[string]any{"bucket": mBucket, "key": mKey},
 		responses: []replay.Response{stsOK, {Status: 403}}, check: failFlow(mskconnect.ErrForbidden, `"error_class":"forbidden"`, "s3:GetObject")},
-	{name: "create_plugin_ok", op: "msk_create_plugin", params: map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP", "expected_size": 48213977},
-		responses: []replay.Response{stsOK, {Status: 200, Headers: map[string]string{"Content-Length": "48213977", "Content-Type": "application/zip"}},
+	{name: "create_plugin_ok", op: "msk_create_plugin", params: map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "version": mObjectVersion, "content_type": "ZIP", "expected_size": 48213977},
+		responses: []replay.Response{stsOK, {Status: 200, Headers: map[string]string{"Content-Length": "48213977", "Content-Type": "application/zip", "X-Amz-Version-Id": mObjectVersion}},
 			kcJSON(`{"customPluginArn":"` + mPlugin + `","customPluginState":"CREATING","name":"debezium-pg","revision":1}`)},
 		check: okFlow("CREATING", "msk_wait")},
 	{name: "wait_plugin_s3_denied", op: "msk_wait", params: map[string]any{"kind": "plugin", "arn": mPlugin},
@@ -210,7 +225,7 @@ var mskFlows = []flow{
 		responses: []replay.Response{stsOK, kcJSON(`{"workerConfigurationArn":"` + mWorker + `","name":"piperoom-orders","workerConfigurationState":"ACTIVE","latestRevision":{"revision":1}}`)},
 		check:     okFlow("ACTIVE", "value.converter.schemas.enable=false")},
 	{name: "create_connector_ok", op: "msk_create_connector", params: connectorParams(),
-		responses: []replay.Response{stsOK, clusterOK, bootstrapOK, kcJSON(`{"connectorArn":"` + mConnector + `","connectorName":"it_orders","connectorState":"CREATING"}`)},
+		responses: []replay.Response{stsOK, clusterOK, bootstrapOK, roleOK, escalationDenied(), kcJSON(`{"connectorArn":"` + mConnector + `","connectorName":"it_orders","connectorState":"CREATING"}`)},
 		check:     okFlow("CREATING", "${secret:db_password}")},
 	{name: "wait_connector_running", op: "msk_wait", params: map[string]any{"kind": "connector", "arn": mConnector},
 		responses: []replay.Response{stsOK, connector("CREATING", "", ""), connector("RUNNING", "", "")}, check: okFlow(`"done":true`, `"polls":2`)},
@@ -222,7 +237,7 @@ var mskFlows = []flow{
 		responses: []replay.Response{stsOK, listOK, kcJSON(`{"tags":{"piperoom-room":"room-other"}}`)},
 		check:     failFlow(ErrNotCreatedByRoom, "not created by this room")},
 	{name: "create_connector_conflict", op: "msk_create_connector", params: connectorParams(),
-		responses: []replay.Response{stsOK, clusterOK, bootstrapOK, kcErr(409, "ConflictException", "A connector with the name it_orders already exists")},
+		responses: []replay.Response{stsOK, clusterOK, bootstrapOK, roleOK, escalationDenied(), kcErr(409, "ConflictException", "A connector with the name it_orders already exists")},
 		check:     failFlow(mskconnect.ErrConflict, `"error_class":"conflict"`)},
 }
 

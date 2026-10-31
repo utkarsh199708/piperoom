@@ -26,7 +26,10 @@ func TestGenerateMSKFlows(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reg, _ := newMSK(t, c, "", nil)
+			reg, d := newMSK(t, c, "", nil)
+			if f.op == "msk_delete_connector" {
+				d.noteCreated(mConnector)
+			}
 			res, err := exec(t, reg, f.op, f.params)
 			f.check(t, res, err)
 			if canned.Left() != 0 {

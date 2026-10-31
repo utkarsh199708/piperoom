@@ -137,6 +137,9 @@ type Role struct {
 	// TrustsKafkaConnect says the trust policy names
 	// kafkaconnect.amazonaws.com as a principal.
 	TrustsKafkaConnect bool `json:"trusts_kafkaconnect"`
+	// TrustProblem is why the trust policy does not trust MSK Connect
+	// alone (see TrustProblem), "" when it does.
+	TrustProblem string `json:"trust_problem,omitempty"`
 }
 
 // Decision is one action's result of iam.SimulatePrincipalPolicy.
@@ -535,7 +538,8 @@ func (c *Client) GetRole(ctx context.Context, arn string) (Role, error) {
 	if uerr != nil {
 		doc = str(out.Role.AssumeRolePolicyDocument)
 	}
-	r.TrustsKafkaConnect = strings.Contains(doc, "kafkaconnect.amazonaws.com")
+	r.TrustsKafkaConnect = strings.Contains(doc, KafkaConnectService)
+	r.TrustProblem = TrustProblem(doc)
 	return r, nil
 }
 

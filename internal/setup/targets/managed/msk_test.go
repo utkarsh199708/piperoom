@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,14 @@ type fakeMSK struct {
 	tags      map[string]string
 	bootstrap string
 	owners    []string
+	// trustProblem is GetRole's TrustProblem; escalate lists the
+	// RoleEscalationActions SimulateRole allows (the rest are denied, every
+	// other action is allowed).
+	trustProblem string
+	escalate     []string
+	simulated    [][]string
+	plugins      []mskconnect.PluginSpec
+	object       mskconnect.Object
 }
 
 func newFake() *fakeMSK {
@@ -57,16 +66,33 @@ func (f *fakeMSK) DescribeNetwork(context.Context, []string, []string) (mskconne
 	return mskconnect.Network{}, nil
 }
 func (f *fakeMSK) GetRole(context.Context, string) (mskconnect.Role, error) {
-	return mskconnect.Role{Name: "r", TrustsKafkaConnect: false}, nil
+	return mskconnect.Role{Name: "r", TrustsKafkaConnect: f.trustProblem == "", TrustProblem: f.trustProblem}, nil
 }
-func (f *fakeMSK) SimulateRole(context.Context, string, []string) ([]mskconnect.Decision, error) {
-	return nil, nil
+func (f *fakeMSK) SimulateRole(_ context.Context, _ string, actions []string) ([]mskconnect.Decision, error) {
+	f.simulated = append(f.simulated, actions)
+	ds := make([]mskconnect.Decision, 0, len(actions))
+	for _, a := range actions {
+		d := "allowed"
+		if slices.Contains(RoleEscalationActions, a) && !slices.Contains(f.escalate, a) {
+			d = "implicitDeny"
+		}
+		ds = append(ds, mskconnect.Decision{Action: a, Decision: d})
+	}
+	return ds, nil
 }
-func (f *fakeMSK) HeadObject(_ context.Context, _, _, _, owner string) (mskconnect.Object, error) {
+func (f *fakeMSK) HeadObject(_ context.Context, _, _, version, owner string) (mskconnect.Object, error) {
 	f.owners = append(f.owners, owner)
-	return mskconnect.Object{Size: 10}, nil
+	o := f.object
+	if o.Size == 0 {
+		o.Size = 10
+	}
+	if o.VersionID == "" {
+		o.VersionID = version
+	}
+	return o, nil
 }
-func (f *fakeMSK) CreatePlugin(context.Context, mskconnect.PluginSpec) (mskconnect.Created, error) {
+func (f *fakeMSK) CreatePlugin(_ context.Context, s mskconnect.PluginSpec) (mskconnect.Created, error) {
+	f.plugins = append(f.plugins, s)
 	return mskconnect.Created{State: "CREATING"}, nil
 }
 func (f *fakeMSK) CreateWorkerConfig(_ context.Context, s mskconnect.WorkerConfigSpec) (mskconnect.WorkerConfig, error) {
@@ -290,13 +316,13 @@ func TestMSKRoleMustBeAPiperoomRole(t *testing.T) {
 func TestMSKPluginNeedsSizeAndOwner(t *testing.T) {
 	f := newFake()
 	reg, _ := newMSK(t, f, "", nil)
-	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP"}); !errors.Is(err, ops.ErrParams) {
+	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "version": "v1", "content_type": "ZIP"}); !errors.Is(err, ops.ErrParams) {
 		t.Errorf("create without expected_size: %v, want ErrParams", err)
 	}
 	if len(f.owners) != 0 {
 		t.Fatalf("a refused create read the bucket")
 	}
-	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP", "expected_size": 10}); err != nil {
+	if _, err := exec(t, reg, "msk_create_plugin", map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "version": "v1", "content_type": "ZIP", "expected_size": 10}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if _, err := exec(t, reg, "msk_plugin_object_check", map[string]any{"bucket": mBucket, "key": mKey}); err != nil {
@@ -304,6 +330,43 @@ func TestMSKPluginNeedsSizeAndOwner(t *testing.T) {
 	}
 	if len(f.owners) != 2 || f.owners[0] != mAccount || f.owners[1] != mAccount {
 		t.Fatalf("expected bucket owners = %v, want the target account twice", f.owners)
+	}
+}
+
+// TestMSKPluginIsPinnedToAVersion (review L10): without an S3 version id the
+// object HeadObject checks and the object CreateCustomPlugin builds can
+// differ (anyone with s3:PutObject on the key swaps it in between). The
+// create requires the version, checks that S3 answered that version, and
+// passes it to CreateCustomPlugin as ObjectVersion.
+func TestMSKPluginIsPinnedToAVersion(t *testing.T) {
+	plugin := func(version string) map[string]any {
+		p := map[string]any{"name": "debezium-pg", "bucket": mBucket, "key": mKey, "content_type": "ZIP", "expected_size": 10}
+		if version != "" {
+			p["version"] = version
+		}
+		return p
+	}
+	f := newFake()
+	reg, _ := newMSK(t, f, "", nil)
+	if _, err := exec(t, reg, "msk_create_plugin", plugin("")); !errors.Is(err, ops.ErrParams) {
+		t.Errorf("create without a version: %v, want ErrParams", err)
+	}
+	if len(f.owners) != 0 || len(f.plugins) != 0 {
+		t.Fatalf("a create without a version reached S3 or MSK")
+	}
+	f.object = mskconnect.Object{Size: 10, VersionID: "v-other"}
+	if _, err := exec(t, reg, "msk_create_plugin", plugin("v-0001")); !errors.Is(err, ErrCheckFailed) {
+		t.Errorf("S3 answered another version: %v, want ErrCheckFailed", err)
+	}
+	if len(f.plugins) != 0 {
+		t.Fatalf("a plugin was created from another version")
+	}
+	f.object = mskconnect.Object{}
+	if _, err := exec(t, reg, "msk_create_plugin", plugin("v-0001")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if len(f.plugins) != 1 || f.plugins[0].ObjectVersion != "v-0001" {
+		t.Errorf("CreatePlugin got %+v, want ObjectVersion v-0001", f.plugins)
 	}
 }
 
@@ -351,10 +414,51 @@ func TestMSKWaitOwnDeadline(t *testing.T) {
 }
 
 func TestMSKRoleCheckFailsOnTrust(t *testing.T) {
-	reg, _ := newMSK(t, newFake(), "", nil)
+	f := newFake()
+	f.trustProblem = "statement 1 trusts a principal of type AWS"
+	reg, _ := newMSK(t, f, "", nil)
 	res, err := exec(t, reg, "msk_role_check", map[string]any{"role_arn": mRole})
-	if !errors.Is(err, ErrCheckFailed) || !strings.Contains(res.Summary, "does not trust") {
+	if !errors.Is(err, ErrRoleUnsafe) || !strings.Contains(res.Summary, "not trusted by MSK Connect alone") {
 		t.Errorf("err = %v, %s", err, res.Summary)
+	}
+}
+
+// TestMSKRoleMustBeNoBroaderThanConnect (review L10): the piperoom name
+// prefix is a convention; what bounds the role is its trust policy (MSK
+// Connect alone) and the absence of IAM writes and sts:AssumeRole. Both
+// msk_role_check and msk_create_connector refuse otherwise, the create
+// before anything is created.
+func TestMSKRoleMustBeNoBroaderThanConnect(t *testing.T) {
+	cases := map[string]func(f *fakeMSK){
+		"trusted by another account": func(f *fakeMSK) { f.trustProblem = "statement 1 trusts a principal of type AWS" },
+		"allowed iam writes":         func(f *fakeMSK) { f.escalate = []string{"iam:AttachRolePolicy", "iam:PassRole"} },
+		"allowed sts:AssumeRole":     func(f *fakeMSK) { f.escalate = []string{"sts:AssumeRole"} },
+	}
+	for name, set := range cases {
+		for _, op := range []string{"msk_role_check", "msk_create_connector"} {
+			f := newFake()
+			set(f)
+			reg, _ := newMSK(t, f, "", nil)
+			params := any(map[string]any{"role_arn": mRole})
+			if op == "msk_create_connector" {
+				params = connectorParams()
+			}
+			res, err := exec(t, reg, op, params)
+			if !errors.Is(err, ErrRoleUnsafe) {
+				t.Errorf("%s, %s: err = %v (%s)", name, op, err, res.Summary)
+			}
+			if len(f.created) != 0 {
+				t.Errorf("%s, %s: a connector was created with the role", name, op)
+			}
+		}
+	}
+	f := newFake()
+	reg, _ := newMSK(t, f, "", nil)
+	if _, err := exec(t, reg, "msk_create_connector", connectorParams()); err != nil {
+		t.Fatalf("a safe role: %v", err)
+	}
+	if len(f.simulated) != 1 || !slices.Equal(f.simulated[0], RoleEscalationActions) {
+		t.Errorf("create simulated %v, want the escalation actions once", f.simulated)
 	}
 }
 

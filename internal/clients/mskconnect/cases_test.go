@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -508,7 +509,7 @@ var mskCases = []mskCase{
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !r.TrustsKafkaConnect || r.Name != "PiperoomMSKConnect" {
+			if !r.TrustsKafkaConnect || r.TrustProblem != "" || r.Name != "PiperoomMSKConnect" {
 				t.Errorf("Role = %+v", r)
 			}
 			ds, err := c.SimulateRole(ctx, tRole, []string{"kafka-cluster:Connect", "logs:PutLogEvents"})
@@ -517,6 +518,25 @@ var mskCases = []mskCase{
 			}
 			if len(ds) != 2 || ds[0].Decision != "allowed" || ds[1].Decision != "implicitDeny" {
 				t.Errorf("decisions = %+v", ds)
+			}
+		},
+	},
+	{
+		// GetRole decodes IAM's URL-encoded document and reports what
+		// TrustProblem finds: here a second, AWS principal (review L10).
+		name: "role_trusted_by_another_account",
+		responses: []replay.Response{
+			xmlOK(`<GetRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>` + tRole + `</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate>` +
+				`<AssumeRolePolicyDocument>` + url.QueryEscape(`{"Statement":[{"Effect":"Allow","Principal":{"Service":"kafkaconnect.amazonaws.com","AWS":"arn:aws:iam::111111111111:root"},"Action":"sts:AssumeRole"}]}`) + `</AssumeRolePolicyDocument>` +
+				`</Role></GetRoleResult></GetRoleResponse>`),
+		},
+		run: func(t *testing.T, ctx context.Context, c *Client) {
+			r, err := c.GetRole(ctx, tRole)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !r.TrustsKafkaConnect || r.TrustProblem == "" {
+				t.Errorf("Role = %+v, want a trust problem", r)
 			}
 		},
 	},

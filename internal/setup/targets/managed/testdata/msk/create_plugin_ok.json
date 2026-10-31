@@ -26,13 +26,15 @@
     {
       "request": {
         "method": "HEAD",
-        "path": "/plugins/debezium-connector-postgres-2.7.3.zip"
+        "path": "/plugins/debezium-connector-postgres-2.7.3.zip",
+        "query": "versionId=3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY"
       },
       "response": {
         "status": 200,
         "headers": {
           "Content-Length": "48213977",
-          "Content-Type": "application/zip"
+          "Content-Type": "application/zip",
+          "X-Amz-Version-Id": "3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY"
         },
         "body": ""
       }
@@ -41,8 +43,8 @@
       "request": {
         "method": "POST",
         "path": "/v1/custom-plugins",
-        "body": "{\"contentType\":\"ZIP\",\"description\":\"created by piperoom-setup\",\"location\":{\"s3Location\":{\"bucketArn\":\"arn:aws:s3:::piperoom-bucket\",\"fileKey\":\"plugins/debezium-connector-postgres-2.7.3.zip\"}},\"name\":\"debezium-pg\",\"tags\":{\"piperoom-created-by\":\"piperoom-setup\",\"piperoom-room\":\"room-1\"}}",
-        "body_sha256": "82ea7b24864b23bfaf96182b25f2489749337a1c784c2fef64ebf6350d615773",
+        "body": "{\"contentType\":\"ZIP\",\"description\":\"created by piperoom-setup\",\"location\":{\"s3Location\":{\"bucketArn\":\"arn:aws:s3:::piperoom-bucket\",\"fileKey\":\"plugins/debezium-connector-postgres-2.7.3.zip\",\"objectVersion\":\"3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY\"}},\"name\":\"debezium-pg\",\"tags\":{\"piperoom-created-by\":\"piperoom-setup\",\"piperoom-room\":\"room-1\"}}",
+        "body_sha256": "5baa37e0bef879b640345c9331fabc92c0b876cf1500f428001b6f59f22f4205",
         "headers": {
           "Content-Type": "application/json"
         }

@@ -45,6 +45,24 @@
       "request": {
         "method": "POST",
         "path": "/",
+        "body": "Action=SimulatePrincipalPolicy&ActionNames.member.1=iam%3AAttachRolePolicy&ActionNames.member.2=iam%3APutRolePolicy&ActionNames.member.3=iam%3ACreatePolicyVersion&ActionNames.member.4=iam%3AUpdateAssumeRolePolicy&ActionNames.member.5=iam%3APassRole&ActionNames.member.6=iam%3ACreateAccessKey&ActionNames.member.7=iam%3ACreateUser&ActionNames.member.8=sts%3AAssumeRole&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "857148e4593794eebe5a2151edfc396803949c3f8df15d32b924d393bed6e713",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<SimulatePrincipalPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults><member><EvalActionName>iam:AttachRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PutRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreatePolicyVersion</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UpdateAssumeRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PassRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateAccessKey</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateUser</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>sts:AssumeRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member></EvaluationResults></SimulatePrincipalPolicyResult></SimulatePrincipalPolicyResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
         "body": "Action=SimulatePrincipalPolicy&ActionNames.member.1=kafka-cluster%3AConnect&ActionNames.member.2=kafka-cluster%3ADescribeCluster&ActionNames.member.3=logs%3ACreateLogStream&ActionNames.member.4=logs%3APutLogEvents&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&Version=2010-05-08",
         "body_sha256": "894f77789e28addb41f69a577b03c82156cad2785018f8a9c004d3f1f4131c6e",
         "headers": {

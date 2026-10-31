@@ -73,6 +73,7 @@
     "name": "debezium-pg",
     "bucket": "piperoom-plugins-0",
     "key": "plugins/debezium-connector-postgres-2.7.3.zip",
+    "version": "3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY",
     "content_type": "ZIP",
     "expected_size": 48213977
    },

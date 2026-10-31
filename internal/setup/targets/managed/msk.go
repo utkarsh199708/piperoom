@@ -123,6 +123,22 @@ func (d *MSKDriver) Class() string { return d.class }
 // simulates (design §3.1).
 var RoleActions = []string{"kafka-cluster:Connect", "kafka-cluster:DescribeCluster", "logs:CreateLogStream", "logs:PutLogEvents"}
 
+// RoleEscalationActions are what the service execution role must not be
+// allowed on any resource: IAM writes that grant it or another principal
+// more (what iam:* includes), and sts:AssumeRole, which would make it a
+// stepping stone to every role that trusts the account. IAM's simulation
+// takes action names, not wildcards, so these stand for iam:*.
+// msk_role_check and msk_create_connector both refuse a role allowed any of
+// them.
+var RoleEscalationActions = []string{
+	"iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:CreatePolicyVersion", "iam:UpdateAssumeRolePolicy",
+	"iam:PassRole", "iam:CreateAccessKey", "iam:CreateUser", "sts:AssumeRole",
+}
+
+// ErrRoleUnsafe is a service execution role that something other than MSK
+// Connect can assume, or that is allowed an IAM write or sts:AssumeRole.
+var ErrRoleUnsafe = errors.New("managed: the service execution role is broader than MSK Connect needs")
+
 // RegisterMSK adds the MSK ops to r.
 func RegisterMSK(r *ops.Registry, o MSKOptions) (*MSKDriver, error) {
 	if r == nil || o.Client == nil {
@@ -178,7 +194,7 @@ func (d *MSKDriver) ops() []ops.Op {
 				"subnets": stringListSchema(""), "security_groups": stringListSchema(""), "database_ip": stringSchema(""),
 				"database_port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535}}),
 			run: d.vpcCheck, check: d.checkVPCParams},
-		mskOp{d: d, name: "msk_role_check", describe: "check the service execution role (its name must start with piperoom): trust in kafkaconnect.amazonaws.com and the simulated MSK IAM and log actions (iam GetRole, SimulatePrincipalPolicy)",
+		mskOp{d: d, name: "msk_role_check", describe: "check the service execution role (its name must start with piperoom, a naming convention only): a trust policy that lets only kafkaconnect.amazonaws.com assume it, no IAM write or sts:AssumeRole allowed on any resource, and the simulated MSK IAM and log actions allowed (iam GetRole, SimulatePrincipalPolicy); msk_create_connector repeats the trust and escalation checks",
 			schema: objectSchema([]string{"role_arn"}, map[string]any{"role_arn": stringSchema("")}), run: d.roleCheck, check: d.checkRoleParams},
 		mskOp{d: d, name: "msk_plugin_object_check", describe: "check the plugin archive the person uploaded to S3: the bucket is the target account's, the object exists and its size matches expected_size when given (s3 HeadObject with ExpectedBucketOwner; the digest is not verified)",
 			schema: objectSchema([]string{"bucket", "key"}, map[string]any{"bucket": stringSchema(""), "key": stringSchema(""), "version": stringSchema(""),
@@ -187,8 +203,8 @@ func (d *MSKDriver) ops() []ops.Op {
 		mskOp{d: d, name: "msk_wait", describe: "poll a custom plugin to ACTIVE or a connector to RUNNING, or report the failure with MSK's state description",
 			schema: objectSchema([]string{"kind", "arn"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"plugin", "connector"}}, "arn": stringSchema("")}),
 			run:    d.wait, check: d.checkWaitParams, deadline: WaitDeadline},
-		mskOp{d: d, name: "msk_create_plugin", write: true, describe: "create an MSK Connect custom plugin from the archive the person uploaded to S3 (kafkaconnect:CreateCustomPlugin); asynchronous, follow with msk_wait",
-			schema: objectSchema([]string{"name", "bucket", "key", "content_type", "expected_size"}, map[string]any{"name": stringSchema(""), "bucket": stringSchema(""), "key": stringSchema(""),
+		mskOp{d: d, name: "msk_create_plugin", write: true, describe: "create an MSK Connect custom plugin from the archive the person uploaded to S3, pinned to its S3 version id (the bucket must have versioning on) so the object checked is the object built (kafkaconnect:CreateCustomPlugin with ObjectVersion); asynchronous, follow with msk_wait",
+			schema: objectSchema([]string{"name", "bucket", "key", "version", "content_type", "expected_size"}, map[string]any{"name": stringSchema(""), "bucket": stringSchema(""), "key": stringSchema(""),
 				"version": stringSchema(""), "content_type": map[string]any{"type": "string", "enum": []string{mskconnect.ContentZIP, mskconnect.ContentJAR}},
 				"expected_size": map[string]any{"type": "integer", "minimum": 1}}),
 			run: d.createPlugin, check: d.checkCreatePlugin, preview: d.previewPlugin},
@@ -512,10 +528,18 @@ func (d *MSKDriver) checkCreatePlugin(raw json.RawMessage) error {
 	if p.ContentType != mskconnect.ContentZIP && p.ContentType != mskconnect.ContentJAR {
 		return fmt.Errorf("%w: content_type %q, want ZIP or JAR", ErrParams, clipText(p.ContentType, 16))
 	}
+	if p.Version == "" {
+		// The plugin runs inside the account's Connect workers. Without a
+		// version the object HeadObject checked and the object
+		// CreateCustomPlugin builds are whatever the key holds at each
+		// moment: someone with s3:PutObject on the key can swap the
+		// archive in between. The version id pins both calls to one
+		// immutable object.
+		return fmt.Errorf("%w: version is required: the archive's S3 version id (turn versioning on for the bucket and read it from the upload or msk_plugin_object_check)", ErrParams)
+	}
 	if p.ExpectedSize <= 0 {
-		// The plugin runs inside the account's Connect workers: the
-		// archive's size is the one check S3 allows without reading it
-		// (the digest is unverified), so a create never skips it.
+		// A consistency check that the version is the archive meant, not
+		// an integrity check: the digest is unverified (design §3.1).
 		return fmt.Errorf("%w: expected_size is required: the archive's size in bytes, from the release you downloaded", ErrParams)
 	}
 	return checkObject(p.Bucket, p.Key, p.Version, p.ExpectedSize)
@@ -651,9 +675,12 @@ func (d *MSKDriver) describeConnector(ctx context.Context, raw json.RawMessage) 
 func (d *MSKDriver) roleCheck(ctx context.Context, raw json.RawMessage) (ops.Result, error) {
 	var p RoleParams
 	_ = decode(raw, &p)
-	role, err := d.api.GetRole(ctx, p.RoleArn)
+	role, unsafe, err := d.roleSafety(ctx, p.RoleArn)
 	if err != nil {
 		return d.result("", errData(err)), err
+	}
+	if res, err := roleRefusal(role, unsafe); err != nil {
+		return d.result(res.Summary, res.Data), err
 	}
 	ds, err := d.api.SimulateRole(ctx, p.RoleArn, RoleActions)
 	if err != nil {
@@ -665,14 +692,48 @@ func (d *MSKDriver) roleCheck(ctx context.Context, raw json.RawMessage) (ops.Res
 			denied = append(denied, x.Action)
 		}
 	}
-	data := map[string]any{"role": role, "decisions": ds, "denied": denied, "ok": role.TrustsKafkaConnect && len(denied) == 0}
-	switch {
-	case !role.TrustsKafkaConnect:
-		return d.result("role "+role.Name+" does not trust kafkaconnect.amazonaws.com", data), fmt.Errorf("%w: the role's trust policy does not name kafkaconnect.amazonaws.com", ErrCheckFailed)
-	case len(denied) > 0:
+	data := map[string]any{"role": role, "decisions": ds, "denied": denied, "escalation_allowed": []string{}, "ok": len(denied) == 0}
+	if len(denied) > 0 {
 		return d.result("role "+role.Name+" is denied "+strings.Join(denied, ", "), data), fmt.Errorf("%w: the role is denied %s", ErrCheckFailed, strings.Join(denied, ", "))
 	}
-	return d.result("role "+role.Name+" trusts MSK Connect and is allowed the connector's actions", data), nil
+	return d.result("role "+role.Name+" is trusted by MSK Connect alone, has no IAM write or sts:AssumeRole, and is allowed the connector's actions", data), nil
+}
+
+// roleSafety reads the role's trust policy and simulates
+// RoleEscalationActions on it; unsafe lists the escalation actions IAM
+// allows. The role's name prefix (RolePrefix) is a naming convention only:
+// these two checks are what bound what the role can do.
+func (d *MSKDriver) roleSafety(ctx context.Context, arn string) (mskconnect.Role, []string, error) {
+	role, err := d.api.GetRole(ctx, arn)
+	if err != nil {
+		return role, nil, err
+	}
+	ds, err := d.api.SimulateRole(ctx, arn, RoleEscalationActions)
+	if err != nil {
+		return role, nil, err
+	}
+	var unsafe []string
+	for _, x := range ds {
+		if x.Decision == "allowed" {
+			unsafe = append(unsafe, x.Action)
+		}
+	}
+	return role, unsafe, nil
+}
+
+// roleRefusal is the refusal of a role roleSafety found unsafe, or a nil
+// error.
+func roleRefusal(role mskconnect.Role, unsafe []string) (ops.Result, error) {
+	data := map[string]any{"role": role, "escalation_allowed": unsafe, "ok": false}
+	switch {
+	case role.TrustProblem != "":
+		return ops.Result{Summary: "role " + role.Name + " is not trusted by MSK Connect alone: " + role.TrustProblem, Data: data},
+			fmt.Errorf("%w: its trust policy %s; it must allow only %s to sts:AssumeRole", ErrRoleUnsafe, role.TrustProblem, mskconnect.KafkaConnectService)
+	case len(unsafe) > 0:
+		return ops.Result{Summary: "role " + role.Name + " is allowed " + strings.Join(unsafe, ", ") + " on any resource", Data: data},
+			fmt.Errorf("%w: it is allowed %s; a connector's role needs no IAM writes and no sts:AssumeRole", ErrRoleUnsafe, strings.Join(unsafe, ", "))
+	}
+	return ops.Result{}, nil
 }
 
 func (d *MSKDriver) pluginObjectCheck(ctx context.Context, raw json.RawMessage) (ops.Result, error) {
@@ -691,8 +752,14 @@ func (d *MSKDriver) objectCheck(ctx context.Context, bucket, key, version string
 		data["hint"] = "the runner's identity needs s3:GetObject on the plugin object, and so does the MSK Connect service when it builds the plugin"
 		return d.result("", data), err
 	}
+	if version != "" && o.VersionID != version {
+		// S3 answers a versioned HEAD with that version's id; anything
+		// else is not the object asked for.
+		return d.result(fmt.Sprintf("s3://%s/%s answered version %q, not %q", bucket, key, clipText(o.VersionID, 64), version), map[string]any{"object": o}),
+			fmt.Errorf("%w: the object's version is not the version asked for", ErrCheckFailed)
+	}
 	matches := size == 0 || o.Size == size
-	data := map[string]any{"object": o, "size_matches": matches, "bucket_owner": d.account, "digest": "unverified: S3 exposes no SHA-512 of the object (design §3.1)"}
+	data := map[string]any{"object": o, "size_matches": matches, "bucket_owner": d.account, "digest": "unverified: the knowledge index pins no digest of an MSK plugin archive, and S3 exposes no SHA-512 of the object (design §3.1)"}
 	if !matches {
 		return d.result(fmt.Sprintf("s3://%s/%s is %d bytes, the expected size is %d", bucket, key, o.Size, size), data),
 			fmt.Errorf("%w: the object's size is not the expected size", ErrCheckFailed)
@@ -800,6 +867,15 @@ func (d *MSKDriver) createConnector(ctx context.Context, raw json.RawMessage) (o
 		return d.result("refused msk_create_connector: the cluster has no IAM listener", map[string]any{"cluster": cl.Name}),
 			fmt.Errorf("%w: cluster %s has no IAM bootstrap brokers (MSK Connect authenticates with IAM in v1)", ErrCheckFailed, cl.Name)
 	}
+	// The role the connector runs as is checked here, not only by
+	// msk_role_check, which a plan may skip.
+	role, unsafe, err := d.roleSafety(ctx, p.ServiceRoleArn)
+	if err != nil {
+		return d.result("", errData(err)), err
+	}
+	if res, err := roleRefusal(role, unsafe); err != nil {
+		return d.result("refused msk_create_connector: "+res.Summary, res.Data), err
+	}
 	cfg, err := materialise(d.secrets, p.Config)
 	if err != nil {
 		return ops.Result{}, err
@@ -869,7 +945,7 @@ func (d *MSKDriver) previewPlugin(raw json.RawMessage) (events.PreviewResult, er
 		return events.PreviewResult{}, err
 	}
 	return events.PreviewResult{
-		Expected:   fmt.Sprintf("custom plugin %s from s3://%s/%s (%s) in account %s; size checked against %d bytes, digest unverified", p.Name, p.Bucket, p.Key, p.ContentType, d.account, p.ExpectedSize),
+		Expected:   fmt.Sprintf("custom plugin %s from s3://%s/%s version %s (%s) in account %s; size checked against %d bytes, digest unverified", p.Name, p.Bucket, p.Key, p.Version, p.ContentType, d.account, p.ExpectedSize),
 		Reversible: false,
 	}, nil
 }
