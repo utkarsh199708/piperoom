@@ -42,15 +42,17 @@ func TestSpansRenderText(t *testing.T) {
 }
 
 // Round 11: a bracketed placeholder ([hidden], the Strimzi reads'
-// [masked:credential]) is kept whole, never masked up to its "]".
+// [masked:credential]) is kept whole, never masked up to its "]". Round
+// 12: only those exact ones; "[${...", a reference's start in brackets,
+// is masked.
 func TestBracketPlaceholderKept(t *testing.T) {
 	for _, in := range []string{"password=[hidden]", "x secret=[hidden], y", "password=[masked:credential]", `{"password":"[hidden]"}`} {
 		if out, _ := Text(in); out != in {
 			t.Errorf("Text(%q) = %q", in, out)
 		}
 	}
-	for _, in := range []string{"password=[hiddenZq9pLm2x]", "password=[masked:Zq9pLm2x]"} {
-		if out, _ := Text(in); strings.Contains(out, "Zq9pLm2x") {
+	for _, in := range []string{"password=[hiddenZq9pLm2x]", "password=[masked:Zq9pLm2x]", "password=[${Zq9hunterXK7]", "password=[${Zq9hunterXK7}]", "password=[nullZq9hunterXK7]"} {
+		if out, _ := Text(in); strings.Contains(out, "Zq9") {
 			t.Errorf("Text(%q) = %q", in, out)
 		}
 	}

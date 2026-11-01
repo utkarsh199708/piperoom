@@ -34,6 +34,9 @@ type corpusCase struct {
 	line    string
 	written []string
 	markers []string
+	// keep, when set, must come back from every read as it is (round
+	// 12: an over-masking case).
+	keep string
 }
 
 // corpusKeys are the credential key spellings the corpus writes values
@@ -380,7 +383,9 @@ func decodedStrings(doc string) []string {
 // and the totals to that file instead of failing (to count leaks at
 // older commits).
 func TestMaskingCorpus(t *testing.T) {
-	cases := append(corpusCases(corpusPEMs(t)), reviewCases()...)
+	cases := append(append(append(corpusCases(corpusPEMs(t)), reviewCases()...), round12Cases()...), round12KeepCases()...)
+	cases = append(cases, round13Cases()...)
+	cases = append(append(cases, round14Cases()...), round14KeepCases()...)
 	if len(cases) < 5000 {
 		t.Fatalf("the corpus has %d inputs, want at least 5000", len(cases))
 	}
@@ -396,12 +401,17 @@ func TestMaskingCorpus(t *testing.T) {
 		}
 		var bad []string
 		for op, doc := range outs {
+			kept := false
 			for _, s := range append(decodedStrings(doc), doc) {
 				for _, m := range c.markers {
 					if strings.Contains(s, m) {
 						bad = append(bad, op+": "+m)
 					}
 				}
+				kept = kept || (c.keep != "" && strings.Contains(s, c.keep))
+			}
+			if c.keep != "" && !kept {
+				bad = append(bad, op+": over-masks "+c.keep)
 			}
 		}
 		if len(bad) == 0 {
