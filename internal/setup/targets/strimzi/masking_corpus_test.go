@@ -386,6 +386,7 @@ func TestMaskingCorpus(t *testing.T) {
 	cases := append(append(append(corpusCases(corpusPEMs(t)), reviewCases()...), round12Cases()...), round12KeepCases()...)
 	cases = append(cases, round13Cases()...)
 	cases = append(append(cases, round14Cases()...), round14KeepCases()...)
+	cases = append(append(cases, round15Cases()...), round15KeepCases()...)
 	if len(cases) < 5000 {
 		t.Fatalf("the corpus has %d inputs, want at least 5000", len(cases))
 	}
