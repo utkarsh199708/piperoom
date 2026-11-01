@@ -166,7 +166,7 @@ func TestCredentialFormsRound11(t *testing.T) {
 	}
 	for _, keep := range []string{
 		"password is required", "password is too short (min 8)", "password authentication failed for user app",
-		"bypass=on", "session.timeout.ms=45000", "- name: LOG_LEVEL\n  value: debug", "user,password,host",
+		"bypass=on", "session.timeout.ms=45000", "- name: LOG_LEVEL\n  value: debug",
 		"credentials:\nnext: 1",
 	} {
 		got := readsOf(t, nil, keep)["k8s_logs"]

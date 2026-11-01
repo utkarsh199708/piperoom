@@ -93,14 +93,19 @@ func round12KeepCases() []corpusCase {
 		// 3: a stack trace under a message ending in token:.
 		"Failed to refresh token:\n\tat org.example.Auth.refresh(Auth.java:42)\n\tat org.example.Main.run(Main.java:7)",
 		"could not read token:\n    at org.example.Auth.read(Auth.java:9)",
-		// 5: a CSV header.
+		// 5: a CSV header's names (round 14: the cell after a
+		// credential key is masked even in a header).
 		"user,password,host",
 		// 6: test runner counters.
 		"pass: 3 fail: 0", // (redact masks "pass=12" on its own)
 		// 7: placeholders already in the text.
 		"password [masked:credential]", "password=[masked:credential]", "password=[redacted 8]", "token [hidden]",
 	} {
-		cs = append(cs, corpusCase{name: "round 12 keep " + strings.SplitN(l, "\n", 2)[0], line: l, keep: strings.SplitN(l, "\n", 2)[0]})
+		keep := strings.SplitN(l, "\n", 2)[0]
+		if keep == "user,password,host" {
+			keep = "user,password,"
+		}
+		cs = append(cs, corpusCase{name: "round 12 keep " + strings.SplitN(l, "\n", 2)[0], line: l, keep: keep})
 	}
 	return cs
 }
@@ -132,8 +137,8 @@ func TestRound12Keeps(t *testing.T) {
 			t.Errorf("%q leaks in %v", line, bad)
 		}
 	}
-	// The CSV header itself is kept; only the column's cells are masked.
-	if got := readsOf(t, nil, "user,password,host\napp,"+s+",db")["k8s_logs"]; !strings.Contains(got, "user,password,host") || !strings.Contains(got, "app,[masked:credential],db") {
+	// The CSV header's names are kept, and the column's cells are masked.
+	if got := readsOf(t, nil, "user,password,host\napp,"+s+",db")["k8s_logs"]; !strings.Contains(got, "user,password,") || !strings.Contains(got, "app,[masked:credential],db") {
 		t.Errorf("CSV: %s", got)
 	}
 }
@@ -213,7 +218,7 @@ func TestRound13Regressions(t *testing.T) {
 	// ConfigDef dump's null, a query string, a switch, a placeholder, a
 	// test count and a Jackson keyword.
 	for _, keep := range []string{
-		"sessionId=1234567, epoch=INITIAL", "session=42", "user,password,host", "ssl.key.password = null",
+		"sessionId=1234567, epoch=INITIAL", "session=42", "ssl.key.password = null",
 		"nextToken=AbC123&limit=10", "OAUTH: true, listener=tls", "a=1, password=[hidden], b=2",
 		"pass: 3 fail: 0", "pass 3 fail 0", "Unrecognized token 'null': was expecting ('true', 'false' or 'null')",
 		"Struct{password=null, user=bob}",

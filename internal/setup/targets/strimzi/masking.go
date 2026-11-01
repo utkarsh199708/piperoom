@@ -337,6 +337,8 @@ var credentialSuffixes = []string{
 	"passphrase", "passcode", "secretkey", "secretaccesskey", "accountkey", "sharedaccesskey",
 	"sharedaccesssignature", "signingkey", "hmackey", "encryptionkey", "keystorekey",
 	"jwt", "cookie", "userinfo", "jsessionid",
+	// Round 14.
+	"phpsessid", "sessionkey",
 }
 
 // wholeSegmentKeys name a credential only as a whole last segment (round
@@ -374,6 +376,9 @@ func credentialKeyKind(key string) keyKind {
 	exempt := !strings.HasPrefix(key, "-")
 	key = strings.TrimLeft(key, "-")
 	l := strings.ToLower(key)
+	if flag && len(l) >= 3 && strings.HasPrefix("password", l) {
+		return credPlain // mysql's long-option prefixes: --pas, --passw= (round 14)
+	}
 	norm := keySeparators.Replace(l)
 	switch {
 	case exempt && cursorKeys[norm]:
@@ -446,15 +451,76 @@ var credentialKeyRE = regexp.MustCompile(`([A-Za-z0-9._-]+)(["']?[ \t]*(?:=>|:=|
 // follow a kept value (cleanAfter).
 var keyValueStartRE = regexp.MustCompile(`^["']?([A-Za-z0-9._-]+)["']?[ \t]*(?:=>|:=|=|:)`)
 
-// mysqlLineRE names a mysql client (mysql, mysqldump, mysqladmin) on a
-// line, and mysqlPasswordRE is a -p<password> after it: every -p<value>
-// on the line, case-sensitive (round 13, D: -P3306 is the port; mysql's
-// own options that start with p are long ones, --port, so -port is
-// masked too).
-var (
-	mysqlLineRE     = regexp.MustCompile(`(?i)\bmysql[a-z]*\b`)
-	mysqlPasswordRE = regexp.MustCompile(`\s-p(?:'([^'\n]*)'|"([^"\n]*)"|([^\s'"]+))`)
-)
+// mysqlLineRE names a mysql or mariadb client (mysql, mysqldump,
+// mysqladmin, mysqlimport, mysqlpump, mariadb, mariadb-dump) on a line.
+// After it every -p<value> on the line is a password (case-sensitive:
+// -P3306 is the port; mysql's own options that start with p are long
+// ones, --port, so -port is masked too). In a text that names one, a
+// YAML list item's or a quoted exec argument's -p<value> on any line is
+// one too (round 14).
+var mysqlLineRE = regexp.MustCompile(`(?i)\b(?:mysql|mariadb)`)
+
+// mysqlPasswords masks the -p<value> words of line, which starts at ls,
+// at or after from: after a blank, a quote, [ or , (sameLine), or else
+// only a quoted argument's or a list item's (- -p...). A value in the
+// quotes an exec argument starts with ends at its closing quote; any
+// other is the shell word, quotes and escapes included, and an unclosed
+// quote runs to the line's end.
+func (ks *keyScan) mysqlPasswords(ls int, line string, from int, sameLine bool) {
+	for i := from; ; {
+		j := strings.Index(line[i:], "-p")
+		if j < 0 {
+			return
+		}
+		at := i + j
+		st := at + 2
+		i = st
+		if st >= len(line) || line[st] == ' ' || line[st] == '\t' || line[st] == '\r' {
+			continue // -p alone: mysql prompts
+		}
+		var prev byte
+		if at > 0 {
+			prev = line[at-1]
+		}
+		quoted := prev == '"' || prev == '\''
+		switch {
+		case quoted:
+		case sameLine && (at == 0 || prev == ' ' || prev == '\t' || prev == '[' || prev == ','):
+		case !sameLine && strings.TrimLeft(strings.TrimRight(line[:at], " \t"), " \t") == "-" && strings.HasSuffix(line[:at], " "):
+		default:
+			continue
+		}
+		end := st
+		if quoted {
+			end = len(line)
+			if k := strings.IndexByte(line[st:], prev); k >= 0 {
+				end = st + k
+			}
+		} else {
+		word:
+			for end < len(line) {
+				switch c := line[end]; c {
+				case ' ', '\t', '\r':
+					break word
+				case '\\':
+					end += 2
+				case '"', '\'':
+					k := strings.IndexByte(line[end+1:], c)
+					if k < 0 {
+						end = len(line)
+						break word
+					}
+					end += k + 2
+				default:
+					end++
+				}
+			}
+			end = min(end, len(line))
+		}
+		ks.add(ls+st, ls+end)
+		i = max(i, end)
+	}
+}
 
 // credentialJSONKeyRE is a JSON object key and its colon at any escaping
 // level: "key":, \"key\": (JSON in a JSON string), \\\"key\\\": (JSON in
@@ -495,10 +561,14 @@ var keptIsWords = map[string]bool{
 var existingMaskRE = regexp.MustCompile(`^\[redacted( [0-9]+| private key [0-9]+)?\]$`)
 
 var (
-	numberRE      = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
-	digitsRE      = regexp.MustCompile(`^[0-9]+$`)
-	cursorValueRE = regexp.MustCompile(`^\S{1,64}$`)
-	absPathRE     = regexp.MustCompile(`^/\S*$`)
+	numberRE = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
+	// sessionDigitsRE is a fetch-session id: an int32's digits; passCountRE
+	// is a test runner's count (round 14: pass 482193 is a PIN).
+	sessionDigitsRE = regexp.MustCompile(`^[0-9]{1,10}$`)
+	passCountRE     = regexp.MustCompile(`^[0-9]{1,5}$`)
+	sessionHexRE    = regexp.MustCompile(`^0x[0-9a-fA-F]{1,16}$`)
+	cursorValueRE   = regexp.MustCompile(`^\S{1,64}$`)
+	absPathRE       = regexp.MustCompile(`^/\S*$`)
 )
 
 // keptValue reports whether one value of a credential key (a token of a
@@ -536,9 +606,11 @@ func keptValue(kind keyKind, v string) bool {
 	case credPath:
 		return keptLiterals[lt] || absPathRE.MatchString(t)
 	case credPass:
-		return keptLiterals[lt] || numberRE.MatchString(t)
+		return keptLiterals[lt] || passCountRE.MatchString(t)
 	case credSessionID:
-		return keptLiterals[lt] || digitsRE.MatchString(t)
+		// Kafka's sessionId=INVALID and int32 ids, ZooKeeper's
+		// sessionid:0x100000b3ca50000 (round 14).
+		return keptLiterals[lt] || t == "INVALID" || sessionDigitsRE.MatchString(t) || sessionHexRE.MatchString(t)
 	}
 	return keptLiterals[lt]
 }
@@ -668,7 +740,7 @@ func keySepForm(sep string) sepForm {
 // before keys are matched, and the ranges mapped back onto t (round 11).
 func credentialKeySpans(t string) [][2]int {
 	s, pos := stripFormatChars(t)
-	ks := &keyScan{t: s, pos: pos, kinds: map[string]keyKind{}}
+	ks := &keyScan{t: s, pos: pos, kinds: map[string]keyKind{}, mysql: mysqlLineRE.MatchString(s)}
 	ks.linePass(ks.jsonPass())
 	if pos != nil {
 		for i, sp := range ks.spans {
@@ -734,11 +806,9 @@ type keyScan struct {
 	// maskedLine and maskedTo: the start of the line a continued value was
 	// masked from, and its end; the lines in between need no scan.
 	maskedLine, maskedTo int
-	// csvCol, csvFields and csvKind: the credential column of the last
-	// CSV header seen, its field count and its key's kind (csvLine).
-	csvCol, csvFields int
-	csvKind           keyKind
-	csvHeader         bool // the line being scanned is a CSV header
+	mysql                bool // the text names a mysql or mariadb client
+	// csv: the tables csvLine is in, one per separator (csvSeps).
+	csv [len(csvSeps)]csvTable
 	// stopFrom, stopAt, stopLe cache tokenAt: the first stop byte at or
 	// after any offset in [stopFrom, stopAt] of the line ending at stopLe
 	// is at stopAt (round 11: pw=pw=pw=... scans the line once).
@@ -866,7 +936,6 @@ func (ks *keyScan) linePass(values [][2]int) {
 	t := ks.t
 	env := envName{line: -2}
 	ks.maskedLine, ks.maskedTo = -1, -1
-	ks.csvCol = -1
 	for ls, n := 0, 0; ls < len(t); n++ {
 		le := strings.IndexByte(t[ls:], '\n')
 		if le < 0 {
@@ -895,18 +964,14 @@ func (ks *keyScan) linePass(values [][2]int) {
 func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 	t := ks.t
 	line := t[ls:le]
-	if strings.Contains(line, "-p") {
+	if ks.mysql && strings.Contains(line, "-p") {
 		if l := mysqlLineRE.FindStringIndex(line); l != nil {
-			for _, m := range mysqlPasswordRE.FindAllStringSubmatchIndex(line[l[1]:], -1) {
-				for g := 2; g <= 6; g += 2 {
-					if m[g] >= 0 {
-						ks.add(ls+l[1]+m[g], ls+l[1]+m[g+1])
-					}
-				}
-			}
+			ks.mysqlPasswords(ls, line, l[1], true)
 		}
+		ks.mysqlPasswords(ls, line, 0, false)
 	}
 	ks.csvLine(ls, le)
+	var jackson lineShape // computed once a line (round 14: not per key)
 	for pos := 0; pos < len(line); {
 		m := findKey(line, pos)
 		if m == nil {
@@ -971,9 +1036,8 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 			continue
 		case formCSV:
 			// A credential key as a CSV cell: the next cell is its value,
-			// unless the line is a header (csvLine), whose column is
-			// masked in the rows under it (round 13).
-			if ks.csvHeader || vs >= len(line) || (m[2] > 0 && line[m[2]-1] != ',' && line[m[2]-1] != ' ') {
+			// always (round 14; csvLine masks its column below too).
+			if vs >= len(line) || (m[2] > 0 && line[m[2]-1] != ',' && line[m[2]-1] != ' ') {
 				continue
 			}
 			e := strings.IndexByte(line[vs:], ',')
@@ -987,17 +1051,27 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 			continue
 		case formSpace:
 			if !strings.HasPrefix(key, "-") {
+				if lk := strings.ToLower(key); strings.HasSuffix(lk, "jsessionid") || strings.HasSuffix(lk, "phpsessid") {
+					// A session cookie's name and its value: JSESSIONID
+					// <value> (round 14).
+					b := vs + len(line[vs:]) - len(strings.TrimLeft(line[vs:], " \t"))
+					if w := line[b : b+tokenLen(line[b:])]; w != "" {
+						ks.add(ls+b, ls+b+len(w))
+					}
+				}
 				if kind == credPass {
 					// "pass 482193": a long number after a bare pass
 					// is a PIN, not a test count (round 13, C).
-					if w := line[vs : vs+tokenLen(line[vs:])]; longDigitsRE.MatchString(strings.TrimRight(w, "\r")) {
-						ks.add(ls+vs, ls+vs+len(w))
+					// Any blanks before it (round 14: pass \t482193).
+					b := vs + len(line[vs:]) - len(strings.TrimLeft(line[vs:], " \t"))
+					if w := line[b : b+tokenLen(line[b:])]; longDigitsRE.MatchString(strings.TrimRight(w, "\r")) {
+						ks.add(ls+b, ls+b+len(w))
 					}
 				}
 				continue
 			}
 		case formQuote:
-			if key == "token" && jacksonBefore(line[:m[2]]) && jacksonShapeRE.MatchString(line) {
+			if key == "token" && jacksonBefore(line[:m[2]]) && jackson.is(line) {
 				// Jackson's "Unrecognized token 'x': was expecting" or
 				// "Unexpected token ... at [Source:" quotes the text it
 				// could not parse, which may be the credential: only a
@@ -1017,6 +1091,16 @@ func (ks *keyScan) line(ls, le, n int, values [][2]int, env *envName) {
 		}
 		pos = next
 	}
+}
+
+// lineShape caches whether a line has Jackson's message shape.
+type lineShape struct{ known, yes bool }
+
+func (l *lineShape) is(line string) bool {
+	if !l.known {
+		l.known, l.yes = true, jacksonShapeRE.MatchString(line)
+	}
+	return l.yes
 }
 
 // jacksonShapeRE is the rest of a Jackson parse error's message.
@@ -1041,101 +1125,124 @@ func jacksonBefore(before string) bool {
 	return strings.HasSuffix(before, "Unrecognized ") || strings.HasSuffix(before, "Unexpected ")
 }
 
-// csvHeaderFieldRE is a CSV header cell: a name, no blanks or colons
-// (round 13: not "keys: user, password, host"). The first cell may carry
-// a log prefix ("build: user").
-var (
-	csvHeaderFieldRE = regexp.MustCompile(`^["']?[A-Za-z0-9._-]+["']?$`)
-	csvPrefixRE      = regexp.MustCompile(`^[A-Za-z0-9._-]+: `)
-)
+// csvNameRE is a cell that may be a credential key: a name.
+var csvNameRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// csvHeaderWords are the names a CSV header's other cells may be; a
-// header is a line of them and credential keys only, so a value after a
-// credential key makes the line a row (round 13).
-var csvHeaderWords = map[string]bool{
-	"user": true, "username": true, "user_name": true, "login": true, "host": true, "hostname": true, "port": true,
-	"database": true, "db": true, "dbname": true, "schema": true, "table": true, "name": true, "id": true, "key": true,
-	"value": true, "type": true, "kind": true, "role": true, "email": true, "url": true, "uri": true, "address": true,
-	"created": true, "updated": true, "created_at": true, "updated_at": true, "comment": true, "description": true,
-	"enabled": true, "status": true, "owner": true, "group": true, "account": true, "tenant": true, "env": true,
-	"environment": true, "service": true, "server": true, "cluster": true, "namespace": true, "topic": true, "note": true,
+// csvSeps are the cell separators of the tables csvLine reads: CSV,
+// semicolon, pipe and tab tables (round 14).
+const csvSeps = ",;|\t"
+
+// csvTable is what csvLine knows of a table of one separator: the
+// credential columns seen in it, with their keys' kinds, and the field
+// count of the line they were seen on.
+type csvTable struct {
+	cols   []csvColumn
+	fields int
 }
 
-// csvLine masks, in a row under a CSV header with a credential column
-// (user,password,host), that row's cell of the column: a row has as many
-// fields as the header, and any other line ends the table. A header is a
-// line of known header words and credential keys only (round 13); in any
-// other line a credential key's next cell is masked (formCSV).
+type csvColumn struct {
+	i    int
+	kind keyKind
+}
+
+// csvCell is a cell of a table line: t[a:b], blanks around it removed.
+type csvCell struct{ a, b int }
+
+// csvLine reads the line t[ls:le] as a table row of each separator in it
+// (round 14: no header-or-row decision). A cell that is a credential key
+// (the first cell may carry any prefix: its last word) has its next cell
+// masked, and its column is masked in the following lines of that
+// separator; a line with another field count is masked from the first
+// credential column on. A blank line keeps a table; any other line
+// without the separator ends it.
 func (ks *keyScan) csvLine(ls, le int) {
-	ks.csvHeader = false
 	line := strings.TrimRight(ks.t[ls:le], "\r")
-	if strings.IndexByte(line, ',') < 0 || len(line) > 4096 {
-		ks.csvCol = -1
+	if strings.TrimSpace(line) == "" {
 		return
 	}
-	fields := strings.Split(line, ",")
-	if ks.csvCol >= 0 && len(fields) == ks.csvFields {
-		a := ls
-		for _, f := range fields[:ks.csvCol] {
-			a += len(f) + 1
+	for si := 0; si < len(csvSeps); si++ {
+		tb := &ks.csv[si]
+		sep := csvSeps[si]
+		if strings.IndexByte(line, sep) < 0 || len(line) > 4096 {
+			tb.cols = nil
+			continue
 		}
-		if v := fields[ks.csvCol]; strings.TrimSpace(v) != "" && !keptValue(ks.csvKind, strings.TrimSpace(v)) {
-			ks.add(a, a+len(v))
-		}
-		return
-	}
-	col, kind, header := ks.csvHeaderLine(ls, fields)
-	if !header {
-		if ks.csvCol >= 0 {
-			// A row under a credential header with another field count
-			// (a quoted comma, an extra cell): its cells from the
-			// column's on are masked (round 13, A).
-			a := ls
-			for _, f := range fields[:min(ks.csvCol, len(fields)-1)] {
-				a += len(f) + 1
+		var cells []csvCell
+		for a := 0; ; {
+			e := strings.IndexByte(line[a:], sep)
+			if e < 0 {
+				e = len(line)
+			} else {
+				e += a
 			}
-			ks.add(a, ls+len(line))
+			c := csvCell{a, e}
+			for c.a < c.b && (line[c.a] == ' ' || line[c.a] == '\t') {
+				c.a++
+			}
+			for c.b > c.a && (line[c.b-1] == ' ' || line[c.b-1] == '\t') {
+				c.b--
+			}
+			cells = append(cells, c)
+			if e == len(line) {
+				break
+			}
+			a = e + 1
 		}
-		return
-	}
-	ks.csvHeader = true
-	ks.csvCol = -1
-	if col >= 0 {
-		ks.csvCol, ks.csvFields, ks.csvKind = col, len(fields), kind
+		if len(tb.cols) > 0 {
+			if len(cells) == tb.fields {
+				for _, col := range tb.cols {
+					ks.csvMask(ls, line, cells[col.i], col.kind)
+				}
+			} else {
+				first := tb.cols[0].i
+				for _, col := range tb.cols {
+					first = min(first, col.i)
+				}
+				ks.add(ls+cells[min(first, len(cells)-1)].a, ls+len(line))
+			}
+		}
+		added := false
+		for i, c := range cells {
+			a := c.a
+			if i == 0 {
+				if w := strings.LastIndexAny(line[c.a:c.b], " \t"); w >= 0 {
+					a = c.a + w + 1 // a prefix: "2026-10-31 INFO user"
+				}
+			}
+			b := c.b
+			if b-a >= 2 && (line[a] == '"' || line[a] == '\'') && line[b-1] == line[a] {
+				a, b = a+1, b-1
+			}
+			name := line[a:b]
+			if !csvNameRE.MatchString(name) {
+				continue
+			}
+			k := ks.kindAt(name, ls+a, ls+b)
+			if k == notCredential {
+				continue
+			}
+			if i+1 < len(cells) {
+				ks.csvMask(ls, line, cells[i+1], k)
+			}
+			if !added {
+				if len(cells) != tb.fields {
+					tb.cols = nil
+				}
+				tb.fields, added = len(cells), true
+			}
+			if !slices.ContainsFunc(tb.cols, func(c csvColumn) bool { return c.i == i }) {
+				tb.cols = append(tb.cols, csvColumn{i, k})
+			}
+		}
 	}
 }
 
-// csvHeaderLine reports whether the CSV line of fields, which starts at
-// ls, is a header, and its first credential column and that key's kind.
-// A cell's kind is kindAt's (round 13, A: page\u200btoken is no cursor).
-func (ks *keyScan) csvHeaderLine(ls int, fields []string) (int, keyKind, bool) {
-	col, kind := -1, notCredential
-	a := ls
-	for i, f := range fields {
-		fa := a
-		a += len(f) + 1
-		if i == 0 {
-			if p := csvPrefixRE.FindString(f); p != "" {
-				f, fa = f[len(p):], fa+len(p)
-			}
-		}
-		if !csvHeaderFieldRE.MatchString(f) {
-			return -1, notCredential, false
-		}
-		q := 0
-		if f[0] == '"' || f[0] == '\'' {
-			q = 1
-		}
-		name := strings.Trim(f, `"'`)
-		k := ks.kindAt(name, fa+q, fa+q+len(name))
-		if k == notCredential && !csvHeaderWords[strings.ToLower(name)] {
-			return -1, notCredential, false // a value: the line is a row
-		}
-		if k != notCredential && col < 0 {
-			col, kind = i, k
-		}
+// csvMask masks the cell c of the line starting at ls unless it is empty
+// or a value of kind keeps.
+func (ks *keyScan) csvMask(ls int, line string, c csvCell, kind keyKind) {
+	if c.b > c.a && (!keptValue(kind, line[c.a:c.b]) || ks.stripped(ls+c.a, ls+c.b)) {
+		ks.add(ls+c.a, ls+c.b)
 	}
-	return col, kind, true
 }
 
 // yamlKeyStart reports whether the text before a key is a YAML line's
@@ -1152,13 +1259,28 @@ func yamlKeyStart(before string) bool {
 var yamlPrefixRE = regexp.MustCompile(`^[ \t]*(?:- +|\{ *|["']?[A-Za-z0-9._-]+["']?: +)*["']?$`)
 
 // yamlBlockValue reports whether v, a YAML key's value on its line, is
-// empty or a block scalar's indicator (|, >, |-, >+).
+// empty or a block scalar's indicator (|, >, |-, >+2), with any tags
+// (!!str, !!binary), anchors (&a) and a comment (round 14: | # c).
 func yamlBlockValue(v string) bool {
 	v = strings.TrimRight(v, " \t\r")
-	if v == "" {
-		return true
+	if strings.HasPrefix(v, "#") {
+		v = ""
+	} else if c := strings.Index(v, " #"); c >= 0 {
+		v = v[:c]
+	} else if c := strings.Index(v, "\t#"); c >= 0 {
+		v = v[:c]
 	}
-	return (v[0] == '|' || v[0] == '>') && strings.Trim(v[1:], "-+123456789") == ""
+	indicators := 0
+	for _, f := range strings.Fields(v) {
+		switch {
+		case f[0] == '!' || (f[0] == '&' && len(f) > 1):
+		case (f[0] == '|' || f[0] == '>') && strings.Trim(f[1:], "-+123456789") == "":
+			indicators++
+		default:
+			return false
+		}
+	}
+	return indicators <= 1
 }
 
 // resumeBefore reports whether "resume " (a word: not "presume") ends
@@ -1206,6 +1328,11 @@ func (ks *keyScan) keyValue(kind keyKind, ls, le, vs int, yaml bool) (int, bool)
 		if yaml {
 			ks.yamlBlock(ls, le)
 		}
+		if t := strings.TrimRight(tv, "-+123456789"); tv != "" && t != "|" && t != ">" {
+			// A tag, anchor or comment on the key's line is masked
+			// too: it may be the value (round 14).
+			ks.maskRest(ls, ls+vs, le)
+		}
 		return len(line), true
 	}
 	var tok string
@@ -1230,8 +1357,15 @@ func (ks *keyScan) keyValue(kind keyKind, ls, le, vs int, yaml bool) (int, bool)
 	end := vs + len(tok)
 	switch {
 	case tok == "":
+		if !cleanAfterWord(line[vs:]) {
+			// An empty value followed by more: password=,Zq9... (round 14).
+			ks.maskRest(ls, ls+vs, le)
+			return 0, true
+		}
 		return vs, false
-	case keptValue(kind, tok):
+	case keptValue(kind, tok) && !ks.stripped(ls+vs, ls+end):
+		// (A value a format character was removed from is never kept:
+		// round 14, sessionid=1234\u200b5678.)
 		if kind == credResume {
 			// The position is kept; anything after it on the line is not.
 			if r := strings.TrimLeft(line[end:], " \t"); strings.TrimRight(r, "\r") != "" {
@@ -1245,8 +1379,9 @@ func (ks *keyScan) keyValue(kind keyKind, ls, le, vs int, yaml bool) (int, bool)
 		ks.maskRest(ls, ls+vs, le)
 		return 0, true
 	}
-	if !cleanAfter(line[end:]) {
-		// A kept word followed by more is no longer kept (none Zq9...).
+	if !cleanAfter(line[end:]) || (!quoted && keptWords[strings.ToLower(tok)] && !cleanAfterWord(line[end:])) {
+		// A kept word followed by more is no longer kept (none Zq9...,
+		// null&x=..., null x=...: round 14).
 		ks.maskRest(ls, ls+vs, le)
 		return 0, true
 	}
@@ -1299,6 +1434,47 @@ func cleanAfter(r string) bool {
 		r = r[1:]
 	case ' ', '\t':
 	default:
+		return false
+	}
+	r = strings.TrimLeft(r, " \t")
+	return r == "" || keyValueStartRE.MatchString(r)
+}
+
+// keptWords are the kept values that are bare words: null, none, true,
+// false. cleanAfterWord judges what follows them.
+var keptWords = map[string]bool{"null": true, "none": true, "true": true, "false": true}
+
+// cleanAfterWord reports whether r, the text after a kept bare word (or
+// after an empty value), ends it: closing brackets, then the line's end,
+// or one , or ; and then blanks and the end or another key= or key: (a
+// struct's "password=null, user=bob"), or blanks and a credential key. After a closing quote, a , ; : }
+// or ] ends it too (JSON: "password=null",). Anything else continues the
+// value: null&x=..., null x=..., null"x=..., ,Zq9... (round 14).
+func cleanAfterWord(r string) bool {
+	r = strings.TrimRight(r, "\r")
+	u := strings.TrimLeft(r, ")]}\"'")
+	if u == "" || (strings.ContainsAny(r[:len(r)-len(u)], "\"'") && strings.IndexByte(",;:}]", u[0]) >= 0) {
+		return true
+	}
+	if !strings.ContainsAny(r[:len(r)-len(u)], "\"'") {
+		r = u
+	} else {
+		return false
+	}
+	if r[0] == ' ' || r[0] == '\t' {
+		// After blanks only another credential key ends it
+		// (useBasicAuth=true requireAuth: true), not x= (null x=...).
+		m := keyValueStartRE.FindStringSubmatch(strings.TrimLeft(r, " \t"))
+		return m != nil && credentialKeyKind(m[1]) != notCredential
+	}
+	if r[0] != ',' && r[0] != ';' {
+		return false
+	}
+	r = r[1:]
+	if r == "" {
+		return true
+	}
+	if r[0] != ' ' && r[0] != '\t' {
 		return false
 	}
 	r = strings.TrimLeft(r, " \t")
