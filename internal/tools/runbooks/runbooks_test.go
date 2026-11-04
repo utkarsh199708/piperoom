@@ -21,7 +21,7 @@ import (
 	"piperoom/internal/tools/kafkatools"
 )
 
-var wantIDs = []string{"connector-failed", "consumer-lag", "poison-pill", "retention-loss", "schema-incompatible", "slot-wal", "source-ddl"}
+var wantIDs = []string{"broker-restart", "connector-failed", "consumer-lag", "converter-errors", "poison-pill", "restore-offset-mismatch", "retention-loss", "schema-incompatible", "slot-wal", "source-ddl", "source-restart", "streams-consumer", "strimzi-not-ready", "throughput-burst"}
 
 func embedded(t *testing.T) []Runbook {
 	t.Helper()
@@ -72,6 +72,15 @@ func TestRunbooksNameRealToolsAndActions(t *testing.T) {
 	}
 	areg := actions.NewRegistry()
 	if err := actions.Register(areg, actions.Deps{}); err != nil {
+		t.Fatal(err)
+	}
+	// The connector lifecycle (Q5) and tuning (X6) actions the newer
+	// runbooks name: connect_stop_connector, connect_reset_source_offsets,
+	// connect_tune_throughput.
+	if err := actions.RegisterLifecycle(areg, actions.LifecycleDeps{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actions.RegisterTuning(areg, actions.TuningDeps{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, rb := range embedded(t) {
