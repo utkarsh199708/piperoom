@@ -163,6 +163,8 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	// variable or file fails the start without a half-built process.
 	var procIDs, ownIDs []string
 	pcfg := map[string]config.Config{}
+	// kcfg holds the resolved Kubernetes keys (strimzi.go), by pipeline id.
+	kcfg := map[string]kubeConfig{}
 	// scfg holds the resolved staging: blocks (X8), by pipeline id.
 	scfg := map[string]config.Config{}
 	// extra holds the references only resolution can see: the process AWS
@@ -216,6 +218,12 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		if usesMSKIAM(pc) {
 			extra[p.ID] = append(extra[p.ID], awsProcessIdentityRef)
 			needAWS = true
+		}
+		// The Kubernetes keys have no config.Config field (strimzi.go).
+		if kc, ok, err := pipelineKube(p, d.src); err != nil {
+			return nil, err
+		} else if ok {
+			kcfg[p.ID] = kc
 		}
 		ownIDs = append(ownIDs, p.ID)
 		pcfg[p.ID] = pc
@@ -271,6 +279,13 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 			return err
 		}
 		w.forge = fs
+		// Only a one-pipeline set has Kubernetes keys (its own block).
+		if kc, ok := kcfg[ids[0]]; ok && len(ids) == 1 {
+			if w.strimzi, err = openStrimzi(ids[0], kc); err != nil {
+				w.Close()
+				return err
+			}
+		}
 		st, err := newStack(name, ids, w, opts.Prepare)
 		if err != nil {
 			w.Close()

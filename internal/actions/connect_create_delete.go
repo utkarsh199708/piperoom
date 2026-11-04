@@ -711,7 +711,12 @@ func (a *createConnector) checkCreateHosts(ctx context.Context, cfg map[string]s
 		return nil
 	}
 	allowed := map[string]bool{}
-	for _, r := range p.Connections {
+	for k, r := range p.Connections {
+		// The Kubernetes API server is what the Strimzi read tools reach,
+		// never a host a connector should be configured to.
+		if owners.IsPipelineOnlyKey(k) {
+			continue
+		}
 		for _, h := range kafkatools.ConfigHosts(r.Value) {
 			if h != "" && kafkatools.ValidHost(h) {
 				allowed[h] = true

@@ -342,7 +342,7 @@ func TestNamedPrincipalsIncludeTenantMembers(t *testing.T) {
 
 func TestConnectionKeys(t *testing.T) {
 	keys := ConnectionKeys()
-	if !slices.IsSorted(keys) || len(keys) != len(connKeys) {
+	if !slices.IsSorted(keys) || len(keys)+len(PipelineOnlyKeys()) != len(connKeys) {
 		t.Fatalf("keys = %v", keys)
 	}
 	if !IsPathKey("kafka_tls_ca_file") || IsPathKey("kafka_sasl_password") || IsPathKey("nope") {
