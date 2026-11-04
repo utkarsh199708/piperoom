@@ -10,6 +10,10 @@ keywords: strimzi, kubernetes, k8s, operator, cluster operator, kafkaconnector, 
 - Common causes: the KafkaConnect lacks the `strimzi.io/use-connector-resources: "true"` annotation; the connector class is not in the Connect image (build failed or plugin missing); the resource carries `strimzi.io/pause-reconciliation: "true"`; the operator does not watch this namespace; Connect pods OOMKilled or in CrashLoopBackOff.
 
 ## Find it with Piperoom tools
+- `strimzi_connector_status` — the KafkaConnector's Ready condition, reason, pause and generation
+- `strimzi_connect_status` — the KafkaConnect's readiness, its pods and `use-connector-resources`
+- `strimzi_operator_status` — whether the cluster operator is running and reconciling
+- `k8s_object_events` — the Kubernetes events of the connector, cluster or pod
 - `connect_status` — what Connect itself reports for the connector and its tasks
 - `connect_list_connectors` — whether Connect knows the connector at all
 - `connect_config` — the configuration Connect is running, to compare with the KafkaConnector spec
