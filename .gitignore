@@ -15,3 +15,8 @@ web/dist/
 /owners.yaml.draft
 /owners.draft.yaml
 /users.yaml
+# Built by `go build ./cmd/devctl` at the repo root.
+/devctl
+# Local Cloudflare tool caches.
+.cloudflare/
+.wrangler/
