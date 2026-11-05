@@ -74,7 +74,7 @@ func RegisterAiven(r *ops.Registry, o AivenOptions) (*AivenDriver, error) {
 	}
 	d.class = class
 	addr := d.project + "/" + d.service
-	for _, op := range []ops.Op{
+	for _, op := range withPreviews([]ops.Op{
 		simpleOp{kind: KindAiven, addr: addr, name: "aiven_service_get", describe: "read an Aiven service of the project: type, state, plan, cloud, user names (never its URIs or passwords)",
 			schema: objectSchema(nil, map[string]any{"service": stringSchema("")}), check: checkAivenService, run: d.serviceGet, class: d.Class},
 		simpleOp{kind: KindAiven, addr: addr, name: "aiven_list_plugins", describe: "list the connector plugins available on the Kafka Connect service",
@@ -83,11 +83,11 @@ func RegisterAiven(r *ops.Registry, o AivenOptions) (*AivenDriver, error) {
 			schema: objectSchema([]string{"name"}, map[string]any{"name": stringSchema("")}), check: checkAivenName, run: d.status, class: d.Class},
 		simpleOp{kind: KindAiven, addr: addr, name: "aiven_create_connector", write: true, describe: "create a connector on the Kafka Connect service after checking its class is an available plugin; ${secret:} values materialised on the runner",
 			schema: objectSchema([]string{"name", "config"}, map[string]any{"name": stringSchema(""), "config": stringMapSchema()}),
-			check:  checkAivenCreate, run: d.createConnector, class: d.Class},
+			check:  checkAivenCreate, run: d.createConnector, preview: d.previewCreate, class: d.Class},
 		simpleOp{kind: KindAiven, addr: addr, name: "aiven_integration_create", write: true, describe: "join a Kafka service of the project to the Kafka Connect service (integration type kafka_connect)",
 			schema: objectSchema([]string{"source_service"}, map[string]any{"source_service": stringSchema("")}),
-			check:  checkAivenIntegration, run: d.createIntegration, class: d.Class},
-	} {
+			check:  checkAivenIntegration, run: d.createIntegration, preview: d.previewIntegration, class: d.Class},
+	}) {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("managed: registering %s: %w", op.Name(), err)
 		}

@@ -21,7 +21,7 @@ type inClusterJob struct {
 // newInClusterJob builds the Job's API client and confirmer. prefix is
 // "piperoom-setup-<room>-confirm"; the pairing Secret the Job read its code
 // from is "piperoom-setup-<room>-pairing", deleted once the Welcome arrives.
-func newInClusterJob(prefix, pipeline, connectors string) (*inClusterJob, error) {
+func newInClusterJob(prefix, pipeline, connectors, sourceDB string) (*inClusterJob, error) {
 	room, ok := strings.CutSuffix(prefix, "-confirm")
 	if !ok || !strings.HasPrefix(room, "piperoom-setup-") {
 		return nil, fmt.Errorf("setup: --confirm-secret-prefix %q is not piperoom-setup-<room>-confirm", prefix)
@@ -46,7 +46,7 @@ func newInClusterJob(prefix, pipeline, connectors string) (*inClusterJob, error)
 	}
 	return &inClusterJob{
 		confirmer: &strimzi.SecretConfirmer{API: api, Namespace: ns, Prefix: prefix, Pairing: room + "-pairing"},
-		strimzi:   strimzi.Options{Pipeline: pipeline, Connectors: names, API: api},
+		strimzi:   strimzi.Options{Pipeline: pipeline, Connectors: names, API: api, SourceDatabase: sourceDB},
 	}, nil
 }
 

@@ -271,6 +271,12 @@ const testSource = "pg:5432"
 
 func newHarness(t *testing.T, class string, secrets map[string]string) *harness {
 	t.Helper()
+	return newHarnessWith(t, class, secrets, nil)
+}
+
+// newHarnessWith is newHarness with a change to the driver's Options.
+func newHarnessWith(t *testing.T, class string, secrets map[string]string, opt func(*Options)) *harness {
+	t.Helper()
 	f := newFakeAPI(t)
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -289,7 +295,11 @@ func newHarness(t *testing.T, class string, secrets map[string]string) *harness 
 	if secrets != nil {
 		lookup = func(n string) (string, bool) { v, ok := secrets[n]; return v, ok }
 	}
-	d, err := Register(reg, Options{Pipeline: testPipeline, Connectors: []string{"orders-src"}, Class: class, API: api, Secret: lookup})
+	o := Options{Pipeline: testPipeline, Connectors: []string{"orders-src"}, Class: class, API: api, Secret: lookup}
+	if opt != nil {
+		opt(&o)
+	}
+	d, err := Register(reg, o)
 	if err != nil {
 		t.Fatal(err)
 	}

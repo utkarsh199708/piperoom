@@ -90,7 +90,16 @@ var targetReadCases = map[string]struct{ good, bad []string }{
 
 // noReadTool are the drivers' T0 ops the room reaches another way:
 // preview_k8s_secret_apply is the k8s_secret_apply action's preview.
-var noReadTool = map[string]bool{"preview_k8s_secret_apply": true}
+var noReadTool = map[string]bool{
+	"preview_k8s_secret_apply": true,
+	// The rollback ops' and the managed writes' previews: the actions'
+	// Preview sends them (internal/setup/actions specs_targets.go).
+	"preview_k8s_delete": true, "preview_k8s_unapply": true,
+	"preview_msk_create_plugin": true, "preview_msk_create_worker_config": true,
+	"preview_msk_create_connector": true, "preview_msk_delete_connector": true,
+	"preview_ccloud_create_connector": true, "preview_ccloud_acl_create": true,
+	"preview_aiven_create_connector": true, "preview_aiven_integration_create": true,
+}
 
 func TestTargetReadToolsMatchTheRunnerOps(t *testing.T) {
 	cat := targetsCatalogue(t)

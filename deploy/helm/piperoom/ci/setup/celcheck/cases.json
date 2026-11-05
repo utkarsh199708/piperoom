@@ -67,6 +67,7 @@
 {"name":"topic canary","allow":true,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.public.piperoom_canary","partitions":1,"replicas":3,"config":{"retention.ms":"1"}}}},
 {"name":"topic: pipeline topic","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.public.orders","partitions":1}}},
 {"name":"topic: other prefix","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"other.public.piperoom_canary","partitions":1}}},
+{"name":"topic: a database segment without sourceDatabase","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.shop.public.piperoom_canary","partitions":1}}},
 {"name":"topic: prefix as a prefix","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pgx.public.piperoom_canary","partitions":1}}},
 {"name":"topic: unpaused no name","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x","annotations":{}},"spec":{"partitions":1}}},
 {"name":"topic: no annotations","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"partitions":1}}},

@@ -284,6 +284,11 @@ spec:
 {{- end }}
 {{- if .Values.setup.pipeline.admissionPolicy }}
 {{- $prefix := .Values.setup.pipeline.topicPrefix }}
+{{- /* A SQL Server source's canary database segment: "" (the policy renders
+as before) or "<database>\." in the canary pattern. */}}
+{{- $canaryDB := "" }}
+{{- $canaryDBText := "" }}
+{{- with .Values.setup.pipeline.sourceDatabase }}{{ $canaryDB = printf "%s\\." (regexQuoteMeta .) }}{{ $canaryDBText = printf "%s." . }}{{ end }}
 {{- $ro := printf "%s-piperoom-ro" $p }}
 {{- $ns := .Release.Namespace }}
 {{- $hosts := list }}
@@ -619,8 +624,10 @@ spec:
         (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in [{{ join ", " $regurls }}])))
       message: {{ printf "piperoom: a source's topic.prefix is %s, a sink's topics, the dead letter queue and the schema history are under it (never a %s-* Connect topic), the schema history reaches %s-kafka-bootstrap, the database is one of %s (an entry without a port admits no database.port or the dialect's default only), and a Schema Registry URL is one of %s" $prefix $connect $kafka (join ", " .Values.setup.pipeline.databaseHosts) (join ", " (.Values.setup.pipeline.schemaRegistries | default (list "none"))) | quote }}
     # ---- KafkaTopic ----
-    # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
-    # shell that names no topic yet (the operator would read metadata.name).
+    # The canary only: <topicPrefix>.<schema>.piperoom_canary (with a SQL
+    # Server source, <topicPrefix>.<sourceDatabase>.<schema>.piperoom_canary),
+    # or the paused shell that names no topic yet (the operator would read
+    # metadata.name).
     - expression: >-
         object.kind != 'KafkaTopic' || !has(object.spec) ||
         (object.spec.all(k, k in ['topicName', 'partitions', 'replicas', 'config']) &&
@@ -628,10 +635,10 @@ spec:
         (!has(object.spec.replicas) || (object.spec.replicas >= 1 && object.spec.replicas <= 3)) &&
         (!has(object.spec.config) || object.spec.config.all(k, k in ['cleanup.policy', 'retention.ms'])) &&
         (has(object.spec.topicName) ?
-        string(object.spec.topicName).matches({{ printf `r'^%s\.[A-Za-z_][A-Za-z0-9_]{0,62}\.piperoom_canary$'` (regexQuoteMeta $prefix) }}) :
+        string(object.spec.topicName).matches({{ printf `r'^%s\.%s[A-Za-z_][A-Za-z0-9_]{0,62}\.piperoom_canary$'` (regexQuoteMeta $prefix) $canaryDB }}) :
         (has(object.metadata.annotations) && 'strimzi.io/pause-reconciliation' in object.metadata.annotations &&
         object.metadata.annotations['strimzi.io/pause-reconciliation'] == 'true')))
-      message: {{ printf "piperoom: the KafkaTopic is the canary %s.<schema>.piperoom_canary (one partition, 1 to 3 replicas), or the paused shell" $prefix | quote }}
+      message: {{ printf "piperoom: the KafkaTopic is the canary %s.%s<schema>.piperoom_canary (one partition, 1 to 3 replicas), or the paused shell" $prefix $canaryDBText | quote }}
     # ---- KafkaUser ----
     - expression: >-
         object.kind != 'KafkaUser' || !has(object.spec) ||

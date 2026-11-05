@@ -163,7 +163,7 @@ func (o k8sDeleteOp) Execute(ctx context.Context, params json.RawMessage, env op
 			data["deleted"] = false
 			return ops.Result{Summary: fmt.Sprintf("KafkaTopic %s/%s was never applied (paused, no topic); kept", ns, p.Name), Data: data, Receipt: httpReceipt("GET", path)}, nil
 		}
-		if err := checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
+		if err := o.d.checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
 			return ops.Result{Receipt: httpReceipt("GET", path)}, err
 		}
 	}
@@ -283,46 +283,11 @@ func (o k8sUnapplyOp) Execute(ctx context.Context, params json.RawMessage, env o
 	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
 		return ops.Result{}, err
 	}
-	var path string
-	switch t.kind {
-	case "Secret":
-		path = coreObjectPath(ns, "secrets", t.name)
-	case "ConfigMap":
-		path = coreObjectPath(ns, "configmaps", t.name)
-	default:
-		path = objectPath(ns, t.kind, t.name)
-	}
+	path := unapplyPath(ns, t)
 	rec := httpReceipt("PATCH", path)
-	body, err := o.d.api.Get(ctx, path)
+	_, patch, err := o.d.unapplyPatch(ctx, path, t, kafka)
 	if err != nil {
 		return ops.Result{Receipt: rec}, err
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ops.Result{Receipt: rec}, fmt.Errorf("strimzi: decoding %s %s: %w", t.kind, t.name, err)
-	}
-	st, err := parseState(body, "/spec")
-	if err != nil {
-		return ops.Result{Receipt: rec}, err
-	}
-	if err := o.d.checkOwned(obj, t.kind, t.name); err != nil {
-		return ops.Result{Receipt: rec}, err
-	}
-	patch := []PatchOp{{Op: "test", Path: "/metadata/resourceVersion", Value: st.rv}}
-	if t.cr {
-		md, _ := obj["metadata"].(map[string]any)
-		if _, ok := md["annotations"].(map[string]any); ok {
-			patch = append(patch, PatchOp{Op: "add", Path: "/metadata/annotations/" + escapePointer(PauseAnnotation), Value: "true"})
-		} else {
-			// No annotations left: a JSON patch cannot add a key under a
-			// missing parent, so the map is added whole.
-			patch = append(patch, PatchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]any{PauseAnnotation: "true"}})
-		}
-		patch = append(patch, PatchOp{Op: "replace", Path: "/spec", Value: shellSpec(t.kind, kafka)})
-	} else {
-		// "add" replaces /data when it is there and creates it when it is
-		// not (an empty chart object has none).
-		patch = append(patch, PatchOp{Op: "add", Path: "/data", Value: map[string]any{}})
 	}
 	out, err := o.d.api.Patch(ctx, path, patch, false)
 	if err != nil {
@@ -347,16 +312,262 @@ func (o k8sUnapplyOp) Execute(ctx context.Context, params json.RawMessage, env o
 		}
 	} else {
 		if left, _ := got.at.(map[string]any); len(left) > 0 {
-			keys := make([]string, 0, len(left))
-			for k := range left {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			return ops.Result{Receipt: rec}, fmt.Errorf("%w: %s %s still holds %s", ErrReadBack, t.kind, t.name, clipText(strings.Join(keys, ", "), 200))
+			return ops.Result{Receipt: rec}, fmt.Errorf("%w: %s %s still holds %s", ErrReadBack, t.kind, t.name, clipText(strings.Join(sortedKeys(left), ", "), 200))
 		}
 		summary = fmt.Sprintf("%s %s/%s patched back to empty", t.kind, ns, t.name)
 	}
 	return ops.Result{Summary: summary, Data: data, Receipt: rec}, nil
+}
+
+// unapplyPath is the API path of the object a k8s_unapply writes.
+func unapplyPath(ns string, t unapplyTarget) string {
+	switch t.kind {
+	case "Secret":
+		return coreObjectPath(ns, "secrets", t.name)
+	case "ConfigMap":
+		return coreObjectPath(ns, "configmaps", t.name)
+	}
+	return objectPath(ns, t.kind, t.name)
+}
+
+// unapplyPatch reads the object a k8s_unapply writes, checks the pipeline
+// release owns it and builds the rollback patch under its resourceVersion:
+// the write and its preview send the same patch, the preview with dryRun=All.
+func (d *Driver) unapplyPatch(ctx context.Context, path string, t unapplyTarget, kafka string) (map[string]any, []PatchOp, error) {
+	body, err := d.api.Get(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, nil, fmt.Errorf("strimzi: decoding %s %s: %w", t.kind, t.name, err)
+	}
+	st, err := parseState(body, "/spec")
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := d.checkOwned(obj, t.kind, t.name); err != nil {
+		return nil, nil, err
+	}
+	patch := []PatchOp{{Op: "test", Path: "/metadata/resourceVersion", Value: st.rv}}
+	if t.cr {
+		md, _ := obj["metadata"].(map[string]any)
+		if _, ok := md["annotations"].(map[string]any); ok {
+			patch = append(patch, PatchOp{Op: "add", Path: "/metadata/annotations/" + escapePointer(PauseAnnotation), Value: "true"})
+		} else {
+			// No annotations left: a JSON patch cannot add a key under a
+			// missing parent, so the map is added whole.
+			patch = append(patch, PatchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]any{PauseAnnotation: "true"}})
+		}
+		patch = append(patch, PatchOp{Op: "replace", Path: "/spec", Value: shellSpec(t.kind, kafka)})
+	} else {
+		// "add" replaces /data when it is there and creates it when it is
+		// not (an empty chart object has none).
+		patch = append(patch, PatchOp{Op: "add", Path: "/data", Value: map[string]any{}})
+	}
+	return obj, patch, nil
+}
+
+// sortedKeys is m's keys in order.
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// notReversibleRollback is the Rollback text of a rollback op's own preview:
+// nothing undoes a rollback automatically, and the text says how a person
+// would. It is prose, never "<op> {params}", so the room records no step
+// for it (events.PreviewResult.Reversible is false).
+func notReversibleRollback(kind string) string {
+	if kind == "Secret" {
+		return "a rollback is not undone automatically: refill the Secret with its k8s_secret_apply step in a new setup plan"
+	}
+	return "a rollback is not undone automatically: apply the " + kind + " again with its k8s_apply step in a new setup plan"
+}
+
+// ---- preview_k8s_delete (T0) ----
+
+// previewDeleteOp is k8s_delete's preview: a read of the object with every
+// check the delete makes (kind, chart name, release ownership, the canary
+// rules), never a DELETE, not even with dryRun. Its rollback is not
+// reversible: a deleted object comes back only by applying it again.
+type previewDeleteOp struct{ d *Driver }
+
+func (previewDeleteOp) Name() string   { return "preview_k8s_delete" }
+func (previewDeleteOp) Target() string { return targetKubernetes }
+func (previewDeleteOp) Tier() string   { return protocol.TierT0 }
+func (previewDeleteOp) Layer() string  { return layer }
+func (previewDeleteOp) Describe() string {
+	return "preview a k8s_delete: read the KafkaConnector or canary KafkaTopic with the delete's ownership and canary checks; nothing is deleted"
+}
+func (previewDeleteOp) ParamsSchema() map[string]any { return rollbackSchema(deleteKinds, true) }
+func (o previewDeleteOp) Validate(params json.RawMessage, env ops.Env) error {
+	return k8sDeleteOp(o).Validate(params, env)
+}
+
+func (o previewDeleteOp) Execute(ctx context.Context, params json.RawMessage, env ops.Env) (ops.Result, error) {
+	pr, err := k8sDeleteOp(o).Preview(ctx, params, env)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	return ops.Result{Summary: "preview of " + pr.Target, Data: pr}, nil
+}
+
+// Preview is k8s_delete's preview: what the object is now and what the
+// delete would do with it, from GETs only.
+func (o k8sDeleteOp) Preview(ctx context.Context, params json.RawMessage, env ops.Env) (events.PreviewResult, error) {
+	p, err := o.decode(params)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	ns, _, err := scope(env)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	pr := events.PreviewResult{
+		Target:   p.Kind + " " + ns + "/" + p.Name,
+		Rollback: notReversibleRollback(p.Kind),
+	}
+	path := objectPath(ns, p.Kind, p.Name)
+	body, err := o.d.api.Get(ctx, path)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		pr.Current = "absent (GET " + path + ")"
+		pr.Expected = "nothing to delete: the object is already absent"
+		return pr, nil
+	case err != nil:
+		return events.PreviewResult{}, err
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return events.PreviewResult{}, fmt.Errorf("strimzi: decoding %s %s: %w", p.Kind, p.Name, err)
+	}
+	if err := o.d.checkOwned(obj, p.Kind, p.Name); err != nil {
+		return events.PreviewResult{}, err
+	}
+	pr.Current = describeObject(obj, p.Kind) + " (GET " + path + ")"
+	if p.Kind == "KafkaTopic" {
+		if canaryNeverApplied(obj) {
+			pr.Expected = "kept: the paused shell was never applied and names no topic"
+			return pr, nil
+		}
+		if err := o.d.checkCanaryTopic(obj, p.Name, p.TopicPrefix); err != nil {
+			return events.PreviewResult{}, err
+		}
+		named, _ := obj["spec"].(map[string]any)["topicName"].(string)
+		if named == "" {
+			named = p.Name
+		}
+		pr.Expected = fmt.Sprintf("KafkaTopic %s/%s deleted by its uid and resourceVersion; the Topic Operator then deletes the Kafka topic %s", ns, p.Name, named)
+		return pr, nil
+	}
+	pr.Expected = fmt.Sprintf("KafkaConnector %s/%s deleted by its uid and resourceVersion with foreground propagation; the connector stops on its Connect cluster", ns, p.Name)
+	return pr, nil
+}
+
+// describeObject is one line on a Strimzi object for a preview: its kind,
+// whether it is paused, and what its status says; never its spec values.
+func describeObject(obj map[string]any, kind string) string {
+	md, _ := obj["metadata"].(map[string]any)
+	ann, _ := md["annotations"].(map[string]any)
+	st, _ := obj["status"].(map[string]any)
+	parts := []string{kind}
+	if ann[PauseAnnotation] == "true" {
+		parts = append(parts, "paused")
+	}
+	if tn, _ := st["topicName"].(string); tn != "" {
+		parts = append(parts, "manages topic "+clipText(tn, 128))
+	}
+	if conds, _ := st["conditions"].([]any); len(conds) > 0 {
+		var ready []string
+		for _, c := range conds {
+			m, _ := c.(map[string]any)
+			typ, _ := m["type"].(string)
+			status, _ := m["status"].(string)
+			if typ != "" {
+				ready = append(ready, clipText(typ, 32)+"="+clipText(status, 16))
+			}
+		}
+		if len(ready) > 0 {
+			parts = append(parts, "conditions "+strings.Join(ready, ", "))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ---- preview_k8s_unapply (T0) ----
+
+// previewUnapplyOp is k8s_unapply's preview: the same rollback patch with
+// dryRun=All, so the API server checks it without storing anything. For the
+// Secret and the ConfigMap it names keys only, never a value.
+type previewUnapplyOp struct{ d *Driver }
+
+func (previewUnapplyOp) Name() string   { return "preview_k8s_unapply" }
+func (previewUnapplyOp) Target() string { return targetKubernetes }
+func (previewUnapplyOp) Tier() string   { return protocol.TierT0 }
+func (previewUnapplyOp) Layer() string  { return layer }
+func (previewUnapplyOp) Describe() string {
+	return "preview a k8s_unapply: the rollback patch with dryRun=All; key names only for the Secret and the ConfigMap"
+}
+func (previewUnapplyOp) ParamsSchema() map[string]any { return rollbackSchema(unapplyKinds, false) }
+func (o previewUnapplyOp) Validate(params json.RawMessage, env ops.Env) error {
+	return k8sUnapplyOp(o).Validate(params, env)
+}
+
+func (o previewUnapplyOp) Execute(ctx context.Context, params json.RawMessage, env ops.Env) (ops.Result, error) {
+	pr, err := k8sUnapplyOp(o).Preview(ctx, params, env)
+	if err != nil {
+		return ops.Result{}, err
+	}
+	return ops.Result{Summary: "preview of " + pr.Target, Data: pr}, nil
+}
+
+// Preview is k8s_unapply's preview: the object now, and the rollback patch
+// sent with dryRun=All.
+func (o k8sUnapplyOp) Preview(ctx context.Context, params json.RawMessage, env ops.Env) (events.PreviewResult, error) {
+	_, t, err := o.decode(params)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	ns, kafka, err := scope(env)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	path := unapplyPath(ns, t)
+	obj, patch, err := o.d.unapplyPatch(ctx, path, t, kafka)
+	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	pr := events.PreviewResult{Target: t.kind + " " + ns + "/" + t.name, Rollback: notReversibleRollback(t.kind)}
+	if t.cr {
+		pr.Current = describeObject(obj, t.kind)
+		pr.Expected = t.kind + " re-paused with the chart shell's spec"
+		if t.kind == "KafkaConnect" {
+			pr.Expected += "; its pods stay until helm uninstall of the pipeline release"
+		}
+	} else {
+		stored, _ := obj["data"].(map[string]any)
+		keys := sortedKeys(stored)
+		if len(keys) == 0 {
+			pr.Current = t.kind + " holds no keys"
+		} else {
+			pr.Current = t.kind + " holds keys " + clipText(strings.Join(keys, ", "), 400)
+		}
+		pr.Expected = t.kind + " patched back to empty (no keys)"
+	}
+	// The dry-run answer is the stored object, values included for a Secret:
+	// only whether it passed, and the API server's message when not, reach
+	// the preview.
+	_, err = o.d.api.Patch(ctx, path, patch, true)
+	pr.DryRun = &events.DryRunResult{Source: "kubernetes dryRun=All", OK: err == nil}
+	if err != nil {
+		pr.DryRun.Text = clipText(err.Error(), 2000)
+	}
+	return pr, nil
 }
 
 // ---- preview_k8s_secret_apply (T0) ----
@@ -458,7 +669,7 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 // reports it manages (status.topicName) must be the same one; when the
 // operator has reported nothing yet, the spec alone decides. Anything that
 // differs keeps the CR.
-func checkCanaryTopic(obj map[string]any, name, prefix string) error {
+func (d *Driver) checkCanaryTopic(obj map[string]any, name, prefix string) error {
 	spec, _ := obj["spec"].(map[string]any)
 	md, _ := obj["metadata"].(map[string]any)
 	st, _ := obj["status"].(map[string]any)
@@ -466,7 +677,7 @@ func checkCanaryTopic(obj map[string]any, name, prefix string) error {
 	if named == "" {
 		named, _ = md["name"].(string)
 	}
-	if !canaryTopicRE(prefix).MatchString(named) {
+	if !d.canaryTopicRE(prefix).MatchString(named) {
 		return fmt.Errorf("%w: KafkaTopic %s names topic %s, not a canary", ErrField, name, clipText(named, 128))
 	}
 	if tn, _ := st["topicName"].(string); tn != "" && tn != named {
@@ -476,9 +687,14 @@ func checkCanaryTopic(obj map[string]any, name, prefix string) error {
 }
 
 // canaryTopicRE is this pipeline's canary topic name:
-// <prefix>.<schema>.piperoom_canary.
-func canaryTopicRE(prefix string) *regexp.Regexp {
-	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `\.[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
+// <prefix>.<schema>.piperoom_canary, or <prefix>.<database>.<schema>.piperoom_canary
+// with the person's SQL Server database. The schema is the only free segment.
+func (d *Driver) canaryTopicRE(prefix string) *regexp.Regexp {
+	db := ""
+	if d.sourceDB != "" {
+		db = regexp.QuoteMeta(d.sourceDB) + `\.`
+	}
+	return regexp.MustCompile(`^` + regexp.QuoteMeta(prefix) + `\.` + db + `[A-Za-z_][A-Za-z0-9_]{0,62}\.` + CanaryTable + `$`)
 }
 
 // canaryNeverApplied: the KafkaTopic is the chart's paused shell, with no

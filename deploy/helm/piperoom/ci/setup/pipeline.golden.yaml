@@ -597,8 +597,10 @@ spec:
         (!(k in ['key.converter.schema.registry.url', 'value.converter.schema.registry.url']) || string(variables.cc[k]) in ['http://registry.data.svc:8081'])))
       message: "piperoom: a source's topic.prefix is pg, a sink's topics, the dead letter queue and the schema history are under it (never a orders-connect-* Connect topic), the schema history reaches prod-kafka-kafka-bootstrap, the database is one of pg:5432, legacy-db (an entry without a port admits no database.port or the dialect's default only), and a Schema Registry URL is one of http://registry.data.svc:8081"
     # ---- KafkaTopic ----
-    # The canary only: <topicPrefix>.<schema>.piperoom_canary, or the paused
-    # shell that names no topic yet (the operator would read metadata.name).
+    # The canary only: <topicPrefix>.<schema>.piperoom_canary (with a SQL
+    # Server source, <topicPrefix>.<sourceDatabase>.<schema>.piperoom_canary),
+    # or the paused shell that names no topic yet (the operator would read
+    # metadata.name).
     - expression: >-
         object.kind != 'KafkaTopic' || !has(object.spec) ||
         (object.spec.all(k, k in ['topicName', 'partitions', 'replicas', 'config']) &&

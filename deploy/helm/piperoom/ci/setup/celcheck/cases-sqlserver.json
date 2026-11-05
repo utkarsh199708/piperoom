@@ -1,0 +1,9 @@
+[
+{"name":"sqlserver topic canary","allow":true,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.shop.public.piperoom_canary","partitions":1,"replicas":3}}},
+{"name":"sqlserver topic shell","allow":true,"obj":{"kind":"KafkaTopic","metadata":{"name":"x","annotations":{"strimzi.io/pause-reconciliation":"true"}},"spec":{"partitions":1}}},
+{"name":"sqlserver topic: no database segment","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.public.piperoom_canary","partitions":1}}},
+{"name":"sqlserver topic: another database","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.other.public.piperoom_canary","partitions":1}}},
+{"name":"sqlserver topic: a database lookalike","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.shopx.public.piperoom_canary","partitions":1}}},
+{"name":"sqlserver topic: a dotted schema","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.shop.a.b.piperoom_canary","partitions":1}}},
+{"name":"sqlserver topic: a pipeline topic","allow":false,"obj":{"kind":"KafkaTopic","metadata":{"name":"x"},"spec":{"topicName":"pg.shop.dbo.orders","partitions":1}}}
+]

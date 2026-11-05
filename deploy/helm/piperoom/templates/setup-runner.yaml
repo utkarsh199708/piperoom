@@ -156,6 +156,10 @@ spec:
             - {{ $p | quote }}
             - --strimzi-connectors
             - {{ join "," $r.connectors | quote }}
+            {{- with $r.sourceDatabase }}
+            - --strimzi-source-database
+            - {{ . | quote }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
