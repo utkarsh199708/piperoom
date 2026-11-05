@@ -121,6 +121,18 @@ jobs:
       # The default lock dir (a sibling of the checkout) does not exist on a runner.
       PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
     steps:
+      # The dev stack with every optional profile (Kafka, Connect, MongoDB,
+      # MySQL, SQL Server, ClickHouse, staging) and the Go build cache no
+      # longer fit in a hosted runner's free disk: the job died with "No space
+      # left on device" while starting the optional profiles. Drop toolchains
+      # this job never uses (the Go toolcache under hostedtoolcache stays).
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force
+          df -h /
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -383,7 +395,9 @@ jobs:
   race:
     name: Go race detector
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # evals replays every scenario; under -race it needs more than go test's
+    # default 10-minute package timeout, so both bounds are raised.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -398,7 +412,7 @@ jobs:
             go.mod
             go.sum
       - name: go test -race
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 30m ./...
 
   vuln:
     name: govulncheck
