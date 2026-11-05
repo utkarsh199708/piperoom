@@ -838,9 +838,11 @@ func TestServerCancelDropsTheT3Prompt(t *testing.T) {
 		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
 		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
 		// Measured from the cancel, not from the test start: handshake and the
-		// prompt sleep ran on a loaded Windows runner at 0.7-1.0 s. The point is "at
-		// once, long before the one-hour deadline", so 500 ms is generous.
-		if waited := time.Since(cancelSent); waited > 500*time.Millisecond {
+		// prompt sleep ran on a loaded Windows runner at 0.7-1.0 s, and the
+		// cancel-to-refusal round trip itself took 0.85 s there. The point is
+		// "at once, long before the one-hour deadline"; that the op never runs
+		// is checked after Run.
+		if waited := time.Since(cancelSent); waited > 5*time.Second {
 			t.Errorf("the cancel took %s to drop the prompt", waited)
 		}
 		// The "y" is typed at ~800 ms, for the dropped prompt; B arrives at
