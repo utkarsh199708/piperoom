@@ -35,11 +35,12 @@ func absPath(dir string) (string, error) {
 // There is no check-then-open: os.Root resolves inside the root at open time,
 // so a swapped symlink cannot escape it.
 //
-// os.Root alone is not enough (design §2.3, U1-0's spike in
-// cmd/setup-spike/osroot): it accepts ".." that stays inside the root, follows
-// a relative symlink that stays inside the root, and on non-Windows accepts
-// every Windows form as an ordinary name. So every name is first checked
-// lexically on all three OSes (lexicalRefusal, in the design's order), then
+// os.Root alone is not enough (design §2.3, from U1-0's os.Root spike, since
+// deleted; its cases are this file's tests): it accepts ".." that stays inside
+// the root, follows a relative symlink that stays inside the root, and on
+// non-Windows accepts every Windows form as an ordinary name. So every name is
+// first checked lexically on all three OSes (lexicalRefusal, in the design's
+// order), then
 // every existing prefix of the path is Lstat'ed through the root and refused
 // for a symlink or reparse point, and finally the opened handle is compared
 // with os.SameFile against the root's .git and .piperoom, so a nested alias

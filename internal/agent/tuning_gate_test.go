@@ -143,3 +143,69 @@ func TestTuningEvidenceGate(t *testing.T) {
 		t.Fatal("a nil ledger let a tuning through")
 	}
 }
+
+// The setup tuning gate (U10b), table-driven for both halves: a step is a
+// tuning step when its config keys map to a tuning entry of the knowledge
+// index for the room's source connector, and such a step passes only when it
+// cites a symptom read of this run.
+func TestSetupTuningKeys(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		params string
+		want   []string
+	}{
+		{"connector config with tuning keys", "postgres", `{"name":"orders-src","config":{"max.batch.size":"4096","max.queue.size":"16384","topic.prefix":"pg"}}`, []string{"max.batch.size", "max.queue.size"}},
+		{"worker properties with a tuning key", "postgres", `{"file":"connect-distributed.properties","entries":{"offset.flush.interval.ms":"10000","group.id":"connect-cluster"}}`, []string{"offset.flush.interval.ms"}},
+		{"env entries with the heap knob", "postgres", `{"file":".env","entries":{"KAFKA_HEAP_OPTS":"-Xms1g -Xmx4g"}}`, []string{"KAFKA_HEAP_OPTS"}},
+		{"no tuning keys", "postgres", `{"config":{"topic.prefix":"pg","table.include.list":"public.orders"}}`, nil},
+		{"no key-bearing fields", "postgres", `{"templates":["kafka-kraft"]}`, nil},
+		{"unparsable params gate nothing here", "postgres", `"not an object"`, nil},
+		{"another source's tuning key still gates every-source entries", "mysql", `{"config":{"max.batch.size":"4096"}}`, []string{"max.batch.size"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := setupTuningKeys(tc.source, []byte(tc.params))
+			if len(got) != len(tc.want) {
+				t.Fatalf("setupTuningKeys = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("setupTuningKeys = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestSetupTuningEvidenceGate(t *testing.T) {
+	l := newStepLedger()
+	l.add("s_01JAAAAAAAAAAAAAAAAAAAAAAA", "container_logs", "connect: java.lang.OutOfMemoryError: Java heap space", false)
+	l.add("s_01JBBBBBBBBBBBBBBBBBBBBBBB", "debezium_snapshot_progress", "snapshot stalled at 2.1 M of 10 M rows", false)
+	l.add("s_01JCCCCCCCCCCCCCCCCCCCCCCC", "env_detect", "linux amd64, docker 27", false)
+	l.add("s_01JDDDDDDDDDDDDDDDDDDDDDDD", "connect_worker_logs", "error: worker unreachable", true)
+	keys := []string{"max.batch.size"}
+	cases := []struct {
+		text string
+		ok   bool
+	}{
+		{"OOM in the worker logs, see s_01JAAAAAAAAAAAAAAAAAAAAAAA", true},
+		{"snapshot stalled (s_01JBBBBBBBBBBBBBBBBBBBBBBB)", true},
+		{"cites a read that shows no symptom s_01JCCCCCCCCCCCCCCCCCCCCCCC", false},
+		{"cites an errored log read s_01JDDDDDDDDDDDDDDDDDDDDDDD", false},
+		{"no citation at all", false},
+	}
+	for _, tc := range cases {
+		err := l.setupTuningEvidence(1, "properties_write", keys, tc.text)
+		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, tools.ErrBadInput)) {
+			t.Fatalf("%q: err = %v, want ok %v", tc.text, err, tc.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "max.batch.size") {
+			t.Fatalf("%q: the refusal does not name the tuning key: %v", tc.text, err)
+		}
+	}
+	var none *stepLedger
+	if err := none.setupTuningEvidence(1, "properties_write", keys, "s_01JAAAAAAAAAAAAAAAAAAAAAAA"); err == nil {
+		t.Fatal("a nil ledger let a setup tuning through")
+	}
+}

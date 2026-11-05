@@ -26,10 +26,13 @@ var factCases = []StepFacts{
 	{KeepsVolumes: true},
 	{CreatedByRoom: true},
 	{Param: "wal_level", KeepsVolumes: true, CreatedByRoom: true},
+	{Kind: "KafkaUser"},
+	{Kind: "Secret"},
 }
 
 // TestFactDependentRows pins which rows have an exception: exactly the ALTER
-// SYSTEM allow-list and compose_down keeping its volumes. A new exception row
+// SYSTEM allow-list, compose_down keeping its volumes and k8s_unapply of a
+// KafkaUser or the logging ConfigMap. A new exception row
 // fails here, so deferring it at plan time is a reviewed decision.
 func TestFactDependentRows(t *testing.T) {
 	var got []string
@@ -38,7 +41,7 @@ func TestFactDependentRows(t *testing.T) {
 			got = append(got, row.Op+"|"+row.Class)
 		}
 	}
-	want := []string{OpSourceAlterSystem + "|" + ClassProduction, OpComposeDown + "|" + ClassProduction}
+	want := []string{OpSourceAlterSystem + "|" + ClassProduction, OpComposeDown + "|" + ClassProduction, OpK8sUnapply + "|" + ClassProduction}
 	if !slices.Equal(got, want) {
 		t.Fatalf("fact-dependent rows = %v, want %v", got, want)
 	}

@@ -34,6 +34,10 @@ var envKeys = map[string]bool{
 	"POSTGRES_USER":     true,
 	"POSTGRES_DB":       true,
 	"POSTGRES_PASSWORD": true,
+	// The dev warehouse of the sink-postgres template (row U3c).
+	"WAREHOUSE_USER":     true,
+	"WAREHOUSE_DB":       true,
+	"WAREHOUSE_PASSWORD": true,
 }
 
 // workerKeys is the Connect worker properties allow-list: the keys a

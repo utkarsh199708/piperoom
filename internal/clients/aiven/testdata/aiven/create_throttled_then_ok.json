@@ -1,0 +1,45 @@
+{
+  "provider": "aiven",
+  "name": "create_throttled_then_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from aiven/aiven-client's client.py paths (read 2026-10-30); response shapes beyond the result keys it names are unconfirmed; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/project/project-0/service/connect-0/connectors",
+        "body": "{\"connector.class\":\"io.debezium.connector.postgresql.PostgresConnector\",\"database.dbname\":\"orders\",\"database.hostname\":\"orders.example.com\",\"database.password\":\"REDACTED\",\"database.port\":\"5432\",\"database.user\":\"debezium\",\"name\":\"it_orders\",\"plugin.name\":\"pgoutput\",\"topic.prefix\":\"orders\"}",
+        "body_sha256": "133b0ae61f96781bea74f6f683a57b4a0d4005d9ffd51cc07244d0d485dabd5b",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "0"
+        },
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/project/project-0/service/connect-0/connectors",
+        "body": "{\"connector.class\":\"io.debezium.connector.postgresql.PostgresConnector\",\"database.dbname\":\"orders\",\"database.hostname\":\"orders.example.com\",\"database.password\":\"REDACTED\",\"database.port\":\"5432\",\"database.user\":\"debezium\",\"name\":\"it_orders\",\"plugin.name\":\"pgoutput\",\"topic.prefix\":\"orders\"}",
+        "body_sha256": "133b0ae61f96781bea74f6f683a57b4a0d4005d9ffd51cc07244d0d485dabd5b",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connector\":{\"name\":\"it_orders\"}}"
+      }
+    }
+  ]
+}

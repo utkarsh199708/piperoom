@@ -1,0 +1,22 @@
+{
+  "provider": "aiven",
+  "name": "integration_not_kafka",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from aiven/aiven-client's client.py paths (read 2026-10-30); response shapes beyond its result keys are unconfirmed; requests as the managed ops send them through internal/clients/aiven; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/project/project-0/service/pg-0"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"service\":{\"service_name\":\"pg-0\",\"service_type\":\"pg\",\"state\":\"RUNNING\"}}"
+      }
+    }
+  ]
+}

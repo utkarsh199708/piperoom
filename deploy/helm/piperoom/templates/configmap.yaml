@@ -1,3 +1,4 @@
+{{- if include "piperoom.server" . }}
 {{- if not .Values.files.existingConfigMap }}
 apiVersion: v1
 kind: ConfigMap
@@ -10,4 +11,5 @@ data:
     {{- .Values.files.owners | nindent 4 }}
   users.yaml: |
     {{- .Values.files.users | nindent 4 }}
+{{- end }}
 {{- end }}

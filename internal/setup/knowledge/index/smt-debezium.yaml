@@ -42,6 +42,9 @@
     - {name: add.headers, default: ""}
     - {name: add.headers.prefix, default: "__"}
     - {name: replace.null.with.default, default: "true", since: 3.1.0.Final}
+    - {name: drop.fields.header.name, default: "", since: 2.4.0.Final}
+    - {name: drop.fields.from.key, default: "false", values: ["true", "false"], since: 2.4.0.Final}
+    - {name: drop.fields.keep.schema.compatible, default: "true", values: ["true", "false"], since: 2.4.0.Final}
   checks:
     - How a delete reaches the sink depends on the release. From 3.2.0.Final the default delete.tombstone.handling.mode=tombstone leaves only a tombstone; before 3.2.0.Final, with neither delete key set, the legacy delete.handling.mode=drop and drop.tombstones=true drop deletes entirely. A sink that must see deletes as rows needs delete.tombstone.handling.mode=rewrite (2.5.0.Final and later), which adds a __deleted field.
     - Relational change events only; MongoDB change events need io.debezium.connector.mongodb.transforms.ExtractNewDocumentState.

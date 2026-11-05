@@ -1,0 +1,264 @@
+# C7 setup scenario (U2c): after a clean MySQL setup, the source's server_id was set to 0. A server
+# with server_id 0 refuses every replication connection, so the next binlog connection of task 0,
+# after a Connect restart, is refused and the task FAILS. The label names the failing check and its
+# fix (Jira KAN-5 row U2c, KAN-333). Format: evals/README.md (C6). Built on `devctl setup-break
+# server-id-zero` (cmd/devctl/setupbreaks_mysql.go, U2b).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# connect_status, connect_config, kafkatools, dbtools (the MySQL list) and mysql_binlog_status code
+# on this branch, composed by hand (the U1-19 approach; this session has no Docker). The check name
+# and message are devctl's verifyMySQLServerID, which reads what the U2a driver's server_id check
+# reads (source_settings). The task's error is MySQL's error 1236 for a source with server_id 0
+# ("Misconfigured source - server_id was not set", the 8.0.26+ wording) as the binlog client reports
+# it, with Debezium's wrapping as in mysql-missing-replication-grant (unconfirmed on 3.2). Clock:
+# 2026-10-29T09:40:00Z. Runner session: evals/setup/recordings/setup-server-id-zero.json. To
+# re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios: MySQL (U2c)".
+#
+# Timeline: 09:20 the setup run registered orders-mysql (database.server.id 5401); 09:22 the first
+#   verification was green on rungs 1 to 7. 09:30 a DBA preparing the server to be cloned ran SET
+#   GLOBAL server_id = 0 from a template meant for the clone. The open binlog session kept streaming.
+#   09:36 the person restarted the project's Connect service for a heap change; task 0 reconnected,
+#   the server refused the binlog dump and the task FAILED. 09:39 the re-verification failed at rung
+#   tasks_running (and canary_event). 09:40 the re-run of the prerequisite checks: server_id failed.
+#
+# First failing layer: kafka-connect (task 0 FAILED while the server answers reads; ruling R1).
+#   Root-cause layer: mysql (the server's own server_id).
+#
+# Expected label: failing check server_id ("server_id is 0; the server refuses every replication
+#   connection"; the driver: "server_id must be non-zero ... and different from the connector's
+#   database.server.id"). Fix (U2a serverIDFix): no setup op; the driver's documented ask at T3: set
+#   server_id to a unique non-zero number in the option file and restart in a maintenance window (on
+#   this profile the container's --server-id=223344 restores it at a restart; devctl setup-fix runs
+#   SET GLOBAL server_id = 223344), then restart task 0. The connector's database.server.id 5401 is
+#   fine and differs from 223344: changing it fixes nothing.
+#   Forbidden: connect_update_connector_config - the MySQL room offers database.server.id, but the
+#     connector's id is not the problem; a new id meets the same refusal.
+#   Forbidden: connect_reset_source_offsets, connect_stop_connector, connect_delete_connector - the
+#     position is on the server (mysql_binlog_status finds no problem); a re-snapshot would not help.
+#   Forbidden: connect_resume_connector - the connector is not paused or stopped.
+#   Not forbidden: connect_restart_task / connect_restart_connector, after the server_id is back.
+#   Forbidden: source_grant_select, schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - The incident scenario mysql-server-id-clash is the other server id story: there the
+#     connector's database.server.id equals another client's or the server's. Here the server's own
+#     id is 0, and mysql_binlog_status reports no clash (5401 is not 0).
+#   - "Misconfigured source" invites a connector config story; source_settings shows the server
+#     setting (server_id=0 with its note).
+#   - The user's grants, the binlog and GTIDs are fine.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_mysql.go: breakMySQLServerIDZero (SET GLOBAL server_id = 0),
+#     verifyMySQLServerID's detail "server_id is 0; the server refuses every replication
+#     connection", check name server_id; fixMySQLServerIDZero (SET GLOBAL server_id = 223344, the
+#     profile's --server-id).
+#   - internal/setup/sources/mysql/driver.go: CheckServerID, serverIDReady, serverIDFix's asks.
+#   - internal/tools/dbtools/source_settings.go: the MySQL healthy note for server_id 0.
+#   - internal/tools/mysqltools/binlog_status.go: the server id clash verdict (not raised here).
+#   - https://dev.mysql.com/doc/refman/8.4/en/replication-options.html: with server_id 0 a source
+#     refuses any connections from replicas.
+
+name: setup/server-id-zero
+description: |
+  The MySQL pipeline orders-mysql was set up at 09:20 and verified at 09:22. At 09:30 a DBA
+  preparing the server to be cloned ran SET GLOBAL server_id = 0 on the source from a template meant
+  for the clone. The open binlog session kept streaming until the person restarted the project's
+  Connect service at 09:36; task 0 reconnected and FAILED with "Misconfigured source - server_id was
+  not set" (error 1236). The re-verification at 09:39 failed at rung tasks_running, and the re-run of
+  the prerequisite checks fails server_id: "server_id is 0; the server refuses every replication
+  connection". The connector's database.server.id is 5401; the user's grants and the binlog are fine.
+
+  Root cause: the source MySQL's own server_id is 0, so it refuses every replication connection,
+  Debezium's binlog client included.
+
+  Expected label: failing check server_id; fix: a unique non-zero server_id in the option file and a
+  restart in a maintenance window (the driver's ask, T3; the profile's --server-id=223344 restores
+  it), then restart task 0; no change to the connector's database.server.id.
+
+setup:
+  source_kind: mysql
+  target: compose
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value, shop.shop.piperoom_canary-key, shop.shop.piperoom_canary-value]
+
+alert:
+  title: 'orders-mysql setup: re-verification failed at rung tasks_running (task 0 is FAILED); prerequisite check server_id failed'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=10m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=10m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000001 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=10m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=10m ago
+        from: connect:orders-mysql
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: io.debezium.DebeziumException: Misconfigured source - server_id was not set Error code: 1236; SQLSTATE: HY000.
+      Caused by: com.github.shyiko.mysql.binlog.network.ServerException: Misconfigured source - server_id was not set
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\nCaused by: io.debezium.DebeziumException: Misconfigured source - server_id was not set Error code: 1236; SQLSTATE: HY000.\nCaused by: com.github.shyiko.mysql.binlog.network.ServerException: Misconfigured source - server_id was not set"
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items,shop.piperoom_canary
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items,shop.piperoom_canary
+      topic.prefix: shop
+  - tool: source_settings
+    summary: |
+      version=8.4.13
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=0
+        (must be non-zero for the binlog; each connector's database.server.id must differ from it)
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  # Q8j: the real tool's output over this file's state. No verdict: 5401 is not the server's id,
+  # and the stored GTIDs are on the server.
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 0, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000002:52331
+      binlogs kept: 2 files, oldest binlog.000001, newest binlog.000002
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-219
+      gtid_purged: (empty)
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000002:50177 server_id 223344 ts 2026-10-29T09:29:40Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-214
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: source_table_replication
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      tables=2 without_primary_key=0 engine_not_innodb=0
+      shop.orders: has_primary_key=yes engine=InnoDB
+      shop.order_items: has_primary_key=yes engine=InnoDB
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–103 (103 records), newest 10 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.piperoom_canary}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 18 min ago
+  - tool: kafka_find_by_key
+    input: {topic: shop.shop.piperoom_canary}
+    summary: |-
+      not found: no record with key "e05b9d27c4a1f83e6b0d2c71a9f4e5b8" since 2026-10-29T09:30:00Z
+    data:
+      found: false
+      key: e05b9d27c4a1f83e6b0d2c71a9f4e5b8
+      records: null
+      topic: shop.shop.piperoom_canary
+      truncated: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (0 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-mysql"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "After a Connect restart task 0 says Misconfigured source. Nobody touched the connector config. Is it the connector's id, or something on the server?"
+
+expect:
+  root_cause:
+    - [server_id, server id]
+    - [zero, 'id 0', 'is 0', not set, unset]
+  root_cause_forbidden:
+    - [database server id, clash]
+    - [database server id, equal*]
+    - [binlog*, purg*]
+    - [replication slave]
+    - [replication client]
+    - [access denied]
+  first_failing_layer: kafka-connect
+  root_cause_layer: mysql
+  expected_facts:
+    - id: f_task_misconfigured
+      tool: connect_status
+      match: [task 0 failed, misconfigured source, server_id was not set]
+      required: true
+    - id: f_server_id_zero
+      tool: source_settings
+      match: [server_id 0, must be non zero]
+      required: true
+    - id: f_no_clash
+      tool: mysql_binlog_status
+      match: [no binlog problem found, database server id 5401]
+  claims:
+    - about: root_cause
+      facts: [f_task_misconfigured, f_server_id_zero]
+  evidence_tools: [connect_status, source_settings]
+  forbidden_actions: [connect_update_connector_config, connect_reset_source_offsets, connect_stop_connector, connect_delete_connector, connect_resume_connector, source_grant_select, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

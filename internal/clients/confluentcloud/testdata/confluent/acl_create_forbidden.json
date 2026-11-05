@@ -1,0 +1,27 @@
+{
+  "provider": "confluent",
+  "name": "acl_create_forbidden",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as this client sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"LITERAL\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"connect-it_orders\",\"resource_type\":\"GROUP\"}",
+        "body_sha256": "fca0dede1c253ff75d50fc04773e598da8114a03c970634214fe51f28e020d55",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"error_code\":40301,\"message\":\"Request is not authorized\"}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "provider": "aws",
+  "name": "role_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetRole&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "f880add47c32d84449c83dc337cd33beb6ad24a93db9c056fd4238d14f97bccf",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetRoleResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>arn:aws:iam::000000000000:role/PiperoomMSKConnect</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate><AssumeRolePolicyDocument>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22kafkaconnect.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D</AssumeRolePolicyDocument></Role></GetRoleResult><ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata></GetRoleResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=SimulatePrincipalPolicy&ActionNames.member.1=kafka-cluster%3AConnect&ActionNames.member.2=logs%3APutLogEvents&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "8da4f3fe5caf76e23cdff70e1c2a5db1e3ce689e2d5a289f6150a527ad3697cf",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<SimulatePrincipalPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults><member><EvalActionName>kafka-cluster:Connect</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>allowed</EvalDecision></member><member><EvalActionName>logs:PutLogEvents</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member></EvaluationResults></SimulatePrincipalPolicyResult><ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata></SimulatePrincipalPolicyResponse>"
+      }
+    }
+  ]
+}

@@ -267,7 +267,7 @@ func (d Driver) Checks() []Check {
 		},
 		{
 			ID:          CheckCaptureLoginGrant,
-			Description: "The connector's login must have SELECT on every source table.",
+			Description: "The connector's login must have a database user in the captured database, SELECT on every source table, SELECT on SCHEMA::cdc and VIEW DATABASE STATE.",
 			ReadOp:      readRoleInfo,
 			Read:        readLogin,
 			Pass:        loginSelectsAll,
@@ -416,8 +416,20 @@ func loginFix(d Driver, ev Evidence) (string, string) {
 	return opCreateReadRole, ""
 }
 
+// loginSelectsAll (U4g): the login reaches the database (sysadmin reaches it
+// as dbo; anyone else needs a mapped database user), can SELECT every source
+// table and the cdc schema, and holds VIEW DATABASE STATE — what Debezium's
+// snapshot and capture reads need. CDCSelect and ViewDBState already fold the
+// fixed roles in (the client computes them), so only the user mapping needs
+// the sysadmin exception here.
 func loginSelectsAll(d Driver, ev Evidence) bool {
 	if !ev.Login.Exists {
+		return false
+	}
+	if !ev.Login.Sysadmin && !ev.Login.HasDBUser {
+		return false
+	}
+	if !ev.Login.CDCSelect || !ev.Login.ViewDBState {
 		return false
 	}
 	for _, t := range d.Tables {
@@ -429,17 +441,31 @@ func loginSelectsAll(d Driver, ev Evidence) bool {
 }
 
 // grantsFix: a missing login is created with its grants; an existing one is
-// never altered by a setup op, so the ask lists the exact grants.
+// never altered by a setup op, so the ask lists exactly the statements the
+// evidence shows missing — the user mapping, the table SELECTs, the
+// cdc-schema SELECT and VIEW DATABASE STATE each name themselves (U4g).
 func grantsFix(d Driver, ev Evidence) (string, string) {
 	if !ev.Login.Exists {
 		return loginFix(d, ev)
 	}
 	var stmts []string
+	if !ev.Login.Sysadmin && !ev.Login.HasDBUser {
+		stmts = append(stmts, "CREATE USER "+bracket(d.Login)+" FOR LOGIN "+bracket(d.Login))
+	}
 	for _, t := range d.Tables {
 		if !ev.Login.Selectable[t] {
 			stmts = append(stmts, "GRANT SELECT ON "+bracketTable(t)+" TO "+bracket(d.Login))
 		}
 	}
-	stmts = append(stmts, "GRANT SELECT ON SCHEMA::cdc TO "+bracket(d.Login))
+	if !ev.Login.CDCSelect {
+		stmts = append(stmts, "GRANT SELECT ON SCHEMA::cdc TO "+bracket(d.Login))
+	}
+	if !ev.Login.ViewDBState {
+		stmts = append(stmts, "GRANT VIEW DATABASE STATE TO "+bracket(d.Login))
+	}
+	if len(stmts) == 0 {
+		// Unreachable while Pass and this agree; a safe ask beats a panic.
+		stmts = append(stmts, "GRANT SELECT ON SCHEMA::cdc TO "+bracket(d.Login))
+	}
 	return "", "No setup op grants to an existing login. In database " + bracket(d.Database) + " run: " + strings.Join(stmts, "; ") + ". Then re-read."
 }

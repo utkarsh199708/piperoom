@@ -1,0 +1,195 @@
+# C7 setup scenario (U12d): a setup on the Strimzi target (the in-cluster runner Job, the chart's
+# paused shells, docs/design/setup-strimzi.md) whose KafkaConnect build fails. The person's platform
+# engineer edited the KafkaConnect by hand while the first build ran: they moved the Debezium Postgres
+# plugin's artifact url from 3.2.0.Final to 3.1.3.Final "to match staging" and kept the sha512sum the
+# connect template had rendered, which is the 3.2.0.Final archive's. Strimzi's build pod
+# orders-connect-connect-build downloads the 3.1.3.Final archive, its sha512sum --check fails, the
+# build stops and the KafkaConnect stays NotReady: no Connect pod runs, so the KafkaConnector was never
+# created. The label names the failing artifact and the fix (Jira KAN-5 row U12d, KAN-290; design §8,
+# "build": "the plugin version (knowledge index) ... never a raw artifact URL"). Format:
+# evals/README.md (C6). Built on the U12a/U12b driver (internal/setup/targets/strimzi: k8s_apply's
+# connect template, strimzi_build_status, k8s_get).
+#
+# RECORDED: NO. No cluster ran: no kind or managed cluster was available to this session, and the
+# setup room path does not run the Strimzi target in the harness yet. The room summaries follow the
+# format code of the real tools on this branch; the runner session
+# (evals/setup/recordings/setup-strimzi-build-failed.json) follows the Strimzi driver's Summary and
+# Data formats, with the k8s_get Data and the strimzi_build_status Data passed through the runner's
+# own redaction (redact.JSONStats masks the pushSecret name). Composed by hand, not read from a
+# cluster: the KafkaConnect's NotReady condition (reason RuntimeException, "The Kafka Connect build
+# failed": Strimzi's exact reason string is unconfirmed), the Kaniko build log tail (the RUN line is
+# the shape of the Dockerfile Strimzi generates for a tgz artifact; the plugin directory hash
+# 5b8e21c4 is made up) and the refused connection of the room's Connect reads (the Connect client's
+# error format; the runner's remote-client wrapping is not reproduced). Clock:
+# 2026-10-30T09:40:00Z. No devctl setup-break exists for this target (the U12 kind test breaks the
+# build itself, design §10); to re-record, see evals/scenarios/README.md, "Setup scenarios: Strimzi
+# (U12d)".
+#
+# Known gaps:
+#   - k8s_get, k8s_events, k8s_logs and strimzi_build_status are runner ops only: they are not
+#     server read tools (internal/setup/tools/read.go registers none of them) and not in
+#     evals.LiveTools, so the room cannot read the KafkaConnect or the build log. The cause reaches
+#     the room through the alert's step and the person's steer (who pasted the build log's last
+#     lines); the runner session holds the reads.
+#   - The ladder in the runner session is plan.Ladder(postgres, strimzi, none), whose rungs 1 and 2
+#     read connect_status (the runner's in-cluster Connect client reaches
+#     orders-connect-connect-api:8083), because evalsetup's FakeLadder runs plan.Ladder.
+#     plan.StrimziLadder (rungs 1 and 2 over the KafkaConnector CR with k8s_get, design §9) is not
+#     what the replay recomputes.
+#   - No server read tool shows a KafkaConnect, so the room has no fact about the spec; the one
+#     replayed fact is the slot that never got created.
+#
+# Timeline: 09:08 k8s_apply KafkaConnect orders-connect from the connect template (release
+#   3.2.0.Final, plugins [postgres]; the url and sha512sum come from the knowledge index as a pair)
+#   and the first build started. 09:14 a platform engineer ran kubectl edit kafkaconnect
+#   orders-connect and changed spec.build.plugins[0].artifacts[0].url to the 3.1.3.Final archive;
+#   the operator started a new build (generation 3). 09:16 the build pod failed: sha512sum --check
+#   on the 3.1.3.Final archive against the 3.2.0.Final digest. 09:22 strimzi_build_status: build
+#   failed; the setup stopped at the build step. 09:23 k8s_get KafkaConnect: the hand-edited spec.
+#   After the label: 09:31 k8s_apply connect again (T2, the same params), 09:38 the build is Ready
+#   (4 connector plugins), 09:39 k8s_secret_apply and the KafkaConnector, 09:41 the ladder is green
+#   on rungs 1 to 7.
+#
+# First failing layer: kafka-connect (the KafkaConnect's image build). Root-cause layer:
+#   kafka-connect (the KafkaConnect spec's plugin artifact). Postgres and Kafka are healthy.
+#
+# Expected label: the failing artifact - debezium-connector-postgres-3.1.3.Final-plugin.tar.gz,
+#   whose computed SHA-512 does not match the sha512sum in spec.build.plugins (the 3.2.0.Final
+#   archive's digest); the spec was edited by hand. Fix: re-render the KafkaConnect from the connect
+#   template with k8s_apply (T2; kind KafkaConnect, template connect, release 3.2.0.Final and
+#   plugins [postgres], or release 3.1.3.Final if the person wants staging's release: the template
+#   takes that release's own url and digest from the knowledge index). Never a hand-edited spec: no
+#   room action writes a KafkaConnect, and the connect template's allow-list refuses spec.image and
+#   any artifact outside the index (internal/setup/targets/strimzi/allowlist.go). The KafkaConnect
+#   is no room action, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets - no
+#     Connect worker runs and no connector exists; nothing on Connect's REST API can fix an image
+#     build.
+#   Forbidden: pg_drop_replication_slot - no slot exists, and the source is not the problem.
+#   Forbidden: schema_register, schema_set_compatibility - nothing reached the registry.
+#
+# Traps:
+#   - k8s_get summarises the KafkaConnect as "no Ready condition yet": Strimzi reports a failure as a
+#     NotReady condition, which that summary does not name. The build status and the condition say
+#     the build failed.
+#   - A build failure has other causes that look the same from the outside (a pushSecret the
+#     registry denies, Kaniko running out of memory, an artifact url that 404s); the log tail rules
+#     them out: the download finished and the checksum check failed.
+#   - Re-applying the connector or restarting anything on Connect changes nothing: no worker runs.
+#
+# Sources:
+#   - internal/setup/targets/strimzi/templates_connect.go: renderConnect takes each plugin's url and
+#     sha512sum from knowledge.ResolvePlugin (pluginArtifact), and the image tag from their digests.
+#   - internal/setup/targets/strimzi/reads.go: strimzi_build_status (the build pod
+#     <pipeline>-connect-connect-build, its log tail on a failed build, state "build failed");
+#     k8s_get's readySummary.
+#   - internal/setup/knowledge/plugins.go: the 3.2.0.Final postgres digest 0f1b1d50... and the
+#     3.1.3.Final digest 5312b8c0..., each from Maven Central's .sha512.
+#   - docs/design/setup-strimzi.md §6 (spec.build.plugins only from the knowledge index; spec.image
+#     refused) and §8 (the build failure row).
+#   - Strimzi's KafkaConnect build: a tgz artifact with sha512sum is downloaded and checked with
+#     sha512sum --check in the generated Dockerfile; a failed build leaves the KafkaConnect NotReady.
+
+name: setup/strimzi-build-failed
+description: |
+  The person ran piperoom-setup with the Strimzi target: the runner Job in namespace data filled the
+  chart's KafkaConnect shell orders-connect from the connect template at 09:08 (Debezium 3.2.0.Final,
+  the Postgres plugin, url and sha512sum from the knowledge index). At 09:14 a platform engineer
+  edited the KafkaConnect by hand to move the plugin to 3.1.3.Final and left the sha512sum alone.
+  The build pod orders-connect-connect-build downloaded
+  debezium-connector-postgres-3.1.3.Final-plugin.tar.gz and failed its sha512sum check
+  ("5b8e21c4.tgz: FAILED", "1 computed checksum did NOT match"); the KafkaConnect is NotReady, no
+  Connect pod runs and the KafkaConnector pg-orders-connector was never created.
+
+  Root cause: the KafkaConnect's spec.build.plugins pairs the 3.1.3.Final archive url with the
+  3.2.0.Final archive's sha512sum (a hand edit outside the connect template), so the build's
+  checksum check fails.
+
+  Expected label: the failing artifact debezium-connector-postgres-3.1.3.Final-plugin.tar.gz and its
+  checksum mismatch; fix: k8s_apply (T2) the KafkaConnect from the connect template again (release
+  from the knowledge index), never a hand-edited spec.
+
+setup:
+  source_kind: postgres
+  target: strimzi
+
+pipeline:
+  id: orders
+  title: Orders CDC (Strimzi)
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  # The Connect REST API is a ClusterIP service with no pod behind it: the slot read needs no
+  # Connect config.
+  watch:
+    slot: debezium_orders
+
+resources:
+  connectors: [pg-orders-connector]
+
+alert:
+  # The title names the step and the build status, not the artifact or the checksum.
+  title: 'orders setup (Strimzi): KafkaConnect orders-connect not Ready 14 min after k8s_apply; strimzi_build_status: build failed, build pod orders-connect-connect-build Failed'
+  # No pipeline_map: no Connect worker runs, so the map has no connector or topic to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # The connector never started, so it never created its slot.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: not found in pg_replication_slots
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (0 past rooms searched).
+  # The Connect API service has no pod: the build never produced an image.
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/status: Get "http://orders-connect-connect-api.data.svc:8083/connectors/pg-orders-connector/status": dial tcp 10.96.84.12:8083: connect: connection refused'
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/config: Get "http://orders-connect-connect-api.data.svc:8083/connectors/pg-orders-connector/config": dial tcp 10.96.84.12:8083: connect: connection refused'
+  # Calls no recording above covers: the real tools' scope and not-found answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "The Strimzi setup is stuck at the Connect build. The last lines of the build pod's log are '/opt/kafka/plugins/debezium-connector-postgres/5b8e21c4/5b8e21c4.tgz: FAILED' and 'sha512sum: WARNING: 1 computed checksum did NOT match', and the RUN line above them downloads debezium-connector-postgres-3.1.3.Final-plugin.tar.gz. Someone on the platform team touched the KafkaConnect this morning to match staging. What is broken, and how do we fix it so nobody edits that object by hand again?"
+
+expect:
+  root_cause:
+    - ['3.1.3']
+    - [sha512sum, sha512, checksum, digest]
+  # The other ways a Strimzi build fails, and the wrong stories of a connector that never started.
+  root_cause_forbidden:
+    - [push secret]
+    - [registry, denied]
+    - [out of memory]
+    - [oom*]
+    - [plugin path]
+    - [schema registry]
+    - [replication slot, dropped]
+    - [permission denied]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_missing
+      tool: pg_replication_slots
+      match: [debezium_orders, not found]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_slot_missing]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

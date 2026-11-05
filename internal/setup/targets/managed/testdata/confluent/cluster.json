@@ -1,0 +1,23 @@
+{
+  "provider": "confluent",
+  "name": "cluster",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/cmk/v2/clusters/lkc-00000",
+        "query": "environment=env-00000"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"api_version\":\"cmk/v2\",\"id\":\"lkc-00000\",\"kind\":\"Cluster\",\"spec\":{\"availability\":\"SINGLE_ZONE\",\"cloud\":\"AWS\",\"display_name\":\"orders\",\"http_endpoint\":\"https://scrubbed.confluent.cloud:443\",\"kafka_bootstrap_endpoint\":\"SASL_SSL://scrubbed.confluent.cloud:9092\",\"region\":\"us-east-1\"},\"status\":{\"phase\":\"PROVISIONED\"}}"
+      }
+    }
+  ]
+}

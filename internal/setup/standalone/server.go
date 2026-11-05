@@ -67,6 +67,10 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
+	writeOn, err := config.ParseWriteMode(qs.Config)
+	if err != nil {
+		return fmt.Errorf("setup: %w", err)
+	}
 	// The picker's price table and endpoint (V7, KAN-525). The stored key from
 	// .piperoom/model.env reaches the adapters through the key overlay
 	// (quickstart.Keys), never the process environment; a model that does not
@@ -111,6 +115,11 @@ func (s *Server) Serve(parent context.Context, qs quickstart.Settings) error {
 		// a loopback setup target is this machine: the denylist allows it.
 		SetupLocal: true,
 		SoloUser:   qs.Config.SoloUser,
+		// A setup room's agent runs over the setup stack (the setup read
+		// tools and the setup actions through the paired runner), the same
+		// registries cmd/server builds (row U1-31); without it the agent
+		// would run in setup mode over the plain registries.
+		SetupStack: setupStackBuilder(qs.Config, setupCfg.Enabled, writeOn),
 		Logger:     log,
 		// A closed room's token count is not kept on the endpoint.
 		OnRoomClosed: func(_ context.Context, roomID, _, _ string) { host.Forget(roomID) },

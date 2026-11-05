@@ -1,3 +1,4 @@
+{{- if include "piperoom.server" . }}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -26,10 +27,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-      {{- with .Values.networkPolicy.dns.to }}
       to:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml .Values.networkPolicy.dns.to | nindent 8 }}
     {{- range $name, $g := .Values.networkPolicy.egress }}
     {{- if $g }}
     # {{ $name }}
@@ -47,4 +46,5 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- end }}
 {{- end }}

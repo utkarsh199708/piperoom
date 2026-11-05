@@ -1,0 +1,186 @@
+# C7 setup scenario (U6c): a setup on the embedded target (the Debezium Engine inside the person's
+# own application, docs/design/setup-agent.md §2.5 "the embedded reference project") where the
+# person's pom.xml mixes two Debezium releases. A dependency bot bumped the property
+# version.debezium to 3.2.0.Final, which sets debezium-api and debezium-embedded, but
+# debezium-connector-postgres carries a literal <version>2.7.2.Final</version> from before the
+# upgrade. Maven resolves one debezium-core (3.2.0.Final, through debezium-embedded) under a
+# connector compiled against 2.7.2.Final, and the engine stops right after it starts with a
+# java.lang.NoSuchMethodError. The label names the mismatch and the fix (Jira KAN-5 row U6c,
+# KAN-344). Format: evals/README.md (C6). Built on the U6a knowledge (internal/setup/knowledge:
+# the reference project, the embedded version rules) and the U6b ops (internal/setup/ops/
+# embedded_ops.go: project_inspect, embedded_log_read, reference_write).
+#
+# RECORDED: NO, but the runner session is the real ops' output: project_inspect, file_read,
+# embedded_log_read and reference_write ran through ops.Registry.Execute over a composed project (the
+# person's pom.xml and log file), and their summaries and Data are copied unchanged into
+# evals/setup/recordings/setup-embedded-version-mismatch.json (receipt MACs synthetic). Composed by
+# hand: the log file's lines (the NoSuchMethodError names a made-up debezium-core member; that a
+# 2.7.2.Final connector over a 3.2.0.Final debezium-core fails with such an error at start is the
+# claim, and its exact member is unconfirmed) and the room's reads below, in the real tools' formats.
+# The person's application prints the reference app's piperoom-reference lines (they copied
+# ReferenceApp's notifying and completion callbacks into their service), which is what
+# embedded_log_read reads; every other log line is dropped. Clock: 2026-10-30T09:40:00Z. No devctl
+# setup-break exists for the embedded target; to re-record, see evals/scenarios/README.md, "Setup
+# scenarios: embedded (U6c)".
+#
+# Known gaps:
+#   - project_inspect reads only debezium-embedded's version (and the Outbox extension's, Kafka's,
+#     Quarkus' and Java's): it does not read a connector artifact's version, and the U6a rules have no
+#     "every io.debezium artifact at one release" rule (embedded_rules.go: not a rule for want of a
+#     release note; the reference project enforces it with debezium-bom). So project_inspect reports
+#     2 findings, both the informational engine-API ones, and the mismatch is visible only in
+#     file_read of pom.xml and in the engine's error.
+#   - project_inspect, embedded_log_read and file_read are setup read tools
+#     (internal/setup/tools/read.go), not in evals.LiveTools, and the harness opens a CDC incident
+#     room, so the room cannot replay them: the cause reaches the room through the alert's step and the
+#     person's steer (who pasted the error); the runner session holds the reads.
+#   - No ladder: plan.Ladder defines none for embedded (plan.EmbeddedLadder is the target's own,
+#     and the room's ladder runner cannot fill the log path yet), so the session records none and
+#     evalsetup.Verify reports it as not defined (Check.NoLadder), as for dbzserver.
+#   - owners.yaml requires a connector on a CDC pipeline and has no embedded kind: the pipeline names
+#     the application, orders-cdc, as a stand-in (its Connect reads answer not found), and watch.slot
+#     names the engine's slot.
+#
+# Timeline: 09:10 the dependency bot's change "update debezium to v3.2.0.Final" merged (the property
+#   only). 09:28 the person started orders-cdc 1.4.0: "piperoom-reference started:
+#   io.debezium.connector.postgresql.PostgresConnector", then "piperoom-reference engine stopped with
+#   an error: Unable to start the connector ...: java.lang.NoSuchMethodError: ...". 09:31
+#   project_inspect (maven; debezium-embedded 3.2.0.Final, java 17; 2 info findings), file_read
+#   pom.xml, embedded_log_read (stopped with an error, 0 events). After the label: 09:36
+#   reference_write (T1) wrote the maven postgres reference project under piperoom-reference/ to
+#   compare; the person imported debezium-bom 3.2.0.Final in their pom and removed the 2.7.2.Final
+#   version; 09:51 orders-cdc 1.4.1 started and took its snapshot (12 events) and the canary; 09:52
+#   embedded_log_read with the nonce: started, 13 events, canary seen.
+#
+# First failing layer: kafka-connect (the Debezium Engine, the connector layer of an embedded
+#   pipeline). Root-cause layer: kafka-connect (the engine's classpath: two Debezium releases). The
+#   source is healthy: the engine failed before it created its slot.
+#
+# Expected label: the mismatch - debezium-embedded (and debezium-api, debezium-core) 3.2.0.Final
+#   with debezium-connector-postgres 2.7.2.Final in the person's pom.xml. Fix: a documented ask: the
+#   person edits their own build file (import debezium-bom 3.2.0.Final and drop the connector's
+#   version, or set every io.debezium artifact to one release); the room never writes the person's
+#   project (embedded mode refuses every write op but reference_write). reference_write (T1) may
+#   regenerate the reference project under piperoom-reference/, whose pom is the aligned one to
+#   compare with. Neither is a room action, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets - there
+#     is no Kafka Connect; the engine runs in the person's process.
+#   Forbidden: pg_drop_replication_slot - no slot exists yet, and the source is not the problem.
+#   Forbidden: schema_register, schema_set_compatibility - an embedded engine here uses no registry.
+#
+# Traps:
+#   - project_inspect reports 2 findings and no error: both are the removed-EmbeddedEngine-API notes,
+#     which the code may or may not hit; they are not the cause (the app uses DebeziumEngine.create).
+#   - Java 17 meets Debezium 3.x's Java 17 floor: not a Java version story.
+#   - The engine logs "started" before it fails: the start line comes before the connector loads.
+#
+# Sources:
+#   - internal/setup/ops/embedded_ops.go: project_inspect's versions() (debezium-embedded only from
+#     io.debezium), its summary format; ParseEmbeddedLog's refStarted and refStopped lines;
+#     reference_write's summary and the embedded-mode write refusal (embeddedRefusal).
+#   - internal/setup/knowledge/embedded_rules.go: the rule table (dbz3-java17, the engine-api info
+#     rules) and the note that one-release-for-every-artifact is not a rule;
+#     internal/setup/knowledge/reference/pom.xml.tmpl: the reference pom imports debezium-bom.
+#   - Maven dependency mediation: two direct dependencies pulling debezium-core at the same depth
+#     resolve to the first declaration's version.
+
+name: setup/embedded-version-mismatch
+description: |
+  The person embeds the Debezium Engine in their own Spring Boot service orders-cdc (Maven) and runs
+  piperoom-setup with the embedded target. A dependency bot bumped version.debezium to 3.2.0.Final,
+  which sets debezium-api and debezium-embedded; debezium-connector-postgres keeps a literal
+  2.7.2.Final. The service logs "piperoom-reference started:
+  io.debezium.connector.postgresql.PostgresConnector" and then "piperoom-reference engine stopped
+  with an error: Unable to start the connector io.debezium.connector.postgresql.PostgresConnector:
+  java.lang.NoSuchMethodError: ..." on a debezium-core member. project_inspect sees debezium-embedded
+  3.2.0.Final and Java 17 and reports only the two engine-API notes.
+
+  Root cause: the build mixes Debezium releases - debezium-embedded 3.2.0.Final with
+  debezium-connector-postgres 2.7.2.Final - so the 2.7.2.Final connector runs over the 3.2.0.Final
+  debezium-core.
+
+  Expected label: the version mismatch (3.2.0.Final engine, 2.7.2.Final connector); fix: the person
+  aligns their own pom.xml (debezium-bom 3.2.0.Final, no connector version), a documented ask, or
+  reference_write (T1) regenerates the reference project to compare; no other write.
+
+setup:
+  source_kind: postgres
+  target: embedded
+
+pipeline:
+  id: orders-cdc
+  title: Orders CDC (embedded engine in orders-cdc)
+  topic_prefix: pg
+  source_tables: [public.orders]
+  # owners.yaml requires a connector on a CDC pipeline and has no embedded kind: the application
+  # stands in, and the room's Connect reads of it answer not found (there is no Connect worker).
+  # watch.slot names the engine's slot, so the slot read needs no Connect config.
+  connectors: [orders-cdc]
+  watch:
+    slot: debezium_orders
+
+alert:
+  # The title names what the setup saw, not the versions.
+  title: 'orders-cdc setup (embedded): the engine in orders-cdc stops right after it starts; embedded_log_read: reference app stopped with an error, 0 events after the last start'
+  # No pipeline_map: an embedded pipeline has no connector, topic or sink table in owners.yaml for
+  # the map to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # The engine failed before the connector created its slot.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: not found in pg_replication_slots
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-cdc (0 past rooms searched).
+  # The stand-in connector name has no Connect worker behind it.
+  - tool: connect_status
+    input: {connector: orders-cdc}
+    error: 'connect: GET /connectors/orders-cdc/status: not found'
+  - tool: connect_config
+    input: {connector: orders-cdc}
+    error: 'connect: GET /connectors/orders-cdc/config: not found'
+  # Calls no recording above covers: the real tools' scope answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders-cdc" (allowed connectors: orders-cdc)'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "orders-cdc starts and dies within a second. The log says 'piperoom-reference engine stopped with an error: Unable to start the connector io.debezium.connector.postgresql.PostgresConnector: java.lang.NoSuchMethodError' on some io.debezium.config.Field method. The only change today was the bot's Debezium bump in our pom.xml. What is wrong, and what do I change? I'd rather the room didn't touch our repo."
+
+expect:
+  root_cause:
+    - ['2.7.2']
+    - ['3.2.0']
+    - [mismatch*, mix*, differ*, two releases, align*]
+  # The other ways an embedded engine fails, and the offset scenario's story.
+  root_cause_forbidden:
+    - [memory offset backing store]
+    - [java, too old]
+    - [wal level]
+    - [permission denied]
+    - [replication slot, dropped]
+    - [schema registry]
+    - [password authentication failed]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_missing
+      tool: pg_replication_slots
+      match: [debezium_orders, not found]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_slot_missing]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

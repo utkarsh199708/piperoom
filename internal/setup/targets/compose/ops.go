@@ -51,9 +51,9 @@ func (composeWriteOp) ParamsSchema() map[string]any {
 		"required": []string{"templates"},
 		"properties": map[string]any{
 			"templates": map[string]any{
-				"type": "array", "minItems": 1, "maxItems": 4,
+				"type": "array", "minItems": 1, "maxItems": 5,
 				"items": map[string]any{"type": "string", "enum": []string{
-					TemplateKafka, TemplateConnect, TemplateRegistry, TemplatePostgres,
+					TemplateKafka, TemplateConnect, TemplateRegistry, TemplatePostgres, TemplateSinkPostgres,
 				}},
 			},
 			"project":  map[string]any{"type": "string", "pattern": `^piperoom-[a-z0-9_-]{1,54}$`},

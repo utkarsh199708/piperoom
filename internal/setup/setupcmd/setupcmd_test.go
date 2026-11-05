@@ -142,3 +142,12 @@ func TestRunDispatchesRunService(t *testing.T) {
 		t.Fatalf("Run(run-service --release) = %v, want the run-service --java refusal", err)
 	}
 }
+
+// The SQL Server canary database is the in-cluster Job's, typed in the room
+// release: on its own it would point at no Strimzi driver.
+func TestStrimziSourceDatabaseNeedsTheJob(t *testing.T) {
+	err := Run([]string{"--strimzi-source-database", "shop", "--server", "https://piperoom.example.com", "--code", "ABCDEFGH", "--project", t.TempDir()}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--strimzi-source-database is the in-cluster Job's") {
+		t.Fatalf("err = %v, want the Job-only refusal", err)
+	}
+}

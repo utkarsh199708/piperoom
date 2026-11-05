@@ -237,7 +237,7 @@ func (s *Service) runSetupLadder(ctx context.Context, roomID string) {
 	}
 	// No sink kind is carried by the setup request, so the ladder is the one
 	// without a sink: rung 7 reports "no sink was set up" (U1-8b PR, known gap).
-	rungs, err := plan.Ladder(snap.Setup.req.SourceKind, snap.Setup.req.Target, plan.SinkNone)
+	rungs, err := setupLadderRungs(snap.Setup.req.SourceKind, snap.Setup.req.Target)
 	if err != nil {
 		s.setupLadderNote(ctx, roomID, "verification: "+setupLadderErrText(err)+"; nothing was verified")
 		return
@@ -594,6 +594,22 @@ func (l *setupLadder) onePass(ctx context.Context, out events.SetupRung, rung pl
 	return out, last
 }
 
+// setupLadderRungs is the ladder of a setup target. A Strimzi Connect cluster
+// is a ClusterIP service the server cannot reach, so rungs 1 and 2 read the
+// KafkaConnector custom resource through the runner (plan.StrimziLadder); the
+// managed services have no Connect REST endpoint at all, so they read the
+// provider's status op (plan.ManagedLadder). Every other target reads Connect's
+// REST status (plan.Ladder).
+func setupLadderRungs(source, target string) ([]plan.Rung, error) {
+	switch target {
+	case "strimzi":
+		return plan.StrimziLadder(source, plan.SinkNone)
+	case "msk", "confluent", "aiven":
+		return plan.ManagedLadder(target, source, plan.SinkNone)
+	}
+	return plan.Ladder(source, target, plan.SinkNone)
+}
+
 // readInput builds the tool input one rung's read needs. Every value comes
 // from the room (the provisional pipeline, the registered target, this run's
 // keys), never from model text.
@@ -604,6 +620,16 @@ func (l *setupLadder) readInput(rungName, tool string) (map[string]any, error) {
 			return nil, fmt.Errorf("the provisional pipeline names no connector")
 		}
 		return map[string]any{"connector": l.connector}, nil
+	case plan.ReadK8sGet:
+		if l.connector == "" {
+			return nil, fmt.Errorf("the provisional pipeline names no connector")
+		}
+		return map[string]any{"kind": "KafkaConnector", "name": l.connector}, nil
+	case plan.ReadMSKConnector, plan.ReadConfluentConnector, plan.ReadAivenConnector:
+		if l.connector == "" {
+			return nil, fmt.Errorf("the provisional pipeline names no connector")
+		}
+		return map[string]any{"name": l.connector}, nil
 	case "kafka_topic_offsets":
 		return map[string]any{"topic": l.canaryTopic}, nil
 	case "kafka_find_by_key":

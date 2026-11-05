@@ -26,6 +26,10 @@ type SetupRoom struct {
 	Room      RoomSnapshot
 	Code      string
 	ExpiresAt time.Time
+	// Nonce is the code's fingerprint nonce: the HTTP layer, which knows the
+	// public origin, computes the fingerprint with SetupFingerprint. Never
+	// logged.
+	Nonce string
 }
 
 // setupNameRe rules for the provisional pipeline's lists. Tables are
@@ -39,6 +43,37 @@ var (
 	setupTopicPrefixRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	setupRepoIDRe        = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
+
+// setupTargetConnectorRes are the connector name rules of the targets whose
+// runner refuses more than setupConnectorRe allows: a Strimzi KafkaConnector
+// is a Kubernetes object (a DNS-1123 label, the chart and the driver's
+// nameRE), and the managed services name connectors as their APIs accept
+// (internal/setup/tools read_targets.go: mskNameRE, ccNameRE, aivenNameRE).
+// A room the runner could never set up is refused at creation, with the rule.
+var setupTargetConnectorRes = map[string]struct {
+	re   *regexp.Regexp
+	what string
+}{
+	"strimzi":   {regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,51}[a-z0-9])?$`), "a Kubernetes object name for a Strimzi target (lowercase letters, digits and '-', at most 53 characters, starting and ending with a letter or digit)"},
+	"msk":       {regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`), "an MSK Connect connector name (letters, digits, '_', '.' and '-', at most 128 characters, starting with a letter or digit)"},
+	"confluent": {regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`), "a Confluent Cloud connector name (letters, digits, '_', '.' and '-', at most 64 characters, starting with a letter or digit)"},
+	"aiven":     {regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`), "an Aiven connector name (letters, digits, '_', '.' and '-', at most 64 characters, starting with a letter or digit)"},
+}
+
+// checkTargetConnectors applies the target's connector name rule, if it has
+// one, to names that already passed setupConnectorRe.
+func checkTargetConnectors(field, target string, names []string) error {
+	rule, ok := setupTargetConnectorRes[target]
+	if !ok {
+		return nil
+	}
+	for _, n := range names {
+		if !rule.re.MatchString(n) {
+			return validation(fmt.Sprintf("%s: %q is not %s", field, n, rule.what))
+		}
+	}
+	return nil
+}
 
 // setupSourceKinds and setupRequestTargets are the values
 // events.SetupRequest.SourceKind and .Target document.
@@ -204,7 +239,7 @@ func (s *Service) CreateSetupRoom(ctx context.Context, user User, req events.Set
 	snap := st.snap.Clone()
 	s.notifyRoomOpenedLocked(roomID)
 	s.unlockRoom(st)
-	return SetupRoom{Room: snap, Code: code, ExpiresAt: now.Add(protocol.CodeTTL)}, nil
+	return SetupRoom{Room: snap, Code: code, ExpiresAt: now.Add(protocol.CodeTTL), Nonce: s.runners.codeNonce(code)}, nil
 }
 
 // planSetupTargets validates every target of the request and combines its
@@ -273,6 +308,9 @@ func validateSetupRequest(req *events.SetupRequest) error {
 		return err
 	}
 	if req.Connectors, err = cleanSetupNames("connectors", req.Connectors, setupConnectorRe, "a connector name"); err != nil {
+		return err
+	}
+	if err := checkTargetConnectors("connectors", req.Target, req.Connectors); err != nil {
 		return err
 	}
 	if req.Repos, err = cleanSetupNames("repos", req.Repos, setupRepoIDRe, "a repo id"); err != nil {
@@ -475,6 +513,9 @@ func (s *Service) ExtendSetupPipeline(ctx context.Context, user User, roomID str
 		return events.Event{}, err
 	}
 	defer s.unlockRoom(st)
+	if err := checkTargetConnectors("add_connectors", st.snap.Setup.req.Target, in.AddConnectors); err != nil {
+		return events.Event{}, err
+	}
 	p := st.snap.Setup.Provisional
 	for _, l := range []struct {
 		field    string

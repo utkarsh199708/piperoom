@@ -116,6 +116,27 @@ func TestOneOpPerMethod(t *testing.T) {
 			_, err := s.Source().PublicationTables(ctx, "dbz_publication", "debezium", []string{"public.orders"})
 			return err
 		}},
+		// SQL Server (U4e).
+		{"SQLServer.ServerInfo", OpSourceServerInfo, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.SQLServer().ServerInfo(ctx)
+			return err
+		}},
+		{"SQLServer.AgentState", OpSourceAgentState, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.SQLServer().AgentState(ctx)
+			return err
+		}},
+		{"SQLServer.DatabaseCDC", OpSourceDatabaseCDC, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.SQLServer().DatabaseCDC(ctx, "orders")
+			return err
+		}},
+		{"SQLServer.TableCDC", OpSourceTableCDC, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.SQLServer().TableCDC(ctx, []string{"dbo.orders"})
+			return err
+		}},
+		{"SQLServer.RoleInfo", OpSourceRoleInfo, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
+			_, err := s.SQLServer().RoleInfo(ctx, "debezium", []string{"dbo.orders"})
+			return err
+		}},
 		// Kafka.
 		{"Kafka.Topics", OpKafkaTopics, protocol.TierT0, read, func(ctx context.Context, s *Session) error {
 			_, err := s.Kafka().Topics(ctx)
@@ -260,6 +281,11 @@ var readWire = map[string]string{
 	"Source.LongTransactions":  `{"older_than_ms":60000}`,
 	"Source.Row":               `{"table":"public.orders","pk_column":"id","pk":"1"}`,
 	"Source.PublicationTables": `{"publication":"dbz_publication","role":"debezium","tables":["public.orders"]}`,
+	"SQLServer.ServerInfo":     `{}`,
+	"SQLServer.AgentState":     `{}`,
+	"SQLServer.DatabaseCDC":    `{"database":"orders"}`,
+	"SQLServer.TableCDC":       `{"tables":["dbo.orders"]}`,
+	"SQLServer.RoleInfo":       `{"role":"debezium","tables":["dbo.orders"]}`,
 	"Kafka.Topics":             `{}`,
 	"Kafka.TopicOffsets":       `{"topic":"pg.public.orders"}`,
 	"Kafka.ConsumerGroups":     `{}`,

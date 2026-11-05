@@ -1,0 +1,184 @@
+# C7 setup scenario (U6c): a setup on the embedded target where the person's own Debezium Engine
+# service keeps its offsets in memory. orders-search-sync (Gradle, Java 21) syncs public.orders into
+# a search index; its engine properties set
+# offset.storage=org.apache.kafka.connect.storage.MemoryOffsetBackingStore because the pod's root
+# filesystem is read-only. Nothing survives a restart, so every start finds an empty offset store and
+# snapshot.mode=initial snapshots public.orders again: the search index got the same 12 orders at
+# 08:31, 09:02 and 09:20. The label names the offset storage and the fix (Jira KAN-5 row U6c,
+# KAN-344). Format: evals/README.md (C6). Built on the U6b ops (internal/setup/ops/embedded_ops.go:
+# project_inspect, embedded_log_read; files.go: file_read).
+#
+# RECORDED: NO, but the runner session is the real ops' output: project_inspect, embedded_log_read
+# and file_read ran through ops.Registry.Execute over a composed project (build.gradle, the engine
+# properties file and the log file), and their summaries and Data are copied unchanged into
+# evals/setup/recordings/setup-embedded-offset-storage.json (receipt MACs synthetic). Composed by
+# hand: the log file's lines and the room's reads below, in the real tools' formats. The service
+# prints the reference app's piperoom-reference lines (its event loop was copied from ReferenceApp),
+# which is all embedded_log_read returns: Debezium's own "Snapshot step 1 - Preparing" and "Snapshot
+# completed" lines are in the file but dropped by the reader, so the repeated snapshot shows as a
+# "started" line followed by the same 12 public.orders events, three times. Clock:
+# 2026-10-30T09:40:00Z. No devctl setup-break exists for the embedded target; to re-record, see
+# evals/scenarios/README.md, "Setup scenarios: embedded (U6c)".
+#
+# Known gaps:
+#   - project_inspect reads build files only: the offset store is in a properties file, which only
+#     file_read shows. project_inspect's 2 findings are the informational engine-API notes.
+#   - project_inspect, embedded_log_read and file_read are setup read tools
+#     (internal/setup/tools/read.go), not in evals.LiveTools, and the harness opens a CDC incident
+#     room: the cause reaches the room through the alert's step and the person's steer; the runner
+#     session holds the reads.
+#   - No ladder: plan.Ladder defines none for embedded (plan.EmbeddedLadder is the target's own), so
+#     the session records none and evalsetup.Verify reports it as not defined (Check.NoLadder).
+#   - The stand-in connector and watch.slot are as in setup/embedded-version-mismatch.
+#
+# Timeline: 08:31 orders-search-sync started (snapshot: 12 events, then 2 streamed changes). 09:02 a
+#   deploy restarted it (12 events again, then 1 change). 09:20 the pod was rescheduled (12 events
+#   again). 09:31 project_inspect (gradle; debezium-embedded 3.2.0.Final, java 21; 2 info findings),
+#   embedded_log_read (started, 12 events after the last start), file_read of
+#   src/main/resources/debezium-engine.properties (MemoryOffsetBackingStore). After the label: the
+#   person moved the offsets to FileOffsetBackingStore at /var/lib/orders-search-sync/offsets.dat on
+#   a mounted volume (file_read 09:56); 09:57 the first start on the new store snapshotted once more;
+#   10:05 a restart resumed from the stored offset ("Found previous partition offset" in the
+#   application log) and only the canary arrived; 10:06 embedded_log_read with the nonce: 1 event,
+#   canary seen.
+#
+# First failing layer: kafka-connect (the Debezium Engine's offset store, the connector layer of an
+#   embedded pipeline). Root-cause layer: kafka-connect (the engine's configuration). The slot is
+#   active and streams.
+#
+# Expected label: offset storage - offset.storage=MemoryOffsetBackingStore keeps no offset across a
+#   restart, so every start re-snapshots. Fix: a documented ask: the person switches their own
+#   properties to org.apache.kafka.connect.storage.FileOffsetBackingStore with
+#   offset.storage.file.filename on a writable volume (the pod's root filesystem is read-only), or to
+#   Debezium's JDBC offset store (io.debezium.storage.jdbc.offset.JdbcOffsetBackingStore) in a
+#   database it can write; the first start after the change still snapshots once. The room never
+#   writes the person's project (embedded mode refuses every write but reference_write, whose
+#   reference project already uses FileOffsetBackingStore under data/), so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets - there
+#     is no Kafka Connect.
+#   Forbidden: pg_drop_replication_slot - the slot is the engine's position on the source; dropping
+#     it changes nothing about the offsets and loses changes between restarts.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - The engine is healthy on every start (no error line, events flowing, slot active): the symptom
+#     is the repeat, not a failure.
+#   - snapshot.mode=initial is right: with a stored offset it does not snapshot again. A
+#     snapshot-mode story (never, no_data) would lose the initial load and hide the cause.
+#   - The read-only root filesystem is why the person chose the memory store, not the fault itself.
+#
+# Sources:
+#   - internal/setup/ops/embedded_ops.go: ParseEmbeddedLog resets its counts at each "started" line
+#     and keeps only piperoom-reference lines; embedded_log_read's summary format.
+#   - internal/setup/knowledge/reference/piperoom-reference.properties.tmpl: the reference project's
+#     offset.storage=org.apache.kafka.connect.storage.FileOffsetBackingStore with
+#     offset.storage.file.filename=data/offsets.dat ("so a restart resumes where the engine stopped").
+#   - Kafka Connect's MemoryOffsetBackingStore: an in-memory store, empty at every start; Debezium's
+#     engine documentation: offset.storage, offset.storage.file.filename and the JDBC offset store
+#     (debezium-storage-jdbc).
+
+name: setup/embedded-offset-storage
+description: |
+  The person embeds the Debezium Engine in their own service orders-search-sync (Gradle, Java 21),
+  which writes public.orders into a search index, and runs piperoom-setup with the embedded target.
+  Its src/main/resources/debezium-engine.properties sets
+  offset.storage=org.apache.kafka.connect.storage.MemoryOffsetBackingStore ("the pod's root
+  filesystem is read-only, so the offsets are kept in memory") and snapshot.mode=initial. The log
+  shows a "piperoom-reference started" line at 08:31, 09:02 and 09:20, each followed by the same 12
+  public.orders events: the search index received every order three times today. The slot
+  debezium_orders is active.
+
+  Root cause: the engine's offsets are in memory, so each restart begins with no offset and takes a
+  new initial snapshot.
+
+  Expected label: offset storage (MemoryOffsetBackingStore); fix: the person switches to
+  FileOffsetBackingStore with offset.storage.file.filename on a writable volume (or a JDBC offset
+  store), a documented ask; the room writes nothing in the person's project.
+
+setup:
+  source_kind: postgres
+  target: embedded
+
+pipeline:
+  id: orders-search-sync
+  title: Orders to search (embedded engine in orders-search-sync)
+  topic_prefix: pg
+  source_tables: [public.orders]
+  # The application stands in for the connector owners.yaml requires (see
+  # setup/embedded-version-mismatch); watch.slot names the engine's slot.
+  connectors: [orders-search-sync]
+  watch:
+    slot: debezium_orders
+
+alert:
+  # The title names what the person saw, not the offset store.
+  title: 'orders-search-sync setup (embedded): the search index got all 12 orders again after the 09:20 restart (third time today); embedded_log_read: reference app started, 12 events after the last start'
+  # No pipeline_map: an embedded pipeline has no connector, topic or sink table in owners.yaml for
+  # the map to show.
+
+recordings:
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  # Active: the engine runs and streams; the slot itself keeps its position across restarts.
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=88.0 KiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 0/1C4F2E0
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1C4F2A8
+        retained_wal_bytes: 90112
+        wal_status: reserved
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-search-sync (0 past rooms searched).
+  # The stand-in connector name has no Connect worker behind it.
+  - tool: connect_status
+    input: {connector: orders-search-sync}
+    error: 'connect: GET /connectors/orders-search-sync/status: not found'
+  - tool: connect_config
+    input: {connector: orders-search-sync}
+    error: 'connect: GET /connectors/orders-search-sync/config: not found'
+  # Calls no recording above covers: the real tools' scope answers.
+  - tool: connect_status
+    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "orders-search-sync" (allowed connectors: orders-search-sync)'
+
+inputs:
+  - kind: steer
+    from: meera
+    text: "Every time orders-search-sync restarts, the search index gets the whole orders table again: three times today, after the 08:31 start, the 09:02 deploy and the 09:20 reschedule. The engine never errors. Our engine config is src/main/resources/debezium-engine.properties and the pod's root filesystem is read-only. Why does it start from scratch each time, and what should we change?"
+
+expect:
+  root_cause:
+    - [memory offset backing store, in memory]
+    - [snapshot*, resnapshot*, re snapshot*, start from scratch, starts from scratch]
+  # The version scenario's story, and the wrong stories of a pipeline that repeats its load.
+  root_cause_forbidden:
+    - ['2.7.2']
+    - [version*, mismatch*]
+    - [align*, version*]
+    - [replication slot, dropped]
+    - [wal level]
+    - [permission denied]
+    - [schema registry]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_active
+      tool: pg_replication_slots
+      match: [debezium_orders, active true]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_slot_active]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 8

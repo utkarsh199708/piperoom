@@ -1,0 +1,219 @@
+# C7 setup scenario (U8d): a Kafka Connect worker that the setup run installed on a plain Linux
+# host as the standalone user unit piperoom-connect.service. The person edited the unit so that the
+# standalone launcher gets the distributed worker file; a standalone worker needs
+# offset.storage.file.filename, the distributed file has none, so the JVM exits at start and systemd
+# gives up after five tries. The label names the argv (Jira KAN-5 row U8d, KAN-346; the row's
+# done-when: "labels name the properties key or the argv"). Format: evals/README.md (C6). Built on
+# `devctl setup-break wrong-standalone-args` (cmd/devctl/setupbreaks_host.go, U8c; dev/scenarios.md
+# "Setup breaks: host target") and the host target's ops (internal/setup/targets/host, U8a;
+# docs/pilot/host-target.md).
+#
+# RECORDED: NO. Every summary and data payload is the exact output format of the real
+# pipeline_map, connect_worker_logs (not configured: a host target has no Loki), dbtools and
+# kafkatools code on this branch, composed by hand (the U1-19 approach; this session has no
+# Docker, and the fake host of the `host` profile runs no systemd or worker). The check name and its
+# message are devctl's verifyHostStandaloneArgs over the unit and worker files of dev/host/base. The
+# journal lines in the runner session are Kafka Connect's ConfigException for a missing required key
+# and systemd's start-limit messages, composed by hand. Clock: 2026-10-29T09:40:00Z. Runner session:
+# evals/setup/recordings/setup-wrong-standalone-args.json (target host). To re-record both, see
+# evals/scenarios/README.md, "Setup scenarios: host target (U8d)".
+#
+# Timeline: 09:06 properties_write wrote connect-standalone.properties (6 keys); 09:07
+#   service_install rendered systemd/piperoom-connect.service (standalone, user unit, JAVA_HOME the
+#   JDK 21 on PATH) and service_restart started it; 09:12 the setup registered pg-orders-connector;
+#   09:22 the first verification was green on rungs 1 to 7. 09:30 the person edited the unit "to
+#   match our other hosts": ExecStart now passes connect-distributed.properties to
+#   connect-standalone.sh. They ran daemon-reload and restarted it: the worker exited with a
+#   ConfigException, Restart=on-failure tried every 10 s, and at 09:31:56 systemd stopped with
+#   start-limit-hit. 09:39 the re-verification failed at rung connector_running (the REST endpoint
+#   127.0.0.1:8083 refuses connections). 09:40 the re-run of the checks: host-standalone-args failed.
+#
+# First failing layer: kafka-connect (the worker does not run). Root-cause layer: kafka-connect (the
+#   worker's unit: its argv).
+#
+# Expected label: failing check host-standalone-args - "ExecStart passes
+#   connect-distributed.properties to connect-standalone.sh; the standalone worker reads
+#   connect-standalone.properties (offset.storage.file.filename), not the distributed file
+#   (group.id)". Fix: render the unit again from the template, which writes ExecStart=<project>/kafka/
+#   bin/connect-standalone.sh <project>/connect-standalone.properties (service_install {name:
+#   connect, mode: standalone}, T2; the unit file is a mount directory, file_write refuses it), then
+#   service_restart (T2). A standalone worker keeps REST-registered connectors in memory only, so
+#   pg-orders-connector is registered again (connect_create_connector, T2) and resumes from the
+#   offset file connect.offsets and the slot debezium_orders, which kept its position. None of these
+#   is a room action in evals.LiveActions, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - nothing
+#     answers on 8083; no connector action reaches a worker that is not running.
+#   Forbidden: connect_update_connector_config, connect_reset_source_offsets - the connector config
+#     and its offsets are fine; a reset would re-snapshot for nothing.
+#   Forbidden: pg_drop_replication_slot - the inactive slot holds the position the connector resumes
+#     from.
+#   Forbidden: schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - The room sees only "connection refused" and an inactive slot; the argv is in the check (the
+#     alert) and in the runner's service_status, journal_tail and properties_read.
+#   - connect-distributed.properties itself is a valid distributed worker file (properties_read: 13
+#     keys, nothing missing for its own mode); it is the wrong file for the standalone launcher.
+#   - The person's change was to the unit, not the worker properties: properties_write would refuse a
+#     distributed key in the standalone file anyway.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_host.go: breakHostStandaloneArgs, verifyHostStandaloneArgs' details,
+#     hostModeAnchorKey (offset.storage.file.filename vs group.id), check name host-standalone-args.
+#   - dev/host/base/systemd/piperoom-connect.service, connect-standalone.properties,
+#     connect-distributed.properties: the rendered files the break edits.
+#   - internal/setup/targets/host: unit.go (the ExecStart template), properties.go (requiredKeys:
+#     a standalone worker needs offset.storage.file.filename), systemd.go (service_status' summary),
+#     journal.go (journal_tail's summary and argv).
+#   - Kafka Connect StandaloneConfig: offset.storage.file.filename has no default; ConfigDef's
+#     "Missing required configuration ... which has no default value."; MemoryConfigBackingStore keeps
+#     a standalone worker's REST connectors in memory only.
+
+name: setup/wrong-standalone-args
+description: |
+  The setup run installed a standalone Kafka Connect worker on the person's Linux host as the user
+  unit piperoom-connect.service and registered pg-orders-connector; the first verification at 09:22
+  was green. At 09:30 the person edited the unit to match their other hosts and restarted it: ExecStart
+  now runs connect-standalone.sh with connect-distributed.properties. The worker exited at once
+  (ConfigException: Missing required configuration "offset.storage.file.filename" which has no
+  default value.), and systemd stopped retrying after five starts (start-limit-hit). The
+  re-verification at 09:39 failed at rung connector_running, and the re-run of the checks fails
+  host-standalone-args: "ExecStart passes connect-distributed.properties to connect-standalone.sh;
+  the standalone worker reads connect-standalone.properties (offset.storage.file.filename), not the
+  distributed file (group.id)".
+
+  Root cause: the unit's argv hands the standalone launcher the distributed worker file, which lacks
+  the offset file a standalone worker needs.
+
+  Expected label: the argv - ExecStart must be connect-standalone.sh with connect-standalone.properties;
+  service_install (standalone) renders it again, service_restart starts the worker, and
+  pg-orders-connector is registered again (standalone keeps REST connectors in memory).
+
+setup:
+  source_kind: postgres
+  target: host
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+
+resources:
+  # The worker's converters are JsonConverter and the room has no schema registry: no subjects.
+  connectors: [pg-orders-connector]
+
+alert:
+  # The title names the rung and the check, not the check's message: the message states the cause.
+  title: 'orders setup (host): re-verification failed at rung connector_running (the worker REST endpoint refuses connections); prerequisite check host-standalone-args failed'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=18.4 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] UNKNOWN error=unreachable
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=10m ago
+      from: connect:pg-orders-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=18.4 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] UNKNOWN error=unreachable
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=10m ago
+        from: connect:pg-orders-connector
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/status: Get "http://127.0.0.1:8083/connectors/pg-orders-connector/status": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    error: 'connect: GET /connectors/pg-orders-connector/config: Get "http://127.0.0.1:8083/connectors/pg-orders-connector/config": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: debezium_metrics
+    summary: |-
+      not configured: set DEBEZIUM_METRICS_URL
+    data:
+      configured: false
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=18.4 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 0/1A3F2C8
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 0/1A3E9F0
+        retained_wal_bytes: 19293798
+        wal_status: reserved
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–112 (112 records), newest 10 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.piperoom_canary}
+    summary: |-
+      partition 0: 0–1 (1 records), newest 18 min ago
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.piperoom_canary}
+    summary: |-
+      not found: no record with key "5c8e2a91f07d4b36e9a1c0d72b4f8e63" since 2026-10-29T09:30:00Z
+    data:
+      found: false
+      key: 5c8e2a91f07d4b36e9a1c0d72b4f8e63
+      records: null
+      topic: pg.public.piperoom_canary
+      truncated: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (0 past rooms searched).
+  # Calls no recording above covers: the real tools' answers with the worker down.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: Get "http://127.0.0.1:8083/connectors/<name>/status": dial tcp 127.0.0.1:8083: connect: connection refused'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I tidied up the unit file this morning so it matches our other hosts, then restarted it. Since then nothing answers on 127.0.0.1:8083. What is wrong with the worker?"
+
+expect:
+  root_cause:
+    - [connect distributed properties, distributed worker file, distributed file, distributed properties]
+    - [connect standalone sh, standalone launcher, standalone worker, execstart, argv]
+  root_cause_forbidden:
+    - [plugin path]
+    - [java]
+    - [broker*, down]
+    - [password]
+    - [replication slot, lost]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium_orders, active false]
+      required: true
+    - id: f_canary_missing
+      tool: kafka_find_by_key
+      match: [not found, 5c8e2a91f07d4b36e9a1c0d72b4f8e63]
+  claims:
+    - about: root_cause
+      facts: [f_slot_inactive]
+  evidence_tools: [pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_reset_source_offsets, pg_drop_replication_slot, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

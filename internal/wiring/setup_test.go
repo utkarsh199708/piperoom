@@ -2,14 +2,17 @@ package wiring_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/setup/protocol"
 	setuptools "piperoom/internal/setup/tools"
+	"piperoom/internal/tools"
 	"piperoom/internal/wiring"
 	"piperoom/internal/wiring/setupwire"
 )
@@ -192,4 +195,70 @@ func contains(sub, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestSetupStackPipelineOption (row U1-32): the caller may pass the room's
+// provisional pipeline as it stands, and the stack's owners scope is built
+// from it — a consumer group a driver added after the request is in scope for
+// the stack's tools only after a rebuild with that pipeline. Without the
+// option the stack derives the pipeline from the request alone, which cannot
+// carry consumer groups, so the same call is refused as out of scope.
+func TestSetupStackPipelineOption(t *testing.T) {
+	cfg := config.Config{SetupEnabled: "on", WriteMode: "on", SecretsDir: t.TempDir()}
+	req := setupRequest(t)
+	// The call resolves the pipeline by id against the stack's owners, the
+	// path a caller without a full pipeline in its context takes.
+	callCtx := tools.WithPipelineID(context.Background(), req.PipelineID)
+	input := json.RawMessage(`{"group":"orders-cg"}`)
+
+	build := func(p *owners.Pipeline, ex protocol.RunnerExecutor) *wiring.SetupStack {
+		t.Helper()
+		d := setupDeps(t, req, ex,
+			func(ex protocol.RunnerExecutor, roomID string) (wiring.SetupClients, error) {
+				return setupwire.Clients(ex, roomID)
+			},
+			func(areg *actions.Registry, ex protocol.RunnerExecutor, roomID string) error {
+				return setupwire.RegisterActions(areg, ex, roomID)
+			})
+		d.Pipeline = p
+		st, err := wiring.OpenSetupStack(context.Background(), cfg, d)
+		if err != nil {
+			t.Fatalf("OpenSetupStack: %v", err)
+		}
+		return st
+	}
+
+	// Before: the request-derived pipeline has no consumer groups, so the
+	// group is out of scope and nothing reaches the runner.
+	exBefore := &countingExecutor{}
+	st := build(nil, exBefore)
+	tool, ok := st.Tools.Get("kafka_consumer_lag")
+	if !ok {
+		t.Fatal("kafka_consumer_lag is not in the stack's tools")
+	}
+	if _, err := tool.Run(callCtx, input); err == nil || !contains("consumer group", err.Error()) {
+		t.Fatalf("err = %v, want a consumer-group scope refusal", err)
+	}
+	if exBefore.calls() != 0 {
+		t.Fatalf("an out-of-scope read reached the runner %d times", exBefore.calls())
+	}
+
+	// After a rebuild with the room's pipeline: the group is in scope, so the
+	// read passes the scope check and reaches the remote client (whose fake
+	// runner answers nothing, which is fine — the refusal now comes from the
+	// client, not the scope).
+	prov, err := owners.Provisional(req)
+	if err != nil {
+		t.Fatalf("Provisional: %v", err)
+	}
+	prov.ConsumerGroups = []string{"orders-cg"}
+	exAfter := &countingExecutor{}
+	st = build(&prov, exAfter)
+	tool, _ = st.Tools.Get("kafka_consumer_lag")
+	if _, err := tool.Run(callCtx, input); err == nil || contains("consumer group", err.Error()) {
+		t.Fatalf("err = %v, want a client error, not a scope refusal", err)
+	}
+	if exAfter.calls() == 0 {
+		t.Fatal("an in-scope read never reached the runner")
+	}
 }

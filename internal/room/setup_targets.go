@@ -56,8 +56,10 @@ type TargetResolver interface {
 }
 
 // setupTargetKinds are the kinds events.SetupTarget documents.
+// "image_registry" is the container registry a Strimzi KafkaConnect build
+// pushes to: the Strimzi driver refuses a build whose registry is not one.
 var setupTargetKinds = map[string]bool{
-	"postgres": true, "kafka": true, "connect": true, "registry": true,
+	"postgres": true, "kafka": true, "connect": true, "registry": true, "image_registry": true,
 	"kubernetes": true, "aws": true, "confluent": true, "aiven": true, "host": true,
 }
 
@@ -65,7 +67,7 @@ var setupTargetKinds = map[string]bool{
 // applies. The others name a kubectl context, a namespace or a cloud account
 // and have no IP the server could check.
 var networkTargetKinds = map[string]bool{
-	"postgres": true, "kafka": true, "connect": true, "registry": true, "host": true,
+	"postgres": true, "kafka": true, "connect": true, "registry": true, "image_registry": true, "host": true,
 }
 
 // Class ranks. A class is a floor that only rises; production outranks shared,
@@ -160,7 +162,7 @@ func setupTargetHosts(address string) []string {
 // only a network kind must name a host.
 func (s *Service) checkSetupTarget(ctx context.Context, kind, address string) error {
 	if !setupTargetKinds[kind] {
-		return validation(fmt.Sprintf("target kind %q: want one of postgres, kafka, connect, registry, kubernetes, aws, confluent, aiven, host", kind))
+		return validation(fmt.Sprintf("target kind %q: want one of postgres, kafka, connect, registry, image_registry, kubernetes, aws, confluent, aiven, host", kind))
 	}
 	raw := strings.TrimSpace(address)
 	if raw == "" {

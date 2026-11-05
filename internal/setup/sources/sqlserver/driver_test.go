@@ -68,6 +68,7 @@ func readyReader() *fakeReader {
 			{Table: "dbo.piperoom_canary", Exists: true, CDCEnabled: true, HasPrimaryKey: true},
 		},
 		login: sqlclient.RoleInfo{Login: "piperoom_cdc", Exists: true,
+			HasDBUser: true, CDCSelect: true, ViewDBState: true,
 			Selectable: map[string]bool{"dbo.orders": true, "dbo.piperoom_canary": true}},
 	}
 }
@@ -116,6 +117,14 @@ func TestChecksPassAndFail(t *testing.T) {
 		{"login disabled", CheckCaptureLogin, nil, func(f *fakeReader) { f.login.Disabled = true }, "", "ALTER LOGIN [piperoom_cdc] ENABLE", plan.TierT2},
 		{"no SELECT", CheckCaptureLoginGrant, nil, func(f *fakeReader) { f.login.Selectable["dbo.orders"] = false }, "", "GRANT SELECT ON [dbo].[orders] TO [piperoom_cdc]", plan.TierT2},
 		{"no SELECT, no login", CheckCaptureLoginGrant, nil, func(f *fakeReader) { f.login = sqlclient.RoleInfo{} }, opCreateReadRole, "", plan.TierT2},
+		{"no database user", CheckCaptureLoginGrant, nil, func(f *fakeReader) { f.login.HasDBUser = false }, "", "CREATE USER [piperoom_cdc] FOR LOGIN [piperoom_cdc]", plan.TierT2},
+		{"no cdc schema SELECT", CheckCaptureLoginGrant, nil, func(f *fakeReader) { f.login.CDCSelect = false }, "", "GRANT SELECT ON SCHEMA::cdc TO [piperoom_cdc]", plan.TierT2},
+		{"no VIEW DATABASE STATE", CheckCaptureLoginGrant, nil, func(f *fakeReader) { f.login.ViewDBState = false }, "", "GRANT VIEW DATABASE STATE TO [piperoom_cdc]", plan.TierT2},
+		{"sysadmin without a user passes the user rule but not a revoked state", CheckCaptureLoginGrant, nil, func(f *fakeReader) {
+			f.login.Sysadmin = true
+			f.login.HasDBUser = false
+			f.login.ViewDBState = false
+		}, "", "GRANT VIEW DATABASE STATE TO [piperoom_cdc]", plan.TierT2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

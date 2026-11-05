@@ -1,0 +1,197 @@
+# C7 setup scenario (U13e): the MSK Connect connector is created in the MSK cluster's subnets, but
+# the source database is an RDS instance in another VPC (172.31.0.0/16) with no peering or transit
+# route from the cluster's VPC (10.0.0.0/16). MSK provisions the connector for twelve minutes and
+# then reports it FAILED with Debezium's connect timeout in its state description. msk_vpc_check
+# reads the subnets' route tables and answers no_route. The label names the failing check and the
+# fix with its tier (Jira KAN-5 rows U13b2, U13e; design docs/design/setup-managed.md §3.1, §9 B
+# "Q7 (MSK VPC reachability) stays a person's change"). Format: evals/README.md (C6).
+#
+# RECORDED: NO. No sandbox account was used. The runner session (evals/setup/recordings/
+# setup-msk-vpc-no-route.json) is composed from the managed ops' summaries and Data over the
+# hand-written cassettes of internal/setup/targets/managed/testdata/msk (vpc_check_no_route.json,
+# describe_connector_failed_timeout.json); the room's connect_status follows kafkatools'
+# format over mskconnect.Status's mapping (state FAILED, StateDescription as the trace, no
+# tasks); CONNECT_KIND=msk is not wired on main (A4 follow-up). Clock: 2026-10-30T11:30:00Z.
+# To re-record on the sandbox, see evals/scenarios/README.md, "Setup scenarios: managed targets
+# (U13e)".
+#
+# Timeline: 11:00 the setup room for orders-msk (aws target 000000000000/us-east-1, cluster demo
+#   in vpc-0a1b2c3d4e5f60001, 10.0.0.0/16). The plugin and worker configuration were created and
+#   ACTIVE. 11:05 msk_create_connector (T2, approved) with the cluster's two client subnets and
+#   its security group, database.hostname 172.31.5.10 (the RDS instance's private address in the
+#   default VPC). 11:17 msk_wait: FAILED, "Could not connect to 172.31.5.10:5432: connect timed
+#   out". 11:18 msk_vpc_check: verdict no_route (the main route table holds only 10.0.0.0/16
+#   local); the security group allows all egress. 11:20 the ladder: rung connector_running red.
+#
+# First failing layer: kafka-connect (the connector FAILED). Root-cause layer: kafka-connect (the
+#   connector's network placement: its subnets have no route to the database's VPC). The database
+#   is up: the room's own net_probe reaches it, because Piperoom's server is in the database's
+#   VPC.
+#
+# Expected label: failing check msk_vpc_check (no_route from the connector's subnets to
+#   172.31.5.10); fix: the person adds a route (VPC peering or a transit gateway between the two
+#   VPCs, with routes in both route tables and the database's security group allowing 5432 from
+#   10.0.0.0/16) - a documented ask, no op writes a route or a security group - or the plan
+#   recreates the connector in subnets of the database's VPC that reach the cluster
+#   (msk_delete_connector of this room's connector, then msk_create_connector: T2, T3 on
+#   production). There is no expect.fix: neither is a room action.
+#   Forbidden: connect_restart_task, connect_restart_connector - MSK Connect has no restart, and
+#     a restart reaches the same subnets.
+#   Forbidden: connect_update_connector_config - the config is right; the address is the RDS
+#     instance's.
+#   Forbidden: schema_register, schema_set_compatibility - nothing was produced.
+#
+# Traps:
+#   - "connect timed out" reads like the database being down; net_probe from the room reaches
+#     172.31.5.10:5432.
+#   - The security group allows all egress: the block is the route, not the group.
+#   - The connector's state description names Debezium, which invites a connector config story.
+#
+# Sources:
+#   - internal/setup/targets/managed/vpc.go: VPCVerdict (each subnet's route table, the longest
+#     active route containing the database IP; egress by CIDR), the note "no route from <subnet> to
+#     <ip> in <table> (routes: ...)".
+#   - AWS: a VPC route table's local route covers only the VPC's own CIDR; another VPC is reached
+#     through peering or a transit gateway with a route to its CIDR.
+#   - internal/clients/mskconnect: Status maps FAILED with StateDescription "<code>: <message>" as
+#     the trace and reports no tasks.
+
+name: setup/msk-vpc-no-route
+description: |
+  The person set up orders-msk on AWS MSK Connect. The connector was created in the MSK cluster's
+  two client subnets (vpc-0a1b2c3d4e5f60001, 10.0.0.0/16) with database.hostname 172.31.5.10, the
+  RDS instance's private address in another VPC. Twelve minutes later MSK reported the connector
+  FAILED: "Could not connect to 172.31.5.10:5432: connect timed out". msk_vpc_check answered
+  no_route: the subnets' route table holds only the 10.0.0.0/16 local route. The security group
+  allows all egress. The room's net_probe reaches the database.
+
+  Root cause: the connector's subnets have no route to the database's VPC (no peering or transit
+  gateway route to 172.31.0.0/16), so the connector cannot open a TCP connection to the database.
+
+  Expected label: failing check msk_vpc_check (no_route); fix: a route between the two VPCs and the
+  database's security group opened to 10.0.0.0/16 (a documented ask), or the connector recreated
+  in subnets that reach the database (msk_delete_connector, msk_create_connector, T2).
+
+setup:
+  source_kind: postgres
+  target: msk
+
+pipeline:
+  id: orders-msk
+  title: Orders CDC (MSK Connect)
+  topic_prefix: orders
+  source_tables: [public.orders]
+  connectors: [orders-msk-connector]
+
+resources:
+  connectors: [orders-msk-connector]
+  subjects: [orders.public.orders-key, orders.public.orders-value]
+
+alert:
+  title: 'orders-msk setup: orders-msk-connector FAILED after provisioning; check msk_vpc_check failed; verification red at rung connector_running'
+  pipeline_map: |
+    pipeline orders-msk
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] UNKNOWN
+    2 connect:orders-msk-connector [kafka-connect, owner arjun] FAILED
+      from: pg:public.orders
+    3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+      from: connect:orders-msk-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-msk}
+    summary: |
+      pipeline orders-msk
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] UNKNOWN
+      2 connect:orders-msk-connector [kafka-connect, owner arjun] FAILED
+        from: pg:public.orders
+      3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+        from: connect:orders-msk-connector
+  - tool: connect_status
+    input: {connector: orders-msk-connector}
+    summary: |-
+      orders-msk-connector (): FAILED:
+      UNKNOWN: There is an issue with the connector. Code: UnknownError.Unknown. Message: org.apache.kafka.connect.errors.ConnectException: Could not connect to 172.31.5.10:5432: connect timed out
+    data:
+      error: 'UNKNOWN: There is an issue with the connector. Code: UnknownError.Unknown. Message: org.apache.kafka.connect.errors.ConnectException: Could not connect to 172.31.5.10:5432: connect timed out'
+      name: orders-msk-connector
+      state: FAILED
+      tasks: []
+      worker: ""
+  - tool: connect_config
+    input: {connector: orders-msk-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: 172.31.5.10
+      database.password: ***
+      database.port: 5432
+      database.user: debezium
+      plugin.name: pgoutput
+      topic.prefix: orders
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: 172.31.5.10
+      database.password: '***'
+      database.port: "5432"
+      database.user: debezium
+      plugin.name: pgoutput
+      topic.prefix: orders
+  # Piperoom's server runs in the database's VPC: the database answers from here.
+  # connect_view is skipped: MSK Connect has no Connect REST endpoint to validate against.
+  - tool: net_probe
+    input: {target: "source"}
+    summary: |-
+      net_probe source (172.31.5.10:5432): all checks ok: dns ok, tcp ok
+      - dns 172.31.5.10:5432 ok: 172.31.5.10
+      - tcp 172.31.5.10:5432 ok: TCP connected
+      - tls 172.31.5.10:5432 skip: not configured with TLS
+      - connect_view skip: no Connect REST endpoint to validate against
+    data: {"checks": [{"addr": "172.31.5.10:5432", "detail": "172.31.5.10", "id": "dns", "ms": 0, "status": "ok"}, {"addr": "172.31.5.10:5432", "detail": "TCP connected", "id": "tcp", "ms": 3, "status": "ok"}, {"addr": "172.31.5.10:5432", "detail": "not configured with TLS", "id": "tls", "ms": 0, "status": "skip"}, {"detail": "no Connect REST endpoint to validate against", "id": "connect_view", "ms": 0, "status": "skip"}], "endpoints": ["172.31.5.10:5432"], "kind": "source_db", "target": "source"}
+  - tool: kafka_topic_offsets
+    input: {topic: orders.public.orders}
+    error: 'kafka: topic orders.public.orders: not found'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-msk (0 past rooms searched).
+  - tool: connect_status
+    error: 'mskconnect: not found: connector "<name>"'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-msk"; read tools only work on the room''s own pipeline'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "MSK took twelve minutes and then said FAILED with a timeout to the database. The database is up, I can reach it from our bastion. What is between them?"
+
+expect:
+  root_cause:
+    - [route, routing, peering, transit gateway, vpc]
+    - [no route, missing, not reach*, cannot reach, unreachable, other vpc, another vpc, different vpc]
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [database, down]
+    - [permission denied]
+    - [password, wrong]
+    - [s3, bucket]
+    - [egress, blocked]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_timeout
+      tool: connect_status
+      match: [172.31.5.10, connect timed out]
+      required: true
+    - id: f_db_up
+      tool: net_probe
+      match: [tcp 172.31.5.10 5432 ok, tcp connected]
+  claims:
+    - about: root_cause
+      facts: [f_timeout, f_db_up]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

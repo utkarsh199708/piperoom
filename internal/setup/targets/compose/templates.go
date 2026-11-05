@@ -22,6 +22,7 @@ var defaultPorts = map[string]int{
 	"connect":         8083,
 	"schema-registry": 8081,
 	"postgres":        5432,
+	"warehouse":       5433,
 }
 
 // minPort and maxPort bound a published port: below 1024 needs a privilege the
@@ -46,7 +47,7 @@ var projectNameRE = regexp.MustCompile(`^piperoom-[a-z0-9_-]{1,54}$`)
 // WriteParams are compose_write's typed params (design §2.5: templates,
 // project name, ports; there is no field that carries YAML text).
 type WriteParams struct {
-	// Templates names one to four templates; each service is rendered once.
+	// Templates names one to five templates; each service is rendered once.
 	Templates []string `json:"templates"`
 	// Project is the Compose project name; "" means DefaultProject.
 	Project string `json:"project,omitempty"`
@@ -125,6 +126,14 @@ func (d *Driver) Render(p WriteParams) (Rendered, error) {
 		services["postgres"] = svc
 		envKeys = postgresEnvKeys()
 	}
+	if selected[TemplateSinkPostgres] {
+		svc, err := warehouseService(ports["warehouse"], local)
+		if err != nil {
+			return Rendered{}, err
+		}
+		services["warehouse"] = svc
+		envKeys = append(envKeys, warehouseEnvKeys()...)
+	}
 	if selected[TemplateConnect] {
 		svc, err := connectService(ports["connect"], local)
 		if err != nil {
@@ -173,7 +182,7 @@ func selectTemplates(names []string) (map[string]bool, error) {
 	sel := make(map[string]bool, len(names))
 	for _, name := range names {
 		switch name {
-		case TemplateKafka, TemplateConnect, TemplateRegistry, TemplatePostgres:
+		case TemplateKafka, TemplateConnect, TemplateRegistry, TemplatePostgres, TemplateSinkPostgres:
 		default:
 			return nil, fmt.Errorf("%w: %s", ErrTemplate, q(name))
 		}
@@ -198,6 +207,9 @@ func resolvePorts(want map[string]int, sel map[string]bool, registry bool) (map[
 	}
 	if sel[TemplatePostgres] {
 		present["postgres"] = true
+	}
+	if sel[TemplateSinkPostgres] {
+		present["warehouse"] = true
 	}
 	if sel[TemplateConnect] {
 		present["connect"] = true
@@ -315,6 +327,37 @@ func postgresService(hostPort int, local bool) (service, error) {
 			Retries:  20,
 		},
 	}, nil
+}
+
+// warehouseService is the dev warehouse (row U3c): a plain Postgres the JDBC
+// sink connector writes into. It needs no logical WAL (nothing captures from
+// it); its credentials are the WAREHOUSE_* keys of the .env, so they never
+// share the source's.
+func warehouseService(hostPort int, local bool) (service, error) {
+	img, err := imageRef("postgres")
+	if err != nil {
+		return service{}, err
+	}
+	return service{
+		Image: img,
+		Environment: []string{
+			"POSTGRES_USER=${WAREHOUSE_USER}",
+			"POSTGRES_PASSWORD=${WAREHOUSE_PASSWORD}",
+			"POSTGRES_DB=${WAREHOUSE_DB}",
+		},
+		Ports:   []string{published(local, hostPort, 5432)},
+		Volumes: []string{"/var/lib/postgresql/data"},
+		Healthcheck: &healthcheck{
+			Test:     []string{"CMD", "pg_isready", "-U", "${WAREHOUSE_USER}", "-d", "${WAREHOUSE_DB}"},
+			Interval: "5s",
+			Retries:  20,
+		},
+	}, nil
+}
+
+// warehouseEnvKeys are the .env keys the sink-postgres template interpolates.
+func warehouseEnvKeys() []string {
+	return []string{"WAREHOUSE_DB", "WAREHOUSE_PASSWORD", "WAREHOUSE_USER"}
 }
 
 // connectService is the Debezium Kafka Connect worker with the plugin

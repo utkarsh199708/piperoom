@@ -1,0 +1,179 @@
+{
+  "provider": "aws",
+  "name": "create_connector_ok",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the managed ops send them through mskconnect; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetCallerIdentity&Version=2011-06-15",
+        "body_sha256": "ab821ae955788b0e33ebd34c208442ccfc2d406e2edc5e7a39bd6458fbb4f843",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetCallerIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><GetCallerIdentityResult><Arn>arn:aws:sts::000000000000:assumed-role/PiperoomSetup/piperoom-runner</Arn><UserId>AROAEXAMPLEROLE:piperoom-runner</UserId><Account>000000000000</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata></GetCallerIdentityResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/clusters/arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"clusterInfo\":{\"clusterArn\":\"arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1\",\"clusterName\":\"demo\",\"clusterType\":\"PROVISIONED\",\"provisioned\":{\"brokerNodeGroupInfo\":{\"clientSubnets\":[\"subnet-0a1b2c3d4e5f60001\",\"subnet-0a1b2c3d4e5f60002\"],\"securityGroups\":[\"sg-0a1b2c3d4e5f60001\"]},\"currentBrokerSoftwareInfo\":{\"kafkaVersion\":\"3.6.0\"},\"numberOfBrokerNodes\":2},\"state\":\"ACTIVE\"}}"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/clusters/arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1/bootstrap-brokers"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"bootstrapBrokerStringSaslIam\":\"scrubbed.amazonaws.com:9098,scrubbed.amazonaws.com:9098\"}"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetRole&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "f880add47c32d84449c83dc337cd33beb6ad24a93db9c056fd4238d14f97bccf",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetRoleResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetRoleResult><Role><Path>/</Path><RoleName>PiperoomMSKConnect</RoleName><RoleId>AROAEXAMPLEROLE</RoleId><Arn>arn:aws:iam::000000000000:role/PiperoomMSKConnect</Arn><CreateDate>2026-10-01T00:00:00Z</CreateDate><AssumeRolePolicyDocument>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Principal%22%3A%7B%22Service%22%3A%22kafkaconnect.amazonaws.com%22%7D%2C%22Action%22%3A%22sts%3AAssumeRole%22%7D%5D%7D</AssumeRolePolicyDocument></Role></GetRoleResult></GetRoleResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=SimulatePrincipalPolicy&ActionNames.member.1=iam%3APutRolePolicy&ActionNames.member.10=iam%3ADetachRolePolicy&ActionNames.member.11=iam%3ACreatePolicyVersion&ActionNames.member.12=iam%3ASetDefaultPolicyVersion&ActionNames.member.13=iam%3ACreateAccessKey&ActionNames.member.14=iam%3ACreateUser&ActionNames.member.15=iam%3ACreateRole&ActionNames.member.16=iam%3ACreateLoginProfile&ActionNames.member.17=iam%3AUpdateLoginProfile&ActionNames.member.18=iam%3AUpdateAssumeRolePolicy&ActionNames.member.19=iam%3AUpdateRole&ActionNames.member.2=iam%3APutUserPolicy&ActionNames.member.20=iam%3APassRole&ActionNames.member.21=iam%3AAddUserToGroup&ActionNames.member.22=iam%3ATagRole&ActionNames.member.23=iam%3AUntagRole&ActionNames.member.24=iam%3AUploadSSHPublicKey&ActionNames.member.25=iam%3ACreateServiceSpecificCredential&ActionNames.member.26=iam%3AResetServiceSpecificCredential&ActionNames.member.27=sts%3AAssumeRole&ActionNames.member.3=iam%3APutGroupPolicy&ActionNames.member.4=iam%3APutRolePermissionsBoundary&ActionNames.member.5=iam%3ADeleteRolePermissionsBoundary&ActionNames.member.6=iam%3ADeleteRolePolicy&ActionNames.member.7=iam%3AAttachRolePolicy&ActionNames.member.8=iam%3AAttachUserPolicy&ActionNames.member.9=iam%3AAttachGroupPolicy&PolicySourceArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&ResourceArns.member.1=%2A&ResourceArns.member.2=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2FPiperoomMSKConnect&ResourceArns.member.3=arn%3Aaws%3Aiam%3A%3A000000000000%3Arole%2F%2A&ResourceArns.member.4=arn%3Aaws%3Aiam%3A%3A000000000000%3Auser%2F%2A&ResourceArns.member.5=arn%3Aaws%3Aiam%3A%3A000000000000%3Apolicy%2F%2A&Version=2010-05-08",
+        "body_sha256": "9dfae9660356dff025c5df2fda09c9e4ade96ab26c55c1c288cc524a096706c1",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<SimulatePrincipalPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><SimulatePrincipalPolicyResult><IsTruncated>false</IsTruncated><EvaluationResults><member><EvalActionName>iam:PutRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PutUserPolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PutGroupPolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PutRolePermissionsBoundary</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:DeleteRolePermissionsBoundary</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:DeleteRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:AttachRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:AttachUserPolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:AttachGroupPolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:DetachRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreatePolicyVersion</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:SetDefaultPolicyVersion</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateAccessKey</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateUser</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateLoginProfile</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UpdateLoginProfile</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UpdateAssumeRolePolicy</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UpdateRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:PassRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:AddUserToGroup</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:TagRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UntagRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:UploadSSHPublicKey</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:CreateServiceSpecificCredential</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>iam:ResetServiceSpecificCredential</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member><member><EvalActionName>sts:AssumeRole</EvalActionName><EvalResourceName>*</EvalResourceName><EvalDecision>implicitDeny</EvalDecision></member></EvaluationResults></SimulatePrincipalPolicyResult></SimulatePrincipalPolicyResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "05fea88b5383f26d0c46be6a160cab888ec81ba8afb6b89800c52e7d0aee6f9d",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ListRolePoliciesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><ListRolePoliciesResult><IsTruncated>false</IsTruncated><PolicyNames></PolicyNames></ListRolePoliciesResult></ListRolePoliciesResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=ListAttachedRolePolicies&RoleName=PiperoomMSKConnect&Version=2010-05-08",
+        "body_sha256": "e7d39b64c421c29421f819c4c48433b85b18f02cbbe68446908ee38254e86370",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<ListAttachedRolePoliciesResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><ListAttachedRolePoliciesResult><IsTruncated>false</IsTruncated><AttachedPolicies><member><PolicyName>piperoom-msk-connect</PolicyName><PolicyArn>arn:aws:iam::000000000000:policy/piperoom-msk-connect</PolicyArn></member></AttachedPolicies></ListAttachedRolePoliciesResult></ListAttachedRolePoliciesResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetPolicy&PolicyArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Apolicy%2Fpiperoom-msk-connect&Version=2010-05-08",
+        "body_sha256": "08d6691ff46a3418d577ad48d9fb6cf69e122aec1182a8b5bc088be5901d34b3",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetPolicyResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetPolicyResult><Policy><PolicyName>piperoom-msk-connect</PolicyName><Arn>arn:aws:iam::000000000000:policy/piperoom-msk-connect</Arn><DefaultVersionId>v1</DefaultVersionId></Policy></GetPolicyResult></GetPolicyResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetPolicyVersion&PolicyArn=arn%3Aaws%3Aiam%3A%3A000000000000%3Apolicy%2Fpiperoom-msk-connect&Version=2010-05-08&VersionId=v1",
+        "body_sha256": "4143a4e17dbc066e7de9294656f53cf699bde565e30c4810449c18b0bc1f9282",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetPolicyVersionResponse xmlns=\"https://iam.amazonaws.com/doc/2010-05-08/\"><GetPolicyVersionResult><PolicyVersion><VersionId>v1</VersionId><IsDefaultVersion>true</IsDefaultVersion><Document>%7B%22Version%22%3A%222012-10-17%22%2C%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%5B%22kafka-cluster%3AConnect%22%2C%22kafka-cluster%3ADescribeCluster%22%2C%22logs%3ACreateLogStream%22%2C%22logs%3APutLogEvents%22%5D%2C%22Resource%22%3A%22*%22%7D%5D%7D</Document></PolicyVersion></GetPolicyVersionResult></GetPolicyVersionResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/connectors",
+        "body": "{\"capacity\":{\"provisionedCapacity\":{\"mcuCount\":1,\"workerCount\":1}},\"connectorConfiguration\":{\"connector.class\":\"io.debezium.connector.postgresql.PostgresConnector\",\"database.hostname\":\"10.0.3.15\",\"database.password\":\"REDACTED\",\"database.user\":\"debezium\",\"plugin.name\":\"pgoutput\",\"topic.prefix\":\"orders\"},\"connectorName\":\"it_orders\",\"kafkaCluster\":{\"apacheKafkaCluster\":{\"bootstrapServers\":\"scrubbed.amazonaws.com:9098,scrubbed.amazonaws.com:9098\",\"vpc\":{\"securityGroups\":[\"sg-0a1b2c3d4e5f60001\"],\"subnets\":[\"subnet-0a1b2c3d4e5f60001\",\"subnet-0a1b2c3d4e5f60002\"]}}},\"kafkaClusterClientAuthentication\":{\"authenticationType\":\"IAM\"},\"kafkaClusterEncryptionInTransit\":{\"encryptionType\":\"TLS\"},\"kafkaConnectVersion\":\"2.7.1\",\"logDelivery\":{\"workerLogDelivery\":{\"cloudWatchLogs\":{\"enabled\":true,\"logGroup\":\"/piperoom/it_orders\"}}},\"plugins\":[{\"customPlugin\":{\"customPluginArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:custom-plugin/debezium-pg/9f8e7d6c-5b4a-3210-fedc-ba9876543210-3\",\"revision\":1}}],\"serviceExecutionRoleArn\":\"arn:aws:iam::000000000000:role/PiperoomMSKConnect\",\"tags\":{\"piperoom-created-by\":\"piperoom-setup\",\"piperoom-room\":\"room-1\"},\"workerConfiguration\":{\"revision\":1,\"workerConfigurationArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:worker-configuration/piperoom-orders/11112222-3333-4444-5555-66667777aaaa-4\"}}",
+        "body_sha256": "8c8883ad749561efd2429cf4c26f4d801b2e812604dcaee7c26c9041b03ca340",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connectorArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders/0a1b2c3d-4e5f-6789-abcd-ef0123456789-2\",\"connectorName\":\"it_orders\",\"connectorState\":\"CREATING\"}"
+      }
+    }
+  ]
+}

@@ -98,6 +98,10 @@ var setupScenarios = map[string]setupScenario{
 	"no-archivelog":           {name: "no-archivelog", check: checkOracleArchiveLog, profile: oracleProfile, breakIt: breakOracleNoArchiveLog, fix: fixOracleNoArchiveLog, verify: verifyOracleArchiveLog},
 	"no-supplemental-logging": {name: "no-supplemental-logging", check: checkOracleSupplementalLogging, profile: oracleProfile, breakIt: breakOracleNoSupplementalLogging, fix: fixOracleNoSupplementalLogging, verify: verifyOracleSupplementalLogging},
 	"missing-logminer-grant":  {name: "missing-logminer-grant", check: checkOracleLogMinerGrants, profile: oracleProfile, breakIt: breakOracleMissingLogMinerGrant, fix: fixOracleMissingLogMinerGrant, verify: verifyOracleLogMinerGrants},
+	// MySQL source, profile mysql (U2b, setupbreaks_mysql.go).
+	"binlog-statement":     mysqlBinlogStatement,
+	"no-replication-grant": mysqlNoReplicationGrant,
+	"server-id-zero":       mysqlServerIDZero,
 	// SQL Server source, profile mssql (U4c, setupbreaks_mssql.go).
 	"agent-stopped":         mssqlAgentStopped,
 	"cdc-not-enabled-table": mssqlCDCNotEnabledTable,

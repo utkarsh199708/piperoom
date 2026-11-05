@@ -55,3 +55,29 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 https://{{ .Values.ingress.host }}
 {{- end -}}
 {{- end }}
+
+{{/* "true" when this release is the Piperoom server, "" when it is one of the
+setup releases (setup.pipeline or setup.runner): those render only their own
+objects. */}}
+{{- define "piperoom.server" -}}
+{{- if not (or .Values.setup.pipeline.enabled .Values.setup.runner.enabled) -}}true{{- end -}}
+{{- end }}
+
+{{/* Labels of the setup releases' objects. */}}
+{{- define "piperoom.setupLabels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/part-of: piperoom-setup
+{{- end }}
+
+{{/* The paused-shell annotation: the operators reconcile nothing until the
+runner removes it as the last step of filling the object. */}}
+{{- define "piperoom.pausedShell" -}}
+strimzi.io/pause-reconciliation: "true"
+{{- end }}
+
+{{/* The room name: the room id lowercased (Kubernetes names are lowercase). */}}
+{{- define "piperoom.setupRoom" -}}
+{{- lower .Values.setup.runner.room -}}
+{{- end }}

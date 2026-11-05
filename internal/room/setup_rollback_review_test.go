@@ -70,7 +70,7 @@ func TestSetupWalkRanOutcomes(t *testing.T) {
 		walkEvent(t, 12, events.ProposalPreviewed, walkPreview("p_slot", true, `source_drop_slot {"slot": "s"}`)),
 		walkEvent(t, 13, events.ActionExecuted, walkExecuted("p_slot", intp(3), false, false)),
 	}
-	ran, executed := setupWalkRan(evs)
+	ran, executed := setupWalkRan(evs, "")
 	if executed != 3 {
 		t.Fatalf("executed = %d, want 3: the failed step changed nothing, the unknown one may have", executed)
 	}
@@ -108,13 +108,13 @@ func TestSetupWalkUndoesNewest(t *testing.T) {
 	}
 	add(events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_undo_failed", Steps: []events.ProposalStep{walkStep("source_drop_publication", `{"publication": "x"}`)}})
 	add(events.ActionExecuted, walkExecuted("p_undo_failed", nil, false, false))
-	ran, _ := setupWalkRan(evs)
+	ran, _ := setupWalkRan(evs, "")
 	if len(ran) != 2 {
 		t.Fatalf("ran = %d, want 2: a failed undo undoes nothing", len(ran))
 	}
 	add(events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_undo", Steps: []events.ProposalStep{walkStep("source_drop_publication", `{"publication":"x"}`)}})
 	add(events.ActionExecuted, walkExecuted("p_undo", nil, true, false))
-	ran, executed := setupWalkRan(evs)
+	ran, executed := setupWalkRan(evs, "")
 	if executed != 2 {
 		t.Fatalf("executed = %d, want 2", executed)
 	}
@@ -193,10 +193,10 @@ func TestSetupRollbackSupersededPlanKeepsRanSteps(t *testing.T) {
 // spacing) still marks the step undone.
 func TestSetupUndoneIndexCanonicalParams(t *testing.T) {
 	ran := []setupRanStep{{PlanIndex: 0, Action: "source_create_publication", Rollback: `source_drop_publication {"publication": "x", "schema": "public"}`}}
-	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{ "schema":"public","publication":"x" }`)); i != 0 {
+	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{ "schema":"public","publication":"x" }`), ""); i != 0 {
 		t.Fatalf("index = %d, want 0: the same params in another key order are the same undo", i)
 	}
-	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{"publication":"y","schema":"public"}`)); i != -1 {
+	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{"publication":"y","schema":"public"}`), ""); i != -1 {
 		t.Fatalf("index = %d, want -1 for other params", i)
 	}
 }
@@ -206,7 +206,7 @@ func TestSetupUndoneIndexCanonicalParams(t *testing.T) {
 // name instead of dropping it.
 func TestSetupWalkKeepsStepWithoutProposal(t *testing.T) {
 	evs := []events.Event{walkEvent(t, 1, events.ActionExecuted, walkExecuted("p_missing", intp(0), true, false))}
-	ran, executed := setupWalkRan(evs)
+	ran, executed := setupWalkRan(evs, "")
 	if executed != 1 || len(ran) != 1 || ran[0].Action != "" {
 		t.Fatalf("ran = %+v, executed = %d; want the step kept with no action", ran, executed)
 	}
@@ -236,5 +236,97 @@ func TestSetupRoomNotClosedWhenNothingRan(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if snap := mustRoom(t, r.svc, roomID); snap.Status != "open" || snap.Resolution != "" {
 		t.Fatalf("room = %s/%q, want open: no plan step ran, so nothing was rolled back", snap.Status, snap.Resolution)
+	}
+}
+
+// TestSetupRollbackFillsLegacyKafkaTopicPrefix: a KafkaTopic delete recorded
+// before k8s_delete took topic_prefix (round 4, C6) replays with the room's
+// own topic prefix, which the server's scope and the runner now require; a
+// recorded prefix is kept as written, other kinds get nothing added, and the
+// executed undo still marks the step undone.
+func TestSetupRollbackFillsLegacyKafkaTopicPrefix(t *testing.T) {
+	legacy := setupRanStep{PlanIndex: 0, Action: "k8s_apply", Rollback: `k8s_delete {"kind":"KafkaTopic","name":"orders.public.piperoom-canary"}`}
+	op, params, err := setupRollbackOf(legacy, "orders")
+	if err != nil || op != "k8s_delete" {
+		t.Fatalf("op, err = %q, %v", op, err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(params, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["topic_prefix"] != "orders" || got["kind"] != "KafkaTopic" || got["name"] != "orders.public.piperoom-canary" {
+		t.Fatalf("params = %s, want the record plus the room's topic_prefix", params)
+	}
+
+	recorded := setupRanStep{PlanIndex: 0, Action: "k8s_apply", Rollback: `k8s_delete {"kind":"KafkaTopic","name":"x.t","topic_prefix":"x"}`}
+	if _, params, _ := setupRollbackOf(recorded, "orders"); !strings.Contains(string(params), `"topic_prefix":"x"`) {
+		t.Fatalf("params = %s, want the recorded topic_prefix kept (the scope refuses it, not the room)", params)
+	}
+	connector := setupRanStep{PlanIndex: 0, Action: "k8s_apply", Rollback: `k8s_delete {"kind":"KafkaConnector","name":"orders-src"}`}
+	if _, params, _ := setupRollbackOf(connector, "orders"); strings.Contains(string(params), "topic_prefix") {
+		t.Fatalf("params = %s, want nothing added to a KafkaConnector delete", params)
+	}
+
+	ran := []setupRanStep{legacy}
+	undo := walkStep("k8s_delete", `{"kind":"KafkaTopic","name":"orders.public.piperoom-canary","topic_prefix":"orders"}`)
+	if i := setupUndoneIndex(ran, undo, "orders"); i != 0 {
+		t.Fatalf("index = %d, want 0: the replayed undo of a legacy record undoes it", i)
+	}
+}
+
+// TestSetupRollbackOfTargetPreviews: the previews the Strimzi and managed
+// drivers now record. A managed connector create records its delete, which
+// the walk turns into an undo step and which, once run, undoes the step; a
+// rollback op's own preview (k8s_delete, k8s_unapply) and a managed write
+// nothing undoes are not reversible, so the walk keeps the step with no
+// rollback and the derivation names it instead of running prose.
+func TestSetupRollbackOfTargetPreviews(t *testing.T) {
+	evs := []events.Event{
+		walkEvent(t, 1, events.SetupPlan, events.SetupPlanPayload{PlanID: "pl_1", Phases: []events.SetupPlanPhase{{
+			Name: "managed", Steps: []events.SetupPlanStep{
+				{Index: 0, Op: "msk_create_connector", Target: "000000000000/us-east-1"},
+				{Index: 1, Op: "msk_create_worker_config", Target: "000000000000/us-east-1"},
+			},
+		}}}),
+		walkEvent(t, 2, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_conn", Steps: []events.ProposalStep{walkStep("msk_create_connector", `{"name":"it_orders"}`)}}),
+		walkEvent(t, 3, events.ProposalPreviewed, walkPreview("p_conn", true, `msk_delete_connector {"name":"it_orders"}`)),
+		walkEvent(t, 4, events.ActionExecuted, walkExecuted("p_conn", intp(0), true, false)),
+		walkEvent(t, 5, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_wc", Steps: []events.ProposalStep{walkStep("msk_create_worker_config", `{"name":"w"}`)}}),
+		walkEvent(t, 6, events.ProposalPreviewed, walkPreview("p_wc", false,
+			"not undone automatically: the runner has no op that deletes a worker configuration; delete w in the MSK Connect console (kafkaconnect:DeleteWorkerConfiguration) once no connector uses it")),
+		walkEvent(t, 7, events.ActionExecuted, walkExecuted("p_wc", intp(1), true, false)),
+	}
+	ran, executed := setupWalkRan(evs, "orders")
+	if executed != 2 || len(ran) != 2 {
+		t.Fatalf("executed %d, ran %+v", executed, ran)
+	}
+	op, params, err := setupRollbackOf(ran[0], "orders")
+	if err != nil || op != "msk_delete_connector" || string(params) != `{"name":"it_orders"}` {
+		t.Fatalf("connector rollback = %q %s, %v", op, params, err)
+	}
+	if _, _, err := setupRollbackOf(ran[1], "orders"); err == nil || !strings.Contains(err.Error(), "no rollback") {
+		t.Fatalf("worker config rollback err = %v, want no recorded rollback", err)
+	}
+
+	// The undo, run outside the plan, undoes the connector step only.
+	evs = append(evs,
+		walkEvent(t, 8, events.ProposalCreated, events.ProposalCreatedPayload{ProposalID: "p_undo", Steps: []events.ProposalStep{walkStep("msk_delete_connector", `{"name":"it_orders"}`)}}),
+		// The undo's own preview is not reversible.
+		walkEvent(t, 9, events.ProposalPreviewed, walkPreview("p_undo", false, "a rollback is not undone automatically: create the connector again with its msk_create_connector step in a new setup plan")),
+		walkEvent(t, 10, events.ActionExecuted, walkExecuted("p_undo", nil, true, false)),
+	)
+	ran, _ = setupWalkRan(evs, "orders")
+	if len(ran) != 1 || ran[0].Action != "msk_create_worker_config" {
+		t.Fatalf("after the undo ran = %+v, want the worker config step only", ran)
+	}
+
+	// The Strimzi rollback ops' previews record prose only.
+	for _, rec := range []string{
+		"a rollback is not undone automatically: apply the KafkaConnector again with its k8s_apply step in a new setup plan",
+		"a rollback is not undone automatically: refill the Secret with its k8s_secret_apply step in a new setup plan",
+	} {
+		if _, _, err := parseSetupRollback(rec); err == nil {
+			t.Errorf("%q parsed as an action and params", rec)
+		}
 	}
 }

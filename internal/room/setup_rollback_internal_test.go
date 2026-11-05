@@ -458,7 +458,7 @@ func TestSetupRollbackRecord(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ran := setupRanStep{PlanIndex: 0, Action: "step", Params: json.RawMessage(c.orig), Rollback: c.record}
-			op, params, err := setupRollbackOf(ran)
+			op, params, err := setupRollbackOf(ran, "")
 			if c.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErrText) {
 					t.Fatalf("err = %v, want %q", err, c.wantErrText)

@@ -94,6 +94,7 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	origin := s.publicOriginString()
 	welcome := protocol.Welcome{
 		RoomID:          res.RoomID,
 		Title:           snap.Title,
@@ -102,6 +103,9 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		Creator:         res.Creator,
 		ProtocolVersion: protocol.CurrentMajor,
 		ProtocolMinor:   protocol.CurrentMinor,
+		Targets:         welcomeTargets(snap),
+		PublicOrigin:    origin,
+		Fingerprint:     room.SetupFingerprint(origin, res.RoomID, snap.PipelineID, res.Creator.ID, res.Nonce),
 	}
 	if err := writeRunnerFrame(connCtx, conn, protocol.Frame{Type: protocol.FrameWelcome, Welcome: &welcome}); err != nil {
 		return
@@ -207,6 +211,8 @@ func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, toke
 		closeRunner(conn, websocket.StatusInternalError, "room lookup failed")
 		return
 	}
+	// A reconnect is not confirmed again (the token is the credential), so it
+	// carries no fingerprint; the targets may have grown since the pairing.
 	welcome := protocol.Welcome{
 		RoomID:          rn.RoomID,
 		Title:           snap.Title,
@@ -215,6 +221,8 @@ func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, toke
 		Creator:         rn.Creator,
 		ProtocolVersion: protocol.CurrentMajor,
 		ProtocolMinor:   protocol.CurrentMinor,
+		Targets:         welcomeTargets(snap),
+		PublicOrigin:    s.publicOriginString(),
 	}
 	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FrameWelcome, Welcome: &welcome}); err != nil {
 		return
@@ -328,4 +336,28 @@ func newRunnerToken() (string, time.Time, error) {
 		return "", time.Time{}, fmt.Errorf("httpapi: runner token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:]), time.Now().Add(protocol.TokenIdle), nil
+}
+
+// welcomeTargets are the setup room's targets with their classes, which the
+// runner's floors start from and its target driver is chosen by; nil on a
+// room that is not a setup room.
+func welcomeTargets(snap room.RoomSnapshot) []events.SetupTarget {
+	if snap.Setup == nil {
+		return nil
+	}
+	out := make([]events.SetupTarget, 0, len(snap.Setup.Targets))
+	for _, t := range snap.Setup.Targets {
+		out = append(out, events.SetupTarget{Kind: t.Kind, Address: t.Address, Class: t.Class})
+	}
+	return out
+}
+
+// publicOriginString is PIPEROOM_PUBLIC_URL's origin, or "" when none is
+// configured. Unlike setupOrigin it never falls back to the request's Host:
+// the fingerprint must be over the origin the person's browser knows.
+func (s *Server) publicOriginString() string {
+	if s.public.Scheme != "" && s.public.Host != "" {
+		return s.public.Scheme + "://" + s.public.Host
+	}
+	return ""
 }

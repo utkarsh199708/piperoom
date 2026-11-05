@@ -524,7 +524,12 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			return snap
 		}
 		snap.Setup = snap.Setup.clone()
-		snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
+		// A cloud setup credential's name is never a read credential to
+		// register (the route refuses it; a log written before that rule
+		// may still hold one).
+		if !isCloudSetupSecretName(p.Name) {
+			snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
+		}
 
 	case events.SetupCredentialsRegistered:
 		// The names the runner's Credentials frame wrote under the server's

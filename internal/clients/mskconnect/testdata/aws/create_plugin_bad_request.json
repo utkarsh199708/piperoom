@@ -1,0 +1,28 @@
+{
+  "provider": "aws",
+  "name": "create_plugin_bad_request",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the SDK sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/custom-plugins",
+        "body": "{\"contentType\":\"ZIP\",\"location\":{\"s3Location\":{\"bucketArn\":\"arn:aws:s3:::piperoom-bucket\",\"fileKey\":\"plugins/debezium-connector-postgres-2.7.3.zip\"}},\"name\":\"debezium-pg\"}",
+        "body_sha256": "f323e4f2fdd1c4422e88298a004180b5affca854f50dd962bde5a084926c144e",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Amzn-Errortype": "BadRequestException"
+        },
+        "body": "{\"message\":\"The S3 object could not be found\"}"
+      }
+    }
+  ]
+}

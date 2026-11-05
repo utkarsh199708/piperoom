@@ -1,0 +1,186 @@
+# C7 setup scenario (U13e): a Confluent Cloud managed connector runs as its own service account
+# (kafka.auth.mode SERVICE_ACCOUNT, sa-00000), but the setup applied only the watcher's ACL
+# template, not the connector's. The connector validated clean and was created; its task FAILED
+# with TopicAuthorizationException on the first write. The label names the failing rung and the
+# fix with its tier (Jira KAN-5 rows U13c, U13e; design docs/design/setup-managed.md §2.2, §3.2).
+# Format: evals/README.md (C6).
+#
+# RECORDED: NO. No sandbox account was used. The runner session (evals/setup/recordings/
+# setup-ccloud-acl-missing.json) is composed from the managed ops' summaries and Data over the
+# hand-written cassettes of internal/setup/targets/managed/testdata/confluent
+# (status_failed_acl.json is this status); the room's connect_status follows kafkatools' format
+# over confluentcloud.Status (a task's msg is its trace) and kafka_acls the acl tool's format;
+# CONNECT_KIND=confluent is not wired on main (A4 follow-up). Clock: 2026-10-30T12:20:00Z. To
+# re-record on the sandbox, see evals/scenarios/README.md, "Setup scenarios: managed targets
+# (U13e)".
+#
+# Timeline: 12:00 the setup room for orders-cc (confluent target env-00000/lkc-00000). 12:04
+#   ccloud_cluster: PROVISIONED. 12:05 ccloud_acl_create with the watcher template for the
+#   person-created read account User:sa-00001 (DESCRIBE, READ, DESCRIBE_CONFIGS on orders,
+#   DESCRIBE on the group). The connector template for the connector's own account User:sa-00000
+#   was planned as the next step and declined by the driver ("later"). 12:08
+#   ccloud_create_connector: validation clean, PostgresCdcSourceV2 connector orders-cc-connector
+#   created. 12:12 the ladder: connector FAILED, task 0 FAILED with TopicAuthorizationException on
+#   orders.public.orders.
+#
+# First failing layer: kafka-connect (the connector and its task FAILED). Root-cause layer: kafka
+#   (the cluster's ACLs: sa-00000 holds no WRITE or CREATE on the orders topics).
+#
+# Expected label: failing rung connector_running/tasks_running (TopicAuthorizationException); fix:
+#   ccloud_acl_create {template: connector, principal: User:sa-00000, topic_prefix: orders} (T2;
+#   T3 on production), after which Confluent's managed connector retries on its own (a restart is
+#   not a room action on Confluent Cloud in U13). There is no expect.fix: ccloud_acl_create is a
+#   runner op, not in evals.LiveActions.
+#   Forbidden: connect_restart_task, connect_restart_connector - no ACL changes by a restart.
+#   Forbidden: connect_update_connector_config, connect_delete_connector - the config validated
+#     clean; deleting the connector loses nothing the ACLs would not fix.
+#   Forbidden: schema_register, schema_set_compatibility - nothing reached the registry.
+#
+# Traps:
+#   - The validation was clean: Confluent's validate does not check the account's ACLs.
+#   - kafka_acls shows ACLs on the orders prefix - for the read account sa-00001, not the
+#     connector's sa-00000.
+#
+# Sources:
+#   - internal/setup/targets/managed/confluent.go: ACLRows' watcher and connector templates;
+#     ccloud_create_connector validates first.
+#   - ccloud-sdk-go-v2 connect/v1 OpenAPI: readConnectv1ConnectorStatus's tasks[].msg;
+#     kafkarest/v3: createKafkaAcls.
+#   - Apache Kafka: a producer without WRITE on a topic gets TopicAuthorizationException ("Not
+#     authorized to access topics: [...]").
+
+name: setup/ccloud-acl-missing
+description: |
+  The person set up orders-cc on Confluent Cloud (environment env-00000, cluster lkc-00000). The
+  setup applied the watcher's ACL template for the read account User:sa-00001; the connector
+  template for the connector's own service account User:sa-00000 was declined for later. The
+  managed PostgresCdcSourceV2 connector validated clean and was created; its task 0 FAILED with
+  TopicAuthorizationException: Not authorized to access topics: [orders.public.orders].
+
+  Root cause: the connector's service account sa-00000 has no ACLs on the orders topics (no CREATE,
+  WRITE or DESCRIBE), so the managed connector cannot write its change events.
+
+  Expected label: failing rung tasks_running (TopicAuthorizationException); fix: ccloud_acl_create
+  with the connector template for User:sa-00000 on the orders prefix (T2).
+
+setup:
+  source_kind: postgres
+  target: confluent
+
+pipeline:
+  id: orders-cc
+  title: Orders CDC (Confluent Cloud)
+  topic_prefix: orders
+  source_tables: [public.orders]
+  connectors: [orders-cc-connector]
+
+resources:
+  connectors: [orders-cc-connector]
+  subjects: [orders.public.orders-key, orders.public.orders-value]
+
+alert:
+  title: 'orders-cc setup: verification red at rungs connector_running and tasks_running; orders-cc-connector task 0 FAILED'
+  pipeline_map: |
+    pipeline orders-cc
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] UNKNOWN
+    2 connect:orders-cc-connector [kafka-connect, owner arjun] FAILED tasks_running=0
+      from: pg:public.orders
+    3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+      from: connect:orders-cc-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-cc}
+    summary: |
+      pipeline orders-cc
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] UNKNOWN
+      2 connect:orders-cc-connector [kafka-connect, owner arjun] FAILED tasks_running=0
+        from: pg:public.orders
+      3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+        from: connect:orders-cc-connector
+  - tool: connect_status
+    input: {connector: orders-cc-connector}
+    summary: |-
+      orders-cc-connector (source): FAILED on orders-cc-connector.
+      Task 0: FAILED:
+      org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [orders.public.orders]
+    data:
+      name: orders-cc-connector
+      state: FAILED
+      tasks:
+        - id: 0
+          state: FAILED
+          error: 'org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [orders.public.orders]'
+      worker: orders-cc-connector
+  - tool: connect_config
+    input: {connector: orders-cc-connector}
+    summary: |-
+      connector.class: PostgresCdcSourceV2
+      database.dbname: orders
+      database.hostname: orders.example.com
+      database.password: ***
+      database.port: 5432
+      database.user: debezium
+      kafka.auth.mode: SERVICE_ACCOUNT
+      kafka.service.account.id: sa-00000
+      output.data.format: JSON
+      topic.prefix: orders
+    data:
+      connector.class: PostgresCdcSourceV2
+      database.dbname: orders
+      database.hostname: orders.example.com
+      database.password: '***'
+      database.port: "5432"
+      database.user: debezium
+      kafka.auth.mode: SERVICE_ACCOUNT
+      kafka.service.account.id: sa-00000
+      output.data.format: JSON
+      topic.prefix: orders
+  - tool: kafka_acls
+    summary: |-
+      User:sa-00001: ALLOW DESCRIBE,DESCRIBE_CONFIGS,READ topic orders (PREFIXED); ALLOW DESCRIBE group connect-orders-cc-connector (LITERAL)
+  - tool: kafka_topic_offsets
+    input: {topic: orders.public.orders}
+    error: 'kafka: topic orders.public.orders: not found'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-cc (0 past rooms searched).
+  - tool: connect_status
+    error: 'confluentcloud: not found: read connector status: HTTP 404: Connector <name> not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-cc"; read tools only work on the room''s own pipeline'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The connector validated fine and then the task failed right away with an authorization error. The ACLs step ran. What is missing?"
+
+expect:
+  root_cause:
+    - [acl*, authoriz*, not authorized, permission]
+    - [sa-00000, service account, connector's account, connector account, write]
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [database, down]
+    - [network, unreachable]
+    - [password, wrong]
+    - [sa-00001, missing]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_topic_auth
+      tool: connect_status
+      match: [not authorized to access topics, orders public orders]
+      required: true
+    - id: f_acls_reader_only
+      tool: kafka_acls
+      match: [user sa 00001, describe configs read topic orders]
+  claims:
+    - about: root_cause
+      facts: [f_topic_auth, f_acls_reader_only]
+  evidence_tools: [connect_status, kafka_acls]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_update_connector_config, connect_delete_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

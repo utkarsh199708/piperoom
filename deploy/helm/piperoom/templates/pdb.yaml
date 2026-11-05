@@ -1,3 +1,4 @@
+{{- if include "piperoom.server" . }}
 {{- if and (gt (int .Values.replicaCount) 1) .Values.podDisruptionBudget.enabled }}
 # Several replicas share the rooms (docs/design/replicas.md): a node drain must
 # leave at least minAvailable of them serving. One replica gets no PDB, so a
@@ -13,4 +14,5 @@ spec:
   selector:
     matchLabels:
       {{- include "piperoom.selectorLabels" . | nindent 6 }}
+{{- end }}
 {{- end }}

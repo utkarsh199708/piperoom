@@ -82,6 +82,14 @@ var (
 	ErrSecretLong = errors.New("setup: secret value is too long")
 	// ErrSecretMissing: the store has no value under that name.
 	ErrSecretMissing = errors.New("setup: no such secret")
+	// ErrSettingValue: a public setting (IsPublicSetting) given a value of
+	// the wrong shape.
+	ErrSettingValue = errors.New("setup: invalid setting value")
+	// ErrCloudSecretRef: a ${secret:} reference names a cloud setup
+	// credential (IsCloudSetupSecret). Those keys authenticate the runner to
+	// the cloud provider; they are never materialised into a connector
+	// config, a Kubernetes Secret or a child process environment.
+	ErrCloudSecretRef = errors.New("setup: a ${secret:} reference cannot name a cloud setup credential")
 	// ErrStoreUnsafe: the store path or a materialised path is a symlink, not
 	// a regular file, or otherwise not something the runner may write.
 	ErrStoreUnsafe = errors.New("setup: secret store is not a regular file")
@@ -485,6 +493,27 @@ func (s *Store) materialisedPath() string {
 	return filepath.Join(s.dir, materialisedFileName)
 }
 
+// The service account ids of the Confluent ACL templates. They name an
+// account, they grant nothing (an API key does), and the agent needs to see
+// them to write ccloud_acl_create's principal, so they are settings the
+// person types on the runner rather than secrets: Set accepts only a
+// service account id under these names, and Redact leaves their values in
+// the text. Like every ccloud_* name they are refused from the server
+// (IsCloudSetupSecret), so only the person sets them.
+const (
+	SettingCCloudWatcherSA   = "ccloud_watcher_service_account"
+	SettingCCloudConnectorSA = "ccloud_connector_service_account"
+)
+
+// serviceAccountRE is a Confluent service account id, bare or as a principal.
+var serviceAccountRE = regexp.MustCompile(`^(User:)?sa-[a-z0-9]{3,16}$`)
+
+// IsPublicSetting reports whether name holds a non-secret runner setting
+// whose value Redact keeps.
+func IsPublicSetting(name string) bool {
+	return name == SettingCCloudWatcherSA || name == SettingCCloudConnectorSA
+}
+
 // Set stores (or replaces) one named value. A replacement is a normal upsert:
 // rotating a generated password must not need a delete. The file is rewritten
 // atomically before Set returns; a write failure leaves the old value in
@@ -495,6 +524,16 @@ func (s *Store) Set(name, value string) error {
 	}
 	if err := ValidateSecretValue(value); err != nil {
 		return err
+	}
+	if strings.HasPrefix(strings.ToLower(name), "aws_") {
+		// The AWS SDK's default chain is the only AWS credential source
+		// (docs/design/setup-managed.md §2): an AWS key in this file would be
+		// a second, unaudited one.
+		return fmt.Errorf("%w: %q: AWS credentials come from the AWS SDK chain on this machine (aws sso login, a profile, an instance role), never from the secret store", ErrSecretName, scrub(name, MaxSecretNameBytes))
+	}
+	if IsPublicSetting(name) && !serviceAccountRE.MatchString(value) {
+		// Redact keeps this value, so nothing but an id may be stored here.
+		return fmt.Errorf("%w: %s holds a service account id (sa-... or User:sa-...)", ErrSettingValue, name)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -575,14 +614,24 @@ func ValidateSecretValue(value string) error {
 // Materialise resolves every ${secret:NAME} reference in text to its stored
 // value. The result is for memory or a child process environment only: it is
 // never written into a compose file or a summary. A missing or reserved name
-// fails the whole call, so a half-materialised string is never used.
+// fails the whole call, so a half-materialised string is never used. A cloud
+// setup credential (IsCloudSetupSecret: ccloud_*, aiven_token, aws_*) fails
+// it too, with ErrCloudSecretRef: the managed drivers read those keys
+// themselves, and a reference would copy one into a connector config, a
+// Kubernetes Secret or a container environment.
 func (s *Store) Materialise(text string) (string, error) {
 	if !strings.Contains(text, "${secret:") {
 		return text, nil
 	}
-	var missing string
+	var missing, cloud string
 	out := secretRefPattern.ReplaceAllStringFunc(text, func(ref string) string {
 		name := ref[len("${secret:") : len(ref)-1]
+		if IsCloudSetupSecret(name) {
+			if cloud == "" {
+				cloud = name
+			}
+			return ref
+		}
 		if name == ReceiptKeyName {
 			if missing == "" {
 				missing = name
@@ -598,10 +647,31 @@ func (s *Store) Materialise(text string) (string, error) {
 		}
 		return v
 	})
+	if cloud != "" {
+		return "", fmt.Errorf("%w: %q", ErrCloudSecretRef, scrub(cloud, MaxSecretNameBytes))
+	}
 	if missing != "" {
 		return "", fmt.Errorf("%w: %q is not in the store", ErrSecretMissing, scrub(missing, MaxSecretNameBytes))
 	}
 	return out, nil
+}
+
+// LookupRef is Get for a name a ${secret:} reference or a driver's own
+// reference field named: a cloud setup credential is refused
+// (ErrCloudSecretRef) and a missing name is ErrSecretMissing. The
+// in-cluster Strimzi driver fills the database Secret through it.
+func (s *Store) LookupRef(name string) (string, error) {
+	if IsCloudSetupSecret(name) {
+		return "", fmt.Errorf("%w: %q", ErrCloudSecretRef, scrub(name, MaxSecretNameBytes))
+	}
+	if name == ReceiptKeyName {
+		return "", fmt.Errorf("%w: %q is not in the store", ErrSecretMissing, name)
+	}
+	v, ok := s.Get(name)
+	if !ok {
+		return "", fmt.Errorf("%w: %q is not in the store", ErrSecretMissing, scrub(name, MaxSecretNameBytes))
+	}
+	return v, nil
 }
 
 // secretRefPattern is one ${secret:NAME} reference with the protocol name
@@ -750,6 +820,11 @@ func (s *Store) redactions() []redaction {
 	defer s.mu.Unlock()
 	out := make([]redaction, 0, len(s.values)+1)
 	for name, value := range s.values {
+		if IsPublicSetting(name) && serviceAccountRE.MatchString(value) {
+			// An id, not a secret; a value of another shape (a store
+			// written before this rule) is still redacted.
+			continue
+		}
 		out = append(out, redaction{name: name, value: value})
 	}
 	out = append(out, redaction{name: ReceiptKeyName, value: hex.EncodeToString(s.key)})
@@ -941,6 +1016,14 @@ func (s *Store) VerifyResult(res protocol.OpResult) bool {
 	got := s.ResultMAC(res.OK, res.Summary, res.Data)
 	return hmac.Equal([]byte(got), []byte(want))
 }
+
+// SecretStore is the runner's own secret store, the one secret_set and the
+// UI's secret frame write to, opened on first use like every other use of
+// it. A target driver resolves ${secret:} references through it (setupcmd
+// passes it to the managed drivers and the Strimzi driver); calling it only
+// when an op needs a value keeps a runner that only pairs from creating the
+// store file.
+func (r *Runner) SecretStore() (*Store, error) { return r.secretStore() }
 
 // secretStore opens the runner's store on first use: the first op or secret
 // frame creates .piperoom/secrets.env (0600) and the .gitignore entry; a

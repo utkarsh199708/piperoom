@@ -56,6 +56,9 @@ const (
 	TemplateConnect  = "connect"
 	TemplateRegistry = "registry"
 	TemplatePostgres = "source-postgres"
+	// TemplateSinkPostgres is the dev warehouse (row U3c): a second Postgres,
+	// service "warehouse", that a JDBC sink connector writes into.
+	TemplateSinkPostgres = "sink-postgres"
 )
 
 // Fixed names and defaults of a rendered stack.

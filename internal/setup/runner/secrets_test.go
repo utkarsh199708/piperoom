@@ -562,3 +562,96 @@ func TestStoreCustomFile(t *testing.T) {
 		t.Fatalf("outside store file: %v", err)
 	}
 }
+
+// TestStoreRefusesCloudSetupReferences: a ${secret:} reference to a cloud
+// setup credential (ccloud_*, aiven_token, aws_*) is never materialised, not
+// in a connector config, not in a child environment and not through
+// LookupRef (the Strimzi driver's Secret source), even when the store holds
+// the name; the error names the reference, never the value.
+func TestStoreRefusesCloudSetupReferences(t *testing.T) {
+	st := mustStore(t, t.TempDir())
+	const cloudValue = "cloud-setup-value-9"
+	for _, name := range []string{"ccloud_api_secret", "CCLOUD_CLUSTER_KEY", "aiven_token"} {
+		if err := st.Set(name, cloudValue); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Set("DB_PASSWORD", "s3cret-value"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ccloud_api_secret", "CCLOUD_CLUSTER_KEY", "aiven_token", "aws_secret_access_key", "AWS_SESSION_TOKEN"} {
+		got, err := st.Materialise("a=${secret:DB_PASSWORD} b=${secret:" + name + "}")
+		if !errors.Is(err, runner.ErrCloudSecretRef) || got != "" {
+			t.Errorf("Materialise(%s) = %q, %v; want ErrCloudSecretRef and nothing", name, got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), cloudValue) {
+			t.Errorf("the error quotes the value: %v", err)
+		}
+		if _, err := st.MaterialiseEnv([]string{"K=${secret:" + name + "}"}); !errors.Is(err, runner.ErrCloudSecretRef) {
+			t.Errorf("MaterialiseEnv(%s) = %v, want ErrCloudSecretRef", name, err)
+		}
+		if v, err := st.LookupRef(name); !errors.Is(err, runner.ErrCloudSecretRef) || v != "" {
+			t.Errorf("LookupRef(%s) = %q, %v; want ErrCloudSecretRef", name, v, err)
+		}
+	}
+	if v, err := st.LookupRef("DB_PASSWORD"); err != nil || v != "s3cret-value" {
+		t.Errorf("LookupRef(DB_PASSWORD) = %q, %v", v, err)
+	}
+	if _, err := st.LookupRef("NOPE"); !errors.Is(err, runner.ErrSecretMissing) {
+		t.Errorf("LookupRef(NOPE) = %v, want ErrSecretMissing", err)
+	}
+}
+
+// TestStoreRefusesAWSNames: the AWS SDK chain is the only AWS credential
+// source, so the store refuses an aws_* name in any case.
+func TestStoreRefusesAWSNames(t *testing.T) {
+	st := mustStore(t, t.TempDir())
+	for _, name := range []string{"aws_access_key_id", "AWS_SECRET_ACCESS_KEY", "Aws_Session_Token"} {
+		if err := st.Set(name, "aws-value-123456"); !errors.Is(err, runner.ErrSecretName) {
+			t.Errorf("Set(%s) = %v, want ErrSecretName", name, err)
+		}
+		if st.Has(name) {
+			t.Errorf("the store holds %s", name)
+		}
+	}
+}
+
+// TestServiceAccountSettingsAreNotRedacted (review, correctness low): the
+// Confluent service account ids are what the agent writes as
+// ccloud_acl_create's principal, and they grant nothing, so SanitizeResult
+// keeps them; only an id may be stored under their names, so nothing secret
+// escapes through the exemption. Other ccloud_* values stay redacted.
+func TestServiceAccountSettingsAreNotRedacted(t *testing.T) {
+	st := mustStore(t, t.TempDir())
+	if err := st.Set(runner.SettingCCloudWatcherSA, "sa-abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set(runner.SettingCCloudConnectorSA, "User:sa-def456"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set("ccloud_api_secret", "cc-secret-value-123"); err != nil {
+		t.Fatal(err)
+	}
+	res := st.SanitizeResult(protocol.OpResult{OK: true,
+		Summary: "4 ACL rows for User:sa-abc123 and User:sa-def456 with cc-secret-value-123",
+		Data:    json.RawMessage(`{"principal":"User:sa-abc123"}`)})
+	for _, w := range []string{"User:sa-abc123", "User:sa-def456", "${secret:ccloud_api_secret}"} {
+		if !strings.Contains(res.Summary, w) {
+			t.Errorf("summary %q lacks %s", res.Summary, w)
+		}
+	}
+	if strings.Contains(res.Summary, "cc-secret-value-123") {
+		t.Errorf("the API secret reached the summary: %q", res.Summary)
+	}
+	if string(res.Data) != `{"principal":"User:sa-abc123"}` || res.Redacted {
+		t.Errorf("data = %s (redacted %v)", res.Data, res.Redacted)
+	}
+	for _, v := range []string{"cc-secret-value-123", "sa-ABCDEF", "User:sa-abc123 x"} {
+		if err := st.Set(runner.SettingCCloudWatcherSA, v); !errors.Is(err, runner.ErrSettingValue) {
+			t.Errorf("Set(watcher, %q) = %v, want ErrSettingValue", v, err)
+		}
+	}
+	if v, _ := st.Get(runner.SettingCCloudWatcherSA); v != "sa-abc123" {
+		t.Errorf("a refused Set replaced the id: %q", v)
+	}
+}

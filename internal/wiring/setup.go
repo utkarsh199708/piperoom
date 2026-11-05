@@ -64,6 +64,15 @@ type SetupStackDeps struct {
 	// targets are the hosts a connector the room creates may name
 	// (registerLifecycle's AllowedHosts). Required.
 	Request events.SetupRequest
+	// Pipeline, when set, is the room's provisional pipeline as it stands —
+	// owners.Provisional of the request plus everything a driver added since
+	// (setup.pipeline_extended: consumer groups, sink tables) — and the
+	// stack's owners scope is built from it, so the stack and the room's own
+	// scope checks agree (row U1-32). Nil keeps today's behaviour and derives
+	// the pipeline from Request alone, which has no consumer-group or
+	// sink-table fields. Request stays required either way: its source kind
+	// and targets are read regardless.
+	Pipeline *owners.Pipeline
 	// Class is the class of the endpoint the setup read tools reach
 	// (protocol.ClassLocal, ClassShared or ClassProduction). Empty sends
 	// ClassLocal; the runner raises a read's class to its own floor for the
@@ -155,6 +164,13 @@ func OpenSetupStack(ctx context.Context, cfg config.Config, d SetupStackDeps) (*
 	prov, err := owners.Provisional(d.Request)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: setup stack: %w", err)
+	}
+	if d.Pipeline != nil {
+		// The caller's pipeline wins: it is the provisional pipeline with the
+		// driver's later extensions, which Request cannot carry. Provisional
+		// still ran above, so a malformed request refuses the same way with
+		// or without it.
+		prov = *d.Pipeline
 	}
 	c, err := d.Clients(d.Executor, d.RoomID)
 	if err != nil {

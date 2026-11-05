@@ -36,16 +36,22 @@ func quiet() *slog.Logger {
 
 // runServer starts an httptest server whose handler runs fn with the accepted
 // WebSocket and request context, then closes the socket and signals done.
+// done is closed when the first connection ends; a runner that reconnects
+// (a retry the test did not expect) runs fn again on its new connection
+// instead of panicking on a second close, so the test's own assertions
+// report it.
 func runServer(t *testing.T, fn func(conn *websocket.Conn, ctx context.Context)) (*httptest.Server, <-chan struct{}) {
 	done := make(chan struct{})
+	var once sync.Once
+	signal := func() { once.Do(func() { close(done) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Errorf("accept: %v", err)
-			close(done)
+			signal()
 			return
 		}
-		defer func() { _ = conn.Close(websocket.StatusNormalClosure, ""); close(done) }()
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, ""); signal() }()
 		fn(conn, r.Context())
 	}))
 	return srv, done

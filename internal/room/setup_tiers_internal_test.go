@@ -189,6 +189,8 @@ var tierOps = []struct {
 	{"compose_down", events.LayerEnvironment, plan.TierT1},
 	{"k8s_delete_namespace", events.LayerEnvironment, plan.TierT2},
 	{"msk_delete_connector", events.LayerEnvironment, plan.TierT2},
+	{"k8s_delete", "kafka-connect", plan.TierT2},
+	{"k8s_unapply", "kafka-connect", plan.TierT2},
 	{"file_write", events.LayerEnvironment, plan.TierT1},
 	{"file_delete", events.LayerEnvironment, plan.TierT1},
 }
@@ -1288,6 +1290,37 @@ func TestSetupAdminGrantScopedToRoomTenant(t *testing.T) {
 	}
 	if err := r.approve(roomA, pidA, "postgres", "bob"); err != nil {
 		t.Fatalf("own tenant's admin refused: %v", err)
+	}
+}
+
+// TestK8sUnapplyGuardReadsKind: the k8s_unapply row's exception reads the
+// kind the runner decodes; anything unclear is the strictest answer, and the
+// two kinds it allows on production pass while the KafkaConnect and the
+// Secret are refused.
+func TestK8sUnapplyGuardReadsKind(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"kind":"KafkaUser","name":"orders-connect"}`: "KafkaUser",
+		`{"KIND":"ConfigMap"}`:                         "ConfigMap",
+		`{"kind":"Secret"}`:                            "Secret",
+		`{"kind":"KafkaUser","Kind":"Secret"}`:         "",
+		`{"kind":7}`:                                   "",
+		`not json`:                                     "",
+	} {
+		if got := setupGuardFacts(plan.OpK8sUnapply, json.RawMessage(raw)).Kind; got != want {
+			t.Errorf("setupGuardFacts(%s).Kind = %q, want %q", raw, got, want)
+		}
+	}
+	for raw, refused := range map[string]bool{
+		`{"kind":"KafkaUser","name":"orders-connect"}`: false,
+		`{"kind":"ConfigMap"}`:                         false,
+		`{"kind":"KafkaConnect"}`:                      true,
+		`{"kind":"Secret"}`:                            true,
+		`{"kind":"KafkaUser","Kind":"Secret"}`:         true,
+	} {
+		_, forbidden := plan.Forbidden(plan.GuardRequest{Op: plan.OpK8sUnapply, Class: plan.ClassProduction, Facts: setupGuardFacts(plan.OpK8sUnapply, json.RawMessage(raw))})
+		if forbidden != refused {
+			t.Errorf("k8s_unapply %s on production: forbidden = %v, want %v", raw, forbidden, refused)
+		}
 	}
 }
 
