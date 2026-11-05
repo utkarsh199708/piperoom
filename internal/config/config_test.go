@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -132,12 +133,13 @@ func TestLimitsEnvNames(t *testing.T) {
 	t.Setenv("PIPEROOM_ROOM_MAX_EVENTS", "5000")
 	t.Setenv("PIPEROOM_ROOM_MAX_BYTES", "1GiB")
 	t.Setenv("PIPEROOM_EVENT_MAX_DATA_BYTES", "131072")
-	t.Setenv("PIPEROOM_ARCHIVE_DIR", "/var/lib/piperoom/archive/")
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	t.Setenv("PIPEROOM_ARCHIVE_DIR", archiveDir+string(filepath.Separator))
 	l, err := ParseLimits(Load())
 	if err != nil {
 		t.Fatalf("ParseLimits: %v", err)
 	}
-	want := Limits{MaxOpenDays: 0, RoomMaxEvents: 5000, RoomMaxBytes: 1 << 30, EventMaxDataBytes: 128 << 10, ArchiveDir: "/var/lib/piperoom/archive"}
+	want := Limits{MaxOpenDays: 0, RoomMaxEvents: 5000, RoomMaxBytes: 1 << 30, EventMaxDataBytes: 128 << 10, ArchiveDir: archiveDir}
 	if l != want {
 		t.Fatalf("ParseLimits = %+v, want %+v", l, want)
 	}
