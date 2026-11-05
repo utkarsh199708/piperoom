@@ -135,6 +135,11 @@ func resolveConnections(id, where string, conns owners.Connections, src connSour
 	}
 	sort.Strings(keys) // same error for the same file
 	for _, k := range keys {
+		if owners.IsPipelineOnlyKey(k) && where == "connections" {
+			// No config.Config field: the Kubernetes keys are resolved by
+			// pipelineKube (strimzi.go).
+			continue
+		}
 		field, ok := connFields[k]
 		if !ok {
 			// owners.Load refuses unknown keys; this guards a hand-built Owners.

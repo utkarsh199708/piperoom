@@ -86,6 +86,24 @@ var labelledQueries = []labelled{
 	{`kafka log start offset moved past the group's committed offset`, "retention-loss/Symptoms"},
 	{`messages aged out of the topic before they were consumed`, "retention-loss/Symptoms"},
 	{`dead-letter topic only works for sink connectors`, "poison-pill/Fixes"},
+	// The design partners' incidents (2026-11), in their words and as the
+	// traces read: one query per new runbook at least.
+	{`connector failed after a postgres restart, connection refused`, "source-restart/Symptoms"},
+	{`PSQLException: An I/O error occurred while sending to the backend`, "source-restart/Symptoms"},
+	{`FATAL: terminating connection due to administrator command`, "source-restart/Symptoms"},
+	{`restart the connector automatically after the database comes back`, "source-restart/Fixes"},
+	{`connector not ready after a kafka broker restart`, "broker-restart/Symptoms"},
+	{`TimeoutException: Expiring 12 record(s) for pg.public.orders-0`, "broker-restart/Symptoms"},
+	{`lower environment restored from production backup, kafka connector wal lsn mismatch`, "restore-offset-mismatch/Symptoms"},
+	{`after the postgres upgrade replication slot "debezium" does not exist`, "restore-offset-mismatch/Symptoms"},
+	{`reset the connector's stored source offsets after a restore`, "restore-offset-mismatch/Fixes"},
+	{`burst of changes, connector not scaled, tasks.max has no effect`, "throughput-burst/Symptoms"},
+	{`raise max.batch.size and max.queue.size for a backfill`, "throughput-burst/Fixes"},
+	{`strimzi operator not ready, kafkaconnector not ready`, "strimzi-not-ready/Symptoms"},
+	{`kubectl get kafkaconnector shows READY False in the test namespace`, "strimzi-not-ready/Symptoms"},
+	{`Unknown magic byte! headless data format, connector stopped`, "converter-errors/Symptoms"},
+	{`JsonConverter with schemas.enable requires "schema" and "payload" fields`, "converter-errors/Symptoms"},
+	{`kafka streams application stuck restoring state stores after the connector restart`, "streams-consumer/Symptoms"},
 }
 
 // sectionID is the id a labelled query refers to.

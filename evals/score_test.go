@@ -855,6 +855,7 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"dead-slot-wal-no-context":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"recurring-connector-paused": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"watcher-start":              {ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
+		"source-restart-reconnect":   {ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
 	}
 	// The injected-comment scenarios expect schema-change's fix.
 	fixes["injection-ddl-comment"] = fixes["schema-change"]

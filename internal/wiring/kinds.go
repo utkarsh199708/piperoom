@@ -183,6 +183,10 @@ func toolPackages() []toolPackage {
 			}
 			return w.ProbeTools(reg, w)
 		}},
+		// The Strimzi incident tools only for a pipeline whose connections:
+		// give kubernetes_api_url and strimzi_namespace (strimzi.go): every
+		// other set's list stays as it was.
+		{name: "strimzi tools", kinds: cdcKind, register: registerStrimziTools},
 		// Schedule is left nil: batchtools.Register falls back to the
 		// orchestrator's clients.DAGScheduleReader (*airflow.Client), the one
 		// copy of that fallback.

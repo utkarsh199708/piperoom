@@ -255,6 +255,8 @@ func TestRegisterToolsPackageErrorNamesPackage(t *testing.T) {
 // exact name or a family prefix), so no tool reaches a room by the default.
 func TestEveryRegisteredToolHasAKind(t *testing.T) {
 	w := &Wired{Owners: ownersOf(cdcPipe("a"), batchPipe("b")), Rooms: similarincidents.FromStore(memstore.New())}
+	// The Strimzi tools register only with a Kubernetes reader.
+	w.strimzi = testStrimzi(t)
 	reg, _ := registered(t, w)
 	for _, n := range regNames(reg) {
 		if _, known := agent.ToolPipelineKinds(n); !known {

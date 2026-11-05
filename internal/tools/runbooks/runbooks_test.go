@@ -18,10 +18,11 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/k8stools"
 	"piperoom/internal/tools/kafkatools"
 )
 
-var wantIDs = []string{"connector-failed", "consumer-lag", "poison-pill", "retention-loss", "schema-incompatible", "slot-wal", "source-ddl"}
+var wantIDs = []string{"broker-restart", "connector-failed", "consumer-lag", "converter-errors", "poison-pill", "restore-offset-mismatch", "retention-loss", "schema-incompatible", "slot-wal", "source-ddl", "source-restart", "streams-consumer", "strimzi-not-ready", "throughput-burst"}
 
 func embedded(t *testing.T) []Runbook {
 	t.Helper()
@@ -70,8 +71,22 @@ func TestRunbooksNameRealToolsAndActions(t *testing.T) {
 	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
 		t.Fatal(err)
 	}
+	// The Strimzi tools register only for a pipeline with Kubernetes keys;
+	// here they only need to exist, so the reader is never called.
+	if err := k8stools.Register(reg, k8stools.Deps{Kube: noKube{}, Settings: k8stools.Settings{Namespace: "kafka"}, Owners: &owners.Owners{}}); err != nil {
+		t.Fatal(err)
+	}
 	areg := actions.NewRegistry()
 	if err := actions.Register(areg, actions.Deps{}); err != nil {
+		t.Fatal(err)
+	}
+	// The connector lifecycle (Q5) and tuning (X6) actions the newer
+	// runbooks name: connect_stop_connector, connect_reset_source_offsets,
+	// connect_tune_throughput.
+	if err := actions.RegisterLifecycle(areg, actions.LifecycleDeps{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := actions.RegisterTuning(areg, actions.TuningDeps{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, rb := range embedded(t) {
@@ -363,3 +378,6 @@ func TestRunbookHitItems(t *testing.T) {
 		}
 	}
 }
+
+// noKube satisfies k8stools.Reader for registration only; no test calls it.
+type noKube struct{ k8stools.Reader }

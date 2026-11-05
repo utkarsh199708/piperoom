@@ -60,6 +60,9 @@ var cdcExact = map[string]bool{
 	"repo_list_files": true,
 	"repo_read_file":  true,
 	"pr_status":       true,
+	// k8s_object_events reads the events of a pipeline's Strimzi objects
+	// (internal/tools/k8stools); its strimzi_* siblings are a family below.
+	"k8s_object_events": true,
 }
 
 // cdcPrefixes and batchPrefixes name whole tool families. The batch tools
@@ -67,7 +70,7 @@ var cdcExact = map[string]bool{
 // dag_schedule_gap; P4d-2 dbttools: dbt_run_results, dbt_model_lineage,
 // dbt_model_sql) are covered before their packages exist.
 var (
-	cdcPrefixes   = []string{"kafka_", "pg_", "connect_", "schema_registry_", "debezium_", "dlq_", "source_", "mysql_"}
+	cdcPrefixes   = []string{"kafka_", "pg_", "connect_", "schema_registry_", "debezium_", "dlq_", "source_", "mysql_", "strimzi_"}
 	batchPrefixes = []string{"dag_", "task_", "dbt_"}
 )
 

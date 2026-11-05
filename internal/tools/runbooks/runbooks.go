@@ -38,7 +38,7 @@ var headings = []string{"Symptoms", "Find it with Piperoom tools", "Safe checks"
 
 // allowedHosts are the documentation sites and issue trackers a runbook or a
 // known issue may cite. On github.com only the debezium organisation counts.
-var allowedHosts = []string{"www.postgresql.org", "debezium.io", "kafka.apache.org", "docs.confluent.io", "issues.redhat.com", "github.com"}
+var allowedHosts = []string{"www.postgresql.org", "debezium.io", "kafka.apache.org", "docs.confluent.io", "issues.redhat.com", "github.com", "strimzi.io"}
 
 //go:embed library/*.md
 var library embed.FS
