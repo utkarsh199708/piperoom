@@ -248,3 +248,16 @@ describe('DecisionBar height variable', () => {
     expect(root.style.getPropertyValue('--sheet-h')).toBe('')
   })
 })
+
+describe('DecisionBar phone sheet, one layer (KAN-599)', () => {
+  it('keeps the single truncating line for a user approving one layer', () => {
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={room(prop())} user={arjun} placement="sheet" />
+      </DecisionHandleContext.Provider>,
+    )
+    const headline = screen.getByText('Needs your approval · kafka-connect — Restart the task')
+    expect(headline.className).toContain('truncate')
+    expect(headline.children).toHaveLength(0)
+  })
+})

@@ -240,16 +240,30 @@ export function DecisionBar({
       // X8: a healthy stage is owed first. The card says so; the bar says it too and keeps Approve off.
       const held = stagingRequired(decision.proposal);
       tone = "bg-warning-subtle text-warning-foreground";
-      live = `${setupPrefix}Needs your approval · ${(decision.all ?? [decision.layer]).join(" · ")} — ${title}${held ? ` · ${STAGING_REQUIRED_SHORT.toLowerCase()}` : ""}`;
+      const lead = `${setupPrefix}Needs your approval · ${(decision.all ?? [decision.layer]).join(" · ")} — `;
+      const rest = `${title}${held ? ` · ${STAGING_REQUIRED_SHORT.toLowerCase()}` : ""}`;
+      live = lead + rest;
+      // A solo user approves every layer at once and the sheet is ~320 px wide, so one truncating line
+      // cut the second layer off. There the layers wrap freely and only the title truncates (KAN-599).
+      const split = sheet && (decision.all?.length ?? 0) > 1;
       text = (
         <>
           <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
           <span
             aria-live="polite"
-            className="min-w-0 truncate font-medium"
+            className={cn("min-w-0 font-medium", split ? "block" : "truncate")}
             title={live}
           >
-            {live}
+            {split ? (
+              <>
+                <span className="break-words">{lead}</span>
+                <span className="inline-block max-w-full truncate align-bottom">
+                  {rest}
+                </span>
+              </>
+            ) : (
+              live
+            )}
           </span>
         </>
       );
