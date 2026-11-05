@@ -1,0 +1,314 @@
+# C7 incident scenario (Q8i), built on `devctl break history-topic-deleted` (dev/scenarios.md §26,
+# Q8a): a Kafka topic clean-up deleted the Debezium MySQL connector's schema history topic
+# schema-history.shop while orders-mysql was stopped. Its stored offset says the snapshot is done,
+# so on resume Debezium needs the history to know the table schemas at that position, finds no
+# topic and fails. Format: evals/README.md (C6). Row Q8i (tasks/Q-board.md, step 8;
+# docs/design/mysql-source.md §10.4).
+#
+# RECORDED: NO. Synthesised from the code paths (the format strings of the real tools on this
+# branch, as mysql-binlog-purged.yaml), values composed by hand from §26's break; nothing in §26
+# is observed yet, including Debezium's message (unconfirmed on 3.2). Clock:
+# 2026-10-23T09:40:00Z, scoped like orders-mysql in dev/owners.mysql.yaml. The mysql: nodes render
+# "owner " empty, as the topology builder does today (per-pipeline mysql owner). See
+# evals/scenarios/README.md, "MySQL scenarios (Q8i)".
+#
+# Label (design §10.4; the row's done-when: layer and action):
+#   source_kind: mysql
+#   first failing layer: kafka-connect (task 0 FAILED)
+#   root-cause layer: kafka (the schema history topic was deleted from the cluster)
+#   action: connect_update_connector_config {connector: orders-mysql, changes: {snapshot.mode:
+#     recovery}} (schema_only_recovery before Debezium 2.6; Q8e checks the name against the
+#     plugin version): the connector rebuilds the history from the current table schemas and keeps
+#     its binlog position. Its Preview carries Debezium's warning (safe only if no DDL ran since the
+#     stored position); Verify wants the connector RUNNING and kafka_schema_history showing the topic
+#     with one partition and infinite retention; then snapshot.mode goes back (the rollback). A
+#     reset to empty plus a full re-snapshot (connect_stop_connector + connect_reset_source_offsets)
+#     also ends it, heavier: it re-emits every row. It is not forbidden, but it does not pass the
+#     graded fix (fix_targets names only the recovery step).
+#   tool that shows the cause: kafka_schema_history (Q8e: "schema-history.shop does not exist").
+#
+# What is graded (Q8i-fu, after Q8j): first_failing_layer kafka-connect, root_cause_layer kafka,
+#   the facts below (the required kafka_schema_history fact; kafka_schema_history is an evidence
+#   tool), the forbidden actions and the fix: connect_update_connector_config with
+#   changes {snapshot.mode: recovery} on orders-mysql. The replay runs it in a MySQL room (Q8j),
+#   whose binlog reader makes connect_update_connector_config offer snapshot.mode. The
+#   kafka_schema_history and mysql_binlog_status recordings are the real tools' output over fake
+#   clients holding this file's state (the topic is gone; the stored binlog.000007 is still on
+#   the server); connect_config gained database.server.id 5401 and
+#   schema.history.internal.kafka.topic schema-history.shop, which the history tool reads.
+#
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - every
+#     start needs the same missing topic.
+#   Forbidden: connect_delete_connector - the connector config and stored position are fine.
+#   Forbidden: pg_* actions (MySQL source), source_grant_select, source_end_session,
+#     source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register,
+#     schema_set_compatibility.
+#
+# Traps:
+#   - The binlog is NOT purged: the stored file binlog.000007 is still on the server (pipeline_map
+#     binlog_oldest binlog.000006). A re-snapshot for "lost position" is the binlog-purged story.
+#   - The Schema Registry subjects shop.shop.*-value are intact: the "schema history" is Debezium's
+#     own DDL log topic, not the Avro registry.
+#
+# Sources:
+#   - dev/scenarios.md §26 (Q8a): break, symptoms, fix (snapshot.mode=recovery, then back).
+#   - docs/design/mysql-source.md §7.3, §8.3, §10.4.
+#   - Debezium MySQL: "The db history topic is missing. You may attempt to recover it by
+#     reconfiguring the connector to recovery" (schema_only_recovery before 2.6); text unconfirmed.
+
+name: mysql-history-topic-deleted
+description: |
+  orders-mysql (Debezium MySQL connector, topic.prefix shop) was stopped at 08:30 UTC for the
+  Connect worker upgrade. At 08:45 the Kafka team's weekly clean-up job deleted topics without a
+  consumer group, among them schema-history.shop, the connector's schema history topic (Debezium
+  reads it only at start, so it never has a group). The connector was resumed at 09:10: its
+  stored offset (binlog.000007, snapshot completed) is valid and still on the server, but task 0
+  FAILED with "The db history topic is missing. You may attempt to recover it by reconfiguring
+  the connector to recovery". Nothing new reaches shop.shop.orders since 08:30. MySQL, the binlog
+  and the Schema Registry are healthy.
+
+  Root cause: the connector's Kafka schema history topic schema-history.shop was deleted, so
+  Debezium cannot rebuild the table schemas for its stored binlog position.
+
+  Expected label: layer kafka (root cause; first failing kafka-connect); action
+  connect_update_connector_config with snapshot.mode=recovery on orders-mysql (then back), which
+  rebuilds the history and keeps the position. kafka_schema_history is the tool that shows it.
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+
+alert:
+  title: 'orders-mysql: connector orders-mysql task 0 FAILED (no recent records in shop.shop.orders)'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=70m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=70m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=70m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=70m ago
+        from: connect:orders-mysql
+  - tool: connect_list_connectors
+    summary: |-
+      orders-mysql (source): RUNNING, 1 failed tasks
+    data:
+      - failed_tasks: 1
+        name: orders-mysql
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      io.debezium.DebeziumException: The db history topic is missing. You may attempt to recover it by reconfiguring the connector to recovery
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "io.debezium.DebeziumException: The db history topic is missing. You may attempt to recover it by reconfiguring the connector to recovery"
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.server.id: 5401
+      database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.server.id: "5401"
+      database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+  - tool: connect_source_offsets
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql partition server=shop: event=1, file=binlog.000007, gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2741, pos=91844, row=1, server_id=223344, ts_sec=1792744200
+    data:
+      connectors:
+        - connector: orders-mysql
+          offsets:
+            - partition: {server: shop}
+              offset: {event: 1, file: binlog.000007, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2741", pos: 91844, row: 1, server_id: 223344, ts_sec: 1792744200}
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–2214 (2214 records), newest 70 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.order_items}
+    summary: |-
+      partition 0: 0–5031 (5031 records), newest 70 min ago
+  - tool: source_settings
+    summary: |-
+      version=8.4.3
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: schema_registry_subjects
+    summary: |-
+      shop.shop.order_items-key
+      shop.shop.order_items-value
+      shop.shop.orders-key
+      shop.shop.orders-value
+  - tool: schema_registry_versions
+    input: {subject: shop.shop.orders-value}
+    summary: |-
+      shop.shop.orders-value: versions [1], latest id 7, compatibility BACKWARD (global)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Q8j: the real tools' output over fake clients holding this state (the
+  # connector's config above names schema-history.shop; the topic does not
+  # exist; the stored position binlog.000007 is still on the server). No
+  # input: the call with or without the connector reads the one connector.
+  - tool: kafka_schema_history
+    summary: |-
+      orders-mysql history topic schema-history.shop
+        FAULT history-topic-deleted: the history topic schema-history.shop does not exist: the connector cannot recover its schema and fails on start; recreate it (one partition, retention.ms=-1, retention.bytes=-1, cleanup.policy=delete) and run a recovery snapshot (snapshot.mode=recovery)
+    data:
+      connectors:
+        - connector: orders-mysql
+          topic: schema-history.shop
+          topic_key: schema.history.internal.kafka.topic
+          exists: false
+          records: 0
+          last_offset: 0
+          findings:
+            - code: history-topic-deleted
+              text: 'the history topic schema-history.shop does not exist: the connector cannot recover its schema and fails on start; recreate it (one partition, retention.ms=-1, retention.bytes=-1, cleanup.policy=delete) and run a recovery snapshot (snapshot.mode=recovery)'
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000007:92310
+      binlogs kept: 2 files, oldest binlog.000006, newest binlog.000007
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2745
+      gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000007:91844 server_id 223344 ts 2026-10-23T08:30:00Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2741
+    data:
+      pipeline_id: orders-mysql
+      server:
+        file: binlog.000007
+        pos: 92310
+        gtid_mode: "ON"
+        gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2745
+        gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+        server_id: 223344
+        server_uuid: 3e11fa47-71ca-11e1-9e33-c80aa9429562
+        binlogs:
+          - {name: binlog.000006, size: 1073741}
+          - {name: binlog.000007, size: 1077042}
+        expire_seconds: 86400
+      connectors:
+        - name: orders-mysql
+          state: RUNNING
+          database_server_id: "5401"
+          stored: {file: binlog.000007, pos: 91844, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2741", server_id: 223344, ts_sec: 1792744200}
+      verdicts: []
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "We resumed orders-mysql at 09:10 after the Connect upgrade and task 0 fails. FYI the weekly topic clean-up ran at 08:45 and deleted every topic without a consumer group. Is that related, and how do we get it streaming without losing its place in the binlog?"
+
+expect:
+  root_cause:
+    - [history*]
+    - [delet*, missing, removed, gone, lost, clean up, cleanup]
+  root_cause_forbidden:
+    - [binlog*, purg*]
+    - [replication slave]
+    - [server id, clash]
+    - [schema registry, deleted]
+    - [repoint*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_task_failed_history
+      tool: connect_status
+      match: [task 0 failed, history topic is missing]
+      required: true
+    - id: f_position_on_server
+      tool: connect_source_offsets
+      match: [file binlog 000007]
+    - id: f_oldest_binlog
+      tool: pipeline_map
+      match: [binlog oldest binlog 000006]
+    - id: f_history_topic_missing
+      tool: kafka_schema_history
+      match: [history topic schema history shop does not exist]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_task_failed_history, f_history_topic_missing]
+  evidence_tools: [connect_status, kafka_schema_history]
+  fix: [[connect_update_connector_config]]
+  fix_targets:
+    connect_update_connector_config: {connector: orders-mysql, changes: {snapshot.mode: recovery}}
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_delete_connector, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_grant_select, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

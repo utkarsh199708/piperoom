@@ -188,16 +188,58 @@ func TestBuilderLayerOwner(t *testing.T) {
 	}
 }
 
-func TestWriteHandoffReturnsCompleteFixture(t *testing.T) {
-	s, err := WriteHandoff(context.Background(), nil, agent.Options{})
+func executedEvent(t *testing.T, stepIndex int, ok bool) events.Event {
+	t.Helper()
+	b, err := json.Marshal(events.ActionExecutedPayload{ProposalID: "p1", StepIndex: stepIndex, OK: ok})
 	if err != nil {
-		t.Fatalf("WriteHandoff: %v", err)
+		t.Fatal(err)
 	}
-	if s.WhatBroke == "" || s.Why == "" {
-		t.Fatalf("hand-off lacks what-broke or why: %+v", s)
+	return events.Event{Type: events.ActionExecuted, Payload: b}
+}
+
+func verificationEvent(t *testing.T, recovered bool) events.Event {
+	t.Helper()
+	b, err := json.Marshal(events.AgentVerificationPayload{ProposalID: "p1", Recovered: recovered})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(s.Done) == 0 || len(s.RuledOut) == 0 || len(s.Open) == 0 || len(s.Risks) == 0 {
-		t.Fatalf("hand-off has an empty section: %+v", s)
+	return events.Event{Type: events.AgentVerification, Payload: b}
+}
+
+func TestWriteHandoffBuildsDoneFromExecutedEvents(t *testing.T) {
+	tests := []struct {
+		name     string
+		evs      []events.Event
+		wantDone []string
+		wantOpen string // substring of the first open item
+	}{
+		{"no events", nil, nil, "has not run"},
+		{"unrelated event only", []events.Event{{Type: events.AgentMessage}}, nil, "has not run"},
+		{"failed step", []events.Event{executedEvent(t, 0, false)}, nil, "has not run"},
+		{"first step only", []events.Event{executedEvent(t, 0, true)}, []string{"Set compatibility to NONE"}, "still to run: restarted task 0"},
+		{"both steps, no verification", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true)},
+			[]string{"Set compatibility to NONE", "Restarted task 0"}, "Verification is still pending"},
+		{"both steps, verification not recovered", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true), verificationEvent(t, false)},
+			[]string{"Set compatibility to NONE", "Restarted task 0"}, "Verification is still pending"},
+		{"both steps, verification recovered", []events.Event{executedEvent(t, 0, true), executedEvent(t, 1, true), verificationEvent(t, true)},
+			[]string{"Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"}, "decimal.handling.mode"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := WriteHandoff(context.Background(), tt.evs, agent.Options{})
+			if err != nil {
+				t.Fatalf("WriteHandoff: %v", err)
+			}
+			if s.WhatBroke == "" || s.Why == "" || len(s.RuledOut) == 0 || len(s.Open) == 0 || len(s.Risks) == 0 {
+				t.Fatalf("hand-off has an empty section: %+v", s)
+			}
+			if !reflect.DeepEqual(s.Done, tt.wantDone) {
+				t.Errorf("Done = %q, want %q", s.Done, tt.wantDone)
+			}
+			if !strings.Contains(s.Open[0], tt.wantOpen) {
+				t.Errorf("Open[0] = %q, want it to contain %q", s.Open[0], tt.wantOpen)
+			}
+		})
 	}
 }
 
@@ -349,7 +391,7 @@ func TestFakeRegistryCompatibilityWrites(t *testing.T) {
 	if err := f.SetCompatibility(ctx, "unknown-value", "NONE"); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("SetCompatibility(unknown): err = %v, want ErrNotFound", err)
 	}
-	if _, ok := f.level("unknown-value"); ok {
+	if _, ok := f.level(ctx, "unknown-value"); ok {
 		t.Fatal("SetCompatibility created a subject it should have refused")
 	}
 
@@ -383,6 +425,55 @@ func TestFakeActionDepsAreWired(t *testing.T) {
 }
 
 // recordingSink keeps every emitted event; it is safe for concurrent use.
+// runFast is Run with the test step delay: the same story, proposal and
+// waits, only the pauses between steps are shortened (runStory injects the
+// delay). A full story at stepDelay takes about 10 s, so a test that waited
+// for it with a 10 s deadline raced the clock and failed under load.
+func runFast(ctx context.Context, alert agent.Alert, deps agent.Deps) error {
+	return runStory(ctx, alert, deps, agent.Options{}, time.Now(), roomTestDelay)
+}
+
+// Run itself, the production entry, keeps the presenter's stepDelay between a
+// step's start and its result; only tests shorten it, through runStory. A
+// timer never fires early, so the lower bound is exact.
+func TestRunKeepsStepDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &timedSink{cancel: cancel}
+	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Inbox: newBlockingInbox()}, agent.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.start.IsZero() || sink.result.IsZero() {
+		t.Fatalf("no step start or result: %+v", sink)
+	}
+	if d := sink.result.Sub(sink.start); d < stepDelay {
+		t.Fatalf("first step took %v, want at least stepDelay %v", d, stepDelay)
+	}
+}
+
+// timedSink notes when the first step starts and when its result arrives,
+// then cancels the run.
+type timedSink struct {
+	mu            sync.Mutex
+	start, result time.Time
+	cancel        context.CancelFunc
+}
+
+func (s *timedSink) Emit(_ context.Context, typ events.Type, _ any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case typ == events.AgentStepStart && s.start.IsZero():
+		s.start = time.Now()
+	case typ == events.AgentToolResult && s.result.IsZero():
+		s.result = time.Now()
+		s.cancel()
+	}
+	return nil
+}
+
 type recordingSink struct {
 	mu    sync.Mutex
 	types []events.Type
@@ -432,7 +523,7 @@ func TestDemoStopsWhenProposalsDisabled(t *testing.T) {
 	inbox := &closedInbox{}
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: failingProposals{}, Inbox: inbox}, agent.Options{})
+		done <- runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: failingProposals{}, Inbox: inbox})
 	}()
 	select {
 	case err := <-done:
@@ -474,7 +565,7 @@ func TestDemoMessagesCarryNoIds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	sink := &recordingSink{}
-	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}, agent.Options{}); err != nil {
+	if err := runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	re := regexp.MustCompile(`\bp_[0-9A-Z]{26}\b`)

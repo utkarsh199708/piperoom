@@ -5,7 +5,15 @@
 # generated from fake clients, so regenerate them if a tool's output format changes.
 # kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
-# First failing layer: schema-registry. Alert fired at: kafka-connect (the sink task).
+# First failing layer: kafka-connect. Alert fired at: kafka-connect (the sink task).
+#   The sink connector wh-orders-sink task 0 FAILED with "Schema 7 not found; error code: 40403";
+#   the registry still answers every request (versions [1 2], latest id 5). One corpus rule for every
+#   scenario (lead ruling, 2026-10-19, after run 39279866979 named the sink task as first failing with
+#   the root cause right, while the morning's 3/3 named the registry): a layer that still serves
+#   requests is not the first failing layer even when the human change there is the cause (README
+#   example: "a schema change fails in Connect first, but the cause is a Postgres DDL"; same shape as
+#   publication-permission-denied and sasl-credential-rotated). The hard delete is the cause, so the
+#   root-cause layer stays schema-registry. Relabelled in P3-W3d-2.
 #   Root cause: schema registry. A cleanup job permanently deleted version 3 of
 #   pg.public.orders-value (schema id 7) 25 minutes after the producer-side DDL that created it.
 #   Debezium caches its schema id and still writes id 7 into every record. The sink worker restarted,
@@ -39,7 +47,9 @@
 #     and its id; IMPORT mode is the way to re-register a schema under a given id.
 #   - Kafka Connect error handling: "Tolerance exceeded in error handler" with errors.tolerance=none.
 #
-# Tool budget (E7b review, max_tool_calls 16, unchanged): the reads a careful on-call engineer
+# Tool budget (E7b review set max_tool_calls 16; P3-W3d raised it to 18: the three passing live runs
+#   of 39212981319 used 14, 16, 16 calls, two of them on the ceiling, and the correct path needs about
+#   14 reads plus the reads the steer and Arjun's audit-log comment call for). The reads a careful on-call engineer
 #   needs to reach the cause with evidence, from the recordings above, the steer and the prompt:
 #     1 connect_status wh-orders-sink (task 0 FAILED, "Schema 7 not found; error code: 40403":
 #       required fact, evidence tool)
@@ -52,9 +62,20 @@
 #     6 kafka_consumer_lag connect-wh-orders-sink (Empty, lag 347879: the impact)
 #   The steer ("who touched the registry?") is answered by Arjun's audit-log comment; no tool
 #   reads the registry audit log. pipeline_map is optional (the alert carries it). That is 6
-#   reads; 6 + 2 = 8 <= 16, so the budget stays. The live runs of 38717633575 used 19-21 reads
+#   reads; 6 + 2 = 8 <= 18. The live runs of 38717633575 used 19-21 reads
 #   (eight schema_registry_diff variants are recorded because runs walk every version pair);
 #   that is redundant reading, which A4's E7a addresses in the prompt, not a budget defect.
+#   W4l (KAN-496): max_tool_calls stays 18. Run 39994729845 (23, 21, 23 calls) has no passing run; 8-9
+#   calls of each were the same schema_registry_diff without from_version, which the tool then
+#   refused as a missing-argument bad input every time. Since #965 the tool diffs the latest version
+#   against the one before it instead, and the subject-only answer is recorded above (re-recorded in
+#   #971, KAN-489). Without that loop the runs are 14, 13 and 15 calls, inside the 18 that the passing runs of 39212981319
+#   set (16 + 2). The budget is not raised to absorb the loop: it is a W4m or A2 item. One entry per
+#   input turn, from those loop-free runs: turn 0, the alert, 11-13 reads (the six above plus
+#   connect_config of both connectors, the registry's subjects with deleted versions, the key
+#   subject's versions, the topic's offsets and similar_incidents); turn 1, Priya's steer, 1-3 reads
+#   (one more registry, worker or offsets read; the audit-log comment answers who); turn 2, Arjun's
+#   audit-log comment, 0 reads. At most 13 + 3 + 0 = 16 reads; 16 + 2 = 18.
 
 name: avro-schema-id-deleted-sink-failed
 description: |
@@ -175,7 +196,7 @@ recordings:
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, to_version: 3}
-    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+    error: 'bad tool input: to_version 3 is not a registered version of pg.public.orders-value (available versions: [1 2])'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, from_version: 2, to_version: 3}
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
@@ -184,7 +205,9 @@ recordings:
     error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value: v1 → v2 (latest vs previous; pass from_version to pick another pair)
+      + Value.status_reason: [null, string]
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
@@ -285,6 +308,34 @@ recordings:
     input: {connector: "pg-orders-connector"}
     summary: |-
       pg-orders-connector: streaming connected=true, 0.6 s behind source, last event 1.1 s ago, queue 7/8192, 29184500 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
+  # W4l (KAN-496): answers to the reads run 39994729845 left unanswered (W4-0 misses table,
+  # reviews/evals-2026-10-23/misses.md). Each summary is the output of the real tool's summary
+  # code (internal/tools/{nettools,kafkatools,logtools}) over this scenario's state on the clock
+  # above; hosts and addresses are composed. The registry answers every request, so its probe is
+  # clean. connect_worker_logs answers as a server without WORKER_LOGS_LOKI_URL does. The recorded
+  # schema_registry_diff error above stays: the tool does return it for a call without from_version.
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group connect-cluster (Stable): 2 workers; runs the pipeline's connectors
+        - worker 10.0.4.11 http://connect-1:8083/ leader; runs pg-orders-connector
+        - worker 10.0.4.12 http://connect-2:8083/; runs wh-orders-sink
+      Internal topics (name match):
+      - config connect-configs: 1 partitions, RF 3, cleanup compact
+      - offset connect-offsets: 25 partitions, RF 3, cleanup compact
+      - status connect-status: 5 partitions, RF 3, cleanup compact
+      Plugins: Kafka 3.6.1 (connect_plugins lists them)
+      Log levels: root INFO
+  - tool: connect_worker_logs
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: net_probe
+    input: {target: schema-registry}
+    summary: |-
+      net_probe schema-registry (schema-registry:8081): all checks ok: dns ok, tcp ok
+      - dns schema-registry:8081 ok: 10.0.4.21
+      - tcp schema-registry:8081 ok: TCP connected
+      - tls schema-registry:8081 skip: not configured with TLS
 
 inputs:
   - kind: steer
@@ -309,7 +360,8 @@ expect:
     - [ddl, 'broke the']
     - [ddl, 'broke avro']
     - ['change broke the']
-  first_failing_layer: schema-registry
+  # The registry answers; the sink task is the component that fails (ruling in the header).
+  first_failing_layer: kafka-connect
   root_cause_layer: schema-registry
   # The sink's cold cache asks for id 7 and gets 40403; the subject no longer
   # lists version 3. The audit log line (who deleted it) is only in Arjun's
@@ -334,4 +386,4 @@ expect:
       facts: [f_schema_7_not_found, f_version_3_gone]
   evidence_tools: [connect_status, schema_registry_versions]
   forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
-  max_tool_calls: 16
+  max_tool_calls: 18

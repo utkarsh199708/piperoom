@@ -764,15 +764,13 @@ func TestDeleteArchivesFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("archive missing: %v", err)
 	}
-	// Windows has no unix permission bits (NTFS ACLs govern instead), so
-	// the 0600/0700 creation modes are only observable elsewhere.
-	if runtime.GOOS != "windows" {
-		if fi.Mode().Perm() != 0o600 {
-			t.Fatalf("archive mode = %v, want 0600", fi.Mode().Perm())
-		}
-		if di, _ := os.Stat(filepath.Dir(path)); di.Mode().Perm() != 0o700 {
-			t.Fatalf("archive dir mode = %v, want 0700", di.Mode().Perm())
-		}
+	// NTFS has no POSIX modes (a file reads as 0666, a directory as 0777),
+	// so the modes are checked on POSIX only.
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("archive mode = %v, want 0600", fi.Mode().Perm())
+	}
+	if di, _ := os.Stat(filepath.Dir(path)); runtime.GOOS != "windows" && di.Mode().Perm() != 0o700 {
+		t.Fatalf("archive dir mode = %v, want 0700", di.Mode().Perm())
 	}
 	got, _ := os.ReadFile(path)
 	if string(got) != string(want) {

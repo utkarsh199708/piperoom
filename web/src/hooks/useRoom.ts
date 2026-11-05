@@ -9,22 +9,25 @@ import type {
   WsServerMessage,
 } from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
-import type { ApproveExtras } from '../api/client'
+import type { ApproveAllExtras, ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError } from '../lib/errors'
+import { actionErrorText, errorText, friendlyError, isNetworkError } from '../lib/errors'
 import { newClientId } from '../lib/clientId'
 import { SendLedger } from './sendLedger'
 import type { DeliveredListener, SendItem } from './sendLedger'
 import { mentionsAgent } from '../lib/mentions'
-import { applyEvent } from '../state/reducer'
+import { applyEvent, applyModeRefresh } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
 import { hideStaleToast, showStaleToast } from '../lib/staleToast'
 import { equalJitter } from '../lib/backoff'
+
+// How long a reconnect waits for GET /api/rooms/{id} (the write mode) before it resumes the replay.
+const MODE_WAIT_MS = 4000
 
 // HTTP status an error frame code stands for (docs/api.md, Errors).
 const WS_FRAME_STATUS: Record<string, number> = {
@@ -43,6 +46,35 @@ export interface ApproveResult {
    * stale banner and reloads the room; the caller must not retry.
    */
   mismatch?: boolean
+  /**
+   * 409 staging_required (X8): the fix needs a healthy stage first. The server's text is on the
+   * proposal (`staging_message`) and the card says it; the room error banner does not.
+   */
+  stagingRequired?: boolean
+}
+
+/** What an approve-all (POST /api/proposals/{pid}/approve-all) came to. */
+export interface ApproveAllResult extends ApproveResult {
+  /**
+   * 403 not_layer_owner: the person may not approve every layer. The hook keeps the server's text
+   * in `approve_all_refused`, so the card and the decision bar go back to the per-layer rows.
+   */
+  refused?: boolean
+  /** Any other failure, for the confirm dialog, which covers the room error banner. */
+  error?: string
+}
+
+/** What a "Try in staging" (POST /api/proposals/{pid}/stage) came to; `code` is the server error code on a failure. */
+export interface StageAttempt {
+  ok: boolean
+  code?: string
+  /** The text for the person (the card shows it; the room error banner does not). */
+  error?: string
+}
+
+/** True for the 409 the server sends when approve needs a healthy stage first (X8). */
+export function isStagingRequired(e: unknown): boolean {
+  return e instanceof ApiClientError && e.status === 409 && e.code === 'staging_required'
 }
 
 /** True for the 409 the server sends when the params_hash sent is not the proposal's. */
@@ -59,6 +91,18 @@ export interface StaleInfo {
   sentHash: string
 }
 
+/** What a cancel of a policy countdown (POST /api/proposals/{pid}/cancel) came to. */
+export interface CancelResult {
+  ok: boolean
+  /**
+   * 409 not_scheduled: no countdown was pending any more (the policy started, or someone cancelled
+   * first). The log says which; the card says so next to the button and stays out of the banner.
+   */
+  notScheduled?: boolean
+  /** Any other failure's text; it is also in the room error banner. */
+  error?: string
+}
+
 /** What a nudge came to; `code` is the server error code on a failure. */
 export interface NudgeResult {
   ok: boolean
@@ -70,6 +114,15 @@ export interface CloseResult {
   ok: boolean
   error?: string
 }
+
+/** What a record trace (POST /api/rooms/{id}/trace) came to; `error` is the text for the person. */
+export interface TraceResult {
+  ok: boolean
+  error?: string
+}
+
+/** The trace panel's line when the server cannot be reached: nothing is kept or retried for a trace. */
+export const TRACE_OFFLINE_TEXT = "Can't reach Piperoom, so the trace may not have run. Try again."
 
 export type { DeliveredListener, Sent } from './sendLedger'
 /** What a steer or comment says (kept for older imports). */
@@ -86,6 +139,10 @@ export interface SendControls {
   cancel: (clientId: string) => void
   /** The action is still owed (on the wire, kept or unknown), so its Retry may reuse its id. */
   isPending: (clientId: string) => boolean
+  /** Why the server refused the action's latest send (400, 403, 409), for a line next to its box. */
+  refusal?: (clientId: string) => string | undefined
+  /** An unknown action: ms until a Retry click sends it (0: now); undefined: it is kept for a retry. */
+  unconfirmedLeft?: (clientId: string) => number | undefined
 }
 
 /** How a steer or comment is sent. */
@@ -137,12 +194,36 @@ export interface RoomActions {
    * `extra.params_hash` is the hash the UI rendered with the proposal, sent as is.
    */
   approve: (proposalId: string, layer: string, extra: ApproveExtras) => Promise<ApproveResult>
+  /**
+   * Approve every pending required layer in one call (P2c "Approve and run"). Same rules as
+   * `approve` (the hash on screen, `needsConfirm` for the solo user's "<pipeline_id>/*",
+   * `mismatch` and no retry); a 403 not_layer_owner is `refused` and recorded on the room state;
+   * any other error is in the room error banner and in `error`. useRoom always sets it; it is
+   * optional only for hosts and test doubles from before it, which keep the per-layer rows.
+   */
+  approveAll?: (proposalId: string, extra: ApproveAllExtras) => Promise<ApproveAllResult>
+  /**
+   * Stop a pending policy countdown (P2c-3). The proposal stays open for manual approval; the
+   * countdown leaves the card when proposal.cancelled arrives over the socket. useRoom always sets
+   * it; optional only for hosts and test doubles from before it, which show no Cancel.
+   */
+  cancelSchedule?: (proposalId: string, reason?: string) => Promise<CancelResult>
+  /**
+   * Try the proposal on the staging stack (X8, the driver's). Resolves when the server took it (the
+   * running state and the result arrive as events) or said no; the answer is for the card and stays
+   * out of the room error banner. Optional for hosts and test doubles from before X8, which show no button.
+   */
+  stage?: (proposalId: string) => Promise<StageAttempt>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
   /** Resolves true once the server took the accept, false when it failed (the error is in the room banner). */
   acceptHandoff: (handoffId: string) => Promise<boolean> | void
-  trace: (table: string, key: string) => void
+  /**
+   * Trace one record (POST /api/rooms/{id}/trace). Resolves when the call is done; a failure is returned,
+   * not put in the room banner, because the trace panel's overlay covers the banner and shows it itself.
+   */
+  trace: (table: string, key: string) => Promise<TraceResult>
   /**
    * Label the closed room (POST /api/rooms/{id}/label). Resolves when the call is done; a failure
    * is returned, not put in the room banner, so the label form keeps its text and shows it.
@@ -155,6 +236,12 @@ export interface RoomActions {
 type RoomAction =
   | { type: 'init'; snapshot: RoomSnapshot }
   | { type: 'event'; event: Event }
+  // A reconnect asked the server for the room again: only the write mode in its answer is used.
+  | { type: 'mode_refreshed'; snapshot: RoomSnapshot }
+  // The server refused this person's approve-all (403 not_layer_owner): kept until the room reloads.
+  | { type: 'approve_all_refused'; proposalId: string; text: string }
+  // The server answered 409 staging_required: the proposal is held for a healthy stage (X8).
+  | { type: 'staging_required'; proposalId: string; text: string }
   | { type: 'reset' }
 
 function roomReducer(state: RoomState | null, action: RoomAction): RoomState | null {
@@ -165,6 +252,21 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
       return fromSnapshot(action.snapshot)
     case 'event':
       return state ? applyEvent(state, action.event) : state
+    case 'mode_refreshed':
+      return state ? applyModeRefresh(state, action.snapshot) : state
+    case 'staging_required':
+      return state
+        ? {
+            ...state,
+            proposals: state.proposals.map((p) =>
+              p.proposal_id === action.proposalId ? { ...p, staging_required: true, staging_message: action.text } : p,
+            ),
+          }
+        : state
+    case 'approve_all_refused':
+      return state
+        ? { ...state, approve_all_refused: { ...state.approve_all_refused, [action.proposalId]: action.text } }
+        : state
   }
 }
 
@@ -323,6 +425,10 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let probed = false
     let firstConnect = true
     let queue: Promise<void> = Promise.resolve()
+    // What the room GET said last, kept here (not read from state, which lags a render) for the
+    // X8 refresh below: the log position the replay runs to, and whether the pipeline has staging.
+    let replayTarget = 0
+    let stagingOn = false
 
     // A hidden tab is away: the heartbeat and a reconnect must not flip it back to viewing.
     const currentPresence = (): PresenceMember['state'] => (document.hidden ? 'away' : 'viewing')
@@ -335,10 +441,16 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     const applyEventSeq = (ev: Event) => {
       if (ev.seq <= lastSeqRef.current) return
       staleRoomRef.current = null
+      const replaying = ev.seq <= replayTarget
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
       // The stream settles a send by its client_id (an answer may have been lost).
       ledger.onEvent(ev, user.id)
+      // X8: what can be staged and whether a stage is still owed are not in the log. A proposal or a
+      // stage that arrives live asks the server again; the room GET at load already covers the replay.
+      if (!replaying && stagingOn && (ev.type === 'proposal.created' || ev.type === 'proposal.staged')) {
+        void refreshMode()
+      }
     }
 
     // Page /events until the gap before `ev` closes. On failure (fetch throws or
@@ -388,9 +500,40 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       applyEventSeq(ev)
     }
 
-    const connect = () => {
+    // Write mode changes only when the server restarts, and a restart drops the socket. So every
+    // reconnect (not the first connect, whose snapshot is fresh) asks for the room again and takes
+    // its `mode` and `blocked` marks before the replay resumes, in both directions. A failed ask
+    // changes nothing: the replay goes on with the mode already known, and the next reconnect asks
+    // again. The reconnect waits for the answer only briefly (MODE_WAIT_MS): a server that is up
+    // for the socket but slow to answer must not hold the replay back, and a late answer is still
+    // applied, because applyModeRefresh re-judges what the replay has already folded in.
+    const refreshMode = async () => {
+      try {
+        const snapshot = await api.room(roomId)
+        if (cancelled || !snapshot) return
+        stagingOn = snapshot.mode?.staging === true
+        dispatch({ type: 'mode_refreshed', snapshot })
+      } catch {
+        // see above
+      }
+    }
+
+    const connect = async () => {
       if (cancelled) return
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      if (!firstConnect) {
+        let waitTimer: number | undefined
+        await Promise.race([
+          refreshMode(),
+          new Promise<void>((resolve) => {
+            waitTimer = window.setTimeout(resolve, MODE_WAIT_MS)
+          }),
+        ])
+        window.clearTimeout(waitTimer)
+        if (cancelled) return
+        // Another connect may have opened a socket while the room was being fetched.
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      }
       const sock = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
       ws = sock
       firstConnect = false
@@ -479,7 +622,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           void api.me().catch(() => undefined)
         }
         setConn('reconnecting')
-        reconnectTimer = window.setTimeout(connect, equalJitter(backoff, randomRef.current))
+        reconnectTimer = window.setTimeout(() => void connect(), equalJitter(backoff, randomRef.current))
         backoff = Math.min(backoff * 2, 10000)
       }
       sock.onerror = () => {
@@ -492,10 +635,12 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         const snapshot = await api.room(roomId)
         if (cancelled) return
         dispatch({ type: 'init', snapshot })
+        replayTarget = snapshot.last_seq ?? 0
+        stagingOn = snapshot.mode?.staging === true
         // lastSeqRef stays 0: open with after=0 so the full log replays and the
         // reducer rebuilds timeline/comments/proposals/trace/handoffs (item D).
         setConn('connecting')
-        connect()
+        void connect()
       } catch (e) {
         if (cancelled) return
         setConn(e instanceof ApiClientError && e.status === 404 ? 'not_found' : 'error')
@@ -553,12 +698,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       onDelivered: (listener) => ledger.onDelivered(listener),
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
+      refusal: (clientId) => ledger.refusal(clientId),
+      unconfirmedLeft: (clientId) => ledger.unconfirmedLeft(clientId),
     }),
     [ledger],
   )
 
   const runAction = useCallback((p: Promise<unknown>) => {
-    p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
+    p.then(() => setError(null)).catch((e: unknown) => setError(actionErrorText(e)))
   }, [])
 
   const synthesize = useCallback(
@@ -638,7 +785,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(
             e instanceof ApiClientError && e.code === 'already_decided'
               ? 'this suggestion was already sent or declined'
-              : errorText(e),
+              : actionErrorText(e),
           ),
         )
     },
@@ -680,7 +827,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         return { ok: true }
       } catch (e) {
         const code = e instanceof ApiClientError ? e.code : undefined
-        if (code !== 'already_nudged') setError(errorText(e))
+        if (code !== 'already_nudged') setError(actionErrorText(e))
         return { ok: false, code }
       }
     },
@@ -694,7 +841,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         setError(null)
         return { ok: true }
       } catch (e) {
-        const text = errorText(e)
+        const text = actionErrorText(e)
         setError(text)
         return { ok: false, error: text }
       }
@@ -726,8 +873,113 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(null)
           return { ok: false, needsConfirm: true }
         }
-        setError(errorText(e))
+        if (isStagingRequired(e)) {
+          setError(null)
+          dispatch({ type: 'staging_required', proposalId, text: errorText(e) })
+          return { ok: false, stagingRequired: true }
+        }
+        setError(actionErrorText(e))
         return { ok: false }
+      }
+    },
+    approveAll: async (proposalId, extra) => {
+      if (isFixtures()) {
+        const p = stateRef.current?.proposals.find((x) => x.proposal_id === proposalId)
+        for (const layer of p?.required_layers ?? []) {
+          if ((p?.approvals[layer] ?? 'pending') !== 'pending') continue
+          synthesize('approval.given', {
+            proposal_id: proposalId,
+            layer,
+            params_hash: extra.params_hash,
+            identity: { method: 'dev', grant: `user:${user.id}` },
+          })
+        }
+        return { ok: true }
+      }
+      try {
+        await api.approveAll(proposalId, extra)
+        setError(null)
+        clearStale()
+        return { ok: true }
+      } catch (e) {
+        if (isParamsMismatch(e)) {
+          setError(null)
+          onMismatch(proposalId, extra.params_hash)
+          return { ok: false, mismatch: true }
+        }
+        if (isSoloConfirmError(e)) {
+          setError(null)
+          return { ok: false, needsConfirm: true }
+        }
+        const text = actionErrorText(e)
+        if (isStagingRequired(e)) {
+          setError(null)
+          dispatch({ type: 'staging_required', proposalId, text })
+          return { ok: false, stagingRequired: true, error: text }
+        }
+        if (e instanceof ApiClientError && e.status === 403 && e.code === 'not_layer_owner') {
+          // The card says it, next to the rows that are back; the banner would say it twice.
+          setError(null)
+          dispatch({ type: 'approve_all_refused', proposalId, text })
+          return { ok: false, refused: true, error: text }
+        }
+        setError(text)
+        return { ok: false, error: text }
+      }
+    },
+    cancelSchedule: async (proposalId, reason) => {
+      if (isFixtures()) {
+        synthesize('proposal.cancelled', {
+          proposal_id: proposalId,
+          by: { kind: 'human', id: user.id, name: user.name },
+          reason: reason ?? '',
+        })
+        return { ok: true }
+      }
+      try {
+        await api.cancelProposal(proposalId, reason)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        if (e instanceof ApiClientError && e.status === 409 && e.code === 'not_scheduled') {
+          setError(null)
+          return { ok: false, notScheduled: true }
+        }
+        const text = actionErrorText(e)
+        setError(text)
+        return { ok: false, error: text }
+      }
+    },
+    stage: async (proposalId) => {
+      if (isFixtures()) {
+        const p = stateRef.current?.proposals.find((x) => x.proposal_id === proposalId)
+        const steps = p?.stageable ?? []
+        const hash = p?.params_hash ?? ''
+        synthesize('proposal.stage_started', {
+          proposal_id: proposalId,
+          params_hash: hash,
+          steps,
+          expires_at: new Date(Date.now() + 150_000).toISOString(),
+        })
+        synthesize('proposal.staged', {
+          proposal_id: proposalId,
+          params_hash: hash,
+          steps: steps.map((i) => ({
+            step_index: i,
+            result: { target: 'connector orders-src', applied: true, healthy: true, detail: 'RUNNING, 1 of 1 tasks RUNNING for 60 s', duration_ms: 61_000 },
+          })),
+          at: new Date().toISOString(),
+        })
+        return { ok: true }
+      }
+      try {
+        await api.stageProposal(proposalId)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        // The card shows the reason next to the button; the banner would say it twice.
+        const code = e instanceof ApiClientError ? e.code : undefined
+        return { ok: false, code, error: actionErrorText(e) }
       }
     },
     reject: (proposalId, layer, reason, paramsHash) => {
@@ -752,7 +1004,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             setError(null)
             onMismatch(proposalId, paramsHash)
           } else {
-            setError(errorText(e))
+            setError(actionErrorText(e))
           }
         })
     },
@@ -787,7 +1039,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           return true
         },
         (e: unknown) => {
-          setError(errorText(e))
+          setError(actionErrorText(e))
           return false
         },
       )
@@ -801,7 +1053,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         await api.label(roomId, input)
         return { ok: true }
       } catch (e) {
-        return { ok: false, error: errorText(e) }
+        return { ok: false, error: actionErrorText(e) }
       }
     },
     checklist: (step) => {
@@ -811,7 +1063,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       }
       void runAction(api.checklist(roomId, step))
     },
-    trace: (table, key) => {
+    trace: async (table, key) => {
       if (isFixtures()) {
         synthesize('trace.pinned', {
           table,
@@ -824,9 +1076,18 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             { layer: 'warehouse', name: 'analytics.orders', status: 'not_seen' },
           ],
         })
-        return
+        return { ok: true }
       }
-      void runAction(api.trace(roomId, table, key))
+      try {
+        await api.trace(roomId, table, key)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        // errorText's offline line promises the message is kept and retried; a trace is neither. A fetch that
+        // rejects can also mean the server got it and only the reply was lost, so this does not say "not sent".
+        if (isNetworkError(e)) return { ok: false, error: TRACE_OFFLINE_TEXT }
+        return { ok: false, error: errorText(e) }
+      }
     },
   }
 

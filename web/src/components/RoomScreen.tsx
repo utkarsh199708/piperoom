@@ -7,6 +7,8 @@ import { exportRoom, isFixtures } from '../api/client'
 import { downloadText, exportErrorText } from '../lib/postmortem'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { useTrends } from '../hooks/useTrends'
+import { ForecastChart } from './room/TrendChart'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
@@ -14,7 +16,7 @@ import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCatchUp } from '../hooks/useCatchUp'
 import { CatchUpStrip } from './room/CatchUpStrip'
 import { useCurrentUser } from '../context/user'
-import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
+import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer, handoffTargetCount, roomPeopleCount } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
@@ -30,10 +32,14 @@ import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
+import { ProposeFixDialog } from './room/ProposeFixDialog'
+import { canProposeFix } from '../lib/proposeFix'
 import { NoDriverBanner } from './NoDriverBanner'
+import { WriteModeBanner } from './WriteModeBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
+import { PipelineCostPanel } from './room/PipelineCostPanel'
 import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
@@ -41,6 +47,9 @@ import { ShadowPanel } from './shadow/ShadowPanel'
 import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
+import { SetupPairingCard } from './room/SetupPairingCard'
+import { SetupStepper } from './room/SetupStepper'
+import { SetupPanel } from './setup/SetupPanel'
 import { HypothesisCard } from './room/HypothesisCard'
 import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
@@ -147,7 +156,7 @@ export function RoomScreen() {
       approve: () => handleRef.current?.approve(),
       view: () => decisionRegistry.get()?.scrollTo(),
       readHandoff: focusHandoff,
-      steer: () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Steer the agent"]')?.focus(),
+      steer: () => document.querySelector<HTMLTextAreaElement>('section[aria-label="Steer"] textarea')?.focus(),
     },
     elsewhereNeedsMe,
   )
@@ -164,6 +173,8 @@ export function RoomScreen() {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  // X3 sparklines: asked for once the pipeline's topology answered, so an unknown pipeline costs no more requests.
+  const trends = useTrends(state?.pipeline_id ?? '', topology !== null && !notFound)
   // The sign-in screen names this room if the session ends while it is open.
   useEffect(() => {
     rememberRoomTitle(state?.title)
@@ -186,6 +197,8 @@ export function RoomScreen() {
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
+  // P3d-2: the driver's "Propose a fix yourself" dialog.
+  const [proposeOpen, setProposeOpen] = useState(false)
   const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
   const [postmortemOpen, setPostmortemOpen] = useState(false)
@@ -256,10 +269,14 @@ export function RoomScreen() {
 
   useBreadcrumbTail(state?.pipeline_id) // shell breadcrumb: "Rooms › <pipeline>"
 
+  // Everyone here (presence, the log, you): one person has nobody to ask for control or hand off to (P2).
+  const peopleHere = state ? roomPeopleCount(state, headerMembers.map((m) => m.id), user.id) : 0
   const takeControl = state && canTakeControl(state, user) ? () => actions.grantControl(user.id) : undefined
   const requestControl =
-    state && !takeControl && canRequestControl(state, user) ? actions.requestControl : undefined
-  const openHandoff = state && canHandoff(state, user) ? () => setHandoffOpen(true) : undefined
+    state && !takeControl && canRequestControl(state, user, peopleHere) ? actions.requestControl : undefined
+  // Hand-off targets: /api/people once loaded (someone off-shift who is not here yet counts), else the room.
+  const handoffTargets = state ? handoffTargetCount(state, headerMembers.map((m) => m.id), user.id, peopleList) : 0
+  const openHandoff = state && canHandoff(state, user, handoffTargets) ? () => setHandoffOpen(true) : undefined
   const openTrace = state && !isViewer(user) ? () => setTraceOpen(true) : undefined
   const canCloseHere = !!state && canClose(state, user)
   const openClose = canCloseHere
@@ -342,8 +359,14 @@ export function RoomScreen() {
       onTrace={viewer ? undefined : () => setTraceOpen(true)}
       selectedLayer={layerFilter ?? undefined}
       onSelectLayer={setLayerFilter}
+      drift={state.alert?.drift}
+      trends={trends.series}
+      forecast={state.forecast}
     />
   )
+  // A forecast room opens on the trend that opened it (X3): nothing has failed yet, so the chart leads.
+  const forecastChart =
+    state.origin === 'forecast' && state.forecast ? <ForecastChart forecast={state.forecast} trends={trends} now={now} /> : null
   const pinned = <PinnedHandoffs key={state.id} roomId={state.id} handoffs={state.handoffs} />
   const hypothesis = state.hypothesis ? (
     <HypothesisCard
@@ -388,7 +411,7 @@ export function RoomScreen() {
         comments={state.comments}
         onComment={actions.comment}
         sends={actions.sends}
-        readOnly={viewer}
+        readOnly={viewer || !roomOpen}
         working={state.agent_status.state === 'working'}
         onTakeControl={takeControl}
         agent={state.agent_status}
@@ -414,7 +437,10 @@ export function RoomScreen() {
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
-  const openProposals = state.proposals.filter((p) => p.status === 'open').length
+  // Pipeline-wide (X6), not this room's spend: the room's own cost is the header chip.
+  const pipelineCost = <PipelineCostPanel pipelineId={state.pipeline_id} />
+  // A closed room has nothing left to act on: its unapproved proposal reads "Not run", so no count (KAN-579).
+  const openProposals = state.status === 'closed' ? 0 : state.proposals.filter((p) => p.status === 'open').length
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
@@ -477,6 +503,7 @@ export function RoomScreen() {
             state={state}
             user={user}
             members={headerMembers}
+            handoffTargets={handoffTargets}
             conn={conn}
             copied={copied}
             onHandoff={() => setHandoffOpen(true)}
@@ -488,11 +515,19 @@ export function RoomScreen() {
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
             onCite={citeStep}
           />
+          <WriteModeBanner mode={state.mode} />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
-          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
+          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} onProposeFix={() => setProposeOpen(true)} />
+          {/* U1-12a: a setup room shows the pairing command until a runner attaches, then the
+              plan's stepper above the feed. Neither renders on an incident room. */}
+          <SetupPairingCard state={state} />
+          <SetupStepper state={state} />
+          {/* U1-12b: the setup controls sit under the stepper, on a setup room only. */}
+          <SetupPanel state={state} user={user} />
 
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+              {forecastChart}
               {lane}
               {pinned}
               {hypothesis}
@@ -519,6 +554,7 @@ export function RoomScreen() {
               </TabsList>
               {/* Every panel stays mounted (hidden) so half-written comments survive a tab change. */}
               <TabsContent value="investigation" forceMount hidden={tab !== 'investigation'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+                {forecastChart}
                 {lane}
                 {pinned}
                 {hypothesis}
@@ -528,7 +564,7 @@ export function RoomScreen() {
               </TabsContent>
               <TabsContent value="fix" forceMount hidden={tab !== 'fix'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
                 {proposalsCard}
-                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
+                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} closed={state.status === 'closed'} />
               </TabsContent>
               <TabsContent value="people" forceMount hidden={tab !== 'people'}>
                 {people}
@@ -536,6 +572,7 @@ export function RoomScreen() {
               <TabsContent value="activity" forceMount hidden={tab !== 'activity'}>
                 {suggestions}
                 <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+                {pipelineCost}
                 <div className="h-px shrink-0 bg-border" />
                 <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
               </TabsContent>
@@ -557,18 +594,19 @@ export function RoomScreen() {
           )}
 
           {state.shadow && state.status === 'closed' && <ShadowPanel state={state} user={user} />}
-          {!state.shadow && <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />}
+          {!state.shadow && <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} people={peopleHere} />}
         </div>
 
         {wide && (
           <aside aria-label="Room details" className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0">
             {similar}
-            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
+            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} closed={state.status === 'closed'} />
             <div className="h-px shrink-0 bg-border" />
             {people}
             <div className="h-px shrink-0 bg-border" />
             {suggestions}
             <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+            {pipelineCost}
             <div className="h-px shrink-0 bg-border" />
             <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
           </aside>
@@ -577,9 +615,31 @@ export function RoomScreen() {
 
       {traceOpen && !viewer && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
       {handoffOpen && (
-        <HandoffDialog state={state} user={user} actions={actions} onClose={() => setHandoffOpen(false)} />
+        <HandoffDialog
+          state={state}
+          user={user}
+          actions={actions}
+          onClose={() => setHandoffOpen(false)}
+          // Nobody to hand off to (solo mode): the dialog offers closing the room instead.
+          onCloseRoom={
+            openClose
+              ? () => {
+                  setHandoffOpen(false)
+                  openClose()
+                }
+              : undefined
+          }
+        />
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
+      {/* Unmounted once the person stops being the driver or the room closes: the server would refuse it. */}
+      {proposeOpen && canProposeFix(state, user) && (
+        <ProposeFixDialog
+          roomId={state.id}
+          onClose={() => setProposeOpen(false)}
+          onCreated={() => toast.success('Fix proposed. Its preview fills in on the card; it runs only after every required layer approves.')}
+        />
+      )}
       {closeOpen && state.status === 'open' && (
         <CloseRoomDialog state={state} actions={actions} initialText={closeText} onClose={() => setCloseOpen(false)} />
       )}

@@ -25,6 +25,7 @@ export function agentPill(state: RoomState): AgentPillInfo {
   const derived = roomStatus(statusInputFromState(state))
   if (derived.kind === 'fixed') return { tone: derived.tone === 'warn' ? 'warn' : 'ok', text: derived.label, title: detail }
   if (derived.kind === 'fix-failed') return { tone: 'fail', text: derived.label, title: detail }
+  if (derived.kind === 'awaiting-write-mode') return { tone: 'muted', text: derived.label, title: detail }
   if (derived.kind === 'executing') return { tone: 'agent', text: 'Executing fix', step: derived.step, title: detail }
   if (derived.kind === 'log-full') return { tone: 'fail', text: 'Log full · agent stopped', title: detail }
   if (derived.kind === 'queued') return { tone: 'agent', text: 'Queued · waiting for an agent slot', title: detail }

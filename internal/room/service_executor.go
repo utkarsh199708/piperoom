@@ -10,7 +10,9 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // execQueue serializes proposal execution per room: approvals released while
@@ -90,8 +92,15 @@ func (q *execQueue) busy() bool {
 // here, when it is queued (docs/design/replicas.md section 5): a proposal that
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
-// already holds queues nothing. Caller holds st's lock.
+// already holds queues nothing. With write mode off nothing is queued or
+// claimed: the proposal stays open and fully approved (BlockedWriteModeOff),
+// and its row is marked store.ProposalStatusBlocked. Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
+	if s.writeOff {
+		s.log.Info("room: proposal fully approved; not run: write mode is off", "room", p.RoomID, "proposal", p.ProposalID)
+		s.markWriteBlocked(p.ProposalID)
+		return
+	}
 	// The worker's place in wg is reserved before the claim, so a closing
 	// service claims nothing; it is given back when the room has its worker
 	// already or nothing is queued.
@@ -111,7 +120,7 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 			return
 		}
 		if !claimed {
-			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			s.log.Info("room: claim refused (claimed by another executor, not approved in full, or not open); not queued here", "proposal", p.ProposalID)
 			s.wg.Done()
 			return
 		}
@@ -176,6 +185,26 @@ func (s *Service) abandonQueued(roomID string, q *execQueue) {
 		q.done()
 	}
 }
+
+// markWriteBlocked marks the row of a proposal fully approved with write mode
+// off, so a later run with write mode on can tell it from one whose server
+// stopped before it started (writeOffNotRunOutput). Best effort: a row left
+// "open" is still kept out of the off-mode sweep by its window, and reads as
+// never claimed later.
+func (s *Service) markWriteBlocked(proposalID string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.SetProposalStatus(rctx, proposalID, store.ProposalStatusBlocked); err != nil {
+		s.log.Warn("room: mark proposal blocked by write mode failed", "proposal", proposalID, "err", err)
+	}
+}
+
+// writeOffNotRunOutput is the failed outcome recorded, once write mode is
+// on, for a proposal that was fully approved while it was off.
+const writeOffNotRunOutput = "approved while write mode was off, so it was not run; create a new proposal to run it"
+
+// errWriteModeOff is executeProposal's refusal with write mode off.
+var errWriteModeOff = errors.New("write mode is off (PIPEROOM_WRITE_MODE): approved proposals do not run")
 
 // stepStatus is one state of the explicit per-step state machine.
 type stepStatus int
@@ -260,6 +289,13 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 	ctx := s.ctx
 
+	// The queue never holds a proposal with write mode off; this guards a
+	// caller that reaches the executor some other way. It runs before the
+	// claim, so the proposal stays as it was and nothing is recorded.
+	if s.writeOff {
+		return fmt.Errorf("room: proposal %s: %w", p.ProposalID, errWriteModeOff)
+	}
+
 	// One executor per approved proposal across replicas
 	// (docs/design/replicas.md section 5): the claim comes before anything
 	// that writes, so a losing executor leaves no trace. With an error the
@@ -271,7 +307,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
 		}
 		if !ok {
-			s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
+			s.log.Info("room: proposal not approved in full, not open, or claimed by another executor; not run here", "proposal", p.ProposalID)
 			return nil
 		}
 	}
@@ -354,20 +390,99 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
-		if err := action.Validate(ctx, step.Params); err != nil {
+		// A setup room re-checks its route here, before the write: the guard
+		// table, the maintenance window and (for an agent's proposal) the
+		// plan may have changed since Create, and the class of a target only
+		// rises (setup_route.go; design §3.5). The decision travels to the
+		// action in ctx, so an adapter's OpRequest carries the server's Class
+		// and Tier and the proposal fields the runner re-checks.
+		snap, snapErr := s.readRoom(ctx, p.RoomID)
+		if snapErr != nil {
+			// Fail closed: without the room's state neither the pipeline scope
+			// nor a setup step's route can be re-checked, and no step runs
+			// unchecked.
+			s.stopOnStep(tracker, p, i, "cannot re-read the room before this step: "+snapErr.Error())
+			return nil
+		}
+		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
+		var planIdx *int
+		bound := stepTimeout
+		if snap != nil && snap.IsSetupRoom() {
+			origin := ""
+			policyApproved := false
+			var approved Proposal
+			approvedOpen := false
+			if prop, ok := openProposal(*snap, p.ProposalID); ok {
+				origin = prop.Origin
+				policyApproved = prop.sched.policyN > 0
+				approved, approvedOpen = prop, true
+			}
+			route, rerr := resolveSetupRoute(snap, s.actionsFor(pipelineID), []events.ProposalStep{step}, setupNeedsPlan(origin), i, s.now().UTC())
+			if rerr != nil {
+				s.stopOnStep(tracker, p, i, "setup: "+rerr.Error())
+				return nil
+			}
+			// A proposal the setup_local policy approved was approved as a T1
+			// step (or, for the ladder's canary insert, as a local-class one:
+			// setupLocalRuns). The fire path re-checks that right before its
+			// approvals, but a target's class (or the plan) can still rise
+			// between the fire and this step: a step the policy no longer
+			// covers needs the §3.6 approver, which the policy is not. A
+			// proposal the fold no longer holds keeps the old T1-only rule.
+			covered := approvedOpen && setupLocalRuns(approved, route)
+			if !approvedOpen {
+				covered = tierRank(route.Steps[0].Tier) <= 1
+			}
+			if policyApproved && !covered {
+				s.stopOnStep(tracker, p, i, fmt.Sprintf(
+					"setup: step %d now routes as %s and the setup_local policy no longer covers it; propose it again for a person's approval", i, route.Steps[0].Tier))
+				return nil
+			}
+			if route.Steps[0].Plan.Op != "" {
+				idx := route.Steps[0].Plan.Index
+				planIdx = &idx
+			}
+			actx = WithSetupStep(s.actionCtxFor(ctx, p.RoomID, snap, pipelineID), SetupStep{
+				ProposalID: p.ProposalID, StepIndex: i, ParamsHash: p.ParamsHash,
+				Tier: route.Steps[0].Tier, Class: route.Steps[0].Class,
+				Action: step.Action, Params: append(json.RawMessage(nil), step.Params...),
+			})
+			// A step the client sends T3 waits for a person's "y": its
+			// bound must not cut the op's own T3 deadline short.
+			bound = setupStepBound(route.Steps[0].Op, route.Steps[0].Tier)
+		}
+		// Validate and Execute run under the room's whole pipeline: the
+		// write clients refuse a write without it (fail closed), and
+		// Validate sees the same scope the write will run under. The room id
+		// travels too, so a client keeping per-room state (--demo) uses this
+		// room's, not another's.
+		// Q7k: the step's approving layer is derived again with the room's
+		// pipeline as it is now (actions.StepLayer). A step whose stored
+		// layer no longer matches (owners.yaml moved a repo glob to another
+		// layer, a source_kind changed) was approved by the wrong owner and
+		// does not run.
+		if want, lerr := s.stepLayer(snap, pipelineID, action, step.Params); lerr != nil {
+			s.stopOnStep(tracker, p, i, "layer check failed: "+lerr.Error())
+			return nil
+		} else if want != step.Layer {
+			s.stopOnStep(tracker, p, i, fmt.Sprintf("layer check failed: the step was approved as layer %q but its layer is now %q; propose it again", step.Layer, want))
+			return nil
+		}
+		// Q7: the step's identity travels to the action (actions.StepRef):
+		// a fix PR names its branch after it and lists the approvers.
+		actx = actions.WithStep(actx, s.stepRef(snap, p, i))
+		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
 		// Re-check the scope right before the write, per docs/api.md: an
 		// approved proposal must not write outside the room's pipeline.
-		if err := s.scopeCheck(pipelineID, action, step.Params); err != nil {
+		if err := s.scopeCheckRoom(snap, pipelineID, action, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "scope check failed: "+err.Error())
 			return nil
 		}
 
-		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
-		out, err := action.Execute(sctx, step.Params)
-		cancel()
+		out, pr, err := s.executeStep(actx, p.ProposalID, action, step.Params, bound)
 		output := out
 		if err != nil {
 			output = err.Error()
@@ -375,12 +490,23 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		// Mask at the source: every later use (store, event, log) sees
 		// only the masked text.
 		output = maskExecOutput(output)
-		if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output); err != nil {
+		// A step whose runner socket dropped is unknown, not failed: it may
+		// have run (docs/design/setup-agent.md §2.1).
+		unknown := errors.Is(err, ErrRunnerLost)
+		if err := s.finishStepResult(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown, planIdx, pr); err != nil {
 			if errors.Is(err, store.ErrClaimLost) {
 				// The sweep declared this run dead while the step ran and
 				// has recorded the outcome; a second event would contradict
 				// it.
 				s.log.Warn("room: step finished after its claim was declared dead; result not recorded", "proposal", p.ProposalID, "step", i)
+				return nil
+			}
+			if errors.Is(err, ErrStepOrder) {
+				// The step was already finished: the runner's reconciled
+				// result (a FrameResult or Resume that raced this request's
+				// end) recorded it. A second outcome event would contradict
+				// that one (U1-5a: completed exactly once).
+				s.log.Warn("room: step already recorded by a reconciled runner result; outcome not recorded again", "proposal", p.ProposalID, "step", i)
 				return nil
 			}
 			// The local or store transition failed: finish the store row
@@ -396,6 +522,17 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 	}
 	s.setProposalStatus(p.ProposalID, "executed")
+	// A setup room whose pipeline_register step executed in full closes
+	// "pipeline live" when the registration wrote the owners file and
+	// reloaded (setup_register.go, U1-14). A repos: registration stays open
+	// until the PR merges, which the follower closes (registerPRMerged).
+	if stepsContainRegister(steps) {
+		s.closeRegisteredSetup(ctx, p.RoomID, p.ProposalID)
+	}
+	// A setup room closes "rolled back" once the last step its plan executed
+	// has been undone (setup_rollback.go, U1-14b). A proposal that is not part
+	// of a setup, or a setup with steps left, closes nothing.
+	s.closeRolledBackSetup(ctx, p.RoomID)
 	return nil
 }
 
@@ -418,6 +555,10 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 // paramsHashMismatchOutput is the step output when the hash check refuses to
 // run a step (design section 3.2).
 const paramsHashMismatchOutput = "params hash mismatch"
+
+// notApprovedOutput is the step output when a required layer has no approved
+// decision right before the step runs.
+const notApprovedOutput = "not approved by every required layer"
 
 // recheckStep is the executor's integrity check (design section 3.2). It
 // re-reads the proposal row and recomputes the hash from what the row holds
@@ -457,14 +598,64 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 			return events.ProposalStep{}, paramsHashMismatchOutput
 		}
 	}
+	// The claim checked this already; checked again before every write so a
+	// step never runs on a proposal that is not approved in full, whatever
+	// path reached the executor.
+	if !layersApproved(cur.RequiredLayers, apps) {
+		return events.ProposalStep{}, notApprovedOutput
+	}
 	return steps[i], ""
+}
+
+// executeStep runs one step's action within bound. A bound longer than
+// stepTimeout outruns the stale-claim window, so the claim is kept fresh while
+// the step runs, and a claim taken by the stale sweep cancels the step. The
+// refresher is stopped by defer, so a panicking action cannot leak it.
+func (s *Service) executeStep(actx context.Context, proposalID string, action actions.Action, params json.RawMessage, bound time.Duration) (string, *events.PullRequestRef, error) {
+	sctx, cancel := context.WithTimeout(actx, bound)
+	defer cancel()
+	if bound > stepTimeout {
+		defer s.keepClaimFresh(proposalID, cancel)()
+	}
+	if opener, ok := action.(actions.PullRequestOpener); ok {
+		// Q7: the executor prefers ExecutePullRequest and stores the PR
+		// on action.executed, which starts the room's follower (Q7e).
+		out, ref, err := opener.ExecutePullRequest(sctx, params)
+		if err != nil {
+			return out, nil, err
+		}
+		return out, &ref, nil
+	}
+	out, err := action.Execute(sctx, params)
+	return out, nil, err
 }
 
 // finishStep checks the local transition, records the step result in the store
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
 func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string) error {
-	output = maskExecOutput(output) // action output is tool text and may hold secrets
+	return s.finishStepOutcome(roomID, proposalID, paramsHash, t, i, ok, output, false, nil)
+}
+
+// finishStepOutcome is finishStep with the outcome-unknown mark: a setup step
+// whose runner socket dropped may have run, so its action.executed says
+// outcome_unknown (OK false) exactly as an interrupted executor step does
+// (events.ActionExecutedPayload.OutcomeUnknown).
+// planIdx is the setup plan step the step consumed (nil outside a plan); it
+// travels on the event so the fold marks the right plan step
+// (ActionExecutedPayload.PlanStepIndex).
+func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool, planIdx *int) error {
+	return s.finishStepResult(roomID, proposalID, paramsHash, t, i, ok, output, unknown, planIdx, nil)
+}
+
+// finishStepResult is finishStepOutcome with the pull request a
+// PullRequestOpener step opened (nil for every other step, and for a step
+// that failed): it travels on action.executed (Q7).
+func (s *Service) finishStepResult(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool, planIdx *int, pr *events.PullRequestRef) error {
+	output = maskExecOutput(output)
+	if !ok {
+		pr = nil
+	} // action output is tool text and may hold secrets
 	status := "done"
 	if !ok {
 		status = "failed"
@@ -480,6 +671,7 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 	// The DB state is authoritative; a failed event append must not undo it.
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
+		OutcomeUnknown: unknown, PlanStepIndex: planIdx, PullRequest: pr,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
@@ -564,6 +756,13 @@ func (s *Service) finishOwnStep(proposalID string, i int, output string) {
 // against, so the action is refused instead of running unchecked (LEAD-ARCH
 // round 4, item 3 removed the "--demo skips scope" bypass).
 func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.RawMessage) error {
+	return s.scopeCheckRoom(nil, pipelineID, a, params)
+}
+
+// scopeCheckRoom is scopeCheck with the room's snapshot: a setup room is
+// scoped to its provisional pipeline (design §3.2), every other room to the
+// owners.yaml pipeline.
+func (s *Service) scopeCheckRoom(snap *RoomSnapshot, pipelineID string, a actions.Action, params json.RawMessage) error {
 	sc, ok := a.(actions.Scoped)
 	if !ok {
 		return fmt.Errorf("action %q does not support scope checks", a.Name())
@@ -571,7 +770,7 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 	if s.owners == nil {
 		return fmt.Errorf("action %q cannot be scope-checked: no owners config is loaded", a.Name())
 	}
-	p, ok := s.owners.Pipeline(pipelineID)
+	p, ok := s.roomPipelineDef(snap, pipelineID)
 	if !ok {
 		return fmt.Errorf("pipeline %q is not configured", pipelineID)
 	}
@@ -579,6 +778,36 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 		return fmt.Errorf("action %q: %w", a.Name(), err)
 	}
 	return nil
+}
+
+// roomPipelineDef resolves the pipeline an action call is scoped to: the
+// provisional pipeline of a setup room before registration (owners.Provisional,
+// design §3.2), else the owners.yaml pipeline.
+func (s *Service) roomPipelineDef(snap *RoomSnapshot, pipelineID string) (owners.Pipeline, bool) {
+	if snap != nil && snap.IsSetupRoom() {
+		return snap.SetupProvisional()
+	}
+	if s.owners == nil {
+		return owners.Pipeline{}, false
+	}
+	return s.owners.Pipeline(pipelineID)
+}
+
+// pipelineCtx scopes ctx to the room's pipeline for an action call. The
+// Postgres and Kafka write clients need the whole pipeline in ctx
+// (tools.WithPipeline) and refuse a write without it (P0 item 7), so the
+// executor's Validate and Execute and the preview all scope through here.
+// A pipeline the owners config does not resolve (no config, an unknown id, no
+// pipeline at all) gets its id only (tools.WithPipelineID): the writers refuse
+// that as tools.ErrNoScope, and "" also clears a pipeline ctx already carried.
+// It never opts out with tools.WithUnscoped.
+func (s *Service) pipelineCtx(ctx context.Context, pipelineID string) context.Context {
+	if pipelineID != "" && s.owners != nil {
+		if p, ok := s.owners.Pipeline(pipelineID); ok {
+			return tools.WithPipeline(ctx, p)
+		}
+	}
+	return tools.WithPipelineID(ctx, pipelineID)
 }
 
 // roomPipeline returns the pipeline of a room ("" when unknown).

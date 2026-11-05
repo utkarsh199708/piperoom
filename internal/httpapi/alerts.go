@@ -22,6 +22,12 @@ func WithAlertIngest(cfg alertin.Config) Option {
 	return func(s *Server) { s.alerts = cfg }
 }
 
+// WithChangesWebhook mounts POST /api/changes/webhook (X4, alertin.ChangeWebhook):
+// signed like the generic alert route, so it sits outside the session group.
+func WithChangesWebhook(h http.Handler) Option {
+	return func(s *Server) { s.changes = h }
+}
+
 // handleSignedAlert is POST /api/alerts/{source}: the sender's signature or
 // token (checked by alertin) is the auth, so there is no X-User. The body is
 // read up to alertin.MaxBodyBytes, verified and parsed in one alertin call,

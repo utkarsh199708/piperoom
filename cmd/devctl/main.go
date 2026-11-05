@@ -1,18 +1,29 @@
 // Command devctl starts, breaks and fixes the local CDC pipeline used to
 // develop and test Piperoom. Run it from anywhere inside the repo.
 //
-//	devctl up | down | reset | status
+//	devctl up [--staging] | down [--staging] | reset [--staging] | status
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
+//	devctl setup-break <check-scenario> | setup-fix <check-scenario>   setup prerequisites
+//	devctl alert <scenario> [--server URL] [--as user]   for breaks the watcher cannot see
 //	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
+//	devctl clickhouse init [--owner <tag>]  start ClickHouse and create the Kafka-backed orders sink
+//	devctl llm-up                     start the llm profile (Ollama) and pull a tool-capable model
+//	devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix API for the dev web menu (no auth)
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
-// slot-inactive, consumer-lag, connector-auth.
+// slot-inactive, consumer-lag, connector-auth, and the P3 ones missed-table,
+// missed-table-kafka-signal, dead-slot, consumer-bad-deploy, dlq-backlog, and
+// the silent-corruption ones (nothing fails, health stays green): sink-filtered-rows,
+// sink-dropped-column, consumer-duplicates, toast-placeholder.
 // See dev/scenarios.md for what each one does and what it looks like.
+// `setup-break` / `setup-fix` are the setup prerequisites of dev/scenarios.md
+// "Setup breaks": each makes one named check a setup run reports fail, and
+// its fix makes it pass again.
 package main
 
 import (
@@ -30,14 +41,18 @@ import (
 
 const usage = `devctl — local pipeline control
 
-  devctl up                 start the stack, register the connector, start devconsumer
-  devctl down               stop the stack
-  devctl reset              remove all data and start clean
+  devctl up [--staging]     start the stack, register the connector, start devconsumer
+                            (--staging: also a second Connect + Schema Registry, dev/README.md)
+  devctl down [--staging]   stop the stack (--staging: only the staging services, their slot and topics)
+  devctl reset [--staging]  remove all data (staging included) and start clean
   devctl status             one-screen pipeline health (for humans)
   devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl setup-break <name> make one setup prerequisite check fail (dev/scenarios.md, setup breaks)
+  devctl setup-fix <name>   restore the stack and prove the check passes again
+  devctl alert <scenario> [--server URL] [--as user]   post the scenario's alert to the dev webhook (missed-table, consumer-bad-deploy)
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
   devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
   devctl lock --owner <tag> take the shared stack lock
@@ -46,12 +61,26 @@ const usage = `devctl — local pipeline control
   devctl identities unbind <user>   delete the user's IdP binding (room database)
   devctl rooms delete <id> --reason <text> --as <admin> [--archive]   erase one room through the running server (admin only; --archive keeps a copy)
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
+  devctl clickhouse init [--owner <tag>]   start ClickHouse and create the Kafka-backed orders sink
+  devctl llm-up             start the llm profile (Ollama on 127.0.0.1:11434) and pull llama3.1:8b (dev/README.md, Local models)
   devctl lock --steal       steal a stale (>15m) lock
+  devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix HTTP API for the dev web menu (no auth)
 
-up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
-(or PIPEROOM_STACK_OWNER) to match the current lock holder.
+missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
+started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios);
+idle-wal-growth needs OWNERS_FILE=dev/owners.q2.yaml (dev/scenarios.md §23).
+
+up/down/reset/load/break/fix/setup-break/setup-fix/serve mutate the shared stack and require
+--owner <tag> (or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
 scenarios: %s
+
+setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replica,
+missing-grant, db-unreachable-from-connect, plugin-after-scan;
+SQL Server (profile mssql, dev/mssql/README.md): agent-stopped, cdc-not-enabled-table;
+oracle profile (dev/oracle/README.md): no-archivelog, no-supplemental-logging, missing-logminer-grant;
+mongo profile (dev/mongo/README.md): standalone-mongod, no-oplog-role;
+host profile (dev/host, the fake host of U8c): wrong-standalone-args, plugin-path-unset, java-too-old
 `
 
 func main() {
@@ -95,37 +124,43 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl up")
+		staging, err := stagingFlag("up", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.up(ctx)
+		return st.upWith(ctx, staging)
 	case "down":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl down")
+		stagingOnly, err := stagingFlag("down", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.compose(ctx, nil, "down")
+		if stagingOnly {
+			return st.stagingDown(ctx)
+		}
+		return st.down(ctx)
 	case "reset":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl reset")
+		staging, err := stagingFlag("reset", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.reset(ctx)
+		return st.resetWith(ctx, staging)
 	case "status":
 		return st.status(ctx, os.Stdout)
 	case "health":
@@ -170,10 +205,37 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if err := requireLock(owner); err != nil {
 			return err
 		}
+		if sc.owners != "" {
+			// The baseline owners file has neither the scenario's table nor its
+			// DLQ: a server on it opens no room and its actions refuse the fix.
+			st.log.Info("devctl: scenario "+rest[0]+" needs the server started with OWNERS_FILE="+sc.owners, "owners_file", sc.owners)
+		}
 		if cmd == "break" {
 			return sc.breakIt(ctx, st)
 		}
 		return sc.fix(ctx, st)
+	case "setup-break", "setup-fix":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(allSetupScenarioNames(), ", "))
+		}
+		if _, ok := setupScenarios[rest[0]]; !ok {
+			return fmt.Errorf("unknown setup-break scenario %q (%s)", rest[0], strings.Join(setupScenarioNames(), ", "))
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
+		// Break and fix each prove the named check: the break must make it
+		// fail, the fix must make it pass (dev/scenarios.md, setup breaks).
+		if cmd == "setup-break" {
+			return setupBreakCmd(ctx, st, rest[0])
+		}
+		return setupFixCmd(ctx, st, rest[0])
+	case "alert":
+		return alertCmd(ctx, st, args, os.Stdout)
 	case "demo":
 		return demoCmd(ctx, st, args)
 	case "identities":
@@ -182,6 +244,27 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return roomsCmd(ctx, st, args, os.Stdout)
 	case "shadow":
 		return shadowCmd(ctx, st, args, os.Stdout)
+	case "clickhouse":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 || rest[0] != "init" {
+			return fmt.Errorf("usage: devctl clickhouse init [--owner <tag>]")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
+		return st.clickhouseInit(ctx)
+	case "llm-up":
+		// Not stack-mutating: the llm profile is a separate service with its
+		// own volume, so no stack lock is taken.
+		if len(args) != 0 {
+			return fmt.Errorf("usage: devctl llm-up")
+		}
+		return st.llmUp(ctx, ollamaBaseURL, llmModel, llmPullTimeout)
+	case "serve":
+		return serveCmd(ctx, st, args)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }

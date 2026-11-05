@@ -17,7 +17,7 @@ import (
 // uses: the OnRoomClosed hook (see Deps), and the three queries and one write
 // below. The watcher opens, joins and resolves through OpenAlertRoom with
 // Source alertin.Watcher and DedupKey "watcher:<pipeline>"; nothing here starts
-// an agent.
+// an agent, except the escalation of a quiet forecast room (forecast.go).
 
 // maxNoteBytes caps a PostRoomNote text. Evidence is a few lines of numbers; a
 // runaway caller must not fill the event log.
@@ -158,8 +158,10 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 // PostRoomEvidence is PostRoomNote for a watcher join that carries its
 // evidence JSON (F6): after the note, the room's agent gets the evidence as a
 // quiet "alert_update" input (agent.AlertEvidenceText; it never wakes an idle
-// agent), and an old first look is re-run (alertUpdateLocked). Empty evidence
-// is a plain note.
+// agent), and an old first look is re-run (alertUpdateLocked). Evidence for
+// the room's own pipeline at a higher severity than the room's writes
+// room.escalated first, and in a forecast room whose agent never ran it also
+// starts the agent (X3c, forecast.go). Empty evidence is a plain note.
 func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
 	text = stripBidi(sanitizeAgentText(text))
 	text = strings.TrimSpace(text)
@@ -199,6 +201,12 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 		return fmt.Errorf("room: post note: %w", mapUnstorable(err))
 	}
 	if len(evidence) > 0 {
+		// A quiet forecast room's real signal raises it and starts its agent
+		// (X3c) before the update, so the new run gets the numbers too.
+		quiet := quietRoom(st.snap)
+		if s.escalateLocked(ctx, roomID, st, evidence) && quiet {
+			s.ensureAgentLocked(roomID, st)
+		}
 		s.alertUpdateLocked(roomID, st, e.Seq, evidence)
 	}
 	return nil

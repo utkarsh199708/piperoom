@@ -1,0 +1,87 @@
+{
+  "pipeline_id": "daily-revenue",
+  "nodes": [
+    {
+      "id": "dag:revenue_daily",
+      "kind": "dag",
+      "name": "revenue_daily",
+      "layer": "orchestrator",
+      "owner": "priya",
+      "health": "fail",
+      "facts": {
+        "cadence": "1d",
+        "last_run_logical_date": "2026-10-18T00:00:00Z",
+        "last_run_started": "2h ago",
+        "last_run_state": "failed",
+        "last_run_took": "14m",
+        "last_run_type": "scheduled",
+        "previous_run_state": "success",
+        "tasks_skipped": "2"
+      }
+    },
+    {
+      "id": "task:revenue_daily.extract_orders",
+      "kind": "task",
+      "name": "revenue_daily.extract_orders",
+      "layer": "orchestrator",
+      "owner": "priya",
+      "health": "ok",
+      "facts": { "operator": "PythonOperator", "state": "success", "try": "1" }
+    },
+    {
+      "id": "task:revenue_daily.fct_revenue_run",
+      "kind": "task",
+      "name": "revenue_daily.fct_revenue_run",
+      "layer": "orchestrator",
+      "owner": "priya",
+      "health": "fail",
+      "facts": { "operator": "BashOperator", "state": "failed", "try": "2" }
+    },
+    {
+      "id": "task:revenue_daily.publish",
+      "kind": "task",
+      "name": "revenue_daily.publish",
+      "layer": "orchestrator",
+      "owner": "priya",
+      "health": "warn",
+      "facts": { "mapped_instances": "3", "operator": "PythonOperator", "state": "upstream_failed" }
+    },
+    {
+      "id": "model:dim_customer",
+      "kind": "model",
+      "name": "dim_customer",
+      "layer": "transform",
+      "owner": "priya",
+      "health": "ok",
+      "facts": { "last_run_at": "2h ago", "last_run_status": "success", "rows": "1204" }
+    },
+    {
+      "id": "model:fct_revenue",
+      "kind": "model",
+      "name": "fct_revenue",
+      "layer": "transform",
+      "owner": "priya",
+      "health": "fail",
+      "facts": { "last_run_at": "2h ago", "last_run_status": "error" }
+    },
+    {
+      "id": "wh:analytics.fct_revenue",
+      "kind": "sink_table",
+      "name": "analytics.fct_revenue",
+      "layer": "warehouse",
+      "owner": "meera",
+      "health": "warn",
+      "facts": { "cadence": "1d", "freshness": "26h", "ts_column": "loaded_at" }
+    }
+  ],
+  "edges": [
+    { "from": "dag:revenue_daily", "to": "task:revenue_daily.extract_orders" },
+    { "from": "dag:revenue_daily", "to": "task:revenue_daily.fct_revenue_run" },
+    { "from": "dag:revenue_daily", "to": "task:revenue_daily.publish" },
+    { "from": "task:revenue_daily.fct_revenue_run", "to": "model:fct_revenue", "mapping": "inferred" },
+    { "from": "dag:revenue_daily", "to": "model:dim_customer", "mapping": "inferred" },
+    { "from": "model:dim_customer", "to": "model:fct_revenue" },
+    { "from": "model:fct_revenue", "to": "wh:analytics.fct_revenue", "mapping": "inferred" }
+  ],
+  "partial": true
+}

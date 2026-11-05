@@ -100,6 +100,49 @@ describe('Timeline step stream', () => {
     expect(document.querySelector('[data-slot="progress-indicator"]')?.className).toContain('motion-safe:animate-indeterminate')
   })
 
+  // The header shows a single call's tool and first arg; the call row drops only those, never the other args.
+  const twoArgs: StepState[] = [
+    {
+      id: 's3',
+      title: 'Check consumer lag',
+      tool_calls: [
+        {
+          tool_use_id: 't3',
+          tool: 'kafka_consumer_lag',
+          input: { group: 'order-sync', topic: 'pg.public.orders' },
+          summary: 'lag 0',
+          took_ms: 1200,
+        },
+      ],
+      messages: [],
+    },
+  ]
+
+  it('a finished single-call step keeps every arg after the first in its call row', () => {
+    render(<Timeline steps={twoArgs} messages={[]} comments={[]} onComment={vi.fn()} />)
+    const row = screen.getByRole('button', { name: /Check consumer lag/ })
+    expect(within(row).getByText('group=order-sync')).toBeInTheDocument()
+    const callRow = screen.getByTestId('call-row')
+    // Shown at every width: the row is not hidden from md, only the repeated tool and first arg are.
+    expect(callRow.className).not.toContain('md:hidden')
+    expect(within(callRow).getByText('topic=pg.public.orders')).toBeInTheDocument()
+    expect(within(callRow).getByText('group=order-sync').parentElement?.className).toContain('[&>*]:md:hidden')
+    expect(within(callRow).getByText('topic=pg.public.orders').parentElement).toBe(callRow)
+  })
+
+  it('a running single-call step shows its other args under the header', () => {
+    render(<Timeline steps={twoArgs} messages={[]} comments={[]} onComment={vi.fn()} working />)
+    const callRow = screen.getByTestId('call-row')
+    expect(callRow.className).not.toMatch(/(^| )hidden/)
+    expect(within(callRow).getByText('group=order-sync').parentElement?.className).toContain('[&>*]:hidden')
+    expect(within(callRow).getByText('topic=pg.public.orders').parentElement).toBe(callRow)
+  })
+
+  it('a single-call step with one arg hides its call row where the header says it all', () => {
+    render(<Timeline steps={steps.slice(0, 1)} messages={[]} comments={[]} onComment={vi.fn()} />)
+    expect(screen.getByTestId('call-row').className).toContain('md:hidden')
+  })
+
   it('no live step when the agent is idle', () => {
     render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} />)
     expect(screen.queryByRole('img', { name: 'Running' })).not.toBeInTheDocument()
@@ -248,5 +291,19 @@ describe('Timeline layer filter', () => {
   it('says so when no step matches', () => {
     render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="postgres" />)
     expect(screen.getByRole('status')).toHaveTextContent('No steps on postgres yet')
+  })
+
+  it('keeps a dag_runs step on the orchestrator filter', () => {
+    const dagSteps: StepState[] = [
+      {
+        id: 'd1',
+        title: 'List DAG runs',
+        tool_calls: [{ tool_use_id: 'd1', tool: 'dag_runs', input: { dag_id: 'revenue_daily' } }],
+        messages: [],
+      },
+    ]
+    render(<Timeline steps={dagSteps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="orchestrator" />)
+    expect(screen.getByRole('status')).toHaveTextContent('Showing 1 step on orchestrator')
+    expect(screen.getByRole('button', { name: /List DAG runs/ })).toBeInTheDocument()
   })
 })

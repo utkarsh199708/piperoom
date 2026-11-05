@@ -20,6 +20,10 @@
 // that stays the same when the sender sends the same incident again, so the
 // room service can return the room that is already open. That also makes a
 // replayed, validly signed request harmless.
+//
+// X4 adds two writers of the pipeline change log that open no room:
+// ChangeWebhook (POST /api/changes/webhook, signed like Generic) and
+// StatusPoller (vendor status feeds).
 package alertin
 
 import (
@@ -64,6 +68,7 @@ const (
 // How Alert.PipelineID was found.
 const (
 	ViaLabel   = "label"   // the alert named it (pipeline / pipeline_id label, tag or field)
+	ViaDAG     = "dag"     // exactly one owners.yaml pipeline lists the DAG of the alert's dag_id label or field
 	ViaService = "service" // PagerDuty service ID in Config.PagerDutyServices
 	ViaOwners  = "owners"  // exactly one pipeline in owners.yaml owns a connector/table/group the alert mentions
 	ViaDefault = "default" // Config.DefaultPipeline
@@ -115,7 +120,7 @@ type Alert struct {
 	Severity string `json:"severity"` // sev1..sev4
 	// PipelineID may be empty when nothing names or matches a pipeline.
 	PipelineID  string `json:"pipeline_id"`
-	PipelineVia string `json:"pipeline_via,omitempty"` // ViaLabel | ViaService | ViaOwners | ViaDefault
+	PipelineVia string `json:"pipeline_via,omitempty"` // ViaLabel | ViaDAG | ViaService | ViaOwners | ViaDefault
 	// DedupKey is stable across re-sends of the same incident: "<source>:<key>".
 	DedupKey string `json:"dedup_key"`
 	URL      string `json:"url,omitempty"` // link back to the alert at its source

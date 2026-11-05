@@ -1,6 +1,7 @@
 package injectscan
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -155,10 +156,10 @@ func TestStrayTagsWindowCutGap(t *testing.T) {
 		in := "x" + strings.Repeat("\U0001F3F4"+tags(code)+"\U000E007F ", 2000)
 		got := Scan(in)
 		want := []Finding{
-			{Kind: KindHiddenText, Offset: 8183, Excerpt: "tag text: gb"},
-			{Kind: KindHiddenText, Offset: 49810, Excerpt: "tag text: " + tail},
+			{Kind: KindHiddenText, Offset: 8183, End: 8191, Excerpt: "tag text: gb"},
+			{Kind: KindHiddenText, Offset: 49810, End: 49818, Excerpt: "tag text: " + tail},
 		}
-		if !slices.Equal(got, want) {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s (%d bytes): got %+v, want today's gap %+v", code, len(in), got, want)
 		}
 	}

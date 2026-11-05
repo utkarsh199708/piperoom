@@ -69,7 +69,7 @@ func TestHostGuardReadyzLeaksNothingToAnyHost(t *testing.T) {
 	}
 	resp = e.do(t, http.MethodGet, "/healthz", "", "Host: evil.test")
 	body, _ = io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"status":"ok","version":"dev"}` {
+	if resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != `{"status":"ok","version":"dev","write_mode":"on"}` {
 		t.Errorf("GET /healthz = %d %s", resp.StatusCode, body)
 	}
 }

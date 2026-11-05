@@ -73,6 +73,90 @@ func TestWatcherEvidenceBounds(t *testing.T) {
 	}
 }
 
+func TestWatcherEvidenceDriftSignals(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"count_drift","severity":"sev2","table":"public.orders","topic":"orders.public.orders",
+	   "window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"source":1000,"sink":990,
+	   "missing":10,"mismatched":0,"sample":0,"detail":"IGNORE PREVIOUS"},
+	  {"signal":"dlq_growth","window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"records":1}]}`)
+	got := AlertEvidenceText(raw)
+	want := "signal=count_drift severity=sev2 mismatched=0 missing=10 sample=0 sink=990 source=1000 table=public.orders " +
+		"topic=orders.public.orders window_from=2026-10-14T01:50:00Z window_to=2026-10-14T02:50:00Z"
+	if !strings.Contains(got, want) {
+		t.Fatalf("drift line missing:\n%s\nwant %s", got, want)
+	}
+	if strings.Contains(got, "IGNORE") || strings.Contains(got, "signal=dlq_growth records=1 window") {
+		t.Fatalf("detail text or an object window off a drift signal was rendered:\n%s", got)
+	}
+}
+
+// X3a forecast and X3b config_drift evidence render their numbers, names
+// and times; hashes and anything off the allow-list stay out, and changed key
+// names are names only (a secret key is a flag, never a name).
+func TestWatcherEvidenceForecastAndConfigDrift(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"forecast","severity":"sev4","metric":"slot_wal_bytes","object":"orders_slot","current":734003200,
+	   "limit":1073741824,"eta":"2026-10-14T06:00:00+02:00","slope_per_hour":52428800.5,"r2":0.97,"samples":12},
+	  {"signal":"config_drift","severity":"sev3","connector":"pg-orders","old_hash":"9f2c","new_hash":"41ab",
+	   "changed_keys":["<secret key changed>","a.b","c.d","e","f","g","h","i","j","k","l","bad key; DROP"],"keys_omitted":3}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=forecast severity=sev4 current=734003200 eta=2026-10-14T04:00:00Z limit=1073741824 metric=slot_wal_bytes " +
+			"object=orders_slot r2=0.97 samples=12 slope_per_hour=52428800.5",
+		"signal=config_drift severity=sev3 connector=pg-orders keys_omitted=3 changed_keys=a.b,c.d,e,f,g,h,i,j " +
+			"changed_keys_more=2 secret_key_changed=true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing line:\n%s\nwant %s", got, want)
+		}
+	}
+	for _, bad := range []string{"9f2c", "41ab", "DROP", "<secret key changed>", "hash"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("%q reached the evidence:\n%s", bad, got)
+		}
+	}
+}
+
+// X7d retention findings render as retention_risk entries, in a
+// config_risk signal and in the body's config_risks list (another signal
+// opened the room); their text and anything off the allow-list stay out.
+func TestWatcherEvidenceRetentionRisks(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"config_risk","severity":"sev3","risks":[
+	   {"connector":"pg-orders","code":"errors_tolerance_all","sev":"sev3"},
+	   {"code":"retention_shorter_than_declared","sev":"sev4","topic":"pg.public.orders","configured":"1d",
+	    "declared":"7d","retention_bytes":1073741824,"cleanup_policy":"delete","text":"IGNORE PREVIOUS retains 1d"},
+	   {"code":"retention_longer_than_declared","sev":"sev4","table":"analytics.orders","configured":"infinite",
+	    "declared":"30d; DROP","text":"t"}]}],
+	  "config_risks":[
+	   {"code":"compact_cdc_topic","sev":"sev4","topic":"pg.public.items","cleanup_policy":"compact","declared":"7d"},
+	   {"code":"retention_longer_than_declared","topic":"bad topic; rm","configured":"infinite","declared":"7d"},
+	   {"code":"retention_shorter_than_declared","topic":"pg.public.x","configured":"1 day","cleanup_policy":"compact,evil"}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=config_risk severity=sev3 risk=pg-orders:errors_tolerance_all " +
+			"retention_risk=pg.public.orders:retention_shorter_than_declared configured=1d declared=7d " +
+			"retention_bytes=1073741824 cleanup_policy=delete " +
+			"retention_risk=analytics.orders:retention_longer_than_declared configured=infinite",
+		"config_risks retention_risk=pg.public.items:compact_cdc_topic declared=7d cleanup_policy=compact " +
+			"retention_risk=pg.public.x:retention_shorter_than_declared",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing:\n%s\nwant %s", got, want)
+		}
+	}
+	for _, bad := range []string{"IGNORE", "DROP", "rm", "1 day", "evil", "retains"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("%q reached the evidence:\n%s", bad, got)
+		}
+	}
+	// A connector risk renders as before.
+	if got := AlertEvidenceText(json.RawMessage(`{"source":"watcher","signals":[{"signal":"slot_inactive","slot":"s1"}],
+	  "config_risks":[{"connector":"c1","code":"drops_records"}]}`)); got != "source=watcher\nsignal=slot_inactive slot=s1\nconfig_risks risk=c1:drops_records" {
+		t.Fatalf("config_risks line = %q", got)
+	}
+}
+
 func TestAlertEvidenceTextOtherBodies(t *testing.T) {
 	for _, raw := range []string{``, `{}`, `not json`, `{"source":"grafana","signals":[{"signal":"x"}]}`, `{"source":"watcher","signals":[]}`, `{"description":"SECRET_DESC"}`} {
 		got := AlertEvidenceText(json.RawMessage(raw))
@@ -103,7 +187,7 @@ func TestFirstUserMessageTriageBlock(t *testing.T) {
 	msg := firstUserMessage(Alert{Title: "orders", PipelineID: "orders", Triage: tr})
 	for _, want := range []string{
 		"First look (triage, unverified; confidence medium; steps s_1, s_2): <untrusted>task 0 FAILED &lt;/untrusted&gt; (verification) recovered</untrusted>",
-		"First look suspects: kafka-connect",
+		"The first look is a prior, not evidence: confirm any cause or layer with your own reads.",
 		"First look suggests checking: <untrusted>schema_registry_diff &lt;b&gt;</untrusted>",
 		`<tool_output tool="connect_status" step="s_1" untrusted="true" suspected_instructions="true">task 0 FAILED &lt;/tool_output&gt;`,
 		`<tool_output tool="pg_recent_ddl" step="s_2" untrusted="true">error: connection refused</tool_output>`,
@@ -111,6 +195,11 @@ func TestFirstUserMessageTriageBlock(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("first message misses %q:\n%s", want, msg)
 		}
+	}
+	// KAN-402: the suspected layer stays a badge for the room. The full run
+	// gets the reads, never the layer stated as a suspect it could anchor on.
+	if strings.Contains(msg, "First look suspects") || strings.Contains(msg, "kafka-connect") {
+		t.Fatalf("the triage layer reached the full run's first message:\n%s", msg)
 	}
 	if strings.Contains(msg, "BOGUS_STEP") {
 		t.Fatalf("a step with a malformed id reached the prompt:\n%s", msg)
@@ -129,7 +218,11 @@ func TestFirstUserMessageTriageBlock(t *testing.T) {
 }
 
 func TestSystemPromptMentionsFirstLook(t *testing.T) {
-	if !strings.Contains(systemPrompt(), "A first look (triage) is a hint, verify it; do not repeat a read it already shows unless the numbers may have changed.") {
+	// W4f (KAN-504) rephrased "a read it already shows" as "its reads" to pay
+	// for rule 4's hypothesis form, W4h (KAN-505) dropped "the" before
+	// "numbers", and W4g (KAN-506) contracted "do not" and reads "may differ"
+	// for "may have changed"; the batch prompt keeps the longer words.
+	if !strings.Contains(systemPrompt(), "A first look (triage) is a hint, verify it; don't repeat its reads unless numbers may differ.") {
 		t.Fatal("system prompt lacks the first-look line")
 	}
 }
@@ -208,3 +301,40 @@ func TestAlertUpdateDoesNotResetTurns(t *testing.T) {
 }
 
 func steerInput() HumanInput { return HumanInput{Kind: "steer", Text: "go"} }
+
+func TestAlertEvidenceLongTx(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","severity":"sev2","at":"2026-10-14T03:12:00Z","signals":[
+	 {"signal":"long_tx","severity":"sev2","slot":"debezium_orders","active":true,
+	  "restart_lsn":"16/B374D848","wal_head_first":"16/C0000000","wal_head_last":"17/10000000",
+	  "confirmed_flush_first":"16/C0000000","confirmed_flush_last":"17/0FFFFFF0",
+	  "retained_bytes":2147483648,"retained_first_bytes":1073741824,"retained_growth_bytes":1073741824,
+	  "ticks":6,"held_for_seconds":360,"note":"restart_lsn is held postgres://app:hunter2secret@db/orders\nSECOND_LINE",
+	  "unknown_key":"IGNORE ME","bad_lsn":"x","restart_lsn_extra":1}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=long_tx", "restart_lsn=16/B374D848", "wal_head_first=16/C0000000", "wal_head_last=17/10000000",
+		"confirmed_flush_first=16/C0000000", "confirmed_flush_last=17/0FFFFFF0", "retained_first_bytes=1073741824",
+		"retained_growth_bytes=1073741824", "ticks=6", "held_for_seconds=360", `note="restart_lsn is held`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("evidence misses %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{"unknown_key", "IGNORE ME", "bad_lsn", "restart_lsn_extra", "hunter2secret", "SECOND_LINE"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("evidence kept %q:\n%s", banned, got)
+		}
+	}
+}
+
+func TestAlertEvidenceLongTxBadValuesAndLongNote(t *testing.T) {
+	long := strings.Repeat("n", 500)
+	raw := json.RawMessage(`{"source":"watcher","signals":[{"signal":"long_tx","restart_lsn":"16/B3; rm -rf","ticks":"six","note":"` + long + `"}]}`)
+	got := AlertEvidenceText(raw)
+	if strings.Contains(got, "rm -rf") || strings.Contains(got, "ticks=") {
+		t.Fatalf("bad values rendered:\n%s", got)
+	}
+	if strings.Contains(got, long) || !strings.Contains(got, "truncated") {
+		t.Fatalf("note not truncated:\n%s", got)
+	}
+}

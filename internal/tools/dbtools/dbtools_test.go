@@ -24,15 +24,64 @@ type fakeSource struct {
 	rowCalls  int
 	pubTables []postgres.PublicationTable
 	pubErr    error
+	// slotReads scripts successive ReplicationSlots calls (the liveness tool
+	// reads twice); the last entry repeats. Empty falls back to slots.
+	slotReads [][]clients.ReplicationSlot
+	slotCalls int
+	slotErr   error
+	// txns, when non-nil, is what LongTransactions reports.
+	txns   []clients.Transaction
+	txnErr error
+
+	// fresh is the newest source timestamp warehouse_freshness compares
+	// against; freshErr models an unreadable source.
+	fresh       time.Time
+	freshErr    error
+	freshCalls  int
+	freshTable  string
+	freshColumn string
+
+	// The Q2a source-settings reads (SourceSettingsReader). A nil field means
+	// the healthy default; err fails every read.
+	settings    []postgres.DBSetting
+	repl        []postgres.TableReplication
+	roleInfo    *postgres.RoleInfo
+	blockers    []postgres.DBSession
+	settingsErr error
+	replErr     error
+	roleErr     error
+	blockErr    error
+	// Q2a read accounting: calls, arguments, and whether the read carried a
+	// context deadline.
+	settingsCalls, replCalls, roleCalls, blockCalls int
+	tablesAsked                                     []string
+	blockTables                                     []string
+	roleAsked                                       string
+	olderThan                                       time.Duration
+	settingsDeadline                                bool
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
+	f.slotCalls++
+	if f.slotErr != nil {
+		return nil, f.slotErr
+	}
+	if len(f.slotReads) > 0 {
+		i := min(f.slotCalls-1, len(f.slotReads)-1)
+		return f.slotReads[i], nil
+	}
 	return f.slots, nil
 }
 func (f *fakeSource) RecentDDL(context.Context, time.Time, int) ([]clients.DDLChange, error) {
 	return []clients.DDLChange{{At: time.Now(), CommandTag: "ALTER TABLE", ObjectIdentity: "public.orders", Query: "ALTER TABLE orders", Username: "priya"}}, nil
 }
 func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
+	if f.txnErr != nil {
+		return nil, f.txnErr
+	}
+	if f.txns != nil {
+		return f.txns, nil
+	}
 	return []clients.Transaction{{PID: 1, Username: "u", State: "active", Age: time.Minute, Query: "SELECT 1"}}, nil
 }
 
@@ -50,6 +99,93 @@ func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]an
 func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []string) ([]postgres.PublicationTable, error) {
 	return f.pubTables, f.pubErr
 }
+func (f *fakeSource) Freshness(_ context.Context, table, tsColumn string) (time.Time, error) {
+	f.freshCalls++
+	f.freshTable, f.freshColumn = table, tsColumn
+	return f.fresh, f.freshErr
+}
+
+// Settings reports the fixed list with wal_level logical, like a healthy dev
+// source; settings, when non-nil, replaces it.
+func (f *fakeSource) Settings(ctx context.Context) ([]postgres.DBSetting, error) {
+	f.settingsCalls++
+	f.noteDeadline(ctx)
+	if f.settingsErr != nil {
+		return nil, f.settingsErr
+	}
+	if f.settings != nil {
+		return f.settings, nil
+	}
+	return []postgres.DBSetting{
+		{Name: "wal_level", Value: "logical"},
+		{Name: "max_replication_slots", Value: "10"},
+		{Name: "max_wal_senders", Value: "10"},
+		{Name: "max_slot_wal_keep_size", Value: "-1", Unit: "MB"},
+		{Name: "wal_sender_timeout", Value: "60000", Unit: "ms"},
+	}, nil
+}
+
+// TableReplication reports every asked table with a primary key and the
+// default replica identity; repl, when non-nil, replaces that.
+func (f *fakeSource) TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error) {
+	f.replCalls++
+	f.tablesAsked = tables
+	f.noteDeadline(ctx)
+	if f.replErr != nil {
+		return nil, f.replErr
+	}
+	if f.repl != nil {
+		return f.repl, nil
+	}
+	out := make([]postgres.TableReplication, 0, len(tables))
+	for _, t := range tables {
+		out = append(out, postgres.TableReplication{Table: t, HasPrimaryKey: true, ReplicaIdentity: "default"})
+	}
+	return out, nil
+}
+
+// RoleInfo reports an existing, logging-in, replicating role with SELECT on
+// every table; roleInfo, when non-nil, replaces that.
+func (f *fakeSource) RoleInfo(ctx context.Context, role string, tables []string) (postgres.RoleInfo, error) {
+	f.roleCalls++
+	f.roleAsked = role
+	f.noteDeadline(ctx)
+	if f.roleErr != nil {
+		return postgres.RoleInfo{}, f.roleErr
+	}
+	if f.roleInfo != nil {
+		return *f.roleInfo, nil
+	}
+	sel := make(map[string]bool, len(tables))
+	for _, t := range tables {
+		sel[t] = true
+	}
+	return postgres.RoleInfo{Role: role, Exists: true, CanLogin: true, Replication: true, Selectable: sel}, nil
+}
+
+// Blockers reports no blockers; blockers, when non-nil, replaces that.
+func (f *fakeSource) Blockers(ctx context.Context, olderThan time.Duration) ([]postgres.DBSession, error) {
+	f.blockCalls++
+	f.olderThan = olderThan
+	f.noteDeadline(ctx)
+	if f.blockErr != nil {
+		return nil, f.blockErr
+	}
+	return f.blockers, nil
+}
+
+// BlockersOnTables is the scoped Blockers: it records the tables it was
+// limited to and returns the same scripted sessions.
+func (f *fakeSource) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error) {
+	f.blockTables = tables
+	return f.Blockers(ctx, olderThan)
+}
+
+func (f *fakeSource) noteDeadline(ctx context.Context) {
+	if _, ok := ctx.Deadline(); ok {
+		f.settingsDeadline = true
+	}
+}
 
 // fakeConnect implements clients.ConnectClient. Config looks up the connector
 // in configs and reports clients.ErrNotFound (wrapped) for unknown names, so
@@ -58,11 +194,13 @@ func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []strin
 type fakeConnect struct {
 	configs   map[string]map[string]string
 	configErr error
+	status    clients.ConnectorStatus
+	statusErr error
 }
 
 func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return nil, nil }
 func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
-	return clients.ConnectorStatus{}, nil
+	return f.status, f.statusErr
 }
 func (f *fakeConnect) Config(_ context.Context, name string) (map[string]string, error) {
 	if f.configErr != nil {
@@ -129,6 +267,9 @@ func testDeps() Deps {
 			rows: map[string]map[string]any{
 				"public.orders|7": {"id": "7", "customer_id": "100", "amount": "50", "status": "placed", "updated_at": "2026-10-11T10:00:00Z"},
 			},
+			// The source is as old as the fake sink's newest row: the default
+			// pipeline is in sync, not idle.
+			fresh: time.Now().Add(-2 * time.Minute),
 		},
 		Wh: &fakeWarehouse{
 			rows:  map[string]map[string]any{"analytics.orders|7": {"id": "7", "updated_at": "2026-10-11T10:00:00Z", "loaded_at": "2026-10-11T10:00:01Z"}},
@@ -157,10 +298,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 11 {
-		t.Fatalf("registered %d tools, want 11", len(all))
+	if len(all) != 18 {
+		t.Fatalf("registered %d tools, want 18", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "pg_connector_scope_gap", "pg_toast_risk", "source_settings", "source_table_replication", "source_role_grants", "source_blocking_sessions", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)

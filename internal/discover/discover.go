@@ -14,20 +14,49 @@ import (
 	"piperoom/internal/clients"
 )
 
-const pgSourceClass = "io.debezium.connector.postgresql.PostgresConnector"
+const (
+	pgSourceClass    = "io.debezium.connector.postgresql.PostgresConnector"
+	mysqlSourceClass = "io.debezium.connector.mysql.MySqlConnector"
+)
 
-// plainTable is a schema.table include entry with no regex metacharacters.
+// sourceKindMySQL is owners.yaml's source_kind of a MySQL pipeline
+// (owners.SourceKindMySQL, Q8d). The package does not import owners: the CLI
+// stays light, and a test loads the rendered file with owners.Load.
+const sourceKindMySQL = "mysql"
+
+// sourceKinds maps a Debezium source class to its source_kind ("" = postgres,
+// the default owners.yaml leaves out).
+var sourceKinds = map[string]string{pgSourceClass: "", mysqlSourceClass: sourceKindMySQL}
+
+// plainTable is a schema.table (db.table on MySQL) include entry with no regex metacharacters.
 var plainTable = regexp.MustCompile(`^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$`)
+
+// sinkTable is a warehouse table name as written in a sink connector's
+// table.name.format: exactly schema.table of plain identifiers, so a
+// "${topic}" template, a bare table name (schema unknown) or hostile text is
+// never taken as a name. A plain-identifier match also keeps the name safe to
+// print in a comment.
+var sinkTable = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$`)
+
+// sink is what discovery keeps of a sink connector: the topics it reads and,
+// when its config names one literally, the table it writes. Only these two
+// non-secret keys are read.
+type sink struct {
+	topics []string
+	table  string // "" = not found
+}
 
 // draft is a pipeline under construction, before IDs are assigned.
 type draft struct {
-	connector string
-	prefix    string
-	slot      string
-	tables    []string
-	topics    map[string]bool
-	groups    []string
-	notes     []string
+	connector  string
+	sourceKind string // "" = postgres, or sourceKindMySQL
+	prefix     string
+	slot       string // "" on MySQL: it has no replication slot
+	tables     []string
+	topics     map[string]bool
+	groups     []string
+	sinkTables []string
+	notes      []string
 }
 
 func (d *draft) note(format string, args ...any) {
@@ -54,8 +83,8 @@ func call[T any](r *runner, f func(context.Context) (T, error)) (T, error) {
 	return f(ctx)
 }
 
-// Discover reads the cluster and drafts one pipeline per Debezium Postgres
-// source connector. Only failures to list connectors or topics are fatal;
+// Discover reads the cluster and drafts one pipeline per Debezium Postgres or
+// MySQL source connector. Only failures to list connectors or topics are fatal;
 // everything else becomes a skipped connector, a pipeline note or a warning,
 // so a partly broken cluster still yields a useful draft.
 func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
@@ -84,23 +113,24 @@ func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
 	}
 
 	var drafts []*draft
-	sinkTopics := map[string][]string{} // sink connector -> topics it reads
+	sinks := map[string]sink{} // sink connector -> what it reads and writes
 	for _, name := range sortedUnique(names) {
-		dr, sink := r.connector(name, topics)
+		dr, sk := r.connector(name, topics)
 		if dr != nil {
 			drafts = append(drafts, dr)
 		}
-		if len(sink) > 0 {
-			sinkTopics[name] = sink
+		if len(sk.topics) > 0 {
+			sinks[name] = sk
 		}
 	}
 	r.warnSharedPrefixes(drafts)
+	r.warnMixedKinds(drafts)
 
 	if len(drafts) > 0 {
 		r.checkSubjects(drafts)
 		r.matchGroups(drafts)
 		r.checkSlots(drafts)
-		noteSinks(drafts, sinkTopics)
+		noteSinks(drafts, sinks)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("discover: %w", err)
@@ -117,36 +147,44 @@ func (r *runner) skip(name, reason string) {
 }
 
 // connector reads one connector's config. It returns a draft for a Debezium
-// Postgres source, or the topics a sink connector reads (only the non-secret
-// "topics" key is looked at).
-func (r *runner) connector(name string, topics map[string]bool) (*draft, []string) {
+// Postgres or MySQL source, or what a sink connector reads and writes (only the
+// non-secret "topics" and "table.name.format" keys are looked at).
+func (r *runner) connector(name string, topics map[string]bool) (*draft, sink) {
 	cfg, err := call(r, func(ctx context.Context) (map[string]string, error) { return r.d.Connect.Config(ctx, name) })
 	switch {
 	case errors.Is(err, clients.ErrNotFound):
 		r.skip(name, "deleted during discovery")
-		return nil, nil
+		return nil, sink{}
 	case err != nil:
 		r.o.Logger.Warn("discover: connector config read failed", "connector", name, "err", err)
 		r.skip(name, "config read failed")
-		return nil, nil
+		return nil, sink{}
 	}
 	class := cfg["connector.class"]
-	if class != pgSourceClass {
+	kind, isSource := sourceKinds[class]
+	if !isSource {
 		if class == "" {
-			r.skip(name, "not a Debezium Postgres source (no connector.class)")
+			r.skip(name, "not a Debezium Postgres or MySQL source (no connector.class)")
 		} else {
-			r.skip(name, fmt.Sprintf("not a Debezium Postgres source (class %s)", class))
+			r.skip(name, fmt.Sprintf("not a Debezium Postgres or MySQL source (class %s)", class))
 		}
-		return nil, splitList(cfg["topics"])
+		sk := sink{topics: splitList(cfg["topics"])}
+		if t := strings.TrimSpace(cfg["table.name.format"]); sinkTable.MatchString(t) {
+			sk.table = t
+		}
+		return nil, sk
 	}
 
-	dr := &draft{connector: name, topics: map[string]bool{}, slot: cmp.Or(cfg["slot.name"], "debezium")}
+	dr := &draft{connector: name, sourceKind: kind, topics: map[string]bool{}}
+	if kind == "" {
+		dr.slot = cmp.Or(cfg["slot.name"], "debezium")
+	}
 	dr.prefix = cfg["topic.prefix"]
 	if dr.prefix == "" {
 		dr.prefix = cfg["database.server.name"]
 		if dr.prefix == "" {
 			r.skip(name, "no topic.prefix or database.server.name")
-			return nil, nil
+			return nil, sink{}
 		}
 		dr.note("topic prefix taken from database.server.name (Debezium 1.x key)")
 	}
@@ -180,7 +218,7 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, []strin
 	if len(custom) > 0 {
 		dr.note("custom topic naming (%s): check topic names by hand", strings.Join(custom, ", "))
 	}
-	return dr, nil
+	return dr, sink{}
 }
 
 // derivedTables returns the schema.table names of the prefix's topics. The
@@ -235,10 +273,18 @@ func includeTables(dr *draft, entries, derived []string) []string {
 	return out
 }
 
+// guessTables keeps the derived tables the connector's filters let through.
+// The first part of a MySQL table is its database, filtered by
+// database.include.list / database.exclude.list where Postgres has
+// schema.include.list / schema.exclude.list.
 func guessTables(dr *draft, derived []string, cfg map[string]string) []string {
+	inKey, exKey := "schema.include.list", "schema.exclude.list"
+	if dr.sourceKind == sourceKindMySQL {
+		inKey, exKey = "database.include.list", "database.exclude.list"
+	}
 	tableEx := compileAll(dr, "exclude", splitList(cfg["table.exclude.list"]))
-	schemaIn := compileAll(dr, "include", splitList(cfg["schema.include.list"]))
-	schemaEx := compileAll(dr, "exclude", splitList(cfg["schema.exclude.list"]))
+	schemaIn := compileAll(dr, "include", splitList(cfg[inKey]))
+	schemaEx := compileAll(dr, "exclude", splitList(cfg[exKey]))
 	var out []string
 	for _, t := range derived {
 		schema, _, _ := strings.Cut(t, ".")
@@ -276,6 +322,27 @@ func anyMatch(res []*regexp.Regexp, s string) bool {
 		}
 	}
 	return false
+}
+
+// warnMixedKinds warns when the cluster has both Postgres and MySQL source
+// connectors. The drafted pipelines carry no connections: blocks, so they
+// would all share one client set, and one client set serves one source kind:
+// the server (wiring.Open) refuses such a file. The warning lands in the
+// file's footer and on stderr, and says what each kind needs.
+func (r *runner) warnMixedKinds(drafts []*draft) {
+	var pg, my []string
+	for _, dr := range drafts {
+		if dr.sourceKind == sourceKindMySQL {
+			my = append(my, dr.connector)
+		} else {
+			pg = append(pg, dr.connector)
+		}
+	}
+	if len(pg) == 0 || len(my) == 0 {
+		return
+	}
+	r.warn("the cluster has Postgres source connectors (%s) and MySQL ones (%s); one server client set serves one source kind, so the server refuses this file as written: give each MySQL pipeline a connections: block whose source_db_url is its mysql:// URL (and keep SOURCE_DB_URL for the Postgres ones), or run one Piperoom deployment per source kind",
+		strings.Join(pg, ", "), strings.Join(my, ", "))
 }
 
 func (r *runner) warnSharedPrefixes(drafts []*draft) {
@@ -357,8 +424,12 @@ func consumes(lag clients.GroupLag, topics map[string]bool) bool {
 	return false
 }
 
+// checkSlots notes a Postgres pipeline whose slot is missing or inactive. A
+// MySQL pipeline has no slot and is not looked at; with only MySQL pipelines
+// the slots are not even listed.
 func (r *runner) checkSlots(drafts []*draft) {
-	if r.d.Source == nil {
+	drafts = slices.DeleteFunc(slices.Clone(drafts), func(dr *draft) bool { return dr.slot == "" })
+	if r.d.Source == nil || len(drafts) == 0 {
 		return
 	}
 	slots, err := call(r, r.d.Source.ReplicationSlots)
@@ -384,13 +455,18 @@ func (r *runner) checkSlots(drafts []*draft) {
 
 // noteSinks flags sink connectors that read a pipeline topic. owners
 // "connectors" is the CheckScope list for connect_restart_*, so a human
-// decides whether to add them.
-func noteSinks(drafts []*draft, sinkTopics map[string][]string) {
-	for _, sink := range sortedKeys(sinkTopics) {
-		for _, t := range sinkTopics[sink] {
+// decides whether to add them. A sink that names its table literally also
+// gives the pipeline a found sink table.
+func noteSinks(drafts []*draft, sinks map[string]sink) {
+	for _, name := range sortedKeys(sinks) {
+		for _, t := range sinks[name].topics {
 			for _, dr := range drafts {
-				if dr.topics[t] {
-					dr.note("sink connector %s reads %s: add it to connectors if connect_restart_* should cover it", sink, t)
+				if !dr.topics[t] {
+					continue
+				}
+				dr.note("sink connector %s reads %s: add it to connectors if connect_restart_* should cover it", name, t)
+				if tbl := sinks[name].table; tbl != "" {
+					dr.sinkTables = append(dr.sinkTables, tbl)
 				}
 			}
 		}
@@ -425,9 +501,12 @@ func assignIDs(drafts []*draft) []Pipeline {
 		out = append(out, Pipeline{
 			ID:             id,
 			Connector:      dr.connector,
+			SourceKind:     dr.sourceKind,
 			TopicPrefix:    dr.prefix,
 			SourceTables:   sortedUnique(dr.tables),
+			Topics:         sortedKeys(dr.topics),
 			ConsumerGroups: sortedUnique(dr.groups),
+			SinkTables:     sortedUnique(dr.sinkTables),
 			Notes:          sortedUnique(dr.notes),
 		})
 	}

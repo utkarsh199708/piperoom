@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -16,6 +17,10 @@ import (
 type PipelineStack struct {
 	Tools   *tools.Registry
 	Actions *actions.Registry
+	// Staging is true when Actions hold the pipeline's staging client set
+	// (wiring.Stack.HasStaging: owners.yaml staging: and write mode on), so
+	// its Stagers can try a step on staging (X8).
+	Staging bool
 }
 
 // toolsFor returns the read tools of the pipeline's own client set. Without
@@ -30,8 +35,20 @@ func (s *Service) toolsFor(pipelineID string) *tools.Registry {
 	return tools.NewRegistry()
 }
 
-// actionsFor returns the write actions of the pipeline's own client set.
+// actionsFor returns the write actions of the pipeline's own client set, or
+// the setup stack's for the pipeline an open setup room sets up
+// (setup_agent.go), so a setup proposal is validated, routed, previewed and
+// executed by the action the setup run proposed.
 func (s *Service) actionsFor(pipelineID string) *actions.Registry {
+	if acts, ok := s.setupActionsFor(pipelineID); ok {
+		return acts
+	}
+	return s.pipelineActionsFor(pipelineID)
+}
+
+// pipelineActionsFor is actionsFor without the setup stack: the actions an
+// incident room's agent run is given, unchanged by setup rooms.
+func (s *Service) pipelineActionsFor(pipelineID string) *actions.Registry {
 	if s.stackFor == nil {
 		return s.actions
 	}
@@ -41,6 +58,53 @@ func (s *Service) actionsFor(pipelineID string) *actions.Registry {
 	return actions.NewRegistry()
 }
 
+// AllActions returns the full write-action catalogue in registration order:
+// what GET /api/actions lists (docs/api.md, P3c), whether or not write mode is
+// on. Without per-pipeline client sets it is the process-wide registry; with
+// them (StackFor) it is the union of every set's actions (Deps.ActionCatalogue),
+// deduplicated by name with the first registration kept.
+func (s *Service) AllActions() []actions.Action {
+	if s.stackFor != nil {
+		if s.actionCatalogue == nil {
+			return nil
+		}
+		return dedupeActions(s.actionCatalogue())
+	}
+	return s.actions.All()
+}
+
+// dedupeActions keeps the first action of each name, in order. The same action
+// is registered in every pipeline's client set, so the catalogue carries it
+// once per set; GET /api/actions lists each action once.
+func dedupeActions(all []actions.Action) []actions.Action {
+	out := make([]actions.Action, 0, len(all))
+	seen := make(map[string]bool, len(all))
+	for _, a := range all {
+		if a == nil {
+			continue
+		}
+		name := a.Name()
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// ownersNow returns the current owners config: the Deps.OwnersNow snapshot
+// when one is wired (a Live holder; the registration reloads it), the
+// process-start set otherwise. Nil means no owners config is loaded.
+func (s *Service) ownersNow() *owners.Owners {
+	if s.ownersNowFn != nil {
+		if o := s.ownersNowFn(); o != nil {
+			return o
+		}
+	}
+	return s.owners
+}
+
 // TenancyOn reports whether owners.yaml has a tenants: block. Without one
 // every signed-in user sees every room.
 func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
@@ -48,7 +112,9 @@ func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
 // CanSeePipeline reports whether the person may see rooms of the pipeline:
 // always with the filter off; with it on, the solo user sees every tenant and
 // everyone else the tenants they belong to (owners.InTenant). A pipeline that
-// owners.yaml does not define is in no tenant.
+// owners.yaml does not define is in no tenant. The check reads the current
+// owners set (ownersNow): a pipeline another room just registered is visible
+// to its tenant at once, not only after a restart (U1-14).
 func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if !s.TenancyOn() {
 		return true
@@ -56,7 +122,7 @@ func (s *Service) CanSeePipeline(u User, pipelineID string) bool {
 	if s.IsSolo(u.ID) {
 		return true
 	}
-	return s.owners.CanSeePipeline(pipelineID, u.ID, u.Groups)
+	return s.ownersNow().CanSeePipeline(pipelineID, u.ID, u.Groups)
 }
 
 // errHidden is the answer for an object outside the person's tenants: the
@@ -75,32 +141,36 @@ func (s *Service) CheckRoomVisible(ctx context.Context, u User, roomID string) e
 // loaded a row (proposal, hand-off) of roomID. It must run before any answer
 // that depends on the row (409 already decided, 403 not the recipient), so a
 // person outside the tenant learns nothing from it. It takes no lock.
+//
+// The room's own snapshot answers, not its row's pipeline id: a setup room's
+// pipeline is provisional and absent from owners.yaml, so its tenant comes
+// from room.created (SetupRequest.tenant) until pipeline_register. A room this
+// replica has not published is loaded first, exactly as the handler would.
 func (s *Service) checkVisible(ctx context.Context, u User, roomID string) error {
 	if !s.TenancyOn() {
 		return nil
 	}
-	pipelineID, err := s.roomPipelineID(ctx, roomID)
+	snap, err := s.readRoom(ctx, roomID)
 	if err != nil {
-		return err
+		return mapStoreErr(err)
 	}
-	if !s.CanSeePipeline(u, pipelineID) {
+	if !s.canSeeRoom(u, snap) {
 		return errHidden()
 	}
 	return nil
 }
 
-// roomPipelineID returns a room's pipeline id from its published snapshot,
-// else from its rooms row: no lock is waited for, and no snapshot is cloned or
-// rebuilt for a visibility check. A missing room is the 404 of mapStoreErr.
-func (s *Service) roomPipelineID(ctx context.Context, roomID string) (string, error) {
-	if p := s.published(roomID); p != nil {
-		return p.PipelineID, nil
+// canSeeRoom reports whether the person may see the room: the setup room's
+// tenant, or the pipeline's tenant for every other room.
+func (s *Service) canSeeRoom(u User, snap *RoomSnapshot) bool {
+	if !s.TenancyOn() || s.IsSolo(u.ID) {
+		return true
 	}
-	row, err := s.store.GetRoom(ctx, roomID)
-	if err != nil {
-		return "", mapStoreErr(err)
+	if snap.IsSetupRoom() {
+		tenant := snap.SetupTenant()
+		return tenant != "" && s.owners.InTenant(tenant, u.ID, u.Groups)
 	}
-	return row.PipelineID, nil
+	return s.owners.CanSeePipeline(snap.PipelineID, u.ID, u.Groups)
 }
 
 // checkTargetVisible refuses to give control or a hand-off to a person who
@@ -113,17 +183,27 @@ func (s *Service) checkTargetVisible(to User, pipelineID string) error {
 }
 
 // ListRoomsFor is ListRooms without the rooms outside the person's tenants.
+// It filters the ordered list, so the rooms it keeps are in the same order as
+// ListRooms (see roomListLess); GET /api/rooms and the room list socket both
+// answer through this method and therefore agree (KAN-382). Setup rooms are
+// filtered by their own tenant (canSeeRoom), and every row carries only the
+// setup fields the list documents (trimSetupForList).
 func (s *Service) ListRoomsFor(ctx context.Context, u User) ([]RoomSnapshot, error) {
 	all, err := s.ListRooms(ctx)
-	if err != nil || !s.TenancyOn() || s.IsSolo(u.ID) {
+	if err != nil {
 		return all, err
 	}
-	visible, _ := s.owners.VisiblePipelines(u.ID, u.Groups)
-	out := make([]RoomSnapshot, 0, len(all))
-	for _, r := range all {
-		if visible[r.PipelineID] {
-			out = append(out, r)
+	out := all
+	if s.TenancyOn() && !s.IsSolo(u.ID) {
+		out = make([]RoomSnapshot, 0, len(all))
+		for i := range all {
+			if s.canSeeRoom(u, &all[i]) {
+				out = append(out, all[i])
+			}
 		}
+	}
+	for i := range out {
+		trimSetupForList(&out[i])
 	}
 	return out, nil
 }

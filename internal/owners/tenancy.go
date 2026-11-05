@@ -25,6 +25,10 @@ const DefaultTenant = "default"
 // error texts next to pipeline ids.
 var tenantNameRE = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
+// repoIDRE is the repo-id charset (a slug, like the pipeline ids it sits next
+// to in errors and the PR tool's repo: field).
+var repoIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // envNameRE is a portable environment variable name.
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -46,12 +50,23 @@ type Tenant struct {
 	// Members see every room of the tenant's pipelines. The owners of those
 	// pipelines' layers are members too, without being listed (InTenant).
 	Members Principals `yaml:"members"`
+	// Admins approve the T2/T3 steps of a setup room whose provisional
+	// pipeline nobody owns yet, and a pipeline_register proposal on a team
+	// server, with grant "admin" (events.GrantAdmin; docs/design/setup-agent.md
+	// §3.6). Principals, exactly like members:. May be empty: a tenant with no
+	// admins relies on an overlapping pipeline's owners, or solo mode.
+	Admins Principals `yaml:"admins"`
+	// Repos are the repo ids of the tenant's default repos: the setup form's
+	// repo list falls back to them when the person names none (§3.10). A repo
+	// id is a plain slug; the repo's url and globs live in the pipeline's
+	// repos: block (Q7a).
+	Repos []string `yaml:"repos"`
 }
 
 // UnmarshalYAML rejects unknown keys, like the other blocks: a typo such as
 // `member:` would otherwise leave the tenant with owners only.
 func (t *Tenant) UnmarshalYAML(node *yaml.Node) error {
-	if err := checkKeys(node, "tenants", "members"); err != nil {
+	if err := checkKeys(node, "tenants", "members", "admins", "repos"); err != nil {
 		return err
 	}
 	type plain Tenant // no methods, so Decode does not recurse
@@ -119,7 +134,12 @@ func (c *Connections) UnmarshalYAML(node *yaml.Node) error {
 
 // connKey describes one key of a connections: block.
 type connKey struct {
-	required bool // every connections: block must set it
+	// kind is the only pipeline kind whose block may set the key (a cdc
+	// system a batch pipeline does not have, or the reverse); "" = every kind.
+	kind string
+	// required: every connections: block of a pipeline the key belongs to
+	// (kind) must set it, so a batch block needs only the batch keys.
+	required bool
 	literal  bool // {value: X} allowed: the setting is never a secret
 	path     bool // the value is a file path (TLS material)
 	// ca: a CA bundle path. It is public material and a shared corporate CA
@@ -130,32 +150,48 @@ type connKey struct {
 // connKeys are the lower-case names of the process-wide settings a pipeline
 // can replace (internal/config/config.go). wiring maps each to its field; a
 // test there keeps the two lists equal.
+//
+// The warehouse keys belong to both kinds; every other key today is a cdc
+// one. The Airflow and dbt keys of a batch pipeline join when wiring maps
+// them (P4b-1), so the two lists stay equal.
 var connKeys = map[string]connKey{
-	"source_db_url":                 {required: true},
+	// source_db_write_url is the source Postgres as its separate write role
+	// (SOURCE_DB_WRITE_URL), for the pg write actions. Optional: without it
+	// the pipeline gets no writer and those actions refuse at Execute. Never
+	// a literal (a DSN with a password), and never the same reference as
+	// source_db_url (checkWriteRole).
+	"source_db_url":                 {kind: cdc, required: true},
+	"source_db_write_url":           {kind: cdc},
 	"warehouse_db_url":              {required: true},
 	"warehouse_kind":                {literal: true},
-	"kafka_brokers":                 {required: true},
-	"kafka_security_protocol":       {literal: true},
-	"kafka_sasl_mechanism":          {literal: true},
-	"kafka_sasl_username":           {},
-	"kafka_sasl_password":           {},
-	"kafka_tls_ca_file":             {path: true, ca: true},
-	"kafka_tls_cert_file":           {path: true},
-	"kafka_tls_key_file":            {path: true},
-	"kafka_tls_server_name":         {literal: true},
-	"connect_url":                   {required: true},
-	"connect_username":              {},
-	"connect_password":              {},
-	"connect_tls_ca_file":           {path: true, ca: true},
-	"connect_tls_cert_file":         {path: true},
-	"connect_tls_key_file":          {path: true},
-	"schema_registry_url":           {required: true},
-	"schema_registry_username":      {},
-	"schema_registry_password":      {},
-	"schema_registry_tls_ca_file":   {path: true, ca: true},
-	"schema_registry_tls_cert_file": {path: true},
-	"schema_registry_tls_key_file":  {path: true},
+	"kafka_brokers":                 {kind: cdc, required: true},
+	"kafka_security_protocol":       {kind: cdc, literal: true},
+	"kafka_sasl_mechanism":          {kind: cdc, literal: true},
+	"kafka_sasl_username":           {kind: cdc},
+	"kafka_sasl_password":           {kind: cdc},
+	"kafka_tls_ca_file":             {kind: cdc, path: true, ca: true},
+	"kafka_tls_cert_file":           {kind: cdc, path: true},
+	"kafka_tls_key_file":            {kind: cdc, path: true},
+	"kafka_tls_server_name":         {kind: cdc, literal: true},
+	"connect_url":                   {kind: cdc, required: true},
+	"connect_username":              {kind: cdc},
+	"connect_password":              {kind: cdc},
+	"connect_tls_ca_file":           {kind: cdc, path: true, ca: true},
+	"connect_tls_cert_file":         {kind: cdc, path: true},
+	"connect_tls_key_file":          {kind: cdc, path: true},
+	"schema_registry_url":           {kind: cdc, required: true},
+	"schema_registry_username":      {kind: cdc},
+	"schema_registry_password":      {kind: cdc},
+	"schema_registry_tls_ca_file":   {kind: cdc, path: true, ca: true},
+	"schema_registry_tls_cert_file": {kind: cdc, path: true},
+	"schema_registry_tls_key_file":  {kind: cdc, path: true},
 }
+
+// cdc is events.PipelineKindCDC, short for the table above.
+const cdc = events.PipelineKindCDC
+
+// belongsTo reports whether a pipeline of kind may set the key.
+func (k connKey) belongsTo(kind string) bool { return k.kind == "" || k.kind == kind }
 
 // ConnectionKeys returns every key a connections: block may hold, sorted.
 func ConnectionKeys() []string {
@@ -181,9 +217,9 @@ func IsCAKey(key string) bool { return connKeys[key].ca }
 func IsLiteralKey(key string) bool { return connKeys[key].literal }
 
 // FileRef is the canonical connection reference of a file path (see
-// ConnRefs): cleaned, forward-slashed and lower case, because Windows
-// paths ignore case and a Linux-written path must name the same
-// reference on a Windows dev machine.
+// ConnRefs): cleaned, lower case, and with forward slashes, so the same file
+// gives the same reference on every OS (Windows paths ignore case, and an
+// owners.yaml written on one OS must compare equal on another).
 func FileRef(path string) string {
 	return "file:" + strings.ToLower(filepath.ToSlash(filepath.Clean(path)))
 }
@@ -267,13 +303,28 @@ func (o *Owners) InTenant(tenant, userID string, groups []string) bool {
 		if o.Pipelines[i].TenantName() != tenant {
 			continue
 		}
-		for _, layer := range events.Layers {
+		for _, layer := range KnownLayers() {
 			if _, ok := o.CanApprove(o.Pipelines[i].ID, layer, userID, groups); ok {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// IsTenantAdmin reports whether the session is named in tenants.<t>.admins:.
+// A tenant admin may approve a setup room's T2/T3 steps and its
+// pipeline_register with grant "admin" (docs/design/setup-agent.md §3.6).
+func (o *Owners) IsTenantAdmin(tenant, userID string, groups []string) bool {
+	if o == nil {
+		return false
+	}
+	t, ok := o.Tenants[tenant]
+	if !ok {
+		return false
+	}
+	_, ok = t.Admins.Matches(userID, groups)
+	return ok
 }
 
 // CanSeePipeline reports whether the session may see the rooms of the
@@ -316,7 +367,7 @@ func (o *Owners) VisiblePipelines(userID string, groups []string) (set map[strin
 
 // InheritedLayers returns the layers of a pipeline whose owners come from the
 // top-level layers: block because the pipeline's owners: block does not set
-// them, in events.Layers order. With the tenant filter on, those owners are in
+// them, in KnownLayers order. With the tenant filter on, those owners are in
 // this pipeline's tenant (InTenant), so the server warns about each.
 func (o *Owners) InheritedLayers(pipelineID string) []string {
 	p, ok := o.Pipeline(pipelineID)
@@ -324,7 +375,7 @@ func (o *Owners) InheritedLayers(pipelineID string) []string {
 		return nil
 	}
 	var out []string
-	for _, l := range events.Layers {
+	for _, l := range KnownLayers() {
 		if _, over := p.Owners[l]; over {
 			continue
 		}
@@ -401,14 +452,17 @@ func refEnv(name string) string { return "env:" + strings.ToUpper(name) }
 
 // CheckSharedRefs fails when one reference is used by pipelines of two or more
 // tenants, unless every pipeline that uses it sets shared_connections: true.
-// extra adds references found only when the connections are resolved
-// (pipeline id -> references), such as the process AWS identity of MSK IAM.
+// A pipeline's staging: references count as its own (X8): a staging
+// credential is a write credential too. extra adds references found only
+// when the connections are resolved (pipeline id -> references), such as the
+// process AWS identity of MSK IAM.
 func (o *Owners) CheckSharedRefs(extra map[string][]string) error {
 	type use struct{ tenant, pipeline string }
 	users := map[string][]use{}
 	shared := map[string]bool{}
 	for _, p := range o.Pipelines {
-		refs := append(p.ConnRefs(), extra[p.ID]...)
+		refs := append(p.ConnRefs(), p.stagingRefs()...)
+		refs = append(refs, extra[p.ID]...)
 		shared[p.ID] = p.SharedConnections
 		for _, r := range refs {
 			users[r] = append(users[r], use{p.TenantName(), p.ID})
@@ -452,6 +506,13 @@ func (o *Owners) validateTenancy() error {
 		if !tenantNameRE.MatchString(name) {
 			return fmt.Errorf("tenants: tenant name %s must match %s", quoteName(name), tenantNameRE)
 		}
+		repos, err := cleanRepos(o.Tenants[name].Repos)
+		if err != nil {
+			return fmt.Errorf("tenants.%s: %w", name, err)
+		}
+		t := o.Tenants[name]
+		t.Repos = repos
+		o.Tenants[name] = t
 	}
 	for i := range o.Pipelines {
 		p := &o.Pipelines[i]
@@ -471,16 +532,18 @@ func (o *Owners) validateTenancy() error {
 		if p.Connections != nil && len(p.Connections) == 0 {
 			return fmt.Errorf("pipeline %q: connections: is empty; remove it to use the process-wide settings", p.ID)
 		}
-		if err := validateConnections(p.Connections); err != nil {
+		if err := validateConnections(p.Connections, p.KindOrDefault()); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 	}
 	return o.CheckSharedRefs(nil)
 }
 
-// validateConnections checks the shape of a connections: block. Values are
-// never read here and never quoted in an error.
-func validateConnections(c Connections) error {
+// validateConnections checks the shape of a connections: block of a pipeline
+// of the given kind: a key of the other kind is refused, as a field of the
+// other kind is (kind.go), and only the required keys of this kind must be
+// set. Values are never read here and never quoted in an error.
+func validateConnections(c Connections, kind string) error {
 	if len(c) == 0 {
 		return nil
 	}
@@ -494,41 +557,110 @@ func validateConnections(c Connections) error {
 		if !ok {
 			return fmt.Errorf("connections: unknown key %s (allowed: %s)", quoteName(k), strings.Join(ConnectionKeys(), ", "))
 		}
-		r := c[k]
-		n := 0
-		for _, s := range []string{r.Env, r.File, r.Value} {
-			if s != "" {
-				n++
-			}
+		if !info.belongsTo(kind) {
+			// A batch pipeline has no Kafka or Connect: a key for one would
+			// open a client to a system the pipeline does not have.
+			return fmt.Errorf("connections.%s is a %s setting, but the pipeline kind is %s", k, info.kind, kind)
 		}
-		if n != 1 {
-			return fmt.Errorf("connections.%s: set exactly one of env, file or value", k)
-		}
-		// The bad text is not quoted: a misplaced DSN or password must not
-		// reach the start-up log.
-		switch {
-		case r.Value != "" && !info.literal:
-			return fmt.Errorf("connections.%s: value: is allowed only for non-secret settings; use env: or file:", k)
-		case r.Env != "" && !envNameRE.MatchString(r.Env):
-			return fmt.Errorf("connections.%s: env: is not a variable name (want %s)", k, envNameRE)
-		case r.File != "" && !isAbsPath(r.File):
-			return fmt.Errorf("connections.%s: file: must be an absolute path", k)
+		if err := checkRef("connections", k, info, c[k]); err != nil {
+			return err
 		}
 	}
+	if err := checkWriteRole(c); err != nil {
+		return err
+	}
 	for _, k := range ConnectionKeys() {
-		if connKeys[k].required {
+		if info := connKeys[k]; info.required && info.belongsTo(kind) {
 			if _, ok := c[k]; !ok {
-				return fmt.Errorf("connections: %s is required", k)
+				return fmt.Errorf("connections: %s is required for kind %s", k, kind)
 			}
 		}
 	}
 	return nil
 }
 
+// checkRef checks one reference of a connections: block (where is
+// "connections") or of a staging: block ("staging.connections"): exactly one
+// of env, file and value, value only for a non-secret key, a variable name,
+// an absolute path. The bad text is never quoted: a misplaced DSN or password
+// must not reach the start-up log.
+func checkRef(where, k string, info connKey, r ConnRef) error {
+	n := 0
+	for _, s := range []string{r.Env, r.File, r.Value} {
+		if s != "" {
+			n++
+		}
+	}
+	if n != 1 {
+		return fmt.Errorf("%s.%s: set exactly one of env, file or value", where, k)
+	}
+	switch {
+	case r.Value != "" && !info.literal:
+		return fmt.Errorf("%s.%s: value: is allowed only for non-secret settings; use env: or file:", where, k)
+	case r.Env != "" && !envNameRE.MatchString(r.Env):
+		return fmt.Errorf("%s.%s: env: is not a variable name (want %s)", where, k, envNameRE)
+	case r.File != "" && !isAbsPath(r.File):
+		return fmt.Errorf("%s.%s: file: must be an absolute path", where, k)
+	}
+	return nil
+}
+
+// checkWriteRole refuses a source_db_write_url that names the same reference
+// as source_db_url: the write actions would then run as the read-only role
+// (or the read tools as the write role), which defeats the separate role.
+// Only two references of the same form can be compared here; an env: and a
+// file: that hold the same DSN are caught by wiring when it resolves them.
+func checkWriteRole(c Connections) error {
+	w, okW := c["source_db_write_url"]
+	r, okR := c["source_db_url"]
+	if !okW || !okR {
+		return nil
+	}
+	if cw, cr := canonRef(w), canonRef(r); cw != "" && cw == cr {
+		return fmt.Errorf("connections.source_db_write_url: is the same reference as source_db_url; the write role needs its own credentials")
+	}
+	return nil
+}
+
+// canonRef is the canonical form of an env: or file: reference (see
+// ConnRefs), or "" for a literal.
+func canonRef(r ConnRef) string {
+	switch {
+	case r.Env != "":
+		return refEnv(r.Env)
+	case r.File != "":
+		return FileRef(r.File)
+	}
+	return ""
+}
+
 // isAbsPath accepts an absolute path on this OS, and also a slash-rooted one
 // so a file written on Linux checks the same way on a Windows dev machine.
 func isAbsPath(p string) bool {
 	return filepath.IsAbs(p) || strings.HasPrefix(p, "/")
+}
+
+// cleanRepos trims and checks a tenant's repos: list, like cleanNames for the
+// pipeline name lists. It returns the trimmed list and leaves its input alone.
+func cleanRepos(repos []string) ([]string, error) {
+	if repos == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(repos))
+	for i, raw := range repos {
+		name := strings.TrimSpace(raw)
+		switch {
+		case name == "":
+			return nil, fmt.Errorf("repos[%d]: empty entry", i)
+		case !repoIDRE.MatchString(name):
+			return nil, fmt.Errorf("repos: %s is not a repo id (want %s)", quoteName(name), repoIDRE)
+		}
+		out = append(out, name)
+	}
+	if d := firstDuplicate(out); d != "" {
+		return nil, fmt.Errorf("repos lists %q twice", d)
+	}
+	return out, nil
 }
 
 // checkNullBlocks refuses a tenants:, connections: or tenant: key whose value
@@ -538,6 +670,14 @@ func isAbsPath(p string) bool {
 // process-wide credentials (a lost tenants: block would turn the filter
 // off). The key's presence is read from the node tree. root is the decoded
 // document; anything that is not a mapping is left to the normal decoder.
+//
+// It also refuses a null entry inside an auto_approve: list. yaml.v3 drops a
+// null list item when it decodes into []string, so `- ` left behind by an edit
+// would vanish without a word and the policy the admin meant would not run. A
+// null auto_approve: key itself is left alone: it reads as no list, which is
+// no auto-approval, the safe meaning (checkAutoApproveSyntax). A null entry in
+// a dags: or models: list is refused the same way. Because only literal keys
+// are read, a `<<` merge key in a pipeline is refused too.
 func checkNullBlocks(root *yaml.Node) error {
 	doc := root
 	if doc.Kind == yaml.DocumentNode {
@@ -564,11 +704,67 @@ func checkNullBlocks(root *yaml.Node) error {
 		if id, ok := mapValue(p, "id"); ok && id.Kind == yaml.ScalarNode && !isNull(id) {
 			name = "pipeline " + quoteName(id.Value)
 		}
+		// This function reads literal keys only. A `<<` merge key would bring in
+		// fields it never sees (a null dags: entry, say), so it is refused.
+		for j := 0; j+1 < len(p.Content); j += 2 {
+			if k := p.Content[j]; k.Kind == yaml.ScalarNode && k.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: %s: merge key << is not supported in a pipeline; write the fields out", k.Line, name)
+			}
+		}
 		if v, ok := mapValue(p, "connections"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: connections: is empty (null); list the connections, or remove the key to use the process-wide settings", v.Line, name)
 		}
+		if v, ok := mapValue(p, "consumer_logs"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: consumer_logs: is empty (null); set its selector, or remove the key to leave consumer logs unconfigured", v.Line, name)
+		}
 		if v, ok := mapValue(p, "tenant"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: tenant: is empty (null); name the tenant, or remove the key for tenant %q", v.Line, name, DefaultTenant)
+		}
+		if v, ok := mapValue(p, "auto_approve"); ok && v.Kind == yaml.SequenceNode {
+			for _, item := range v.Content {
+				if isNull(item) {
+					return fmt.Errorf("line %d: %s: auto_approve: has an empty (null) entry; name an action or remove the entry", item.Line, name)
+				}
+			}
+		}
+		// X8: a dropped null require_staging: entry would drop a requirement,
+		// and a null staging: block would read as "no staging" while the
+		// file seems to declare one.
+		if v, ok := mapValue(p, "require_staging"); ok && v.Kind == yaml.SequenceNode {
+			for _, item := range v.Content {
+				if isNull(item) {
+					return fmt.Errorf("line %d: %s: require_staging: has an empty (null) entry; name an action or remove the entry", item.Line, name)
+				}
+			}
+		}
+		// X7c: a dropped null pii.include entry would drop a declared PII
+		// column; a null pii: block would read as "no overrides".
+		if v, ok := mapValue(p, "pii"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: pii: is empty (null); list include: or exclude:, or remove the key", v.Line, name)
+		} else if ok && v.Kind == yaml.MappingNode {
+			for _, key := range []string{"include", "exclude"} {
+				if l, ok := mapValue(v, key); ok && l.Kind == yaml.SequenceNode {
+					for _, item := range l.Content {
+						if isNull(item) {
+							return fmt.Errorf("line %d: %s: pii.%s: has an empty (null) entry; name a column or remove the entry", item.Line, name, key)
+						}
+					}
+				}
+			}
+		}
+		if v, ok := mapValue(p, "staging"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: staging: is empty (null); declare its connections:, or remove the key", v.Line, name)
+		}
+		// The same for dags: and models: of a batch pipeline: a dropped null
+		// entry would shrink the scope the file seems to give.
+		for _, key := range []string{"dags", "models"} {
+			if v, ok := mapValue(p, key); ok && v.Kind == yaml.SequenceNode {
+				for _, item := range v.Content {
+					if isNull(item) {
+						return fmt.Errorf("line %d: %s: %s: has an empty (null) entry; name one or remove the entry", item.Line, name, key)
+					}
+				}
+			}
 		}
 	}
 	return nil

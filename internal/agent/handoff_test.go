@@ -32,7 +32,7 @@ func TestWriteHandoff(t *testing.T) {
 		{Type: events.AgentHypothesis, Actor: events.Actor{Name: "Agent"}, Payload: json.RawMessage(`{"text":"amount changed","confirmed":false}`)},
 	}
 
-	got, err := writeHandoff(context.Background(), roomEvents, Options{}, m)
+	got, err := writeHandoff(context.Background(), roomEvents, Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatalf("writeHandoff: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestWriteHandoff(t *testing.T) {
 
 func TestWriteHandoffEmptyRoom(t *testing.T) {
 	m := &handoffModel{}
-	_, err := writeHandoff(context.Background(), nil, Options{}, m)
+	_, err := writeHandoff(context.Background(), nil, Options{}, viaSDK(m))
 	if err == nil {
 		t.Fatal("expected error for empty room")
 	}
@@ -60,7 +60,7 @@ func TestWriteHandoffInvalidJSON(t *testing.T) {
 		StopReason: anthropic.BetaStopReasonEndTurn,
 		Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: "not json"}},
 	}}
-	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, m)
+	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, viaSDK(m))
 	if err == nil {
 		t.Fatal("expected error for non-JSON output")
 	}
@@ -71,7 +71,7 @@ func TestWriteHandoffMissingField(t *testing.T) {
 		StopReason: anthropic.BetaStopReasonEndTurn,
 		Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: `{"what_broke":"","why":"","done":[],"ruled_out":[],"open":[],"risks":[]}`}},
 	}}
-	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, m)
+	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, viaSDK(m))
 	if err == nil {
 		t.Fatal("expected error when what_broke is empty")
 	}

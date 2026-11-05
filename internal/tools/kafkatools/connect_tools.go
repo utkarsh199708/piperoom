@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -277,6 +278,12 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 		"errors.deadletterqueue.context.headers.enable": true,
 		"errors.retry.timeout":                          true,
 		"event.processing.failure.handling.mode":        true,
+		// Debezium signalling and publication: a table name, a channel list,
+		// a publication name and an enum, never credentials. The prompt and
+		// pg_snapshot_signal's signal_table tell the agent to read
+		// signal.data.collection here; without them it cannot.
+		"signal.data.collection": true, "signal.enabled.channels": true,
+		"publication.name": true, "publication.autocreate.mode": true,
 	}
 	shown := map[string]string{}
 	for k, v := range cfg {
@@ -340,17 +347,22 @@ func sortedKeys(m map[string]string) []string {
 	return ks
 }
 
-// sensitiveKey reports whether a config key holds a credential. ".key" targets
-// fields like "ssl.key.password"/"api.key" but not "key.converter".
+// sensitiveKey reports whether a config key holds a credential. The substring
+// list mirrors actions.LooksSecret (secretKeySubstrings), so the tools and the
+// actions agree on what is a credential; ".key" additionally targets fields
+// like "ssl.key.password"/"api.key" but not "key.converter", and a last
+// segment authorization, seed or jwt marks a credential as in LooksSecret.
 func sensitiveKey(k string) bool {
 	lower := strings.ToLower(k)
-	if strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") {
+	for _, s := range secretKeySubstrings {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	if i := strings.LastIndexAny(lower, "._-"); slices.Contains(secretKeyLastSegments, lower[i+1:]) {
 		return true
 	}
-	if strings.Contains(lower, ".key") {
-		return true
-	}
-	return false
+	return strings.Contains(lower, ".key")
 }
 
 // truncateRunes returns s truncated to n bytes on a UTF-8 rune boundary.

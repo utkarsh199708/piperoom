@@ -792,6 +792,57 @@ func TestConnectErrorHeadersUnknownKeysDropped(t *testing.T) {
 	}
 }
 
+// TestConnectErrorHeadersRejectRule: Piperoom's own reject-rule header is the
+// one non-Connect key PeekDLQ returns (KAN-412). It is cleaned, capped and
+// redacted like the message, and every other application header stays dropped.
+func TestConnectErrorHeadersRejectRule(t *testing.T) {
+	got := connectErrorHeaders([]kgo.RecordHeader{
+		{Key: headerRejectRule, Value: []byte("status_enum")},
+		{Key: "x-trace-id", Value: []byte("trace")},
+		{Key: "x-piperoom-other", Value: []byte("nope")},
+		{Key: "X-Piperoom-Reject-Rule", Value: []byte("case")},
+	})
+	if len(got) != 1 || got[headerRejectRule] != "status_enum" {
+		t.Fatalf("got %v, want only the reject rule", got)
+	}
+
+	tests := []struct {
+		name, in string
+		want     string // "" = redacted text only checked by the absence list
+		absent   []string
+	}{
+		{"plain name", "status_enum", "status_enum", nil},
+		{"rejection text", `unknown status "gift"`, "", []string{"gift"}},
+		{"credential", "rule password=hunter2", "", []string{"hunter2"}},
+		{"newline becomes a space", "status\n_enum", "status _enum", nil},
+		{"other control bytes dropped", "status\x00_enum\x7f", "status_enum", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := connectErrorHeaders([]kgo.RecordHeader{{Key: headerRejectRule, Value: []byte(tc.in)}})[headerRejectRule]
+			if tc.want != "" && v != tc.want {
+				t.Fatalf("value = %q, want %q", v, tc.want)
+			}
+			if tc.want == "" && !strings.Contains(v, dlq.Redacted) {
+				t.Fatalf("value %q carries no redaction mark", v)
+			}
+			for _, a := range tc.absent {
+				if strings.Contains(v, a) {
+					t.Fatalf("value %q keeps %q", v, a)
+				}
+			}
+			if strings.ContainsAny(v, "\x00\n\r\t") {
+				t.Fatalf("value %q keeps control characters", v)
+			}
+		})
+	}
+
+	long := connectErrorHeaders([]kgo.RecordHeader{{Key: headerRejectRule, Value: []byte(strings.Repeat("A", 10*1024))}})[headerRejectRule]
+	if n := len([]rune(long)); n > dlq.MaxMessageRunes {
+		t.Fatalf("value has %d runes, want at most %d", n, dlq.MaxMessageRunes)
+	}
+}
+
 // TestNoGoroutineLeakFromRealConsumer builds and closes the real kgo consumer
 // path (no broker is contacted until polled) and checks the goroutine count
 // returns to its baseline.

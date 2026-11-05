@@ -59,6 +59,14 @@ func (f *pvConnect) UpdateConfig(context.Context, string, string, string) error 
 	f.rec("UpdateConfig")
 	return nil
 }
+func (f *pvConnect) PauseConnector(context.Context, string) error {
+	f.rec("PauseConnector")
+	return nil
+}
+func (f *pvConnect) UpdateConnectorConfigKeys(context.Context, string, map[string]string) error {
+	f.rec("UpdateConnectorConfigKeys")
+	return nil
+}
 func (f *pvConnect) ValidateConfig(_ context.Context, class string, cfg map[string]string) (connect.ValidateResult, error) {
 	f.rec("ValidateConfig")
 	f.validate = &validateCall{class, cfg}
@@ -283,7 +291,7 @@ func TestPreviewUpdateConfigUnsetNotReversible(t *testing.T) {
 func TestPreviewBadParams(t *testing.T) {
 	d := Deps{Connect: &pvConnect{}, Registry: &pvRegistry{}}
 	for _, a := range []Action{&restartTask{d: d}, &restartConnector{d: d}, &resumeConnector{d: d},
-		&updateConnectorConfig{d: d}, &setCompatibility{d: d}, &registerSchema{d: d}} {
+		&updateConnectorConfig{d: d}, &pauseConnector{d: d}, &setCompatibility{d: d}, &registerSchema{d: d}} {
 		_, err := a.(Preview).Preview(context.Background(), json.RawMessage(`{}`))
 		if err == nil || !strings.HasPrefix(err.Error(), "actions: preview "+a.Name()+": ") {
 			t.Errorf("%s: want wrapped error, got %v", a.Name(), err)
@@ -303,6 +311,7 @@ func TestPreviewNeverWrites(t *testing.T) {
 		&restartConnector{d: d}:      map[string]any{"connector": "c"},
 		&resumeConnector{d: d}:       map[string]any{"connector": "c"},
 		&updateConnectorConfig{d: d}: map[string]any{"connector": "c", "key": "decimal.handling.mode", "value": "string"},
+		&pauseConnector{d: d}:        map[string]any{"connector": "c"},
 		&setCompatibility{d: d}:      map[string]any{"subject": "s", "level": "NONE"},
 		&registerSchema{d: d}:        map[string]any{"subject": "s", "schema": `{"type":"string"}`},
 	}
@@ -313,7 +322,7 @@ func TestPreviewNeverWrites(t *testing.T) {
 	}
 	for _, c := range append(append([]string{}, fc.calls...), fr.calls...) {
 		switch c {
-		case "RestartTask", "RestartConnector", "Resume", "UpdateConfig", "SetCompatibility", "Register":
+		case "RestartTask", "RestartConnector", "Resume", "UpdateConfig", "PauseConnector", "UpdateConnectorConfigKeys", "SetCompatibility", "Register":
 			t.Errorf("Preview called writer method %s", c)
 		}
 	}

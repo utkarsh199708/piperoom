@@ -212,7 +212,7 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 		t.Fatalf("newRunner: %v", err)
 	}
 	m := &paramsModel{}
-	r.model = m
+	r.model = viaSDK(m)
 	_ = r.run(context.Background()) // the inbox ends the run; only the request matters
 	if len(m.params) == 0 {
 		t.Fatal("no model request was made")

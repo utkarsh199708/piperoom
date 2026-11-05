@@ -73,7 +73,7 @@ type stackFinder interface {
 func roomStacks(st stackFinder) func(pipelineID string) room.PipelineStack {
 	return func(pipelineID string) room.PipelineStack {
 		s := st.For(pipelineID)
-		return room.PipelineStack{Tools: s.Tools, Actions: s.Actions}
+		return room.PipelineStack{Tools: s.Tools, Actions: s.Actions, Staging: s.HasStaging()}
 	}
 }
 
@@ -84,11 +84,16 @@ func watchClients(st stackFinder) func(pipelineID string) watch.PipelineClients 
 		s := st.For(pipelineID)
 		pc := watch.PipelineClients{Set: s.Name}
 		if s.Clients != nil {
-			pc.Source, pc.Connect = s.Clients.Source, s.Clients.Connect
+			pc.Source, pc.Connect, pc.Warehouse = s.Clients.Source, s.Clients.Connect, s.Clients.Warehouse
 			// dlq_growth needs DLQ offsets; a Kafka client without them leaves
 			// the signal off for this set (watch.Deps.Kafka).
 			if r, ok := s.Clients.Kafka.(clients.DLQReader); ok {
 				pc.Kafka = r
+			}
+			// The consumer-group signals read GroupLag per set; without it
+			// they stay unknown (checkWatchLag reports that at start).
+			if r, ok := s.Clients.Kafka.(watch.LagReader); ok {
+				pc.Lag = r
 			}
 		}
 		return pc

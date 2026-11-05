@@ -1,6 +1,8 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
+import { DEVCTL_PROXY_KEY, devctlLoopbackGuard, devctlProxyOptions } from './src/lib/devctlProxy'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -8,6 +10,10 @@ export default defineConfig(({ mode }) => {
   // `PIPEROOM_API=http://127.0.0.1:9000 npm run dev`.
   const env = loadEnv(mode, process.cwd(), '')
   const api = process.env.PIPEROOM_API ?? env.PIPEROOM_API ?? 'http://127.0.0.1:8090'
+
+  // Where the dev-only `devctl serve` break/fix API listens (loopback, no auth).
+  // Override with PIPEROOM_DEVCTL, e.g. `PIPEROOM_DEVCTL=http://127.0.0.1:7071 npm run dev`.
+  const devctl = process.env.PIPEROOM_DEVCTL ?? env.PIPEROOM_DEVCTL ?? 'http://127.0.0.1:7071'
 
   // The session is an HttpOnly cookie, so the browser must talk to ONE origin.
   // The dev server proxies /api and /auth to the Go server (docs/design/auth.md
@@ -22,7 +28,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [react(), tailwindcss(), devctlLoopbackGuard()],
     resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
     build: {
       rollupOptions: {
@@ -38,7 +44,15 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    server: { proxy },
+    server: {
+      proxy: {
+        ...proxy,
+        // The dev-only "Break something" menu (web/src/components/shell/BreakSomethingMenu.tsx)
+        // drives `devctl serve` (cmd/devctl/serve.go); see src/lib/devctlProxy.ts for the
+        // prefix rewrite and the "not running" response.
+        [DEVCTL_PROXY_KEY]: devctlProxyOptions(devctl),
+      },
+    },
     preview: { proxy },
   }
 })

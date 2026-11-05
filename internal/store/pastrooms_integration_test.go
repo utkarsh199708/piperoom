@@ -23,8 +23,11 @@ func pastRoomsFixture() []fake.Room {
 	at := func(d int) time.Time { return time.Date(2026, 9, d, 10, 0, 0, 0, time.UTC) }
 	return []fake.Room{
 		{ID: "pr-old", Title: "orders stale", ClosedAt: at(1), Resolution: "restarted task 0", Layer: "kafka-connect", LabelTerms: []string{"avro"},
+			// A precedent needs a human label (similar_incidents returns labelled rooms only).
+			Label:       &events.RoomLabelledPayload{ActualLayer: "kafka-connect", Cause: "the connector role no longer owns table orders", FixThatWorked: "restarted task 0"},
 			ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: "org.apache.kafka.connect.errors.ConnectException: boom\nCaused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders"}}},
-		{ID: "pr-new", Title: "orders stale again", ClosedAt: at(9), Resolution: "set compatibility NONE", Handoff: &events.HandoffSummary{WhatBroke: "schema", Open: []string{"migration policy"}}},
+		{ID: "pr-new", Title: "orders stale again", ClosedAt: at(9), Resolution: "set compatibility NONE", Handoff: &events.HandoffSummary{WhatBroke: "schema", Open: []string{"migration policy"}},
+			Label: &events.RoomLabelledPayload{ActualLayer: "schema-registry", Cause: "the registry rejected the orders schema change", FixThatWorked: "set compatibility NONE"}},
 		{ID: "pr-pay", PipelineID: "payments", Title: "payments stale", ClosedAt: at(5), Resolution: "other pipeline"},
 	}
 }

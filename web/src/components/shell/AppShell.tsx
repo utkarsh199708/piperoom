@@ -4,12 +4,15 @@ import { ChevronRight, Menu } from 'lucide-react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { DialogDescription, DialogOverlay, DialogTitle } from '@/components/ui/dialog'
+import { FirstRunModelGate } from '@/components/models/FirstRunModelGate'
+import { ModelPopover } from '@/components/models/ModelPopover'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
 import { useCurrentUser } from '@/context/user'
 import { roomsNeedingYou, useListAttention } from '@/hooks/useListAttention'
 import { useRoomList } from '@/hooks/useRoomList'
+import { pageTitle } from '@/lib/title'
 import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
@@ -20,6 +23,13 @@ import { ThemeToggle } from './ThemeToggle'
 
 // cmdk and the menu are only needed once it is opened: a separate chunk.
 const CommandMenu = lazy(() => import('./CommandMenu').then((m) => ({ default: m.CommandMenu })))
+
+// The "Break something" menu is dev-only: import.meta.env.DEV is statically false in a
+// production build, so the import() (and the chunk's "/devctl" strings) are tree-shaken
+// out of dist, and nothing renders. In dev it loads as its own chunk on first paint.
+const BreakSomethingMenu = import.meta.env.DEV
+  ? lazy(() => import('./BreakSomethingMenu').then((m) => ({ default: m.BreakSomethingMenu })))
+  : null
 
 // True from 768px (Tailwind md). Without matchMedia (tests) it is true.
 function useIsDesktop(): boolean {
@@ -130,7 +140,7 @@ export function AppShell() {
   const needsYouCount = useMemo(() => roomsNeedingYou(rooms, user).length, [rooms, user])
   const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
   const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
-  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`))
+  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`), pageTitle(location.pathname))
 
   return (
     <InShellContext.Provider value>
@@ -158,6 +168,7 @@ export function AppShell() {
                   <SidebarContent
                     openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                     pipelines={pipelines}
                     currentPipelineId={currentPipelineId}
                     navKey={navKey}
@@ -177,6 +188,7 @@ export function AppShell() {
                     <SidebarContent
                       openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                       pipelines={pipelines}
                       currentPipelineId={currentPipelineId}
                       navKey={navKey}
@@ -202,7 +214,13 @@ export function AppShell() {
                   <Breadcrumb pipelineId={crumbPipeline ?? currentPipelineId} />
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <div ref={setSlotEl} className="flex min-w-0 items-center gap-2" data-testid="topbar-slot" />
+                    {roomId !== '' && <ModelPopover canEdit={user.role !== 'viewer'} />}
                     <ThemeToggle />
+                    {BreakSomethingMenu && (
+                      <Suspense fallback={null}>
+                        <BreakSomethingMenu />
+                      </Suspense>
+                    )}
                   </div>
                 </header>
                 <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:calc(var(--composer-h,0px)+var(--sheet-h,0px))] [scroll-padding-top:3rem] focus:outline-none">
@@ -217,6 +235,7 @@ export function AppShell() {
                 <CommandMenu open={paletteOpen} onOpenChange={setPaletteOpen} rooms={rooms} registry={registry} />
               </Suspense>
             )}
+            <FirstRunModelGate />
             <Toaster />
           </TooltipProvider>
          </BreadcrumbTailContext.Provider>
@@ -242,9 +261,31 @@ function safeDecode(v: string): string {
 function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const { pathname } = useLocation()
   const inRoom = pathname.startsWith('/rooms/')
+  if (pathname === '/settings') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Settings</h1>
+  }
+  if (pathname === '/fleet') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Fleet</h1>
+  }
+  if (pathname.startsWith('/pipelines/')) {
+    // X5b: one pipeline's lane, reached from the fleet. The id is the route's, shown as text.
+    return (
+      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
+        <Link to="/fleet" className="text-muted-foreground hover:text-foreground">
+          Fleet
+        </Link>
+        <ChevronRight className="size-3 shrink-0 text-subtle-foreground" aria-hidden="true" />
+        <h1 className="m-0 truncate font-mono text-sm font-medium text-foreground">
+          {safeDecode(pathname.slice('/pipelines/'.length))}
+        </h1>
+      </nav>
+    )
+  }
   if (!inRoom) {
     return (
-      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>
+      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
+        {pathname === '/shadow' ? 'Shadow results' : 'Rooms'}
+      </h1>
     )
   }
   return (

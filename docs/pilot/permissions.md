@@ -9,15 +9,23 @@ Piperoom, never reuse a human or application credential, so you can audit and re
 The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, actions in
 `internal/actions`, clients in `internal/clients/*`. Replace placeholders (`<...>`).
 
+**Write mode** adds more write calls — the three `pg_*` source-Postgres writes, the Connect
+pause and N-key config patch, the Kafka offset reset and the produce calls (signal and DLQ
+replay). Their write roles and ACLs are in [write-roles.md](write-roles.md); this page covers
+the read access and the original Connect and Registry writes.
+
 ## Summary
 
 | System | Used by | Read access needed | Write access needed |
 |---|---|---|---|
 | Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `pg_publication_tables`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views, catalog views | **none** |
-| Warehouse (Postgres, or Snowflake with `WAREHOUSE_KIND=snowflake`) | `warehouse_freshness`, `warehouse_row`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables | **none** |
-| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
+| Source MongoDB (setup only) | `source_create_read_role` and the canary (setup writer) | the capture user Piperoom creates: `find`/`changeStream` on captured collections and `find` on `local.oplog.rs` (deployment-wide, see the section) | the setup credential: user/role admin in `admin`, create and insert for the canary |
+| Warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md); see each warehouse's section) | **none** |
+| Airflow (batch orchestrator) | `dag_runs`, `task_instances`, `task_log_tail`, `dag_schedule_gap` | `Viewer` role; REST `GET` only | **none** |
+| dbt (batch transform) | `dbt_run_results`, `dbt_model_lineage`, `dbt_model_sql` | read `run_results.json` / `manifest.json` (a directory, or dbt Cloud with a read-only service token) | **none** |
+| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record`, `connect_worker_info` (Connect worker group and internal topics) | describe topics/groups, describe topic configs, read pipeline topics | **none** |
 | Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go`) | none | none |
-| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
+| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config`, `connect_source_offsets`, `connect_plugins`, `connect_validate_config`, `connect_worker_info` | REST `GET` (and the validate `PUT`, which creates nothing) | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | 2 actions: `schema_set_compatibility`, `schema_register` |
 | Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
 | Model provider | agent | `anthropic`: API key (env var). `bedrock`: AWS identity with invoke rights in `AWS_REGION`. `vertex`: Google identity with Vertex AI access in `VERTEX_PROJECT_ID` | n/a |
@@ -84,14 +92,53 @@ function is `SECURITY DEFINER`, so Piperoom's role only needs `SELECT` on the lo
 The log stores the full DDL statement text (`query`), so review that it does not contain
 secrets (for example `CREATE ROLE ... PASSWORD`) before enabling it in production.
 
+## Source MongoDB
+
+Setup only (U wave): Piperoom's incident tools do not read MongoDB yet. Two credentials are involved, and neither
+is the application's user.
+
+**The capture user Piperoom creates** (`source_create_read_role`, `internal/clients/mongodb/writer.go`). The setup
+writer creates, in `admin`:
+
+- a custom role `<user>_cdc` with `find` and `changeStream` on each captured collection (`db.collection` from the
+  pipeline's `source_tables`), `find` on `local.oplog.rs`, and no inherited role;
+- a user `<user>` holding only that role, with a generated password that goes straight to the runner's secret
+  store (`source_read_password`) and is never shown, logged or returned.
+
+An existing user or role of that name is an error; Piperoom never re-passwords or widens an existing user.
+
+> **Read the oplog grant before you approve it.** `find` on `local.oplog.rs` lets the user read every replicated
+> write in the deployment during the oplog window: every database and collection, not only the captured ones. That
+> includes writes to `admin.system.users`, which carry the SCRAM credentials of any user created or re-passworded in
+> that window (this capture user included). In practice this user can read far more than its per-collection
+> privileges suggest, so treat it as a deployment-wide read credential: keep it to the connector, and keep the oplog
+> window no longer than the connector needs.
+>
+> Why the grant is still there: Piperoom's own setup check `mongo-oplog-read` (`RoleInfo.Replication`, the
+> `no-oplog-role` setup break) requires it. Debezium 2.x captures through change streams and does not read
+> `local.oplog.rs` itself, so the grant is expected to go once the real-run row U7-R confirms the connector works
+> without it; the check then moves to change-stream access. Until then it stays, and this note is the record.
+
+The role may also be **too narrow** for some connector settings: Debezium's default `capture.scope=deployment`
+opens a cluster-wide change stream, which needs `changeStream` and `find` on `{db: "", collection: ""}`, and its
+snapshot may need `listDatabases` / `listCollections`. U7b sets `capture.scope` in the connector config, and U7-R
+confirms the final list; this section will be updated with it.
+
+**The setup write credential** (`PIPEROOM_IT_MONGODB_WRITE_URI` in tests; wiring is not done yet). It needs
+`viewUser`, `viewRole` (the existence checks), `createUser`, `createRole`, `dropUser` and `dropRole` in `admin`
+(the drops only undo a create that failed), and
+`createCollection` and `insert` in the canary's database. Use a dedicated setup user with exactly those actions, not
+`root`, and remove it after setup. The dev stack's `piperoom_admin` root user is for the local stack only.
+
 ## Warehouse
 
-**The warehouse is Postgres by default, or Snowflake with `WAREHOUSE_KIND=snowflake`.**
-`WAREHOUSE_KIND` accepts `postgres` (the default) or `snowflake`. Any other value stops the start
-(`internal/wiring/warehouse.go`). The choice is made in `internal/wiring/warehouse.go`,
-called from `internal/wiring/wiring.go`. With Postgres, `WAREHOUSE_DB_URL` is a Postgres URL and
-the client is `internal/clients/warehouse/warehouse.go`. With Snowflake, it is a gosnowflake DSN
-(see the Snowflake section below).
+**The warehouse is Postgres by default; set `WAREHOUSE_KIND` for Snowflake, BigQuery, Databricks or ClickHouse.**
+`WAREHOUSE_KIND` accepts `postgres` (the default), `snowflake`, `bigquery`, `databricks` or
+`clickhouse`; a value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). The choice is made in
+`internal/wiring/warehouse.go`, called from `internal/wiring/wiring.go`. With Postgres,
+`WAREHOUSE_DB_URL` is a Postgres URL and the client is `internal/clients/warehouse/warehouse.go`.
+With Snowflake, it is a gosnowflake DSN (see the Snowflake section below). With ClickHouse, it is
+a clickhouse-go/v2 DSN; see [clickhouse.md](clickhouse.md).
 
 Same principle for either engine: a dedicated `SELECT`-only identity on the sink tables from
 `sink_tables` in `owners.yaml`.
@@ -137,6 +184,218 @@ GRANT ROLE PIPEROOM_RO TO USER PIPEROOM_SVC;
 Do not grant `INSERT/UPDATE/DELETE/CREATE/OWNERSHIP`, and do not give the user other roles.
 Set a resource monitor / `STATEMENT_TIMEOUT_IN_SECONDS` on the dedicated warehouse to cap cost.
 
+### ClickHouse (`WAREHOUSE_KIND=clickhouse`)
+
+Set `WAREHOUSE_KIND=clickhouse`; `WAREHOUSE_DB_URL` is then a clickhouse-go/v2 DSN
+(`internal/config/config.go`; `internal/wiring/warehouse.go`). The client enforces a read-only
+session itself (`readonly = 2`) and issues only `SELECT` queries
+(`internal/clients/clickhouse/client.go`), but the grant is the real boundary: give the DSN's user
+only the grants below. Full setup, what the agent can read and the limits are in
+[clickhouse.md](clickhouse.md).
+
+- Create a settings profile with `readonly = 2` — **never `readonly = 1`**, which rejects the
+  per-query `readonly` and `max_execution_time` settings the client sends and fails every query
+  with code 164 (`internal/clients/clickhouse/errors.go`; `internal/clients/clickhouse/README.md`).
+  Reference SQL: `dev/clickhouse/init/01-reader.sql`.
+- `SELECT` on the sink tables from `sink_tables` in `owners.yaml`
+  (`dev/clickhouse/init/01-reader.sql` grants `analytics.*`).
+- For the optional load-error tool: `SELECT` on `system.query_log`, and on
+  `system.kafka_consumers` if you want the Kafka-engine error history
+  (`internal/clients/clickhouse/loads.go`). A missing `system.kafka_consumers` grant (or a build
+  without Kafka support) skips that history; query-log results are still returned (`loads.go`).
+
+## Airflow
+
+For a batch pipeline (`kind: batch` in `owners.yaml`) Piperoom reads the Airflow webserver's stable
+REST API v1 through `internal/clients/airflow/airflow.go`. It sends `GET` requests only, so an
+Airflow **Viewer** role is enough (`internal/clients/airflow/doc.go`). Airflow 2.1 or later is
+required (the client uses `order_by`, `doc.go`); Airflow 3's `/api/v2` is not supported yet.
+
+**Identity.** `AIRFLOW_URL` is the webserver base URL (its root, without `/api/v1`). Login is one
+of, never both (`internal/config/config.go` `ParseAirflow`; `airflow.go` `New`):
+
+- **basic auth** (`AIRFLOW_USERNAME` + `AIRFLOW_PASSWORD`) — Airflow's `basic_auth` API backend; or
+- **bearer token** (`AIRFLOW_TOKEN`) — as managed Airflow services expect, sent as
+  `Authorization: Bearer <token>`.
+
+Either login is refused over plain `http://` (`airflow.go` `New`; `internal/clients/netsec/http.go`):
+the password or token would travel in clear text. A URL with no login is allowed — an Airflow
+behind a proxy that authenticates (`config.go` `ParseAirflow`). The credential is sent only to the
+base URL's own scheme and host, never to a redirect target (`airflow.go` `bearer`). An optional
+`WithTLS` sets a CA bundle, client certificate and server name for an `https` URL (`airflow.go`).
+
+**Every API call Piperoom makes** (`internal/clients/airflow/doc.go`; each path segment is
+`url.PathEscape`'d and checked by `netsec.CheckPath`):
+
+| Method and path | Used by | Code |
+|---|---|---|
+| `GET /api/v1/dags/{dag_id}` | `dag_schedule_gap` (schedule state) | `airflow.go` (`DAG`) |
+| `GET /api/v1/dags/{dag_id}/dagRuns?limit=N&order_by=-execution_date` | `dag_runs` | `airflow.go` (`DAGRuns`) |
+| `GET /api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances?limit=100&offset=N` | `task_instances` | `airflow.go` (`TaskInstances`) |
+| `GET /api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{task_try_number}[?map_index=N]` | `task_log_tail` | `airflow.go` (`TaskLogTailMapped`) |
+
+There is no write call. A wrong login surfaces as `ErrAuth` (401/403) (`airflow.go`). The `dag_id`
+a tool reads must be one of the room pipeline's `dags` (`internal/tools/batchtools/batchtools.go`
+`scopeDAG`), and a DAG outside it is refused before any read.
+
+## dbt
+
+For a batch pipeline, Piperoom reads dbt's artifacts — `run_results.json` and `manifest.json` —
+through `internal/clients/dbt`, never by running dbt. Two readers implement the same interface
+(`internal/clients/dbt/doc.go`; `reader.go` `FromConfig`); pick one:
+
+- **Artifacts directory** (`DBT_ARTIFACTS_DIR`): `internal/clients/dbt/dir.go` opens
+  `run_results.json` and `manifest.json` from dbt's `target/` directory, re-read on every call.
+  **Identity:** the OS user the Piperoom server runs as needs read access to the directory and its
+  two files. Files are opened for reading only, and only regular files (a FIFO or device in place
+  of an artifact is refused unopened, `dir.go`).
+- **dbt Cloud** (`DBT_CLOUD_URL`): `internal/clients/dbt/cloud.go` reads the same two artifacts of
+  the newest finished run of one job through the Administrative API v2. **Identity:** a read-only
+  **service token** (`DBT_CLOUD_TOKEN`), sent as `Authorization: Bearer <token>`. A **Job Viewer**
+  service token is enough (`doc.go`). The token goes only to `DBT_CLOUD_URL`'s own scheme and host,
+  never to a redirect target (`cloud.go` `bearer`).
+
+Only one source may be set; a `DBT_ARTIFACTS_DIR` that is not an absolute path, a dbt Cloud URL over
+`http://`, or incomplete dbt Cloud settings stop the start (`internal/config/config.go` `ParseDBT`).
+
+**dbt Cloud API calls** (`internal/clients/dbt/doc.go`; segments `url.PathEscape`'d and checked by
+`netsec.CheckPath`):
+
+| Method and path | Purpose | Code |
+|---|---|---|
+| `GET /api/v2/accounts/{a}/runs/?job_definition_id={j}&order_by=-id&limit=10` | find the newest finished (not cancelled) run | `cloud.go` (`latestRun`) |
+| `GET /api/v2/accounts/{a}/runs/{run_id}/artifacts/run_results.json` | `dbt_run_results` | `cloud.go` (`artifact`) |
+| `GET /api/v2/accounts/{a}/runs/{run_id}/artifacts/manifest.json` | `dbt_model_lineage`, `dbt_model_sql` | `cloud.go` (`artifact`) |
+
+Each artifact is capped at 16 MiB (`MaxArtifactBytes`, `internal/clients/dbt/artifacts.go`) and its
+`metadata.dbt_schema_version` checked before use: an unsupported, malformed or oversized artifact is
+an error, never a partial result (`artifacts.go`; `doc.go`). `DBT_CLOUD_ACCOUNT_ID` is the `{a}` and
+`DBT_CLOUD_JOB_ID` the `{j}` above.
+
+The dbt tools are read-only (`internal/tools/dbttools`): `dbt_run_results` shows each node's status
+and dbt's message, `dbt_model_lineage` one model's direct parents and children, and `dbt_model_sql`
+**shows** a model's compiled SQL — it never executes it (`internal/tools/dbttools/dbttools.go`;
+`model_sql.go`). A model is in scope only when it is one of the room pipeline's `models` or a direct
+parent or child of one (`internal/tools/dbttools/dbttools.go` `checkModel`).
+
+## BigQuery
+
+`WAREHOUSE_KIND=bigquery` makes the warehouse a Google BigQuery project (`internal/wiring/warehouse.go`).
+`WAREHOUSE_DB_URL` is
+
+```
+bigquery://<project>/<location>[?billing_project=<project>][&max_bytes_billed=<bytes>]
+```
+
+The DSN carries **no credential**: the client uses Google Application Default Credentials
+(`internal/clients/bigquery/dsn.go`; `README.md`). Give it a dedicated service account (workload
+identity on GKE, a key file, or the instance metadata server). A `user:password@` in the DSN is
+refused at startup (`dsn.go`).
+
+**Minimum IAM roles** — read-only comes from these, not from code
+(`internal/clients/bigquery/README.md`):
+
+| Role | On | Why |
+|---|---|---|
+| `roles/bigquery.dataViewer` | each sink dataset (or the project) | read table data and `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` / `KEY_COLUMN_USAGE` |
+| `roles/bigquery.jobUser` | the billing project | run query jobs (`bigquery.jobs.create`) |
+| `roles/bigquery.resourceViewer` | the data project | `bigquery.jobs.listAll`, which `warehouse_load_errors`' `INFORMATION_SCHEMA.JOBS` read needs; without it the call is `ErrPermissionDenied` |
+
+None of these can modify table data. Do not grant `dataEditor`, `dataOwner` or `admin`. Query
+results go to an anonymous temporary table the service manages; no user dataset is written
+(`README.md`).
+
+**Every query Piperoom makes** — fixed `SELECT` statements with backtick-quoted, validated
+identifiers and named parameters (`@key`, `@since`, ...); no SQL text from a tool reaches a query
+(`internal/clients/bigquery/bigquery.go`; `runner.go`):
+
+| Query | Used by |
+|---|---|
+| `SELECT MAX(<ts>)` | `warehouse_freshness` |
+| `SELECT * ... WHERE CAST(<pk> AS STRING) = @key LIMIT 1` | `warehouse_row` |
+| `INFORMATION_SCHEMA.TABLE_CONSTRAINTS` join `KEY_COLUMN_USAGE` | primary-key discovery for `warehouse_row` |
+| `` `region-<location>`.INFORMATION_SCHEMA.JOBS `` | `warehouse_load_errors` |
+
+Each query runs under a 10 s deadline, is labelled `app: piperoom`, and is capped by
+`max_bytes_billed` (default 10 GiB, `0` = the project default) so a runaway scan fails instead of
+billing (`runner.go`; `dsn.go`). `sink_tables` are `dataset.table` in `<project>`; a project prefix
+in a table name is refused, so a tool cannot reach another project the credential can see
+(`README.md`). `warehouse_row` and `warehouse_freshness` behave as in
+[data-handling.md](data-handling.md#2-what-each-tool-exposes) (key and non-timestamp columns are
+dropped; column names come back lower-cased). **Network:** the host running Piperoom needs egress
+to the Google BigQuery API for the project and location named in the DSN.
+
+## Databricks
+
+`WAREHOUSE_KIND=databricks` makes the warehouse a Databricks SQL warehouse on Unity Catalog
+(`internal/wiring/warehouse.go`). `WAREHOUSE_DB_URL` is the `databricks-sql-go` DSN form, restricted
+to what a read-only reader needs (`internal/clients/databricks/dsn.go`; `README.md`):
+
+```
+token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
+```
+
+**Identity:** a **service principal** (better) or a user. Two login forms exist; the DSN holds
+exactly one (checked against `main` @ `cd330eb`):
+
+| Form | DSN part | Code |
+|---|---|---|
+| OAuth M2M (service principal client credentials) | `clientId=<id>&clientSecret=<secret>[&authType=OAuthM2M]`, no `token:` user info | `internal/clients/databricks/dsn.go:185-193` (parse); `internal/clients/databricks/databricks.go:86-98` (authenticator); `internal/clients/databricks/README.md:18-21` |
+| Personal access token (PAT) | `token:<pat>@` (or `accessToken=<pat>`); use a PAT of a service principal, not of a person | `internal/clients/databricks/dsn.go:195-197`; `internal/clients/databricks/databricks.go:99-100`; `internal/clients/databricks/README.md:15` |
+
+- **Prefer OAuth M2M.** OAuth M2M landed with P4e-3 (merged as #720, `ea1522d`), so the earlier
+  advice "OAuth M2M is not supported, use a PAT" no longer holds. A workspace that disables
+  personal access tokens can connect with M2M. Whether your workspace allows PATs or service
+  principal OAuth secrets is a workspace setting that this repository cannot tell: not verified,
+  check the Databricks admin docs.
+- M2M tokens are minted by Piperoom's own authenticator over one bounded HTTP client (10 s timeout,
+  4 MB body cap), cached until a minute before expiry, with scope `all-apis`. A hung token endpoint
+  fails the query within the cap and the query never reaches the warehouse
+  (`internal/clients/databricks/m2m.go:19-30, 64-76`; `internal/clients/databricks/README.md:57-66`).
+  The client secret and the token never appear in errors (`internal/clients/databricks/m2m.go:62-63`).
+- A DSN that mixes a token with client credentials, has only one of `clientId`/`clientSecret`, or has
+  no credential stops the start (`internal/clients/databricks/dsn.go:187-197`). OAuth U2M is refused
+  because it opens a browser, and `http://` is refused because the credential would travel in clear
+  text (`internal/clients/databricks/dsn.go:89-90, 146`).
+- Keep the DSN in a secret store; errors never quote it, the token or the client secret
+  (`internal/clients/databricks/dsn.go` `Redact`; `internal/wiring/warehouse.go:111, 129`). A bad or
+  expired credential, or a missing `CAN USE` on the warehouse, surfaces as `ErrPermissionDenied`
+  (HTTP 401/403) (`internal/clients/databricks/errors.go:16-20`).
+- Requires Databricks Runtime 14.1 or later on the SQL warehouse (named parameters,
+  `internal/clients/databricks/README.md:24`).
+- **Update when the code changes:** this row describes `main` @ `cd330eb`, after P4e-3 (#720).
+
+**Minimum grants** — read-only comes from the principal, not from code; the driver has no read-only
+session switch (`internal/clients/databricks/databricks.go`; `README.md`):
+
+| Grant | On | Why |
+|---|---|---|
+| `CAN USE` | the SQL warehouse | run statements (without it every call is 403, `ErrPermissionDenied`) |
+| `USE CATALOG` | the catalog | resolve `catalog.schema.table` |
+| `USE SCHEMA` | each sink schema | resolve the tables |
+| `SELECT` | each sink table (or the schema) | `warehouse_freshness`, `warehouse_row`, `reconcile`, and the `information_schema` read for the primary key |
+
+Do not grant `MODIFY`, `ALL PRIVILEGES`, `CREATE TABLE`, ownership, or `CAN MANAGE`; do not use a
+workspace admin's token (`README.md`).
+
+**Every query Piperoom makes** — fixed `SELECT` statements with backtick-quoted, validated
+identifiers and named parameters (`:key`, `:since`, ...; DBR 14.1 or later); no SQL text from a
+tool reaches a query (`databricks.go`; `runner.go`):
+
+| Query | Used by |
+|---|---|
+| `SELECT MAX(<ts>)` | `warehouse_freshness` |
+| `SELECT * ... WHERE CAST(<pk> AS STRING) = :key LIMIT 1` | `warehouse_row` |
+| `catalog.information_schema.table_constraints` join `key_column_usage` | primary-key discovery for `warehouse_row` |
+| `SELECT COUNT(*)` grouped into time buckets | `reconcile` counts (`CountByBucket`) |
+
+Sessions run in UTC; every call has a 10 s deadline (context and server-side statement timeout),
+cloud fetch is off, and each HTTP response is capped at 4 MB (`README.md`;
+`internal/clients/databricks/transport.go`). `sink_tables` are `schema.table` in the catalog; a
+catalog prefix in a table name is refused (`README.md`). `warehouse_row` and `warehouse_freshness`
+behave as in [data-handling.md](data-handling.md#2-what-each-tool-exposes). **Network:** the host
+running Piperoom needs egress to the workspace host named in the DSN.
+
 ## Kafka
 
 Piperoom uses the Kafka protocol for metadata, offsets, consumer-group lag, and reading
@@ -153,6 +412,8 @@ Minimum ACLs for a principal such as `User:piperoom`:
 | Topic `<prefix>*` | `DescribeConfigs` | `kafka_topic_config` (retention, cleanup policy, min in-sync replicas, partitions, replication factor). Calls `DescribeTopicConfigs` (`internal/clients/kafka/kafka.go`; `internal/tools/kafkatools/kafka_tools.go`) |
 | Group `<consumer group>` (literal, one per consumer in `owners.yaml`) | `Describe` | `kafka_consumer_lag` |
 | Cluster | `Describe` only if your brokers require it for group listing | `kafka_list_groups` |
+| Group `<connect GROUP_ID>` (literal, the Connect cluster's `group.id`) | `Describe` | `connect_worker_info` (Q3a): `ListGroups` keeps groups with protocol type `connect`, then `DescribeGroups` reads their members (`internal/clients/kafka/connect_cluster.go`) |
+| Topic: the Connect internal topics (`config.storage.topic`, `offset.storage.topic`, `status.storage.topic`, literal) | `Describe`, `DescribeConfigs` | `connect_worker_info`: partitions, replication and `cleanup.policy` / `min.insync.replicas`; never `Read` (their values are never consumed). Without `CONNECT_INTERNAL_TOPICS` the tool lists all topics' metadata to find them by name |
 
 Do **not** grant `Write`, `Create`, `Delete`, `Alter`, `AlterConfigs`, `ClusterAction`, or `Read`
 on groups (that would allow committing offsets). Do not grant `Read` on topics outside the
@@ -201,6 +462,11 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 | `GET /connectors` | `connect_list_connectors`; actions check that a connector exists | `connect.go` |
 | `GET /connectors/{name}/status` | `connect_status`; actions read state and poll it | `connect.go` |
 | `GET /connectors/{name}/config` | `connect_config`; the config action reads it before and after its write | `connect.go`, `internal/actions/connector_config.go` |
+| `GET /connectors/{name}/offsets` | `connect_source_offsets` (Kafka Connect 3.5+, KIP-875; positions only, no record data) | `internal/clients/connect/lifecycle.go` (`SourceOffsets`); `internal/tools/kafkatools/connect_offsets.go` |
+| `GET /` | `connect_source_offsets`, only to name the worker's version when the offsets endpoint is missing; `connect_plugins` and `connect_worker_info` (the worker's Kafka version) | `lifecycle.go` (`ServerInfo`) |
+| `GET /connector-plugins?connectorsOnly=false` | `connect_plugins` (Q1c), `connect_worker_info` (Q3a), and once per room for `runbook_lookup`'s running versions (Q1d, `internal/agent/versions.go`) | `internal/clients/connect/plugins.go` (`Plugins`) |
+| `GET /connector-plugins/{class}/config` and `PUT /connector-plugins/{class}/config/validate` | `connect_validate_config` (Q4b) and `connect_create_connector`'s proposal and preview; validate is a `PUT` that creates nothing | `connect.go` (`PluginConfigDef`, `ValidateConfig`) |
+| `GET /admin/loggers` | `connect_worker_info` (Q3a): logger names and levels of the worker at `CONNECT_URL`, Kafka Connect 2.4+ | `internal/clients/connect/loggers.go` (`Loggers`) |
 
 **Write calls (only for approved fixes, one per action):**
 
@@ -213,7 +479,12 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 
 Notes on the table:
 
-- Piperoom sends no other write. No create, no delete, no pause, and no `PUT` on config.
+- These are the original four. Write mode adds the pause and the N-key config patch, and the connector lifecycle
+  actions (stop, offsets reset, create, delete; registered in both modes since Q5d, but they write only with write
+  mode on); every one of those calls, with the Kafka Connect version it needs, is in
+  [write-roles.md](write-roles.md#kafka-connect). The staged config change
+  (`internal/actions/stage.go`) sends `PUT /connectors/{name}/config` (`PutConnectorConfig`,
+  `internal/clients/connect/put_config.go`); it is not covered on these two pages.
 - `connect_update_connector_config` may change only these keys and values
   (`defaultConnectorConfigAllowList` in `internal/actions/connector_config.go`):
   `decimal.handling.mode` = `precise|string` (`double` is not offered: it loses precision, which matters
@@ -231,8 +502,11 @@ Notes on the table:
   reported as an error. There is no `PUT` fallback (`Client.UpdateConfig`).
 - Connect restarts the connector's tasks when its config changes, so the update is not free.
 
-**Read-only mode (recommended default):** allow only these three `GET` calls:
-`GET /connectors`, `GET /connectors/{name}/status` and `GET /connectors/{name}/config`.
+**Read-only mode (recommended default):** allow these `GET` calls:
+`GET /connectors`, `GET /connectors/{name}/status`, `GET /connectors/{name}/config`, and for
+`connect_source_offsets` `GET /connectors/{name}/offsets` and `GET /`; for `connect_plugins` and
+`connect_worker_info` also `GET /connector-plugins` and `GET /admin/loggers`, and for config validation
+`GET /connector-plugins/{class}/config` and `PUT /connector-plugins/{class}/config/validate`.
 Proposals that need a write will then fail, by design.
 
 **Write mode (only to allow approved fixes):** additionally allow exactly these four calls:
@@ -322,8 +596,13 @@ Pick one provider. The default is `anthropic` (the section above).
 - [ ] Every credential is dedicated to Piperoom and stored in a secret manager, not in the repo or in `owners.yaml`.
 - [ ] Postgres and warehouse roles cannot write (`INSERT` as that role fails), and see only pipeline tables.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
-- [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above.
-- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go`).
+- [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above, plus the P3 calls in [write-roles.md](write-roles.md).
+- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the ClickHouse host (only if `WAREHOUSE_KIND=clickhouse`), the Google BigQuery endpoint and `oauth2.googleapis.com` (where a service-account key file exchanges its ADC token) (only if `WAREHOUSE_KIND=bigquery`), the Databricks workspace host (only if `WAREHOUSE_KIND=databricks`), the `AIRFLOW_URL` and `DBT_CLOUD_URL` hosts (only for a batch pipeline), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go`).
 - [ ] If `WAREHOUSE_KIND=snowflake`: the DSN password is URL-encoded, the role in the DSN has only `USAGE` and `SELECT` as listed above, and the resource monitor is set.
+- [ ] If `WAREHOUSE_KIND=clickhouse`: the DSN's user has a `readonly=2` profile (never `readonly=1`) and only the `SELECT` grants listed above (`dev/clickhouse/init/01-reader.sql`).
+- [ ] Airflow: the login (basic auth or a bearer token) is dedicated to Piperoom, over `https`, and has the `Viewer` role only.
+- [ ] dbt: `DBT_ARTIFACTS_DIR` is readable only by the server's user, or the `DBT_CLOUD_TOKEN` is a read-only (Job Viewer) service token over `https`.
+- [ ] If `WAREHOUSE_KIND=bigquery`: the service account has only `roles/bigquery.dataViewer` on the sink datasets, `roles/bigquery.jobUser` on the billing project and `roles/bigquery.resourceViewer` on the data project.
+- [ ] If `WAREHOUSE_KIND=databricks`: the credential is a dedicated service principal's OAuth M2M client id and secret (or, if you must, that principal's personal access token), and the principal has only `CAN USE` on the warehouse and `USE CATALOG`/`USE SCHEMA`/`SELECT` in Unity Catalog.
 - [ ] `ANTHROPIC_BASE_URL` is unset or pinned, and `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` are unset on the host (`anthropic-sdk-go@v1.80.0/client.go:52-82`).
 - [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.

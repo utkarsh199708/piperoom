@@ -179,10 +179,20 @@ func TestE2EAlertToWebSocket(t *testing.T) {
 	if e.Seq != 2 || e.Type != events.AgentToolResult {
 		t.Fatalf("event 2: want agent.tool_result/2, got %s/%d", e.Type, e.Seq)
 	}
+	// arjun is a member and the first to join this driverless alert room, so
+	// the server makes him its driver (P2b sole member, docs/api.md item 4),
+	// and the grant is the next event on his connection.
+	e = viewer.nextEvent(t, 5*time.Second)
+	if e.Seq != 3 || e.Type != events.ControlGranted {
+		t.Fatalf("event 3: want control.granted/3, got %s/%d", e.Type, e.Seq)
+	}
+	if p, err := events.Decode[events.ControlGrantedPayload](e); err != nil || p.Reason != events.ControlReasonSoleMember || p.To.ID != "arjun" {
+		t.Fatalf("event 3: payload %+v (err %v), want sole_member to arjun", p, err)
+	}
 
 	// 4. A client already at the last seq gets nothing until a new event is
-	// appended.
-	current := dialWS(t, srv, snap.ID, "priya", 2)
+	// appended (a second member's join grants nothing).
+	current := dialWS(t, srv, snap.ID, "priya", 3)
 	current.noEvent(t, 400*time.Millisecond)
 
 	// 5. One new event: both clients receive exactly that one, nothing else.
@@ -190,12 +200,13 @@ func TestE2EAlertToWebSocket(t *testing.T) {
 		t.Fatalf("comment: %v", err)
 	}
 	e = current.nextEvent(t, 5*time.Second)
-	if e.Seq != 3 || e.Type != events.CommentAdded {
-		t.Fatalf("event 3 on current: want comment.added/3, got %s/%d", e.Type, e.Seq)
+	if e.Seq != 4 || e.Type != events.CommentAdded {
+		t.Fatalf("event 4 on current: want comment.added/4, got %s/%d", e.Type, e.Seq)
 	}
 	e = viewer.nextEvent(t, 5*time.Second)
-	if e.Seq != 3 || e.Type != events.CommentAdded {
-		t.Fatalf("event 3 on viewer: want comment.added/3, got %s/%d", e.Type, e.Seq)
+	if e.Seq != 4 || e.Type != events.CommentAdded {
+		t.Fatalf("event 4 on viewer: want comment.added/4, got %s/%d", e.Type, e.Seq)
 	}
 	current.noEvent(t, 300*time.Millisecond)
+	viewer.noEvent(t, 100*time.Millisecond)
 }

@@ -13,7 +13,7 @@ describe('traceVerdict', () => {
           { layer: 'consumer', name: 'order-sync', status: 'stopped_here', facts: { committed: '48212', lag: '9' } },
         ]),
       ),
-    ).toEqual({ tone: 'fail', text: 'Stopped at consumer order-sync — committed=48212' })
+    ).toEqual({ tone: 'fail', text: 'Stopped at consumer order-sync — committed offset 48212' })
   })
   it('omits the dash without facts', () => {
     expect(traceVerdict(t([{ layer: 'warehouse', name: 'a.b', status: 'stopped_here' }])).text).toBe('Stopped at warehouse a.b')

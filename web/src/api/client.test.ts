@@ -247,6 +247,45 @@ describe('people and approve (auth PR 3)', () => {
     })
   })
 
+  it('approveAll posts {params_hash, confirm?} to approve-all and answers the events', async () => {
+    const events = [{ seq: 7, type: 'approval.given' }, { seq: 8, type: 'approval.given' }]
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, events)))
+    await expect(api.approveAll('p 1', { params_hash: 'h1' })).resolves.toEqual(events)
+    expect(lastCall().url).toBe('/api/proposals/p%201/approve-all')
+    expect(lastCall().init.method).toBe('POST')
+    expect(lastCall().headers.get('Content-Type')).toBe('application/json')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ params_hash: 'h1' })
+    await api.approveAll('p_1', { params_hash: 'h1', confirm: 'orders/*' })
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ params_hash: 'h1', confirm: 'orders/*' })
+  })
+
+  it('approveAll rejects with the route error code (403 not_layer_owner)', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, { error: { code: 'not_layer_owner', message: 'layer "kafka": user sam does not own layer "kafka"' } }),
+    )
+    const err = await api.approveAll('p_1', { params_hash: 'h1' }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiClientError)
+    expect((err as ApiClientError).status).toBe(403)
+    expect((err as ApiClientError).code).toBe('not_layer_owner')
+    expect((err as ApiClientError).message).toContain('layer "kafka"')
+  })
+
+  it('cancelProposal posts {reason?} to cancel and rejects 409 not_scheduled with its code', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { seq: 9, type: 'proposal.cancelled' })))
+    await api.cancelProposal('p 1')
+    expect(lastCall().url).toBe('/api/proposals/p%201/cancel')
+    expect(lastCall().init.method).toBe('POST')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({})
+    await api.cancelProposal('p_1', 'not during the backfill')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ reason: 'not during the backfill' })
+
+    fetchMock.mockResolvedValue(jsonResponse(409, { error: { code: 'not_scheduled', message: 'no countdown is pending' } }))
+    const err = await api.cancelProposal('p_1').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiClientError)
+    expect((err as ApiClientError).status).toBe(409)
+    expect((err as ApiClientError).code).toBe('not_scheduled')
+  })
+
   it('reject sends {layer, reason, params_hash}', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
     await api.reject('p_1', 'kafka', 'wrong subject', 'h1')
@@ -363,5 +402,33 @@ describe('idempotency key (#459)', () => {
     expect(JSON.parse(String(lastCall().init.body))).toEqual({ step_id: 's1', text: 'ok', client_id: 'k2' })
     await api.steer('r1', 'stop')
     expect(JSON.parse(String(lastCall().init.body))).toEqual({ text: 'stop' })
+  })
+})
+
+describe('setup routes (U1-5b, U1-5d; U1-12b controls)', () => {
+  it('setupSecret POSTs the name and value to its own route', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+    await api.setupSecret('r 1', { name: 'DB_PASSWORD', value: 's3cr3t!' })
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r%201/setup/secret')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ name: 'DB_PASSWORD', value: 's3cr3t!' })
+  })
+
+  it('setupCredentials asks the runner with no body at all', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 202 }))
+    await api.setupCredentials('r_1')
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r_1/setup/credentials')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('setupTargetClass sends the target as a path segment and the class in the body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { seq: 1 }))
+    await api.setupTargetClass('r_1', 'db.acme:5432', { class: 'production' })
+    const { url, init } = lastCall()
+    expect(url).toBe('/api/rooms/r_1/setup/targets/db.acme%3A5432/class')
+    expect(JSON.parse(String(init.body))).toEqual({ class: 'production' })
   })
 })

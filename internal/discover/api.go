@@ -1,6 +1,8 @@
 // Package discover drafts an owners file from a live cluster: one pipeline per
-// Debezium Postgres source connector, with its topic prefix, source tables,
-// topics' consumer groups and notes for a human to review.
+// Debezium Postgres or MySQL source connector, with its topic prefix, source
+// tables, topics' consumer groups and notes for a human to review. A MySQL
+// connector's pipeline says source_kind: mysql (docs/design/mysql-source.md
+// §10.3).
 //
 // It is read-only by type: the narrow interfaces below expose only read
 // methods of the client contracts, and compile-time assertions prove the real
@@ -74,12 +76,23 @@ const (
 // Pipeline is one drafted owners.yaml pipeline. Lists are sorted and
 // de-duplicated. Notes are fixed text plus names only, never config values.
 type Pipeline struct {
-	ID             string
-	Connector      string // connector name; also the draft title
-	TopicPrefix    string
-	SourceTables   []string
+	ID        string
+	Connector string // connector name; also the draft title
+	// SourceKind is the owners.yaml source_kind: "" for a Debezium Postgres
+	// source (the default, left out of the file), "mysql" for a Debezium
+	// MySQL one.
+	SourceKind   string
+	TopicPrefix  string
+	SourceTables []string
+	// Topics are the "<prefix>.<schema>.<table>" topics that exist for
+	// SourceTables; a table with no topic yet has none.
+	Topics         []string
 	ConsumerGroups []string
-	Notes          []string
+	// SinkTables are warehouse tables (schema.table) that a sink connector
+	// reading one of Topics names literally in its config. Empty means "not
+	// found", never "none": the name is never guessed.
+	SinkTables []string
+	Notes      []string
 }
 
 // Skipped is a connector that produced no pipeline, with a short reason.

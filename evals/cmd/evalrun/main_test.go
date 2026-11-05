@@ -340,3 +340,86 @@ func TestRunCheckValidatesLearnedAndPending(t *testing.T) {
 		t.Fatalf("code %d err %v", code, err)
 	}
 }
+
+// TestRunCompareInvalidCalls: invalid tool calls per run growing fails
+// -fail-on-regression like a regression; an older baseline without the
+// counter is unknown and never fails.
+func TestRunCompareInvalidCalls(t *testing.T) {
+	dir := t.TempDir()
+	sum := func(invalid *int) evals.ScenarioSummary {
+		return evals.ScenarioSummary{Name: "a", Summary: evals.Summary{Runs: 3, Passes: 3, PassRate: 1, MeanScore: 90, InvalidToolCalls: invalid}}
+	}
+	n := func(v int) *int { return &v }
+	base := saveReport(t, dir, "base.json", evals.Report{Label: "main", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(0))}})
+	old := saveReport(t, dir, "old.json", evals.Report{Label: "old", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(nil)}})
+	same := saveReport(t, dir, "same.json", evals.Report{Label: "same", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(0))}})
+	more := saveReport(t, dir, "more.json", evals.Report{Label: "more", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(2))}})
+
+	cases := []struct {
+		name, base, cand string
+		code             int
+		want             string
+	}{
+		{"same", base, same, 0, "invalid tool calls per run over 1 shared scenario(s): 0.00 → 0.00"},
+		{"grew", base, more, exitRegressed, "**invalid tool calls per run grew**"},
+		{"old baseline", old, more, 0, "invalid tool calls: unknown, not compared"},
+	}
+	for _, tc := range cases {
+		var out bytes.Buffer
+		code, err := run(flags{compare: tc.base + "," + tc.cand, failOnRegr: true, tolerance: 5}, &out, &out)
+		if err != nil || code != tc.code || !strings.Contains(out.String(), tc.want) {
+			t.Errorf("%s: code %d err %v out:\n%s", tc.name, code, err, out.String())
+		}
+	}
+}
+
+// TestSetupRecordingsDir: the sibling setup/recordings directory is used only
+// when it holds a *.json recording; an absent or empty one reads none.
+func TestSetupRecordingsDir(t *testing.T) {
+	root := t.TempDir()
+	scen := filepath.Join(root, "scenarios")
+	recs := filepath.Join(root, "setup", "recordings")
+	if got := setupRecordingsDir(scen); got != "" {
+		t.Errorf("absent dir: got %q, want empty", got)
+	}
+	if err := os.MkdirAll(recs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupRecordingsDir(scen); got != "" {
+		t.Errorf("empty dir: got %q, want empty", got)
+	}
+	if err := os.WriteFile(filepath.Join(recs, "a.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := setupRecordingsDir(scen); got != recs {
+		t.Errorf("dir with a recording: got %q, want %q", got, recs)
+	}
+}
+
+// TestRunCheckRejectsBrokenSetupRecording: a run only warns about a broken
+// setup recording, so -check is where it fails.
+func TestRunCheckRejectsBrokenSetupRecording(t *testing.T) {
+	root := t.TempDir()
+	scen := filepath.Join(root, "scenarios")
+	recs := filepath.Join(root, "setup", "recordings")
+	for _, d := range []string{scen, recs} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed, err := os.ReadFile("../../scenarios/schema-change.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scen, "schema-change.yaml"), seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(recs, "bad.json"), []byte(`{"scenario":"x","ops":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{scenarios: scen, check: true}, &out, &out)
+	if err == nil || code == 0 || !strings.Contains(err.Error(), "ops is empty") {
+		t.Fatalf("code %d err %v, want the broken recording's error", code, err)
+	}
+}

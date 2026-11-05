@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/actions"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -164,6 +164,9 @@ type actionOutcome struct {
 	// notes are the [verification] lines for the model, to be sent in the same
 	// user message as the inputs they judge.
 	notes []string
+	// failures are the steps of this batch that did not succeed; the runner
+	// reads their logs before the model re-plans (replan.go).
+	failures []failedStep
 }
 
 // handleActionResults runs verify-after-fix for every input in the batch and
@@ -174,16 +177,36 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 	var out actionOutcome
 	out.needsModel = hasHumanInput(inputs)
 	for _, in := range inputs {
-		if in.Kind != "action_result" {
+		var one actionOutcome
+		switch in.Kind {
+		case "action_result":
+			one = r.verifyActionResult(ctx, in)
+		case "proposal_executed":
+			// A driver's fix ran: verify it as after the agent's own (P3e).
+			one = r.verifyDriverProposal(ctx, in)
+		case "pr_merged":
+			// A fix PR merged: wait for it to reach the system (Q7f).
+			one = r.prMerged(ctx, in)
+		case "pr_closed":
+			one = r.prClosed(ctx, in)
+		case kindApplyChecked:
+			one = r.applyChecked(ctx, in)
+		case "steer":
+			// A steer restarts the check of a merged PR not seen in time.
+			one.notes = r.restartNotDeployed(ctx)
+		default:
 			continue
 		}
-		one := r.verifyActionResult(ctx, in)
 		out.recovered = out.recovered || one.recovered
 		out.broken = out.broken || one.broken
 		out.needsModel = out.needsModel || one.needsModel
 		out.statusSet = out.statusSet || one.statusSet
 		out.notes = append(out.notes, one.notes...)
+		out.failures = append(out.failures, one.failures...)
 	}
+	// U5b: the logs and the known issues of a failed step go in the same
+	// message as the failure, so the model reads them before it re-plans.
+	out.notes = append(out.notes, r.readAfterFailure(ctx, out.failures)...)
 	switch {
 	case out.broken:
 		r.recoveredIdle = false
@@ -206,10 +229,13 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	id, step, parsed := actionResultFields(in)
 	switch {
 	case in.OK == nil:
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		out := actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)},
+			failures: []failedStep{r.failedOwnStep(id, step, parsed, in.Text)}}
+		return mergeOutcome(out, r.stoppedDeferred(ctx, id, step, parsed))
 	}
 	if !parsed {
 		return actionOutcome{}
@@ -218,6 +244,10 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if !ok {
 		r.log.Warn("agent: action_result for a proposal the agent did not create", "proposal", id)
 		return actionOutcome{}
+	}
+	if step >= 0 && step < len(rec.steps) && r.isDeferredAction(rec.steps[step].Action) {
+		// A fix-PR step only opened its PR: nothing to verify yet (Q7f).
+		return r.deferredOpened(ctx, id, rec.steps, step, events.ProposalOriginAgent)
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.
@@ -239,6 +269,41 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 			broken:    !rec.recovered,
 			notes:     []string{verifyTag + repeat},
 		}
+	}
+
+	out := r.verifyExecuted(ctx, rec, r.executedAt(in, id, step))
+	return r.setupVerifyFailure(out, id, step, rec.steps)
+}
+
+// failedOwnStep describes a failed step of the agent's own proposal. A result
+// without its fields, or for a proposal the runner did not record, is still a
+// failure; its step is unknown.
+func (r *runner) failedOwnStep(id string, step int, parsed bool, text string) failedStep {
+	f := failedStep{proposalID: id, index: -1, text: text}
+	if !parsed {
+		return f
+	}
+	if rec, ok := r.proposals.get(id); ok {
+		f.index, f.steps = step, rec.steps
+	}
+	return f
+}
+
+// verifyExecuted runs the verification pass of a proposal whose every step
+// succeeded and emits its agent.verification: the recovery, performance or
+// layer-and-data-flow pass by the proposal's steps. The agent's own proposals
+// and a driver's (driverproposal.go) both come here. executedAt is when the
+// last step ran.
+func (r *runner) verifyExecuted(ctx context.Context, rec proposalRecord, executedAt time.Time) actionOutcome {
+	id := rec.id
+	if steps := r.recoverySteps(rec.steps); len(steps) > 0 {
+		// A recovery is verified by counts (X2c, verify_recovery.go).
+		return r.verifyRecoveryProposal(ctx, rec, steps, executedAt)
+	}
+	if steps := r.classSteps(rec.steps, actions.ClassPerformance); len(steps) > 0 {
+		// A tuning is verified by throughput before and after (X6c,
+		// verify_performance.go).
+		return r.verifyPerformanceProposal(ctx, rec, steps, executedAt)
 	}
 
 	vr := r.verifyProposal(ctx, rec)
@@ -465,6 +530,9 @@ func (f flowResult) dataFlowCheck(detail string) *events.DataFlowCheck {
 // model note, and the structured checks. The data-flow check runs only after
 // the layer checks pass.
 func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyResult {
+	if r.kind == events.PipelineKindBatch {
+		return r.verifyBatch(ctx, rec)
+	}
 	var lines []string
 	var checks []events.VerificationCheck
 	layersOK := true
@@ -908,27 +976,40 @@ func (r *runner) readNewest(ctx context.Context, verb string, input json.RawMess
 // timestamp column each one carries in its facts. It is a read tool like any
 // other, so the call is traced in the room.
 func (r *runner) sinkTables(ctx context.Context, verb, pipelineID string) ([]sinkTable, error) {
-	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+	nodes, err := r.pipelineNodes(ctx, verb, pipelineID)
 	if err != nil {
 		return nil, err
 	}
-	var g struct {
-		Nodes []struct {
-			Kind  string            `json:"kind"`
-			Name  string            `json:"name"`
-			Facts map[string]string `json:"facts"`
-		} `json:"nodes"`
-	}
-	if err := decodeData(res.Data, &g); err != nil {
-		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
-	}
 	var out []sinkTable
-	for _, n := range g.Nodes {
+	for _, n := range nodes {
 		if n.Kind == "sink_table" && n.Name != "" {
 			out = append(out, sinkTable{name: n.Name, tsColumn: n.Facts["ts_column"]})
 		}
 	}
 	return out, nil
+}
+
+// mapNode is the part of a pipeline_map node the verification reads.
+type mapNode struct {
+	Kind  string            `json:"kind"`
+	Name  string            `json:"name"`
+	Facts map[string]string `json:"facts"`
+}
+
+// pipelineNodes reads the nodes of one pipeline from pipeline_map, as a traced
+// read step of the room.
+func (r *runner) pipelineNodes(ctx context.Context, verb, pipelineID string) ([]mapNode, error) {
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+	if err != nil {
+		return nil, err
+	}
+	var g struct {
+		Nodes []mapNode `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
+	}
+	return g.Nodes, nil
 }
 
 // decodeData round-trips a tool's Data through JSON so judges can read it
@@ -1127,10 +1208,10 @@ func jsonObject(kv ...string) json.RawMessage {
 
 // verifyBlocks renders the verification notes of one batch as text blocks, for
 // the same user message as the inputs they judge.
-func verifyBlocks(notes []string) []anthropic.BetaContentBlockParamUnion {
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(notes))
+func verifyBlocks(notes []string) []llm.Part {
+	blocks := make([]llm.Part, 0, len(notes))
 	for _, n := range notes {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(n))
+		blocks = append(blocks, textPart(n))
 	}
 	return blocks
 }

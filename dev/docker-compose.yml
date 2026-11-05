@@ -5,7 +5,7 @@ name: piperoom-dev
 
 services:
   postgres:
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:-postgres:17}
     command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
     environment:
       POSTGRES_USER: piperoom
@@ -20,7 +20,7 @@ services:
       retries: 20
 
   kafka:
-    image: apache/kafka:4.1.0
+    image: ${KAFKA_IMAGE:-apache/kafka:4.1.0}
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -34,6 +34,11 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_NUM_PARTITIONS: 3
+      # Fast log cleanup so `devctl break retention-loss` deletes retained
+      # segments within seconds (broker defaults: a 5-minute retention check
+      # and a 1-minute segment delete delay; dev/scenarios.md §12).
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 1000
+      KAFKA_LOG_SEGMENT_DELETE_DELAY_MS: 1000
     ports: ["29092:29092"]
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
@@ -41,7 +46,7 @@ services:
       retries: 20
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:8.0.0
+    image: ${SCHEMA_REGISTRY_IMAGE:-confluentinc/cp-schema-registry:8.0.0}
     depends_on:
       kafka: { condition: service_healthy }
     environment:
@@ -56,7 +61,10 @@ services:
       retries: 40
 
   connect:
-    build: ./connect
+    build:
+      context: ./connect
+      args:
+        DEBEZIUM_VERSION: ${DEBEZIUM_VERSION:-3.2.0.Final}
     image: piperoom-dev/connect:3.2.0
     depends_on:
       kafka: { condition: service_healthy }
@@ -75,7 +83,14 @@ services:
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-    ports: ["8083:8083"]
+      # Prometheus JMX exporter (dev/connect/Dockerfile, rules in
+      # dev/connect/jmx-exporter.yml): debezium_metrics_* and kafka_connect_* on
+      # :9404/metrics, the server's DEBEZIUM_METRICS_URL (dev/README.md). A JVM
+      # started with `docker exec` in this container inherits it and cannot bind
+      # 9404 again: run such a command with `-e KAFKA_OPTS=`.
+      KAFKA_OPTS: -javaagent:/kafka/etc/jmx_prometheus_javaagent.jar=9404:/kafka/etc/jmx-exporter.yml
+    # The exporter takes no login: host loopback only.
+    ports: ["8083:8083", "127.0.0.1:9404:9404"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
       interval: 5s
@@ -99,6 +114,17 @@ services:
       PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}
+      # Bad-build knobs for `devctl break consumer-bad-deploy` / `dlq-backlog`
+      # (dev/scenarios.md §8, §9). Empty = the good build.
+      SKIP_OPS: ${DEVCONSUMER_SKIP_OPS:-}
+      REJECT_STATUS: ${DEVCONSUMER_REJECT_STATUS:-}
+      # Silent bad builds for `devctl break sink-filtered-rows` /
+      # `sink-dropped-column` (dev/scenarios.md §14, §15). Empty = the good build.
+      SKIP_WHERE: ${DEVCONSUMER_SKIP_WHERE:-}
+      DROP_COLUMNS: ${DEVCONSUMER_DROP_COLUMNS:-}
+      # The pipeline's DLQ (dev/owners.yaml watch.dlq_topics). It exists only
+      # while dlq-backlog is broken; nothing is written to it otherwise.
+      DLQ_TOPIC: devctl.order-sync.dlq
 
   # Piperoom server in shadow mode, against this stack (dev/shadow.md).
   # Profile "shadow": `devctl up` does not start it; `devctl shadow up` does.
@@ -138,6 +164,11 @@ services:
       PIPEROOM_AUTH_MODE: dev
       PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
       PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}
+      # Write mode on when your environment does not set it, as before the setting existed
+      # (the server's default is off). An explicitly empty value stays empty, which the
+      # server reads as off: hence "-on", not ":-on". Shadow rooms propose nothing; a
+      # non-shadow pipeline in the file runs approved fixes.
+      PIPEROOM_WRITE_MODE: ${PIPEROOM_WRITE_MODE-on}
       # The watcher opens the rooms: `devctl break <scenario>` trips it within a few
       # intervals (dev/owners.shadow.yaml has short `for:` values).
       PIPEROOM_WATCH_MODE: rooms
@@ -147,3 +178,360 @@ services:
       PIPEROOM_SHADOW_GRACE: ${PIPEROOM_SHADOW_GRACE:-0}
       PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
       PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
+
+  # Batch pipeline "daily-revenue" (dev/batch.md, dev/owners.yaml):
+  # Airflow standalone runs DAG revenue_daily, whose dbt run builds
+  # analytics.stg_orders -> analytics.fct_revenue in the warehouse database.
+  # Profile "batch": `docker compose --profile batch up -d --wait` starts it
+  # with the default services; without the profile nothing here starts.
+  airflow:
+    profiles: ["batch"]
+    build: ./batch/airflow
+    image: piperoom-dev/airflow:2.10.5-dbt1.9.0
+    command: ["standalone"]
+    # Linux: export AIRFLOW_UID=$(id -u) so dbt can write the bind-mounted artifacts dir.
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres: { condition: service_healthy }
+    # Host loopback only: the REST API below takes no login.
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./batch/dags:/opt/airflow/dags:ro
+      - ./batch/dbt:/opt/airflow/dbt:ro
+      # AUTH_ROLE_PUBLIC=Viewer: without it the no-login API answers 403.
+      - ./batch/airflow/webserver_config.py:/opt/airflow/webserver_config.py:ro
+      # dbt's target/ (run_results.json, manifest.json); the host server reads it
+      # as DBT_ARTIFACTS_DIR=<absolute path of dev/batch/artifacts>.
+      - ./batch/artifacts:/opt/airflow/dbt-artifacts
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # No login on /api/v1: internal/clients/airflow refuses to send a password
+      # or token over http:// (#587), and the port is bound to 127.0.0.1.
+      # Anonymous callers get the Viewer role (batch/airflow/webserver_config.py).
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.default
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+      WAREHOUSE_HOST: postgres
+      WAREHOUSE_USER: piperoom
+      WAREHOUSE_PASSWORD: piperoom-dev
+      DBT_PROFILES_DIR: /opt/airflow/dbt/analytics
+      DBT_TARGET_PATH: /opt/airflow/dbt-artifacts
+      DBT_LOG_PATH: /tmp/dbt-logs
+    healthcheck:
+      # Healthy once the API answers without login and the DAG is parsed
+      # (urlopen raises on 401/403/404). Python, not curl: no tool assumptions.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/dags/revenue_daily', timeout=5)"]
+      start_period: 60s
+      interval: 5s
+      retries: 40
+
+  # Optional ClickHouse warehouse and Kafka Engine sink (dev/clickhouse/README.md).
+  clickhouse:
+    profiles: ["clickhouse"]
+    # 25.8 LTS, exact release and multi-arch index digest (verified on Docker Hub).
+    image: clickhouse/clickhouse-server:25.8.33.6@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: piperoom_admin
+      CLICKHOUSE_PASSWORD: piperoom-clickhouse-admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:9001:9000"]
+    volumes:
+      - ./clickhouse/init/01-reader.sql:/docker-entrypoint-initdb.d/01-reader.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
+      interval: 5s
+      retries: 40
+
+  # Worker logs (Q3d, dev/README.md "Logs profile"): Promtail tails the `connect`
+  # and `devconsumer` containers' output through the Docker API and pushes it to
+  # Loki, which the server reads as WORKER_LOGS_LOKI_URL (connect_worker_logs, and
+  # consumer_logs with a pipeline's consumer_logs.selector). Profile "logs":
+  # `docker compose --profile logs up -d --wait` starts them with the default
+  # services; without the profile nothing here starts.
+  loki:
+    profiles: ["logs"]
+    image: grafana/loki:3.5.7
+    command: ["-config.file=/etc/loki/piperoom.yml"]
+    volumes:
+      - ./logs/loki.yml:/etc/loki/piperoom.yml:ro
+    # Host loopback only: Loki runs without auth (auth_enabled: false).
+    ports: ["127.0.0.1:3100:3100"]
+    healthcheck:
+      # The image is distroless with busybox under /busybox.
+      test: ["CMD", "/busybox/wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/ready"]
+      interval: 5s
+      retries: 24
+
+  promtail:
+    profiles: ["logs"]
+    image: grafana/promtail:3.5.7
+    command: ["-config.file=/etc/promtail/piperoom.yml"]
+    depends_on:
+      loki: { condition: service_healthy }
+      connect: { condition: service_started }
+    volumes:
+      - ./logs/promtail.yml:/etc/promtail/piperoom.yml:ro
+      # Read-only Docker API access, to find the connect container and read its
+      # output (Docker Desktop provides the socket at this path on Windows too).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      # /ready answers 200 once Promtail tails at least one target, i.e. it found
+      # the connect container. The image has bash but neither curl nor wget.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9080 && printf 'GET /ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
+      interval: 5s
+      retries: 24
+
+  # Staging stack (X8, dev/README.md "Staging profile"): a second Schema
+  # Registry and a second Connect worker on the SAME Kafka, to try a fix on
+  # before it touches production. Profile "staging": `devctl up` does not start
+  # them; `devctl up --staging` does. Nothing here depends on the production
+  # connect or schema-registry, and nothing shares their state: each has its own
+  # group.id and its own internal topics (a shared group.id would make the two
+  # workers one Connect cluster, and the two registries one election).
+  schema-registry-staging:
+    profiles: ["staging"]
+    image: ${SCHEMA_REGISTRY_IMAGE:-confluentinc/cp-schema-registry:8.0.0}
+    depends_on:
+      kafka: { condition: service_healthy }
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry-staging
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas_staging
+      SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID: schema-registry-staging
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+    # Host loopback only: like the production registry, it takes no login.
+    ports: ["127.0.0.1:18081:8081"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 5s
+      retries: 40
+
+  connect-staging:
+    profiles: ["staging"]
+    # Same build and image tag as `connect`, so the image is built once.
+    build:
+      context: ./connect
+      args:
+        DEBEZIUM_VERSION: ${DEBEZIUM_VERSION:-3.2.0.Final}
+    image: piperoom-dev/connect:3.2.0
+    depends_on:
+      kafka: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      schema-registry-staging: { condition: service_healthy }
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: piperoom-connect-staging
+      CONFIG_STORAGE_TOPIC: _connect_configs_staging
+      OFFSET_STORAGE_TOPIC: _connect_offsets_staging
+      STATUS_STORAGE_TOPIC: _connect_status_staging
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry-staging:8081
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry-staging:8081
+    ports: ["127.0.0.1:18083:8083"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
+      interval: 5s
+      retries: 40
+
+  # Oracle source for the setup breaks (U9c, dev/oracle/README.md): Oracle
+  # Database Free with ARCHIVELOG, supplemental logging and the LogMiner user
+  # C##DBZUSER, set up on the first start by dev/oracle/cdc-setup.sh.
+  # Profile "oracle": `docker compose -f dev/docker-compose.yml --profile oracle
+  # up -d --wait oracle` starts it alone; nothing else depends on it.
+  oracle:
+    profiles: ["oracle"]
+    # 23.9, the last "Oracle Database 23ai Free" release: 23.26.x reports itself
+    # as "Oracle AI Database 26ai", a banner the U9a client does not read yet
+    # (ORACLE_IMAGE=gvenzl/oracle-free:23.26.3 runs it; dev/oracle/README.md).
+    # The regular variant, not -slim (which strips more components); this one
+    # was run with a LogMiner session as C##DBZUSER. Exact release and
+    # multi-arch index digest (verified with docker pull, 2026-10-23).
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:23.9@sha256:eb47a5c4abbb473efb27398d967ff96462cae67b099caa5cb70ac2dd94bf6a3f}
+    environment:
+      # SYS and SYSTEM; dev stack only (AGENTS.md section 3).
+      ORACLE_PASSWORD: piperoom-dev
+    # Host loopback only: the dev passwords are in this file.
+    ports: ["127.0.0.1:1521:1521"]
+    volumes:
+      - ./oracle/cdc-setup.sh:/opt/piperoom/oracle/cdc-setup.sh:ro
+      - ./oracle/initdb:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      # The image's own check: FREEPDB1 open READ WRITE and no first-start
+      # script still running (the CDC setup is one of them).
+      test: ["CMD", "healthcheck.sh"]
+      start_period: 30s
+      interval: 5s
+      timeout: 10s
+      retries: 54
+
+  # SQL Server source (U4c, dev/mssql/README.md): SQL Server 2022 Developer
+  # with SQL Server Agent on and CDC off, so a setup run enables CDC itself.
+  # The image's own setup hook runs dev/mssql/init on a fresh data directory
+  # (database orders, table dbo.orders, 100 rows). Profile "mssql":
+  # `docker compose -f dev/docker-compose.yml --profile mssql up -d --wait mssql`
+  # starts it alone (it depends on nothing); without the profile nothing here
+  # starts. `devctl setup-break agent-stopped | cdc-not-enabled-table`.
+  mssql:
+    profiles: ["mssql"]
+    # 2022 CU27 GDR1 on Ubuntu 22.04, exact tag and digest (verified with
+    # `docker buildx imagetools inspect` on 2026-10-23; built 2026-10-03).
+    # amd64 only: Microsoft publishes no arm64 SQL Server image.
+    image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      # Dev-only sa password (the stack's test credentials, AGENTS.md §3); it
+      # meets SQL Server's complexity rule, which refuses to start otherwise.
+      MSSQL_SA_PASSWORD: Piperoom-dev-1
+      MSSQL_AGENT_ENABLED: "true"
+    # Host loopback only, and not 1433, so a SQL Server installed on the dev
+    # machine keeps its port. DSN: dev/mssql/README.md.
+    ports: ["127.0.0.1:11433:1433"]
+    volumes:
+      - ./mssql/init:/mssql-server-setup-scripts.d:ro
+    healthcheck:
+      # Healthy once the init script ran (the seeded table answers) and SQL
+      # Server Agent is connected (its sessions exist), so the Agent check
+      # and `devctl setup-break agent-stopped` never see the Agent still
+      # starting. tools18's sqlcmd encrypts by default; -C trusts the image's
+      # self-signed cert.
+      test: ["CMD-SHELL", "SQLCMDPASSWORD=\"$$MSSQL_SA_PASSWORD\" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -h -1 -Q \"SET NOCOUNT ON; SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE program_name LIKE N'SQLAgent - %') THEN (SELECT COUNT(*) FROM orders.dbo.orders) ELSE 0 END\" | grep -q '[1-9]'"]
+      start_period: 30s
+      interval: 5s
+      retries: 36
+
+  # MongoDB source (U7c, dev/mongo/README.md): a one-member replica set rs0
+  # with auth, for the setup checks of internal/clients/mongodb and the
+  # `devctl setup-break` scenarios standalone-mongod and no-oplog-role.
+  # Profile "mongo": `docker compose --profile mongo up -d --wait mongo`;
+  # without the profile nothing here starts and nothing depends on it.
+  mongo:
+    profiles: ["mongo"]
+    # MongoDB 7.0, exact release and multi-arch index digest (verified with
+    # `docker pull` and the Docker Hub tags API, 2026-10-23).
+    image: mongo:7.0.43@sha256:1f995ad6fdb93244a1addab1b58f934a0bc2f5643c38e02f5e9d7f0c7d227a7b
+    # start.sh generates the keyFile auth + --replSet needs inside the
+    # container (a bind-mounted one cannot be mode 0400 on Windows).
+    command: ["bash", "/piperoom-mongo/start.sh", "--replSet", "rs0"]
+    environment:
+      # Dev-only credentials, never real secrets.
+      MONGO_INITDB_ROOT_USERNAME: piperoom_admin
+      MONGO_INITDB_ROOT_PASSWORD: piperoom-mongo-admin
+      MONGO_INITDB_DATABASE: inventory
+    # Host loopback only. A host client connects with directConnection=true:
+    # the set's member is named mongo:27017, which only resolves on the
+    # compose network.
+    ports: ["127.0.0.1:27017:27017"]
+    volumes:
+      - ./mongo/start.sh:/piperoom-mongo/start.sh:ro
+      - ./mongo/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Idempotent: initiates rs0 once (rs.status() throws until then), and is
+      # healthy only once this member is the writable primary.
+      test: ["CMD", "mongosh", "--quiet", "--norc", "-u", "piperoom_admin", "-p", "piperoom-mongo-admin", "--authenticationDatabase", "admin", "--eval", "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}) } if (!db.hello().isWritablePrimary) { quit(1) }"]
+      start_period: 60s
+      interval: 2s
+      retries: 60
+  # MySQL source (Q8a, dev/mysql/README.md, docs/design/mysql-source.md §10.1):
+  # MySQL 8.4 LTS with GTIDs on and a ROW binlog, read by the Debezium MySQL
+  # connector orders-mysql (dev/connectors/orders-mysql.json) on the existing
+  # connect service, whose image ships the MySQL connector. The image's
+  # entrypoint runs dev/mysql/init on a fresh data directory (database shop,
+  # tables orders and order_items, the users of the design's §10.2). Profile
+  # "mysql": `docker compose -f dev/docker-compose.yml --profile mysql up -d
+  # --wait mysql` starts it next to the default services; without the profile
+  # nothing here starts. `devctl break binlog-purged | history-topic-deleted |
+  # missing-replication-grant | server-id-clash` (dev/scenarios.md §25-§28).
+  mysql:
+    profiles: ["mysql"]
+    # 8.4.13 LTS, exact release and multi-arch index digest (Docker Hub tag
+    # list, 2026-10-23).
+    image: mysql:8.4.13@sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69
+    command:
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --server-id=223344
+      - --binlog-expire-logs-seconds=86400
+    environment:
+      # Dev-only root password (the stack's test credentials, AGENTS.md §3).
+      MYSQL_ROOT_PASSWORD: piperoom-dev
+    # Host loopback only, and not 3306, so a MySQL installed on the dev
+    # machine keeps its port. Inside the network Connect reaches mysql:3306.
+    ports: ["127.0.0.1:13306:3306"]
+    volumes:
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP, so the entrypoint's init server (started with
+      # --skip-networking) never counts: healthy once the real server is up
+      # and the init script's last statement (the seed rows) ran.
+      # The password reaches mysql through a process-substitution option
+      # file, as the image's own entrypoint passes it (never argv).
+      test: ["CMD", "bash", "-c", "mysql --defaults-extra-file=<(printf '[client]\\npassword=%s\\n' \"$$MYSQL_ROOT_PASSWORD\") -uroot -h127.0.0.1 --protocol=TCP -N -B -e 'SELECT COUNT(*) FROM shop.orders' | grep -q '[1-9]'"]
+      start_period: 30s
+      interval: 5s
+      retries: 30
+
+  # A container that plays a Linux host for the host-target setup breaks (U8c,
+  # dev/scenarios.md "Setup breaks: host target"): a JDK, a Kafka
+  # distribution's bin/ scripts, the systemd unit service_install renders and
+  # the worker files properties_write writes, under /piperoom-host/project.
+  # Nothing listens on a port, runs systemd or starts a worker: `devctl
+  # setup-break wrong-standalone-args | plugin-path-unset | java-too-old` reads
+  # and rewrites those files through `docker exec`. Profile "host":
+  # `docker compose --profile host up -d --wait host`; the break and fix start
+  # it themselves. A container restart copies the baked base again, so it heals
+  # every break.
+  host:
+    profiles: ["host"]
+    build:
+      context: ./host
+    image: piperoom-dev/host:1
+    healthcheck:
+      # The start script has laid the project down: the unit file the three
+      # checks read is there.
+      test: ["CMD-SHELL", "test -f /piperoom-host/project/systemd/piperoom-connect.service"]
+      interval: 2s
+      retries: 30
+
+  # Local model server (V17, dev/README.md "Local models"). Profile "llm":
+  # `docker compose --profile llm up -d` starts it next to the default stack;
+  # without the profile nothing here starts. `devctl llm-up` also pulls a model.
+  ollama:
+    profiles: ["llm"]
+    # Pinned release. Not pulled when this was written (no Docker there).
+    image: ollama/ollama:0.40.1
+    environment:
+      # Ollama cuts a prompt longer than its context window without an error
+      # (docs/design/model-providers.md §6.2); its default is 2k to 4k tokens,
+      # far under one investigation turn. 131072 is the window of llama3.1:8b,
+      # the model `devctl llm-up` pulls.
+      OLLAMA_CONTEXT_LENGTH: "131072"
+      # Unset by default (Ollama's own defaults). On a memory-capped Docker,
+      # OLLAMA_FLASH_ATTENTION=1 with OLLAMA_KV_CACHE_TYPE=q8_0 roughly halves
+      # the KV cache of the 131072 window (dev/README.md "Local models").
+      OLLAMA_FLASH_ATTENTION: "${OLLAMA_FLASH_ATTENTION:-}"
+      OLLAMA_KV_CACHE_TYPE: "${OLLAMA_KV_CACHE_TYPE:-}"
+    # Host loopback only: Ollama has no auth.
+    ports: ["127.0.0.1:11434:11434"]
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # The image has the ollama CLI but no curl or wget; `list` asks the server.
+      test: ["CMD", "ollama", "list"]
+      start_period: 10s
+      interval: 5s
+      retries: 24
+
+volumes:
+  ollama-models:

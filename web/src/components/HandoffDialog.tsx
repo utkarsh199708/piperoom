@@ -1,5 +1,5 @@
 import { Loader2 } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
@@ -31,13 +31,20 @@ export function HandoffDialog({
   user,
   actions,
   onClose,
+  onCloseRoom,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
   onClose: () => void
+  /** The driver's way out when nobody else can take the room (solo mode): opens Close the room. */
+  onCloseRoom?: () => void
 }) {
   const [to, setTo] = useState('')
+  // Solo mode (PIPEROOM_SOLO_USER) puts one account in the login picker (GET /auth/users,
+  // docs/api.md), so /api/people also lists people who could never sign in and accept a hand-off.
+  // Only the solo user is a real recipient here; the current user is the solo user, so none is.
+  const signInIds = useMemo(() => (user.solo ? new Set([user.id]) : undefined), [user.solo, user.id])
   const [stay, setStay] = useState(false)
   const restoreFocus = useRestoreFocus()
   // "Hand off to someone else" on a pending hand-off: a new one voids it on the server. Keyed by
@@ -127,7 +134,14 @@ export function HandoffDialog({
                 Hand off to
               </label>
               <div className="[&_select]:h-9 [&_select]:w-full">
-                <PersonSelect id="handoff-to" selfId={user.id} value={to} onChange={setTo} />
+                <PersonSelect
+                  id="handoff-to"
+                  selfId={user.id}
+                  value={to}
+                  onChange={setTo}
+                  signInIds={signInIds}
+                  noSignInText={user.solo ? 'No other person can sign in on this server (solo mode).' : undefined}
+                />
               </div>
             </div>
             <label className="flex items-center gap-2 text-sm">
@@ -140,6 +154,11 @@ export function HandoffDialog({
               Stay as watcher after hand-off
             </label>
             <DialogFooter>
+              {onCloseRoom && !to && (
+                <Button type="button" variant="secondary" onClick={onCloseRoom}>
+                  Close the room
+                </Button>
+              )}
               <Button type="button" variant="ghost" onClick={onClose}>
                 Cancel
               </Button>

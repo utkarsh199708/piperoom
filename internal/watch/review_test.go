@@ -48,7 +48,7 @@ func TestRoomClosedWhilePostingIsNotRevived(t *testing.T) {
 		}
 	}
 	posts := len(h.rooms.postsContaining("watcher:"))
-	h.steps(60, time.Minute)
+	h.steps(45, time.Minute) // inside the cooldown; after it the fault re-opens a room
 	if got := len(h.rooms.postsContaining("watcher:")); got != posts {
 		t.Fatalf("posts to a closed room: %d more", got-posts)
 	}

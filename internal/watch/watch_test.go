@@ -444,8 +444,9 @@ func TestResolvedAlertWhenAllSignalsClear(t *testing.T) {
 }
 
 func TestAckedAfterRoomClosedAndResetOnClear(t *testing.T) {
-	// Cooldown is tiny so that only the acked state can hold the watcher back.
-	h := newHarness(t, opts{cooldown: time.Millisecond})
+	// The cooldown outlasts the ticks below, so only the acked state holds the
+	// watcher back (after the cooldown it re-opens: rearm_test.go).
+	h := newHarness(t, opts{cooldown: 30 * time.Minute})
 	h.breakConnector("orders", "boom")
 	h.steps(4, time.Minute)
 	rooms := h.rooms.created()
@@ -458,7 +459,7 @@ func TestAckedAfterRoomClosedAndResetOnClear(t *testing.T) {
 	if h.phase("orders", owners.SignalConnectorDown) != phaseAcked {
 		t.Fatalf("phase = %v, want acked", h.phase("orders", owners.SignalConnectorDown))
 	}
-	h.steps(40, time.Minute)
+	h.steps(25, time.Minute)
 	if got := len(h.rooms.created()); got != 1 {
 		t.Fatalf("a closed room was re-opened by the same incident: %d rooms", got)
 	}
@@ -670,8 +671,8 @@ func TestSourceErrorDoesNotHideConnectorDown(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "must be the primary") {
 		t.Fatalf("no hint for the recovery error\n%s", h.logs)
 	}
-	if n := h.logs.count("watch: check failed"); n != 2 { // once per slot signal, not every tick
-		t.Fatalf("check failed warnings = %d, want 2", n)
+	if n := h.logs.count("watch: check failed"); n != 3 { // once per slot signal (slot_inactive, slot_wal, long_tx), not every tick
+		t.Fatalf("check failed warnings = %d, want 3", n)
 	}
 }
 

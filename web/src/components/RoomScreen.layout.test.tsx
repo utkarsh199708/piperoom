@@ -94,15 +94,18 @@ beforeEach(() => {
 })
 
 describe('RoomScreen header', () => {
-  it('shows title, severity, a mono facts line and a polite status pill', () => {
+  it('shows title, severity, a plain facts line and a polite status pill', () => {
     show(arjun, room())
     expect(screen.getByRole('heading', { level: 1, name: 'Warehouse orders stale' })).toBeInTheDocument()
     expect(screen.getByText('sev2')).toBeInTheDocument()
-    expect(screen.getByText('#r_schema_change')).toBeInTheDocument()
-    // The facts line carries the pipeline, the id and when it opened.
-    const facts = screen.getByText('#r_schema_change').closest('p') as HTMLElement
+    // The facts line carries the pipeline and when it opened. The room id is not shown; the title's
+    // tooltip has it.
+    expect(screen.queryByText(/#r_schema_change/)).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1 })).toHaveAttribute('title', 'Room r_schema_change')
+    const facts = screen.getByTestId('cost-chip').closest('p') as HTMLElement
     expect(facts).toHaveTextContent('orders')
     expect(facts).toHaveTextContent(/opened/)
+    expect(facts.className).not.toContain('font-mono')
     // Only the state words are live; the step number is outside the live region and hidden from
     // assistive technology, so a new step is not announced.
     const live = screen.getByText('Agent working')

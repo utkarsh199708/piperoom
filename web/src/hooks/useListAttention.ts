@@ -24,6 +24,7 @@ export function useListAttention(
   loading: boolean,
   inRoom: boolean,
   onOpen: (roomId: string) => void,
+  title: string = LIST_TITLE,
 ) {
   const known = useRef<Set<string> | null>(null)
   const open = useRef(onOpen)
@@ -58,7 +59,7 @@ export function useListAttention(
   useEffect(() => {
     if (inRoom) return
     setFavicon(needing.length > 0)
-    document.title = LIST_TITLE
+    document.title = title
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, inRoom])
+  }, [key, inRoom, title])
 }

@@ -71,6 +71,22 @@ func (s *cSource) PublicationTables(ctx context.Context, p, r string, t []string
 	s.c.add("src.pub")
 	return s.fakeSource.PublicationTables(ctx, p, r, t)
 }
+func (s *cSource) Settings(ctx context.Context) ([]postgres.DBSetting, error) {
+	s.c.add("src.settings")
+	return s.fakeSource.Settings(ctx)
+}
+func (s *cSource) TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error) {
+	s.c.add("src.repl")
+	return s.fakeSource.TableReplication(ctx, tables)
+}
+func (s *cSource) RoleInfo(ctx context.Context, role string, tables []string) (postgres.RoleInfo, error) {
+	s.c.add("src.role")
+	return s.fakeSource.RoleInfo(ctx, role, tables)
+}
+func (s *cSource) Blockers(ctx context.Context, olderThan time.Duration) ([]postgres.DBSession, error) {
+	s.c.add("src.blockers")
+	return s.fakeSource.Blockers(ctx, olderThan)
+}
 
 // cSourceDDL also has the SQL table filter (tableDDLFilterer).
 type cSourceDDL struct{ *cSource }
@@ -159,6 +175,8 @@ var scopeCases = []struct {
 	{"pipeline_map", `{"pipeline_id":"orders"}`, `{"pipeline_id":"payments"}`},
 	{"trace_record", `{"pipeline_id":"orders","table":"public.orders","key":"7"}`, `{"pipeline_id":"payments","table":"public.payments","key":"7"}`},
 	{"pg_publication_tables", `{"pipeline_id":"orders"}`, `{"pipeline_id":"payments"}`},
+	{"source_table_replication", `{"pipeline_id":"orders"}`, `{"pipeline_id":"payments"}`},
+	{"source_role_grants", `{"pipeline_id":"orders"}`, `{"pipeline_id":"payments"}`},
 	{"pg_row", `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"7"}`, `{"pipeline_id":"payments","table":"public.payments","pk_column":"id","key":"7"}`},
 	{"warehouse_row", `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`, `{"pipeline_id":"payments","table":"analytics.payments","pk_column":"id","key":"7"}`},
 	{"warehouse_freshness", `{"table":"analytics.orders","ts_column":"updated_at"}`, `{"table":"analytics.payments","ts_column":"updated_at"}`},
@@ -263,6 +281,8 @@ func TestScopeNoRoomRefusedByDefault(t *testing.T) {
 		{"pg_replication_slots", `{}`, ``},
 		{"pg_long_transactions", `{}`, ``},
 		{"pg_recent_ddl", `{"since":"2026-10-11T00:00:00Z"}`, ``},
+		{"source_settings", `{}`, ``},
+		{"source_blocking_sessions", `{}`, ``},
 	}, scopeCases...)
 	for _, tc := range all {
 		t.Run(tc.tool, func(t *testing.T) {

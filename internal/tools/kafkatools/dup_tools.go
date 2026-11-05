@@ -1,0 +1,182 @@
+package kafkatools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/tools"
+)
+
+// ---- kafka_dup_keys (X1c) ----
+
+// The tool reads through the optional clients.DupScanner (X1, applied from
+// the X1c contract change request). It is registered only for a client that
+// has it, so fakes and the eval replay get no tool the model could call in
+// vain.
+
+// dupMaxListed caps the findings kafka_dup_keys lists in Summary; Data has
+// up to clients.MaxDupFindings.
+const dupMaxListed = 10
+
+type dupKeys struct{ d Deps }
+
+func (t *dupKeys) Name() string     { return "kafka_dup_keys" }
+func (t *dupKeys) Kind() tools.Kind { return tools.KindRead }
+func (t *dupKeys) InputSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"topic": strProp("one of the pipeline's CDC topics"),
+		"since": strProp("RFC 3339 timestamp; scan from here"),
+		"max_scan": map[string]any{
+			"type":        "integer",
+			"description": "max records over all partitions, 1 to " + strconv.Itoa(clients.DupScanMaxScan) + "; default " + strconv.Itoa(clients.DupScanMaxScan),
+		},
+	}, "topic", "since")
+}
+
+func (t *dupKeys) Description() string {
+	return "Checks one of the pipeline's Debezium Postgres CDC topics since a time for duplicate change events (the same key and source.lsn more than once) " +
+		"and per-key order regressions (source.lsn going backwards within a partition). Counts and offsets only; keys appear as sha256 fingerprints, never values."
+}
+
+func (t *dupKeys) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+	var p struct {
+		Topic   string `json:"topic"`
+		Since   string `json:"since"`
+		MaxScan *int   `json:"max_scan"`
+	}
+	if err := json.Unmarshal(input, &p); err != nil || p.Topic == "" || p.Since == "" {
+		return tools.Result{}, fmt.Errorf("%w: topic and since are required", tools.ErrBadInput)
+	}
+	since, err := time.Parse(time.RFC3339, p.Since)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("%w: since must be RFC 3339: %v", tools.ErrBadInput, err)
+	}
+	if since.Before(time.Unix(0, 0)) {
+		since = time.Unix(0, 0).UTC() // Kafka reads negative times as "latest"/"earliest"
+	}
+	maxScan := clients.DupScanMaxScan
+	if p.MaxScan != nil {
+		if *p.MaxScan < 1 {
+			return tools.Result{}, fmt.Errorf("%w: max_scan must be between 1 and %d", tools.ErrBadInput, clients.DupScanMaxScan)
+		}
+		maxScan = min(*p.MaxScan, clients.DupScanMaxScan)
+	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckTopic(p.Topic); err != nil {
+		return tools.Result{}, err
+	}
+	ds, ok := t.d.Kafka.(clients.DupScanner)
+	if !ok {
+		return tools.Result{}, fmt.Errorf("kafka_dup_keys: this Kafka client cannot scan for duplicates")
+	}
+	cctx, cancel := withTimeout(ctx)
+	defer cancel()
+	rep, err := ds.DupScan(cctx, p.Topic, since, maxScan)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("kafka_dup_keys: %w", err)
+	}
+	return res(dupSummary(rep), rep), nil
+}
+
+// dupSummary is built from numbers, fixed words, the scoped topic name and
+// key fingerprints: no record text can reach it.
+func dupSummary(rep clients.DupReport) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s: %s across %s, %s in %s", rep.Topic,
+		plural(rep.Duplicates, "duplicate event"), plural(rep.Keys, "key"),
+		plural(rep.OrderRegressions, "order regression"), plural(rep.Scanned, "record"))
+	if rep.OrderRegressions > 0 {
+		fmt.Fprintf(&sb, " (regressions on %s)", plural(rep.RegressionKeys, "key"))
+	}
+	var open []int32
+	for _, p := range rep.Partitions {
+		if !p.Done {
+			open = append(open, p.Partition)
+		}
+	}
+	switch {
+	case rep.Scanned == 0 && !rep.Partial:
+		appendLine(&sb, "no records since "+rep.Since.Format(time.RFC3339))
+	case rep.Capped:
+		appendLine(&sb, fmt.Sprintf("scanned %s (capped): max_scan stopped the scan before the end of partition(s) %s; newer records were not checked, use a later since", group(rep.Scanned), partList(open)))
+	}
+	if rep.Partial {
+		appendLine(&sb, fmt.Sprintf("partial: the time limit cut the scan before the end of partition(s) %s; the counts cover the %s read", partList(open), plural(rep.Scanned, "record")))
+	}
+	if rep.Undecodable > 0 {
+		reasons := make([]string, 0, len(rep.UndecodableReasons))
+		for r, n := range rep.UndecodableReasons {
+			reasons = append(reasons, r+" "+group(n))
+		}
+		slices.Sort(reasons)
+		appendLine(&sb, fmt.Sprintf("%s had no usable key or source.lsn (%s) and were not checked; only Debezium Postgres change events carry source.lsn",
+			plural(rep.Undecodable, "record"), strings.Join(reasons, ", ")))
+	}
+	if rep.Tombstones > 0 {
+		appendLine(&sb, plural(rep.Tombstones, "tombstone")+" skipped")
+	}
+	for i, f := range rep.Findings {
+		if i == dupMaxListed {
+			break
+		}
+		// The key fingerprint stays out of these lines: the summary is
+		// recorded into agent.tool_result events, and the DupFinding contract
+		// keeps the fingerprint in tool Data, never in an event (a short key
+		// can be guessed back from it). Data.findings carries it.
+		if f.Kind == clients.DupKindRegression {
+			appendLine(&sb, fmt.Sprintf("  regression: partition %d offset %d has lsn %d after lsn %d at offset %d", f.Partition, f.Offset, f.LSN, f.PrevLSN, f.FirstOffset))
+			continue
+		}
+		appendLine(&sb, fmt.Sprintf("  duplicate: partition %d offset %d repeats lsn %d of partition %d offset %d", f.Partition, f.Offset, f.LSN, f.FirstPartition, f.FirstOffset))
+	}
+	if n := len(rep.Findings) + rep.FindingsOmitted - min(len(rep.Findings), dupMaxListed); n > 0 {
+		appendLine(&sb, fmt.Sprintf("%d more finding(s) not listed; Data.findings has the first %d", n, clients.MaxDupFindings))
+	}
+	return sb.String()
+}
+
+// dupMaxPartsListed caps the partition numbers a summary line names, so a
+// topic with hundreds of partitions does not push the findings past the
+// summary cap.
+const dupMaxPartsListed = 20
+
+// partList is "[0 3 7]", or the first dupMaxPartsListed and "and N more".
+func partList(ps []int32) string {
+	if len(ps) <= dupMaxPartsListed {
+		return fmt.Sprint(ps)
+	}
+	return fmt.Sprintf("%v and %d more", ps[:dupMaxPartsListed], len(ps)-dupMaxPartsListed)
+}
+
+// plural is "1 key", "2 keys", with thousands grouped.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return group(n) + " " + noun + "s"
+}
+
+// group writes n with a space between thousands ("41 200").
+func group(n int) string {
+	s := strconv.Itoa(n)
+	if n < 0 {
+		return s
+	}
+	var b strings.Builder
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}

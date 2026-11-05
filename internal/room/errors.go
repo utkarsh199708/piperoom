@@ -3,7 +3,11 @@ package room
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
+
+	"piperoom/internal/agent"
+	"piperoom/internal/setup/plan"
 )
 
 // compensateCtx is the context for undoing a side-table write whose event
@@ -134,4 +138,98 @@ func noHypothesis() *Error {
 // alreadyNudged is 409 already_nudged; msg says how long ago (F9).
 func alreadyNudged(msg string) *Error {
 	return &Error{Status: 409, Code: "already_nudged", Msg: msg}
+}
+
+// tooManyProposals is 429 too_many_proposals: a sixth open driver-authored
+// proposal in one room (docs/api.md; P3c).
+func tooManyProposals() *Error {
+	return &Error{Status: http.StatusTooManyRequests, Code: "too_many_proposals", Msg: "at most 5 open driver-authored proposals per room"}
+}
+
+// ---- Setup rooms (U wave; docs/api.md, "Setup rooms") ----
+
+// setupDisabled is 404 setup_disabled: every setup route and
+// /api/runners/ws while PIPEROOM_SETUP_ENABLED is off.
+func setupDisabled() *Error {
+	return &Error{Status: http.StatusNotFound, Code: "setup_disabled", Msg: "setup is not enabled on this server"}
+}
+
+// noRunner is 409 no_runner: a setup route needs the room's paired runner and
+// none is connected (docs/api.md error table).
+func noRunner() *Error {
+	return &Error{Status: http.StatusConflict, Code: "no_runner", Msg: "no setup runner is paired to this room right now"}
+}
+
+// notTenantMember is 403 not_tenant_member: POST /api/setup for a tenant the
+// caller is not in (or one no tenants: block declares, which is the same
+// answer so a tenant name does not leak).
+func notTenantMember() *Error {
+	return &Error{Status: http.StatusForbidden, Code: "not_tenant_member", Msg: "you are not a member of that tenant"}
+}
+
+// pipelineExists is 409 pipeline_exists: POST /api/setup for a pipeline
+// owners.yaml already defines, or one an open setup room is already building.
+func pipelineExists(id string) *Error {
+	return &Error{Status: http.StatusConflict, Code: "pipeline_exists", Msg: "pipeline " + id + " already exists"}
+}
+
+// notSetupRoom is 400 not_setup_room: a setup route on an incident room.
+func notSetupRoom() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "not_setup_room", Msg: "this room is not a setup room"}
+}
+
+// addressRefused is 400 address_refused: a target address on the denylist of
+// design §2.6. The message carries no part of the address (a URL form may hold
+// credentials).
+func addressRefused() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "address_refused", Msg: "the target address is not allowed: cloud metadata endpoints, link-local, multicast, unspecified and loopback addresses of another host are refused, as are this server's own addresses"}
+}
+
+// credentialRefused is 400 address_refused for a URL-form target address that
+// carries user info. The address would be stored verbatim in events, snapshots
+// and exports, so the message never echoes it (the user info IS the secret).
+func credentialRefused() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "address_refused", Msg: "the target address must not carry user info: register the host without credentials"}
+}
+
+// classLowered is 400 class_lowered: a class below the one the server derived
+// (a class is a floor that only rises).
+func classLowered(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "class_lowered", Msg: msg}
+}
+
+// windowTooLong is 400 window_too_long: a maintenance window over 4 hours or
+// more than 24 hours ahead.
+func windowTooLong(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "window_too_long", Msg: msg}
+}
+
+// notInPlan is 400 not_in_plan: a setup proposal step whose op is not in the
+// current setup.plan (docs/api.md, Setup rooms). The kind is
+// agent.ErrNotInPlan, so the agent recognises the one refusal it answers with
+// a new plan (design §3.3).
+func notInPlan(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "not_in_plan", Msg: msg, kind: agent.ErrNotInPlan}
+}
+
+// notAdmin is 403 not_admin: a T2 or T3 approval of a setup room on a team
+// server by someone who is neither a tenant admin nor an owner of an
+// overlapping pipeline (docs/api.md, Setup rooms; design §3.6). A driver who
+// is not a tenant admin gets it too: the driver's fallback grant applies only
+// in solo mode on the standalone server.
+func notAdmin() *Error {
+	return &Error{
+		Status: http.StatusForbidden, Code: "not_admin",
+		Msg: "this step is T2 or T3 of a setup room: a tenant admin, or an owner of the pipeline it overlaps, must approve it",
+	}
+}
+
+// setupGuardRefused is 400 validation for a step the guard table forbids on
+// its class. The kind is plan.ErrGuard and the message names the row's fixed
+// reason code, so the caller and the runner refuse the same pair with the
+// same word (design §3.5).
+func setupGuardRefused(msg string) *Error {
+	e := validation(msg)
+	e.kind = plan.ErrGuard
+	return e
 }

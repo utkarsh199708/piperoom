@@ -108,6 +108,7 @@ exactly one reference:
 | Key | Replaces | Notes |
 |---|---|---|
 | `source_db_url` | `SOURCE_DB_URL` | required |
+| `source_db_write_url` | `SOURCE_DB_WRITE_URL` | optional, `cdc` pipelines only (P1a-3b, P1a-3c; #665, #673): the source Postgres as its separate write role, for the pg write actions. `{env}` or `{file}` only, never a literal. `owners.Load` refuses it when it is the same reference as `source_db_url`; `wiring` resolves it at start and refuses it when it logs in as the same role (same user, host and port) as `source_db_url`. Both checks run in either write mode, so the mistake stops the start; the writer is built from it only with `PIPEROOM_WRITE_MODE=on` (off, the pipeline's set drops it). Without it the pg write actions refuse at Execute ("no write credentials") |
 | `warehouse_db_url` | `WAREHOUSE_DB_URL` | required |
 | `warehouse_kind` | `WAREHOUSE_KIND` | literal allowed; empty = `postgres` |
 | `kafka_brokers` | `KAFKA_BROKERS` | required |
@@ -119,6 +120,8 @@ exactly one reference:
 | `connect_url` | `CONNECT_URL` | required |
 | `connect_username`, `connect_password` | `CONNECT_USERNAME`, `CONNECT_PASSWORD` | |
 | `connect_tls_ca_file`, `connect_tls_cert_file`, `connect_tls_key_file` | `CONNECT_TLS_*_FILE` | path |
+| `connect_kind` | `CONNECT_KIND` | literal: `rest` (default) \| `msk` \| `confluent` \| `aiven`; not accepted until U13c extends the same two files (U12-0/U13-0) |
+| `ccloud_api_key`, `ccloud_api_secret` | – (no server-wide variable) | `file:` only; the Confluent Cloud read-only account's keys. Not accepted yet: the key table of `owners/tenancy.go` (A3) and the mapper in `wiring/connections.go` (A4) gain both keys, and the loader refuses `connect_kind: confluent` without the two, in U13c (U12-0/U13-0) |
 | `schema_registry_url` | `SCHEMA_REGISTRY_URL` | required |
 | `schema_registry_username`, `schema_registry_password` | `SCHEMA_REGISTRY_USERNAME`, `SCHEMA_REGISTRY_PASSWORD` | |
 | `schema_registry_tls_ca_file`, `schema_registry_tls_cert_file`, `schema_registry_tls_key_file` | `SCHEMA_REGISTRY_TLS_*_FILE` | path |
@@ -268,6 +271,13 @@ object did not exist when it is outside the caller's tenants. **404, never 403**
 | `POST /api/handoffs/{hid}/accept` | `404 not_found`, the answer for a missing hand-off, before `409`/`403` |
 | `GET /api/pipelines/{pid}/topology` | `404 not_found` "pipeline not found" |
 | `GET /api/shadow/metrics` | only rooms of your tenants are counted; `?pipeline=` outside them counts nothing, as an unknown pipeline does |
+| `GET /api/fleet` (X5-0) | the pipeline has no row and is in no count; `?tenant=` naming a tenant you are not in, or none, answers `[]` (not `403`/`404`) |
+| `GET /api/fleet/changes` (X5-0) | the pipeline's changes are not listed; `?pipeline=` outside them answers an empty page, as an unknown pipeline does |
+| `GET /api/pipelines/{pid}/connectors/{name}/config-versions` (X5-0, also `?diff=`) | `404 not_found` "pipeline not found", before the connector, hash and role checks |
+| `GET /api/pipelines/{pid}/trends` (X3-0) | `404 not_found` "pipeline not found", before the metric check (X3a's ticket said `403`; this rule wins) |
+| `POST /api/pipelines/{pid}/connectors/{name}/accept-config` (X3-0) | `404 not_found` "pipeline not found", before the connector, role and watcher checks |
+| `POST /api/rooms/{id}/page-team` (X4-0) | the room-id rule above; a `team` of another tenant is refused like an unknown team (`400 validation`) |
+| `POST /api/changes/webhook` (X4-0, signed) | no caller tenant: the secret is shared by every tenant, so the reply carries `stored` only; an unknown pipeline is `404 not_found` |
 | `POST /api/rooms` | `400 validation` "unknown pipeline", the answer for an unknown pipeline |
 | `POST /api/alerts/webhook` (dev) | `404 not_found` for a pipeline outside your tenants, unknown pipelines included |
 | `control/grant`, `handoffs` (create) | a target who cannot see the room is refused like an unknown person (`400 validation`) |

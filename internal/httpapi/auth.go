@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/auth"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
@@ -104,14 +105,20 @@ func isHealthProbe(r *http.Request) bool {
 }
 
 // isSignedAlertRoute reports whether r is POST /api/alerts/{source} for a
-// signed source. Those routes skip the Host check (lead decision on PR #61):
-// the sender's HMAC or token is their auth and DNS rebinding cannot forge it,
-// while in-cluster senders call by internal DNS names that no operator would
-// think to list. The unsigned dev webhook (/api/alerts/webhook) is not one of
-// them and stays under the check.
+// signed source, or POST /api/changes/webhook (X4, signed like the generic
+// source with CHANGES_WEBHOOK_SECRET; its handler checks the secret, caps the
+// body and verifies the HMAC before any other work). Those routes skip the
+// Host check (lead decision on PR #61, extended to the change webhook by the
+// X-batch3 review): the sender's HMAC or token is their auth and DNS
+// rebinding cannot forge it, while in-cluster senders call by internal DNS
+// names that no operator would think to list. The unsigned dev webhook
+// (/api/alerts/webhook) is not one of them and stays under the check.
 func isSignedAlertRoute(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
+	}
+	if r.URL.Path == alertin.ChangeWebhookPath {
+		return true
 	}
 	src, ok := strings.CutPrefix(r.URL.Path, "/api/alerts/")
 	return ok && src != "" && src != "webhook" && !strings.Contains(src, "/")

@@ -184,6 +184,8 @@ func TestScenarioFromShadowErrors(t *testing.T) {
 			want: ErrShadowUnlabelled},
 		{name: "unknown layer", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "etl" },
 			want: ErrShadowUnknownLayer, text: "etl"},
+		{name: "environment layer", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "environment" },
+			want: ErrShadowUnknownLayer, text: "environment"},
 		{name: "layer in other case", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "Kafka-Connect" },
 			want: ErrShadowUnknownLayer},
 		{name: "too many terms", mutate: func(m map[string]any) {

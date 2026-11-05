@@ -1,0 +1,46 @@
+[
+  {
+    "pipeline_id": "orders",
+    "title": "Orders CDC",
+    "kind": "cdc",
+    "tenant": "payments",
+    "team": "orders-core",
+    "health": "fail",
+    "worst_node": "connect:pg-orders-connector",
+    "open_rooms": 1,
+    "signals_firing": ["connector_down", "slot_wal"],
+    "changes_24h": 3,
+    "forecasts": [{ "metric": "slot_wal_bytes", "eta": "2026-10-23T04:10:00Z" }],
+    "last_verdict": { "room_id": "r_01J9", "verdict": "confirmed", "layer_correct": true, "at": "2026-10-21T09:12:00Z" },
+    "checked_at": "2026-10-22T10:01:00Z"
+  },
+  {
+    "pipeline_id": "refunds",
+    "title": "Refunds CDC",
+    "kind": "cdc",
+    "tenant": "payments",
+    "team": "refunds",
+    "health": "warn",
+    "worst_node": "pg:public.refunds",
+    "open_rooms": 0,
+    "signals_firing": ["count_drift"],
+    "changes_24h": 0,
+    "forecasts": [],
+    "last_verdict": null,
+    "checked_at": "2026-10-22T10:01:00Z"
+  },
+  {
+    "pipeline_id": "nightly",
+    "title": "Nightly load",
+    "kind": "batch",
+    "tenant": "",
+    "team": "",
+    "health": "unknown",
+    "worst_node": "",
+    "open_rooms": 0,
+    "signals_firing": [],
+    "changes_24h": 1,
+    "forecasts": [],
+    "last_verdict": { "room_id": "r_02AA", "verdict": "", "layer_correct": false, "at": "2026-10-20T07:00:00Z" }
+  }
+]

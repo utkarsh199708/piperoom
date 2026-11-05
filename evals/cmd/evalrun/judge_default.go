@@ -1,15 +1,12 @@
-//go:build !claude
+//go:build !livejudge && !claude
 
 package main
 
-import (
-	"errors"
+import "piperoom/evals"
 
-	"piperoom/evals"
-)
-
-// newJudge refuses: the LLM judge is compiled in only with -tags claude, so
-// the default binary never needs the API for judging.
-func newJudge(string) (evals.HypothesisJudge, error) {
-	return nil, errors.New("the claude judge needs a build with -tags claude")
+// newJudge refuses: the live LLM judge is compiled in only with -tags
+// livejudge (or its alias claude), so the default binary never needs a model
+// API for judging.
+func newJudge(string, string) (evals.HypothesisJudge, error) {
+	return nil, errNoLiveJudge
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
@@ -159,4 +161,38 @@ func (m *mirrors) stop(timeout time.Duration) {
 	case <-t.C:
 		m.log.Warn("slack mirrors did not stop in time", "timeout", timeout)
 	}
+}
+
+// teamPager is room.Deps.TeamPager (X4d): nil while the bridge is off, so
+// page-team answers 409 slack_off. Every replica pages, not only the leader:
+// the page is the driver's request, not part of the mirror.
+func (m *mirrors) teamPager() room.TeamPager {
+	if m == nil {
+		return nil
+	}
+	return bridgePager{b: m.bridge}
+}
+
+// bridgePager turns a room.TeamPage into the bridge's typed page. Only the
+// cited change's URL and service come out of its after JSON, and only for the
+// external kinds that carry a clients.ExternalChange.
+type bridgePager struct{ b *slackbridge.Bridge }
+
+func (p bridgePager) PageTeam(ctx context.Context, pg room.TeamPage) error {
+	tp := slackbridge.TeamPage{
+		RoomID: pg.RoomID, PipelineID: pg.PipelineID, Channel: pg.Channel, Team: pg.Team, By: pg.By,
+		Scope: pg.Scope, Hypothesis: pg.Hypothesis, Confidence: pg.Confidence, Steps: pg.Steps, ChangeID: pg.ChangeID,
+	}
+	if c := pg.Change; c != nil {
+		tc := &slackbridge.TeamPageChange{Kind: c.Kind, Summary: c.Summary, At: c.At}
+		var x clients.ExternalChange
+		if clients.IsExternalChange(c.Kind) && json.Unmarshal(c.After, &x) == nil {
+			tc.URL, tc.Service = x.URL, x.Service
+		}
+		tp.Change = tc
+	}
+	if err := p.b.PageTeam(ctx, tp); err != nil {
+		return &room.TeamPageError{Code: slackbridge.ErrorCode(err), Err: err}
+	}
+	return nil
 }

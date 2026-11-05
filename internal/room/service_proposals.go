@@ -5,16 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // stepTimeout bounds each action execution (rule 4).
 const stepTimeout = 30 * time.Second
+
+// setupT3StepTimeout bounds a setup step sent T3: the runner waits for a
+// person's "y" on its terminal, so the setup client gives the op a 5 minute
+// deadline (remoteclients' T3 deadline), and the step needs that plus the
+// usual margin, or stepTimeout would cut the confirmation short. The claim of
+// such a step is kept fresh while it runs (keepClaimFresh).
+const setupT3StepTimeout = 5*time.Minute + stepTimeout
+
+// stepsContainRegister reports whether any step of a proposal is the
+// pipeline_register action (U1-14): its Create gate, its approval guard and
+// the Execute re-check all key on it.
+func stepsContainRegister(steps []events.ProposalStep) bool {
+	for _, st := range steps {
+		if st.Action == registerActionName {
+			return true
+		}
+	}
+	return false
+}
 
 // placeholderTexts are values a model or a form writes when it has nothing to
 // say. They look filled in but say nothing about the risk or the undo plan, so
@@ -65,45 +87,194 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
-	return s.createProposal(ctx, roomID, p, actor, nil)
+	id, _, err := s.createProposal(ctx, roomID, p, actor, nil)
+	return id, err
+}
+
+// maxOpenDriverProposals caps the open driver-authored proposals of one room
+// (docs/api.md: a sixth answers 429 too_many_proposals).
+const maxOpenDriverProposals = 5
+
+// driverLayerAccepted reports whether a driver's step layer sent stands for
+// the layer the server derived (want, from actions.StepLayer): empty, want
+// itself, or the room-less catalogue value GET /api/actions served for the
+// action (a.Layer()). Any other value is a different approver and is refused.
+// The agent's proposals never take this path: they must send want.
+func driverLayerAccepted(a actions.Action, sent, want string) bool {
+	return sent == "" || sent == want || sent == a.Layer()
+}
+
+// CreateDriverProposal is POST /api/rooms/{id}/proposals (P3c): the driver
+// authors a fix proposal. Driver only (403 not_driver), open rooms only
+// (409 room_closed), never in a shadow room (400 validation), at most
+// maxOpenDriverProposals open driver-authored proposals per room
+// (429 too_many_proposals). It is validated exactly like an agent proposal
+// (createProposal: registered action, layer match (the driver's step layer
+// may also be "" or the catalogue's a.Layer(); the server stores the derived
+// one, see driverLayerAccepted), Validate under the room's
+// pipeline ctx, param keys, scope, params_hash, preview); only the typed text
+// is refused rather than sanitized, and Origin is forced to
+// ProposalOriginDriver, which also keeps the auto-approve policy off it
+// (scheduleCheckLocked).
+func (s *Service) CreateDriverProposal(ctx context.Context, user User, roomID string, p events.ProposalCreatedPayload) (events.Event, error) {
+	// The title, risk, rollback and step descriptions are typed by the driver,
+	// so they follow the typed-text rule (refused, not sanitized).
+	if err := rejectUnstorable(p.Title, p.Risk, p.Rollback); err != nil {
+		return events.Event{}, err
+	}
+	for _, st := range p.Steps {
+		if err := rejectUnstorable(st.Description, st.Verify); err != nil {
+			return events.Event{}, err
+		}
+	}
+	p.Origin = events.ProposalOriginDriver
+	// The fence below re-checks under the room's lock and is authoritative, but
+	// createProposal runs the structural and Validate checks first: Validate
+	// reads the pipeline's own systems, so a non-driver (or a call to a closed,
+	// shadow or capped room) must be refused before that. precheckDriverProposal
+	// does those checks under a short lock; the fence repeats them where the
+	// write lands.
+	if err := s.precheckDriverProposal(ctx, user, roomID); err != nil {
+		return events.Event{}, err
+	}
+	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), s.driverProposalFence(user))
+	return ev, err
+}
+
+// precheckDriverProposal refuses, before any action Validate runs, the calls
+// createProposal's fence would refuse under the lock: a non-driver, a closed
+// room, a shadow room, or a room at its driver-proposal cap. The fence still
+// re-checks under the lock (the room may change between the checks); this
+// pass only keeps a refused caller from reading the pipeline's systems through
+// Validate and seeing their error text.
+func (s *Service) precheckDriverProposal(ctx context.Context, user User, roomID string) error {
+	s.syncRoom(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer s.unlockRoom(st)
+	if !s.isDriver(st, user.ID) {
+		return ErrNotDriver()
+	}
+	if !s.roomOpen(st) {
+		return roomClosed("room is closed")
+	}
+	if st.snap.Shadow {
+		return validation("a shadow room has no proposals")
+	}
+	if openDriverProposals(st.snap) >= maxOpenDriverProposals {
+		return tooManyProposals()
+	}
+	return nil
+}
+
+// openDriverProposals counts the open driver-authored proposals of a snapshot
+// (Origin "driver"; see scheduleCheckLocked, which never schedules them).
+func openDriverProposals(snap RoomSnapshot) int {
+	n := 0
+	for _, p := range snap.OpenProposals {
+		if p.Origin == events.ProposalOriginDriver {
+			n++
+		}
+	}
+	return n
 }
 
 // createProposal is CreateProposal with an optional fence, checked under the
 // room's lock before anything is written: the agent's proposals refuse a run
-// that lost its lease (fenceLocked).
-func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
+// that lost its lease (fenceLocked), the driver's refuse a non-driver, a
+// shadow room or too many open driver proposals. It returns the proposal id
+// and the proposal.created event.
+func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, events.Event, error) {
 	p = sanitizeProposal(p)
+	// The system origin grants plan-free routing and the ladder canary's
+	// setup_local auto-run (setupNeedsPlan, setupLocalRuns): only the server's
+	// own actor may claim it, never a payload from the agent or a person.
+	if p.Origin == setupProposalOriginSystem && (actor.Kind != systemActor.Kind || actor.ID != systemActor.ID) {
+		return "", events.Event{}, validation("origin system is reserved for the server's own proposals")
+	}
 	if len(p.Steps) == 0 {
-		return "", validation("proposal requires at least one step")
+		return "", events.Event{}, validation("proposal requires at least one step")
 	}
 	if err := checkPlanText("risk", p.Risk); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	if err := checkPlanText("rollback", p.Rollback); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	// The actions of the room's own pipeline (docs/design/tenancy.md): their
 	// Validate reads that pipeline's systems only.
-	acts := s.actionsFor(s.roomPipeline(ctx, roomID))
+	pipelineID := s.roomPipeline(ctx, roomID)
+	acts := s.actionsFor(pipelineID)
+	// Validate runs under the room's pipeline scope and room id, as the
+	// executor and the preview do, so an action reads that pipeline's whole
+	// config and that room's per-room client state. A setup room runs before
+	// pipeline_register, so its pipeline is the provisional one
+	// (owners.Provisional, design §3.2): Validate and the scope check see that
+	// pipeline, never a pipeline owners.yaml does not define yet.
+	setupSnap := s.setupSnapshot(ctx, roomID)
+	vctx := s.actionCtx(ctx, roomID, pipelineID)
+	if setupSnap != nil {
+		if prov, ok := setupSnap.SetupProvisional(); ok {
+			vctx = tools.WithPipeline(vctx, prov)
+		}
+	}
 	// Structural checks first: they do not need the room state.
-	for i, step := range p.Steps {
+	stepActs := make([]actions.Action, 0, len(p.Steps))
+	for _, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
-			return "", validation(fmt.Sprintf("unknown action %q", step.Action))
+			return "", events.Event{}, validation(fmt.Sprintf("unknown action %q", step.Action))
 		}
-		if step.Layer != a.Layer() {
-			return "", validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
+		stepActs = append(stepActs, a)
+	}
+	// Q7k: a proposal with a Deferred (pull-request) step holds only
+	// Deferred steps, at most actions.MaxDeferredSteps.
+	deferredSteps, err := checkDeferredSteps(stepActs)
+	if err != nil {
+		return "", events.Event{}, err
+	}
+	// The class comes from the registry, never from the proposer (X2, X6).
+	p.Class = ""
+	for i, step := range p.Steps {
+		a := stepActs[i]
+		switch c := actions.ClassOf(a); {
+		case c == actions.ClassFix:
+		case p.Class != "" && p.Class != c:
+			// One verdict per proposal: counts or throughput, not both.
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): a proposal cannot mix recovery and performance steps; propose them separately", i, step.Action))
+		default:
+			p.Class = c
+		}
+		// The one layer rule (actions.StepLayer): the room's pipeline and the
+		// step's params decide the approver, never the proposer (Q7k, Q8o).
+		want, lerr := s.stepLayer(setupSnap, pipelineID, a, step.Params)
+		if lerr != nil {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): no approving layer: %v", i, step.Action, lerr))
+		}
+		if p.Origin == events.ProposalOriginDriver && driverLayerAccepted(a, step.Layer, want) {
+			// The driver's form only knows GET /api/actions, which has no
+			// room: it sends the catalogue's a.Layer() ("postgres" for a
+			// SourceLayered action, "" for a Layered one) or nothing. The
+			// server sets the derived layer, so the proposer still never
+			// picks the approver (review of #934, MySQL Major 2).
+			step.Layer = want
+			p.Steps[i].Layer = want
+		}
+		if step.Layer != want {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, want))
 		}
 		if !isKnownLayer(step.Layer) {
-			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
-		if err := a.Validate(ctx, step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+		if err := a.Validate(vctx, step.Params); err != nil {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the
 		// approver would not see which value ran (see param_keys.go).
 		if err := checkParamKeys(a.ParamsSchema(), step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 	}
 
@@ -111,22 +282,30 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	s.syncRoom(ctx, roomID)
 	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	defer s.unlockRoom(st)
 	if fence != nil {
 		if err := fence(st); err != nil {
-			return "", err
+			return "", events.Event{}, err
 		}
 	}
 	if !s.roomOpen(st) {
-		return "", roomClosed("room is closed")
+		return "", events.Event{}, roomClosed("room is closed")
 	}
 	// A room opened from a webhook with an unknown pipeline has proposals
 	// disabled (docs/api.md:103): the agent must not propose a fix against a
 	// pipeline nothing can be scoped to.
 	if s.proposalsDisabled(st) {
-		return "", errProposalsDisabled(st.snap.PipelineID)
+		return "", events.Event{}, errProposalsDisabled(st.snap.PipelineID)
+	}
+
+	// Q7k: at most maxOpenFixPRs fix PRs open (or about to open) per room.
+	if deferredSteps > 0 {
+		if n := s.pendingFixPRs(&st.snap); n+deferredSteps > maxOpenFixPRs {
+			return "", events.Event{}, validation(fmt.Sprintf(
+				"a room holds at most %d open fix pull requests (%d open or proposed); wait until one merges or closes", maxOpenFixPRs, n))
+		}
 	}
 
 	// Scope check against the room's pipeline (docs/api.md): a step must
@@ -134,27 +313,65 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// violation is a validation error, not a server error.
 	for i, step := range p.Steps {
 		a, _ := acts.Get(step.Action)
-		if err := s.scopeCheck(st.snap.PipelineID, a, step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+		if err := s.scopeCheckRoom(&st.snap, st.snap.PipelineID, a, step.Params); err != nil {
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 	}
 
-	// The required layers are the union of the step layers: a proposal needs
-	// approval from every layer it writes to, never fewer.
-	required := make([]string, 0, len(p.Steps))
-	seen := map[string]bool{}
-	for _, step := range p.Steps {
-		if !seen[step.Layer] {
-			seen[step.Layer] = true
-			required = append(required, step.Layer)
+	if st.snap.IsSetupRoom() {
+		// The tier decides the route (T1 scheduled, T2/T3 an approver), the
+		// guard table and the maintenance window are checked here for the
+		// first time, and an agent proposal must come from the latest
+		// setup.plan (setup_route.go; design §3.3, §3.5).
+		route, rerr := resolveSetupRoute(&st.snap, acts, p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
+		if rerr != nil {
+			return "", events.Event{}, rerr
 		}
+		// pipeline_register's own gates (U1-14; design §3.9, §3.6): a green
+		// setup.verified for the current plan with no executed step after
+		// it, and an overlap whose owners can never approve this proposal.
+		if stepsContainRegister(p.Steps) {
+			if gerr := setupRegisterGate(&st.snap); gerr != nil {
+				return "", events.Event{}, gerr
+			}
+			if oerr := s.registerCreateRefusal(&st.snap); oerr != nil {
+				return "", events.Event{}, oerr
+			}
+			// And what the server itself needs to register (an owners dir
+			// and reload, or a forge with repos:; registered read
+			// credentials for a pipeline this server will watch; an id the
+			// owners set does not already hold), so the proposal is refused
+			// here with the reason instead of failing at Execute.
+			if perr := s.registerPreconditions(&st.snap); perr != nil {
+				return "", events.Event{}, perr
+			}
+		}
+		p.RequiredLayers, p.FallbackLayers = s.setupLayers(&st.snap, route, p.Steps)
+	} else {
+		// pipeline_register writes a setup room's provisional pipeline; an
+		// incident room has no setup state to register.
+		if stepsContainRegister(p.Steps) {
+			return "", events.Event{}, validation("pipeline_register is a setup-room step; this room is not a setup room")
+		}
+		// The required layers are the union of the step layers: a proposal needs
+		// approval from every layer it writes to, never fewer.
+		required := make([]string, 0, len(p.Steps))
+		seen := map[string]bool{}
+		for _, step := range p.Steps {
+			if !seen[step.Layer] {
+				seen[step.Layer] = true
+				required = append(required, step.Layer)
+			}
+		}
+		p.RequiredLayers = required
+		// Fixed at creation like the required layers; never set by the caller.
+		p.FallbackLayers = s.fallbackLayersFor(st.snap.PipelineID, required)
 	}
-	p.RequiredLayers = required
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
 	if err != nil {
-		return "", fmt.Errorf("room: marshal proposal steps: %w", err)
+		return "", events.Event{}, fmt.Errorf("room: marshal proposal steps: %w", err)
 	}
 	// The hash is always computed here, over the parsed and sanitized proposal
 	// that is about to be stored. A value the caller put in ParamsHash is
@@ -164,9 +381,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	hash, err := ComputeParamsHash(roomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, p.Steps)
 	if err != nil {
 		if errors.Is(err, errParamsNumber) {
-			return "", validation(err.Error())
+			return "", events.Event{}, validation(err.Error())
 		}
-		return "", validation("proposal cannot be hashed: " + err.Error())
+		return "", events.Event{}, validation("proposal cannot be hashed: " + err.Error())
 	}
 	p.ParamsHash = hash
 	// Row first so a crash cannot leave an event with no backing row; if the
@@ -182,15 +399,16 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		Rollback:       p.Rollback,
 		ParamsHash:     p.ParamsHash,
 	}); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
+	ev, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p)
+	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
 		if delErr := s.store.DeleteProposal(dctx, p.ProposalID); delErr != nil {
 			s.log.Warn("room: compensate failed proposal row", "proposal", p.ProposalID, "err", delErr)
 		}
-		return "", err
+		return "", events.Event{}, err
 	}
 	// Preview runs outside the room's lock, on the service lifetime context;
 	// it waits for this call to release the lock before it appends anything.
@@ -201,7 +419,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 			s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
 		}(st.snap.PipelineID, p.Steps)
 	}
-	return p.ProposalID, nil
+	return p.ProposalID, ev, nil
 }
 
 // ApproveProposal records a layer owner's approval. When every required layer
@@ -244,7 +462,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		// The solo confirm text is checked after the hash (below), so a stale
 		// solo user is told params_mismatch first.
-		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, false)
+		grant, err := s.authorizeProposalLayer(st, p, user, layer, confirm, false)
 		if err != nil {
 			return err
 		}
@@ -259,34 +477,19 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if err := s.checkParamsHash(ctx, &p, paramsHash, false); err != nil {
 			return err
 		}
+		// X8: a require_staging: step needs a healthy stage of the
+		// current params first; nothing is recorded otherwise.
+		if err := s.stagingGateLocked(st, proposalID); err != nil {
+			return err
+		}
 		if grant == "solo" {
 			if err := checkSoloConfirm(st.snap.PipelineID, layer, confirm); err != nil {
 				return err
 			}
 		}
 		prow = p
-		ident := s.identityFor(user, grant)
-		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
-			if errors.Is(err, store.ErrAlreadyExists) {
-				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
-			}
+		if ev, err = s.appendApprovalLocked(ctx, st, p, layer, s.personApprover(st, proposalID, user, layer, grant)); err != nil {
 			return err
-		}
-		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
-			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
-		})
-		if err != nil {
-			dctx, cancel := compensateCtx(ctx)
-			defer cancel()
-			if delErr := s.store.DeleteApproval(dctx, proposalID, layer); delErr != nil {
-				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
-			}
-			return err
-		}
-		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
-		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
-			_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)})
-			s.afterAppend(p.RoomID, "backup approval note", err, "proposal", proposalID)
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -301,9 +504,126 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	return ev, nil
 }
 
+// approver is who gives one approval and on what right: the event actor,
+// the identity recorded with it (nil for the policy, which has none),
+// authorizeLayer's principal detail ("user:priya", "backup:user:meera",
+// "solo", "fallback", GrantAdmin or GrantPolicy for a policy), the person
+// (nil for the policy), the policy name for a policy approval (PolicyAutoApprove
+// or PolicySetupLocal) and the condition the append is made under (nil: none
+// beyond the caller's checks).
+type approver struct {
+	actor  events.Actor
+	ident  *events.Identity
+	detail string
+	policy string
+	user   *User
+	check  func() error
+}
+
+// personApprover is the approver of a person's approve or approve-all. A
+// fallback approval is appended only while checkFallbackLocked still holds,
+// so a driver change logged after the caller's check refuses it.
+func (s *Service) personApprover(st *roomState, proposalID string, user User, layer, detail string) approver {
+	ident := s.identityFor(user, detail)
+	a := approver{actor: s.humanActor(user), ident: &ident, detail: detail, user: &user}
+	if approvalGrant(detail) == events.GrantFallback {
+		a.check = func() error { return s.checkFallbackLocked(st, proposalID, user, layer) }
+	}
+	return a
+}
+
+// appendApprovalLocked records one layer's approval: the approvals row first,
+// so the store's one-decision-per-layer rule refuses a second one
+// (409 already_decided), then approval.given, removing the row again when the
+// event cannot be appended. a.detail is identity.grant, and
+// approvalGrant(a.detail) is the event's grant (P0 item 4). A backup's
+// approval also gets the room's backup note. ApproveProposalConfirm,
+// ApproveAllProposal and the auto-approve policy (firePolicyLocked) all
+// record through here, so an approval is the same record, log line and
+// metric whichever path gave it. The caller has checked that the proposal is
+// open, the layer pending and the params hash; it holds st's lock and queues
+// the executor once allApproved. With a.check set the event is appended only
+// while it holds (emitCheckedLocked).
+//
+// A person's approval also stops a pending policy countdown of the proposal:
+// the fold of its approval.given does (foldScheduleDecision), on every
+// replica, and the policy's fire path re-checks that fold under the room's
+// lock, so there is no timer here to stop.
+func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p store.ProposalRow, layer string, a approver) (events.Event, error) {
+	grant := approvalGrant(a.detail)
+	rowIdent := events.Identity{Grant: a.detail}
+	if a.ident != nil {
+		rowIdent = *a.ident
+	}
+	if err := s.store.RecordApproval(ctx, approvalRow(p.ProposalID, layer, "approved", "", p.ParamsHash, rowIdent)); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
+		}
+		// Named, so a failure part-way through approve-all says which layer.
+		return events.Event{}, fmt.Errorf("room: record approval of %s: %w", layer, err)
+	}
+	payload := events.ApprovalGivenPayload{
+		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: a.ident, Grant: grant,
+	}
+	if grant == events.GrantPolicy {
+		payload.Policy = a.policy
+		if payload.Policy == "" {
+			payload.Policy = events.PolicyAutoApprove
+		}
+	}
+	var ev events.Event
+	var err error
+	if a.check != nil {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, a.check, events.ApprovalGiven, a.actor, payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, a.actor, payload)
+	}
+	if err != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteApproval(dctx, p.ProposalID, layer); delErr != nil {
+			s.log.Warn("room: compensate failed approval", "proposal", p.ProposalID, "layer", layer, "err", delErr)
+		}
+		return events.Event{}, err
+	}
+	s.approvals.inc(grant)
+	s.log.Info("room: approval given", "proposal", p.ProposalID, "layer", layer, "user", a.actor.ID, "grant", a.detail)
+	if a.user != nil && strings.HasPrefix(a.detail, owners.GrantBackupPrefix) {
+		_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(*a.user, layer, a.detail)})
+		s.afterAppend(p.RoomID, "backup approval note", err, "proposal", p.ProposalID)
+	}
+	return ev, nil
+}
+
+// approvalGrant maps authorizeLayer's principal detail to approval.given's
+// grant: the solo user's detail is "solo", the driver's on an unowned layer
+// is "fallback" (authorizeProposalLayer), a policy's is "policy", a tenant
+// admin's is "admin" (Events.GrantAdmin, setup rooms); every other detail is
+// an owner right (owners.yaml principal or backup, or the users.yaml layers
+// list).
+func approvalGrant(detail string) string {
+	switch detail {
+	case events.GrantSolo:
+		return events.GrantSolo
+	case events.GrantFallback:
+		return events.GrantFallback
+	case events.GrantPolicy:
+		return events.GrantPolicy
+	case events.GrantAdmin:
+		return events.GrantAdmin
+	}
+	return events.GrantOwner
+}
+
 // RejectProposal records a layer owner's rejection. paramsHash follows the same
 // rule as in ApproveProposal: required, and 409 params_mismatch when it is not
 // the proposal's hash.
+//
+// Whoever may approve a layer may reject it (authorizeProposalLayer), so the
+// room's driver may reject a fallback_layers entry (P2b-3b); otherwise a layer
+// nobody owns would keep the proposal open until the room closes. As for a
+// fallback approval, the fallback rule is checked again when the event is
+// appended (emitCheckedLocked), so a driver change logged in between refuses it.
 func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason, paramsHash string) (events.Event, error) {
 	if err := rejectUnstorable(layer, reason, paramsHash); err != nil {
 		return events.Event{}, err
@@ -322,7 +642,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, "", false)
+	grant, err := s.authorizeProposalLayer(st, p, user, layer, "", false)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -342,9 +662,17 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		}
 		return events.Event{}, err
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), events.ApprovalRejectedPayload{
+	payload := events.ApprovalRejectedPayload{
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
-	})
+	}
+	var ev events.Event
+	if grant == events.GrantFallback {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, func() error {
+			return s.checkFallbackLocked(st, proposalID, user, layer)
+		}, events.ApprovalRejected, s.humanActor(user), payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), payload)
+	}
 	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
@@ -408,13 +736,12 @@ func (s *Service) lockProposalRoom(ctx context.Context, user User, proposalID st
 // executeProposal, finishStep, failStep, setProposalStatus, isRoomOpen and the
 // step state machine live in service_executor.go.
 
+// isKnownLayer reports whether layer is one owners.yaml may name
+// (owners.KnownLayers: events.Layers plus the mysql source layer). The room
+// and owners.yaml share that one list, so a layer owners.yaml accepts is
+// never refused here, and the other way round.
 func isKnownLayer(layer string) bool {
-	for _, l := range events.Layers {
-		if l == layer {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(owners.KnownLayers(), layer)
 }
 
 func contains(layers []string, layer string) bool {

@@ -2,9 +2,15 @@
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import { neutralizeBadgeText } from '../lib/verification'
 import { verdictKind, verdictWords } from '../lib/execution'
+import { checkingLabel, gapLine, recoveryOutcome, verdictView } from '../lib/recovery'
 import { stripBidi } from '../lib/title'
+import { policyLabel } from '../lib/countdown'
+import { clockTimeSeconds } from '../lib/time'
+import { stagedVerdict } from '../lib/staging'
+import type { StagedVerdict } from '../lib/staging'
 import type {
   ActionExecutedPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
   AgentHypothesisPayload,
   AgentMessagePayload,
@@ -24,7 +30,11 @@ import type {
   HandoffRequestedPayload,
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
+  ProposalCancelledPayload,
   ProposalCreatedPayload,
+  ProposalStagedPayload,
+  ProposalScheduledPayload,
+  PullRequestUpdatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   SteerDeclinedPayload,
@@ -34,6 +44,14 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { argTags } from '../lib/toolLayers'
+import { prLine } from '../lib/fixpr'
+
+const STAGE_WORDS: Record<StagedVerdict, string> = {
+  healthy: 'healthy',
+  failed: 'failed',
+  not_applied: 'not applied',
+  no_verdict: 'no verdict',
+}
 
 export type ActivityKind = 'step' | 'human' | 'decision' | 'control' | 'system'
 export interface Described {
@@ -90,6 +108,10 @@ const STATE_WORDS: Record<string, string> = {
 }
 
 const RANK: Record<string, number> = { low: 0, medium: 1, high: 2 }
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
 
 function took(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
@@ -207,6 +229,8 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: `${who} asked for control`, kind: 'control' }
     case 'control.granted': {
       const p = as<ControlGrantedPayload>(e)
+      // P2b: the system made the first member of a driverless room its driver.
+      if (p.reason === 'sole_member') return { text: `${nm(p.to.name)} is the driver · the only one here`, kind: 'control' }
       if (e.actor.id === p.to.id) {
         // A self-grant is either the sitting driver renewing their lease or
         // someone taking over (no driver, or an expired lease), never a hand-over.
@@ -222,19 +246,56 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
+      if (p.origin === 'driver') return { text: `${who} proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
       return { text: `Agent proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
     }
     case 'proposal.previewed':
       return { text: 'Previewed what the fix will do', kind: 'decision' }
+    case 'proposal.stage_started':
+      return { text: `${who} is trying the fix in staging`, kind: 'decision' }
+    case 'proposal.staged': {
+      const p = as<ProposalStagedPayload>(e)
+      return { text: `Staging result: ${STAGE_WORDS[stagedVerdict(p)]}`, kind: 'decision' }
+    }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
       // A repeat re-states the first verdict (no check ran again): one line already announced it.
       if (p.repeat) return { text: 'Verification already recorded', kind: 'system' }
+      const outcome = recoveryOutcome(p)
+      // The feed has no proposal class: "unverifiable" reads the same for a recovery and a performance verdict, and
+      // recovered counts with a failed layer check are not a recovery.
+      if (outcome) return { text: `Verification: ${verdictView(outcome, p.recovered === true).word.toLowerCase()}`, kind: 'decision' }
       return { text: `Verification: ${verdictWords(verdictKind(p))}`, kind: 'decision' }
+    }
+    case 'agent.recovery_check': {
+      const p = as<AgentRecoveryCheckPayload>(e)
+      const gap = gapLine(p.before, p.after, p.unit)
+      return { text: `Recovery ${checkingLabel(p)}${gap ? ` · ${gap}` : ''}`, kind: 'system' }
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)
+      // The policy's approvals have the system as actor (the server's rule): name the policy, not "system". A person's approval never takes this wording, whatever its grant says.
+      if (p.grant === 'policy' && e.actor.kind === 'system') return { text: `${capitalize(policyLabel(p.policy ?? ''))} approved ${clip(p.layer, 40)}`, kind: 'decision' }
       return { text: `${who} approved ${clip(p.layer, 40)}`, kind: 'decision' }
+    }
+    // cancel_until is advertised, never a deadline (#629): "may run from", never "cancel by".
+    case 'proposal.scheduled': {
+      const p = as<ProposalScheduledPayload>(e)
+      const title = ctx.proposalTitles[p.proposal_id]
+      return {
+        text: `${capitalize(policyLabel(p.policy))} may run the fix from ${clockTimeSeconds(p.cancel_until || p.run_at)} unless cancelled`,
+        detail: title ? clip(title, 200) : undefined,
+        kind: 'decision',
+      }
+    }
+    case 'proposal.cancelled': {
+      const p = as<ProposalCancelledPayload>(e)
+      const title = ctx.proposalTitles[p.proposal_id]
+      return {
+        text: `${who} cancelled the policy countdown · the fix waits for approval`,
+        detail: p.reason ? clip(p.reason, 200) : title ? clip(title, 200) : undefined,
+        kind: 'decision',
+      }
     }
     case 'approval.rejected': {
       const p = as<ApprovalRejectedPayload>(e)
@@ -242,7 +303,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'action.executed': {
       const p = as<ActionExecutedPayload>(e)
+      if (p.ok && p.pull_request) return { text: `Step ${p.step_index + 1} opened pull request #${p.pull_request.number} in ${clip(p.pull_request.repo, 40)}`, kind: 'decision' }
       return { text: `Step ${p.step_index + 1} ${p.ok ? 'ran' : 'failed'}`, detail: p.output ? clip(p.output, 200) : undefined, kind: 'decision' }
+    }
+    case 'pull_request.updated': {
+      const p = as<PullRequestUpdatedPayload>(e)
+      return { text: `Pull request #${p.number} in ${clip(p.repo, 40)}: ${prLine(p)}`, kind: 'system' }
     }
     case 'handoff.requested': {
       const p = as<HandoffRequestedPayload>(e)

@@ -8,6 +8,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -68,6 +69,12 @@ func (s *writeSpy) Status(context.Context, string) (clients.ConnectorStatus, err
 func (s *writeSpy) Config(context.Context, string) (map[string]string, error) {
 	return map[string]string{"k": "v"}, nil
 }
+func (s *writeSpy) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	return connect.ValidateResult{}, nil
+}
+func (s *writeSpy) PluginConfigDef(context.Context, string) ([]connect.ConfigKeyDef, error) {
+	return []connect.ConfigKeyDef{{Name: "k"}}, nil
+}
 func (s *writeSpy) RestartTask(context.Context, string, int) error {
 	s.writes = append(s.writes, "RestartTask")
 	return nil
@@ -91,6 +98,21 @@ func (s *writeSpy) SetCompatibility(context.Context, string, string) error {
 func (s *writeSpy) Register(context.Context, string, string) (int, error) {
 	s.writes = append(s.writes, "Register")
 	return 1, nil
+}
+func (s *writeSpy) SubjectsIncludingDeleted(context.Context) ([]string, error) {
+	return []string{"s", "gone"}, nil
+}
+func (s *writeSpy) VersionsIncludingDeleted(context.Context, string) ([]int, error) {
+	return []int{1, 2}, nil
+}
+
+// validateOnlyConnect is a Connect client with the config validate call but
+// not the plugin config definitions: connect_validate_config must stay
+// unregistered over it.
+type validateOnlyConnect struct{ clients.ConnectClient }
+
+func (validateOnlyConnect) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	return connect.ValidateResult{}, nil
 }
 
 func TestReadOnlyClients(t *testing.T) {
@@ -117,6 +139,19 @@ func TestReadOnlyClients(t *testing.T) {
 	if cfg, err := c.Config(ctx, "c"); err != nil || cfg["k"] != "v" {
 		t.Fatalf("Config = %v, %v", cfg, err)
 	}
+	// The config validation pair (Q4b) passes through: connect_validate_config
+	// finds it by a type assertion on its client, so the wrapper must keep it
+	// when the client has it.
+	vc, ok := c.(connectConfigValidator)
+	if !ok {
+		t.Fatalf("readConnect(%T) = %T, which hides the config validation pair", sp, c)
+	}
+	if _, err := vc.ValidateConfig(ctx, "c", map[string]string{"k": "v"}); err != nil {
+		t.Fatalf("ValidateConfig = %v", err)
+	}
+	if defs, err := vc.PluginConfigDef(ctx, "c"); err != nil || len(defs) != 1 {
+		t.Fatalf("PluginConfigDef = %v, %v", defs, err)
+	}
 	if got, err := r.Subjects(ctx); err != nil || len(got) != 1 {
 		t.Fatalf("Subjects = %v, %v", got, err)
 	}
@@ -128,6 +163,39 @@ func TestReadOnlyClients(t *testing.T) {
 	}
 	if lvl, _, err := r.Compatibility(ctx, "s"); err != nil || lvl != "BACKWARD" {
 		t.Fatalf("Compatibility = %v, %v", lvl, err)
+	}
+
+	// The deleted-state reads pass through too: kafkatools' registry tools
+	// find them by a type assertion on their client (KAN-407), so the
+	// wrapper must keep them when the client has them, or the deleted-state
+	// path is unreachable in production.
+	dr, ok := r.(deletedSubjectLister)
+	if !ok {
+		t.Fatalf("readRegistry(%T) = %T, which hides the deleted-state reads", sp, r)
+	}
+	if got, err := dr.SubjectsIncludingDeleted(ctx); err != nil || len(got) != 2 {
+		t.Fatalf("SubjectsIncludingDeleted = %v, %v", got, err)
+	}
+	if got, err := dr.VersionsIncludingDeleted(ctx, "s"); err != nil || len(got) != 2 {
+		t.Fatalf("VersionsIncludingDeleted = %v, %v", got, err)
+	}
+
+	// A registry without the deleted-state reads must not grow them through
+	// the wrapper: the tools' assertion must fail exactly when it would fail
+	// on the client itself.
+	if plain := readRegistry(&Wired{Registry: noRegistry{}}); plain != nil {
+		if _, ok := plain.(deletedSubjectLister); ok {
+			t.Fatalf("readRegistry(noRegistry) = %T, which fakes the deleted-state reads", plain)
+		}
+	}
+
+	// The same for the config validation pair: a client with ValidateConfig
+	// but no PluginConfigDef stays unregistered for connect_validate_config
+	// rather than offering the model a tool that always fails.
+	if plain := readConnect(&Wired{Connect: validateOnlyConnect{sp}}); plain != nil {
+		if _, ok := plain.(connectConfigValidator); ok {
+			t.Fatalf("readConnect(%T) = %T, which fakes PluginConfigDef", validateOnlyConnect{}, plain)
+		}
 	}
 
 	// Writes refuse and never reach the client.
@@ -163,6 +231,35 @@ func TestActionsStillGetWriters(t *testing.T) {
 	}
 }
 
+// readOnlyAdapterMethods is every exported method a read-only adapter may
+// have: the reads it forwards and the writes that refuse with ErrReadOnly.
+// The no-writer walks skip descending into an adapter (it holds the raw
+// client in an unexported field by design), so its method set is the only
+// surface a smuggled forwarding write could ship on; assertAdapterMethodSet
+// fails on any method outside this list, so adding a method to an adapter
+// means consciously adding it here too.
+var readOnlyAdapterMethods = map[string]bool{
+	// Forwarded reads.
+	"ListConnectors": true, "Status": true, "Config": true,
+	"ValidateConfig": true, "PluginConfigDef": true, "WorkerTasks": true,
+	"Subjects": true, "Versions": true, "Schema": true, "Compatibility": true,
+	"SubjectsIncludingDeleted": true, "VersionsIncludingDeleted": true,
+	"CheckCompatibility": true,
+	"SourceOffsets":      true, "ServerInfo": true, "Plugins": true, "Loggers": true,
+	// Writes that refuse (ErrReadOnly, or errNoRegistry on noRegistry).
+	"RestartTask": true, "RestartConnector": true,
+	"SetCompatibility": true, "Register": true,
+}
+
+func assertAdapterMethodSet(t *testing.T, path string, ty reflect.Type) {
+	t.Helper()
+	for i := 0; i < ty.NumMethod(); i++ {
+		if m := ty.Method(i).Name; !readOnlyAdapterMethods[m] {
+			t.Errorf("%s: read-only adapter %s has method %s outside the known reads and refusing writes; a forwarding write would ship exactly here", path, ty, m)
+		}
+	}
+}
+
 // TestRegisteredToolsHoldNoWriter registers every tool over a Wired whose
 // Connect and Registry are the writing spy, then walks each tool's fields (and
 // the topology builder they reach) looking for any value that can write. The
@@ -172,27 +269,50 @@ func TestActionsStillGetWriters(t *testing.T) {
 //
 // It cannot see a client captured by a closure (func values are opaque).
 func TestRegisteredToolsHoldNoWriter(t *testing.T) {
-	sp := &writeSpy{}
+	// The spy has every Connect read and write the real client has, the Q5
+	// lifecycle writes included, so the walk sees what production wires.
+	sp := lifecycleSpy{&writeSpy{}}
 	w := &Wired{Connect: sp, Registry: sp, Owners: &owners.Owners{}}
 	reg := tools.NewReadOnlyRegistry()
 	if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
+	// A client that validates configs gives the model connect_validate_config
+	// (Q4b); the tool is read-only, so it belongs in this registry. So do
+	// connect_plugins (Q1c, registered by Q1d) and connect_source_offsets
+	// (Q5a) over a client with the plugin, version and offsets reads.
+	for _, name := range []string{"connect_validate_config", "connect_plugins", "connect_source_offsets"} {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("%s is not registered over a client with its reads", name)
+		}
+	}
 
 	connW := reflect.TypeOf((*clients.ConnectWriter)(nil)).Elem()
 	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
+	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
+	lifeW := reflect.TypeOf((*connect.ConnectLifecycleWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
-		reflect.TypeOf(readOnlyConnect{}):  true,
-		reflect.TypeOf(readOnlyRegistry{}): true,
+		reflect.TypeOf(readOnlyConnect{}):               true,
+		reflect.TypeOf(readOnlyConnectTasks{}):          true,
+		reflect.TypeOf(readOnlyConnectValidate{}):       true,
+		reflect.TypeOf(readOnlyConnectValidateTasks{}):  true,
+		reflect.TypeOf(readOnlyConnectQ{}):              true,
+		reflect.TypeOf(readOnlyConnectTasksQ{}):         true,
+		reflect.TypeOf(readOnlyConnectValidateQ{}):      true,
+		reflect.TypeOf(readOnlyConnectValidateTasksQ{}): true,
+		reflect.TypeOf(readOnlyRegistry{}):              true,
+		reflect.TypeOf(readOnlyRegistryDeleted{}):       true,
 	}
 	canWrite := func(ty reflect.Type) bool {
 		if allowed[ty] {
 			return false
 		}
-		if ty.Implements(connW) || ty.Implements(regW) {
+		if ty.Implements(connW) || ty.Implements(regW) || ty.Implements(fixW) || ty.Implements(lifeW) {
 			return true
 		}
-		for _, m := range []string{"Resume", "UpdateConfig"} {
+		// Any one write method is enough, even on a type that implements
+		// none of the writer interfaces in full.
+		for _, m := range []string{"Resume", "UpdateConfig", "PauseConnector", "UpdateConnectorConfigKeys", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
 			if _, ok := ty.MethodByName(m); ok {
 				return true
 			}
@@ -207,7 +327,12 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 			return
 		}
 		if allowed[v.Type()] {
-			return // the refusing wrappers hold the writer by design
+			// The refusing wrappers hold the writer in unexported fields by
+			// design, so the walk does not descend into them — which makes
+			// their own method set the only surface a smuggled forwarding
+			// write could ship on. Check it instead of trusting the type.
+			assertAdapterMethodSet(t, path, v.Type())
+			return
 		}
 		// An interface-typed field is judged by the value inside it: its
 		// static type (clients.ConnectClient) always has write methods.
@@ -250,4 +375,33 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	}
 	// The builder RegisterTools stored on w is what the db tools reach.
 	walk("builder", reflect.ValueOf(w.Builder), 0)
+}
+
+// taskSpy is the writing spy plus the worker-task read (X6b).
+type taskSpy struct{ *writeSpy }
+
+func (taskSpy) WorkerTasks(context.Context) (map[string][]clients.TaskAssignment, error) {
+	return map[string][]clients.TaskAssignment{"w1:8083": {{Connector: "c", Task: 0, State: "RUNNING"}}}, nil
+}
+
+// TestReadConnectKeepsWorkerTasks: connect_task_balance finds the worker-task
+// read by a type assertion, so the read-only wrapper keeps it exactly when
+// the client has it, and its writes still refuse.
+func TestReadConnectKeepsWorkerTasks(t *testing.T) {
+	ctx := context.Background()
+	sp := &writeSpy{}
+	c := readConnect(&Wired{Connect: taskSpy{sp}})
+	wt, ok := c.(clients.WorkerTaskReader)
+	if !ok {
+		t.Fatalf("readConnect(taskSpy) = %T, which hides WorkerTasks", c)
+	}
+	if got, err := wt.WorkerTasks(ctx); err != nil || len(got["w1:8083"]) != 1 {
+		t.Fatalf("WorkerTasks = %v, %v", got, err)
+	}
+	if err := c.RestartTask(ctx, "c", 0); !errors.Is(err, ErrReadOnly) || len(sp.writes) != 0 {
+		t.Fatalf("RestartTask = %v, writes %v", err, sp.writes)
+	}
+	if _, ok := readConnect(&Wired{Connect: sp}).(clients.WorkerTaskReader); ok {
+		t.Fatal("readConnect grew WorkerTasks on a client without it")
+	}
 }

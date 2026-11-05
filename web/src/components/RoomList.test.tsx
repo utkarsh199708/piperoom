@@ -39,7 +39,7 @@ vi.mock('../api/client', () => {
       this.status = status
     }
   }
-  return { api: { createRoom: vi.fn(), grantControl: vi.fn() }, isFixtures: () => false, ApiClientError }
+  return { api: { createRoom: vi.fn(), grantControl: vi.fn(), requestControl: vi.fn() }, isFixtures: () => false, ApiClientError }
 })
 
 import { toast } from 'sonner'
@@ -118,6 +118,7 @@ beforeEach(() => {
   }
   vi.clearAllMocks()
   vi.mocked(api.grantControl).mockReset()
+  vi.mocked(api.requestControl).mockReset()
   vi.mocked(api.createRoom).mockReset()
   mockList([])
 })
@@ -154,6 +155,14 @@ describe('RoomList table', () => {
     // No driver: a member is offered Take control instead.
     const older = screen.getByRole('row', { name: /Older open/ })
     expect(within(older).getByRole('button', { name: /Take control/ })).toBeInTheDocument()
+  })
+
+  it('renders a room with no severity as "unknown", not a blank badge', () => {
+    mockList([room({ id: 'o_blank', title: 'Legacy room', severity: '' })])
+    renderList()
+
+    const row = screen.getByRole('row', { name: /Legacy room/ })
+    expect(within(row).getByText('unknown')).toBeInTheDocument()
   })
 
   it('has the Open / Mine / Resolved / All tabs with counts', () => {
@@ -204,7 +213,7 @@ describe('first-insight span', () => {
     usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0 },
   })
 
-  it('shows "insight 48 s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
+  it('shows "first hypothesis in 48s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
     mockList([
       room({ id: 'with', insight: insight(48) }),
       room({ id: 'without', insight: insight(-1) }),
@@ -213,8 +222,8 @@ describe('first-insight span', () => {
       room({ id: 'shadowed', shadow: true, insight: insight(30) }),
     ])
     renderList('/?tab=all')
-    expect(screen.getAllByText(/insight \d+ s/)).toHaveLength(1)
-    expect(screen.getByText(/insight 48 s/)).toBeInTheDocument()
+    expect(screen.getAllByText(/first hypothesis in \d+s/)).toHaveLength(1)
+    expect(screen.getByText(/first hypothesis in 48s/)).toBeInTheDocument()
   })
 })
 
@@ -392,6 +401,25 @@ describe('New room', () => {
     expect(options.map((o) => o.textContent)).toEqual(['payments · Payments', 'orders'])
   })
 
+  it('shows the selected pipeline kind next to the pipeline picker', () => {
+    pipelinesState.value = {
+      status: 'ready',
+      reload: vi.fn(),
+      data: [
+        { id: 'payments', title: 'Payments', shadow: false, kind: 'cdc' },
+        { id: 'nightly', title: 'Nightly', shadow: false, kind: 'batch' },
+      ],
+    }
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const dialog = screen.getByRole('dialog', { name: 'New room' })
+    // The first pipeline is the default; its kind is a cdc badge.
+    expect(within(dialog).getByText('cdc')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Pipeline'), { target: { value: 'nightly' } })
+    expect(within(dialog).getByText('batch')).toBeInTheDocument()
+    expect(within(dialog).queryByText('cdc')).not.toBeInTheDocument()
+  })
+
   it('with no pipelines it says so and cannot open a room (no made-up "orders")', () => {
     pipelinesState.value = { status: 'ready', reload: vi.fn(), data: [] }
     renderList()
@@ -500,11 +528,70 @@ describe('keyboard', () => {
     mockList(rooms)
     renderList()
     fireEvent.keyDown(document.body, { key: 'j' })
-    fireEvent.keyDown(document.body, { key: 't' }) // Alpha has a driver: nothing
-    expect(api.grantControl).not.toHaveBeenCalled()
     fireEvent.keyDown(document.body, { key: 'j' })
     fireEvent.keyDown(document.body, { key: 't' })
     await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('b', 'arjun'))
+  })
+
+  it('T on a room another member drives with a live lease requests control and toasts', async () => {
+    vi.mocked(api.requestControl).mockResolvedValueOnce({} as never)
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' }) // Alpha, driven by Kabir
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.requestControl).toHaveBeenCalledWith('a'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Kabir')))
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room whose lease expired takes control, not a request', async () => {
+    vi.mocked(api.grantControl).mockResolvedValueOnce({} as never)
+    mockList([room({ id: 'e', title: 'Expired', driver: { id: 'kabir', name: 'Kabir', lease_until: '2020-01-01T00:00:00Z' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('e', 'arjun'))
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a room I already drive sends nothing', () => {
+    mockList([room({ id: 'm', title: 'Mine', driver: { id: 'arjun', name: 'Arjun' } })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('T on a closed room with a live other driver sends nothing', () => {
+    mockList([room({ id: 'x', title: 'Closed driven', status: 'closed', closed_at: '2026-10-11T11:00:00Z', driver: { id: 'kabir', name: 'Kabir' } })])
+    renderList()
+    fireEvent.mouseDown(screen.getByRole('tab', { name: /All/ }))
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('a viewer pressing T on a driven room sends nothing', () => {
+    ctx.user = { id: 'v', name: 'Vee', layers: [], role: 'viewer' }
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('typing t in a text field fires no shortcut', () => {
+    mockList(rooms)
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    fireEvent.keyDown(input, { key: 't' })
+    input.remove()
+    expect(api.requestControl).not.toHaveBeenCalled()
+    expect(api.grantControl).not.toHaveBeenCalled()
   })
 
   it('the picked row is a room, not a position: a refresh that inserts a row above does not move T', async () => {
@@ -726,5 +813,38 @@ describe('resolved rows', () => {
     expect(within(row).getByText('—')).toBeInTheDocument()
     expect(within(row).getByText(/^closed .* ago$/)).toHaveAttribute('title', '2026-10-11 10:06:00 UTC')
     expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
+  })
+})
+
+describe('shadow marker', () => {
+  it('marks a shadow room and does not call its agent idle; an ordinary room is unchanged', () => {
+    mockList([room({ id: 'quiet', shadow: true }), room({ id: 'plain' })])
+    renderList()
+    const shadowRow = screen.getByText('quiet').closest('tr')!
+    expect(within(shadowRow).getByLabelText('Shadow room')).toHaveTextContent('Shadow')
+    expect(within(shadowRow).getByText('silent run')).toBeInTheDocument()
+    expect(within(shadowRow).queryByText('idle')).toBeNull()
+    const plainRow = screen.getByText('plain').closest('tr')!
+    expect(within(plainRow).queryByLabelText('Shadow room')).toBeNull()
+    expect(within(plainRow).getByText('idle')).toBeInTheDocument()
+  })
+
+  it('a closed shadow room reads resolved, not silent run, and keeps its Shadow badge', () => {
+    mockList([
+      room({
+        id: 'gone',
+        title: 'Closed shadow',
+        shadow: true,
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Closed shadow').closest('tr')!
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).queryByText('silent run')).toBeNull()
+    expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
   })
 })

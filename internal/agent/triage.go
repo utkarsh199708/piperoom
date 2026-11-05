@@ -7,8 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -77,7 +76,7 @@ func (r *runner) pickModel() (name, reason string, triage bool) {
 }
 
 // modelTurn runs one model request with the model the triage rules pick.
-func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessageParam) (anthropic.BetaMessage, error) {
+func (r *runner) modelTurn(ctx context.Context, messages []llm.Message) (llm.Response, error) {
 	req := r.request(messages)
 	name, reason, triage := r.pickModel()
 	req.Model = name
@@ -116,7 +115,7 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 		}
 		return resp, nil
 	}
-	if !callsWriteProposal(resp.Content) {
+	if !callsWriteProposal(resp.Message.Parts) {
 		return resp, nil
 	}
 	// Nothing of the triage answer was kept, so the history stays append-only.
@@ -137,7 +136,7 @@ func triageRejected(err error) bool {
 	if apierr == nil {
 		return false
 	}
-	switch c := apierr.StatusCode; {
+	switch c := apierr.Status; {
 	case c < 400 || c >= 500:
 		return false
 	case c == http.StatusUnauthorized, c == http.StatusRequestTimeout,
@@ -147,54 +146,21 @@ func triageRejected(err error) bool {
 	return true
 }
 
-// modelRejectionMarkers are lower-case fragments of the API error body that say
-// the model, or the request shape for this model, is the problem.
-var modelRejectionMarkers = []string{
-	"model", "not supported", "does not support", "unsupported",
-	"thinking", "effort", "adaptive", "context_management", "compact",
-	"cache_control", "eager_input_streaming", "extra inputs",
-	"access to the model", // Bedrock AccessDeniedException
-}
-
-// perRunMarkers are fragments of errors that depend on one conversation, not on
-// the model: a history longer than the triage model's window (Haiku 200K vs the
-// main model's 1M) or an empty credit balance. They win over the markers above
-// (the text often says "model" too).
-var perRunMarkers = []string{"prompt is too long", "too long", "credit balance"}
-
 // modelRejection reports whether a triage error means the triage model itself
-// cannot serve the loop, so no room should try it: a 404, or a 400/403 whose
-// body names the model or the request shape. 413 and "prompt is too long" are
-// about one run's history and never qualify. The caller has already seen the
-// main model accept the same request.
+// cannot serve the loop, so no room should try it: the adapter classified it
+// llm.ErrModelNotFound (a 404, or a 400/403 whose body names the model or the
+// request shape; see anthropicllm.Kind). A history longer than the triage
+// model's window (Haiku 200K vs the main model's 1M), a 413 or an empty
+// credit balance concern one run (too_long, billing) and never qualify. The
+// caller has already seen the main model accept the same request.
 func modelRejection(err error) bool {
 	apierr := asAPIError(err)
-	if apierr == nil {
-		return false
-	}
-	switch apierr.StatusCode {
-	case http.StatusNotFound:
-		return true
-	case http.StatusBadRequest, http.StatusForbidden:
-	default:
-		return false
-	}
-	body := strings.ToLower(apierr.RawJSON())
-	for _, m := range perRunMarkers {
-		if strings.Contains(body, m) {
-			return false
-		}
-	}
-	for _, m := range modelRejectionMarkers {
-		if strings.Contains(body, m) {
-			return true
-		}
-	}
-	return false
+	return apierr != nil && apierr.Kind == llm.ErrModelNotFound
 }
 
-func asAPIError(err error) *anthropic.Error {
-	var apierr *anthropic.Error
+// asAPIError returns the *llm.APIError in err's chain, if any.
+func asAPIError(err error) *llm.APIError {
+	var apierr *llm.APIError
 	if errors.As(err, &apierr) {
 		return apierr
 	}
@@ -202,9 +168,9 @@ func asAPIError(err error) *anthropic.Error {
 }
 
 // callsWriteProposal reports whether a turn asks for a write-proposal tool.
-func callsWriteProposal(content []anthropic.BetaContentBlockUnion) bool {
-	for _, b := range content {
-		if b.Type == "tool_use" && writesProposal(b.Name) {
+func callsWriteProposal(parts []llm.Part) bool {
+	for _, p := range parts {
+		if p.Kind == llm.PartToolCall && p.ToolCall != nil && writesProposal(p.ToolCall.Name) {
 			return true
 		}
 	}

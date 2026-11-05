@@ -64,7 +64,7 @@ type triageFixture struct {
 	tools map[string]*recordingTool
 }
 
-func newTriageFixture(t *testing.T, m model, toolDefs ...*recordingTool) *triageFixture {
+func newTriageFixture(t *testing.T, m sdkModel, toolDefs ...*recordingTool) *triageFixture {
 	t.Helper()
 	reg := tools.NewRegistry()
 	f := &triageFixture{ep: testEndpoint(m, 0), sink: &fakeSink{}, reg: reg, tools: map[string]*recordingTool{}}
@@ -151,6 +151,7 @@ func TestTriagePassUsesSignalTable(t *testing.T) {
 			"suspected_layer": "kafka-connect", "confidence": "medium",
 			"next_check":     "schema_registry_diff for orders-value",
 			"based_on_steps": []string{"s_forged", stepOf(t, p, 0), stepOf(t, p, 0)},
+			"evidence_steps": []string{stepOf(t, p, 0)},
 		}), nil
 	}}
 	f := newTriageFixture(t, m,
@@ -218,8 +219,143 @@ func stepOf(t *testing.T, p anthropic.BetaMessageNewParams, n int) string {
 	return parts[n+1][:strings.Index(parts[n+1], `\"`)]
 }
 
+// TestTriagePassSuspectedLayerNeedsEvidence pins KAN-402's rule: the layer is a
+// hypothesis and reaches the stored payload only when the verdict is at least
+// medium confident and cites one of this pass's reads of that layer. A layer
+// guessed from the alert, or cited with another layer's read, is dropped so it
+// cannot steer the room or the full investigation.
+func TestTriagePassSuspectedLayerNeedsEvidence(t *testing.T) {
+	// firstStep is the step id of the first read in the verdict request.
+	firstStep := func(t *testing.T, p anthropic.BetaMessageNewParams) []string {
+		return []string{stepOf(t, p, 0)}
+	}
+	tests := []struct {
+		name string
+		// modelPicks reads with the model instead of the watcher table, so a
+		// schema_registry_versions read is the first step.
+		modelPicks bool
+		layer      string
+		confidence string
+		evidence   func(*testing.T, anthropic.BetaMessageNewParams) []string
+		want       string
+	}{
+		{name: "named with no citing step", layer: "schema-registry", confidence: "medium", want: ""},
+		{name: "named with a forged step", layer: "schema-registry", confidence: "medium",
+			evidence: func(*testing.T, anthropic.BetaMessageNewParams) []string { return []string{"s_forged"} }, want: ""},
+		{name: "named with another layer's read", layer: "schema-registry", confidence: "medium",
+			evidence: firstStep, want: ""},
+		{name: "named at low confidence", modelPicks: true, layer: "schema-registry", confidence: "low",
+			evidence: firstStep, want: ""},
+		{name: "named with its own read", modelPicks: true, layer: "schema-registry", confidence: "medium",
+			evidence: firstStep, want: "schema-registry"},
+		{name: "unknown layer", modelPicks: true, layer: "the-network", confidence: "high",
+			evidence: firstStep, want: ""},
+		{name: "no layer", modelPicks: true, layer: "", confidence: "high",
+			evidence: firstStep, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &funcModel{fn: func(_ context.Context, i int, p anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+				if tt.modelPicks && i == 0 {
+					return mustMessage(t, `{"stop_reason":"tool_use","content":[
+						{"type":"tool_use","id":"tu_sr","name":"schema_registry_versions","input":{"subject":"orders-value"}}]}`), nil
+				}
+				var evidence []string
+				if tt.evidence != nil {
+					evidence = tt.evidence(t, p)
+				}
+				return verdictMessage(t, map[string]any{
+					"headline":        "orders-value: reader rejects the new schema",
+					"suspected_layer": tt.layer, "confidence": tt.confidence,
+					"next_check": "", "based_on_steps": []string{}, "evidence_steps": evidence,
+				}), nil
+			}}
+			f := newTriageFixture(t, m,
+				&recordingTool{name: "connect_status", schema: propSchema([]string{"connector"}, "connector"), result: tools.Result{Summary: "orders-source RUNNING; task 0 FAILED: MISSING_UNION_BRANCH"}},
+				&recordingTool{name: "pg_recent_ddl", schema: propSchema([]string{"since", "table"}, "since"), result: tools.Result{Summary: "ALTER TABLE public.orders ADD COLUMN note text at 03:01"}},
+				&recordingTool{name: "schema_registry_versions", schema: propSchema([]string{"subject"}, "subject"), result: tools.Result{Summary: "orders-value v3: compatibility NONE"}},
+			)
+			alert := Alert{Title: "orders stale"}
+			if !tt.modelPicks {
+				alert.Raw = watcherRaw(t, connectorDownSignal())
+			}
+			res := f.run(t, alert)
+			pl := f.triagePayload(t)
+			if pl.Status != "ok" {
+				t.Fatalf("payload = %+v, want status ok", pl)
+			}
+			if pl.SuspectedLayer != tt.want {
+				t.Fatalf("suspected_layer = %q, want %q (confidence %q)", pl.SuspectedLayer, tt.want, pl.Confidence)
+			}
+			if tt.want != "" && len(res.Steps) == 0 {
+				t.Fatal("a kept layer has no reads")
+			}
+		})
+	}
+}
+
+// TestTriageVerdictPromptTreatsLayerAsHypothesis pins the wording the first
+// look is asked for (KAN-402): the layer is a hypothesis that needs a read of
+// its own layer, never a guess from the alert, and it is kept only at medium or
+// high confidence. A prompt that asks for "the layer most likely at fault"
+// pushes the model to name one.
+func TestTriageVerdictPromptTreatsLayerAsHypothesis(t *testing.T) {
+	got := triageVerdictPrompt()
+	for _, want := range []string{
+		"suspected_layer: a hypothesis, not a conclusion",
+		"Never name a layer from the alert alone.",
+		"A suspected_layer is kept only at medium or high.",
+		"evidence_steps: the step ids",
+		"A layer without such a step is a guess and is dropped.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the verdict prompt misses %q", want)
+		}
+	}
+	if strings.Contains(got, "the layer most likely at fault") {
+		t.Error("the verdict prompt still asks for the layer as a conclusion")
+	}
+}
+
+// TestTriageToolLayer pins the tool-to-layer map the evidence check uses: a
+// read of a layer's tool is what backs a claim about that layer, and a
+// cross-cutting tool backs none. It fails if a prefix moves without the map.
+func TestTriageToolLayer(t *testing.T) {
+	tests := []struct {
+		tool string
+		want string
+	}{
+		{"schema_registry_versions", "schema-registry"},
+		{"schema_registry_diff", "schema-registry"},
+		{"connect_status", "kafka-connect"},
+		{"connect_list_connectors", "kafka-connect"},
+		{"debezium_metrics", "kafka-connect"},
+		{"pg_replication_slots", "postgres"},
+		{"pg_recent_ddl", "postgres"},
+		{"kafka_topic_offsets", "kafka"},
+		{"dlq_peek", "kafka"},
+		{"kafka_consumer_lag", "consumer"},
+		{"consumer_logs", "consumer"},
+		{"warehouse_freshness", "warehouse"},
+		{"dag_runs", "orchestrator"},
+		{"task_log_tail", "orchestrator"},
+		{"dbt_model_lineage", "transform"},
+		{"what_changed", ""},
+		{"pipeline_map", ""},
+		{"similar_incidents", ""},
+		{"runbook_lookup", ""},
+		{"trace_record", ""},
+		{"reconcile", ""},
+	}
+	for _, tt := range tests {
+		if got := triageToolLayer(tt.tool); got != tt.want {
+			t.Errorf("triageToolLayer(%q) = %q, want %q", tt.tool, got, tt.want)
+		}
+	}
+}
+
 func TestTriagePassTableForEverySignal(t *testing.T) {
-	all := []string{"connect_status", "connect_list_connectors", "pg_recent_ddl", "pg_replication_slots", "pg_long_transactions",
+	all := []string{"connect_status", "connect_list_connectors", "pg_recent_ddl", "pg_replication_slots", "pg_long_transactions", "pg_streaming_liveness",
 		"dlq_peek", "kafka_consumer_lag", "kafka_topic_offsets", "kafka_topic_config", "connect_config"}
 	tests := []struct {
 		sig  map[string]any
@@ -227,6 +363,7 @@ func TestTriagePassTableForEverySignal(t *testing.T) {
 	}{
 		{map[string]any{"signal": "slot_inactive", "slot": "debezium_orders"}, []string{"connect_list_connectors", "pg_replication_slots"}},
 		{map[string]any{"signal": "slot_wal", "slot": "debezium_orders"}, []string{"pg_long_transactions", "pg_replication_slots"}},
+		{map[string]any{"signal": "long_tx", "slot": "debezium_orders"}, []string{"pg_streaming_liveness", "pg_long_transactions"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{"orders-sink"}}, []string{"dlq_peek", "connect_status"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{}}, []string{"dlq_peek", "connect_list_connectors"}},
 		{map[string]any{"signal": "consumer_lag", "group": "order-sync"}, []string{"kafka_consumer_lag", "connect_list_connectors"}},
@@ -410,7 +547,7 @@ func TestTriagePassFailures(t *testing.T) {
 			f.ep.triagePass.on = !tt.off
 			res := f.run(t, Alert{Title: "t", Raw: watcherRaw(t, connectorDownSignal())})
 			pl := f.triagePayload(t)
-			if pl.Status != "failed" || pl.Reason != tt.want || pl.Headline != "" {
+			if pl.Status != "failed" || pl.Reason != tt.want || pl.Headline != "" || pl.SuspectedLayer != "" {
 				t.Fatalf("payload = %+v, want failed/%s", pl, tt.want)
 			}
 			if res.Steps == nil {
@@ -444,5 +581,46 @@ func TestTriagePassSettingsDefaults(t *testing.T) {
 	}
 	if got := triagePassSettings(EndpointConfig{TriagePassTimeout: time.Hour}); got.timeout != 90*time.Second {
 		t.Fatalf("timeout = %s, want the 90s cap", got.timeout)
+	}
+}
+
+// TestTriagePassConsumerSignalsReadLogs (H2): with consumer_logs registered,
+// a consumer signal's first look reads the group state first and the
+// consumer's own log second (two reads, no input for the log: its pipeline
+// and streams come from the room). Without a group the next read of the row
+// fills in.
+func TestTriagePassConsumerSignalsReadLogs(t *testing.T) {
+	all := []string{"connect_status", "connect_list_connectors", "kafka_consumer_lag", "kafka_topic_offsets", "kafka_topic_config", "consumer_logs"}
+	tests := []struct {
+		sig  map[string]any
+		want []string
+	}{
+		{map[string]any{"signal": "consumer_lag", "group": "order-sync"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "group_unstable", "group": "order-sync"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "offset_below_log_start", "group": "order-sync", "topic": "pg.public.orders"}, []string{"kafka_consumer_lag", "consumer_logs"}},
+		{map[string]any{"signal": "offset_below_log_start", "topic": "pg.public.orders"}, []string{"consumer_logs", "kafka_topic_offsets"}},
+		{map[string]any{"signal": "consumer_lag"}, []string{"consumer_logs", "connect_list_connectors"}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.sig), func(t *testing.T) {
+			var defs []*recordingTool
+			for _, n := range all {
+				defs = append(defs, &recordingTool{name: n, schema: map[string]any{"type": "object"}, result: tools.Result{Summary: n + " ok"}})
+			}
+			f := newTriageFixture(t, &funcModel{fn: func(context.Context, int, anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+				return verdictMessage(t, map[string]any{"headline": "h", "suspected_layer": "", "confidence": "low", "next_check": "", "based_on_steps": []string{}}), nil
+			}}, defs...)
+			res := f.run(t, Alert{Title: "t", Raw: watcherRaw(t, tt.sig)})
+			var got []string
+			for _, s := range res.Steps {
+				got = append(got, s.Tool)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("reads = %v, want %v", got, tt.want)
+			}
+			if in := f.tools["consumer_logs"].inputsAsJSON(); len(in) != 1 || in[0] != `{}` {
+				t.Errorf("consumer_logs inputs = %q, want one {}", in)
+			}
+		})
 	}
 }

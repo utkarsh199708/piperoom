@@ -13,10 +13,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/runbooks"
 )
 
 const (
@@ -56,6 +57,16 @@ var ErrInboxClosed = errors.New("agent: inbox closed")
 // runner carries the per-investigation state.
 type runner struct {
 	alert Alert
+	// kind is the room's pipeline kind, normalised (RoomKind): it picks the
+	// system prompt section and the verification of a fix.
+	kind string
+	// source is the room's source kind, normalised (SourceKind): postgres or
+	// mysql. It picks the CDC prompt's source wording, and the layer and
+	// description of each action propose_fix lists (Q8g).
+	source string
+	// mode is the room's mode for wording (P2d). It defaults to write mode on;
+	// the room service fills it once the contract change lands (see mode.go).
+	mode  RoomMode
 	deps  Deps
 	opts  Options
 	log   *slog.Logger
@@ -67,6 +78,13 @@ type runner struct {
 	toolList toolList
 	system   string
 
+	// setup is the run's setup-mode state (setup.go): nil outside setup
+	// mode (Alert.Mode != ModeSetup). It holds the bounds and the counters,
+	// and setupRoom carries the two KindRoom setup tools (setup_plan,
+	// setup_request_verification) added to the room tool list.
+	setup     *setupRun
+	setupRoom []tools.Tool
+
 	// proposals remembers the proposals the agent created this run, so a later
 	// action_result can be matched to its last step and verified.
 	proposals *proposalTracker
@@ -74,6 +92,22 @@ type runner struct {
 	// steps remembers the steps this run opened, for update_hypothesis to check
 	// the steps a hypothesis cites.
 	steps *stepLedger
+
+	// gaps remembers this run's failed reads, so an unreachable component
+	// blocks a healthy verdict until a later read of it succeeds (KAN-408).
+	gaps *readFailures
+
+	// causes remembers the external changes this run's what_changed reads
+	// listed and the latest hypothesis's scope (X4c, externalcause.go).
+	causes *externalCauses
+
+	// guard is the hypothesis guard of update_hypothesis and post_message
+	// (H1, guard.go): its mode and the refusal streaks of this episode.
+	guard *hypothesisGuard
+
+	// versions are the room's running versions, read once with
+	// connect_plugins for runbook_lookup (Q1d, versions.go). Nil passes none.
+	versions *versionReads
 
 	// recoveredIdle is true while the pipeline is verified recovered and nothing
 	// since has broken that (a failed or unknown step, or a NOT recovered
@@ -113,6 +147,25 @@ type runner struct {
 	// past is the worked-examples block of the first user turn (examples.go),
 	// "" when there is none.
 	past string
+
+	// driverVerdicts holds the verdict of each driver-authored proposal this
+	// run verified after its proposal_executed (driverproposal.go), so a
+	// repeated input reports it instead of checking again. Lost on restart.
+	driverVerdicts map[string]bool
+
+	// repos are the room pipeline's owners.yaml repos: when the room offers
+	// the fix PR (scopeForge), nil otherwise (Q7f, fixpr.go).
+	repos []owners.Repo
+	// deferred are the fix-PR proposals the run follows, by id; applies runs
+	// their apply waits and applyResults holds the finished ones until the
+	// loop handles them. Only applies is touched by another goroutine.
+	deferred     map[string]*deferredProposal
+	applies      *applyWaits
+	applyResults map[string]applyDone
+
+	// compact is the client-side compaction state (compaction.go); off on a
+	// model that compacts on the server.
+	compact compactor
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -137,10 +190,45 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 // production client from the environment (Anthropic API).
 func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, error) {
 	opts = opts.withDefaults()
+	guardMode, err := resolveGuardMode(opts.HypothesisGuard)
+	if err != nil {
+		return nil, err
+	}
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
 	}
 	if err := checkReadOnly(deps.Tools); err != nil {
+		return nil, err
+	}
+	// The room offers only the tools and the write actions of its pipeline's
+	// kind (P4b): every use below (tool list, worked examples, triage reads,
+	// propose_fix) goes through r.deps. A batch room is not offered
+	// propose_fix at all (roomToolsForKind, in run).
+	kind, err := RoomKind(alert.PipelineKind)
+	if err != nil {
+		return nil, err
+	}
+	kindTools, err := ToolsForKind(deps.Tools, kind)
+	if err != nil {
+		return nil, err
+	}
+	deps.Tools = kindTools
+	kindActions, err := ActionsForKind(deps.Actions, kind)
+	if err != nil {
+		return nil, err
+	}
+	deps.Actions = kindActions
+	// Then only the tools and actions of the room's source kind (Q8g): a
+	// MySQL room offers no pg_* name and a Postgres room no mysql_* one. The
+	// kind is read off the registry until Alert carries it (sourcekind.go).
+	source, err := RoomSourceKind(deps.Tools)
+	if err != nil {
+		return nil, err
+	}
+	if deps.Tools, err = ToolsForSource(deps.Tools, source); err != nil {
+		return nil, err
+	}
+	if deps.Actions, err = ActionsForSource(deps.Actions, source); err != nil {
 		return nil, err
 	}
 	if deps.Sink == nil {
@@ -156,10 +244,22 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		m = newModel(opts, deps.Logger)
 	}
 	steps := newStepLedger()
+	// The names go in before the triage seeds: seedTriage scans each seeded
+	// read for the echo guard, and the triage pass's own ledger (it runs in
+	// its own runner) is not this one.
+	steps.setScanNames(scanNamesFor(deps, alert.PipelineMap))
 	steps.seedTriage(alert.Triage)
 	steps.setBackground(alertBackground(alert))
-	return &runner{
+	gaps := newReadFailures()
+	// A first-look read that could not reach its component is evidence this
+	// run must keep: it blocks a healthy verdict until a read succeeds
+	// (KAN-408).
+	gaps.seedTriage(alert.Triage)
+	r := &runner{
 		alert:     alert,
+		kind:      kind,
+		source:    source,
+		mode:      RoomMode{Write: true},
 		deps:      deps,
 		opts:      opts,
 		log:       deps.Logger,
@@ -168,14 +268,68 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
 		steps:     steps,
+		gaps:      gaps,
+		causes:    newExternalCauses(alert, time.Now()),
+		versions:  newVersionReads(),
+		applies:   newApplyWaits(),
 
 		noneSubjects: map[string]bool{},
-	}, nil
+	}
+	// A refusal names only read tools this room offers.
+	r.guard = newHypothesisGuard(guardMode, deps.Logger, alert, func(name string) bool {
+		_, ok := deps.Tools.Get(name)
+		return ok
+	})
+	// Rule 1 reads the watcher's status row; it is off without a reader, with
+	// the guard off, and in setup mode (no pipeline runs yet). Shadow rooms
+	// get the same reader and the same mode, so the rule behaves the same.
+	if deps.Watch != nil && guardMode != GuardOff && alert.Mode != ModeSetup {
+		r.guard.symptom = newSymptomGuard(deps.Watch, alert.PipelineID, r.log, r.nowTime,
+			func(ctx context.Context, d time.Duration) error { return r.clk.Sleep(ctx, d) })
+	}
+	if alert.Mode == ModeSetup {
+		// Setup mode (U1-10): the run's bounds and the two KindRoom setup
+		// tools. A room the server opened always carries its request in
+		// alert.Raw; a harness that does not still runs, with the defaults
+		// and no request in the opening message.
+		su, err := newSetupRun(opts.Setup)
+		if err != nil {
+			return nil, err
+		}
+		su.decodeRequest(alert)
+		r.setup = su
+		roomTools, err := r.setupRoomTools()
+		if err != nil {
+			return nil, err
+		}
+		r.setupRoom = roomTools
+	}
+	return r, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
-	r.system = systemPrompt()
+	// Every apply wait (fixpr.go) and the guard's watch recheck
+	// (symptomguard.go) end with the run.
+	defer r.applies.stop()
+	r.guard.symptomWatch().begin(ctx)
+	defer r.guard.symptomWatch().stop()
+	if err := r.scopeForge(ctx); err != nil {
+		return err
+	}
+	room := newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes)
+	setRoomSource(room, r.source)
+	setRoomSetup(room, r.setup)
+	setRoomGuard(room, r.guard)
+	room = append(room, r.setupRoom...)
+	r.toolList = buildToolListWithCap(r.deps.Tools, roomToolsForKind(room, r.kind, r.deps.Actions),
+		strictCap(r.model.Capabilities(r.opts.Model)))
+	r.system = systemPromptForSource(r.kind, r.source, r.mode)
+	if r.setup != nil {
+		// The setup prompt frame replaces the CDC frame for a setup room
+		// (design §3.1); the rules block is the one every kind shares.
+		r.system = systemPromptForSetup(r.kind)
+	}
+	r.initCompaction()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
@@ -190,10 +344,22 @@ func (r *runner) run(ctx context.Context) error {
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
 	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
 	r.past = r.pastIncidents(ctx, pastIncidentsRunBytes, pastIncidentsTimeout)
-	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
+	messages := []llm.Message{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
+		}
+
+		// A setup bound stops the run like a budget stop (design §3.1):
+		// setup.blocked with a question, the idle status, and an error
+		// wrapping *BudgetError, which the caller treats as a stop, never a
+		// failure. The check runs at the top of every turn, after each
+		// input batch updated the counters; a run parked on the inbox is
+		// checked again when the next input wakes it.
+		if r.setup != nil {
+			if reason := r.setup.exhausted(); reason != "" {
+				return fmt.Errorf("agent: stopped: %w", r.stopForSetupBound(ctx, reason))
+			}
 		}
 
 		if turns >= r.opts.MaxTurns {
@@ -219,7 +385,7 @@ func (r *runner) run(ctx context.Context) error {
 				return nil
 			}
 			inputs, outcome := r.handleInputs(ctx, inputs)
-			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
+			messages = appendUser(messages, r.idleInputBlocks(inputs, outcome.notes)...)
 			turns = 0
 			if r.parked(outcome) {
 				if !recovered {
@@ -236,13 +402,22 @@ func (r *runner) run(ctx context.Context) error {
 			continue
 		}
 
-		resp, err := r.modelTurn(ctx, messages)
+		var resp llm.Response
+		var err error
+		messages, resp, err = r.sendTurn(ctx, messages)
 		if err != nil {
 			// The room's token budget is spent: stop here, between turns. Tool
 			// calls of the previous turn have all finished by now.
 			// The error is returned so a supervisor can tell this stop from a
 			// normal end; it must treat it as a stop (no retry, no error status).
 			if be, ok := asBudgetError(err); ok {
+				if r.setup != nil {
+					// In a setup room the room's cap is the setup's token
+					// budget (Endpoint.Run), so the room log says which
+					// bound stopped it (design §3.1); the budget message
+					// and idle status below are the stop's only ones.
+					r.setupBudgetBlocked(ctx, be)
+				}
 				r.stopForBudget(ctx, be)
 				return fmt.Errorf("agent: stopped: %w", be)
 			}
@@ -257,7 +432,7 @@ func (r *runner) run(ctx context.Context) error {
 			return fmt.Errorf("agent: model turn: %w", err)
 		}
 
-		if resp.StopReason == anthropic.BetaStopReasonRefusal {
+		if resp.Stop == llm.StopRefusal {
 			reason := refusalReason(resp)
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
@@ -276,9 +451,9 @@ func (r *runner) run(ctx context.Context) error {
 
 		turns++
 		// History is append-only: keep the assistant turn exactly as returned.
-		messages = append(messages, resp.ToParam())
+		messages = append(messages, resp.Message)
 
-		texts, uses := splitContent(resp.Content)
+		texts, uses := splitContent(resp.Message.Parts)
 		resultBlocks := r.runToolUses(ctx, uses)
 
 		// The agent's own words follow the tool steps, matching the loop order.
@@ -286,8 +461,15 @@ func (r *runner) run(ctx context.Context) error {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: t})
 		}
 
-		switch resp.StopReason {
-		case anthropic.BetaStopReasonEndTurn, anthropic.BetaStopReasonStopSequence:
+		// propose_fix refused a step past the setup's steps bound
+		// (admitProposal): the run stops on it now, before another turn,
+		// exactly as a bound stop at the top of a turn.
+		if r.setup != nil && r.setup.stop != "" {
+			return fmt.Errorf("agent: stopped: %w", r.stopForSetupBound(ctx, r.setup.stop))
+		}
+
+		switch resp.Stop {
+		case llm.StopEndTurn:
 			// resultBlocks is empty here in practice (the model does not stop
 			// with end_turn while also requesting a tool), but pass it anyway:
 			// if a turn's content ever did carry a tool_use with one of these
@@ -297,7 +479,7 @@ func (r *runner) run(ctx context.Context) error {
 			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
 				return err
 			}
-		case anthropic.BetaStopReasonModelContextWindowExceeded:
+		case llm.StopContextExceeded:
 			// This must never end the room: report it and wait for a human,
 			// the same as a refusal. Server-side compaction (see request())
 			// should make this rare, but a single turn's input can still
@@ -318,15 +500,15 @@ func (r *runner) run(ctx context.Context) error {
 				return err
 			}
 		default:
-			// tool_use, max_tokens and pause_turn all continue: the next user
+			// tool_use, max_tokens, pause_turn and any other stop continue: the next user
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
 			inputs, outcome := r.handleInputs(ctx, inputs)
-			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
+			blocks := append([]llm.Part(nil), resultBlocks...)
 			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
-				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
+				blocks = append(blocks, textPart("Continue."))
 			}
 			messages = appendUser(messages, blocks...)
 			if resetsTurns(inputs) {
@@ -342,13 +524,13 @@ func (r *runner) run(ctx context.Context) error {
 // agent.usage event (docs/design/cost.md): role is triage or main, the model
 // the triage rules picked. A request that was never sent (a budget refused it)
 // is not reported.
-func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewParams, role string) (anthropic.BetaMessage, error) {
+func (r *runner) callModel(ctx context.Context, req llm.Request, role string) (llm.Response, error) {
 	start := time.Now()
 	resp, err := r.model.Turn(ctx, req)
 	if wasSent(err) {
 		ectx, cancel := detached(ctx)
 		defer cancel()
-		for _, p := range usagePayloads(req.Model, role, resp, time.Since(start), r.prices) {
+		for _, p := range withProvider(usagePayloads(req.Model, role, resp.Usage, time.Since(start), r.prices), r.model.Provider()) {
 			r.emit(ectx, events.AgentUsage, p)
 		}
 	}
@@ -358,73 +540,89 @@ func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewPara
 // request assembles one model request. The system prompt and tool list are
 // stable so the prompt cache stays warm.
 //
-// It asks for server-side compaction (beta compact-2026-01-12): once the
-// conversation passes the server's input-token trigger, the response gets an
-// extra compaction content block summarizing the oldest messages, in place of
-// a stop. Run keeps history append-only either way — resp.ToParam() carries
-// that block back in the next request's messages exactly like any other
-// content block, never specially — which is what lets a room survive hours
-// of steers and tool calls without hitting the model's context window. The
-// edit carries compactionInstructions() so the summary keeps step ids,
-// hypotheses, proposals and driver instructions, and keeps untrusted text
-// data instead of laundering its instructions into trusted history.
-func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
-	return anthropic.BetaMessageNewParams{
-		Model:     r.opts.Model,
-		MaxTokens: maxTokens,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaCompact2026_01_12},
-		System:    []anthropic.BetaTextBlockParam{{Text: r.system, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()}},
-		Tools:     r.toolList.params,
-		Messages:  messages,
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(r.opts.effort()),
-		},
-		Thinking: anthropic.BetaThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
-		},
-		ToolChoice: anthropic.BetaToolChoiceUnionParam{
-			OfAuto: &anthropic.BetaToolChoiceAutoParam{},
-		},
-		ContextManagement: anthropic.BetaContextManagementConfigParam{
-			Edits: []anthropic.BetaContextManagementConfigEditUnionParam{
-				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{
-					Instructions: anthropic.String(compactionInstructions()),
-				}},
-			},
-		},
-		// Top-level cache control applies a breakpoint to the last cacheable
-		// block, so each turn re-reads the conversation history from cache.
-		CacheControl: anthropic.NewBetaCacheControlEphemeralParam(),
+// It asks for server-side compaction (on Claude the beta compact-2026-01-12):
+// once the conversation passes the server's input-token trigger, the response
+// gets an extra compaction content block summarizing the oldest messages, in
+// place of a stop. Run keeps history append-only either way — resp.Message
+// carries that block back in the next request's messages exactly like any
+// other content block (a native part the adapter sends back as it came),
+// never specially — which is what lets a room survive hours of steers and
+// tool calls without hitting the model's context window. The edit carries
+// compactionInstructions() so the summary keeps step ids, hypotheses,
+// proposals and driver instructions, and keeps untrusted text data instead of
+// laundering its instructions into trusted history.
+func (r *runner) request(messages []llm.Message) llm.Request {
+	return llm.Request{
+		Model:      r.opts.Model,
+		MaxTokens:  maxTokens,
+		System:     r.system,
+		Tools:      r.toolList.defs,
+		Messages:   messages,
+		Effort:     r.opts.effort(),
+		Thinking:   true,
+		ToolChoice: llm.ToolChoiceAuto,
+		Compaction: &llm.Compaction{Instructions: compactionInstructions()},
+		// Cache through the system prompt and the tool list, and (History) a
+		// breakpoint on the last cacheable block, so each turn re-reads the
+		// conversation history from cache.
+		Cache: llm.CacheHints{System: true, Tools: true, History: true},
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
-	blocks := openingBlocks(r.alert, r.past)
-	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
-	return anthropic.NewBetaUserMessage(blocks...)
+func (r *runner) initialMessage(inputs []HumanInput, notes []string) llm.Message {
+	blocks := r.openingParts()
+	// The opening turn has read nothing yet, so a driver's proposal in it gets
+	// the idle wording (a read or two first), not "answer from the evidence
+	// you already have" (driverproposal.go).
+	blocks = append(blocks, r.idleInputBlocks(inputs, notes)...)
+	return userMessage(blocks...)
 }
 
 // inputBlocks renders one batch of human input and its verification notes, in
 // the order the model reads them: the inputs, then what verification found.
-func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
-	return append(r.humanBlocks(inputs), verifyBlocks(notes)...)
+func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []llm.Part {
+	return append(r.humanBlocks(inputs, false), verifyBlocks(notes)...)
+}
+
+// idleInputBlocks is inputBlocks for a batch that woke the agent from a wait
+// for input: the agent was idle, so a driver's proposal may get a read of its
+// own before the agent answers (P3e, driverproposal.go).
+func (r *runner) idleInputBlocks(inputs []HumanInput, notes []string) []llm.Part {
+	return append(r.humanBlocks(inputs, true), verifyBlocks(notes)...)
+}
+
+// textPart is one text block of a user turn.
+func textPart(text string) llm.Part { return llm.Part{Kind: llm.PartText, Text: text} }
+
+// userMessage is a user turn of the given blocks.
+func userMessage(parts ...llm.Part) llm.Message {
+	return llm.Message{Role: llm.RoleUser, Parts: parts}
 }
 
 // appendUser adds blocks to the history as a user turn. When the last message
 // is already a user turn, the blocks join it, so the request never carries two
 // consecutive user messages.
-func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaContentBlockParamUnion) []anthropic.BetaMessageParam {
-	if n := len(messages); n > 0 && messages[n-1].Role == anthropic.BetaMessageParamRoleUser {
-		messages[n-1].Content = append(messages[n-1].Content, blocks...)
+func appendUser(messages []llm.Message, blocks ...llm.Part) []llm.Message {
+	if n := len(messages); n > 0 && messages[n-1].Role == llm.RoleUser {
+		messages[n-1].Parts = append(messages[n-1].Parts, blocks...)
 		return messages
 	}
-	return append(messages, anthropic.NewBetaUserMessage(blocks...))
+	return append(messages, userMessage(blocks...))
 }
 
-func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(inputs))
+func (r *runner) humanBlocks(inputs []HumanInput, idle bool) []llm.Part {
+	blocks := make([]llm.Part, 0, len(inputs))
 	for _, in := range inputs {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(formatHumanInput(in)))
+		if in.Kind == kindApplyChecked {
+			// The runner's own input: its verdict is a [verification] note.
+			continue
+		}
+		text := formatInput(in, idle)
+		if in.Kind == kindSetupVerified && r.setup != nil {
+			text = r.formatSetupVerified(in)
+		}
+		blocks = append(blocks, textPart(text))
+		r.compact.noteInput(in, text)
 	}
 	return blocks
 }
@@ -435,9 +633,9 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 	inputs, err := r.deps.Inbox.Drain(ctx)
 	if err != nil {
 		r.log.Warn("agent: inbox drain failed", "err", err)
-		return r.takeHeld(nil)
+		return r.takeHeld(r.takeOwnInputs())
 	}
-	return r.takeHeld(inputs)
+	return r.takeHeld(append(inputs, r.takeOwnInputs()...))
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
@@ -472,14 +670,21 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			}
 			continue
 		}
-		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) {
+		inputs = append(inputs, r.takeOwnInputs()...)
+		// Track approvals as they arrive, held or not: the approval that
+		// completes a proposal must wake the agent into its wait for step
+		// results (awaitStepResults), which observes them again harmlessly.
+		for _, in := range inputs {
+			r.observe(in)
+		}
+		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) || len(r.proposals.awaiting()) > 0 {
 			return r.takeHeld(inputs), nil
 		}
 		// Only quiet inputs (or none): they never wake an idle agent. Keep
 		// them for the next batch and wait on.
 		r.held = append(r.held, inputs...)
 		backoff = r.timing.drainBackoffMin
-		if err := r.deps.Inbox.Wait(ctx); err != nil {
+		if err := r.waitInbox(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -499,7 +704,7 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // should return. If the room closes before input arrives, pending is
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
-func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
+func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]llm.Message, turns *int, pending []llm.Part) (bool, error) {
 	// A recovered episode ends "done" with the reason, not "idle".
 	recovered := r.recoveredIdle
 	if recovered {
@@ -515,7 +720,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		return true, nil
 	}
 	inputs, outcome := r.handleInputs(ctx, inputs)
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
+	blocks := append(append([]llm.Part(nil), pending...), r.idleInputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
 	if r.parked(outcome) {
@@ -523,6 +728,12 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 			r.emitWaiting(ctx)
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if r.setupSettled(inputs) {
+		// A green ladder in a room that cannot register leaves the run
+		// nothing to do: the verdict is posted (noteSetupVerified), and the
+		// run stays idle until a batch needs the model.
+		return r.holdSetupSettled(ctx, messages, turns)
 	}
 	if !outcome.statusSet {
 		// The model runs again: leave the idle (or done) status, so the room
@@ -540,14 +751,14 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 // stop=false when the model should run again (a human spoke, or a step failed
 // or is unknown) and stop=true when the room closed, with the error Run should
 // return.
-func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]llm.Message, turns *int) (bool, error) {
 	for {
 		inputs, err := r.waitForInput(ctx)
 		if err != nil {
 			return true, stopErr(err)
 		}
 		inputs, outcome := r.handleInputs(ctx, inputs)
-		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
+		*messages = appendUser(*messages, r.idleInputBlocks(inputs, outcome.notes)...)
 		*turns = 0
 		if !r.parked(outcome) {
 			if !outcome.statusSet {
@@ -563,7 +774,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 // a model turn.
 func hasHumanInput(inputs []HumanInput) bool {
 	for _, in := range inputs {
-		if in.Kind != "action_result" && in.Kind != "alert_update" {
+		if in.Kind != "action_result" && in.Kind != "alert_update" && in.Kind != kindApplyChecked {
 			return true
 		}
 	}
@@ -573,7 +784,27 @@ func hasHumanInput(inputs []HumanInput) bool {
 // isQuiet reports an input that rides along with the next batch but never
 // starts a turn or resets the turn guard on its own: an alert update (the
 // alert fired again, the watcher joined) is new numbers, not a request.
-func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" }
+//
+// An approval is quiet too. A live room (schema-change, 2026-10-25) spent two
+// Opus calls on every approval.given (a repeated hypothesis, then "the
+// kafka-connect owner has approved ... it still needs schema-registry"), which
+// the room's approval bar already shows; 17 calls used 536k tokens. An approval
+// that leaves a layer pending tells the model nothing it can act on. The one
+// that completes a proposal still wakes the agent, through waitForInput's
+// check of proposals awaiting step results, not through this function: the
+// agent then waits for the executor's results (awaitStepResults) and makes the
+// one turn those results get anyway, with the held approvals ahead of them. A
+// rejection, or an approval_result with no verdict, is not quiet: the agent
+// may have to re-plan.
+func isQuiet(in HumanInput) bool {
+	switch in.Kind {
+	case "alert_update":
+		return true
+	case "approval_result":
+		return in.Approved != nil && *in.Approved
+	}
+	return false
+}
 
 // resetsTurns reports whether a batch resets the per-episode turn guard: any
 // input but a quiet one does.
@@ -655,32 +886,28 @@ func stopErr(err error) error {
 	return err
 }
 
-// refusalReason renders the structured refusal details into a short, stable
-// reason string for the room log and the agent's message.
-func refusalReason(m anthropic.BetaMessage) string {
-	d := m.StopDetails
-	if d.Category == "" && d.Explanation == "" {
+// refusalReason is the short, stable reason of a refusal for the room log
+// and the agent's message: the adapter's "category: explanation" detail, or
+// a fixed text when the provider gave none.
+func refusalReason(resp llm.Response) string {
+	if resp.StopDetail == "" {
 		return "model refused the request"
 	}
-	if d.Category == "" {
-		return d.Explanation
-	}
-	if d.Explanation == "" {
-		return string(d.Category)
-	}
-	return string(d.Category) + ": " + d.Explanation
+	return resp.StopDetail
 }
 
-// splitContent separates an assistant turn into text and tool_use blocks.
-func splitContent(content []anthropic.BetaContentBlockUnion) (texts []string, uses []toolUse) {
-	for _, block := range content {
-		switch block.Type {
-		case "text":
-			if s := strings.TrimSpace(block.Text); s != "" {
-				texts = append(texts, block.Text)
+// splitContent separates an assistant turn into text and tool calls.
+func splitContent(parts []llm.Part) (texts []string, uses []toolUse) {
+	for _, p := range parts {
+		switch p.Kind {
+		case llm.PartText:
+			if s := strings.TrimSpace(p.Text); s != "" {
+				texts = append(texts, p.Text)
 			}
-		case "tool_use":
-			uses = append(uses, toolUse{id: block.ID, name: block.Name, input: block.Input})
+		case llm.PartToolCall:
+			if c := p.ToolCall; c != nil {
+				uses = append(uses, toolUse{id: c.ID, name: c.Name, input: c.Input})
+			}
 		}
 	}
 	return texts, uses
@@ -700,10 +927,10 @@ type toolResult struct {
 	isError   bool
 }
 
-// runToolUses executes every tool_use. Room tools run inline in order; read
-// tools run in parallel (max 4). The returned blocks preserve the model's
-// original order.
-func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.BetaContentBlockParamUnion {
+// runToolUses executes every tool call. Room tools run inline in order; read
+// tools run in parallel (max 4). The returned tool results preserve the
+// model's original order.
+func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []llm.Part {
 	results := make([]toolResult, len(uses))
 
 	// Room tools first: they are fast and often steer the turn.
@@ -765,9 +992,11 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		panic(firstPanic)
 	}
 
-	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(results))
-	for _, res := range results {
-		blocks = append(blocks, anthropic.NewBetaToolResultBlock(res.toolUseID, res.content, res.isError))
+	blocks := make([]llm.Part, 0, len(results))
+	for i, res := range results {
+		blocks = append(blocks, llm.Part{Kind: llm.PartToolResult, ToolResult: &llm.ToolResult{
+			CallID: res.toolUseID, Name: uses[i].name, Content: res.content, IsError: res.isError,
+		}})
 	}
 	return blocks
 }
@@ -787,15 +1016,28 @@ func (r *runner) toolScope(ctx context.Context) context.Context {
 func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	entry, ok := r.toolList.byName[u.name]
 	if !ok {
-		return r.failReadTool(ctx, u, "", "unknown tool "+u.name)
+		return r.failReadTool(ctx, u, "", "unknown tool "+u.name, events.ToolRejectedUnknownTool)
 	}
 
 	cleaned, why, err := stripWhy(u.input)
 	if err != nil {
-		return r.failReadTool(ctx, u, u.name, "invalid tool input: "+err.Error())
+		return r.failReadTool(ctx, u, u.name, "invalid tool input: "+err.Error(), inputRejection(u.input))
 	}
 	if err := validateInput(entry.schema, cleaned); err != nil {
-		return r.failReadTool(ctx, u, why, "invalid tool input: "+err.Error())
+		return r.failReadTool(ctx, u, why, "invalid tool input: "+err.Error(), events.ToolRejectedInvalidInput)
+	}
+	// Q1d: runbook_lookup gets the room's running versions (versions.go) for
+	// every component the model did not name. The tool_call event shows the
+	// input the tool ran with, so the room log says what was judged.
+	callInput := u.input
+	var added []runbooks.RunningVersion
+	if u.name == runbooks.ToolName {
+		if merged, add := withRunningVersions(cleaned, r.runningVersions(ctx)); len(add) > 0 && validateInput(entry.schema, merged) == nil {
+			cleaned, added = merged, add
+			if in, a := withRunningVersions(u.input, add); len(a) > 0 {
+				callInput = in
+			}
+		}
 	}
 
 	title := why
@@ -809,7 +1051,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
-		Input:     u.input,
+		Input:     callInput,
 	})
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
@@ -829,7 +1071,17 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		msg := "error: " + r.scrubToolError(u.name, err).Error()
+		// Classify from the scrubbed error: its text can reach the model and
+		// the room log through the fact, and scrubbing keeps the typed chain
+		// (scrubbedError.Unwrap), so errors.Is/As classification still works.
+		scrubbed := r.scrubToolError(u.name, err)
+		failure := classifyReadFailure(u.name, scrubbed)
+		failure.stepID = stepID
+		// An unreachable component is an evidence gap this run keeps until a
+		// read of it succeeds; the summary carries the stable fact so the model
+		// and the room log name the failure mechanically (KAN-408).
+		r.gaps.record(failure)
+		msg := failedReadSummary(failure, scrubbed.Error())
 		summary, truncated := tools.Truncate(msg)
 		r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:     stepID,
@@ -849,9 +1101,18 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		}
 	}
 
+	if len(added) > 0 {
+		res.Summary = runningVersionsLine(added) + "\n" + res.Summary
+	}
 	// Defensively re-cap the summary before it reaches the model; a tool that
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
+	// A later successful read of a tool that failed earlier resolves the gap
+	// (a transient blip, not a fault) and says so in the room log, so the
+	// model reports it as a blip instead of keeping a stale fault (KAN-408).
+	if f, blip := r.gaps.succeeded(u.name); blip {
+		summary, reTruncated = tools.Truncate(blipSummary(f, summary))
+	}
 	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:     stepID,
 		ToolUseID:  u.id,
@@ -863,37 +1124,49 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		TookMS:     took,
 		Provenance: prov,
 	})
-	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
+	// X4c: a what_changed read that lists an external change gets the
+	// runner's ranking beside it (externalcause.go). The ledger keeps it with
+	// the summary, so a hypothesis naming a team or change id it shows is
+	// backed by this step.
+	var ranked string
+	if u.name == whatChangedTool {
+		ranked = r.causes.observe(stepID, res.Data)
+	}
+	ledger := summary
+	if ranked != "" {
+		ledger += "\n" + ranked
+	}
+	r.steps.addWithInput(stepID, u.name, string(cleaned), ledger, false)
+	content := r.readToolContent(u.name, stepID, summary, res.Data)
+	if ranked != "" {
+		content += "\n" + ranked
+	}
 	return toolResult{
 		toolUseID: u.id,
-		content:   r.wrapReadToolOutput(u.name, stepID, summary),
+		content:   content,
 		isError:   false,
 	}
 }
 
+// inputRejection names why arguments that could not be decoded were refused:
+// text that is not JSON at all, or JSON that is not an object (which the
+// schema refuses).
+func inputRejection(raw json.RawMessage) string {
+	if !json.Valid(raw) {
+		return events.ToolRejectedInvalidJSON
+	}
+	return events.ToolRejectedInvalidInput
+}
+
 // failReadTool reports a tool call that could not be validated (unknown tool,
-// bad input) without panicking.
-func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string) toolResult {
+// bad input) without panicking. rejected is the events.ToolRejected* reason
+// recorded on the tool_result; the model's tool_result text does not carry it.
+func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg, rejected string) toolResult {
 	if title == "" {
 		title = u.name
 	}
-	stepID := newStepID()
-	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
-		StepID:    stepID,
-		ToolUseID: u.id,
-		Tool:      u.name,
-		Input:     u.input,
-	})
-	summary, truncated := tools.Truncate("error: " + msg)
-	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
-		StepID:    stepID,
-		ToolUseID: u.id,
-		Tool:      u.name,
-		Summary:   summary,
-		IsError:   true,
-		Truncated: truncated,
-	})
+	stepID := r.emitRejected(ctx, u, title, "error: "+msg, rejected)
+	summary, _ := tools.Truncate("error: " + msg)
 	r.steps.add(stepID, u.name, summary, true)
 	return toolResult{
 		toolUseID: u.id,
@@ -904,10 +1177,12 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 
 // runRoomTool executes one room tool (update_hypothesis, propose_fix,
 // post_message). These emit their own domain events rather than step/tool_call
-// events, but still return a tool_result block to the model.
+// events, but still return a tool_result block to the model. A call refused
+// before it runs (unknown name, schema check) gets a step (emitRejected).
 func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	entry, ok := r.toolList.byName[u.name]
 	if !ok {
+		r.emitRejected(ctx, u, u.name, "error: unknown tool", events.ToolRejectedUnknownTool)
 		return toolResult{
 			toolUseID: u.id,
 			content:   wrapToolOutput(u.name, "", "error: unknown tool"),
@@ -915,6 +1190,12 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 		}
 	}
 	if err := validateInput(entry.schema, u.input); err != nil {
+		// Only the schema check is a rejection here. The room tools' own
+		// checks inside Run (cited steps, the healthy-verdict guard, a
+		// proposal step's action Validate) judge what the model concluded,
+		// not whether it called the tool well; proposal refusals are counted
+		// apart as rejected_attempts (docs/design/model-providers.md 5.1).
+		r.emitRejected(ctx, u, u.name, "error: invalid input: "+err.Error(), inputRejection(u.input))
 		return toolResult{
 			toolUseID: u.id,
 			content:   wrapToolOutput(u.name, "", "error: invalid input: "+err.Error()),
@@ -936,11 +1217,53 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	if pr, ok := res.Data.(proposeFixResult); ok {
 		r.snapshotBaseline(ctx, pr.ProposalID)
 	}
+	// A new setup plan (setup_plan) restarts the steps bound's count: the
+	// executed steps of the previous plan no longer count (design §3.1). The
+	// failed-attempts count carries over (setup.go, attempts).
+	if r.setup != nil {
+		if pl, ok := res.Data.(events.SetupPlanPayload); ok {
+			r.setup.notePlan(pl)
+		}
+	}
 	return toolResult{
 		toolUseID: u.id,
 		content:   wrapToolOutput(u.name, "", res.Summary),
 		isError:   false,
 	}
+}
+
+// emitRejected writes the step of a tool call refused before it ran:
+// step.started, tool_call and a tool_result with IsError and Rejected set
+// (V1t). It returns the step id. It does not touch the step ledger or what the
+// model is sent, so a rejection changes no request bytes. A room tool's
+// rejection gets a step too, so its tool_result pairs with a tool_call like a
+// read tool's.
+func (r *runner) emitRejected(ctx context.Context, u toolUse, title, text, rejected string) string {
+	stepID := newStepID()
+	input := u.input
+	if !json.Valid(input) {
+		// Arguments that are not JSON cannot go in the event's JSON input
+		// (the event would fail to encode and be lost); the summary says why.
+		input = nil
+	}
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+		StepID:    stepID,
+		ToolUseID: u.id,
+		Tool:      u.name,
+		Input:     input,
+	})
+	summary, truncated := tools.Truncate(text)
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+		StepID:    stepID,
+		ToolUseID: u.id,
+		Tool:      u.name,
+		Summary:   summary,
+		IsError:   true,
+		Truncated: truncated,
+		Rejected:  rejected,
+	})
+	return stepID
 }
 
 // wrapToolOutput marks tool output as untrusted data. The system prompt tells

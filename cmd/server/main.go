@@ -4,8 +4,28 @@
 // --demo it applies the migrations, opens the real stack clients via
 // wiring.OpenStacks (one client set per pipeline with its own connections,
 // docs/design/tenancy.md), registers the real tools/actions and runs the real
-// agent (agent.Run). Owners are loaded and cross-checked against the users
-// file in both modes.
+// agent (agent.Run). With --quickstart it runs the real agent and tools like
+// the full server, but on the in-memory store, with dev login on loopback
+// only, write mode off and a one-user users file written for the run
+// (quickstart.go). Owners are loaded and cross-checked against the users file
+// in every mode.
+//
+// PIPEROOM_FAKE_AGENT=scripted replaces every model path (the agent run, the
+// hand-off and post-mortem writers, triage) with the scripted story of
+// internal/room/demo while keeping the real path around it: Postgres store and
+// migrations, tools, actions, topology, watcher, HTTP and WebSocket API. It
+// needs no model call and no ANTHROPIC_API_KEY. Because a scripted
+// investigation is not real, it is accepted only with dev login, write mode
+// off and no Slack token; the documented demo start is
+//
+//	PIPEROOM_FAKE_AGENT=scripted PIPEROOM_AUTH_MODE=dev \
+//	PIPEROOM_DEV_ACK=dev-login-has-no-password PIPEROOM_WRITE_MODE=off \
+//	PIPEROOM_WATCH_MODE=rooms go run ./cmd/server
+//
+// Any other value, or a scripted request that would reach real users or run
+// fixes, stops the start through config.ParseFakeAgent. --demo and
+// --quickstart ignore the variable (--demo already runs the scripted agent and
+// forces write mode on).
 package main
 
 import (
@@ -13,7 +33,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,22 +43,25 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/adminconfig"
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
+	"piperoom/internal/discover/openlineage"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
+	"piperoom/internal/quickstart"
 	"piperoom/internal/room"
 	"piperoom/internal/room/demo"
 	"piperoom/internal/slackbridge"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
-	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/version"
 	"piperoom/internal/watch"
@@ -51,10 +76,25 @@ func main() {
 	}
 }
 
+// startDeps are what run reaches outside the process besides the room store:
+// the data stack and stdout. Tests replace the stack opener so the whole
+// --quickstart start runs with no stack.
+type startDeps struct {
+	openStacks func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts wiring.StackOptions) (*wiring.Stacks, error)
+	stdout     io.Writer
+}
+
 // run is main's body so every cleanup defer runs on every exit path,
 // including the listen-error path.
 func run() error {
+	return runWith(startDeps{openStacks: wiring.OpenStacks, stdout: os.Stdout})
+}
+
+func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
+	quickstartFlag := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
+	solo := flag.Bool("solo", false, "with --demo: give the demo presenter the solo ceremony (sole driver, approve-all); with --quickstart: give the sole owner from the owners file the solo ceremony (sole driver, approve-all)")
+	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstart.DefaultOwnersFile+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
@@ -73,12 +113,18 @@ func run() error {
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
+	if err := checkStartFlags(*demoMode, *quickstartFlag, *solo, *allowRemote, *ownersPath); err != nil {
+		return err
+	}
 	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
 		if down.n == 0 {
 			return errDownStrayFlag
 		}
 		if *demoMode {
 			return errors.New("server: -migrate-down needs the room database; it cannot run with -demo")
+		}
+		if *quickstartFlag {
+			return errors.New("server: -migrate-down needs the room database; it cannot run with --quickstart")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -93,86 +139,30 @@ func run() error {
 	slog.SetDefault(log)
 	log.Info("server: starting", "version", version.String())
 
-	// The agent cap is cost control: parse it first so a bad value stops the
-	// server before it connects to anything.
-	maxAgents, err := parseMaxAgents(cfg.MaxAgents)
-	if err != nil {
-		return err
-	}
-	maxAgentsGlobal, err := parseMaxAgentsGlobal(cfg.MaxAgentsGlobal)
-	if err != nil {
-		return err
-	}
-	resumeOnTakeover, err := parseResumeOnTakeover(cfg.ResumeOnTakeover)
-	if err != nil {
-		return err
-	}
-	// The name of this process in room leases, executor claims and leader
-	// logs (docs/design/replicas.md section 2).
-	replica := replicaID(cfg.ReplicaID)
-	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica, "resume_on_takeover", resumeOnTakeover)
-
-	// A bad PIPEROOM_WATCH_* value stops the server too; the error names the
-	// variable. --demo forces the watcher off.
-	watchCfg, err := watchConfig(cfg, *demoMode, log)
-	if err != nil {
-		return err
-	}
-	// The watcher's open-room cap is its own (F6), not the agent pool's: a
-	// room beyond PIPEROOM_MAX_AGENTS queues for an agent but still gets its
-	// first look.
-	watchMaxOpenRooms, err := config.ParseWatchMaxOpenRooms(cfg)
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-
-	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
-	pmMode, err := config.ParsePostmortemModel(cfg)
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-
-	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
-	// PIPEROOM_SHADOW_* value stops the server like a bad watcher value. Which
-	// pipelines are shadow comes from owners.yaml.
-	shadowCfg, err := config.ParseShadow(cfg)
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-
-	// Spend limits and the price table (docs/design/cost.md): a bad value
-	// stops the server before it connects to anything.
-	spend, err := spendSetup(cfg)
-	if err != nil {
-		return err
-	}
-	spend.logSettings(log)
-
-	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
-	// config refuses start, and so does a reachable-from-outside listen
-	// address in dev mode without PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (security
-	// F1). Both run before anything else starts.
-	authSettings, err := authSetup(cfg, *allowRemote, *demoMode, log)
-	if err != nil {
-		return err
-	}
-	log.Info("server: auth", "mode", authSettings.Mode, "session_idle", authSettings.Idle.String(), "session_max", authSettings.Max.String())
-
-	// PIPEROOM_PUBLIC_URL becomes an allowed WebSocket origin, so a malformed
-	// value (a wildcard, say) must stop the start rather than widen access.
-	publicOrigin, err := httpapi.ParsePublicURL(cfg.PublicURL)
-	if err != nil {
-		return fmt.Errorf("server: %w", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The quickstart runs through internal/quickstart: the package forces the
+	// settings it owns (loopback, dev login, write mode off) and writes the
+	// run's users file, then calls serve with the composition every mode uses.
+	if *quickstartFlag {
+		return runQuickstart(ctx, d, cfg, *ownersPath, *solo, log)
+	}
+
+	// The settings every mode validates first: a bad value refuses the start
+	// before the users or owners are read.
+	m := serveMode{demo: *demoMode, allowRemote: *allowRemote, solo: *solo, log: log, stdout: d.stdout}
+	s, err := parseServer(cfg, m)
+	if err != nil {
+		return err
+	}
 
 	// Real mode refuses to start without a usable users file: it is the
 	// directory of who may approve and drive (LEAD-ARCH round 4, item 7).
 	// Demo mode stays self-contained for the users file only, falling back to
 	// the dev directory so the UI can be built with no config.
-	users, err := room.LoadUsers(cfg.UsersFile)
+	var users *room.Users
+	users, err = room.LoadUsers(cfg.UsersFile)
 	if err != nil {
 		if !*demoMode {
 			return fmt.Errorf("server: load users file %s: %w", cfg.UsersFile, err)
@@ -180,7 +170,7 @@ func run() error {
 		log.Warn("server: users file unavailable, using demo users", "path", cfg.UsersFile, "err", err)
 		users = room.DefaultUsers()
 	}
-	// Owners are required in both modes: every action's scope check runs
+	// Owners are required in every mode: every action's scope check runs
 	// against them, so a room can only ever write inside its own pipeline.
 	// Users and owners must agree (a layer owner in owners.yaml must exist in
 	// users.yaml and actually own that layer), otherwise start is refused.
@@ -188,9 +178,183 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
 	}
+	// --solo resolves the solo user from the flags. The quickstart resolves it
+	// in internal/quickstart, before that package writes the users file.
+	if err := applySoloFlag(&cfg, own, *demoMode, false, *solo, log); err != nil {
+		return err
+	}
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
 	}
+	return serve(ctx, d, cfg, own, users, m, s)
+}
+
+// serveMode is what serve reads of the flags. The quickstart start reaches
+// serve through internal/quickstart with quickstart set and the rest zero.
+type serveMode struct {
+	demo        bool
+	quickstart  bool
+	allowRemote bool
+	solo        bool
+	log         *slog.Logger
+	// stdout receives the quickstart URL once the listener is bound.
+	stdout io.Writer
+	// The model picker (V7), quickstart and standalone only: the panel's
+	// mode, where model.env lives, and what it held at start.
+	modelMode  string
+	projectDir string
+	modelEnv   quickstart.ModelEnv
+}
+
+// serverSettings are the parsed settings the server needs. The real and demo
+// starts read them before the users and owners, so a bad value refuses the
+// start first, as it always did; the quickstart reads them after
+// internal/quickstart has forced its config.
+type serverSettings struct {
+	replica           string
+	maxAgents         int
+	maxAgentsGlobal   int
+	resumeOnTakeover  bool
+	watchCfg          config.Watch
+	hypothesisGuard   string // agent.GuardOff, GuardLog or GuardEnforce
+	watchMaxOpenRooms int
+	watchForecast     config.WatchForecast
+	pmMode            string
+	shadowCfg         config.Shadow
+	writeOn           bool
+	fakeAgent         bool
+	autoDelay         time.Duration
+	setupCfg          config.Setup
+	spend             spendSettings
+	authSettings      auth.Settings
+	publicOrigin      httpapi.PublicOrigin
+}
+
+// parseServer reads and validates the settings serve needs, before anything
+// connects.
+func parseServer(cfg config.Config, m serveMode) (serverSettings, error) {
+	log := m.log
+	var s serverSettings
+	var err error
+
+	// The agent cap is cost control: parse it first so a bad value stops the
+	// server before it connects to anything.
+	if s.maxAgents, err = parseMaxAgents(cfg.MaxAgents); err != nil {
+		return serverSettings{}, err
+	}
+	if s.maxAgentsGlobal, err = parseMaxAgentsGlobal(cfg.MaxAgentsGlobal); err != nil {
+		return serverSettings{}, err
+	}
+	if s.resumeOnTakeover, err = parseResumeOnTakeover(cfg.ResumeOnTakeover); err != nil {
+		return serverSettings{}, err
+	}
+	// The name of this process in room leases, executor claims and leader
+	// logs (docs/design/replicas.md section 2).
+	s.replica = replicaID(cfg.ReplicaID)
+	log.Info("server: agent cap", "max_agents_per_replica", s.maxAgents, "max_agents_global", s.maxAgentsGlobal, "replica", s.replica, "resume_on_takeover", s.resumeOnTakeover)
+
+	// A bad PIPEROOM_WATCH_* value stops the server too; the error names the
+	// variable. --demo forces the watcher off.
+	if s.watchCfg, err = watchConfig(cfg, m.demo, log); err != nil {
+		return serverSettings{}, err
+	}
+	// The watcher's open-room cap is its own (F6), not the agent pool's: a
+	// room beyond PIPEROOM_MAX_AGENTS queues for an agent but still gets its
+	// first look.
+	if s.watchMaxOpenRooms, err = config.ParseWatchMaxOpenRooms(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+	// X3: a bad PIPEROOM_WATCH_FORECAST_HORIZON stops the start like any
+	// other watcher value.
+	if s.watchForecast, err = config.ParseWatchForecast(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+
+	// A bad PIPEROOM_POSTMORTEM_MODE stops the server.
+	if s.pmMode, err = config.ParsePostmortemModel(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+
+	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
+	// PIPEROOM_SHADOW_* value stops the server like a bad watcher value. Which
+	// pipelines are shadow comes from owners.yaml.
+	if s.shadowCfg, err = config.ParseShadow(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+
+	// Write mode (P0 item 1): a bad PIPEROOM_WRITE_MODE stops the server
+	// before it connects to anything; off (the default) records approvals
+	// and runs nothing; --demo forces on. The quickstart's option is already
+	// written into cfg by internal/quickstart.
+	if s.writeOn, err = writeModeSetup(cfg, m.demo, log); err != nil {
+		return serverSettings{}, err
+	}
+	// Hypothesis guard mode (H1): a bad PIPEROOM_HYPOTHESIS_GUARD stops the
+	// start before anything connects.
+	if s.hypothesisGuard, err = config.ParseHypothesisGuard(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+	// The scripted agent on a real stack (PIPEROOM_FAKE_AGENT=scripted) is
+	// read only outside --demo and --quickstart. A bad value, or a scripted
+	// request that would reach real users or run fixes, refuses the start
+	// before anything connects (config.ParseFakeAgent).
+	if s.fakeAgent, err = fakeAgentSetup(cfg, m.demo, m.quickstart, log); err != nil {
+		return serverSettings{}, err
+	}
+	// Auto-approve delay (P0 item 2): a bad value stops the server here; the
+	// owners.yaml lists are checked once the action registries exist.
+	if s.autoDelay, err = autoApproveDelay(cfg); err != nil {
+		return serverSettings{}, err
+	}
+
+	// Setup mode (docs/design/setup-agent.md): PIPEROOM_SETUP_ENABLED=on mounts
+	// the runner endpoint (GET /api/runners/ws); ParseSetup refuses it while
+	// write mode is off, since setup executes writes through the runner.
+	if s.setupCfg, err = config.ParseSetup(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+	if s.setupCfg.Enabled {
+		// Every replica writes registered read credentials under
+		// PIPEROOM_SECRETS_DIR: one that cannot refuses the start (U1-5d).
+		if err := checkSetupSecretsDir(s.setupCfg.SecretsDir); err != nil {
+			return serverSettings{}, fmt.Errorf("server: %w", err)
+		}
+	}
+
+	// Spend limits and the price table (docs/design/cost.md): a bad value
+	// stops the server before it connects to anything.
+	if s.spend, err = spendSetup(cfg); err != nil {
+		return serverSettings{}, err
+	}
+	s.spend.logSettings(log)
+
+	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
+	// config refuses start, and so does a reachable-from-outside listen
+	// address in dev mode without PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (security
+	// F1). Both run before anything else starts.
+	if s.authSettings, err = authSetup(cfg, m.allowRemote, m.demo, log); err != nil {
+		return serverSettings{}, err
+	}
+	log.Info("server: auth", "mode", s.authSettings.Mode, "session_idle", s.authSettings.Idle.String(), "session_max", s.authSettings.Max.String())
+
+	// PIPEROOM_PUBLIC_URL becomes an allowed WebSocket origin, so a malformed
+	// value (a wildcard, say) must stop the start rather than widen access.
+	if s.publicOrigin, err = httpapi.ParsePublicURL(cfg.PublicURL); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+	return s, nil
+}
+
+// serve is the server from the users and owners on: the real, demo and
+// quickstart starts share it, so they cannot drift apart.
+func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owners, users *room.Users, m serveMode, s serverSettings) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	log := m.log
+	// memStore: the in-memory room store, which --demo and --quickstart use.
+	memStore := m.demo || m.quickstart
+
 	// Tenancy (docs/design/tenancy.md): PIPEROOM_TENANCY_MODE must agree with
 	// the owners file, and the chosen model is logged.
 	slackCfg := slackFromConfig(cfg)
@@ -205,19 +369,25 @@ func run() error {
 		return err
 	}
 	if own.AnyShadow() {
-		log.Info("server: shadow mode", "pipelines", shadowPipelines(own), "grace", shadowCfg.Grace.String(),
-			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
+		log.Info("server: shadow mode", "pipelines", shadowPipelines(own), "grace", s.shadowCfg.Grace.String(),
+			"token_budget", s.shadowCfg.TokenBudget, "max_turns", s.shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
-	// names anyone else (design section 5.3).
-	soloUser, err := soloSetup(cfg, users, own, log)
+	// names anyone else (design section 5.3). The solo user was resolved from
+	// the flags above (--demo -> the presenter, --quickstart -> the sole owner,
+	// otherwise PIPEROOM_SOLO_USER); only --demo relaxes the single-owner rule,
+	// so --quickstart runs the real check against the owners file.
+	soloUser, err := soloSetup(cfg, users, own, m.demo, log)
 	if err != nil {
 		return err
+	}
+	if m.demo && m.solo && soloUser != "" && s.authSettings.DevNonLoopback {
+		log.Warn("server: --demo --solo on a non-loopback address: anyone who can reach this port can drive as the solo user", "addr", cfg.HTTPAddr)
 	}
 	// The OIDC relying party (nil in dev mode). Discovery runs in the
 	// background and is retried, so an IdP that is down now does not stop the
 	// start; new logins answer 503 until it is up.
-	oidcRP, err := oidcSetup(cfg, authSettings, publicOrigin, log)
+	oidcRP, err := oidcSetup(cfg, s.authSettings, s.publicOrigin, log)
 	if err != nil {
 		return err
 	}
@@ -235,9 +405,9 @@ func run() error {
 	log.Info("server: alert sources", "enabled", enabledAlertSources(alerts))
 
 	// --demo is fully self-contained (in-memory store + scripted agent) so A6
-	// can build the UI against it with no database or migrations. The real
-	// mode uses Postgres: migrations first (goose on migrations.FS), then the
-	// store.
+	// can build the UI against it with no database or migrations;
+	// --quickstart takes only its in-memory store. The real mode uses
+	// Postgres: migrations first (goose on migrations.FS), then the store.
 	var (
 		st      store.Store
 		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
@@ -251,7 +421,7 @@ func run() error {
 		loginStates auth.LoginStateStore = auth.NewMemLoginStates()
 		identities  auth.IdentityStore   = auth.NewMemIdentities()
 	)
-	if *demoMode {
+	if memStore {
 		st = memstore.New()
 	} else {
 		if err := migrateRoomDB(ctx, cfg.RoomDBURL, log); err != nil {
@@ -267,7 +437,7 @@ func run() error {
 		}
 		st = pg
 		ready = pg
-		elector = pg.Elector(replica)
+		elector = pg.Elector(s.replica)
 		threads = pg.SlackThreads()
 		sessions = pg.Sessions()
 		loginStates = pg.LoginStates()
@@ -287,6 +457,14 @@ func run() error {
 	}
 	defer slack.stop(mirrorStopTimeout)
 
+	// OpenLineage (X7b): off unless OPENLINEAGE_URL is set; then it sends on
+	// the elected leader only. A bad setting refuses start.
+	lineage, stopLineage, err := openlineage.Start(ctx, cfg, own, elector, log)
+	if err != nil {
+		return err
+	}
+	defer stopLineage()
+
 	var (
 		acts     *actions.Registry
 		toolsReg = tools.NewRegistry()
@@ -294,7 +472,7 @@ func run() error {
 		run      = agent.Run
 		write    = agent.WriteHandoff
 		// writePM is room.Deps.WritePostmortem; nil gives the events-only
-		// draft (PIPEROOM_POSTMORTEM_MODEL=off, or no writer wired yet).
+		// draft (PIPEROOM_POSTMORTEM_MODE=off, or no writer wired yet).
 		writePM agent.PostmortemWriter
 		// triage is the first look (F6); nil in --demo, which has no model.
 		triage        agent.Triager
@@ -303,6 +481,9 @@ func run() error {
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
+		// demoCtl is the scripted demo's presenter controls (KAN-398); nil
+		// outside --demo, where the control routes do not exist.
+		demoCtl *demo.Controls
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
@@ -312,75 +493,108 @@ func run() error {
 		// usage hands the hand-off's agent.usage events to the room service
 		// once it exists.
 		usage = &usageRelay{log: log}
+		// live is the picker's swappable endpoint; nil outside quickstart.
+		live *liveModel
 	)
 	// Both stores keep the spend tables; the in-memory one only for --demo.
 	spendStore, ok := st.(store.SpendStore)
 	if !ok {
 		return errors.New("server: the room store keeps no spend tables")
 	}
-	if *demoMode {
+	if m.demo {
 		// The real actions over the demo's in-memory clients (LEAD-ARCH round
 		// 4, item 3): the proposal path -- scope check, approval, executor --
 		// is identical to production.
 		acts = actions.NewRegistry()
-		if err := actions.Register(acts, demo.FakeActionDeps()); err != nil {
+		fakes := demo.NewFakes()
+		if err := actions.Register(acts, fakes.Actions()); err != nil {
 			return fmt.Errorf("server: register demo actions: %w", err)
 		}
 		topo = demo.Builder{}
-		run = demo.Run
+		// The presenter controls: skip, pause, resume and reset, over the
+		// same fake clients the actions write through (KAN-398).
+		demoCtl = demo.NewControls(fakes)
+		run = demoCtl.Run
 		write = demo.WriteHandoff
-		if pmMode == config.PostmortemModelAuto {
+		if s.pmMode == config.PostmortemModelAuto {
 			writePM = demo.WritePostmortem
 		}
 	} else {
-		// The model endpoint first: a wrong provider, region, project or token
-		// budget should stop the server before it opens any connection.
-		// One AWS config for the process, shared by Bedrock and MSK IAM.
-		awsCfg, err := wiring.LoadAWS(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
+		if m.quickstart {
+			// The picker's stored key reaches the adapters through the key
+			// overlay (wiring.WithGetenv), not the process environment; a
+			// standalone or quickstart server with no usable model starts in
+			// the no model state (models.go).
+			live = &liveModel{startKeys: quickstart.NewKeys(nil, m.modelEnv)}
 		}
-		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		// Spend limits are checked against the room database, so a restart
-		// does not reset them.
-		if err := ep.SetSpend(spend.options(spendStore, usage)); err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		run = ep.Run
-		write = ep.WriteHandoff
-		// With PIPEROOM_TRIAGE_PASS=off the pass still writes agent.triage
-		// "failed"/"off" (no model call), so the UI never waits for one.
-		triage = ep.Triage
-		_, _, triageTimeout = ep.FirstLook()
-		closedHook.setForget(ep)
-
-		// One client set per pipeline with connections: in owners.yaml, plus
-		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
-		// section 5). Each room, the topology and the watcher reach only the
-		// set of their own pipeline.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
-			// similar_incidents reads past closed rooms from the room store;
-			// each set's Owners holds only its own pipelines.
-			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
+		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpointWithEnv, wireAgentInput{
+			cfg:        cfg,
+			log:        log,
+			own:        own,
+			st:         st,
+			spendStore: spendStore,
+			spend:      s.spend,
+			usage:      usage,
+			hook:       closedHook,
+			fakeAgent:  s.fakeAgent,
+			pmMode:     s.pmMode,
+			writeOn:    s.writeOn,
+			live:       live,
 		})
 		if err != nil {
-			return fmt.Errorf("server: open the data stack: %w", err)
+			return err
 		}
-		defer sets.Close()
-		logStacks(log, sets)
-		stacks = sets
-		stackFor = roomStacks(sets)
-		topo = sets
+		defer w.stacks.Close()
+		logStacks(log, w.stacks)
+		run = w.run
+		write = w.write
+		writePM = w.writePM
+		triage = w.triage
+		triageTimeout = w.triageTimeout
+		stacks = w.stacks
+		stackFor = w.stackFor
+		topo = lineage.Wrap(w.topo)
+	}
+
+	// The auto-approve lists name actions of the proposal registry: acts in
+	// --demo, every client set's actions otherwise (registered whatever the
+	// write mode; only their clients change).
+	regs := []*actions.Registry{acts}
+	if stacks != nil {
+		for _, s := range stacks.All() {
+			regs = append(regs, s.Actions)
+		}
+	}
+	if err := checkAutoApprove(own, regs, s.autoDelay, log); err != nil {
+		return err
+	}
+
+	// GET /api/actions lists every action once, across every client set, in
+	// stack order (process-wide first); room.AllActions deduplicates by name.
+	var actionCatalogue func() []actions.Action
+	if stacks != nil {
+		actionCatalogue = func() []actions.Action {
+			var out []actions.Action
+			for _, s := range stacks.All() {
+				out = append(out, s.Actions.All()...)
+			}
+			return out
+		}
+	}
+
+	// Q7e: the follower of opened fix PRs; nil with FORGE_KIND empty.
+	prReader, err := forgeSetup(cfg, own, log)
+	if err != nil {
+		return err
 	}
 
 	svc := newRoomService(room.Deps{
+		PullRequests:      prReader,
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,
 		StackFor:          stackFor,
+		ActionCatalogue:   actionCatalogue,
 		Topology:          topo,
 		Users:             users,
 		Owners:            own,
@@ -389,29 +603,39 @@ func run() error {
 		WritePostmortem:   writePM,
 		Triage:            triage,
 		TriagePassTimeout: triageTimeout,
-		Options:           agentOptions(cfg, limits),
-		ShadowOptions:     shadowAgentOptions(cfg, shadowCfg, limits),
-		ShadowGrace:       shadowCfg.Grace,
+		Options:           agentOptions(cfg, limits, s.hypothesisGuard),
+		ShadowOptions:     shadowAgentOptions(cfg, s.shadowCfg, limits, s.hypothesisGuard),
+		Watch:             freshWatchReader(st, s.watchCfg, log),
+		ShadowGrace:       s.shadowCfg.Grace,
 		Logger:            log,
-		MaxAgents:         maxAgents,
-		ReplicaID:         replica,
-		MaxAgentsGlobal:   maxAgentsGlobal,
-		ResumeOnTakeover:  resumeOnTakeover,
+		MaxAgents:         s.maxAgents,
+		ReplicaID:         s.replica,
+		MaxAgentsGlobal:   s.maxAgentsGlobal,
+		ResumeOnTakeover:  s.resumeOnTakeover,
 		Sessions:          sessions,
 		SoloUser:          soloUser,
+		WriteModeOff:      !s.writeOn,
+		AutoApproveDelay:  s.autoDelay,
 		Limits:            limits,
+		Setup:             s.setupCfg,
+		SetupStack:        setupStackBuilder(cfg, s.setupCfg.Enabled, s.writeOn),
+		SetupLocal:        setupListenLoopback(cfg.HTTPAddr),
+		SetupOwnAddrs:     setupOwnAddrs(cfg.HTTPAddr, log),
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
+		OnActionExecuted:  closedHook.onActionExecuted,
+		OnActionResult:    lineage.ActionHook(),
 		OnRoomDeleted:     deletedHook.onDeleted,
-	}, authSettings, usage)
+		TeamPager:         slack.teamPager(),
+	}, s.authSettings, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
 	cancelLoad()
 	if loadErr != nil {
-		if *demoMode {
-			// Demo uses an in-memory store; a failed load is unexpected but not
-			// worth refusing to start.
+		if memStore {
+			// Demo and quickstart use an in-memory store; a failed load is
+			// unexpected but not worth refusing to start.
 			log.Warn("server: cache load failed", "err", loadErr)
 		} else {
 			// Real mode must fail: a broken cache means rooms reached later are
@@ -457,17 +681,69 @@ func run() error {
 	changesPurge, _ := st.(changesPurger)
 	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopChangesRetention()
+	// Watch samples (X3a) are kept 7 days, whatever else is configured.
+	sampleStore, _ := st.(store.SampleStore)
+	var samplesPurge samplesPurger
+	if sampleStore != nil {
+		samplesPurge = sampleStore
+	}
+	stopSamplesRetention := startElectedSamplesRetention(ctx, elector, samplesPurge, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopSamplesRetention()
 
-	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
+	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(s.publicOrigin), httpapi.WithAuth(s.authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
 		httpapi.WithSpend(httpapi.Spend{
 			Store:                spendStore,
-			RoomTokens:           spend.roomLimit,
-			PipelineDailyTokens:  spend.cost.PipelineDailyTokens,
-			PipelineDailyCostUSD: spend.cost.PipelineDailyCostUSD,
+			RoomTokens:           s.spend.roomLimit,
+			PipelineDailyTokens:  s.spend.cost.PipelineDailyTokens,
+			PipelineDailyCostUSD: s.spend.cost.PipelineDailyCostUSD,
 		})}
+	httpOpts = append(httpOpts, httpapi.WithChangesWebhook(changeWebhook(cfg, own, st, log)))
+	if s.watchCfg.Mode != config.WatchOff {
+		// config_drift accept-config (X3b): the current term's watcher.
+		httpOpts = append(httpOpts, httpapi.WithConfigAccept(closedHook))
+	}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	if sampleStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
+	}
+	// The fleet view (X5a) reads the watcher's status rows, which the leader's
+	// watcher writes, so every replica answers alike.
+	fleetStore, _ := st.(store.FleetStore)
+	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
+	// Connector config versions (X5c): the watcher writes them, the
+	// config-versions routes read them; the change-log retention above
+	// purges them (configVersionsPurger).
+	versionStore, _ := st.(store.ConfigVersionStore)
+	if versionStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithConfigVersions(versionStore))
+	}
+	if s.setupCfg.Enabled {
+		httpOpts = append(httpOpts, httpapi.WithSetup(true))
+	}
+	if demoCtl != nil {
+		// --demo only: mounts POST /api/rooms/{id}/demo/{skip|pause|resume|reset}
+		// and marks /healthz with "demo": true for the web control strip.
+		httpOpts = append(httpOpts, httpapi.WithDemoControls(demoCtl))
+	}
+	// Admin settings and connection tests (docs/api.md): real mode only.
+	// --demo has no real connections to show or test, and its users may be
+	// the built-in directory rather than a users file.
+	if !m.demo {
+		adm, err := adminconfig.New(cfg, own, users, cfg.OwnersFile, cfg.UsersFile)
+		if err != nil {
+			return fmt.Errorf("server: admin settings: %w", err)
+		}
+		httpOpts = append(httpOpts, httpapi.WithAdmin(adm))
+	}
+	modelsOpt, err := modelsOption(m, cfg, s.spend.prices, live, soloUser, users)
+	if err != nil {
+		return err
+	}
+	if modelsOpt != nil {
+		httpOpts = append(httpOpts, modelsOpt)
 	}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the
@@ -496,11 +772,14 @@ func run() error {
 	watchDeps := watch.Deps{
 		Owners:       own,
 		Rooms:        watchRooms{svc: svc},
-		Config:       watchCfg,
-		MaxOpenRooms: watchMaxOpenRooms,
+		Config:       s.watchCfg,
+		MaxOpenRooms: s.watchMaxOpenRooms,
+		Forecast:     s.watchForecast,
 	}
+	watchStores(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
+		checkWatchLag(log, s.watchCfg.Mode, own, watchDeps.ClientsFor)
 	}
 	stopWatch, err := startElectedWatcher(ctx, elector, watchDeps, closedHook, log)
 	if err != nil {
@@ -520,19 +799,58 @@ func run() error {
 	}()
 
 	mode := "real"
-	if *demoMode {
+	switch {
+	case m.demo:
 		mode = "demo"
+	case m.quickstart:
+		mode = "quickstart"
 	}
-	log.Info("server: listening", "addr", cfg.HTTPAddr, "mode", mode)
-	serveErr := server.ListenAndServe()
+	// Listen before Serve so the log and the quickstart URL carry the bound
+	// address (a :0 port is the real one there).
+	serveErr := listenAndServe(server, m.quickstart, m.stdout, log, mode)
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		// There was no signal; trigger the same shutdown path, then report.
 		log.Error("server: listen failed", "err", serveErr)
-		stop()
+		cancel()
 	}
 	<-done
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		return fmt.Errorf("server: listen: %w", serveErr)
+		return serveError(serveErr)
+	}
+	return nil
+}
+
+// serveError adds the one "server:" prefix to a listenAndServe error, whose
+// own messages carry none ("listen on ...", "listen: --quickstart: ...",
+// "serve: ...").
+func serveError(err error) error {
+	return fmt.Errorf("server: %w", err)
+}
+
+// listenAndServe binds the server's address and serves until Shutdown. With
+// quickstart it refuses a listener that is not on loopback and prints the URL
+// to open once to out; everything else goes to the log.
+func listenAndServe(server *http.Server, quickstartMode bool, out io.Writer, log *slog.Logger, mode string) error {
+	addr := server.Addr
+	if addr == "" {
+		addr = ":http" // what http.Server.ListenAndServe uses
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	if quickstartMode {
+		if err := quickstart.CheckListener(ln.Addr()); err != nil {
+			_ = ln.Close()
+			return err
+		}
+	}
+	log.Info("server: listening", "addr", ln.Addr().String(), "mode", mode)
+	if quickstartMode {
+		fmt.Fprintln(out, quickstart.URL(ln.Addr()))
+	}
+	if err := server.Serve(ln); err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
 }

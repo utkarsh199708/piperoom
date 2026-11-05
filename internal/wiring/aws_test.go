@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm/converse"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 )
@@ -233,4 +234,89 @@ func writeEmptyOwners(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// A model role on bedrock-converse, the main one or a role's own provider,
+// loads the shared AWS config as bedrock does; the error names every user.
+func TestLoadAWSForBedrockConverseRoles(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want []string
+	}{
+		{"main", config.Config{ModelProvider: "Bedrock-Converse"}, []string{"PIPEROOM_MODEL_PROVIDER=bedrock-converse"}},
+		{"summary", config.Config{SummaryProvider: "bedrock-converse"}, []string{"PIPEROOM_SUMMARY_PROVIDER=bedrock-converse"}},
+		{"judge and first look", config.Config{JudgeProvider: "bedrock-converse", TriagePassProvider: "bedrock"},
+			[]string{"PIPEROOM_TRIAGE_PASS_PROVIDER=bedrock and PIPEROOM_JUDGE_PROVIDER=bedrock-converse"}},
+		{"with msk iam", func() config.Config {
+			c := mskIAMConfig()
+			c.SummaryProvider = "bedrock-converse"
+			c.AWSRegion = ""
+			return c
+		}(),
+			[]string{"PIPEROOM_SUMMARY_PROVIDER=bedrock-converse and KAFKA_SASL_MECHANISM=AWS_MSK_IAM"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeAWS{}
+			_, err := loadAWS(context.Background(), tt.cfg, envOf(nil), f.load)
+			if err == nil || !strings.Contains(err.Error(), "needs AWS_REGION") {
+				t.Fatalf("without a region: err = %v", err)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("err %q lacks %q", err, w)
+				}
+			}
+			c := tt.cfg
+			c.AWSRegion = "us-east-1"
+			got, err := loadAWS(context.Background(), c, envOf(nil), f.load)
+			if err != nil || got == nil || got.Region != "us-east-1" {
+				t.Fatalf("loadAWS = %v, %v", got, err)
+			}
+			if f.loads.Load() != 1 || f.retrieves.Load() != 1 {
+				t.Fatalf("loads %d, fetches %d; want 1 and 1", f.loads.Load(), f.retrieves.Load())
+			}
+		})
+	}
+	// A Bedrock API key replaces the credential check for Converse too.
+	f := &fakeAWS{noCreds: true}
+	if got, err := loadAWS(context.Background(), config.Config{ModelProvider: "bedrock-converse", AWSRegion: "us-east-1"},
+		envOf(map[string]string{bedrockTokenEnv: "k"}), f.load); err != nil || got == nil {
+		t.Fatalf("loadAWS with a Bedrock API key = %v, %v", got, err)
+	}
+}
+
+// The endpoint builds a bedrock-converse role on the shared config (one
+// load; the start credential check reads the shared provider) and refuses a
+// Claude id naming the role's own variable, with converse.ErrClaudeModel
+// still reachable through errors.Is.
+func TestNewAgentEndpointBedrockConverseUsesSharedAWS(t *testing.T) {
+	t.Setenv(bedrockTokenEnv, "")
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	f := &fakeAWS{}
+	cfg := config.Config{ModelProvider: "bedrock-converse", Model: "amazon.nova-pro-v1:0", AWSRegion: "us-east-1"}
+	awsCfg, err := loadAWS(context.Background(), cfg, envOf(nil), f.load)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nova is not in supported.json: the start checks refuse it before any
+	// request, after the client was built on the shared config.
+	_, err = NewAgentEndpoint(context.Background(), cfg, log, awsCfg)
+	if err == nil || !strings.Contains(err.Error(), "PIPEROOM_MODEL_UNVERIFIED=on") {
+		t.Fatalf("err = %v, want the supported-list refusal", err)
+	}
+	if f.loads.Load() != 1 || f.retrieves.Load() != 2 {
+		t.Fatalf("loads %d, fetches %d; want 1 load and the endpoint's fetch from the shared provider", f.loads.Load(), f.retrieves.Load())
+	}
+
+	cfg = config.Config{Model: "claude-opus-5-5", SummaryProvider: "bedrock-converse", SummaryModel: "us.anthropic.claude-opus-5-5-v1:0", AWSRegion: "us-east-1"}
+	if awsCfg, err = loadAWS(context.Background(), cfg, envOf(nil), f.load); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewAgentEndpoint(context.Background(), cfg, log, awsCfg)
+	if !errors.Is(err, converse.ErrClaudeModel) || !strings.Contains(err.Error(), "PIPEROOM_SUMMARY_MODEL=") {
+		t.Fatalf("err = %v, want converse.ErrClaudeModel naming PIPEROOM_SUMMARY_MODEL", err)
+	}
 }

@@ -8,17 +8,20 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"piperoom/internal/events"
 )
 
-// Judge modes. "terms" is the deterministic keyword grade; "claude" asks a
-// model to grade every final hypothesis (judge_claude.go, build tag claude);
-// "auto" keeps the keyword grade of a clear hypothesis and asks the judge only
-// about one the tri-state keyword pass marks ambiguous (tristate.go,
-// judge_auto.go), from the recorded verdict cache first.
+// Judge modes. "terms" is the deterministic keyword grade; "llm" asks a model
+// to grade every final hypothesis (NewLLMJudge; evalrun links the live judge
+// only with the build tag livejudge); "claude" is the alias "llm" had before
+// the judge became provider-neutral; "auto" keeps the keyword grade of a
+// clear hypothesis and asks the judge only about one the tri-state keyword
+// pass marks ambiguous (tristate.go, judge_auto.go), from the recorded verdict
+// cache first.
 const (
-	JudgeTerms  = "terms"
+	JudgeTerms = "terms"
+	JudgeLLM   = "llm"
+	// JudgeClaude is an alias of JudgeLLM: the same judge on whatever model
+	// the judge client runs.
 	JudgeClaude = "claude"
 	JudgeAuto   = "auto"
 )
@@ -57,17 +60,24 @@ type JudgeResult struct {
 // validJudge reports whether m is a judge mode ("" means unset).
 func validJudge(m string) bool {
 	switch m {
-	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+	case "", JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto:
 		return true
 	}
 	return false
 }
 
+// IsLLMJudge reports whether m is the LLM judge mode, under its name or its
+// alias.
+func IsLLMJudge(m string) bool { return m == JudgeLLM || m == JudgeClaude }
+
 // effectiveJudge returns the judge mode for sc: the evalrun flag wins over the
 // scenario's own field, which wins over the run's default (Config.DefaultJudge);
-// the last resort is terms.
+// the last resort is terms. The alias "claude" comes back as "llm".
 func effectiveJudge(flag string, sc Scenario, def string) string {
 	for _, m := range []string{flag, sc.Judge, def} {
+		if IsLLMJudge(m) {
+			return JudgeLLM
+		}
 		if m != "" {
 			return m
 		}
@@ -107,6 +117,11 @@ Rules:
 - root_cause_layer_correct is true only when the hypothesis places the root cause in the ground-truth root-cause layer (the layer the cause sits in, which can differ from the first failing layer). It is true when no root-cause layer is given.
 - If the hypothesis tells any of the listed wrong stories, root_cause_correct is false.`
 
+// judgeIncidentLayers are the layers an incident scenario can fail in, in
+// pipeline order. Part of every recorded verdict's truth hash: changing it
+// invalidates evals/judgecache.
+var judgeIncidentLayers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+
 // judgePrompt builds the user message: the ground truth, then the wrapped
 // hypothesis.
 func judgePrompt(sc Scenario, hypothesis string) string {
@@ -117,10 +132,23 @@ func judgePrompt(sc Scenario, hypothesis string) string {
 		b.WriteString("Description (the truth, including the root cause):\n" + d + "\n")
 	}
 	if l := sc.Expect.FirstFailingLayer; l != "" {
-		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(events.Layers, ", ") + ")\n")
+		// The six CDC incident layers, not events.Layers and not
+		// events.LayersOf("cdc"): every scenario is a CDC one until scenarios
+		// carry a kind (P4h), a scenario fails in one of the six systems and
+		// never in the setup layer "environment" that U0 appended to
+		// LayersOf("cdc"), and the recorded verdicts (evals/judgecache) are
+		// keyed on this exact prompt text, so the list is literal.
+		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(judgeIncidentLayers, ", ") + ")\n")
 	}
 	if l := sc.Expect.RootCauseLayer; l != "" {
-		b.WriteString("Root-cause layer: " + l + "\n")
+		// The alternatives change this line only for a scenario that sets
+		// them, so the recorded verdicts of every other scenario stay valid.
+		if alt := sc.Expect.RootCauseLayerAlt; len(alt) > 0 {
+			b.WriteString("Root-cause layer: " + l + ", or alternatively " + strings.Join(alt, " or ") +
+				" (the cause has more than one defensible reading; root_cause_layer_correct is true when the hypothesis places the root cause in any one of these)\n")
+		} else {
+			b.WriteString("Root-cause layer: " + l + "\n")
+		}
 	} else {
 		b.WriteString("Root-cause layer: not given (answer root_cause_layer_correct true)\n")
 	}
@@ -230,8 +258,8 @@ type MeteredJudge interface {
 
 // textJudge is a HypothesisJudge on top of any function that sends a system
 // prompt and a user message and returns the reply text (and, when it knows
-// them, the tokens). Claude's transport (judge_claude.go) and test fakes both
-// plug in here.
+// them, the tokens). The LLM judge (judge_llm.go) and test fakes both plug in
+// here.
 type textJudge struct {
 	send func(ctx context.Context, system, user string) (string, JudgeUsage, error)
 }

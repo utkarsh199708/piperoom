@@ -210,7 +210,7 @@ func TestDLQDeclaredConsumerWriter(t *testing.T) {
 	if n.Health != HealthOK || n.Facts["recent"] != "" || n.Facts["writer"] != "order-sync" || n.Facts["records"] != "4" {
 		t.Fatalf("node = %+v", n)
 	}
-	if !slices.Contains(g.Edges, Edge{From: "group:order-sync", To: "dlq:order-sync-dlq"}) {
+	if !containsEdge(g.Edges, Edge{From: "group:order-sync", To: "dlq:order-sync-dlq"}) {
 		t.Fatalf("edge from the writing group missing: %v", g.Edges)
 	}
 }
@@ -236,7 +236,7 @@ func TestDLQDeclaredAndConfiguredMergeIntoOneNode(t *testing.T) {
 		t.Fatalf("node = %+v", node)
 	}
 	for _, from := range []string{"connect:pg-orders-sink", "group:order-sync"} {
-		if !slices.Contains(g.Edges, Edge{From: from, To: "dlq:orders-dlq"}) {
+		if !containsEdge(g.Edges, Edge{From: from, To: "dlq:orders-dlq"}) {
 			t.Errorf("edge from %s missing: %v", from, g.Edges)
 		}
 	}

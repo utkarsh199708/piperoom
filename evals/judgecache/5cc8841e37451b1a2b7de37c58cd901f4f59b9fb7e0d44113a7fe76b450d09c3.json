@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "sasl-credential-rotated",
   "hypothesis": "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.",
-  "truth_sha256": "de46e044dfe2ae2e6b7181259300949c2661958e231ce3ea20baa8c5a1d141ce",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "6f06bf48d363840af62a7097cd9ade1cb461b8539633f66e8ca72e604aebda22",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": true,
     "root_cause_correct": false,
     "root_cause_layer_correct": false,
-    "reason": "The hypothesis puts the rotated credential on the Postgres replication user and says source login failed. The truth is that the Kafka SASL principal's password was rotated and the broker rejected the connector. The failing connector task is in kafka-connect, so the first failing layer is right, but the root-cause layer is wrong (postgres instead of kafka)."
+    "reason": "The hypothesis blames a rotated Postgres replication password, meaning a failed login to the source database. The real cause is the rotated Kafka SCRAM credential, which the broker rejects with SaslAuthenticationException. The first failing layer (connector task in kafka-connect) is right, but the root cause is placed in postgres."
   }
 }

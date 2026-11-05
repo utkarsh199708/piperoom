@@ -1,0 +1,86 @@
+# C7 setup log scenario (U5c): the warehouse sink's setup canary fails, but ordinary connector
+# status does not explain why. The failed-step re-plan reads connect_worker_logs, whose exception
+# is the only root-cause evidence. The scenario uses the eval harness's existing Connect log path;
+# see README's U5c section for the setup-mode container_logs limitation.
+#
+# RECORDED: NO. The worker-log summary is synthetic and follows logtools.summarize's format. The
+# alert, steer, connector status and failed restart contain no authentication detail.
+#
+# Expected label: failing check canary_event; fixing op secret_set (T1).
+
+name: setup/sink-authentication-log-only
+description: |
+  A Compose setup on the orders pipeline stopped at check canary_event on the warehouse sink. The
+  sink connector is FAILED and the final canary is absent. The check and proposed fix label are
+  canary_event; secret_set (T1). The failed task restart returned no diagnostic detail.
+setup:
+  source_kind: postgres
+  target: compose
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector, wh-orders-sink]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+resources:
+  connectors: [pg-orders-connector, wh-orders-sink]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+alert:
+  title: 'orders setup: check canary_event failed; final canary was not observed'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres] OK
+    2 connect:pg-orders-connector [kafka-connect] OK tasks_running=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka] OK newest_record=just now
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer] OK lag=0
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse] FAIL stale_for=40m ts_column=updated_at
+      from: group:order-sync
+recordings:
+  - tool: connect_status
+    input: {connector: wh-orders-sink}
+    summary: |-
+      wh-orders-sink (sink): FAILED on connect:8083.
+      Task 0: FAILED
+    data:
+      name: wh-orders-sink
+      state: FAILED
+      tasks:
+        - id: 0
+          state: FAILED
+  - tool: connect_worker_logs
+    input: {connector: wh-orders-sink}
+    summary: |-
+      Worker log lines naming wh-orders-sink at WARN or above, 2026-10-24T09:30:00Z to 2026-10-24T09:40:00Z: 1 line(s), newest last (all of them in data).
+      09:38:20.000 ERROR [worker-1] WorkerSinkTask{id=wh-orders-sink-0}: SnowflakeSQLException: warehouse login rejected for service account analytics_loader
+inputs:
+  - kind: steer
+    text: 'The setup run stopped at the final canary. Find the failing check before changing anything.'
+  - kind: action_result
+    from: arjun
+    action: connect_restart_task
+    params: {connector: wh-orders-sink, task: 0}
+    ok: false
+    text: 'Task 0 returned to FAILED after restart; no further detail was returned.'
+expect:
+  root_cause:
+    - [login, credential, credentials]
+    - [warehouse, snowflake]
+  first_failing_layer: kafka-connect
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_warehouse_login_rejected
+      tool: connect_worker_logs
+      match: [warehouse, login, rejected]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_warehouse_login_rejected]
+  evidence_tools: [connect_worker_logs]
+  forbidden_actions: [connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]

@@ -1,6 +1,8 @@
 import type { ProposalState } from '../state/types'
+import { waitingForWriteMode } from './writeMode'
 
-export type ExecutionPhase = 'pending' | 'running' | 'done' | 'failed' | 'unknown'
+/** blocked (P1a): approved while write mode is off, so no step will run. */
+export type ExecutionPhase = 'pending' | 'blocked' | 'running' | 'done' | 'failed' | 'unknown'
 
 export interface ExecutionInfo {
   phase: ExecutionPhase
@@ -21,6 +23,7 @@ export function executionPhase(p: ProposalState): ExecutionInfo {
   if (failed) return { phase: 'failed', step: failed.step_index + 1, of }
   const okSteps = new Set(p.executed.filter((x) => x.ok).map((x) => x.step_index))
   if (of > 0 && okSteps.size >= of) return { phase: 'done', step: of, of }
+  if (waitingForWriteMode(p)) return { phase: 'blocked', step: 0, of }
   if (p.status === 'approved') return { phase: 'running', step: Math.min(okSteps.size + 1, of), of }
   return { phase: 'pending', step: 0, of }
 }

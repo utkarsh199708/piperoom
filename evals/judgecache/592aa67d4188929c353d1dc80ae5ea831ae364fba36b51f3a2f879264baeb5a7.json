@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "replication-slot-lost-failover",
   "hypothesis": "I doubt the failover did not carry slot debezium_orders.",
-  "truth_sha256": "fa26ddedfcae6870adcbc11dafafd1a20906d1be5d2195baa67147e10141c233",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "80fc3dfb77bda06bb86aaa85b3613eb145ae3a2e74b71e7781e7baaa93ad6255",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": false,
     "root_cause_correct": false,
     "root_cause_layer_correct": false,
-    "reason": "The hypothesis explicitly doubts the true root cause rather than asserting it. It also commits to no layer or alternative cause, so it neither places the failure in postgres nor states that the slot was lost in the failover."
+    "reason": "The hypothesis explicitly doubts the true root cause, namely that the slot was not carried over in the failover, rather than asserting it. It also offers no alternative explanation and names no failing layer."
   }
 }

@@ -1,0 +1,9 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.7",
+    "generated_at": "2026-10-17T00:12:20Z"
+  },
+  "nodes": {
+    "model.analytics.stg_orders": {"name": "stg_orders", "resource_type": "model"},
+    "model.analytics.fct_revenue": {"name": "fct_rev

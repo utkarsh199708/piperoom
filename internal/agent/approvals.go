@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"piperoom/internal/events"
 )
@@ -46,10 +47,14 @@ type execFlow struct {
 	waiting bool
 	// arrived holds the step indexes whose result has been seen.
 	arrived map[int]bool
+	// seenAt is when the agent first drained each step's result: the
+	// stand-in for the action.executed time a recovery's Verify needs
+	// (verify_recovery.go) when the input carries none (HumanInput.At zero).
+	seenAt map[int]time.Time
 }
 
 func newExecFlow(steps []events.ProposalStep) *execFlow {
-	f := &execFlow{approved: map[string]bool{}, arrived: map[int]bool{}, lastStep: len(steps) - 1}
+	f := &execFlow{approved: map[string]bool{}, arrived: map[int]bool{}, seenAt: map[int]time.Time{}, lastStep: len(steps) - 1}
 	seen := map[string]bool{}
 	for _, s := range steps {
 		if s.Layer != "" && !seen[s.Layer] {
@@ -103,6 +108,50 @@ func (t *proposalTracker) observe(in HumanInput) {
 			f.settled = true
 			f.waiting = false
 		}
+	}
+}
+
+// markSeen records when the result of a proposal step was first drained. A
+// repeated result keeps the first time.
+func (t *proposalTracker) markSeen(id string, step int, at time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f := t.flows[id]
+	if f == nil {
+		return
+	}
+	if _, ok := f.seenAt[step]; !ok {
+		f.seenAt[step] = at
+	}
+}
+
+// seenAt returns when the result of a proposal step was first drained.
+func (t *proposalTracker) seenAt(id string, step int) (time.Time, bool) {
+	if t == nil {
+		return time.Time{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	f := t.flows[id]
+	if f == nil {
+		return time.Time{}, false
+	}
+	at, ok := f.seenAt[step]
+	return at, ok
+}
+
+// observe updates the proposal tracker with one drained input and stamps an
+// action_result with the time it was drained.
+func (r *runner) observe(in HumanInput) {
+	r.proposals.observe(in)
+	if in.Kind != "action_result" {
+		return
+	}
+	if id, step, ok := actionResultFields(in); ok {
+		r.proposals.markSeen(id, step, r.nowTime())
 	}
 }
 
@@ -172,6 +221,16 @@ func contains(list []string, s string) bool {
 // carry the pending-results note when the wait ended without every result.
 func (r *runner) handleInputs(ctx context.Context, inputs []HumanInput) ([]HumanInput, actionOutcome) {
 	inputs, pending := r.awaitStepResults(ctx, inputs)
+	// A person or an executor result starts a new episode for the
+	// hypothesis guard's refusal cap, as for the turn guard.
+	r.guard.observeInputs(inputs)
+	if r.setup != nil {
+		// The setup bounds count every executed step of the batch, once,
+		// before the run acts on it (setup.go), and a green ladder in a room
+		// that cannot register is posted to the room.
+		r.setup.observe(inputs)
+		r.noteSetupVerified(ctx, inputs)
+	}
 	out := r.handleActionResults(ctx, inputs)
 	if pending != "" {
 		out.notes = append(out.notes, pending)
@@ -188,7 +247,7 @@ const waitingDetailResults = "waiting for step results"
 // the returned note says which, and why the wait ended; otherwise it is empty.
 func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]HumanInput, string) {
 	for _, in := range inputs {
-		r.proposals.observe(in)
+		r.observe(in)
 	}
 	if len(r.proposals.awaiting()) == 0 {
 		return inputs, ""
@@ -223,7 +282,7 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 	for len(r.proposals.awaiting()) > 0 && wctx.Err() == nil {
 		if more := r.drain(ctx); len(more) > 0 {
 			for _, in := range more {
-				r.proposals.observe(in)
+				r.observe(in)
 			}
 			inputs = append(inputs, more...)
 			continue
@@ -236,7 +295,7 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 	if timedOut.Load() {
 		// Results that landed as the timer fired still count.
 		for _, in := range r.drain(ctx) {
-			r.proposals.observe(in)
+			r.observe(in)
 			inputs = append(inputs, in)
 		}
 	}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -52,8 +53,8 @@ func TestSpendRefundGoesToTheDayItWasCharged(t *testing.T) {
 	l := &clockLedger{st: st, clock: clock, to: time.Date(2026, 10, 14, 0, 0, 1, 0, time.UTC)}
 	ep := spendEndpoint(t, &scriptedModel{}, 0, l, SpendOptions{PipelineDailyTokens: 1000, Now: clock.now})
 	ep.budget("room-a").record(usageTokens{input: 100}, true)
-	bm := &budgetModel{inner: &scriptedModel{}, budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
-	if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err == nil {
+	bm := &budgetModel{inner: viaSDK(&scriptedModel{}), budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
+	if _, err := bm.Turn(context.Background(), llm.Request{Model: "m"}); err == nil {
 		t.Fatal("want a refusal")
 	}
 	d13, _ := st.PipelineSpend(context.Background(), "orders", "2026-10-13")
@@ -89,8 +90,8 @@ func TestSpendRefundSurvivesARoomClose(t *testing.T) {
 	l := &cancelAfterChargeLedger{st: st, cancel: cancel}
 	ep := spendEndpoint(t, &scriptedModel{}, 50, l, SpendOptions{})
 	ep.budget("room-a").record(usageTokens{input: 100}, true)
-	bm := &budgetModel{inner: &scriptedModel{}, budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
-	if _, err := bm.Turn(ctx, anthropic.BetaMessageNewParams{Model: "m"}); err == nil {
+	bm := &budgetModel{inner: viaSDK(&scriptedModel{}), budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
+	if _, err := bm.Turn(ctx, llm.Request{Model: "m"}); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if rep, _ := st.RoomSpend(context.Background(), "room-a"); rep.ChargedTokens != 0 {
@@ -126,8 +127,8 @@ func TestSpendSettleSurvivesARoomClose(t *testing.T) {
 	ep.budget("room-a").record(usageTokens{input: 100}, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	bm := &budgetModel{inner: cancelModel{cancel: cancel, turn: inputTurn(t, 700)}, budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
-	_, _ = bm.Turn(ctx, anthropic.BetaMessageNewParams{Model: "m"})
+	bm := &budgetModel{inner: viaSDK(cancelModel{cancel: cancel, turn: inputTurn(t, 700)}), budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
+	_, _ = bm.Turn(ctx, llm.Request{Model: "m"})
 	if rep, _ := st.RoomSpend(context.Background(), "room-a"); rep.ChargedTokens != 700 || rep.Totals().Calls != 1 {
 		t.Fatalf("room spend = %+v, want the billed 700 settled", rep)
 	}
@@ -138,8 +139,8 @@ func TestSpendSettleNetsTheEstimatedCost(t *testing.T) {
 	prices := Prices{"m": {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 1}}
 	ep := spendEndpoint(t, &scriptedModel{}, 0, storeLedger{st}, SpendOptions{Prices: prices})
 	ep.budget("room-a").record(usageTokens{input: 1000}, true)
-	bm := &budgetModel{inner: &scriptedModel{turns: []anthropic.BetaMessage{inputTurn(t, 1000)}}, budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
-	if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
+	bm := &budgetModel{inner: viaSDK(&scriptedModel{turns: []anthropic.BetaMessage{inputTurn(t, 1000)}}), budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
+	if _, err := bm.Turn(context.Background(), llm.Request{Model: "m"}); err != nil {
 		t.Fatal(err)
 	}
 	rep, _ := st.RoomSpend(context.Background(), "room-a")
@@ -217,10 +218,10 @@ func TestSpendSettleRetriesOnceThenLogsAnError(t *testing.T) {
 		ep := spendEndpoint(t, &scriptedModel{}, 1_000_000, l, SpendOptions{})
 		ep.log = slog.New(slog.NewTextHandler(&logs, nil))
 		ep.budget("room-a").record(usageTokens{input: 500}, true)
-		bm := &budgetModel{inner: &scriptedModel{turns: []anthropic.BetaMessage{
+		bm := &budgetModel{inner: viaSDK(&scriptedModel{turns: []anthropic.BetaMessage{
 			mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"SECRET-MODEL-TEXT"}],"usage":{"input_tokens":1000}}`),
-		}}, budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
-		if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
+		}}), budget: ep.budget("room-a"), loop: true, guard: ep.guard("room-a", "orders")}
+		if _, err := bm.Turn(context.Background(), llm.Request{Model: "m"}); err != nil {
 			t.Fatal(err)
 		}
 		rep, _ := st.RoomSpend(context.Background(), "room-a")
@@ -270,8 +271,8 @@ func TestSpendFirstRequestsReserveTheEstimateFloor(t *testing.T) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			bm := &budgetModel{inner: m, budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
-			_, _ = bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"})
+			bm := &budgetModel{inner: viaSDK(m), budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
+			_, _ = bm.Turn(context.Background(), llm.Request{Model: "m"})
 		}(id)
 	}
 	wg.Wait()
@@ -313,13 +314,13 @@ func TestUsageEventOfARequestInFlightWhenTheRoomCloses(t *testing.T) {
 	var reported atomic.Int64
 	hctx, hcancel := context.WithCancel(context.Background())
 	defer hcancel()
-	rm := &reportingModel{inner: cancelModel{cancel: hcancel, turn: inputTurn(t, 5)}, role: events.UsageRoleHandoff,
+	rm := &reportingModel{inner: viaSDK(cancelModel{cancel: hcancel, turn: inputTurn(t, 5)}), role: events.UsageRoleHandoff,
 		report: func(ctx context.Context, _ events.AgentUsagePayload) {
 			if ctx.Err() == nil {
 				reported.Add(1)
 			}
 		}}
-	_, _ = rm.Turn(hctx, anthropic.BetaMessageNewParams{Model: "m"})
+	_, _ = rm.Turn(hctx, llm.Request{Model: "m"})
 	if reported.Load() != 1 {
 		t.Fatal("the hand-off's usage was reported on a dead context")
 	}

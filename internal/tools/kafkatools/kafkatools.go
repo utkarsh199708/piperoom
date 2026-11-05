@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -33,11 +35,26 @@ type Deps struct {
 	// process (cmd/server); nil in cmd/investigate and the evals, where
 	// dlq_peek then says the arrival rate is unknown.
 	DLQStats func(topic string) (newInWindow int64, window time.Duration, ok bool)
+	// Samples is optional: the watcher's watch samples (the room store).
+	// kafka_throughput reads the pipeline's group_lag samples from it for the
+	// consumed rate and the lag trend, because Kafka keeps no history of
+	// committed offsets. Nil (cmd/investigate, the evals) leaves the tool
+	// with produce rates and current lag only, and it says so.
+	Samples clients.SampleReader
 	// CertTargets are the configured endpoints tls_cert_expiry may dial
 	// (CertTargets(config)). Empty = the tool is not registered.
 	CertTargets []CertTarget
 	// CertProbe replaces netsec.CertExpiry in tests.
 	CertProbe func(ctx context.Context, addr string, cfg *tls.Config) (netsec.CertInfo, error)
+	// RenamedKey resolves a connector config key renamed by a component
+	// upgrade to its new name and the Q1 known-issue id (the Q1a known-issues
+	// index). Nil until that index is wired: connect_validate_config then only
+	// suggests the nearest key from PluginConfigDef and cannot name an issue.
+	RenamedKey func(key string) (newKey, issueID string, ok bool)
+	// ConnectInternalTopics are the Connect cluster's config, offset and
+	// status topics, in that order, from CONNECT_INTERNAL_TOPICS
+	// (ParseInternalTopics). Empty = connect_worker_info finds them by name.
+	ConnectInternalTopics []string
 }
 
 const timeout = 10 * time.Second
@@ -71,6 +88,11 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	// The F12a reads are optional on a KafkaAdmin: a client (or fake, or eval
 	// replay) without them gets no tool the model could call in vain.
+	if _, ok := d.Connect.(ConfigValidator); ok {
+		if err := reg.Register(&connectValidateConfig{d: d}); err != nil {
+			return err
+		}
+	}
 	if _, ok := d.Kafka.(clients.ClusterReader); ok {
 		if err := reg.Register(&clusterHealth{d: d}); err != nil {
 			return err
@@ -80,14 +102,54 @@ func Register(reg *tools.Registry, d Deps) error {
 		if err := reg.Register(&partitionRates{d: d}); err != nil {
 			return err
 		}
+		if err := reg.Register(&throughput{d: d}); err != nil {
+			return err
+		}
+	}
+	if _, ok := d.Kafka.(clients.DupScanner); ok {
+		if err := reg.Register(&dupKeys{d: d}); err != nil {
+			return err
+		}
 	}
 	if len(d.CertTargets) > 0 {
 		if err := reg.Register(&certExpiry{d: d}); err != nil {
 			return err
 		}
 	}
+	// X6b: the cluster-wide task read is optional on a ConnectReader.
+	if _, ok := d.Connect.(clients.WorkerTaskReader); ok {
+		if err := reg.Register(&taskBalance{d: d}); err != nil {
+			return err
+		}
+	}
 	if _, ok := d.Kafka.(clients.ACLReader); ok {
 		if err := reg.Register(&kafkaACLs{d: d}); err != nil {
+			return err
+		}
+	}
+	// The KIP-875 offsets read is optional on the Connect client: a fake or
+	// eval replay without it gets no tool the model could call in vain.
+	if _, ok := d.Connect.(connect.SourceOffsetReader); ok {
+		if err := reg.Register(&connectSourceOffsets{d: d}); err != nil {
+			return err
+		}
+	}
+	// The plugin/version read is optional for the same reason (Q1c).
+	if _, ok := d.Connect.(connect.PluginReader); ok {
+		if err := reg.Register(&connectPlugins{d: d}); err != nil {
+			return err
+		}
+	}
+	// Q8e: the schema history record read is optional on the Kafka client,
+	// so a fake or eval replay without it gets no tool it could not answer.
+	if _, ok := d.Kafka.(kafka.SchemaHistoryReader); ok {
+		if err := reg.Register(&schemaHistory{d: d}); err != nil {
+			return err
+		}
+	}
+	// Q3a: the Connect worker-group read is optional on the Kafka client.
+	if _, ok := d.Kafka.(kafka.ConnectClusterReader); ok {
+		if err := reg.Register(&workerInfo{d: d}); err != nil {
 			return err
 		}
 	}

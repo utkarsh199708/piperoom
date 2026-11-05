@@ -1,0 +1,487 @@
+package room_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"piperoom/internal/actions"
+	"piperoom/internal/agent"
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
+	"piperoom/internal/room"
+	"piperoom/internal/store/memstore"
+)
+
+// validateAction is an action whose Validate fails with a fixed error, for the
+// driver-proposal param test. It counts Validate calls so a test can pin that
+// the driver check runs before Validate.
+type validateAction struct {
+	name, layer string
+	err         error
+	calls       atomic.Int32
+}
+
+func (a *validateAction) Name() string     { return a.name }
+func (a *validateAction) Layer() string    { return a.layer }
+func (a *validateAction) Describe() string { return a.name }
+func (a *validateAction) ParamsSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (a *validateAction) Validate(context.Context, json.RawMessage) error {
+	a.calls.Add(1)
+	return a.err
+}
+func (a *validateAction) CheckScope(owners.Pipeline, json.RawMessage) error {
+	return nil
+}
+func (a *validateAction) Execute(context.Context, json.RawMessage) (string, error) {
+	return "", nil
+}
+
+// validateCalls reports how many times Validate ran.
+func (a *validateAction) validateCalls() int { return int(a.calls.Load()) }
+
+// driverProposal builds the POST /api/rooms/{id}/proposals body as a payload.
+func driverProposal(title string) events.ProposalCreatedPayload {
+	return events.ProposalCreatedPayload{
+		Title: title, Risk: "low", Rollback: "revert the change",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}
+}
+
+// TestDriverProposalNonDriverForbidden pins the driver-only rule: a member who
+// is not the driver gets 403 not_driver and nothing is stored.
+func TestDriverProposalNonDriverForbidden(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, _ := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+	before := len(allEvents(t, st, roomID))
+
+	_, err := svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "priya"), roomID, driverProposal("fix"))
+	wantCode(t, err, "not_driver")
+	var re *room.Error
+	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
+		t.Fatalf("non-driver proposal: %v, want 403", err)
+	}
+	if got := len(allEvents(t, st, roomID)); got != before {
+		t.Fatalf("a refused proposal appended %d events", got-before)
+	}
+}
+
+// TestDriverProposalNonDriverFailingValidate pins that the driver check runs
+// before the action's Validate: a non-driver whose action Validate would fail
+// gets 403 not_driver (not the pipeline's Validate error text) and Validate is
+// never called.
+func TestDriverProposalNonDriverFailingValidate(t *testing.T) {
+	act := &validateAction{name: "pg_act", layer: "postgres", err: errors.New("missing table")}
+	svc, st, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+	before := len(allEvents(t, st, roomID))
+
+	_, err := svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "priya"), roomID, driverProposal("fix"))
+	wantCode(t, err, "not_driver")
+	var re *room.Error
+	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
+		t.Fatalf("non-driver proposal: %v, want 403", err)
+	}
+	if act.validateCalls() != 0 {
+		t.Fatalf("Validate ran %d times for a non-driver", act.validateCalls())
+	}
+	if got := len(allEvents(t, st, roomID)); got != before {
+		t.Fatalf("a refused proposal appended %d events", got-before)
+	}
+}
+
+// TestDriverProposalSixthOpenProposalRateLimited pins the cap: at most 5 open
+// driver-authored proposals per room; the sixth answers 429 too_many_proposals.
+func TestDriverProposalSixthOpenProposalRateLimited(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _, _ := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+	arjun := mustUser(t, svc, "arjun")
+
+	for i := 0; i < 5; i++ {
+		if _, err := svc.CreateDriverProposal(context.Background(), arjun, roomID, driverProposal("fix")); err != nil {
+			t.Fatalf("driver proposal %d: %v", i, err)
+		}
+	}
+	_, err := svc.CreateDriverProposal(context.Background(), arjun, roomID, driverProposal("fix"))
+	wantCode(t, err, "too_many_proposals")
+	var re *room.Error
+	if !errors.As(err, &re) || re.Status != http.StatusTooManyRequests {
+		t.Fatalf("sixth proposal: %v, want 429", err)
+	}
+}
+
+// TestDriverProposalBadParamsValidateError pins that a bad param answers 400
+// validation naming the action's Validate error, exactly like an agent
+// proposal.
+func TestDriverProposalBadParamsValidateError(t *testing.T) {
+	act := &validateAction{name: "pg_act", layer: "postgres", err: errors.New("missing table")}
+	svc, _, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	_, err := svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "arjun"), roomID, driverProposal("fix"))
+	wantCode(t, err, "validation")
+	if err == nil || !strings.Contains(err.Error(), "missing table") {
+		t.Fatalf("want the Validate error text, got %v", err)
+	}
+}
+
+// TestDriverProposalWriteModeOffCreatedAndBlocked pins that write mode off does
+// not stop the driver from authoring a proposal: it is created with
+// origin "driver", and once fully approved it stays open and blocked
+// (write_mode_off), never executed.
+func TestDriverProposalWriteModeOffCreatedAndBlocked(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _ := newWriteModeService(t, nil, true, "", pg)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	ev, err := svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "arjun"), roomID, driverProposal("fix"))
+	if err != nil {
+		t.Fatalf("create driver proposal: %v", err)
+	}
+	if ev.Type != events.ProposalCreated {
+		t.Fatalf("want proposal.created, got %s", ev.Type)
+	}
+	p, err := events.Decode[events.ProposalCreatedPayload](ev)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Origin != events.ProposalOriginDriver {
+		t.Fatalf("origin = %q, want %q", p.Origin, events.ProposalOriginDriver)
+	}
+	if p.ParamsHash == "" {
+		t.Fatal("driver proposal has no params_hash")
+	}
+
+	approveLayer(t, svc, "priya", p.ProposalID, "postgres")
+	_, snap := viewProposal(t, svc, "priya", roomID, p.ProposalID)
+	if snap.Blocked != room.BlockedWriteModeOff {
+		t.Fatalf("blocked = %q, want %q", snap.Blocked, room.BlockedWriteModeOff)
+	}
+	if pg.Calls() != 0 {
+		t.Fatalf("action ran with write mode off: %d calls", pg.Calls())
+	}
+}
+
+// TestDriverProposalOriginOnSnapshot pins that open_proposals[].origin is
+// "driver" for the driver's proposal and "agent" for the agent's, and that an
+// agent proposal does not count towards the driver cap.
+func TestDriverProposalOriginOnSnapshot(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _, _ := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+	ctx := context.Background()
+
+	// Five agent proposals never block the driver's own (the cap counts driver
+	// proposals only), and each agent proposal is origin "agent".
+	for i := 0; i < 5; i++ {
+		if _, err := svc.CreateProposal(ctx, roomID, driverProposal("agent fix"), events.AgentActor); err != nil {
+			t.Fatalf("agent proposal %d: %v", i, err)
+		}
+	}
+	ev, err := svc.CreateDriverProposal(ctx, mustUser(t, svc, "arjun"), roomID, driverProposal("driver fix"))
+	if err != nil {
+		t.Fatalf("driver proposal after five agent ones: %v", err)
+	}
+	dp, _ := events.Decode[events.ProposalCreatedPayload](ev)
+
+	snap, err := svc.GetRoom(ctx, roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if len(snap.OpenProposals) != 6 {
+		t.Fatalf("want 6 open proposals, got %d", len(snap.OpenProposals))
+	}
+	drivers := 0
+	for _, op := range snap.OpenProposals {
+		if op.ProposalID == dp.ProposalID {
+			if op.Origin != events.ProposalOriginDriver {
+				t.Fatalf("driver proposal origin = %q, want %q", op.Origin, events.ProposalOriginDriver)
+			}
+			drivers++
+			continue
+		}
+		if op.Origin != events.ProposalOriginAgent {
+			t.Fatalf("agent proposal origin = %q, want %q", op.Origin, events.ProposalOriginAgent)
+		}
+	}
+	if drivers != 1 {
+		t.Fatalf("want exactly one driver proposal, got %d", drivers)
+	}
+}
+
+// TestDriverProposalShadowRoomRefused pins that a shadow room has no proposals
+// (docs/api.md): the driver's authoring is a 400 validation.
+func TestDriverProposalShadowRoomRefused(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	reg := actions.NewRegistry()
+	if err := reg.Register(pg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	enabled := true
+	own := &owners.Owners{Pipelines: []owners.Pipeline{{
+		ID: "orders", SourceTables: []string{"public.orders"},
+		ShadowSpec: &owners.ShadowSpec{Enabled: &enabled},
+	}}}
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: own, Run: fakeRun, Now: c.Now,
+	})
+	t.Cleanup(svc.Close)
+
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", json.RawMessage(`{"title":"lag"}`))
+	if err != nil {
+		t.Fatalf("open shadow room: %v", err)
+	}
+	if !snap.Shadow {
+		t.Fatalf("room is not shadow: %+v", snap)
+	}
+	// A shadow room opens driverless; take control first so the driver check
+	// passes and the shadow refusal is what the call returns.
+	if _, err := svc.GrantControl(context.Background(), mustUser(t, svc, "arjun"), snap.ID, "arjun"); err != nil {
+		t.Fatalf("take control of the shadow room: %v", err)
+	}
+	_, err = svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "arjun"), snap.ID, driverProposal("fix"))
+	wantCode(t, err, "validation")
+	if err == nil || !strings.Contains(err.Error(), "shadow") {
+		t.Fatalf("want a shadow-room error, got %v", err)
+	}
+}
+
+// TestDriverProposalAgentInputs pins the agent side of P3c end to end through
+// the route's service call: the driver's proposal reaches the agent's inbox as
+// one proposal_created (the driver's words, origin "driver"), and after its
+// run one proposal_executed with a StepsOK entry per step (a step after the
+// failed one never ran: false). The per-step action_result inputs stay. An
+// agent proposal run in the same room yields neither kind.
+func TestDriverProposalAgentInputs(t *testing.T) {
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	bad := &fakeAction{name: "bad_act", layer: "postgres", fail: true}
+	reg := actions.NewRegistry()
+	for _, a := range []actions.Action{good, bad} {
+		if err := reg.Register(a); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	inboxCh := make(chan agent.Inbox, 1)
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			inboxCh <- deps.Inbox
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	roomID := createRoom(t, svc, "arjun").ID
+	inbox := <-inboxCh
+
+	step := func(a string) events.ProposalStep {
+		return events.ProposalStep{Action: a, Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders"}`)}
+	}
+	run := func(steps ...events.ProposalStep) string {
+		t.Helper()
+		p := driverProposal("driver fix")
+		p.Steps = steps
+		ev, err := svc.CreateDriverProposal(ctx, mustUser(t, svc, "arjun"), roomID, p)
+		if err != nil {
+			t.Fatalf("driver proposal: %v", err)
+		}
+		dp, _ := events.Decode[events.ProposalCreatedPayload](ev)
+		approveLayer(t, svc, "priya", dp.ProposalID, "postgres")
+		return dp.ProposalID
+	}
+	allOK := run(step("good_act"), step("good_act"))
+	failed := run(step("good_act"), step("bad_act"), step("good_act"))
+	ap := driverProposal("agent fix")
+	ap.Steps = []events.ProposalStep{step("good_act")}
+	agentPID, err := svc.CreateProposal(ctx, roomID, ap, events.AgentActor)
+	if err != nil {
+		t.Fatalf("agent proposal: %v", err)
+	}
+	approveLayer(t, svc, "priya", agentPID, "postgres")
+
+	waitFor(t, 5*time.Second, func() bool {
+		var n int
+		for _, pid := range []string{allOK, failed, agentPID} {
+			if p, err := st.GetProposal(ctx, pid); err == nil && (p.Status == "executed" || p.Status == "failed") {
+				n++
+			}
+		}
+		return n == 3
+	})
+	var inputs []agent.HumanInput
+	waitFor(t, 5*time.Second, func() bool {
+		got, err := inbox.Drain(ctx)
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+		inputs = append(inputs, got...)
+		n := 0
+		for _, in := range inputs {
+			if in.Kind == "proposal_executed" {
+				n++
+			}
+		}
+		return n >= 2
+	})
+
+	created := map[string]agent.HumanInput{}
+	executed := map[string][]*bool{}
+	results := map[string]int{}
+	for _, in := range inputs {
+		switch in.Kind {
+		case "proposal_created":
+			if _, dup := created[in.ProposalID]; dup {
+				t.Fatalf("second proposal_created for %s", in.ProposalID)
+			}
+			created[in.ProposalID] = in
+		case "proposal_executed":
+			if _, dup := executed[in.ProposalID]; dup {
+				t.Fatalf("second proposal_executed for %s", in.ProposalID)
+			}
+			if in.Origin != events.ProposalOriginDriver {
+				t.Fatalf("proposal_executed origin = %q", in.Origin)
+			}
+			executed[in.ProposalID] = in.StepsOK
+		case "action_result":
+			results[in.ProposalID]++
+		}
+	}
+	for _, pid := range []string{allOK, failed} {
+		in, ok := created[pid]
+		if !ok {
+			t.Fatalf("no proposal_created for driver proposal %s", pid)
+		}
+		if in.Origin != events.ProposalOriginDriver || in.Actor.ID != "arjun" || !strings.Contains(in.Text, "good_act") || !strings.Contains(in.Text, "public.orders") {
+			t.Fatalf("proposal_created fields: %+v", in)
+		}
+	}
+	if _, ok := created[agentPID]; ok {
+		t.Fatal("an agent proposal produced proposal_created")
+	}
+	if _, ok := executed[agentPID]; ok {
+		t.Fatal("an agent proposal produced proposal_executed")
+	}
+	wantSteps := func(pid string, want ...bool) {
+		t.Helper()
+		got := executed[pid]
+		if len(got) != len(want) {
+			t.Fatalf("StepsOK of %s = %v, want %v", pid, got, want)
+		}
+		for i := range want {
+			if got[i] == nil || *got[i] != want[i] {
+				t.Fatalf("StepsOK[%d] of %s = %v, want %v", i, pid, got[i], want[i])
+			}
+		}
+	}
+	wantSteps(allOK, true, true)
+	wantSteps(failed, true, false, false)
+	if results[allOK] != 2 || results[failed] != 2 || results[agentPID] != 1 {
+		t.Fatalf("action_result inputs per proposal = %v, want 2, 2 and 1", results)
+	}
+}
+
+// TestDriverProposalStartsStoppedAgent pins the P3e flow when the room has no
+// agent run (Load starts none after a restart): the driver's proposal starts
+// one, as a steer does, and its proposal_created reaches that run's inbox;
+// after the proposal runs, the same run gets the proposal_executed, and its
+// Proposals reads the driver's steps (agent.ProposalStepsReader), which is
+// what the runner's verification pass builds its layer checks from.
+func TestDriverProposalStartsStoppedAgent(t *testing.T) {
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	reg := actions.NewRegistry()
+	if err := reg.Register(good); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc1 := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	roomID := createRoom(t, svc1, "arjun").ID
+	svc1.Close() // the old process dies here
+
+	var runs atomic.Int32
+	depsCh := make(chan agent.Deps, 4)
+	svc2 := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			runs.Add(1)
+			depsCh <- deps
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc2.Close)
+	ctx := context.Background()
+	if err := svc2.Load(ctx); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("Load started %d run(s), want 0", n)
+	}
+
+	p := driverProposal("driver fix")
+	p.Steps = []events.ProposalStep{{Action: "good_act", Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders"}`)}}
+	ev, err := svc2.CreateDriverProposal(ctx, mustUser(t, svc2, "arjun"), roomID, p)
+	if err != nil {
+		t.Fatalf("driver proposal: %v", err)
+	}
+	dp, _ := events.Decode[events.ProposalCreatedPayload](ev)
+	var deps agent.Deps
+	select {
+	case deps = <-depsCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the driver's proposal did not start the agent")
+	}
+
+	drainKind := func(kind string) agent.HumanInput {
+		t.Helper()
+		var found *agent.HumanInput
+		waitFor(t, 5*time.Second, func() bool {
+			got, err := deps.Inbox.Drain(ctx)
+			if err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			for i := range got {
+				if got[i].Kind == kind && got[i].ProposalID == dp.ProposalID {
+					found = &got[i]
+				}
+			}
+			return found != nil
+		})
+		return *found
+	}
+	if in := drainKind("proposal_created"); in.Origin != events.ProposalOriginDriver {
+		t.Fatalf("proposal_created origin = %q", in.Origin)
+	}
+
+	approveLayer(t, svc2, "priya", dp.ProposalID, "postgres")
+	in := drainKind("proposal_executed")
+	if len(in.StepsOK) != 1 || in.StepsOK[0] == nil || !*in.StepsOK[0] {
+		t.Fatalf("StepsOK = %v, want [true]", in.StepsOK)
+	}
+	if n := runs.Load(); n != 1 {
+		t.Fatalf("runs = %d, want 1 (the executed input must reach the same run)", n)
+	}
+	sr, ok := deps.Proposals.(agent.ProposalStepsReader)
+	if !ok {
+		t.Fatal("the room's Proposals does not implement agent.ProposalStepsReader")
+	}
+	steps, err := sr.ProposalSteps(ctx, dp.ProposalID)
+	if err != nil || len(steps) != 1 || steps[0].Action != "good_act" {
+		t.Fatalf("ProposalSteps = %+v, %v", steps, err)
+	}
+}

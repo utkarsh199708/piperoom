@@ -118,10 +118,44 @@ var rules = []rule{
 	{kind: KindRoleTag, distinctRoles: true, whole: true, keys: []string{"human", "assistant", "system", "user"},
 		re: regexp.MustCompile(`(?m)^[ \t]*(human|assistant|system|user)[ \t]*:`)},
 
+	// ---- chat-template control tokens and fake tool-call tags (V16) ----
+	{kind: KindControlToken, keys: controlTokenKeys, re: controlTokenRE},
+
 	// ---- wrapper tags ----
 	{kind: KindWrapperTag, keys: []string{"untrusted", "tool_output", "[verification]"},
 		re: regexp.MustCompile(`<\s*/?\s*(?:untrusted|tool_output)\b|\[verification\]`)},
 }
+
+// controlTokenRE matches the special tokens of the common chat templates and
+// the tool-call syntaxes a forged turn would use. It runs on the normalised,
+// lower-cased text, so fullwidth bars (DeepSeek's <｜User｜>) and zero-width
+// padding are already undone; U+2581 (the sentencepiece space DeepSeek puts in
+// token names) is allowed where an underscore is. Alternatives:
+//   - <|name|>: ChatML, Llama 3, Phi, Command R, Granite, DeepSeek, Qwen and
+//     every other "<|...|>" token; any identifier of 2 to 41 characters, so
+//     new templates are covered without a list (a bare "<|", "<|>" or
+//     "a <|b|>" is not one);
+//   - Gemma and generic markers: <start_of_turn>, <end_of_turn>,
+//     <end_of_image>, <bos>, <eos>;
+//   - Mistral and Llama 2: [INST], [/INST], [AVAILABLE_TOOLS], [TOOL_CALLS],
+//     [TOOL_RESULTS], [SYSTEM_PROMPT] and their closers, <<SYS>>, <</SYS>>;
+//   - fake tool calls: <tool_call>, <tool_response>, <tool_code>,
+//     <function_call>, <functioncall>, <function=name>, <invoke name=...>.
+//
+// Bare <s> and </s> are not matched: they are HTML (strikethrough) as often as
+// the Llama 2 sentence markers, and a forged Llama 2 turn carries [INST].
+var controlTokenRE = regexp.MustCompile(
+	`<\|\s*[a-z][a-z0-9_\x{2581}]{1,40}\s*\|>` +
+		`|<\s*/?\s*(?:start_of_turn|end_of_turn|start_of_image|end_of_image|bos|eos|tool_calls?|tool_responses?|tool_code|function_calls?|functioncall|function_response)\s*>` +
+		`|<\s*function\s*=\s*[a-z_][a-z0-9_.-]{0,63}\s*>` +
+		`|<\s*invoke\s+name\s*=` +
+		`|\[\s*/?\s*(?:inst|available_tools|tool_calls|tool_results|system_prompt)\s*\]` +
+		`|<<\s*/?\s*sys\s*>>`)
+
+// controlTokenKeys prefilter the control-token rule. They are fragments every
+// alternative of controlTokenRE contains; the rule runs only in windows
+// around them.
+var controlTokenKeys = []string{"<|", "_of_", "bos", "eos", "tool_", "function", "invoke", "inst", "available_tools", "system_prompt", "<<"}
 
 // addressee marks where the text names the AI (context for conditional rules).
 var addressee = regexp.MustCompile(addresseePattern)
@@ -251,6 +285,7 @@ func scanText(text string, origin []int) []Finding {
 	}
 	for i := range out {
 		out[i].Offset = origin[out[i].Offset]
+		out[i].End = origin[out[i].End]
 	}
 	return out
 }
@@ -283,9 +318,35 @@ func runRule(r rule, subject, text string, spans [][2]int) []Finding {
 		if r.names != nil && (len(loc) < 6 || loc[4] < 0 || !r.names[subject[loc[4]:loc[5]]]) {
 			continue
 		}
-		out = append(out, Finding{Kind: r.kind, Offset: loc[0], Excerpt: excerpt(text[loc[0]:loc[1]])})
+		out = append(out, Finding{Kind: r.kind, Offset: loc[0], End: clauseEnd(subject, loc[1]), Excerpt: excerpt(text[loc[0]:loc[1]])})
 	}
 	return out
+}
+
+// clauseEnd returns the end of the clause a match ending at end belongs to:
+// the next line break, sentence stop (. ! ? ; followed by a space, a closing
+// quote or bracket, or the end), comment close or closing tag, at most
+// SpanTailBytes further (then widened to the next word boundary, so a name
+// is never cut in half).
+func clauseEnd(s string, end int) int {
+	limit := min(len(s), end+SpanTailBytes)
+	for i := end; i < limit; i++ {
+		switch c := s[i]; {
+		case c == '\n':
+			return i
+		case c == '.' || c == '!' || c == '?' || c == ';':
+			if i+1 == len(s) || strings.IndexByte(" \t\r\n'\")]}>", s[i+1]) >= 0 {
+				return i
+			}
+		case c == '-' && strings.HasPrefix(s[i:], "-->"),
+			c == '<' && strings.HasPrefix(s[i:], "</"):
+			return i
+		}
+	}
+	for n := 0; limit < len(s) && n < 64 && isWordByte(s[limit]); n++ {
+		limit++
+	}
+	return limit
 }
 
 // keyOffsets returns the sorted offsets of every occurrence of keys in s,
@@ -381,11 +442,13 @@ func hiddenComments(lower, text string) []Finding {
 		}
 		start := from + i
 		end := min(len(lower), start+commentBytes)
+		spanEnd := end
 		if j := strings.Index(lower[start+4:end], "-->"); j >= 0 {
 			end = start + 4 + j
+			spanEnd = end + len("-->")
 		}
 		if addressee.MatchString(lower[start+4 : max(start+4, end)]) {
-			out = append(out, Finding{Kind: KindHiddenComment, Offset: start, Excerpt: excerpt(text[start:end])})
+			out = append(out, Finding{Kind: KindHiddenComment, Offset: start, End: spanEnd, Excerpt: excerpt(text[start:end])})
 		}
 		from = start + 4
 	}

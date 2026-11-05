@@ -1,6 +1,7 @@
 // "While you were away": a pure diff of two folded room states (like lib/attention.ts), so it is
 // tested without timers or a browser. It never reads the activity window (capped at 20).
 import { neutralizeBadgeText } from './verification'
+import { canDecideLayer } from '../state/permissions'
 import type { CurrentUser } from '../state/permissions'
 import type { ProposalState, RoomState } from '../state/types'
 
@@ -14,8 +15,9 @@ export interface CatchUpSummary {
   lastStepId?: string
 }
 
-function mine(p: ProposalState, user: CurrentUser): boolean {
-  return p.required_layers.some((l) => user.layers.includes(l) && p.approvals[l] === 'pending')
+// Only in an open room does anyone decide a layer; the driver decides a fallback layer there (state/permissions.ts).
+function mine(p: ProposalState, user: CurrentUser, open: boolean, driverId: string | undefined): boolean {
+  return open && p.required_layers.some((l) => canDecideLayer(p, user, l, driverId))
 }
 
 function executedCount(proposals: ProposalState[], ok: boolean): number {
@@ -43,7 +45,8 @@ export function catchUpSummary(prev: RoomState, next: RoomState, user: CurrentUs
 
   const known = new Set(prev.proposals.map((p) => p.proposal_id))
   const fresh = next.proposals.filter((p) => !known.has(p.proposal_id))
-  if (fresh.some((p) => mine(p, user))) {
+  const driverId = next.status === 'open' ? next.driver?.id : undefined
+  if (fresh.some((p) => mine(p, user, next.status === 'open', driverId))) {
     items.push('a proposal needs you')
     target = 'proposal'
   } else if (fresh.length > 0) {

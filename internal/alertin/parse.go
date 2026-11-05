@@ -17,6 +17,7 @@ import (
 type parsed struct {
 	alert    Alert
 	explicit string   // pipeline the alert names itself
+	dags     []string // dag_id values, matched against owners.yaml dags (MatchDAG)
 	service  string   // PagerDuty service ID
 	values   []string // exact names (label values, tag values) matched against owners
 	text     []string // free text (titles, summaries) scanned for owner names
@@ -84,10 +85,17 @@ func (c Config) Parse(src Source, body []byte) (Alert, error) {
 }
 
 // resolvePipeline picks the pipeline in this order: the alert's own label,
-// the PagerDuty service map, a unique owners.yaml match, the default.
+// the one batch pipeline whose dags list the alert's dag_id, the PagerDuty
+// service map, a unique owners.yaml match, the default. A dag_id is a
+// structured name like the pipeline label, so it comes before the guesses; an
+// unknown or shared one is skipped and the steps after it run as they would
+// without it.
 func (c Config) resolvePipeline(p parsed) (string, string) {
 	if ValidPipelineID(p.explicit) {
 		return p.explicit, ViaLabel
+	}
+	if id := MatchDAG(c.Owners, p.dags...); id != "" {
+		return id, ViaDAG
 	}
 	if id := c.PagerDutyServices[p.service]; p.service != "" && ValidPipelineID(id) {
 		return id, ViaService
@@ -183,6 +191,14 @@ func parseAlertmanager(src Source, body []byte) (parsed, error) {
 		sets = append(sets, al.Labels)
 	}
 	out.values = labelValues(sets...)
+	// Every firing alert's dag_id counts, not only the first one's as for the
+	// pipeline label: a group that covers DAGs of two pipelines must not be
+	// pinned to one of them. Read directly, so the value cap cannot drop one.
+	for _, set := range append(sets, p.GroupLabels) {
+		if d := strings.TrimSpace(set["dag_id"]); d != "" {
+			out.dags = append(out.dags, d)
+		}
+	}
 	return out, nil
 }
 
@@ -361,8 +377,8 @@ func tagValue(tags, key string) string {
 }
 
 // parseGeneric reads the generic form: any JSON. When the body is an object,
-// title, severity, pipeline_id, status, dedup_key and url are used if present
-// (docs/api.md, POST /api/alerts/webhook).
+// title, severity, pipeline_id, dag_id, status, dedup_key and url are used if
+// present (docs/api.md, POST /api/alerts/webhook).
 func parseGeneric(body []byte) (parsed, error) {
 	if !json.Valid(body) {
 		return parsed{}, fmt.Errorf("alertin: generic payload is not JSON")
@@ -394,6 +410,9 @@ func parseGeneric(body []byte) (parsed, error) {
 		out.alert.DedupKey = "generic:" + k
 	}
 	out.explicit = str("pipeline_id")
+	if d := str("dag_id"); d != "" {
+		out.dags = []string{d}
+	}
 	out.text = matchText(title)
 	strs := map[string]string{}
 	for k, v := range obj {

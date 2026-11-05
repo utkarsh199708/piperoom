@@ -161,6 +161,9 @@ func TestShadowQueuedRetryEndsAtClose(t *testing.T) {
 	if r.Status != store.ShadowInterrupted || env.run.Calls() != 1 {
 		t.Fatalf("status %q after %d calls", r.Status, env.run.Calls())
 	}
+	// The run row is marked finished before shadow.revealed is appended, so
+	// the reveal is waited for rather than read at the same instant.
+	waitFor(t, 2*time.Second, func() bool { return countReveals(env.roomLog(t, shadowID)) > 0 })
 	if n := countReveals(env.roomLog(t, shadowID)); n != 1 {
 		t.Fatalf("reveals = %d", n)
 	}

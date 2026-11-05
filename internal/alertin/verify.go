@@ -50,8 +50,9 @@ type Config struct {
 
 	GenericSecret string // HMAC secret for the generic JSON form
 
-	// Owners lets alerts that do not name a pipeline be matched by the
-	// connector, table or consumer-group names they mention. May be nil.
+	// Owners lets alerts that do not name a pipeline be matched by their
+	// dag_id (a batch pipeline's dags) or by the connector, table or
+	// consumer-group names they mention. May be nil.
 	Owners *owners.Owners
 	// PagerDutyServices maps a PagerDuty service ID to a pipeline id, because
 	// V3 incident payloads carry no labels or custom details.

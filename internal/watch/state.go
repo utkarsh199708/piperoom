@@ -17,8 +17,9 @@ const (
 	// phaseFiring: the condition held for `for`.
 	phaseFiring
 	// phaseAcked: the driver closed the room while the signal still fires. It
-	// goes back to phaseOK only when the signal clears, so a closed room is not
-	// re-opened by the same incident.
+	// goes back to phaseOK only when the signal clears. Until then it is quiet
+	// for one cooldown (the same incident does not re-open at once, nor on a
+	// flap); if it still breaches after that, rearmClosed fires it again.
 	phaseAcked
 )
 
@@ -59,6 +60,9 @@ type reading struct {
 	withDur bool
 	// value and threshold are for the log line.
 	value, threshold string
+	// node, when set, is the topology node the status row names (retention
+	// findings name their topic or table; signalNode derives the others).
+	node string
 	// ev is this signal's evidence. Built fresh each tick and never changed
 	// afterwards, so it can be read without the lock.
 	ev map[string]any
@@ -86,6 +90,10 @@ type sigState struct {
 	etaSince time.Time
 	// notified: a room or join already carries this signal.
 	notified bool
+	// ackedAt is when the room closed and the signal was acked. A signal that
+	// still breaches one cooldown later is re-armed (rearmClosed): a person
+	// closing a room does not fix the fault.
+	ackedAt time.Time
 	// ackSev is the severity when the driver closed the room; a rise above it
 	// re-opens the incident (reviveWorse).
 	ackSev string
@@ -137,7 +145,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 		if now.Sub(s.clearingSince) >= forD {
 			s.phase = phaseOK
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
-			s.notified, s.ackSev, s.breachSev = false, "", ""
+			s.notified, s.ackSev, s.breachSev, s.ackedAt = false, "", "", time.Time{}
 			return tResolved
 		}
 	}
@@ -147,8 +155,8 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 // ack marks a firing signal acked at the severity the driver last saw firing:
 // the latest breach, not a clear reading's "" (sevRank 9), which would make the
 // same severity count as a rise in reviveWorse.
-func (s *sigState) ack() {
-	s.phase, s.ackSev = phaseAcked, s.breachSev
+func (s *sigState) ack(now time.Time) {
+	s.phase, s.ackSev, s.ackedAt = phaseAcked, s.breachSev, now
 	if s.ackSev == "" {
 		s.ackSev = s.last.sev
 	}

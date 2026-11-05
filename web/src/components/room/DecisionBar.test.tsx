@@ -82,6 +82,21 @@ describe('DecisionBar', () => {
     expect(window.sessionStorage.getItem('piperoom.dismissed.p1')).toBe('1')
   })
 
+  it('a rejection names the layer that stopped it and the layers it cancelled (KAN-393)', () => {
+    const rejected = prop({
+      status: 'rejected',
+      approvals: { 'schema-registry': 'pending', 'kafka-connect': 'rejected' },
+      decisions: { 'kafka-connect': { outcome: 'rejected', reason: 'no', by: { kind: 'human', id: 'k', name: 'Kabir' }, params_hash: 'h' } },
+    })
+    show(room(rejected))
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    // One rejection rejects the whole proposal: the bar must not leave the other layer looking pending.
+    expect(bar).toHaveTextContent(/Rejected by/)
+    expect(bar).toHaveTextContent(/\(kafka-connect\); schema-registry cancelled/)
+    expect(bar).not.toHaveTextContent(/Waiting for|Proposal rejected/)
+    expect(screen.queryByRole('button', { name: /Nudge/ })).not.toBeInTheDocument()
+  })
+
   it('done ok shows for 3 s after the fix ran, then goes', () => {
     vi.useFakeTimers()
     const approved = prop({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' } })
@@ -122,6 +137,92 @@ describe('DecisionBar as a bottom sheet', () => {
     expect(screen.queryByRole('button', { name: /View steps/ })).not.toBeInTheDocument()
     fireEvent.click(approve)
     expect(handle.approve).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('DecisionBar needs-you text fit (KAN-588)', () => {
+  const textOf = (placement: 'sheet' | 'top') => {
+    const { container } = render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={room(prop())} user={arjun} placement={placement} />
+      </DecisionHandleContext.Provider>,
+    )
+    const bar = container.querySelector('[role="region"] > div') as HTMLElement
+    return { bar, span: screen.getByText(/Needs your approval/) }
+  }
+
+  // jsdom has no layout: assert the classes. A wrapping column gives each line its max-content width,
+  // so items-stretch never narrows the text wrapper to the bar and the truncate never fires.
+  it('stacks the phone sheet as a non-wrapping column so the text truncates inside the bar', () => {
+    const { bar, span } = textOf('sheet')
+    expect(bar.className).toContain('flex-col')
+    expect(bar.className).toContain('flex-nowrap')
+    expect(bar.className).toContain('items-stretch')
+    expect(span.className).toContain('truncate')
+    expect(span.className).toContain('min-w-0')
+    expect(span.parentElement?.className).toContain('min-w-0')
+  })
+
+  it('keeps the top bar wrapping as a row', () => {
+    const { bar } = textOf('top')
+    expect(bar.className).toContain('flex-wrap')
+    expect(bar.className).not.toContain('flex-col')
+    expect(bar.className).not.toContain('flex-nowrap')
+  })
+})
+
+describe('DecisionBar phone sheet, long Approve label (KAN-595)', () => {
+  // jsdom has no layout: assert the classes. flex-1's basis is 0, but a button is never narrower than its
+  // nowrap label, so a row that may wrap moves "Approve … (will not run)" to its own line when both can't fit.
+  it('lets the action row wrap and keeps the label whole, so "will not run" stays on screen', () => {
+    const state: RoomState = { ...room(prop()), mode: { write: false, solo: false, auto_approve: [] } }
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={state} user={arjun} placement="sheet" />
+      </DecisionHandleContext.Provider>,
+    )
+    const approve = screen.getByRole('button', { name: 'Approve kafka-connect (will not run)' })
+    const row = approve.parentElement as HTMLElement
+    expect(row.className).toContain('flex-wrap')
+    expect(row.className).not.toContain('flex-nowrap')
+    expect(row.className).toContain('w-full')
+    expect(approve.className).toContain('flex-1')
+    expect(approve.className).toContain('whitespace-nowrap')
+    expect(screen.getByRole('button', { name: 'Reject' }).className).toContain('flex-1')
+  })
+})
+
+describe('DecisionBar needs-you headline on a narrow desktop column (KAN-593)', () => {
+  const showBar = (state: RoomState, placement: 'sheet' | 'top') =>
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={state} user={arjun} placement={placement} />
+      </DecisionHandleContext.Provider>,
+    )
+
+  // jsdom has no layout: assert the classes. A wrapping flex line counts each item at its basis, so
+  // without one the headline counts as 0 and the buttons never leave its row.
+  it('gives the top bar a headline basis, so the buttons wrap below it, in the same order', () => {
+    showBar(room(prop()), 'top')
+    const wrapper = screen.getByText(/Needs your approval/).parentElement as HTMLElement
+    expect(wrapper.className).toContain('basis-80')
+    expect(wrapper.className).toContain('flex-1')
+    expect(wrapper.className).toContain('min-w-0')
+    const row = screen.getByRole('button', { name: /^Reject/ }).parentElement as HTMLElement
+    expect(row.className).toContain('flex-wrap')
+    expect(row.className).toContain('max-w-full')
+    const names = Array.from(row.querySelectorAll('button')).map((b) => b.textContent)
+    expect(names[0]).toMatch(/^Reject/)
+    expect(names[1]).toMatch(/^Approve kafka-connect/)
+    expect(names[2]).toMatch(/^View steps/)
+  })
+
+  it('leaves the phone sheet and the other decisions without the basis', () => {
+    const { unmount } = showBar(room(prop()), 'sheet')
+    expect((screen.getByText(/Needs your approval/).parentElement as HTMLElement).className).not.toContain('basis-80')
+    unmount()
+    showBar(room(prop({ approvals: { 'schema-registry': 'pending', 'kafka-connect': 'approved' } })), 'top')
+    expect((screen.getByText(/Waiting for/).parentElement as HTMLElement).className).not.toContain('basis-80')
   })
 })
 

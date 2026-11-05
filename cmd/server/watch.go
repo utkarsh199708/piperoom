@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -53,13 +54,17 @@ type watchRoomService interface {
 	OpenRoomForPipeline(pipelineID string) (roomID string, ok bool)
 	LastRoomForKey(pipelineID, dedupKey string) (roomID string, closedAt *time.Time, ok bool)
 	PostRoomNote(ctx context.Context, roomID, text string) error
+	PostRoomEvidence(ctx context.Context, roomID, text string, evidence json.RawMessage) error
 }
 
 // watchRooms adapts the room service to watch.RoomSink. It only translates
 // values and errors; the watcher decides what to do about them.
 type watchRooms struct{ svc watchRoomService }
 
-var _ watch.RoomSink = watchRooms{}
+var (
+	_ watch.RoomSink     = watchRooms{}
+	_ watch.EvidenceSink = watchRooms{}
+)
 
 // OpenAlertRoom opens or joins the room for a. A resolved alert that matches no
 // open room becomes watch.ErrNoRoom.
@@ -89,7 +94,18 @@ func (r watchRooms) LastRoomForKey(pipelineID, dedupKey string) (string, *time.T
 // watch.ErrRoomClosed: the watcher only stops retrying on ErrRoomClosed, and a
 // room that is gone is as finished as a closed one.
 func (r watchRooms) PostEvidence(ctx context.Context, roomID, text string) error {
-	err := r.svc.PostRoomNote(ctx, roomID, text)
+	return noteErr(r.svc.PostRoomNote(ctx, roomID, text))
+}
+
+// PostEvidenceJSON is PostEvidence with the watcher's evidence JSON
+// (watch.EvidenceSink): the service feeds it to the room's agent and raises
+// the room on a more severe signal (room.escalated, X3c). Same errors.
+func (r watchRooms) PostEvidenceJSON(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
+	return noteErr(r.svc.PostRoomEvidence(ctx, roomID, text, evidence))
+}
+
+// noteErr maps a note's room error to the watcher's sentinels.
+func noteErr(err error) error {
 	if err == nil {
 		return nil
 	}

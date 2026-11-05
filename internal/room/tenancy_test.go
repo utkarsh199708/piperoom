@@ -169,6 +169,52 @@ func TestStackForGivesEachRoomItsOwnSet(t *testing.T) {
 	}
 }
 
+// TestAllActionsUnionAcrossStacks pins that with per-pipeline client sets
+// (StackFor) AllActions returns the union of every set's actions, deduplicated
+// by name with the first registration kept.
+func TestAllActionsUnionAcrossStacks(t *testing.T) {
+	sharedA := &fakeAction{name: "shared", layer: "kafka-connect"}
+	onlyA := &fakeAction{name: "only_a", layer: "kafka-connect"}
+	dupA := &fakeAction{name: "dup", layer: "kafka-connect"}
+	sharedB := &fakeAction{name: "shared", layer: "kafka-connect"}
+	onlyB := &fakeAction{name: "only_b", layer: "kafka-connect"}
+	dupB := &fakeAction{name: "dup", layer: "kafka-connect"}
+	regA := actionRegistry(t, sharedA, onlyA, dupA)
+	regB := actionRegistry(t, sharedB, onlyB, dupB)
+	svc := room.New(room.Deps{
+		Store:  memstore.New(),
+		Users:  room.DefaultUsers(),
+		Owners: &owners.Owners{Pipelines: []owners.Pipeline{{ID: "pa", SourceTables: []string{"public.a"}}}},
+		StackFor: func(string) room.PipelineStack {
+			return room.PipelineStack{Actions: regA}
+		},
+		ActionCatalogue: func() []actions.Action {
+			return append(regA.All(), regB.All()...)
+		},
+		Run: fakeRun,
+	})
+	t.Cleanup(svc.Close)
+
+	got := svc.AllActions()
+	var names []string
+	for _, a := range got {
+		names = append(names, a.Name())
+	}
+	want := []string{"shared", "only_a", "dup", "only_b"}
+	if len(names) != len(want) {
+		t.Fatalf("AllActions names = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("AllActions names = %v, want %v", names, want)
+		}
+	}
+	// The first registration of a duplicated name is kept.
+	if got[0] != actions.Action(sharedA) || got[2] != actions.Action(dupA) {
+		t.Fatalf("dedup kept the wrong instance: got %v / %v", got[0], got[2])
+	}
+}
+
 // TestSoloRefusesTenantMembers: a tenant member is someone else named in
 // owners.yaml, so solo mode refuses to start.
 func TestSoloRefusesTenantMembers(t *testing.T) {

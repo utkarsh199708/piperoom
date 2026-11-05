@@ -1,5 +1,8 @@
 // Package kafka implements clients.KafkaAdmin against a Kafka cluster using
-// franz-go (kgo for consuming, kadm for admin reads).
+// franz-go (kgo for consuming, kadm for admin reads). Writer (writer.go) is
+// the separate write client of the P3 actions: clients.KafkaWriter and
+// clients.RecordReader. Its two writes fail closed on the room's pipeline
+// scope in ctx (see Writer).
 package kafka
 
 import (
@@ -46,6 +49,9 @@ type Client struct {
 	clusterFn  clusterAdmin
 	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
 	probeFn    func(ctx context.Context, topic string, wins map[int32]readWindow) map[int32]int64
+	// connectFn stands in for the Connect cluster reads (connect_cluster.go);
+	// a test seam, nil in production.
+	connectFn connectAdmin
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
@@ -57,6 +63,12 @@ type Client struct {
 	keyAPI avro.API
 	// decodeHook runs just before the Avro decode; a test seam, nil in production.
 	decodeHook func()
+	// envCache holds DupScan's checked value schemas by id (refusals too),
+	// apart from srCache: a value schema fails the key checks.
+	envCache map[int]*dbzEnvelope
+	// dupReader stands in for DupScan's record reads; a test seam, nil in
+	// production (a ReplayReader over this Client).
+	dupReader clients.RecordReader
 }
 
 // maxKeyBytes bounds a record key before any parsing: keys are untrusted and a
@@ -92,10 +104,20 @@ func (c *Client) metadata() metaReader {
 // connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
 // callers want NewSecure instead.
 func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
-	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
-	cl, err := c.newKgo()
+	c, err := buildClient(brokers, sr, connOpts)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
+	}
+	return c, nil
+}
+
+// buildClient builds a Client. mainOpts go to its long-lived kgo client only
+// (NewWriter's producer settings), never to the short-lived consumers.
+func buildClient(brokers []string, sr *schemareg.Client, connOpts []kgo.Opt, mainOpts ...kgo.Opt) (*Client, error) {
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
+	cl, err := c.newKgo(mainOpts...)
+	if err != nil {
+		return nil, err
 	}
 	c.cl, c.adm = cl, kadm.NewClient(cl)
 	return c, nil
@@ -223,19 +245,9 @@ func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.Part
 }
 
 // TopicConfig is one topic's key configuration and shape, as returned by
-// DescribeTopicConfigs. Config values are the raw Kafka strings; "-1" means
-// unlimited where the config allows it. It lives in this package until
-// clients.KafkaAdmin gains the method (contract change request in the PR);
-// it is then meant to move to package clients unchanged.
-type TopicConfig struct {
-	Topic             string `json:"topic"`
-	Partitions        int    `json:"partitions"`
-	ReplicationFactor int    `json:"replication_factor"`
-	RetentionMS       string `json:"retention_ms"`
-	RetentionBytes    string `json:"retention_bytes"`
-	CleanupPolicy     string `json:"cleanup_policy"`
-	MinInsyncReplicas string `json:"min_insync_replicas"`
-}
+// DescribeTopicConfigs. It moved to package clients unchanged (X7-0), so
+// *Client satisfies clients.TopicConfigReader.
+type TopicConfig = clients.TopicConfig
 
 // DescribeTopicConfigs returns the topic's key configs (retention.ms,
 // retention.bytes, cleanup.policy, min.insync.replicas) plus its partition
@@ -692,8 +704,21 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 	defer pr.record(rctx) // runs after the poll's receipt below
 	pollStart := time.Now()
 	defer func() { c.record(rctx, pollStart, "kgo.PollFetches(topic, offsets)", "topic="+topic) }()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	// Bound this read by the caller's deadline, not a fixed one. TopicOffsets
+	// is invoked with the tool's 10 s deadline (and the kfake tests use
+	// within's), so the record read already has a budget. A fixed 5 s inner
+	// deadline was too tight: for a partition stuck behind an aborted record
+	// below an open transaction (#300), the prober needs its stallAfter plus
+	// several round trips before newestReadable can answer, and on a loaded
+	// machine those CPU-starved round trips pushed the read past 5 s and cut
+	// a healthy one off with "context deadline exceeded". Callers that pass no
+	// deadline (a couple of integration tests) still get a 10 s bound so a
+	// stuck read cannot wait forever.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
 	got := map[int32]time.Time{}
 	wait := map[int32]readWindow{}
 	for p, off := range at {

@@ -211,7 +211,7 @@ describe('who decided, and how', () => {
   it('shows approver, grant and method', () => {
     render(<ProposalsPanel state={roomWith(decided)} user={arjun} actions={actions} />)
     expect(screen.getByTestId('decision-kafka-connect')).toHaveTextContent(
-      'approved by priya (user:priya, oidc)',
+      'approved by priya (named owner, SSO)',
     )
   })
 
@@ -227,7 +227,7 @@ describe('who decided, and how', () => {
     }
     render(<ProposalsPanel state={roomWith(backup)} user={arjun} actions={actions} />)
     expect(screen.getByTestId('decision-kafka-connect')).toHaveTextContent(
-      'approved by priya (backup:group:sre, oidc)',
+      'approved by priya (backup approver, SSO)',
     )
   })
 
@@ -260,19 +260,19 @@ describe('executed steps and their hash', () => {
   it('shows the hash a step ran with and does not flag a match', () => {
     render(<ProposalsPanel state={roomWith(executed(H1))} user={arjun} actions={actions} />)
     expect(screen.getByTestId('exec-hash-0')).toHaveTextContent(H1.slice(0, 12))
-    expect(screen.queryByText('hash differs from proposal')).not.toBeInTheDocument()
+    expect(screen.queryByText('fingerprint differs from proposal')).not.toBeInTheDocument()
   })
 
   it('flags a step whose hash differs from the proposal', () => {
     render(<ProposalsPanel state={roomWith(executed(H2))} user={arjun} actions={actions} />)
     expect(screen.getByTestId('exec-hash-0')).toHaveTextContent(H2.slice(0, 12))
-    expect(screen.getByText('hash differs from proposal')).toBeInTheDocument()
+    expect(screen.getByText('fingerprint differs from proposal')).toBeInTheDocument()
   })
 
   it('shows no hash and no flag for a result from before the hash existed', () => {
     render(<ProposalsPanel state={roomWith(executed(undefined))} user={arjun} actions={actions} />)
     expect(screen.queryByTestId('exec-hash-0')).not.toBeInTheDocument()
-    expect(screen.queryByText('hash differs from proposal')).not.toBeInTheDocument()
+    expect(screen.queryByText('fingerprint differs from proposal')).not.toBeInTheDocument()
   })
 })
 

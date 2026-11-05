@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,12 +13,14 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
+	"piperoom/internal/wiring/netwire"
 )
 
 // fakeClients implements every client interface the wiring touches, replaying
@@ -28,6 +31,7 @@ type fakeClients struct {
 	slotsCalls     atomic.Int64
 	statusCalls    atomic.Int64
 	findByKeyCalls atomic.Int64
+	validateCalls  atomic.Int64
 }
 
 func newFakeClients() *fakeClients { return &fakeClients{now: time.Now()} }
@@ -62,6 +66,13 @@ func (f *fakeClients) Status(context.Context, string) (clients.ConnectorStatus, 
 }
 func (f *fakeClients) Config(context.Context, string) (map[string]string, error) {
 	return map[string]string{"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "debezium"}, nil
+}
+func (f *fakeClients) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	f.validateCalls.Add(1)
+	return connect.ValidateResult{}, nil
+}
+func (f *fakeClients) PluginConfigDef(context.Context, string) ([]connect.ConfigKeyDef, error) {
+	return []connect.ConfigKeyDef{{Name: "topic.prefix", Type: "STRING"}}, nil
 }
 func (f *fakeClients) RestartTask(context.Context, string, int) error { return nil }
 func (f *fakeClients) RestartConnector(context.Context, string) error { return nil }
@@ -140,6 +151,8 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 		Kafka:     f,
 		Registry:  f,
 		Owners:    testOwners(),
+		// As main.go's Prepare sets it (Q6b).
+		ProbeTools: netwire.Register,
 	}
 	if err := wiring.RegisterTools(reg, areg, w); err != nil {
 		t.Fatalf("wiring.RegisterTools: %v", err)
@@ -151,15 +164,28 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	reg, areg, _ := wireFakes(t)
 
 	want := []string{
-		"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row",
+		"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row",
 		"pg_publication_tables",
+		"pg_connector_scope_gap",
+		"pg_toast_risk",
+		"source_settings", "source_table_replication", "source_role_grants", "source_blocking_sessions",
 		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record",
+		// H1: registered after dbtools.Register's fixed list.
+		"pg_object_owners",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
 		"kafka_topic_config",
 		"dlq_peek",
-		"debezium_metrics",
+		// Q4b: registered because the fake Connect client validates configs.
+		"connect_validate_config",
+		"debezium_metrics", "debezium_snapshot_progress",
+		// Q3e: the Connect worker tools, registered whatever is configured.
+		"connect_worker_metrics", "connect_worker_logs",
+		// H2: the consumer's own log, registered whatever is configured.
+		"consumer_logs",
+		// Q6b: through the netwire hook.
+		"net_probe",
 		"runbook_lookup",
 		"what_changed",
 	}
@@ -175,8 +201,19 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	}
 
 	wantActions := []string{
-		"connect_restart_task", "connect_restart_connector", "connect_resume_connector", "connect_update_connector_config",
+		"connect_restart_task", "connect_restart_connector", "connect_resume_connector", "connect_pause_connector", "connect_update_connector_config",
 		"schema_set_compatibility", "schema_register",
+		// X6c: the performance action, listed with write mode off too.
+		"connect_tune_throughput",
+		// P3 (P3-W): listed with write mode off; Execute refuses without a writer.
+		"kafka_reset_consumer_offsets", "dlq_replay", "kafka_replay_range", "connect_snapshot_table",
+		"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
+		// X2a: the recovery action, listed the same way.
+		"pg_resnapshot_rows",
+		// Q2e: the source admin actions, listed the same way.
+		"pg_set_replica_identity", "source_create_heartbeat_table", "source_grant_select", "source_end_session",
+		// Q5d: the connector lifecycle actions, listed the same way (P0 ruling #606).
+		"connect_stop_connector", "connect_reset_source_offsets", "connect_create_connector", "connect_delete_connector",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
 	for _, a := range areg.All() {
@@ -242,6 +279,33 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	}
 	if f.findByKeyCalls.Load() == 0 {
 		t.Error("FindByKey never called: trace not wired to the kafka client")
+	}
+}
+
+// TestConnectValidateConfigUsesRealClients covers Q4b: the wiring hands
+// connect_validate_config a Connect client that really validates, so the
+// tool is reachable in a room; the call creates nothing (the fake counts the
+// validate request and nothing else).
+func TestConnectValidateConfigUsesRealClients(t *testing.T) {
+	reg, _, f := wireFakes(t)
+
+	tool, ok := reg.Get("connect_validate_config")
+	if !ok {
+		t.Fatal("connect_validate_config not registered")
+	}
+	if tool.Kind() != tools.KindRead {
+		t.Fatalf("connect_validate_config kind = %s, want %s", tool.Kind(), tools.KindRead)
+	}
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"),
+		json.RawMessage(`{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"topic.prefix":"pg","table.include.list":"public.orders"}}`))
+	if err != nil {
+		t.Fatalf("connect_validate_config run: %v", err)
+	}
+	if !strings.Contains(res.Summary, "0 errors") {
+		t.Errorf("summary = %q, want the fake's 0-error verdict", res.Summary)
+	}
+	if got := f.validateCalls.Load(); got != 1 {
+		t.Errorf("ValidateConfig calls = %d, want 1: the tool is not wired to the client", got)
 	}
 }
 

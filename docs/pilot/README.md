@@ -5,14 +5,26 @@ For the platform/data engineer at a pilot team who will connect Piperoom to a re
 These docs describe the code on `main` at `a91d2bd`, except the login, identity and role text,
 which was checked against `main` at `41a2eea` (auth PR 3). The pilot gate G5 pass (restart behaviour,
 login defaults, auth PR 4, shadow rooms, scale, Kafka key decoding) was re-checked against `main` at
-`b5bbbc2`. Each claim names the file it comes from. If a file changes, update the claim and its citation
+`b5bbbc2`. The X-wave text (`governance.md`, the X-wave rows of `setup.md` and `data-handling.md`) was checked
+against the integration branch at `6feaf910`. The Q-wave pages for code not yet built (`mysql-users.md`, and `fix-pr-github.md`) were written
+against their designs (`docs/design/mysql-source.md`, `docs/design/fix-pr.md`) at `e61d90ec` and say so at the top. Each claim names the file it comes from. If a file changes, update the claim and its citation
 in the same PR.
 
 | Doc | Read it to |
 |---|---|
+| [quickstart.md](quickstart.md) | get a read-only room on your own pipelines in two commands, before reading anything else |
 | [permissions.md](permissions.md) | create **least-privilege** credentials for each system Piperoom touches |
-| [setup.md](setup.md) | prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
+| [clickhouse.md](clickhouse.md) | point the warehouse at ClickHouse: DSN, least-privilege `readonly=2` reader, what works, limits |
+| [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions and the connector lifecycle actions (each Connect call with the Kafka version it needs), only if you turn write mode on |
+| [source-admin.md](source-admin.md) | add the source admin actions: replica identity, the connector's `SELECT` grant, ending a blocking session, the heartbeat table |
+| [fix-pr-github.md](fix-pr-github.md) | set up the GitHub App for the pull-request fix (designed, not built on this commit): exact permissions (no Workflows), selected repos only, no webhook, the key file, the proposed `GITHUB_*` settings, `repos:` in `owners.yaml`, the base-branch ruleset, GitHub Enterprise |
+| [mysql-users.md](mysql-users.md) | create the MySQL accounts (designed, not built on this commit): the Debezium connector user, Piperoom's read user (no `REPLICATION SLAVE`, no password hash) and write user, RDS/Aurora notes, the `mysql://` URL rules; MySQL 8.0 and 8.4 only |
+| [worker-visibility.md](worker-visibility.md) | let the agent read Kafka Connect worker logs (Loki) and JMX metrics: the least-privilege Loki token, the proposed `WORKER_LOGS_*` settings, the exporter rules, what reaches the model |
+| [transforms-and-sinks.md](transforms-and-sinks.md) | what the agent knows about SMTs, predicates and sinks from the knowledge index, which tool answers which question, and what it does not know |
+| [host-target.md](host-target.md) | run Kafka Connect on a plain host with `piperoom-setup` (driver written, not yet wired into the runner on this commit): systemd user unit on Linux, Windows service, what needs `sudo` or an Administrator prompt, the service account and its permissions, tiers and approvals, how to undo, limits |
+| [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
+| [governance.md](governance.md) | know what Piperoom can attest about drift, column lineage, PII tags and retention, and what it cannot (value-level correctness, erasure, business metrics), before you tell an auditor anything |
 | [shadow-rooms.md](shadow-rooms.md) | run the agent blind on a pipeline's real alerts, then label and grade it after the incident, before anyone depends on it |
 | [decision.md](decision.md) | see how the first pilot is proposed to run, and the go-live gates |
 
@@ -34,7 +46,7 @@ below is from the code.
 | F4 | **fixed** (with F11) | Row tools accept only tables listed in the `source_tables` / `sink_tables` of the room's pipeline. The `pipeline_id` in a tool input must be the room's own pipeline, or the tool refuses. | `internal/tools/dbtools/pg.go`, `wh.go`, `dbtools.go` (`resolve`, `scopedTable`); `internal/tools/scope.go` |
 | F5 | **fixed** | Integration tests print only host and port, not the DSN. Test code only. | `internal/clients/postgres/integration_test.go`; `internal/clients/warehouse/integration_test.go` |
 | F6 | **closed** | Retention and export are live: `PIPEROOM_RETENTION_DAYS` deletes whole closed rooms older than N days, checked every 6 hours; an empty value or `0` keeps everything; `GET /api/rooms/{id}/export` saves a room first. A room's log is capped by `PIPEROOM_ROOM_MAX_EVENTS` (default 20000) and `PIPEROOM_ROOM_MAX_BYTES` (default 256 MiB), and with `PIPEROOM_ARCHIVE_DIR` set retention, and an admin delete asked to (`archive=true`, or `devctl rooms delete --archive`), write the room's export first. Details are in [data-handling.md](data-handling.md#4-retention-and-deletion). | `cmd/server/retention.go`; `internal/store/retention.go`; `internal/room/service_export.go`; the orphan-room delete is `internal/store/store.go` |
-| F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go`; `internal/wiring/wiring.go` |
+| F7 | **fixed by `connections:`** | A pipeline in `owners.yaml` may have its own `connections:` block. It names the environment variable or file that holds each DSN, URL and login (a plain secret value is refused). That pipeline gets its own clients, tools and actions and takes nothing from the process-wide `SOURCE_DB_URL`, `KAFKA_*` and so on. A pipeline without the block uses the process-wide settings, as before. The start fails when two tenants use the same variable or file, unless every pipeline involved sets `shared_connections: true`. One process still holds the secrets of every pipeline it serves, so separate customers still need one deployment each. Setup: [setup.md](setup.md#2a-tenancy). | `internal/owners/tenancy.go` (`Connections`, `ConnRef.UnmarshalYAML`, `validateConnections`, `Pipeline.HasConnections`, `Owners.CheckSharedRefs`); `internal/wiring/connections.go` (`pipelineConfig`); `internal/wiring/stacks.go` (`openStacks`); design `docs/design/tenancy.md` |
 | F8 | **fixed** | The dev terminal sink removes control characters (including DEL and C1) and caps printed size. Dev CLI only, not the room service. | `cmd/investigate/sink.go` |
 | F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: in dev mode anyone who can reach it and sends the `X-User` of a user in `users.yaml` (or has a dev session) can open rooms through it. In oidc mode it is not mounted (`404`); use the signed `/api/alerts/generic`. | `internal/httpapi/alerts.go`; `internal/alertin/verify.go`; `internal/httpapi/handlers.go`; `internal/httpapi/server.go` |
 | F10 | **fixed** for write actions | Every write action is scope-checked against the room's pipeline when the proposal is created and again right before it runs. | `internal/room/service_proposals.go`; `service_executor.go`; `internal/actions/scope_test.go` |
@@ -64,11 +76,13 @@ below is from the code.
   [setup.md](setup.md#6-wire-up-alerts).
 - **Write actions: six.** Four of them write to Kafka Connect and two to the Schema Registry. Each
   one is listed with its exact HTTP call in [permissions.md](permissions.md#kafka-connect).
-- **Warehouse is Postgres by default, or Snowflake with `WAREHOUSE_KIND=snowflake`.** The Snowflake
-  client is selectable on `main` (`internal/wiring/warehouse.go`). `WAREHOUSE_DB_URL` is then a
-  gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
-  Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go`).
-  See [permissions.md](permissions.md#warehouse).
+- **Warehouse is Postgres by default; `WAREHOUSE_KIND` selects another.** The wiring accepts
+  `postgres` (the default), `snowflake`, `bigquery`, `databricks` or `clickhouse`
+  (`internal/wiring/warehouse.go`). The Snowflake client is selectable on `main`. `WAREHOUSE_DB_URL`
+  is then a gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
+  Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go`). The
+  ClickHouse client is also selectable (`WAREHOUSE_KIND=clickhouse`); see
+  [clickhouse.md](clickhouse.md). See [permissions.md](permissions.md#warehouse).
 - **Retention is live.** `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N days, checked
   every 6 hours; an empty value or `0` keeps everything. Export a room first with
   `GET /api/rooms/{id}/export`. Also on `main`: the Docker image and the served web UI, the signed alert routes,
@@ -97,8 +111,22 @@ below is from the code.
   whatever its type (`dbtools.go`). Other tools return their values as described in
   [data-handling.md](data-handling.md#2-what-each-tool-exposes). Table, topic and column names,
   and timestamps, still appear in the room.
-- **One credential set per process (F7).** Run one Piperoom process per team or pipeline group.
-  Do not share one process between teams with different data access.
+- **Governance facts are evidence, not attestation.** Drift signals compare counts and timestamp columns on a
+  source Postgres and a Postgres warehouse only; PII tags come from column names; the OpenLineage export is
+  optional, leader only and best effort; no warehouse retention is read. Value-level correctness, erasure and business metrics are out of
+  reach. Read [governance.md](governance.md) before you quote any of it.
+- **Write mode is off by default.** With `PIPEROOM_WRITE_MODE` unset or `off`, the agent still
+  proposes fixes and people still approve them, but a fully approved fix never runs and no
+  `action.executed` is written. The room view marks it `blocked: "write_mode_off"` and `/healthz`
+  reports `"write_mode": "off"`. Any value other than `off` or `on` stops the start. `--demo` forces
+  `on` (its actions use fake clients). The switch is one per process. Grant read-only credentials
+  too: the switch stops the executor, not the credentials. Code: `internal/config/config.go`
+  (`ParseWriteMode`); `cmd/server/writemode.go` (`writeModeSetup`); `internal/room/service_executor.go`
+  (`enqueueExecutionLocked`, `executeProposal`); `internal/room/writemode.go` (`RoomFor`);
+  `internal/httpapi/health.go` (`handleHealthz`).
+- **Credentials per pipeline (F7).** Give each team's pipelines their own `connections:` block
+  (`internal/owners/tenancy.go`). Pipelines without it share the process-wide settings. One process
+  still holds every secret it is given: run one deployment per customer.
 
 If any of these is a blocker for your environment, start with a non-production replica or a
 staging pipeline. Check the code on your release before you trust a row in the table above.

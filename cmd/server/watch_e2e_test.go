@@ -5,6 +5,7 @@ package main
 // with fake Connect/source clients and a fake clock.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -275,6 +276,31 @@ func (h *watchHarness) systemTexts(roomID string) []string {
 	return out
 }
 
+// roomAlert is the raw alert (the watcher's evidence body) the room was opened with.
+func (h *watchHarness) roomAlert(roomID string) string {
+	h.t.Helper()
+	evs, _, err := h.svc.Events(context.Background(), roomID, 0, 1000)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Type != events.RoomCreated {
+			continue
+		}
+		var p events.RoomCreatedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			h.t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, p.Alert); err != nil {
+			h.t.Fatal(err)
+		}
+		return buf.String()
+	}
+	h.t.Fatal("no room.created event")
+	return ""
+}
+
 func (h *watchHarness) closeRoom(roomID string) {
 	h.t.Helper()
 	ctx := context.Background()
@@ -389,11 +415,10 @@ func TestWatcherIsAckedWhenTheDriverClosesTheRoom(t *testing.T) {
 		t.Fatalf("Forget calls = %v, want [%s]", h.forget.rooms, id)
 	}
 
-	// 75 more minutes of the same failure: past "still firing" (15m) and past
-	// the cooldown (60m). The room stays closed because the signal is acked (and
-	// because the watcher already marked it as notified); a cooldown alone would
-	// not hold for this long.
-	for range 75 {
+	// 45 more minutes of the same failure: past "still firing" (15m), inside the
+	// cooldown (60m). The room stays closed because the signal is acked (and
+	// because the watcher already marked it as notified).
+	for range 45 {
 		h.tick()
 	}
 	if n := countRooms(t, h.svc); n != 1 {
@@ -409,9 +434,30 @@ func TestWatcherIsAckedWhenTheDriverClosesTheRoom(t *testing.T) {
 		t.Fatalf("the watcher wrote %d notes into the closed room", got-notes)
 	}
 
+	// Past the cooldown the fault still fires: the watcher opens a second room
+	// and says why (rearmClosed). The closed room is left alone.
+	h.tickUntil(25, "no room after the cooldown", func() bool { return countRooms(t, h.svc) == 2 })
+	id2, open2, _ := h.watcherRoom()
+	if id2 == id || !open2 {
+		t.Fatalf("newest watcher room = %q open=%v, want a new open room", id2, open2)
+	}
+	snap, err := h.svc.GetRoom(context.Background(), id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap.Title, "[reopened after close, still firing]") {
+		t.Fatalf("title %q lacks the reopen marker", snap.Title)
+	}
+	if !strings.Contains(h.roomAlert(id2), `"reopened_after_close":true`) {
+		t.Fatalf("alert evidence lacks reopened_after_close: %s", h.roomAlert(id2))
+	}
+	if got := len(h.systemTexts(id)); got != notes {
+		t.Fatalf("the watcher wrote %d notes into the closed room", got-notes)
+	}
+
 	// Real service errors reach the watcher through the adapter as ErrRoomClosed
 	// (the unit tests use hand-made errors; this one is the room's own).
-	err := watchRooms{svc: h.svc}.PostEvidence(context.Background(), id, "late evidence")
+	err = watchRooms{svc: h.svc}.PostEvidence(context.Background(), id, "late evidence")
 	if !errors.Is(err, watch.ErrRoomClosed) {
 		t.Fatalf("PostEvidence into a closed room = %v, want watch.ErrRoomClosed", err)
 	}

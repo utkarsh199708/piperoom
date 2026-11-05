@@ -64,7 +64,9 @@ const maxUnescape = 3
 // Anything refused becomes "/". The result is what auth.SafeReturn makes of
 // the accepted value, so both checks always agree.
 func safeReturnPath(raw string) string {
-	if raw == "" || raw[0] != '/' {
+	// The second-character check repeats the loop's first round on purpose:
+	// it keeps "//host" and "/\host" out even if the loop below changes.
+	if raw == "" || raw[0] != '/' || (len(raw) > 1 && (raw[1] == '/' || raw[1] == '\\')) {
 		return "/"
 	}
 	p, _, _ := strings.Cut(raw, "?")

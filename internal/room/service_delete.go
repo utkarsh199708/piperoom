@@ -324,13 +324,12 @@ func (s *Service) archiveRoom(ctx context.Context, roomID string) (int64, error)
 	return ex.upTo, nil
 }
 
-// syncDir fsyncs a directory inside root.
+// syncDir fsyncs a directory inside root. Windows has no directory fsync:
+// FlushFileBuffers on a directory handle opened for reading fails with
+// "Access is denied", and NTFS journals the rename itself, so it is a no-op
+// there.
 func syncDir(root *os.Root, dir string) error {
 	if runtime.GOOS == "windows" {
-		// Windows has no directory fsync: File.Sync on a directory handle
-		// returns Access is denied. The file itself is already synced
-		// before the rename, so only directory-entry crash durability
-		// is skipped here.
 		return nil
 	}
 	d, err := root.Open(dir)

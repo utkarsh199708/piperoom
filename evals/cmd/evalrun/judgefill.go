@@ -60,19 +60,29 @@ func runJudgeFill(f flags, stdout io.Writer) (int, error) {
 		return 1, err
 	}
 
+	provider := strings.ToLower(strings.TrimSpace(cfg.ModelProvider))
+	if provider == "" {
+		provider = agent.ProviderAnthropic
+	}
+	// Each entry records the judge as "provider:model"; the key stays the
+	// same, so a verdict stays valid across models.
+	judgeID := evals.JudgeID(provider, model)
 	var judge evals.HypothesisJudge
 	if !f.dryRun {
-		if p := strings.ToLower(strings.TrimSpace(cfg.ModelProvider)); (p == "" || p == agent.ProviderAnthropic) && os.Getenv("ANTHROPIC_API_KEY") == "" {
+		if provider == agent.ProviderAnthropic && os.Getenv("ANTHROPIC_API_KEY") == "" {
 			return 1, errors.New("ANTHROPIC_API_KEY is not set (-dry-run estimates the fill without it)")
 		}
-		if judge, err = newJudge(f.judgeModel); err != nil {
+		if judge, err = newJudge(f.judgeModel, ""); err != nil {
 			return 1, err
+		}
+		if id, ok := judge.(interface{ JudgeID() string }); ok && id.JudgeID() != "" {
+			judgeID = id.JudgeID()
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	res, err := evals.FillJudgeCache(ctx, cache, judge, model, scs, set, f.maxCalls)
-	fmt.Fprintf(stdout, "judge fill (%s, prompt %s, model %s, cache %s): %s\n", f.judgeFill, evals.JudgePromptVersion, model, f.judgeCache, res)
+	res, err := evals.FillJudgeCache(ctx, cache, judge, judgeID, scs, set, f.maxCalls)
+	fmt.Fprintf(stdout, "judge fill (%s, prompt %s, model %s, judge %s, cache %s): %s\n", f.judgeFill, evals.JudgePromptVersion, model, judgeID, f.judgeCache, res)
 	if f.dryRun {
 		fmt.Fprintf(stdout, "dry run: %d judge call(s) needed, about %d input and %d output tokens on %s%s\n",
 			res.Remaining, res.EstInputTokens, res.EstOutputTokens, model, costNote(prices, model, res.EstInputTokens, res.EstOutputTokens))

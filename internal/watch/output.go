@@ -17,6 +17,9 @@ import (
 // maxEvidenceBytes keeps the evidence small. Past it, task traces are dropped.
 const maxEvidenceBytes = 4096
 
+// reopenReason is the evidence reason of a room that reopens after a close.
+const reopenReason = "reopened after close: the signal still fires"
+
 // maxAffected caps the pipeline list of a storm in the evidence.
 const maxAffected = 20
 
@@ -45,7 +48,10 @@ type view struct {
 	sev        string // most severe of active
 	postedSev  string
 	lastPost   time.Time
+	reopenOf   time.Time        // set: this room reopens after a close (rearmClosed)
 	bypass     bool             // skip the cooldown (a severity rise re-opened the incident)
+	roomKey    string           // the key the watcher opened roomID under ("" = joined)
+	key        string           // set by openRoom: the key of the room it opens
 	risks      []map[string]any // current config findings (codes only)
 }
 
@@ -65,7 +71,18 @@ func (v view) hasPending(sig string) bool {
 
 // signalCfg returns the shared settings of a signal.
 func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
+	if forecastMetric(id) != "" {
+		return forecastSignal
+	}
+	if k := driftKind(id); k != "" {
+		return driftSignalCfg(cfg, k)
+	}
+	if configDriftConnector(id) != "" {
+		return configDriftSignal
+	}
 	switch id {
+	case retentionID:
+		return retentionSignal(cfg)
 	case owners.SignalConnectorDown:
 		return cfg.ConnectorDown
 	case owners.SignalSlotInactive:
@@ -80,6 +97,8 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return cfg.GroupUnstable.WatchSignal
 	case owners.SignalOffsetBelowLogStart:
 		return cfg.OffsetBelowLogStart
+	case owners.SignalLongTx:
+		return cfg.LongTx.WatchSignal
 	}
 	return cfg.SlotWAL.WatchSignal
 }
@@ -87,9 +106,10 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 // viewOf copies the state of a pipeline. Caller holds w.mu.
 func (w *Watcher) viewOf(t target, ps *pipeState) view {
 	v := view{roomID: ps.roomID, owned: ps.owned, follower: ps.follower, episode: ps.episode,
-		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9", risks: ps.risks}
+		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, reopenOf: ps.reopenOf, sev: "sev9", risks: ps.risks,
+		roomKey: ps.roomKey}
 	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomLedLocked(ps.roomID)
-	for _, id := range signalIDs {
+	for _, id := range ps.ids() {
 		ss := ps.sigs[id]
 		sc := signalCfg(t.cfg, id)
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom {
@@ -132,7 +152,7 @@ func (w *Watcher) roomLedLocked(roomID string) bool {
 // ackSev moves to the new severity at the next close, so each level re-opens at
 // most once. Caller holds w.mu.
 func (w *Watcher) reviveWorse(id string, ps *pipeState, t target) {
-	for _, sid := range signalIDs {
+	for _, sid := range ps.ids() {
 		sc := signalCfg(t.cfg, sid)
 		ss := ps.sigs[sid]
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked {
@@ -148,6 +168,58 @@ func (w *Watcher) reviveWorse(id string, ps *pipeState, t target) {
 			return
 		}
 	}
+}
+
+// rearmClosed fires acked signals again when their room closed at least one
+// cooldown ago and they still breach. A person closing a room does not fix the
+// fault; before this, a closed room muted the signal until it cleared, so a
+// fault left in place never reached a room again (2026-10-25).
+//
+// All acked signals that still breach are re-armed together, so the pipeline
+// gets one room, not one per signal. They go through openRoom like any other
+// firing signal: the open-rooms cap, an already open room (joined) and the
+// forecast and drift cooldowns apply. A signal that is clearing, or whose last
+// reading is a hold or unknown, stays acked. A fault that persists therefore
+// opens one room per cooldown for as long as it lasts, if each is closed;
+// closing a room is a vote to be asked again later, not to be left alone.
+// Severity changes are handled by reviveWorse (sooner) or simply by the sev of
+// the reopened room. State is in memory: after a restart the signals fire anew
+// and openRoom waits out the cooldown from the room service's closed time.
+// Caller holds w.mu.
+func (w *Watcher) rearmClosed(id string, ps *pipeState, t target, now time.Time) (rearmed []string) {
+	due := false
+	var acked []*sigState
+	var ackedIDs []string
+	var closedAt time.Time
+	for _, sid := range ps.ids() {
+		sc := signalCfg(t.cfg, sid)
+		ss := ps.sigs[sid]
+		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked || sid == retentionID {
+			continue
+		}
+		if (ss.last.v != vBreach && ss.last.v != vBreachNow) || !ss.clearingSince.IsZero() {
+			continue
+		}
+		acked = append(acked, ss)
+		ackedIDs = append(ackedIDs, sid)
+		if !ss.ackedAt.IsZero() && now.Sub(ss.ackedAt) >= w.cfg.Cooldown {
+			due = true
+		}
+		if ss.ackedAt.After(closedAt) {
+			closedAt = ss.ackedAt
+		}
+	}
+	if !due {
+		return nil
+	}
+	for _, ss := range acked {
+		ss.phase, ss.notified = phaseFiring, false
+	}
+	ps.reopenOf = closedAt
+	w.log.Info("watch: signal still fires one cooldown after its room closed, opening a new room",
+		"mode", string(w.cfg.Mode), "pipeline", id, "signals", len(acked),
+		"closed_ago", now.Sub(closedAt).Round(time.Second).String(), "cooldown", w.cfg.Cooldown.String())
+	return ackedIDs
 }
 
 // stormInfo is one storm: the signal fired on several pipelines in one tick.
@@ -263,6 +335,30 @@ func (w *Watcher) inCooldown(now time.Time, id string) bool {
 // resolved. Sink calls are made without the lock (a room hook may call back
 // into OnRoomClosed).
 func (w *Watcher) emit(ctx context.Context, now time.Time, ts []target, fired map[string][]string) {
+	// Before stormGroups: signals re-armed together on several pipelines are
+	// one storm, one room.
+	w.mu.Lock()
+	rearmed := map[string]bool{}
+	for _, t := range ts {
+		if ps := w.pipes[t.p.ID]; ps != nil {
+			for _, sid := range w.rearmClosed(t.p.ID, ps, t, now) {
+				if !slices.Contains(fired[sid], t.p.ID) {
+					fired[sid] = append(fired[sid], t.p.ID)
+				}
+				rearmed[sid] = true
+			}
+		}
+	}
+	// Pipelines that fired earlier and waited out their own cooldown join the
+	// same storm as the re-armed ones.
+	for sid := range rearmed {
+		for _, t := range ts {
+			if w.waitingLocked(t.p.ID, sid) && !slices.Contains(fired[sid], t.p.ID) {
+				fired[sid] = append(fired[sid], t.p.ID)
+			}
+		}
+	}
+	w.mu.Unlock()
 	storm := w.stormGroups(now, ts, fired)
 	for _, t := range ts {
 		if ctx.Err() != nil {
@@ -336,9 +432,37 @@ func (w *Watcher) updateRoom(ctx context.Context, now time.Time, t target, v vie
 func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view, storm map[string]*stormInfo) {
 	id := t.p.ID
 	key := DedupKey(id)
+	// Forecasts alone open a quiet room under their own key, with a cooldown
+	// per (pipeline, metric) instead of the pipeline's (forecast.go).
+	fcOnly := v.forecastOnly()
+	if fcOnly {
+		var ok bool
+		if v, key, ok = w.forecastOpen(now, id, v); !ok {
+			w.once(id, func(ps *pipeState) *bool { return &ps.warnedCooldown }, func() {
+				w.log.Info("watch: cooldown after a closed forecast room, staying quiet",
+					"mode", string(w.cfg.Mode), "pipeline", id, "cooldown", w.cfg.Cooldown.String())
+			})
+			return
+		}
+	}
+	// Drift signals alone keep a cooldown per (pipeline, table, kind)
+	// instead of the pipeline's: a closed room about one table does not
+	// mute another table (drift.go).
+	driftOnly := v.driftOnly()
+	if driftOnly {
+		var ok bool
+		if v, ok = w.driftOpen(now, id, v); !ok {
+			w.once(id, func(ps *pipeState) *bool { return &ps.warnedCooldown }, func() {
+				w.log.Info("watch: cooldown after a closed room for the same drift, staying quiet",
+					"mode", string(w.cfg.Mode), "pipeline", id, "cooldown", w.cfg.Cooldown.String())
+			})
+			return
+		}
+	}
+	v.key = key
 
 	existing, closedAt, found := w.rooms.LastRoomForKey(id, key)
-	if last := w.closedAtFor(id, closedAt, found); last != nil && !v.bypass && now.Sub(*last) < w.cfg.Cooldown {
+	if last := w.closedAtFor(id, closedAt, found); !fcOnly && !driftOnly && last != nil && !v.bypass && now.Sub(*last) < w.cfg.Cooldown {
 		w.once(id, func(ps *pipeState) *bool { return &ps.warnedCooldown }, func() {
 			w.log.Info("watch: cooldown after a closed watcher room, staying quiet",
 				"mode", string(w.cfg.Mode), "pipeline", id, "room", existing,
@@ -387,7 +511,11 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		}
 	}
 
-	title, ev := compose(id, now, v, "opened", affected)
+	reason := "opened"
+	if !v.reopenOf.IsZero() {
+		reason = reopenReason
+	}
+	title, ev := compose(id, now, v, reason, affected)
 	alert := alertin.Alert{
 		Source:     alertin.Watcher,
 		Status:     alertin.StatusFiring,
@@ -454,7 +582,7 @@ func (w *Watcher) assignFollowers(now time.Time, leader, roomID string, storm ma
 			}
 			ss.notified = true
 			if w.closed[roomID] {
-				ss.ack()
+				ss.ack(w.clock.Now())
 				ps.lastClosed = w.clock.Now()
 				continue
 			}
@@ -523,7 +651,7 @@ func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID st
 		if ss := ps.sigs[s.id]; ss != nil {
 			ss.notified = true
 			if w.closed[roomID] && ss.phase == phaseFiring {
-				ss.ack()
+				ss.ack(w.clock.Now())
 			}
 		}
 	}
@@ -535,8 +663,14 @@ func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID st
 		return false
 	}
 	ps.roomID, ps.owned, ps.follower = roomID, owned, follower
+	if !owned {
+		ps.roomKey = ""
+	} else if v.key != "" {
+		ps.roomKey = v.key
+	}
 	ps.lastPost, ps.postedSev = now, v.sev
 	ps.bypassCooldown = false
+	ps.reopenOf = time.Time{}
 	ps.warnedOpen = false
 	return true
 }
@@ -550,6 +684,10 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	id := t.p.ID
 	if v.roomID != "" {
 		if v.owned {
+			key := v.roomKey
+			if key == "" {
+				key = DedupKey(id)
+			}
 			raw, _ := json.Marshal(map[string]any{
 				"source": "watcher", "pipeline": id, "resolved": true, "at": now.UTC().Format(time.RFC3339),
 			})
@@ -560,7 +698,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 			a := alertin.Alert{
 				Source: alertin.Watcher, Status: alertin.StatusResolved,
 				Title: clipTitle(id + ": all watcher signals are clear"), Severity: sev,
-				PipelineID: id, DedupKey: DedupKey(id), OccurredAt: now, Raw: raw,
+				PipelineID: id, DedupKey: key, OccurredAt: now, Raw: raw,
 			}
 			sctx, cancel := context.WithTimeout(ctx, w.cfg.CheckTimeout)
 			_, _, err := w.rooms.OpenAlertRoom(sctx, a)
@@ -598,9 +736,10 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	}
 	w.mu.Lock()
 	ps := w.pipes[id]
-	ps.episode, ps.roomID, ps.owned, ps.follower = false, "", false, false
+	ps.episode, ps.roomID, ps.owned, ps.follower, ps.roomKey = false, "", false, false, ""
 	ps.postedSev, ps.lastPost = "", time.Time{}
 	ps.bypassCooldown = false
+	ps.reopenOf = time.Time{}
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 	w.mu.Unlock()
 }
@@ -613,7 +752,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 func compose(pipelineID string, now time.Time, v view, reason string, affected []string) (string, json.RawMessage) {
 	var frags []string
 	var sigs []map[string]any
-	for _, id := range signalIDs {
+	for _, id := range activeIDs(v) {
 		for _, s := range v.active {
 			if s.id != id {
 				continue
@@ -635,6 +774,10 @@ func compose(pipelineID string, now time.Time, v view, reason string, affected [
 		}
 	}
 	title := pipelineID + ": " + strings.Join(frags, "; ")
+	if !v.reopenOf.IsZero() {
+		// The marker leads, so clipTitle cannot cut it off.
+		title = pipelineID + ": [reopened after close, still firing] " + strings.Join(frags, "; ")
+	}
 	// Whatever signal opened the room, the agent should see the connector
 	// settings that drop records. A config_risk signal lists them itself.
 	riskInEv := slices.ContainsFunc(v.active, func(s sigSnap) bool { return s.id == owners.SignalConfigRisk })
@@ -644,6 +787,10 @@ func compose(pipelineID string, now time.Time, v view, reason string, affected [
 	body := map[string]any{
 		"source": "watcher", "pipeline": pipelineID, "severity": v.sev,
 		"at": now.UTC().Format(time.RFC3339), "reason": reason, "signals": sigs,
+	}
+	if !v.reopenOf.IsZero() {
+		body["reopened_after_close"] = true
+		body["previous_room_closed_at"] = v.reopenOf.UTC().Format(time.RFC3339)
 	}
 	if len(v.risks) > 0 && !riskInEv {
 		body["config_risks"] = v.risks
@@ -691,6 +838,18 @@ func stripTraces(sigs []map[string]any) {
 		}
 		s["connectors"] = out
 	}
+}
+
+// activeIDs are the ids of v.active in title order: signalIDs first, then the
+// others (drift ids) as viewOf listed them.
+func activeIDs(v view) []string {
+	out := slices.Clone(signalIDs)
+	for _, s := range v.active {
+		if !slices.Contains(signalIDs, s.id) {
+			out = append(out, s.id)
+		}
+	}
+	return out
 }
 
 // copyMap is a shallow copy.

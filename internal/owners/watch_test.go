@@ -53,9 +53,9 @@ func TestWatchFullBlock(t *testing.T) {
         connector_down: {for: 3m, action: log}
         slot_inactive:  {for: 90s}
         slot_wal:       {fire: 2GiB, clear: 1.5GiB, for: 15m, eta_sev1: 12h}
+        long_tx:        {ticks: 4, min_growth: 128KiB, for: 2m, action: log}
         # v2 keys: parsed, ignored
         freshness:      {sla: 30m, clear: 15m, for: 5m, interval: 10m, tz: UTC}
-        long_tx:        {age: 10m, for: 5m}
         compat_none:    {action: log}
         unreachable:    {for: 5m, action: log}
 `)))
@@ -72,6 +72,9 @@ func TestWatchFullBlock(t *testing.T) {
 	}
 	if w.SlotInactive.Action != ActionRoom || w.SlotInactive.For != 90*time.Second {
 		t.Fatalf("slot_inactive: %+v", w.SlotInactive)
+	}
+	if lt := w.LongTx; !lt.Enabled || lt.Action != ActionLog || lt.For != 2*time.Minute || lt.Ticks != 4 || lt.MinGrowthBytes != 128<<10 {
+		t.Fatalf("long_tx: %+v", lt)
 	}
 	s := w.SlotWAL
 	if s.FireBytes != 2<<30 || s.ClearBytes != 3<<29 || s.For != 15*time.Minute || s.EtaSev1 != 12*time.Hour {

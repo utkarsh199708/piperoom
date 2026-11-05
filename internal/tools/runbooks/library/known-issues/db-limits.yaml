@@ -1,0 +1,157 @@
+# Known issues: database version limits and managed-database quirks (plan §6, theme 5).
+# "affected" is the database versions that have the limit; "fixed_in" the first
+# version without it.
+
+- id: pg-pgoutput-needs-pg10
+  title: pgoutput needs Postgres 10 or later
+  component: postgres
+  theme: db-limit
+  affected: "<10"
+  fixed_in: "10"
+  symptoms: [could not access file pgoutput, pgoutput, plugin.name, postgres 9.6, logical replication]
+  workaround: >-
+    Upgrade Postgres to 10 or later (built-in logical replication and pgoutput), or install the
+    decoderbufs plug-in on the server and set plugin.name=decoderbufs.
+  source: https://www.postgresql.org/docs/release/10.0/
+
+- id: pg-decoderbufs-default-missing
+  title: plugin.name defaults to decoderbufs, which managed Postgres does not install
+  component: debezium-postgres
+  theme: db-limit
+  affected: "*"
+  symptoms: [could not access file decoderbufs, decoderbufs, plugin.name, rds, cloud sql, azure]
+  workaround: Set plugin.name=pgoutput explicitly; it is built into Postgres 10+ and needs no server install.
+  source: https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+- id: pg-partitioned-publication-pg13
+  title: Partitioned tables can be published through the root only from Postgres 13
+  component: postgres
+  theme: db-limit
+  affected: "<13"
+  fixed_in: "13"
+  symptoms: [partitioned table, publish_via_partition_root, publication, partition, pgoutput]
+  workaround: >-
+    On Postgres 13+ create the publication WITH (publish_via_partition_root = true) so changes carry
+    the root table; before 13 add every partition to the publication and route the topics.
+  source: https://www.postgresql.org/docs/release/13.0/
+
+- id: pg-slot-invalidated-max-wal-keep
+  title: max_slot_wal_keep_size can invalidate a lagging replication slot
+  component: postgres
+  theme: db-limit
+  affected: ">=13"
+  symptoms: [max_slot_wal_keep_size, wal_status lost, slot invalidated, requested WAL segment has already been removed, replication slot]
+  workaround: >-
+    A lost slot cannot resume: recreate it and snapshot again. Size max_slot_wal_keep_size above the
+    longest expected connector outage and alert on pg_replication_slots.wal_status = unreserved.
+  source: https://www.postgresql.org/docs/release/13.0/
+
+- id: pg-standby-logical-decoding
+  title: Logical decoding on a standby needs Postgres 16
+  component: postgres
+  theme: db-limit
+  affected: "<16"
+  fixed_in: "16"
+  symptoms: [standby, read replica, logical decoding cannot be used while in recovery, hot_standby, replica]
+  workaround: Point the connector at the primary, or upgrade to Postgres 16+ to decode from a standby.
+  source: https://www.postgresql.org/docs/release/16.0/
+
+- id: pg-failover-slots-pg17
+  title: Logical replication slots survive a failover only from Postgres 17 (failover slots)
+  component: postgres
+  theme: db-limit
+  affected: "<17"
+  fixed_in: "17"
+  symptoms: [failover, replication slot missing, slot lost after failover, promote, sync_replication_slots]
+  workaround: >-
+    On Postgres 17+ create the slot with failover enabled and sync slots to the standby (see the
+    connector's failover slots section); before 17 recreate the slot on the new primary and expect a
+    gap or a new snapshot.
+  source: https://www.postgresql.org/docs/release/17.0/
+
+- id: pg-rds-logical-replication
+  title: Amazon RDS Postgres needs rds.logical_replication and the rds_replication role
+  component: postgres
+  theme: db-limit
+  affected: "*"
+  symptoms: [rds.logical_replication, rds_replication, wal_level, must be superuser or replication role, aws rds, aurora]
+  workaround: >-
+    Set rds.logical_replication=1 in the DB parameter group (reboot needed; wal_level becomes logical)
+    and grant rds_replication to the connector user.
+  source: https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+- id: pg-publication-all-tables-superuser
+  title: The default publication.autocreate.mode=all_tables needs a superuser
+  component: postgres
+  theme: db-limit
+  affected: "*"
+  symptoms: [must be superuser to create FOR ALL TABLES publication, publication.autocreate.mode, all_tables, CREATE PUBLICATION]
+  workaround: >-
+    Create the publication yourself for the captured tables (or set publication.autocreate.mode=filtered
+    with a user that owns them) instead of giving the connector superuser.
+  source: https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+- id: pg-idle-tables-wal-growth
+  title: WAL grows when the captured tables are idle but the server is busy
+  component: postgres
+  theme: db-limit
+  affected: "*"
+  symptoms: [wal growth, heartbeat.interval.ms, heartbeat.action.query, idle tables, restart_lsn not advancing, rds]
+  workaround: >-
+    Set heartbeat.interval.ms and a heartbeat.action.query that writes to a small captured heartbeat
+    table, so the slot advances even when the captured tables do not change.
+  source: https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+- id: pg-replica-identity-default
+  title: With REPLICA IDENTITY DEFAULT updates and deletes carry no full before image
+  component: postgres
+  theme: db-limit
+  affected: "*"
+  symptoms: [replica identity, before is null, REPLICA IDENTITY FULL, toast, __debezium_unavailable_value]
+  workaround: >-
+    ALTER TABLE ... REPLICA IDENTITY FULL on tables whose consumers need old values or unchanged TOAST
+    columns (it costs more WAL); otherwise treat before as key-only.
+  source: https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+- id: mysql-binlog-row-format
+  title: The MySQL connector needs binlog_format=ROW and binlog_row_image=FULL
+  component: mysql
+  theme: db-limit
+  affected: "*"
+  symptoms: [binlog_format, binlog_row_image, ROW, FULL, MINIMAL, statement based]
+  workaround: >-
+    Set binlog_format=ROW and binlog_row_image=FULL (on Amazon RDS and Aurora, in the parameter group)
+    and restart the connector.
+  source: https://debezium.io/documentation/reference/stable/connectors/mysql.html
+
+- id: mysql-binlog-purged
+  title: The binlog position stored by the connector was purged from the server
+  component: mysql
+  theme: db-limit
+  affected: "*"
+  symptoms: [binlog no longer available, purged, binlog retention, binlog_expire_logs_seconds, rds_set_configuration, Could not find first log file]
+  workaround: >-
+    Keep binlogs longer than the longest outage (binlog_expire_logs_seconds; on RDS
+    CALL mysql.rds_set_configuration('binlog retention hours', N)). A purged position needs a new
+    snapshot (snapshot.mode=when_needed) or an offsets reset.
+  source: https://debezium.io/documentation/reference/stable/connectors/mysql.html
+
+- id: mysql-duplicate-server-id
+  title: Two binlog clients with the same database.server.id kick each other off
+  component: mysql
+  theme: db-limit
+  affected: "*"
+  symptoms: [database.server.id, same server_id, server_uuid, slave with the same, replica with the same, disconnects]
+  workaround: Give every connector (and every replica) a unique database.server.id.
+  source: https://debezium.io/documentation/reference/stable/connectors/mysql.html
+
+- id: sqlserver-agent-not-running
+  title: SQL Server CDC captures nothing when SQL Server Agent is not running
+  component: sqlserver
+  theme: db-limit
+  affected: "*"
+  symptoms: [SQL Server Agent, capture job, cdc tables empty, no change events, sys.sp_cdc_enable_table]
+  workaround: >-
+    Start SQL Server Agent (the CDC capture job runs under it) and check the capture job; on Linux
+    enable it with mssql-conf.
+  source: https://debezium.io/documentation/reference/stable/connectors/sqlserver.html

@@ -42,7 +42,7 @@ func slotActive(t *testing.T, dsn string) bool {
 
 // stopConnector mirrors `devctl break slot-inactive`'s Connect call
 // (PUT /connectors/{name}/stop) without pulling cmd/devctl into this package.
-func stopConnector(t *testing.T, connectURL string) {
+func stopDevConnector(t *testing.T, connectURL string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPut, connectURL+"/connectors/"+resumeConnectorName+"/stop", nil)
 	if err != nil {
@@ -69,7 +69,7 @@ func TestResumeConnectorIntegration(t *testing.T) {
 	cfg := testenv.Require(t)
 	c := connect.New(cfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
 
-	stopConnector(t, cfg.ConnectURL)
+	stopDevConnector(t, cfg.ConnectURL)
 	// The shared pg-orders-connector is used instead of an it_ connector: a
 	// Debezium replication slot per test would be too heavy. If the test fails
 	// before the action resumes it, this cleanup resumes it so the next run

@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -41,12 +41,10 @@ func (hs *headerServer) turn(t *testing.T, getenv func(string) string) http.Head
 	t.Helper()
 	m := newModelWith(getenv, nil,
 		option.WithBaseURL(hs.URL), option.WithAPIKey("sk-ant-test-not-real"), option.WithMaxRetries(0))
-	_, err := m.Turn(context.Background(), anthropic.BetaMessageNewParams{
+	_, err := m.Turn(context.Background(), llm.Request{
 		Model:     "claude-opus-5-5",
 		MaxTokens: 16,
-		Messages: []anthropic.BetaMessageParam{
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("hi")),
-		},
+		Messages:  []llm.Message{userMessage(textPart("hi"))},
 	})
 	if err == nil {
 		t.Fatal("test server answers 400, want an error from Turn")
@@ -111,9 +109,9 @@ func TestProductionClientsSendWorkspaceHeader(t *testing.T) {
 		return hs.seen[len(hs.seen)-1]
 	}
 	turn := func() {
-		_, _ = newModel(Options{}, nil).Turn(context.Background(), anthropic.BetaMessageNewParams{
+		_, _ = newModel(Options{}, nil).Turn(context.Background(), llm.Request{
 			Model: "claude-opus-5-5", MaxTokens: 16,
-			Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("hi"))},
+			Messages: []llm.Message{userMessage(textPart("hi"))},
 		})
 	}
 	// WriteHandoff refuses an empty log before calling the model, so give it one event.

@@ -170,6 +170,24 @@ func BenchmarkTextClean(b *testing.B) {
 	}
 }
 
+// fuzzSecret derives a deterministic secret from a fuzz input, using only
+// characters safe to plant in every form below (a key/value bare value, a URL
+// password and an Authorization header token): letters, digits and . _ ~ -.
+// It is always 12-24 characters, so no rule treats it as a stray one-byte
+// value, a placeholder or a port.
+func fuzzSecret(s string) string {
+	const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-"
+	var b strings.Builder
+	b.Grow(24)
+	for i := 0; i < len(s) && b.Len() < 24; i++ {
+		b.WriteByte(alpha[int(s[i])%len(alpha)])
+	}
+	for b.Len() < 12 {
+		b.WriteByte(alpha[b.Len()])
+	}
+	return b.String()
+}
+
 func FuzzText(f *testing.F) {
 	for _, fx := range buildFixtures(5, 1) {
 		f.Add(fx.text)
@@ -189,6 +207,23 @@ func FuzzText(f *testing.F) {
 		}
 		if utf8.ValidString(s) && !utf8.ValidString(once) {
 			t.Fatalf("produced invalid UTF-8 from %q: %q", s, once)
+		}
+
+		// A secret derived from the input must not survive any shape it is
+		// planted in. The surrounding text is the input with the secret
+		// removed, so the secret can only appear where it was planted.
+		secret := fuzzSecret(s)
+		sur := strings.ReplaceAll(s, secret, "")
+		for _, form := range []string{
+			"password=" + secret,
+			"postgres://app:" + secret + "@db.example:5432/orders",
+			"Authorization: Bearer " + secret,
+		} {
+			in := sur + "\n" + form + "\n" + sur
+			out, _ := Text(in)
+			if strings.Contains(out, secret) {
+				t.Fatalf("planted secret survived: secret=%q form=%q in=%q out=%q", secret, form, in, out)
+			}
 		}
 	})
 }

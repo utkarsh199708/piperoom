@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -47,9 +48,9 @@ var _ ChangeStore = (*PG)(nil)
 // A row without pipeline, kind, object, source or fingerprint is refused: it
 // could never be deduplicated or shown.
 func NormalizeChange(c clients.PipelineChange) (clients.PipelineChange, error) {
-	switch c.Kind {
-	case clients.ChangeDDL, clients.ChangeConnectorConfig, clients.ChangeConnectorState, clients.ChangeSchemaVersion:
-	default:
+	// clients.ChangeKinds is the one list (X4 added deploy, migration and
+	// vendor_incident), so a new kind needs no edit here.
+	if !slices.Contains(clients.ChangeKinds(), c.Kind) {
 		return c, fmt.Errorf("store: change kind %q is not one of the known kinds", c.Kind)
 	}
 	if c.PipelineID == "" || c.Object == "" || c.Source == "" || c.Fingerprint == "" {

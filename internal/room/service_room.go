@@ -163,7 +163,8 @@ const webhookKeyPrefix = "webhook:"
 // propose a fix against a pipeline it knows nothing about. The 400 for an
 // unknown pipeline stays only on POST /api/rooms (CreateRoom). With no owners
 // config (unit tests) there is nothing to validate against, so every pipeline
-// is treated as known. No driver until someone takes control. created is false
+// is treated as known. No driver until its first member joins (sole member,
+// service_solemember.go) or someone takes control. created is false
 // when the alert joined the open room for it (see alertIndexKey) instead of
 // opening one. A resolved alert (a.Status) that matches no open room returns
 // ErrResolvedAlertNoRoom and changes nothing: it never opens a room. An empty
@@ -209,6 +210,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	// shadow.
 	shadow := s.pipelineShadow(pipelineID)
 	resolved := a.Status == alertin.StatusResolved
+	// Only the built-in watcher holds a "watcher:" key: no HTTP route can
+	// send that source (alertin.Sources), so no sender can open a quiet room.
+	origin := ""
+	if a.Source == alertin.Watcher && isForecastKey(pipelineID, a.DedupKey) {
+		origin = events.RoomOriginForecast
+	}
 	indexKey := alertIndexKey(pipelineID, a.DedupKey)
 	roomID := NewID("r_")
 	now := s.now().UTC()
@@ -259,7 +266,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 
 	created, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
-		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow,
+		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow, Origin: origin,
 	})
 	if err != nil {
 		s.discardNewRoomLocked(ctx, roomID, st)
@@ -278,6 +285,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	if indexKey != "" {
 		s.setAlertKey(roomID, st, indexKey, true)
+	}
+	if origin != "" {
+		// The trend summary is the room's first message: it is all a quiet
+		// room shows until someone asks the agent.
+		_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: forecastNote(raw)})
+		s.afterAppend(roomID, "forecast note", err, "pipeline", pipelineID)
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -299,7 +312,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	snap := st.snap.Clone()
 	st.firstLook = true
-	s.startAgentLocked(roomID, title, pipelineID, raw, st)
+	// A forecast room opens quietly: its agent (and first look) starts on
+	// the first steer or @agent comment, or on escalation (forecast.go). A
+	// shadow pipeline's run is silent already and keeps its start here.
+	if origin == "" || shadow {
+		s.startAgentLocked(roomID, title, pipelineID, raw, st)
+	}
 	s.notifyRoomOpenedLocked(roomID)
 	s.unlockRoom(st)
 	return snap, true, nil
@@ -443,7 +461,11 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, err
 	return p.Clone(), nil
 }
 
-// ListRooms returns every room, open rooms first, as each was last published.
+// ListRooms returns every room in the list order defined by roomListLess, as
+// each was last published. The order is total, so every call and every list
+// path (GET /api/rooms, the first frame of GET /api/rooms/ws, and ListRoomsFor
+// after its tenant filter) answers the same rows in the same order for the
+// same state (KAN-382).
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	// The store is read outside every lock; a room lock is taken only for a
 	// room that has to be loaded or folded (refreshAll).
@@ -455,27 +477,49 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	for _, p := range rooms {
 		out = append(out, p.Clone())
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if (out[i].Status == "open") != (out[j].Status == "open") {
-			return out[i].Status == "open"
-		}
-		if !out[i].OpenedAt.Equal(out[j].OpenedAt) {
-			return out[i].OpenedAt.After(out[j].OpenedAt)
-		}
-		// Same order the stores use (ORDER BY opened_at DESC, id ASC), so
-		// tied timestamps list deterministically instead of in map order.
-		return out[i].ID < out[j].ID
-	})
+	sort.SliceStable(out, func(i, j int) bool { return roomListLess(&out[i], &out[j]) })
 	return out, nil
 }
 
+// roomListLess is the one definition of the room-list order:
+//
+//  1. open rooms before closed ones;
+//  2. newest opened_at first;
+//  3. id ascending as the final tiebreaker.
+//
+// The third key is what makes the order total. Two rooms can share an
+// opened_at (Postgres and the mem store both keep only microsecond precision),
+// and publishedRooms hands them over in map iteration order; without the id
+// comparison that random order would leak into the list, so the HTTP list and
+// the room list socket could disagree (KAN-382).
+func roomListLess(a, b *RoomSnapshot) bool {
+	if (a.Status == "open") != (b.Status == "open") {
+		return a.Status == "open"
+	}
+	if !a.OpenedAt.Equal(b.OpenedAt) {
+		return a.OpenedAt.After(b.OpenedAt)
+	}
+	return a.ID < b.ID
+}
+
 // Events returns events after afterSeq and the room's current last_seq.
+// An explicit limit 0 is an empty page: the caller asks for the log head
+// (last_seq) and no events. A negative limit is invalid. The HTTP layer
+// defaults an absent limit to 500 (docs/api.md, GET /api/rooms/{id}/events).
 func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, int64, error) {
-	if _, err := s.readRoom(ctx, roomID); err != nil {
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil {
 		return nil, 0, err
 	}
-	if limit <= 0 {
-		limit = 500
+	if limit < 0 {
+		return nil, 0, validation("limit must be a non-negative integer")
+	}
+	if limit == 0 {
+		// "Give me no events" used to fall into a limit <= 0 default of 500,
+		// so limit=0 returned the whole page (KAN-395). last_seq can trail an
+		// append that is still in flight; the next poll sees it, exactly as a
+		// client paging the log already allows.
+		return []events.Event{}, snap.LastSeq, nil
 	}
 	if limit > 1000 {
 		limit = 1000

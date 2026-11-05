@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/events"
 	"piperoom/internal/redact"
 )
 
@@ -26,7 +27,9 @@ import (
 // numbers, booleans, RFC 3339 times, a few fixed-vocabulary strings and
 // object names that look like names. The only free text kept is the first
 // line of a task trace, masked. Anything else in the body is dropped, so a
-// new watcher key reaches the model only after it is added here.
+// new watcher key reaches the model only after it is added here. Signals
+// include slot_wal, long_tx (frozen restart_lsn: LSN keys and a masked note),
+// connector_down, dlq_growth, consumer_lag and the X1/X3 signals.
 
 const (
 	// maxEvidenceSignals caps the signals rendered from one body.
@@ -49,6 +52,13 @@ var evidenceNumberKeys = map[string]bool{
 	"members": true, "total_lag": true, "lag_rate_per_min": true, "state_changes_15m": true,
 	"partition": true, "committed": true, "log_start": true, "records_lost": true,
 	"connectors_omitted": true, "tasks_omitted": true, "restarts": true,
+	// long_tx (internal/watch/long_tx.go): byte counts, tick count, seconds held.
+	"retained_first_bytes": true, "retained_growth_bytes": true, "ticks": true, "held_for_seconds": true,
+	// X1 drift signals (events.DriftSignal): counts only.
+	"source": true, "sink": true, "missing": true, "mismatched": true, "sample": true,
+	// X3 forecast (events.ForecastSignal) and config_drift
+	// (events.ConfigDriftSignal).
+	"current": true, "limit": true, "slope_per_hour": true, "r2": true, "samples": true, "keys_omitted": true,
 }
 
 // evidenceBoolKeys are watcher keys whose value is a boolean.
@@ -57,15 +67,36 @@ var evidenceBoolKeys = map[string]bool{
 }
 
 // evidenceTimeKeys are watcher keys whose value is an RFC 3339 time.
-var evidenceTimeKeys = map[string]bool{"first_seen": true}
+var evidenceTimeKeys = map[string]bool{"first_seen": true, "eta": true}
 
 // evidenceWordKeys are watcher keys with a fixed vocabulary (a state, a
 // wal_status, an ETA basis, a window like "15m"): one short word.
 var evidenceWordKeys = map[string]bool{"state": true, "wal_status": true, "eta_basis": true, "window": true}
 
 // evidenceNameKeys are watcher keys that name an object: a slot, a group, a
-// topic, a connector.
-var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true}
+// topic, a table, a connector, a forecast's metric and object.
+var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true, "table": true,
+	"connector": true, "metric": true, "object": true}
+
+// evidenceLSNKeys are watcher keys whose value is a Postgres LSN ("16/B374D848"),
+// which the long_tx signal uses to show that restart_lsn stays flat.
+var evidenceLSNKeys = map[string]bool{"restart_lsn": true, "wal_head_first": true, "wal_head_last": true,
+	"confirmed_flush_first": true, "confirmed_flush_last": true}
+
+// evidenceLSN is the shape of an LSN as watch.fmtLSN writes it.
+var evidenceLSN = regexp.MustCompile(`^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$`)
+
+// maxEvidenceNote caps the watcher's free-text note on a signal. The watcher
+// writes it today, but a body is still outside data, so it is masked, quoted
+// and capped like a task trace.
+const maxEvidenceNote = 120
+
+// maxEvidenceChangedKeys caps the config_drift key names rendered.
+const maxEvidenceChangedKeys = 8
+
+// driftSignals are the X1 signals whose "window" is an object {from, to}
+// (events.DriftWindow), not a word as in dlq_growth.
+var driftSignals = map[string]bool{"count_drift": true, "row_drift": true, "dup_keys": true, "order_skew": true}
 
 // evidenceWord is the shape of a fixed-vocabulary value.
 var evidenceWord = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
@@ -94,6 +125,10 @@ type watcherBody struct {
 	Severity string           `json:"severity"`
 	At       string           `json:"at"`
 	Signals  []map[string]any `json:"signals"`
+	// ConfigRisks are the pipeline's config_risk findings when another
+	// signal opened or joined the room (watch.compose): connector risks and
+	// X7d retention findings, rendered like a config_risk signal's risks.
+	ConfigRisks any `json:"config_risks"`
 }
 
 // parseWatcherBody decodes raw when it is a watcher body with at least one
@@ -135,6 +170,9 @@ func watcherEvidence(raw json.RawMessage) string {
 			lines = append(lines, line)
 		}
 	}
+	if rs := riskFields(b.ConfigRisks); len(rs) > 0 {
+		lines = append(lines, truncatePromptField("config_risks "+strings.Join(rs, " "), maxEvidenceLine))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -155,6 +193,16 @@ func signalLine(s map[string]any) string {
 		parts = append(parts, "firing_for="+n+"s")
 	}
 	parts = append(parts, flatFields(s)...)
+	if driftSignals[sig] {
+		parts = append(parts, driftWindowFields(s["window"])...)
+	}
+	parts = append(parts, changedKeyFields(s["changed_keys"])...)
+	if sig == "long_tx" {
+		// Last, so the line cap cuts the note and not the numbers.
+		if n := evidenceNoteLine(s["note"]); n != "" {
+			parts = append(parts, "note="+n)
+		}
+	}
 	parts = append(parts, connectorFields(s["connectors"])...)
 	parts = append(parts, riskFields(s["risks"])...)
 	parts = append(parts, partitionFields(s["worst_partitions"])...)
@@ -201,6 +249,9 @@ func evidenceValue(k string, v any) (string, bool) {
 	case evidenceNameKeys[k]:
 		n, _ := v.(string)
 		return n, evidenceName.MatchString(n)
+	case evidenceLSNKeys[k]:
+		l, _ := v.(string)
+		return l, evidenceLSN.MatchString(l)
 	}
 	return "", false
 }
@@ -232,6 +283,50 @@ func evidenceTime(v any) (string, bool) {
 		return "", false
 	}
 	return t.UTC().Format(time.RFC3339), true
+}
+
+// driftWindowFields renders a drift signal's window {from, to} as two times.
+func driftWindowFields(v any) []string {
+	m, _ := v.(map[string]any)
+	from, ok1 := evidenceTime(m["from"])
+	to, ok2 := evidenceTime(m["to"])
+	if !ok1 || !ok2 {
+		return nil
+	}
+	return []string{"window_from=" + from, "window_to=" + to}
+}
+
+// changedKeyFields renders config_drift's changed key names (never values):
+// the first maxEvidenceChangedKeys that look like names, comma-joined, the
+// count of the rest, and whether a secret key changed (events.SecretKeyChanged
+// stands for its name, so only the fact is rendered).
+func changedKeyFields(v any) []string {
+	items, _ := v.([]any)
+	var names []string
+	more, secret := 0, false
+	for _, it := range items {
+		k, _ := it.(string)
+		switch {
+		case k == events.SecretKeyChanged:
+			secret = true
+		case !evidenceName.MatchString(k):
+		case len(names) == maxEvidenceChangedKeys:
+			more++
+		default:
+			names = append(names, k)
+		}
+	}
+	var out []string
+	if len(names) > 0 {
+		out = append(out, "changed_keys="+strings.Join(names, ","))
+	}
+	if more > 0 {
+		out = append(out, "changed_keys_more="+strconv.Itoa(more))
+	}
+	if secret {
+		out = append(out, "secret_key_changed=true")
+	}
+	return out
 }
 
 // connectorFields renders connector_down evidence: name, state, and per task
@@ -276,6 +371,20 @@ func connectorFields(v any) []string {
 	return out
 }
 
+// evidenceNoteLine keeps a long_tx note: first line, masked, capped, quoted.
+func evidenceNoteLine(v any) string {
+	s, _ := v.(string)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s, _ = redact.Text(s)
+	return fmt.Sprintf("%q", truncatePromptField(s, maxEvidenceNote))
+}
+
 // traceLine keeps the masked first line of a task trace, capped.
 func traceLine(v any) string {
 	s, _ := v.(string)
@@ -290,7 +399,10 @@ func traceLine(v any) string {
 	return truncatePromptField(s, maxEvidenceTrace)
 }
 
-// riskFields renders config_risk findings as connector:code pairs.
+// riskFields renders config_risk findings: a connector risk as a
+// connector:code pair, a retention finding (X7d, events.RetentionRisk) as
+// retention_risk=<topic or table>:code with its durations, size cap and
+// cleanup policy. Its text is never rendered.
 func riskFields(v any) []string {
 	risks, _ := v.([]any)
 	var out []string
@@ -299,14 +411,60 @@ func riskFields(v any) []string {
 			break
 		}
 		m, _ := r.(map[string]any)
-		conn, _ := m["connector"].(string)
 		code, _ := m["code"].(string)
-		if !evidenceName.MatchString(conn) || !evidenceWord.MatchString(code) {
+		if !evidenceWord.MatchString(code) {
+			continue
+		}
+		if retentionCodes[code] {
+			if part := retentionRiskField(m, code); part != "" {
+				out = append(out, part)
+			}
+			continue
+		}
+		conn, _ := m["connector"].(string)
+		if !evidenceName.MatchString(conn) {
 			continue
 		}
 		out = append(out, "risk="+conn+":"+code)
 	}
 	return out
+}
+
+// retentionCodes are the RetentionRisk codes.
+var retentionCodes = map[string]bool{
+	events.RiskRetentionShorter: true, events.RiskRetentionLonger: true, events.RiskCompactCDCTopic: true,
+}
+
+// evidenceRetention is topology.FormatRetention's output ("7d", "36h",
+// "infinite"); evidencePolicy is a cleanup.policy of the two Kafka words.
+var (
+	evidenceRetention = regexp.MustCompile(`^(infinite|[0-9]{1,12}[dhms])$`)
+	evidencePolicy    = regexp.MustCompile(`^(compact|delete)(,(compact|delete))?$`)
+)
+
+// retentionRiskField renders one retention finding; "" when its topic or
+// table does not look like a name.
+func retentionRiskField(m map[string]any, code string) string {
+	obj, _ := m["topic"].(string)
+	if obj == "" {
+		obj, _ = m["table"].(string)
+	}
+	if !evidenceName.MatchString(obj) {
+		return ""
+	}
+	part := "retention_risk=" + obj + ":" + code
+	for _, k := range []string{"configured", "declared"} {
+		if d, _ := m[k].(string); evidenceRetention.MatchString(d) {
+			part += " " + k + "=" + d
+		}
+	}
+	if n, ok := evidenceNumber(m["retention_bytes"]); ok {
+		part += " retention_bytes=" + n
+	}
+	if p, _ := m["cleanup_policy"].(string); evidencePolicy.MatchString(p) {
+		part += " cleanup_policy=" + p
+	}
+	return part
 }
 
 // partitionFields renders a consumer lag signal's worst partitions as

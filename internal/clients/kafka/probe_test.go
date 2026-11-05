@@ -279,6 +279,16 @@ func probeSeamClient(probe func(ctx context.Context, topic string, wins map[int3
 	}
 }
 
+// seamDeadline is the ctx deadline of the TestProbeSeam reads that must wait
+// it out. The first probe comes one stallAfter into the read (the first
+// bounded poll), so the old 1200 ms gave a loaded machine only 2.4 times the
+// idle time to get there and run its follow-up probe, and a busy run ended
+// the read first ("never probed", or one probe where two were due). Six
+// stallAfters give it the headroom #636 gave within. A real regression still
+// fails fast: a read that ends early returns before the deadline with the
+// wrong error, and one that never probes fails at the deadline.
+const seamDeadline = 6 * stallAfter
+
 // TestProbeSeam: what a read does with each probe answer.
 func TestProbeSeam(t *testing.T) {
 	t.Run("probe fails: the read ends at its deadline as before", func(t *testing.T) {
@@ -287,7 +297,7 @@ func TestProbeSeam(t *testing.T) {
 			calls++
 			return nil
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), seamDeadline)
 		defer cancel()
 		_, err := c.PeekDLQ(ctx, "d", 5)
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -307,7 +317,7 @@ func TestProbeSeam(t *testing.T) {
 			}
 			return nil
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), seamDeadline)
 		defer cancel()
 		_, err := c.PeekDLQ(ctx, "d", 5)
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -321,7 +331,7 @@ func TestProbeSeam(t *testing.T) {
 		c := probeSeamClient(func(context.Context, string, map[int32]readWindow) map[int32]int64 {
 			return map[int32]int64{7: 99}
 		})
-		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), seamDeadline)
 		defer cancel()
 		_, err := c.PeekDLQ(ctx, "d", 5)
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -448,8 +458,8 @@ func TestKFakeStuckPartitionBesideBusyOne(t *testing.T) {
 	within(t, func(ctx context.Context) {
 		// The newest records win the limit, and partition 0 keeps getting
 		// newer ones, so k1 may be cut; what matters is that partition 1
-		// finishes, which within's 2 s bound checks (a stuck partition
-		// waited out the deadline and still returned a nil error).
+		// finishes, which withinBound checks (a stuck partition waits out
+		// withinDeadline and still returns a nil error).
 		if _, err := c.PeekDLQ(ctx, kfTopic, 5); err != nil {
 			t.Fatalf("PeekDLQ: %v", err)
 		}

@@ -10,12 +10,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/tools"
 )
 
@@ -62,11 +62,13 @@ func newWireServer(t *testing.T) *wireServer {
 // call sends one request through ep's model and returns what arrived.
 func (ws *wireServer) call(t *testing.T, ep *Endpoint, modelID string) seenRequest {
 	t.Helper()
-	_, err := ep.model.Turn(context.Background(), anthropic.BetaMessageNewParams{
-		Model:     modelID,
-		MaxTokens: 16,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaCompact2026_01_12},
-		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("hi"))},
+	// Compaction asks for the compact-2026-01-12 beta, which every provider
+	// must carry (a header, or anthropic_beta in a Bedrock body).
+	_, err := ep.model.Turn(context.Background(), llm.Request{
+		Model:      modelID,
+		MaxTokens:  16,
+		Compaction: &llm.Compaction{Instructions: compactionInstructions()},
+		Messages:   []llm.Message{userMessage(textPart("hi"))},
 	})
 	if err == nil {
 		t.Fatal("the test server answers 400, want an error from Turn")
@@ -114,8 +116,8 @@ func TestNewEndpointStartupErrors(t *testing.T) {
 	}{
 		{"unknown provider names the allowed values", EndpointConfig{Provider: "azure"},
 			[]string{`"azure"`, "anthropic", "bedrock", "vertex"}},
-		{"provider names are trimmed and lower-cased before the check", EndpointConfig{Provider: "Gemini"},
-			[]string{`"gemini"`, "allowed values"}},
+		{"provider names are trimmed and lower-cased before the check", EndpointConfig{Provider: " Cohere "},
+			[]string{`"cohere"`, "allowed values", "openai", "gemini", "bedrock-converse"}},
 		{"bedrock without a region", EndpointConfig{Provider: "bedrock"}, []string{"AWS_REGION"}},
 		{"bedrock with a blank region", EndpointConfig{Provider: "bedrock", AWSRegion: "  "}, []string{"AWS_REGION"}},
 		{"vertex without a project", EndpointConfig{Provider: "vertex", VertexRegion: "global"}, []string{"VERTEX_PROJECT_ID"}},
@@ -377,7 +379,7 @@ func TestLoopRequestPassesThroughTheCloudAdapters(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req := r.request([]anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("go"))})
+			req := r.request([]llm.Message{userMessage(textPart("go"))})
 			if _, err := ep.model.Turn(context.Background(), req); err == nil {
 				t.Fatal("want the test server's 400")
 			}
@@ -403,5 +405,16 @@ func TestLoopRequestPassesThroughTheCloudAdapters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestModelConcurrencyIsClamped(t *testing.T) {
+	for _, tt := range []struct {
+		in   int64
+		want int
+	}{{-1, 0}, {0, 0}, {3, 3}, {maxModelConcurrency, maxModelConcurrency}, {1 << 40, maxModelConcurrency}} {
+		if got := modelConcurrency(tt.in); got != tt.want {
+			t.Errorf("modelConcurrency(%d) = %d, want %d", tt.in, got, tt.want)
+		}
 	}
 }

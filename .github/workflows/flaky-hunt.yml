@@ -1,0 +1,255 @@
+name: Flaky-test hunt
+
+# Nightly hunt for flaky unit tests (X-QA4b): run the unit suite ten times with
+# the race detector and a shuffled order, sharded across a matrix of package
+# lists, and report every failing test as `package.Test` with the shuffle seed
+# that reproduces it.
+#
+# The hunt is report-only: it writes its result to the job summary and an
+# uploaded artifact and stays green when tests fail, because the failures are
+# the deliverable. A flaky test must not turn a PR red (CI already runs each
+# test once); it shows up here, with the seed needed to reproduce it.
+#
+# Never on pull_request: the hunt is deliberately slow (count=10 x race) and a
+# PR run would only re-report flakes from one branch's unmerged state.
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # nightly, 02:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shards:
+    name: Compute package shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      shards: ${{ steps.split.outputs.shards }}
+      packages: ${{ steps.split.outputs.packages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Split the unit-test packages into shards
+        id: split
+        run: |
+          set -euo pipefail
+          shards=16
+          # The package list is exactly what `go test -race ./...` runs:
+          # - `-e` lets a package with no Go files for this GOOS (today only
+          #   cmd/setup-spike/winsvc, //go:build windows) be listed as erroneous
+          #   instead of failing the whole list; the template then drops it.
+          # - the template keeps a package iff it has any non-test or test Go
+          #   files, which is precisely the set `go test` will execute.
+          go list -e -f '{{if or .GoFiles .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... \
+            | grep -v '^$' > packages.txt
+          # Round-robin over the list: shard i gets packages i, i+16, i+32, ...
+          # so each shard holds a small, spread-out slice of the heavy packages.
+          matrix="$(jq -Rnc --argjson shards "$shards" '
+            [inputs] as $pkgs
+            | [ range(0; $shards) as $s
+                | [ $pkgs[range($s; ($pkgs | length); $shards)] ] as $shard
+                | select($shard | length > 0)
+                | { index: ($s + 1), pkgs: ($shard | join(" ")) } ]
+            | { include: . }' < packages.txt)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "packages=$(wc -l < packages.txt)" >> "$GITHUB_OUTPUT"
+          # Evidence the shards partition the package list exactly: union ==
+          # list and no package appears twice (a duplicate would make union.txt
+          # longer than packages.txt and this diff non-empty).
+          sort packages.txt > packages.sorted
+          echo "$matrix" | jq -r '.include[].pkgs' | tr ' ' '\n' | grep -v '^$' | sort > union.sorted
+          if ! diff -u packages.sorted union.sorted; then
+            echo "::error::shards do not partition the package list (union differs)"
+            exit 1
+          fi
+          echo "::notice::$(wc -l < packages.txt) packages across $(echo "$matrix" | jq '.include | length') shards"
+
+  hunt:
+    name: Hunt (${{ matrix.index }})
+    needs: shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.shards.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: go test -race -count=10 -shuffle=on
+        id: run
+        run: |
+          set -uo pipefail
+          pkgs="${{ matrix.pkgs }}"
+          expected="$(printf '%s' "$pkgs" | wc -w)"
+          # rc 0 (pass) and rc 1 (test or build failures) are both findings to
+          # report; only rc > 1 (OOM, bad flag, killed) is a shard failure.
+          set +e
+          # The packages are import paths, not shell words a user typed: word
+          # splitting is the intended way to pass them to go test.
+          go test -json -race -count=10 -shuffle=on ${pkgs} > "$RUNNER_TEMP/test.json"
+          rc=$?
+          set -e
+          started="$(jq -s '[.[] | select(.Action == "start") | .Package] | unique | length' "$RUNNER_TEMP/test.json" 2>/dev/null || echo 0)"
+          if [ "$started" != "$expected" ] || [ "$rc" -gt 1 ]; then
+            printf '{"index":%s,"seed_count":0,"test_failures":[],"build_failures":[],"error":"go test exited %s after starting %s of %s packages"}\n' \
+              "${{ matrix.index }}" "$rc" "$started" "$expected" > report.json
+            echo "::error::shard ${{ matrix.index }}: go test exited $rc (started $started of $expected packages)"
+            exit 1
+          fi
+          jq -s '
+            def seeds:
+              reduce (.[] | select(.Action == "output" and ((.Output // "") | startswith("-test.shuffle ")))) as $e ({};
+                .[$e.Package] = ($e.Output | capture("(?<seed>[0-9]+)") | .seed));
+            seeds as $seeds
+            | {
+                index: ${{ matrix.index }},
+                seed_count: ($seeds | length),
+                test_failures: ([ .[]
+                  | select(.Action == "fail" and ((.Test // "") != ""))
+                  | { package: .Package, test: (.Test | split("/")[0]) }
+                  | .seed = ($seeds[.package] // "")
+                ] | unique | sort_by(.package, .test)),
+                build_failures: (([ .[] | select(.Action == "fail" and ((.Test // "") == "")) | .Package ] | unique)
+                  - ([ .[] | select(.Action == "fail" and ((.Test // "") != "")) | .Package ] | unique))
+              }
+          ' "$RUNNER_TEMP/test.json" > report.json
+          nfail="$(jq '.test_failures | length' report.json)"
+          nbuild="$(jq '.build_failures | length' report.json)"
+          if [ "$nfail" = "0" ] && [ "$nbuild" = "0" ]; then
+            echo "### Shard ${{ matrix.index }}: no flakes" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Shard ${{ matrix.index }}: $nfail failing test(s), $nbuild build failure(s)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload shard report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shard-${{ matrix.index }}
+          path: report.json
+          if-no-files-found: error
+          retention-days: 14
+
+  summary:
+    name: Summarize
+    needs: [shards, hunt]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    steps:
+      - name: Download shard reports
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: reports
+      - name: Aggregate and write the summary
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find reports -name report.json | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no shard reports were uploaded"
+            exit 1
+          fi
+          jq -s '{
+            test_failures: ([ .[].test_failures[] ] | sort_by(.package, .test)),
+            build_failures: ([ .[].build_failures[] ] | unique | sort),
+            errors: [ .[] | select(.error != null) | { index: .index, error: .error } ]
+          }' "${files[@]}" > combined.json
+          nfail="$(jq '.test_failures | length' combined.json)"
+          nbuild="$(jq '.build_failures | length' combined.json)"
+          nerr="$(jq '.errors | length' combined.json)"
+
+          # The combined artifact: one line per failing test, package.Test +
+          # seed + the command that reproduces it. Plain text so it is easy to
+          # read without jq.
+          {
+            echo "flaky-test hunt — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "packages: ${{ needs.shards.outputs.packages }}  shards: ${{ needs.shards.outputs.shards }}  count: 10  race: on  shuffle: on"
+            echo
+            if [ "$nfail" = "0" ] && [ "$nbuild" = "0" ] && [ "$nerr" = "0" ]; then
+              echo "no flakes"
+            else
+              echo "test failures: $nfail"
+              echo "build failures: $nbuild"
+              echo "shard errors: $nerr"
+              echo
+              jq -r '.test_failures[] | "\(.package).\(.test)\t\(.seed)\tgo test -race -count=10 -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)"' combined.json
+              jq -r '.build_failures[] | "\(.)\t(build failure)"' combined.json
+              jq -r '.errors[] | "shard \(.index)\t\(.error)"' combined.json
+            fi
+          } > flake-report.txt
+
+          # The run summary ($GITHUB_STEP_SUMMARY).
+          {
+            echo "## Flaky-test hunt"
+            echo
+            echo "- \`${{ needs.shards.outputs.packages }}\` packages across \`${{ needs.shards.outputs.shards }}\` shards, \`go test -race -count=10 -shuffle=on\` each"
+            echo
+            if [ "$nfail" = "0" ] && [ "$nbuild" = "0" ] && [ "$nerr" = "0" ]; then
+              echo "**no flakes**"
+            else
+              echo "**$nfail flaky test(s)**, $nbuild package build failure(s), $nerr shard error(s)"
+              echo
+              if [ "$nfail" != "0" ]; then
+                echo "| package.Test | seed | reproduce |"
+                echo "|---|---|---|"
+                jq -r '.test_failures[] | "| `\(.package).\(.test)` | `\(.seed)` | `go test -race -count=10 -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)` |"' combined.json
+                echo
+              fi
+              if [ "$nbuild" != "0" ]; then
+                echo "Packages that failed to build:"
+                jq -r '.build_failures[] | "- `\(.)`"' combined.json
+                echo
+              fi
+              if [ "$nerr" != "0" ]; then
+                echo "Shard errors:"
+                jq -r '.errors[] | "- shard \(.index): \(.error)"' combined.json
+                echo
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Gate: a shard that died before reporting, or that reported an
+          # infrastructure error, must not read as a green nightly run. The
+          # summary and artifact above are written first, so a failure here
+          # still leaves the report behind.
+          missing=$(( ${{ needs.shards.outputs.shards }} - ${#files[@]} ))
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::${#files[@]} of ${{ needs.shards.outputs.shards }} shard reports found ($missing missing)"
+            exit 1
+          fi
+          if [ "$nerr" != "0" ]; then
+            echo "::error::$nerr shard(s) reported an infrastructure error"
+            exit 1
+          fi
+      - name: Upload the combined report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: flake-report
+          path: flake-report.txt
+          if-no-files-found: error
+          retention-days: 14

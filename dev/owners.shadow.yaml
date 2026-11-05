@@ -21,6 +21,24 @@ pipelines:
     # pipeline silently and proposes nothing. The only difference from owners.yaml.
     shadow:
       enabled: true
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch
+    dags: [revenue_daily]
+    dbt_project: dev/batch/dbt/analytics
+    models: [stg_orders, fct_revenue]
+    sink_tables: [analytics.fct_revenue]
+    sink_ts_column: loaded_at
+    # The batch layers are not in the top-level `layers:` map (that map stays the
+    # six CDC layers, which TestExistingFilesStayValid pins), so they are owned
+    # here per-pipeline.
+    owners:
+      orchestrator: {approvers: priya}
+      transform: {approvers: priya}
+      warehouse: {approvers: meera}
+    # Shadow is off for the batch pipeline in this wave (its scenarios run live).
+    shadow:
+      enabled: false
 layers:
   postgres: priya
   kafka-connect: arjun

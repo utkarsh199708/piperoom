@@ -58,9 +58,14 @@ export function layersNeedingYou(room: RoomSnapshot, user: CurrentUser): string[
   const out: string[] = []
   for (const p of room.open_proposals ?? []) {
     // The same rule the proposals panel uses to show Approve/Reject (state/permissions.ts).
-    const proposal = { required_layers: p.required_layers, approvals: p.approvals, status: 'open' as const }
+    const proposal = {
+      required_layers: p.required_layers,
+      approvals: p.approvals,
+      status: 'open' as const,
+      fallback_layers: p.fallback_layers,
+    }
     for (const layer of p.required_layers) {
-      if (canDecideLayer(proposal, user, layer) && !out.includes(layer)) out.push(layer)
+      if (canDecideLayer(proposal, user, layer, room.driver?.id) && !out.includes(layer)) out.push(layer)
     }
   }
   return out

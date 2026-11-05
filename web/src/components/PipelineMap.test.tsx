@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import type { Topology } from '../api/types'
 import { PipelineMap } from './PipelineMap'
 
@@ -83,12 +83,55 @@ describe('PipelineMap — lane', () => {
     expect(screen.getByText('orders-dlq')).toBeInTheDocument()
   })
 
+  it('labels a schema_subject node and keeps it in lane order with its health', () => {
+    const withSubject: Topology = {
+      ...five,
+      nodes: [
+        five.nodes[0],
+        {
+          id: 'sr:pg.public.orders-value',
+          kind: 'schema_subject',
+          name: 'pg.public.orders-value',
+          layer: 'schema-registry',
+          owner: 'arjun',
+          health: 'fail',
+          facts: { compatibility: 'BACKWARD', latest_version: '1' },
+        },
+        ...five.nodes.slice(1),
+      ],
+    }
+    const { container } = render(<PipelineMap topology={withSubject} />)
+    const names = [...container.querySelectorAll('[data-node] .font-mono.text-sm')].map((n) => n.textContent)
+    expect(names).toEqual([
+      'public.orders',
+      'pg.public.orders-value',
+      'pg-orders-connector',
+      'pg.public.orders',
+      'orders-sync',
+      'analytics.orders',
+    ])
+    const subject = screen.getByText('pg.public.orders-value').closest('button')!
+    expect(within(subject).getByText('Schema subject')).toBeInTheDocument()
+    expect(subject).toHaveAttribute('data-health', 'fail')
+    expect(within(subject).getByText('failed')).toBeInTheDocument()
+  })
+
   it('shows health as a word, not only a colour', () => {
     render(<PipelineMap topology={five} />)
     expect(screen.getByText('healthy')).toBeInTheDocument()
     expect(screen.getByText('failed')).toBeInTheDocument()
     expect(screen.getAllByText('degraded')).toHaveLength(2)
     expect(screen.getByText('unknown')).toBeInTheDocument()
+  })
+
+  it('words facts for people, keeps the server key as a tooltip, and gives the name its own line', () => {
+    render(<PipelineMap topology={five} />)
+    const node = screen.getByText('pg-orders-connector').closest('button')!
+    expect(node.title).toContain('failed tasks 1')
+    expect(node).not.toHaveTextContent('tasks_failed')
+    fireEvent.click(screen.getByRole('button', { name: /Expand/ }))
+    expect(screen.getByText('failed tasks').closest('[title]')).toHaveAttribute('title', 'tasks_failed')
+    expect(screen.queryByText('tasks_failed')).not.toBeInTheDocument()
   })
 
   it('gives only the failed node a danger border', () => {
@@ -116,6 +159,16 @@ describe('PipelineMap — lane', () => {
     const lane = screen.getByRole('group', { name: /Pipeline/ })
     expect(lane.className).toContain('overflow-x-auto')
     expect(container.querySelector('[data-health]')?.className).toContain('min-w-[168px]')
+  })
+
+  it('is the containing block for the sr-only node labels so they cannot widen the page', () => {
+    const { container } = render(<PipelineMap topology={five} />)
+    const lane = screen.getByRole('group', { name: /Pipeline/ })
+    expect(lane.className).toContain('relative')
+    expect(lane.className).toContain('overflow-x-auto')
+    const labels = container.querySelectorAll('.sr-only')
+    expect(labels.length).toBeGreaterThan(0)
+    for (const label of labels) expect(lane.contains(label)).toBe(true)
   })
 
   it('shows skeleton nodes and a loading label before the topology arrives', () => {

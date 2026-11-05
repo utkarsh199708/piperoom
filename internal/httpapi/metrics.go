@@ -58,6 +58,10 @@ type gauges struct {
 	conns     func() int                 // live WebSocket connections
 	agents    func() (inUse, queued int) // agent slots in use, rooms queued for one
 	openRooms func() int                 // open rooms in the room cache
+	approvals func() map[string]uint64   // approval.given appended here, by grant (a counter)
+	// soleMembers is how many control.granted{reason: "sole_member"} this
+	// replica appended (a counter, P2b).
+	soleMembers func() uint64
 }
 
 func newMetrics(start time.Time, g gauges) *metrics {
@@ -175,6 +179,24 @@ func (m *metrics) write(w io.Writer, now time.Time) {
 	}
 	if m.g.openRooms != nil {
 		gauge(w, "piperoom_rooms_open", "Open rooms in this replica's room cache.", m.g.openRooms())
+	}
+	if m.g.approvals != nil {
+		byGrant := m.g.approvals()
+		grants := make([]string, 0, len(byGrant))
+		for g := range byGrant {
+			grants = append(grants, g)
+		}
+		slices.Sort(grants)
+		fmt.Fprintln(w, "# HELP piperoom_approvals_total approval.given events this replica appended, by grant.")
+		fmt.Fprintln(w, "# TYPE piperoom_approvals_total counter")
+		for _, g := range grants {
+			fmt.Fprintf(w, "piperoom_approvals_total{grant=%s} %d\n", quoteLabel(g), byGrant[g])
+		}
+	}
+	if m.g.soleMembers != nil {
+		fmt.Fprintln(w, "# HELP piperoom_sole_member_grants_total Driverless alert rooms whose first member this replica made the driver.")
+		fmt.Fprintln(w, "# TYPE piperoom_sole_member_grants_total counter")
+		fmt.Fprintf(w, "piperoom_sole_member_grants_total %d\n", m.g.soleMembers())
 	}
 	fmt.Fprintln(w, "# HELP piperoom_goroutines Goroutines in this process.")
 	fmt.Fprintln(w, "# TYPE piperoom_goroutines gauge")

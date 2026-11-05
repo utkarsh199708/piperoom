@@ -31,6 +31,18 @@ describe('LoginScreen', () => {
     expect(screen.getByRole('button', { name: 'Priya' })).toHaveAccessibleDescription('postgres schema-registry')
   })
 
+  it('renders the batch layers orchestrator and transform with their own badge colours', () => {
+    loaded.value = {
+      status: 'ready',
+      reload: vi.fn(),
+      data: [{ id: 'nina', name: 'Nina', layers: ['orchestrator', 'transform'] }],
+    }
+    render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.getByText('orchestrator')).toHaveClass('text-layer-orchestrator')
+    expect(screen.getByText('transform')).toHaveClass('text-layer-transform')
+    expect(screen.getByRole('button', { name: 'Nina' })).toHaveAccessibleDescription('orchestrator transform')
+  })
+
   it('picking a user calls onPick with the id; busy disables the picker', () => {
     const onPick = vi.fn()
     const { rerender } = render(<LoginScreen onPick={onPick} busy={false} />)
@@ -68,9 +80,11 @@ describe('LoginScreen', () => {
     expect(first).toHaveAttribute('data-on', 'true')
   })
 
-  it('the SSO button is a link only when the server has SSO', () => {
+  it('the SSO button is a link when the server has SSO, and a quiet footnote when it does not', () => {
     const { rerender } = render(<LoginScreen onPick={vi.fn()} busy={false} />)
-    expect(screen.getByRole('button', { name: 'Continue with SSO' })).toBeDisabled()
+    // No greyed-out primary button: a dead control at the top of the card reads as broken.
+    expect(screen.queryByRole('button', { name: 'Continue with SSO' })).not.toBeInTheDocument()
+    expect(screen.getByText(/SSO is not enabled on this server/)).toBeInTheDocument()
     rerender(<LoginScreen onPick={vi.fn()} busy={false} ssoHref="/auth/login" />)
     expect(screen.getByRole('link', { name: 'Continue with SSO' })).toHaveAttribute('href', '/auth/login')
   })
@@ -79,7 +93,7 @@ describe('LoginScreen', () => {
     const reload = vi.fn()
     loaded.value = { status: 'loading', reload }
     const { rerender } = render(<LoginScreen onPick={vi.fn()} busy={false} />)
-    expect(screen.getByText('Loading users…')).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Loading users' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Priya' })).not.toBeInTheDocument()
     loaded.value = { status: 'error', message: 'not_found: nope', reload }
     rerender(<LoginScreen onPick={vi.fn()} busy={false} />)

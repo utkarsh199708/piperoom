@@ -6,6 +6,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,16 +15,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"piperoom/internal/clients/workerlogs/logql"
 )
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
 	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
-	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
-	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
+	SourceDBURL       string // SOURCE_DB_URL (the CDC source database: postgres:// or mysql://; a pipeline's source_kind must match the scheme, Q8)
+	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source database (postgres:// or mysql://, matching source_kind, Q8) as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
+	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
-	ConnectURL        string // CONNECT_URL
+	ConnectURL        string // CONNECT_URL (CONNECT_KIND=rest only)
+	ConnectKind       string // CONNECT_KIND: rest (default) | msk | confluent | aiven (ParseConnectKind; no caller yet, inert until wiring and cmd/discover call it: msk.md PR 2, U13)
 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
@@ -68,8 +74,29 @@ type Config struct {
 	PublicURL         string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
-	// "snowflake" uses it as a gosnowflake DSN.
-	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake
+	// "snowflake" uses it as a gosnowflake DSN; "bigquery" and "databricks"
+	// (P0 item 8, readers in P4e) use it as that driver's DSN; "clickhouse"
+	// uses it as a clickhouse-go/v2 DSN. internal/wiring validates the value
+	// and refuses a kind it has no reader for yet.
+	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake | bigquery | databricks | clickhouse
+
+	// Batch pipelines (P0 item 8): the orchestrator and transform readers.
+	// An empty URL or directory turns that reader off, and its tools answer
+	// clients.ErrNotSupported. ParseAirflow and ParseDBT type them.
+	AirflowURL      string // AIRFLOW_URL: base URL of the Airflow REST API v1 (http or https, no user info)
+	AirflowUsername string // AIRFLOW_USERNAME: basic auth, with AIRFLOW_PASSWORD
+	AirflowPassword string // AIRFLOW_PASSWORD (secret)
+	AirflowToken    string // AIRFLOW_TOKEN: bearer token instead of basic auth (secret)
+	DBTArtifactsDir string // DBT_ARTIFACTS_DIR: directory holding run_results.json and manifest.json; or dbt Cloud below, not both
+	DBTCloudURL     string // DBT_CLOUD_URL: dbt Cloud base URL, e.g. https://cloud.getdbt.com
+	DBTCloudToken   string // DBT_CLOUD_TOKEN: read-only service token (secret)
+	DBTCloudAccount string // DBT_CLOUD_ACCOUNT_ID: the {a} of /api/v2/accounts/{a}/runs/
+	DBTCloudJobID   string // DBT_CLOUD_JOB_ID: the job whose latest run's artifacts are read
+
+	// AutoApproveDelay is how long a proposal whose every step is on its
+	// pipeline's owners.yaml auto_approve: list waits, cancellable, before the
+	// policy approves and runs it (P2). ParseAutoApproveDelay.
+	AutoApproveDelay string // PIPEROOM_AUTO_APPROVE_DELAY: Go duration before a policy-approved proposal runs; default "60s"; "0" turns the policy off even when owners.yaml lists actions
 
 	// Signed alert sources (internal/alertin). A source with an empty secret is
 	// disabled: its route answers 401. All secrets; never log them.
@@ -80,6 +107,13 @@ type Config struct {
 	DatadogAlertToken    string // DATADOG_ALERT_TOKEN
 	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
 	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
+
+	// X4: ChangesWebhookSecret signs POST /api/changes/webhook with the
+	// generic alert scheme (X-Piperoom-Signature: t=<unix ts>,v1=<hex
+	// HMAC-SHA256("<ts>.<body>")>, ±5 min). Comma-separated for rotation,
+	// like GENERIC_ALERT_SECRET. Empty = the route answers 401. Secret; never
+	// log it. Limits: ChangesWebhookMaxBodyBytes, ChangesWebhookPerMinute.
+	ChangesWebhookSecret string // CHANGES_WEBHOOK_SECRET
 
 	// Agent cost guard: at most this many agent runs working at once on THIS
 	// replica, across all its rooms; further rooms wait in a queue (round-robin
@@ -113,19 +147,24 @@ type Config struct {
 	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
 	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
 	WatchMaxOpenRooms string // PIPEROOM_WATCH_MAX_OPEN_ROOMS: rooms the watcher keeps open at once; default 6, min 1 (F6; ParseWatchMaxOpenRooms)
+	// X3: how far ahead a forecast signal looks (ParseWatchForecast).
+	WatchForecastHorizon string // PIPEROOM_WATCH_FORECAST_HORIZON: Go duration, default 48h, 1h..168h
 
 	// Triage pass (F6): one bounded first look on a cheap model before the
 	// full investigation, outside the agent pool. Not PIPEROOM_TRIAGE_MODEL,
 	// which runs the first turns of the investigation itself. ParseTriagePass
 	// types them and names the env var on error.
 	TriagePass        string // PIPEROOM_TRIAGE_PASS: on | off, default on
-	TriagePassModel   string // PIPEROOM_TRIAGE_PASS_MODEL: default "claude-haiku-5-5"
+	TriagePassModel   string // PIPEROOM_TRIAGE_PASS_MODEL: empty = claude-haiku-5-5 on a Claude provider, else the role's main model (ParseModelRoles; ParseTriagePass)
 	TriagePassTimeout string // PIPEROOM_TRIAGE_PASS_TIMEOUT: Go duration, default 40s, max 90s
 
 	// PostmortemModel says whether a closed room without a fresh hand-off
 	// summary gets one model call for the post-mortem prose (F2):
 	// auto (default) | off (events-only draft). ParsePostmortemModel.
-	PostmortemModel string // PIPEROOM_POSTMORTEM_MODEL
+	// PostmortemMode is its name since V0; PostmortemModel is the deprecated
+	// alias (design model-providers 15, decision 5). Both empty = auto.
+	PostmortemModel string // PIPEROOM_POSTMORTEM_MODEL (deprecated alias of PIPEROOM_POSTMORTEM_MODE)
+	PostmortemMode  string // PIPEROOM_POSTMORTEM_MODE: auto | off
 
 	// ChangesRetentionDays deletes pipeline_changes rows older than this many
 	// days (F8); "0" = keep. Rows per pipeline are capped at 5000 regardless.
@@ -135,6 +174,34 @@ type Config struct {
 	// exporter next to Kafka Connect. ParseDebeziumMetrics.
 	DebeziumMetricsURL    string // DEBEZIUM_METRICS_URL: http(s)://host:port/metrics; empty = debezium_metrics says "not configured"
 	DebeziumMetricsPrefix string // DEBEZIUM_METRICS_PREFIX: metric name prefix, default "debezium_metrics_"
+
+	// Worker and consumer logs (Q3): a Loki that holds the Kafka Connect worker
+	// logs (connect_worker_logs) and, with a per-pipeline consumer_logs
+	// selector in owners.yaml, the consumer application's logs (consumer_logs).
+	// ParseWorkerLogs. Empty URL = both tools answer "not configured".
+	WorkerLogsLokiURL  string // WORKER_LOGS_LOKI_URL: http(s)://host:port, no user info
+	WorkerLogsSelector string // WORKER_LOGS_SELECTOR: a LogQL stream selector for the Connect workers, e.g. {service="connect"}
+	WorkerLogsToken    string // WORKER_LOGS_TOKEN (secret): bearer token, or the password when WORKER_LOGS_USER is set
+	WorkerLogsUser     string // WORKER_LOGS_USER: basic auth user (the token is its password)
+	WorkerLogsOrgID    string // WORKER_LOGS_ORG_ID: X-Scope-OrgID for a multi-tenant Loki
+
+	// X7: the optional OpenLineage emitter (X7b; mapping in
+	// docs/design/lineage.md). Empty URL = off: no goroutine, no request.
+	// ParseOpenLineage. The API key is a secret; never log it.
+	OpenLineageURL       string // OPENLINEAGE_URL: the full endpoint events are POSTed to, e.g. http://marquez:5000/api/v1/lineage
+	OpenLineageNamespace string // OPENLINEAGE_NAMESPACE: the job namespace, default "piperoom"
+	OpenLineageAPIKey    string // OPENLINEAGE_API_KEY: sent as "Authorization: Bearer <key>"; empty = no header (secret)
+
+	// Q7: the forge of the pull-request fix (docs/design/fix-pr.md §4, §5.6).
+	// FORGE_KIND "" = off: no forge client, no forge tool, no fix-PR action.
+	// ParseForge and ParseFixPRApplyTimeout type them. The App's private key
+	// lives in a file; only its path is here.
+	ForgeKind               string // FORGE_KIND: "" (off, the default) | "github"
+	GitHubAPIURL            string // GITHUB_API_URL: default https://api.github.com; GitHub Enterprise Server: https://<host>/api/v3
+	GitHubAppID             string // GITHUB_APP_ID
+	GitHubAppInstallationID string // GITHUB_APP_INSTALLATION_ID
+	GitHubAppPrivateKeyFile string // GITHUB_APP_PRIVATE_KEY_FILE: path to the App's PEM private key (secret file)
+	FixPRApplyTimeout       string // PIPEROOM_FIXPR_APPLY_TIMEOUT: how long after a merge the agent waits for the change to reach the system; default "2h", 10m to 168h
 
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
@@ -148,8 +215,38 @@ type Config struct {
 	VertexProject string // VERTEX_PROJECT_ID (vertex)
 	VertexRegion  string // VERTEX_REGION (vertex)
 	// TriageModel, when set, runs the first investigation turns on a cheaper
-	// model; empty = always Model.
+	// model; empty = always Model. Always on the main provider: the triage
+	// turns share the investigation's history.
 	TriageModel string // PIPEROOM_TRIAGE_MODEL
+
+	// Model providers (V0; docs/design/model-providers.md section 9). Kept as
+	// strings like the other groups; ParseModelRoles and ParseModelKnobs type
+	// them and name the env var on error. Keys are never here: adapters read
+	// PIPEROOM_MODEL_API_KEY / PIPEROOM_MODEL_API_KEY_FILE (EnvModelAPIKey,
+	// EnvModelAPIKeyFile) or the provider's standard key variable themselves.
+	// On anthropic, bedrock and vertex none of these changes anything unless set.
+	ModelFlavor                  string // PIPEROOM_MODEL_FLAVOR: provider openai only; openai (default) | azure | deepseek | qwen | mistral | groq | together | openrouter | xai | ollama | vllm | generic
+	ModelBaseURL                 string // PIPEROOM_MODEL_BASE_URL: providers openai and gemini only; empty = the flavor's default (ParseBaseURL)
+	ModelContextTokens           string // PIPEROOM_MODEL_CONTEXT_TOKENS: the main model's context window; empty = the adapter's table, else 128000
+	ModelCaps                    string // PIPEROOM_MODEL_CAPS: comma list for generic, ollama and vllm hosts: parallel_tools, structured_output, reasoning
+	ModelUnverified              string // PIPEROOM_MODEL_UNVERIFIED: on | off (default); on allows a model not in supported.json on a new provider
+	ModelMaxConcurrency          string // PIPEROOM_MODEL_MAX_CONCURRENCY: requests in flight per endpoint, new providers only; empty = PIPEROOM_MAX_AGENTS
+	ModelTPM                     string // PIPEROOM_MODEL_TPM: optional tokens-per-minute budget per endpoint; empty = none
+	ModelProxy                   string // PIPEROOM_MODEL_PROXY: on | off (default); on sends model requests through HTTPS_PROXY with the target check
+	GeminiBackend                string // PIPEROOM_GEMINI_BACKEND: api (default) | vertex (Google ADC, VERTEX_PROJECT_ID, VERTEX_REGION)
+	ModelAllowPrivateHTTP        string // PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP: on | off (default); on allows plain http to RFC 1918, ULA and loopback hosts only
+	ModelAckCNEndpoint           string // PIPEROOM_MODEL_ACK_CN_ENDPOINT: must be "yes" to start with an endpoint operated in the People's Republic of China
+	ModelPricingStrict           string // PIPEROOM_MODEL_PRICING_STRICT: all | non-claude (default) | off; off with PIPEROOM_PIPELINE_DAILY_COST_USD refuses start
+	ModelNeutraliseControlTokens string // PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS: all (default) | non-claude; there is no off
+	ModelPromptVariant           string // PIPEROOM_MODEL_PROMPT_VARIANT: reserved, not implemented; any non-empty value refuses start
+	TriagePassProvider           string // PIPEROOM_TRIAGE_PASS_PROVIDER: first look; empty = PIPEROOM_MODEL_PROVIDER
+	SummaryProvider              string // PIPEROOM_SUMMARY_PROVIDER: hand-off and post-mortem writer; empty = PIPEROOM_MODEL_PROVIDER
+	SummaryModel                 string // PIPEROOM_SUMMARY_MODEL: empty = PIPEROOM_MODEL (required when the provider differs)
+	JudgeProvider                string // PIPEROOM_JUDGE_PROVIDER: hand-off and evals judge; empty = PIPEROOM_MODEL_PROVIDER
+	JudgeModel                   string // PIPEROOM_JUDGE_MODEL: empty = PIPEROOM_MODEL (required when the provider differs)
+	TriagePassBaseURL            string // PIPEROOM_TRIAGE_PASS_BASE_URL: only when the first look's provider differs from the main one
+	SummaryBaseURL               string // PIPEROOM_SUMMARY_BASE_URL: only when the summary provider differs from the main one
+	JudgeBaseURL                 string // PIPEROOM_JUDGE_BASE_URL: only when the judge provider differs from the main one
 	// RoomTokenBudget caps model tokens (input + output) per room; when reached
 	// the agent stops and says so. Empty = default 2000000; "0" = no cap. The
 	// server keeps the count in the room database (docs/design/cost.md), so it
@@ -217,6 +314,54 @@ type Config struct {
 	// password: anyone who reaches the port picks any user) is served on a
 	// non-loopback address. See ParseDevAck. Never baked into an image.
 	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
+
+	// FakeAgent swaps the real agent for the scripted one of internal/room/demo
+	// on a server wired to a real stack, so a full-stack test can run the demo
+	// story without a model or an API key. Dev only: see ParseFakeAgent.
+	FakeAgent string // PIPEROOM_FAKE_AGENT: "" (default, the real agent) | FakeAgentScripted
+
+	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) makes the executor
+	// refuse to queue or run any step, so an approved proposal is recorded but
+	// never executed and `action.executed` is never emitted; "on" wires the
+	// write clients. --demo forces "on" (fake clients only).
+	WriteMode string // PIPEROOM_WRITE_MODE: off | on
+
+	// HypothesisGuard is PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+	// (default log). The agent's checks that refuse a "nothing to fix" verdict
+	// while the watcher still fires and a "ruled out" claim no cited read
+	// supports; log only records what would be refused. (H1)
+	HypothesisGuard string // PIPEROOM_HYPOTHESIS_GUARD: off | log | enforce
+
+	// Autonomy is PIPEROOM_AUTONOMY: the AU wave's earned auto-approve.
+	// ParseAutonomy types it; write mode off makes it off whatever it says. (AU1)
+	Autonomy string // PIPEROOM_AUTONOMY: on (default) | off
+
+	// Setup rooms (docs/design/setup-agent.md §3.8, §4 item 6; U wave).
+	// Server side. Raw strings; ParseSetup types them and refuses
+	// SetupEnabled "on" while write mode is off.
+	SetupEnabled      string // PIPEROOM_SETUP_ENABLED: off (default) | on; "on" requires PIPEROOM_WRITE_MODE=on
+	SetupProdPatterns string // PIPEROOM_SETUP_PROD_PATTERNS: comma list of host globs, kubectl context names and cloud account ids that class a target production
+	SetupTokenBudget  string // PIPEROOM_SETUP_TOKEN_BUDGET: model tokens per setup room; default 2000000
+	SetupLocalDelay   string // PIPEROOM_SETUP_LOCAL_DELAY: countdown before a T1 setup step runs (policy setup_local); default 20s; "0" = every T1 step waits for a click
+	SetupPluginHosts  string // PIPEROOM_SETUP_PLUGIN_HOSTS: comma list of hosts plugin_install may download from; default repo1.maven.org
+	SecretsDir        string // PIPEROOM_SECRETS_DIR: absolute directory where registered read credentials land (<dir>/<pipeline>/<name>, 0600); required when setup is on; secret files, never logged
+	OwnersDir         string // OWNERS_DIR: directory of per-pipeline owners files (<id>.yaml) a registration writes and the server hot-reloads; "" = registration writes nothing on this server (standalone writes next to the project)
+
+	// Runner side (cmd/setup). The runner reads these; the server ignores
+	// them. Only names of files and endpoints: the secret store's contents
+	// are never in the environment of anything the runner starts.
+	SetupSecretsFile string // PIPEROOM_SETUP_SECRETS_FILE: the runner's secret store; default <project dir>/.piperoom/secrets.env (0600)
+	SetupServerURL   string // PIPEROOM_SETUP_SERVER_URL: the server origin, same as --server; https unless loopback
+	SetupCode        string // PIPEROOM_SETUP_CODE: the pairing code, same as --code; single use, never logged
+}
+
+// LogValue keeps a Config out of the log: it holds database URLs with
+// passwords, the alert HMAC secrets, the OIDC client secret and the runner's
+// pairing code (PIPEROOM_SETUP_CODE), so slog prints a fixed marker instead
+// of the fields. A command that wants to log settings logs the typed values
+// ParseX returns, which hold no secret. (U0)
+func (c Config) LogValue() slog.Value {
+	return slog.StringValue("config.Config{redacted: holds secrets}")
 }
 
 // Load reads the environment and applies dev defaults.
@@ -225,9 +370,11 @@ func Load() Config {
 		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
 		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
+		SourceDBWriteURL:  get("SOURCE_DB_WRITE_URL", ""),
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
+		ConnectKind:       get("CONNECT_KIND", DefaultConnectKind),
 		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
@@ -261,6 +408,18 @@ func Load() Config {
 
 		WarehouseKind: get("WAREHOUSE_KIND", "postgres"),
 
+		AirflowURL:      get("AIRFLOW_URL", ""),
+		AirflowUsername: get("AIRFLOW_USERNAME", ""),
+		AirflowPassword: get("AIRFLOW_PASSWORD", ""),
+		AirflowToken:    get("AIRFLOW_TOKEN", ""),
+		DBTArtifactsDir: get("DBT_ARTIFACTS_DIR", ""),
+		DBTCloudURL:     get("DBT_CLOUD_URL", ""),
+		DBTCloudToken:   get("DBT_CLOUD_TOKEN", ""),
+		DBTCloudAccount: get("DBT_CLOUD_ACCOUNT_ID", ""),
+		DBTCloudJobID:   get("DBT_CLOUD_JOB_ID", ""),
+
+		AutoApproveDelay: get("PIPEROOM_AUTO_APPROVE_DELAY", DefaultAutoApproveDelay),
+
 		AlertmanagerToken:    get("ALERTMANAGER_TOKEN", ""),
 		GrafanaAlertSecret:   get("GRAFANA_ALERT_SECRET", ""),
 		PagerDutyAlertSecret: get("PAGERDUTY_ALERT_SECRET", ""),
@@ -268,6 +427,7 @@ func Load() Config {
 		DatadogAlertToken:    get("DATADOG_ALERT_TOKEN", ""),
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
+		ChangesWebhookSecret: get("CHANGES_WEBHOOK_SECRET", ""), // X4
 
 		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
 		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
@@ -279,17 +439,43 @@ func Load() Config {
 		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
 		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
 		WatchMaxOpenRooms: get("PIPEROOM_WATCH_MAX_OPEN_ROOMS", DefaultWatchMaxOpenRooms),
+		// X3
+		WatchForecastHorizon: get("PIPEROOM_WATCH_FORECAST_HORIZON", DefaultWatchForecastHorizon),
 
-		TriagePass:        get("PIPEROOM_TRIAGE_PASS", DefaultTriagePass),
-		TriagePassModel:   get("PIPEROOM_TRIAGE_PASS_MODEL", DefaultTriagePassModel),
+		TriagePass: get("PIPEROOM_TRIAGE_PASS", DefaultTriagePass),
+		// No default here since V0: ParseModelRoles (and ParseTriagePass) give
+		// claude-haiku-5-5 on a Claude provider and can tell "unset" elsewhere.
+		TriagePassModel:   get("PIPEROOM_TRIAGE_PASS_MODEL", ""),
 		TriagePassTimeout: get("PIPEROOM_TRIAGE_PASS_TIMEOUT", DefaultTriagePassTimeout),
 
-		PostmortemModel: get("PIPEROOM_POSTMORTEM_MODEL", PostmortemModelAuto),
+		// Empty default (ParsePostmortemModel reads "" as auto), so a set alias
+		// can be told from an unset one (V0).
+		PostmortemModel: get("PIPEROOM_POSTMORTEM_MODEL", ""),
+		PostmortemMode:  get("PIPEROOM_POSTMORTEM_MODE", ""),
 
 		ChangesRetentionDays: get("PIPEROOM_CHANGES_RETENTION_DAYS", DefaultChangesRetentionDays),
 
 		DebeziumMetricsURL:    get("DEBEZIUM_METRICS_URL", ""),
 		DebeziumMetricsPrefix: get("DEBEZIUM_METRICS_PREFIX", DefaultDebeziumMetricsPrefix),
+
+		WorkerLogsLokiURL:  get("WORKER_LOGS_LOKI_URL", ""),
+		WorkerLogsSelector: get("WORKER_LOGS_SELECTOR", ""),
+		WorkerLogsToken:    get("WORKER_LOGS_TOKEN", ""),
+		WorkerLogsUser:     get("WORKER_LOGS_USER", ""),
+		WorkerLogsOrgID:    get("WORKER_LOGS_ORG_ID", ""),
+
+		// X7
+		OpenLineageURL:       get("OPENLINEAGE_URL", ""),
+		OpenLineageNamespace: get("OPENLINEAGE_NAMESPACE", DefaultOpenLineageNamespace),
+		OpenLineageAPIKey:    get("OPENLINEAGE_API_KEY", ""),
+
+		// Q7
+		ForgeKind:               get("FORGE_KIND", ""),
+		GitHubAPIURL:            get("GITHUB_API_URL", DefaultGitHubAPIURL),
+		GitHubAppID:             get("GITHUB_APP_ID", ""),
+		GitHubAppInstallationID: get("GITHUB_APP_INSTALLATION_ID", ""),
+		GitHubAppPrivateKeyFile: get("GITHUB_APP_PRIVATE_KEY_FILE", ""),
+		FixPRApplyTimeout:       get("PIPEROOM_FIXPR_APPLY_TIMEOUT", ""),
 
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
 
@@ -299,6 +485,30 @@ func Load() Config {
 		VertexRegion:    get("VERTEX_REGION", ""),
 		TriageModel:     get("PIPEROOM_TRIAGE_MODEL", ""),
 		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
+
+		// V0
+		ModelFlavor:                  get("PIPEROOM_MODEL_FLAVOR", ""),
+		ModelBaseURL:                 get("PIPEROOM_MODEL_BASE_URL", ""),
+		ModelContextTokens:           get("PIPEROOM_MODEL_CONTEXT_TOKENS", ""),
+		ModelCaps:                    get("PIPEROOM_MODEL_CAPS", ""),
+		ModelUnverified:              get("PIPEROOM_MODEL_UNVERIFIED", ""),
+		ModelMaxConcurrency:          get("PIPEROOM_MODEL_MAX_CONCURRENCY", ""),
+		ModelTPM:                     get("PIPEROOM_MODEL_TPM", ""),
+		ModelProxy:                   get("PIPEROOM_MODEL_PROXY", ""),
+		GeminiBackend:                get("PIPEROOM_GEMINI_BACKEND", ""),
+		ModelAllowPrivateHTTP:        get("PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP", ""),
+		ModelAckCNEndpoint:           get("PIPEROOM_MODEL_ACK_CN_ENDPOINT", ""),
+		ModelPricingStrict:           get("PIPEROOM_MODEL_PRICING_STRICT", ""),
+		ModelNeutraliseControlTokens: get("PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS", ""),
+		ModelPromptVariant:           get("PIPEROOM_MODEL_PROMPT_VARIANT", ""),
+		TriagePassProvider:           get("PIPEROOM_TRIAGE_PASS_PROVIDER", ""),
+		SummaryProvider:              get("PIPEROOM_SUMMARY_PROVIDER", ""),
+		SummaryModel:                 get("PIPEROOM_SUMMARY_MODEL", ""),
+		JudgeProvider:                get("PIPEROOM_JUDGE_PROVIDER", ""),
+		JudgeModel:                   get("PIPEROOM_JUDGE_MODEL", ""),
+		TriagePassBaseURL:            get("PIPEROOM_TRIAGE_PASS_BASE_URL", ""),
+		SummaryBaseURL:               get("PIPEROOM_SUMMARY_BASE_URL", ""),
+		JudgeBaseURL:                 get("PIPEROOM_JUDGE_BASE_URL", ""),
 
 		ModelPrices:              get("PIPEROOM_MODEL_PRICES", ""),
 		PipelineDailyTokenBudget: get("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", ""),
@@ -336,7 +546,25 @@ func Load() Config {
 		LogLevel:  get("PIPEROOM_LOG_LEVEL", DefaultLogLevel),
 		LogFormat: get("PIPEROOM_LOG_FORMAT", DefaultLogFormat),
 
-		DevAck: get("PIPEROOM_DEV_ACK", ""),
+		DevAck:    get("PIPEROOM_DEV_ACK", ""),
+		FakeAgent: get("PIPEROOM_FAKE_AGENT", ""),
+
+		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
+
+		HypothesisGuard: get("PIPEROOM_HYPOTHESIS_GUARD", DefaultHypothesisGuard),
+		Autonomy:        get("PIPEROOM_AUTONOMY", "on"),
+
+		SetupEnabled:      get("PIPEROOM_SETUP_ENABLED", "off"),
+		SetupProdPatterns: get("PIPEROOM_SETUP_PROD_PATTERNS", ""),
+		SetupTokenBudget:  get("PIPEROOM_SETUP_TOKEN_BUDGET", DefaultSetupTokenBudget),
+		SetupLocalDelay:   get("PIPEROOM_SETUP_LOCAL_DELAY", DefaultSetupLocalDelay),
+		SetupPluginHosts:  get("PIPEROOM_SETUP_PLUGIN_HOSTS", DefaultSetupPluginHosts),
+		SecretsDir:        get("PIPEROOM_SECRETS_DIR", ""),
+		OwnersDir:         get("OWNERS_DIR", ""),
+
+		SetupSecretsFile: get("PIPEROOM_SETUP_SECRETS_FILE", ""),
+		SetupServerURL:   get("PIPEROOM_SETUP_SERVER_URL", ""),
+		SetupCode:        get("PIPEROOM_SETUP_CODE", ""),
 	}
 	c.SlackPageNoDriver = splitList(get("PIPEROOM_SLACK_PAGE_NO_DRIVER", ""))
 	return c
@@ -420,6 +648,87 @@ func ParseDevAck(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_DEV_ACK: want exactly %q (or unset)", DevAckValue)
+}
+
+// ParseWriteMode validates PIPEROOM_WRITE_MODE and reports whether write mode
+// is on. "off" (the default, also when empty) is false and "on" is true; any
+// other value is an error, so a "true", "1" or typo stops the start instead of
+// silently counting as either.
+func ParseWriteMode(c Config) (bool, error) {
+	switch strings.TrimSpace(c.WriteMode) {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	}
+	return false, fmt.Errorf("config: PIPEROOM_WRITE_MODE=%q: want off or on", c.WriteMode)
+}
+
+// DefaultHypothesisGuard is the guard mode when PIPEROOM_HYPOTHESIS_GUARD is
+// unset: check and log, never refuse, until a pilot week of logs says enforce
+// is safe. (H1)
+const DefaultHypothesisGuard = "log"
+
+// ParseHypothesisGuard validates PIPEROOM_HYPOTHESIS_GUARD. Empty is the
+// default; off, log and enforce are accepted; anything else is an error naming
+// the variable, so a typo stops the start instead of silently turning the guard
+// off or on. (H1)
+func ParseHypothesisGuard(c Config) (string, error) {
+	switch v := strings.TrimSpace(c.HypothesisGuard); v {
+	case "":
+		return DefaultHypothesisGuard, nil
+	case "off", "log", "enforce":
+		return v, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_HYPOTHESIS_GUARD=%q: want off, log or enforce", c.HypothesisGuard)
+}
+
+// FakeAgentScripted is the only accepted value of PIPEROOM_FAKE_AGENT.
+const FakeAgentScripted = "scripted"
+
+// ParseFakeAgent validates PIPEROOM_FAKE_AGENT and reports whether the server
+// runs the scripted agent instead of the real one. Empty is false. "scripted"
+// is true only in dev auth mode with PIPEROOM_DEV_ACK=DevAckValue, with write
+// mode off and with no Slack bot token: a scripted agent shows people an
+// investigation that did not happen, so it must never reach a deployment with
+// real users or a real channel, and its proposals must never run against real
+// systems. Anything else is an error naming the variable, so a typo stops the
+// start instead of running the real agent unnoticed.
+//
+// cmd/server reads it only outside --demo and --quickstart (--demo already
+// runs the scripted agent and forces write mode on). When it is true the
+// server replaces every model path, not only the runner: the hand-off and
+// post-mortem writers are the scripted ones, triage is off and no model
+// endpoint is built.
+func ParseFakeAgent(c Config) (bool, error) {
+	switch v := strings.TrimSpace(c.FakeAgent); v {
+	case "":
+		return false, nil
+	case FakeAgentScripted:
+	default:
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%q: want %q (or unset)", c.FakeAgent, FakeAgentScripted)
+	}
+	if mode := strings.ToLower(strings.TrimSpace(c.AuthMode)); mode != "" && mode != DefaultAuthMode {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_AUTH_MODE=%s, not %q", FakeAgentScripted, DefaultAuthMode, mode)
+	}
+	ack, err := ParseDevAck(c)
+	if err != nil {
+		return false, err
+	}
+	if !ack {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_DEV_ACK=%s", FakeAgentScripted, DevAckValue)
+	}
+	write, err := ParseWriteMode(c)
+	if err != nil {
+		return false, err
+	}
+	if write {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_WRITE_MODE=off", FakeAgentScripted)
+	}
+	if strings.TrimSpace(c.SlackBotToken) != "" {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs SLACK_BOT_TOKEN unset", FakeAgentScripted)
+	}
+	return true, nil
 }
 
 // slackMemberID is the shape of a Slack member ID ("U0…" for users, "W0…"
@@ -851,6 +1160,53 @@ func parseWatchDuration(name, v, def string) (time.Duration, error) {
 	return d, nil
 }
 
+// ---- X3: watch sample history and forecasts ----
+
+// Sample history and forecast settings. Only the horizon is configurable:
+// the sample period, retention, fit window and fit threshold are fixed by the
+// X3a design, and the trends route and the web chart (X3d) assume them. (X3)
+const (
+	// WatchSampleInterval is the least time between two samples of one
+	// pipeline and metric, whatever PIPEROOM_WATCH_INTERVAL is.
+	WatchSampleInterval = 15 * time.Minute
+	// WatchSampleRetention is how long watch_samples rows are kept; it is
+	// also the largest ?days= of GET /api/pipelines/{pid}/trends.
+	WatchSampleRetention = 7 * 24 * time.Hour
+	// WatchForecastFitWindow is the history the least-squares line uses.
+	WatchForecastFitWindow = 24 * time.Hour
+	// WatchForecastMinR2 is the least goodness of fit that may fire: a noisy
+	// series says nothing about when it reaches a limit.
+	WatchForecastMinR2 = 0.6
+	// WatchForecastMinSamples is the fewest points a fit may use (2 h).
+	WatchForecastMinSamples = 8
+
+	DefaultWatchForecastHorizon = "48h"
+	MinWatchForecastHorizon     = time.Hour
+	// MaxWatchForecastHorizon: past a week a 24 h line says too little, and
+	// the web shows no ETA badge beyond 7 d.
+	MaxWatchForecastHorizon = 7 * 24 * time.Hour
+)
+
+// WatchForecast holds the typed forecast settings. (X3)
+type WatchForecast struct {
+	// Horizon: a forecast fires when the metric's ETA to its limit is less.
+	Horizon time.Duration
+}
+
+// ParseWatchForecast validates PIPEROOM_WATCH_FORECAST_HORIZON: a Go
+// duration from 1h to 168h; empty = 48h. The error names the env var. (X3)
+func ParseWatchForecast(c Config) (WatchForecast, error) {
+	h, err := parseWatchDuration("PIPEROOM_WATCH_FORECAST_HORIZON", c.WatchForecastHorizon, DefaultWatchForecastHorizon)
+	if err != nil {
+		return WatchForecast{}, err
+	}
+	if h < MinWatchForecastHorizon || h > MaxWatchForecastHorizon {
+		return WatchForecast{}, fmt.Errorf("config: PIPEROOM_WATCH_FORECAST_HORIZON=%q: must be between %s and %s",
+			c.WatchForecastHorizon, MinWatchForecastHorizon, MaxWatchForecastHorizon)
+	}
+	return WatchForecast{Horizon: h}, nil
+}
+
 // ---- F wave (F2, F6, F8, F12) ----
 
 // DefaultWatchMaxOpenRooms is the watcher's open-room cap (F6). It is not
@@ -906,7 +1262,20 @@ func ParseTriagePass(c Config) (TriagePass, error) {
 	}
 	t.Model = strings.TrimSpace(c.TriagePassModel)
 	if t.Model == "" {
-		t.Model = DefaultTriagePassModel
+		// The same default and refusal as ParseModelRoles: claude-haiku-5-5
+		// on a Claude provider (today's value), the main model on a new one
+		// (V0), and none for a first-look provider other than the main one
+		// unless it is a Claude provider, so a first look moved to openai
+		// never silently runs the main Claude model instead.
+		p, main := firstLookProvider(c), mainProvider(c)
+		if p != main && !claudeProvider(p) {
+			return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL is required when PIPEROOM_TRIAGE_PASS_PROVIDER (%s) differs from PIPEROOM_MODEL_PROVIDER (%s)", p, main)
+		}
+		mainModel := strings.TrimSpace(c.Model)
+		if mainModel == "" {
+			mainModel = DefaultModel
+		}
+		t.Model = defaultFirstLookModel(p, mainModel)
 	}
 	if strings.ContainsAny(t.Model, " \t\r\n") {
 		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL=%q: want a model id without spaces", c.TriagePassModel)
@@ -930,17 +1299,14 @@ const (
 	PostmortemModelOff = "off"
 )
 
-// ParsePostmortemModel validates PIPEROOM_POSTMORTEM_MODEL (auto | off, any
-// case; empty = auto). Any other value refuses start; the error names the var.
+// ParsePostmortemModel returns the post-mortem mode (auto | off, any case;
+// empty = auto). It reads PIPEROOM_POSTMORTEM_MODE first and its deprecated
+// alias PIPEROOM_POSTMORTEM_MODEL second; the two set to different values,
+// or any other value, refuse start and the error names the var. The
+// deprecation warning is ParseModelKnobs' (V0).
 func ParsePostmortemModel(c Config) (string, error) {
-	switch v := strings.ToLower(strings.TrimSpace(c.PostmortemModel)); v {
-	case "", PostmortemModelAuto:
-		return PostmortemModelAuto, nil
-	case PostmortemModelOff:
-		return PostmortemModelOff, nil
-	default:
-		return "", fmt.Errorf("config: PIPEROOM_POSTMORTEM_MODEL=%q: want auto or off", c.PostmortemModel)
-	}
+	mode, _, err := parsePostmortemMode(c)
+	return mode, err
 }
 
 // Pipeline change log retention (F8).
@@ -951,6 +1317,19 @@ const (
 	// MaxChangesPerPipeline is the row cap per pipeline the store keeps
 	// whatever the retention.
 	MaxChangesPerPipeline = 5000
+)
+
+// X4: limits of POST /api/changes/webhook (docs/api.md, External changes).
+const (
+	// ChangesWebhookMaxBodyBytes caps the body; a larger one is 413
+	// too_large and nothing is stored.
+	ChangesWebhookMaxBodyBytes = 4096
+	// ChangesWebhookPerMinute is how many verified requests one pipeline may
+	// send per minute; the next is 429 rate_limited.
+	ChangesWebhookPerMinute = 60
+	// VendorStatusPollInterval is how often an owners.yaml vendor_status_url
+	// is fetched; an unreachable feed logs one warning per hour.
+	VendorStatusPollInterval = 5 * time.Minute
 )
 
 // ParseChangesRetentionDays validates PIPEROOM_CHANGES_RETENTION_DAYS: a whole
@@ -1005,6 +1384,582 @@ func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
 	return d, nil
 }
 
+// WorkerLogs holds the typed Loki settings. URL "" = not configured. Token is
+// a secret: log the typed value's Configured and Selector, never the struct.
+type WorkerLogs struct {
+	URL      string
+	Selector string
+	Token    string
+	User     string
+	OrgID    string
+}
+
+// Configured reports whether a Loki is set.
+func (w WorkerLogs) Configured() bool { return w.URL != "" }
+
+// ParseWorkerLogs validates WORKER_LOGS_LOKI_URL (empty, or an absolute http
+// or https URL with a host and no user info), WORKER_LOGS_SELECTOR (required
+// with a URL, and only a LogQL stream selector: a pipeline stage or metric
+// query is refused, the tools add their own filters), and the auth settings (a
+// user needs the token as its password). The error names the env var. (Q3)
+func ParseWorkerLogs(c Config) (WorkerLogs, error) {
+	w := WorkerLogs{
+		URL:      strings.TrimSpace(c.WorkerLogsLokiURL),
+		Selector: strings.TrimSpace(c.WorkerLogsSelector),
+		Token:    c.WorkerLogsToken,
+		User:     strings.TrimSpace(c.WorkerLogsUser),
+		OrgID:    strings.TrimSpace(c.WorkerLogsOrgID),
+	}
+	if w.URL == "" {
+		if w.Selector != "" || w.Token != "" || w.User != "" || w.OrgID != "" {
+			return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_*: set WORKER_LOGS_LOKI_URL too, or unset the others")
+		}
+		return WorkerLogs{}, nil
+	}
+	u, err := url.Parse(w.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_LOKI_URL: want an http(s)://host:port URL")
+	}
+	if u.User != nil {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_LOKI_URL: must not carry user info")
+	}
+	if w.Selector == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_SELECTOR: required with WORKER_LOGS_LOKI_URL, e.g. {service=\"connect\"}")
+	}
+	if err := logql.CheckSelector(w.Selector); err != nil {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_SELECTOR: %v", err)
+	}
+	if w.User != "" && w.Token == "" {
+		return WorkerLogs{}, fmt.Errorf("config: WORKER_LOGS_USER: needs WORKER_LOGS_TOKEN as its password")
+	}
+	return w, nil
+}
+
+// ---- X7: OpenLineage emitter (X7b; docs/design/lineage.md) ----
+
+// OpenLineage emitter limits. Fixed, not configurable: docs/design/lineage.md
+// and the emitter's tests state them. (X7)
+const (
+	DefaultOpenLineageNamespace = "piperoom"
+	// OpenLineageEmitInterval is the least time between two topology
+	// events of one pipeline; builds in between send nothing.
+	OpenLineageEmitInterval = 15 * time.Minute
+	// OpenLineageTimeout is the deadline of one POST, retries apart.
+	OpenLineageTimeout = 10 * time.Second
+	// OpenLineageMaxRetries is how many times a failed POST (network error,
+	// 429 or 5xx) is retried with backoff before one warning is logged and
+	// the event is dropped. A 4xx other than 429 is not retried.
+	OpenLineageMaxRetries = 3
+	// OpenLineageMaxEventBytes caps one event body. An event over it is sent
+	// without its columnLineage and schema facets, then dropped if still over.
+	OpenLineageMaxEventBytes = 1 << 20
+	// OpenLineageMaxResponseBytes caps what is read of a response (rule 7).
+	OpenLineageMaxResponseBytes = 4 << 20
+)
+
+// OpenLineage holds the typed emitter settings. URL "" = off.
+type OpenLineage struct {
+	URL       string
+	Namespace string
+	APIKey    string // secret: LogValue hides it
+}
+
+// LogValue keeps the API key out of the log.
+func (o OpenLineage) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("url", o.URL), slog.String("namespace", o.Namespace),
+		slog.Bool("api_key_set", o.APIKey != ""))
+}
+
+// ParseOpenLineage validates OPENLINEAGE_URL (empty = off; else an absolute
+// http(s) URL with a host and no user info), OPENLINEAGE_NAMESPACE (1 to 128
+// characters of letters, digits and . _ - : /, starting with a letter or
+// digit; empty = "piperoom") and OPENLINEAGE_API_KEY: a key is only sent over
+// https, or http to a loopback host, so http to any other host with a key is
+// an error. The error names the env var and never quotes the key.
+func ParseOpenLineage(c Config) (OpenLineage, error) {
+	o := OpenLineage{
+		URL:       strings.TrimSpace(c.OpenLineageURL),
+		Namespace: strings.TrimSpace(c.OpenLineageNamespace),
+		APIKey:    strings.TrimSpace(c.OpenLineageAPIKey),
+	}
+	if o.Namespace == "" {
+		o.Namespace = DefaultOpenLineageNamespace
+	}
+	if !validOpenLineageNamespace(o.Namespace) {
+		return OpenLineage{}, fmt.Errorf("config: OPENLINEAGE_NAMESPACE=%q: want 1 to 128 of letters, digits and . _ - : /, starting with a letter or digit", c.OpenLineageNamespace)
+	}
+	if o.URL == "" {
+		return o, nil
+	}
+	scheme, err := checkHTTPURL("OPENLINEAGE_URL", o.URL)
+	if err != nil {
+		return OpenLineage{}, err
+	}
+	if scheme == "http" && o.APIKey != "" {
+		u, _ := url.Parse(o.URL) // checkHTTPURL parsed it
+		if !loopbackHost(u.Hostname()) {
+			return OpenLineage{}, fmt.Errorf("config: OPENLINEAGE_URL: an API key is sent only over https (or http to a loopback host)")
+		}
+	}
+	return o, nil
+}
+
+func validOpenLineageNamespace(ns string) bool {
+	if ns == "" || len(ns) > 128 {
+		return false
+	}
+	for i, r := range ns {
+		alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alnum && (i == 0 || !strings.ContainsRune("._-:/", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+// ---- Q7: the forge of the pull-request fix (docs/design/fix-pr.md §5.6) ----
+
+// Forge kinds of FORGE_KIND. (Q7)
+const (
+	ForgeKindOff    = ""
+	ForgeKindGitHub = "github"
+)
+
+// DefaultGitHubAPIURL is GITHUB_API_URL's default: github.com's API. (Q7)
+const DefaultGitHubAPIURL = "https://api.github.com"
+
+// Bounds of PIPEROOM_FIXPR_APPLY_TIMEOUT (docs/design/fix-pr.md §14 D5). (Q7)
+const (
+	DefaultFixPRApplyTimeout = 2 * time.Hour
+	MinFixPRApplyTimeout     = 10 * time.Minute
+	MaxFixPRApplyTimeout     = 168 * time.Hour
+)
+
+// Forge is the parsed forge settings. Zero when FORGE_KIND is "". (Q7)
+type Forge struct {
+	Kind           string
+	APIURL         string // validated, no trailing slash
+	WebHost        string // github.com for api.github.com, else the API URL's host
+	AppID          int64
+	InstallationID int64
+	PrivateKeyFile string
+}
+
+// ParseForge validates the forge settings. FORGE_KIND "" with any GITHUB_APP_*
+// set is an error ("set FORGE_KIND=github"); "github" needs positive integer
+// ids and a key file path; the API URL is https unless the host is loopback
+// (the netsec rule), with no user info, query or fragment. It does not read
+// the key file (wiring does, and refuses a key that is not PEM RSA). (Q7)
+//
+// GITHUB_API_URL alone does not turn anything on: GitHub Actions sets it in
+// every job, so it is read only when FORGE_KIND is github. WebHost is lower
+// case and keeps a port (a GitHub Enterprise Server on :8443 serves its web
+// pages there too); cmd/server compares every owners.yaml repos[].url host
+// with it at start.
+func ParseForge(c Config) (Forge, error) {
+	kind := strings.ToLower(strings.TrimSpace(c.ForgeKind))
+	appID := strings.TrimSpace(c.GitHubAppID)
+	instID := strings.TrimSpace(c.GitHubAppInstallationID)
+	keyFile := strings.TrimSpace(c.GitHubAppPrivateKeyFile)
+	switch kind {
+	case ForgeKindOff:
+		if appID != "" || instID != "" || keyFile != "" {
+			return Forge{}, fmt.Errorf("config: GITHUB_APP_* is set but FORGE_KIND is empty: set FORGE_KIND=github (or unset GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_FILE)")
+		}
+		return Forge{}, nil
+	case ForgeKindGitHub:
+	default:
+		return Forge{}, fmt.Errorf("config: FORGE_KIND=%q: want github, or empty for off", c.ForgeKind)
+	}
+	f := Forge{Kind: kind, PrivateKeyFile: keyFile}
+	var err error
+	if f.AppID, err = positiveID("GITHUB_APP_ID", appID); err != nil {
+		return Forge{}, err
+	}
+	if f.InstallationID, err = positiveID("GITHUB_APP_INSTALLATION_ID", instID); err != nil {
+		return Forge{}, err
+	}
+	if keyFile == "" {
+		return Forge{}, fmt.Errorf("config: GITHUB_APP_PRIVATE_KEY_FILE: required with FORGE_KIND=github (the path of the App's PEM private key)")
+	}
+	raw := strings.TrimSpace(c.GitHubAPIURL)
+	if raw == "" {
+		raw = DefaultGitHubAPIURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") || u.Opaque != "" {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: want an https://host URL such as %s or https://<host>/api/v3", DefaultGitHubAPIURL)
+	}
+	if u.User != nil {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must not carry user info")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must not carry a query or fragment")
+	}
+	if u.Scheme == "http" && !loopbackHost(u.Hostname()) {
+		return Forge{}, fmt.Errorf("config: GITHUB_API_URL: must be https (plain http only to a loopback host)")
+	}
+	host := strings.ToLower(u.Host)
+	f.APIURL = u.Scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
+	f.WebHost = host
+	if host == "api.github.com" {
+		f.WebHost = "github.com"
+	}
+	return f, nil
+}
+
+// positiveID parses a GitHub App or installation id: a base-10 integer
+// above zero. The error names the variable.
+func positiveID(name, v string) (int64, error) {
+	if v == "" {
+		return 0, fmt.Errorf("config: %s: required with FORGE_KIND=github", name)
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("config: %s=%q: want a positive integer id", name, v)
+	}
+	return n, nil
+}
+
+// ParseFixPRApplyTimeout: "" = 2h; a Go duration from 10m to 168h; else an
+// error naming the variable. (Q7)
+func ParseFixPRApplyTimeout(c Config) (time.Duration, error) {
+	v := strings.TrimSpace(c.FixPRApplyTimeout)
+	if v == "" {
+		return DefaultFixPRApplyTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_FIXPR_APPLY_TIMEOUT=%q: not a duration like 2h or 90m: %w", v, err)
+	}
+	if d < MinFixPRApplyTimeout || d > MaxFixPRApplyTimeout {
+		return 0, fmt.Errorf("config: PIPEROOM_FIXPR_APPLY_TIMEOUT=%q: want %s to %s", v, MinFixPRApplyTimeout, MaxFixPRApplyTimeout)
+	}
+	return d, nil
+}
+
+// loopbackHost reports whether host is localhost or a loopback IP.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ---- P wave (P2, P3, P4; PIPEROOM_WRITE_MODE of P1 is next to ParseDevAck) ----
+
+// DefaultAutoApproveDelay is the policy countdown (P0 item 2): long enough
+// for someone in the room to read the card and cancel.
+const DefaultAutoApproveDelay = "60s"
+
+// MaxAutoApproveDelay bounds PIPEROOM_AUTO_APPROVE_DELAY: a countdown longer
+// than an hour leaves a fix pending past any incident's attention span, so it
+// is a typo, not a policy.
+const MaxAutoApproveDelay = time.Hour
+
+// ParseAutoApproveDelay validates PIPEROOM_AUTO_APPROVE_DELAY: "0" turns the
+// auto-approve policy off (0 is returned), anything else must be a Go
+// duration above zero and at most MaxAutoApproveDelay; empty = 60s. "0s" is
+// refused with a pointer to "0", so off is always spelled one way. The error
+// names the env var.
+func ParseAutoApproveDelay(c Config) (time.Duration, error) {
+	v := strings.TrimSpace(c.AutoApproveDelay)
+	switch v {
+	case "0":
+		return 0, nil
+	case "":
+		v = DefaultAutoApproveDelay
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: not a duration like 60s or 2m: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: must be greater than zero; use \"0\" to turn the policy off", v)
+	}
+	if d > MaxAutoApproveDelay {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: at most %s", v, MaxAutoApproveDelay)
+	}
+	return d, nil
+}
+
+// Airflow holds the typed Airflow settings (P0 item 8). URL "" = off.
+// Password and Token are secrets: never log them.
+type Airflow struct {
+	URL      string
+	Username string
+	Password string
+	Token    string
+}
+
+// ParseAirflow validates AIRFLOW_URL (empty, or an absolute http or https URL
+// with a host and no user info) and the login: basic auth (AIRFLOW_USERNAME
+// and AIRFLOW_PASSWORD, both) or AIRFLOW_TOKEN, not both. A URL with neither
+// is allowed (an Airflow behind a proxy that authenticates). A login needs an
+// https URL: over http:// the password or token would travel in clear text
+// (the internal/clients/netsec rule). A login without a URL is an error, so a
+// forgotten URL is not read as "off". The error names the env var and never
+// quotes a secret.
+func ParseAirflow(c Config) (Airflow, error) {
+	a := Airflow{
+		URL:      strings.TrimSpace(c.AirflowURL),
+		Username: strings.TrimSpace(c.AirflowUsername),
+		Password: c.AirflowPassword,
+		Token:    strings.TrimSpace(c.AirflowToken),
+	}
+	if a.URL == "" {
+		if a.Username != "" || a.Password != "" || a.Token != "" {
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME, AIRFLOW_PASSWORD or AIRFLOW_TOKEN is set but AIRFLOW_URL is empty")
+		}
+		return Airflow{}, nil
+	}
+	scheme, err := checkHTTPURL("AIRFLOW_URL", a.URL)
+	if err != nil {
+		return Airflow{}, err
+	}
+	if (a.Username == "") != (a.Password == "") {
+		return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME and AIRFLOW_PASSWORD go together: set both or neither")
+	}
+	if a.Username != "" && a.Token != "" {
+		return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN and AIRFLOW_USERNAME/AIRFLOW_PASSWORD: set one login, not both")
+	}
+	if scheme == "http" {
+		switch {
+		case a.Token != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN with an http:// AIRFLOW_URL sends the token in clear text; use an https:// URL")
+		case a.Username != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME/AIRFLOW_PASSWORD with an http:// AIRFLOW_URL sends the password in clear text; use an https:// URL")
+		}
+	}
+	return a, nil
+}
+
+// DBT holds the typed dbt settings (P0 item 8): an artifacts directory or dbt
+// Cloud, never both; all empty = off. CloudToken is a secret.
+type DBT struct {
+	ArtifactsDir string
+	CloudURL     string
+	CloudToken   string
+	CloudAccount string
+	CloudJobID   string
+}
+
+// ParseDBT validates the dbt settings: DBT_ARTIFACTS_DIR (an absolute path)
+// or dbt Cloud (DBT_CLOUD_URL, an https URL without user info, plus
+// DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID, the two ids
+// whole numbers), not both. An http:// DBT_CLOUD_URL is refused: the token
+// goes with every request and would travel in clear text. Whether the
+// directory exists is the reader's check at use, not this one. The error
+// names the env var.
+func ParseDBT(c Config) (DBT, error) {
+	d := DBT{
+		ArtifactsDir: strings.TrimSpace(c.DBTArtifactsDir),
+		CloudURL:     strings.TrimSpace(c.DBTCloudURL),
+		CloudToken:   strings.TrimSpace(c.DBTCloudToken),
+		CloudAccount: strings.TrimSpace(c.DBTCloudAccount),
+		CloudJobID:   strings.TrimSpace(c.DBTCloudJobID),
+	}
+	cloud := d.CloudURL != "" || d.CloudToken != "" || d.CloudAccount != "" || d.CloudJobID != ""
+	if d.ArtifactsDir != "" {
+		if cloud {
+			return DBT{}, fmt.Errorf("config: DBT_ARTIFACTS_DIR and DBT_CLOUD_*: set one dbt source, not both")
+		}
+		if !filepath.IsAbs(d.ArtifactsDir) {
+			return DBT{}, fmt.Errorf("config: DBT_ARTIFACTS_DIR=%q: want an absolute path", c.DBTArtifactsDir)
+		}
+		d.ArtifactsDir = filepath.Clean(d.ArtifactsDir)
+		return d, nil
+	}
+	if !cloud {
+		return DBT{}, nil
+	}
+	if d.CloudURL == "" || d.CloudToken == "" || d.CloudAccount == "" || d.CloudJobID == "" {
+		return DBT{}, fmt.Errorf("config: dbt Cloud needs DBT_CLOUD_URL, DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID together")
+	}
+	scheme, err := checkHTTPURL("DBT_CLOUD_URL", d.CloudURL)
+	if err != nil {
+		return DBT{}, err
+	}
+	if scheme == "http" {
+		return DBT{}, fmt.Errorf("config: DBT_CLOUD_TOKEN with an http:// DBT_CLOUD_URL sends the token in clear text; use an https:// URL")
+	}
+	if _, err := parseWholeNumber("DBT_CLOUD_ACCOUNT_ID", d.CloudAccount, "", false); err != nil {
+		return DBT{}, err
+	}
+	if _, err := parseWholeNumber("DBT_CLOUD_JOB_ID", d.CloudJobID, "", false); err != nil {
+		return DBT{}, err
+	}
+	return d, nil
+}
+
+// ---- U wave (setup rooms; docs/design/setup-agent.md §3.8, §4 item 6) ----
+
+// Setup defaults.
+const (
+	// DefaultSetupTokenBudget is the model tokens one setup room may use.
+	DefaultSetupTokenBudget = "2000000"
+	// DefaultSetupLocalDelay is the countdown before a T1 setup step runs on
+	// a local-class target (policy setup_local): long enough to read the
+	// card and cancel.
+	DefaultSetupLocalDelay = "20s"
+	// DefaultSetupPluginHosts is where plugin_install may download from; the
+	// digest it verifies comes from the knowledge index, never from the host.
+	DefaultSetupPluginHosts = "repo1.maven.org"
+	// MaxSetupLocalDelay bounds PIPEROOM_SETUP_LOCAL_DELAY like
+	// MaxAutoApproveDelay bounds the auto-approve countdown.
+	MaxSetupLocalDelay = time.Hour
+)
+
+// Setup holds the typed server-side setup settings. Enabled false means no
+// setup route, no runner endpoint, no setup action and no remote writer is
+// built, whatever the other fields say.
+type Setup struct {
+	Enabled      bool
+	ProdPatterns []string      // host globs, kubectl context names, cloud account ids; nil when none
+	TokenBudget  int64         // > 0
+	LocalDelay   time.Duration // 0 = every T1 step waits for a click
+	PluginHosts  []string      // never empty when Enabled
+	SecretsDir   string        // absolute; "" only when !Enabled
+	OwnersDir    string        // absolute or ""
+}
+
+// ParseSetup validates the setup variables. PIPEROOM_SETUP_ENABLED is "off"
+// (the default, also when empty) or "on"; anything else is an error naming
+// the variable. "on" is refused while ParseWriteMode(c) is false, with an
+// error that names both variables: with write mode off nothing in the tree
+// may reach a writer, and setup is all writes. With setup on,
+// PIPEROOM_SECRETS_DIR must be set and absolute (a replica that cannot write
+// to it refuses to start, which the server checks after this); OWNERS_DIR,
+// when set, must be absolute. The other variables are checked whether or not
+// setup is on, so a typo is caught before the day setup is switched on.
+func ParseSetup(c Config) (Setup, error) {
+	var s Setup
+	switch strings.TrimSpace(c.SetupEnabled) {
+	case "", "off":
+	case "on":
+		s.Enabled = true
+	default:
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=%q: want off or on", c.SetupEnabled)
+	}
+	if s.Enabled {
+		on, err := ParseWriteMode(c)
+		if err != nil {
+			return Setup{}, err
+		}
+		if !on {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=on requires PIPEROOM_WRITE_MODE=on (setup executes writes through the runner; write mode is %q)", c.WriteMode)
+		}
+	}
+	var err error
+	if s.TokenBudget, err = parseWholeNumber("PIPEROOM_SETUP_TOKEN_BUDGET", c.SetupTokenBudget, DefaultSetupTokenBudget, false); err != nil {
+		return Setup{}, err
+	}
+	if s.LocalDelay, err = parseSetupLocalDelay(c.SetupLocalDelay); err != nil {
+		return Setup{}, err
+	}
+	s.ProdPatterns = splitList(c.SetupProdPatterns)
+	for _, p := range s.ProdPatterns {
+		if strings.ContainsAny(p, " \t\r\n") {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_PROD_PATTERNS: entry %q contains white space", p)
+		}
+	}
+	hosts := c.SetupPluginHosts
+	if strings.TrimSpace(hosts) == "" {
+		hosts = DefaultSetupPluginHosts
+	}
+	s.PluginHosts = splitList(hosts)
+	for _, h := range s.PluginHosts {
+		if strings.ContainsAny(h, "/:@ \t") {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_PLUGIN_HOSTS: entry %q is not a host name", h)
+		}
+	}
+	s.SecretsDir = strings.TrimSpace(c.SecretsDir)
+	if s.SecretsDir != "" && !filepath.IsAbs(s.SecretsDir) {
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SECRETS_DIR: want an absolute directory")
+	}
+	if s.Enabled && s.SecretsDir == "" {
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=on requires PIPEROOM_SECRETS_DIR (where registered read credentials are written)")
+	}
+	s.OwnersDir = strings.TrimSpace(c.OwnersDir)
+	if s.OwnersDir != "" && !filepath.IsAbs(s.OwnersDir) {
+		return Setup{}, fmt.Errorf("config: OWNERS_DIR: want an absolute directory")
+	}
+	return s, nil
+}
+
+// parseSetupLocalDelay is ParseAutoApproveDelay's rule for
+// PIPEROOM_SETUP_LOCAL_DELAY: "0" = off (every T1 step waits for a click),
+// else a Go duration above zero and at most MaxSetupLocalDelay; empty = 20s.
+func parseSetupLocalDelay(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	switch v {
+	case "0":
+		return 0, nil
+	case "":
+		v = DefaultSetupLocalDelay
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: not a duration like 20s or 2m: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: must be greater than zero; use \"0\" so every T1 step waits for a click", v)
+	}
+	if d > MaxSetupLocalDelay {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: at most %s", v, MaxSetupLocalDelay)
+	}
+	return d, nil
+}
+
+// SetupRunner holds the typed runner-side settings (cmd/setup). Code is the
+// pairing code: it is used once and must never be logged or written to the
+// runner's op log.
+type SetupRunner struct {
+	SecretsFile string // "" = <project dir>/.piperoom/secrets.env
+	ServerURL   string // "" = --server must be given (or --standalone)
+	Code        string // "" = --code must be given (or --standalone)
+}
+
+// ParseSetupRunner validates the runner variables. PIPEROOM_SETUP_SERVER_URL,
+// when set, must be an http(s) URL without user info (the runner itself
+// refuses plain http to a non-loopback host, the netsec rule);
+// PIPEROOM_SETUP_CODE, when set, must be exactly 8 characters (the alphabet
+// is checked by the runner against protocol.CodeAlphabet). The error never
+// quotes the code.
+func ParseSetupRunner(c Config) (SetupRunner, error) {
+	r := SetupRunner{
+		SecretsFile: strings.TrimSpace(c.SetupSecretsFile),
+		ServerURL:   strings.TrimSpace(c.SetupServerURL),
+		Code:        strings.TrimSpace(c.SetupCode),
+	}
+	if r.ServerURL != "" {
+		if _, err := checkHTTPURL("PIPEROOM_SETUP_SERVER_URL", r.ServerURL); err != nil {
+			return SetupRunner{}, err
+		}
+	}
+	if r.Code != "" && len(r.Code) != 8 {
+		return SetupRunner{}, fmt.Errorf("config: PIPEROOM_SETUP_CODE: want the 8-character pairing code the Set up button showed")
+	}
+	return r, nil
+}
+
+// checkHTTPURL refuses anything but an absolute http(s) URL with a host and
+// no user info (credentials do not belong in a URL that may be logged) and
+// returns its scheme ("http" or "https", lower case) so the caller can refuse
+// a login over plain http. The error names the env var but never quotes the
+// value.
+func checkHTTPURL(name, v string) (string, error) {
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("config: %s: want an http(s)://host URL", name)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("config: %s: must not carry user info", name)
+	}
+	return u.Scheme, nil
+}
+
 // getSet is get, except that a variable set to "" keeps "" (for settings
 // where empty means off, like PIPEROOM_OIDC_GROUPS_CLAIM). Compose files must
 // not pass such a variable as ${VAR:-} (that sets ""); use ${VAR-default} or
@@ -1031,4 +1986,765 @@ func get(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ---- V wave (V0; docs/design/model-providers.md sections 9, 10.3 and 15) ----
+
+// Model provider values of PIPEROOM_MODEL_PROVIDER and PIPEROOM_<ROLE>_PROVIDER.
+// They equal llm.Provider* (internal/agent/llm); config stays a leaf package.
+const (
+	ModelProviderAnthropic       = "anthropic"
+	ModelProviderBedrock         = "bedrock"
+	ModelProviderVertex          = "vertex"
+	ModelProviderOpenAI          = "openai"
+	ModelProviderGemini          = "gemini"
+	ModelProviderBedrockConverse = "bedrock-converse"
+)
+
+// Key variables of the main provider. Adapters read them at construction;
+// they are never stored in Config, logged or put in an error.
+const (
+	EnvModelAPIKey     = "PIPEROOM_MODEL_API_KEY"
+	EnvModelAPIKeyFile = "PIPEROOM_MODEL_API_KEY_FILE"
+)
+
+// DefaultModel is the main model when PIPEROOM_MODEL is unset.
+const DefaultModel = "claude-opus-5-5"
+
+// modelFlavors are the PIPEROOM_MODEL_FLAVOR values with their default base
+// URL ("" = none: PIPEROOM_MODEL_BASE_URL is required) (design section 3).
+var modelFlavors = map[string]string{
+	"openai":     "https://api.openai.com/v1",
+	"azure":      "",
+	"deepseek":   "https://api.deepseek.com/v1",
+	"qwen":       "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+	"mistral":    "https://api.mistral.ai/v1",
+	"groq":       "https://api.groq.com/openai/v1",
+	"together":   "https://api.together.xyz/v1",
+	"openrouter": "https://openrouter.ai/api/v1",
+	"xai":        "https://api.x.ai/v1",
+	"ollama":     "http://localhost:11434/v1",
+	"vllm":       "http://localhost:8000/v1",
+	"generic":    "",
+}
+
+// claudeProvider reports whether p is anthropic, bedrock or vertex, where
+// every model id is accepted as today.
+func claudeProvider(p string) bool {
+	return p == ModelProviderAnthropic || p == ModelProviderBedrock || p == ModelProviderVertex
+}
+
+func knownProvider(p string) bool {
+	return claudeProvider(p) || p == ModelProviderOpenAI || p == ModelProviderGemini || p == ModelProviderBedrockConverse
+}
+
+// mainProvider is PIPEROOM_MODEL_PROVIDER normalised; empty is anthropic.
+func mainProvider(c Config) string {
+	if p := strings.ToLower(strings.TrimSpace(c.ModelProvider)); p != "" {
+		return p
+	}
+	return ModelProviderAnthropic
+}
+
+func firstLookProvider(c Config) string {
+	if p := strings.ToLower(strings.TrimSpace(c.TriagePassProvider)); p != "" {
+		return p
+	}
+	return mainProvider(c)
+}
+
+// defaultFirstLookModel is the first-look model when
+// PIPEROOM_TRIAGE_PASS_MODEL is unset: claude-haiku-5-5 on a Claude provider
+// (and on an unknown one, which start refuses anyway), as before V0; the
+// main model on a new provider.
+func defaultFirstLookModel(provider, mainModel string) string {
+	if knownProvider(provider) && !claudeProvider(provider) {
+		return mainModel
+	}
+	return DefaultTriagePassModel
+}
+
+// BaseURL is a validated model endpoint base URL (ParseBaseURL).
+type BaseURL struct {
+	// URL is the parsed URL: scheme, host and path only.
+	URL *url.URL
+	// Host is the lower-case host name or address, without port or brackets.
+	Host string
+	// PrivateHTTP is true for plain http to a host that is not loopback,
+	// allowed only by PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on. The adapter's
+	// dialer must then refuse every dialed address that is not RFC 1918, ULA
+	// or loopback (ModelPrivateHTTPAddr), since a name is resolved at dial time.
+	PrivateHTTP bool
+}
+
+// String returns the whole URL. ParseBaseURL refuses userinfo, a query and a
+// fragment, but the path is kept and some gateways put an account id or a
+// token in it, so logs, errors and API responses use Redacted.
+func (b BaseURL) String() string {
+	if b.URL == nil {
+		return ""
+	}
+	return b.URL.String()
+}
+
+// Redacted returns scheme://host[:port] only, the form that may be logged or
+// shown.
+func (b BaseURL) Redacted() string {
+	if b.URL == nil {
+		return ""
+	}
+	return b.URL.Scheme + "://" + b.URL.Host
+}
+
+// metadataHostNames are refused by name before any lookup.
+var metadataHostNames = map[string]bool{
+	"metadata.google.internal": true,
+	"metadata":                 true,
+}
+
+var (
+	awsIMDSv6     = netip.MustParseAddr("fd00:ec2::254")
+	alibabaMeta   = netip.MustParseAddr("100.100.100.200")
+	ipv4Broadcast = netip.MustParseAddr("255.255.255.255")
+	thisNetwork   = netip.MustParsePrefix("0.0.0.0/8")
+	nat64Prefix   = netip.MustParsePrefix("64:ff9b::/96")
+	// IPv6 forms that carry an IPv4 address a host with the matching
+	// translation or tunnel reaches: IPv4-compatible (::/96, deprecated),
+	// local-use NAT64 (RFC 8215) and 6to4 (2002::/16, the IPv4 address in
+	// bits 16-47).
+	ipv4CompatPrefix = netip.MustParsePrefix("::/96")
+	nat64LocalPrefix = netip.MustParsePrefix("64:ff9b:1::/48")
+	sixToFourPrefix  = netip.MustParsePrefix("2002::/16")
+	ulaPrefix        = netip.MustParsePrefix("fc00::/7")
+	rfc1918Prefixs   = []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	}
+)
+
+// ModelAddrDenied reports whether a model endpoint may never be reached at
+// addr: link-local (169.254.0.0/16 and fe80::/10, every cloud's metadata
+// service and ECS task metadata), AWS IMDS over IPv6 (fd00:ec2::254), Alibaba
+// Cloud metadata (100.100.100.200), multicast, broadcast, unspecified and
+// 0.0.0.0/8; IPv4-mapped, IPv4-compatible, NAT64 (well-known and local-use)
+// and 6to4 forms are checked as the IPv4 address they carry, and a local-use
+// NAT64 or 6to4 address whose IPv4 address is denied is denied whatever its
+// other bits. It is the metadata deny list of design 10.3: no setting changes
+// it, and the adapters' dialers apply it to every dialed address.
+func ModelAddrDenied(addr netip.Addr) bool {
+	addr = addr.Unmap().WithZone("")
+	if addr.Is6() {
+		b := addr.As16()
+		switch {
+		case nat64Prefix.Contains(addr), nat64LocalPrefix.Contains(addr):
+			addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		case sixToFourPrefix.Contains(addr):
+			addr = netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
+		case ipv4CompatPrefix.Contains(addr) && !addr.IsLoopback() && !addr.IsUnspecified():
+			addr = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+		}
+	}
+	switch {
+	case !addr.IsValid(),
+		addr.IsLinkLocalUnicast(), addr.IsLinkLocalMulticast(), addr.IsMulticast(), addr.IsInterfaceLocalMulticast(),
+		addr.IsUnspecified(),
+		addr == awsIMDSv6, addr == alibabaMeta, addr == ipv4Broadcast,
+		addr.Is4() && thisNetwork.Contains(addr):
+		return true
+	}
+	return false
+}
+
+// ModelPrivateHTTPAddr reports whether plain http may reach addr under
+// PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on: loopback, RFC 1918 or ULA, and never
+// an address ModelAddrDenied refuses.
+func ModelPrivateHTTPAddr(addr netip.Addr) bool {
+	addr = addr.Unmap().WithZone("")
+	if ModelAddrDenied(addr) {
+		return false
+	}
+	if addr.IsLoopback() || (addr.Is6() && ulaPrefix.Contains(addr)) {
+		return true
+	}
+	for _, p := range rfc1918Prefixs {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// numericHost reports a host that a resolver may read as an IPv4 address in a
+// non-canonical form (2852039166, 0xA9FEA9FE, 0251.0376.0251.0376): its last
+// label is all digits or 0x-hex. A real top-level domain never is.
+func numericHost(h string) bool {
+	last := h[strings.LastIndexByte(h, '.')+1:]
+	if last == "" {
+		return false
+	}
+	if strings.HasPrefix(last, "0x") {
+		return true
+	}
+	for _, r := range last {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseBaseURL validates a model endpoint base URL taken from env var name
+// (design 10.3). https is required; plain http only to localhost, 127.0.0.0/8
+// or ::1, or, with allowPrivateHTTP (PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on), to
+// an RFC 1918 or ULA address or a host name (the dialer then checks what it
+// resolves to, BaseURL.PrivateHTTP). User info, a query and a fragment are
+// refused; the path is kept. The metadata deny list (ModelAddrDenied, and the
+// names metadata.google.internal and metadata) applies always, whatever the
+// scheme or knob. The error names the env var and the reason, never the value,
+// which an operator may have pasted with a key in it.
+func ParseBaseURL(name, v string, allowPrivateHTTP bool) (BaseURL, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return BaseURL{}, fmt.Errorf("config: %s: empty", name)
+	}
+	if strings.ContainsAny(v, "?#") {
+		return BaseURL{}, fmt.Errorf("config: %s: must not carry a query or a fragment", name)
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Opaque != "" {
+		return BaseURL{}, fmt.Errorf("config: %s: want an https://host[/path] URL", name)
+	}
+	if u.User != nil || strings.Contains(u.Host, "@") {
+		return BaseURL{}, fmt.Errorf("config: %s: must not carry user info", name)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return BaseURL{}, fmt.Errorf("config: %s: want an https://host[/path] URL", name)
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return BaseURL{}, fmt.Errorf("config: %s: want an https://host[/path] URL", name)
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return BaseURL{}, fmt.Errorf("config: %s: bad port", name)
+		}
+	}
+	if metadataHostNames[host] {
+		return BaseURL{}, fmt.Errorf("config: %s: a cloud metadata host is never a model endpoint", name)
+	}
+	addr, aerr := netip.ParseAddr(host)
+	isIP := aerr == nil
+	if !isIP && numericHost(host) {
+		return BaseURL{}, fmt.Errorf("config: %s: write an IPv4 address in dotted decimal", name)
+	}
+	if isIP && addr.Zone() != "" {
+		return BaseURL{}, fmt.Errorf("config: %s: an IPv6 zone is not allowed", name)
+	}
+	if isIP && ModelAddrDenied(addr) {
+		return BaseURL{}, fmt.Errorf("config: %s: a link-local, metadata, multicast, broadcast or unspecified address is never a model endpoint", name)
+	}
+	out := BaseURL{URL: &url.URL{Scheme: scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath}, Host: host}
+	if scheme == "http" {
+		loopback := host == "localhost" || (isIP && addr.Unmap().IsLoopback())
+		switch {
+		case loopback:
+		case !allowPrivateHTTP:
+			return BaseURL{}, fmt.Errorf("config: %s: plain http only to localhost, 127.0.0.0/8 or ::1 (PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on also allows RFC 1918 and ULA hosts); use https", name)
+		case isIP && !ModelPrivateHTTPAddr(addr):
+			return BaseURL{}, fmt.Errorf("config: %s: plain http only to loopback, RFC 1918 or ULA addresses; use https", name)
+		default:
+			out.PrivateHTTP = true
+		}
+	}
+	return out, nil
+}
+
+// ModelRole is the endpoint and model of one model role.
+type ModelRole struct {
+	Provider string // a ModelProvider* value
+	Model    string // the model id as the provider names it
+	// Flavor is the OpenAI-compatible flavor when Provider is openai
+	// (PIPEROOM_MODEL_FLAVOR, shared by every openai role), else "".
+	Flavor string
+	// BaseURL is the endpoint override; nil = the provider's or flavor's
+	// default (FlavorDefaultBaseURL) or, on a Claude provider, the SDK's.
+	BaseURL *BaseURL
+}
+
+// ModelRoles is every model role (design section 9).
+type ModelRoles struct {
+	Main ModelRole
+	// Triage is PIPEROOM_TRIAGE_MODEL, on Main's provider and endpoint (the
+	// triage turns share the investigation's history); "" = always Main.Model.
+	Triage    string
+	FirstLook ModelRole // PIPEROOM_TRIAGE_PASS_PROVIDER / _MODEL / _BASE_URL
+	Summary   ModelRole // PIPEROOM_SUMMARY_PROVIDER / _MODEL / _BASE_URL
+	Judge     ModelRole // PIPEROOM_JUDGE_PROVIDER / _MODEL / _BASE_URL
+}
+
+// FlavorDefaultBaseURL returns the default base URL of an OpenAI-compatible
+// flavor, "" when the flavor has none (azure, generic) or is unknown.
+func FlavorDefaultBaseURL(flavor string) string { return modelFlavors[flavor] }
+
+// ParseModelRoles validates the provider and model of every role. Each role
+// falls back to the main provider and model; the first look's model defaults
+// to claude-haiku-5-5 on a Claude provider and to the main model on a new
+// one; a role on a provider other than the main one must name its model
+// (except a first look on a Claude provider). PIPEROOM_MODEL_FLAVOR is for
+// provider openai only (default openai); PIPEROOM_MODEL_BASE_URL and
+// PIPEROOM_<ROLE>_BASE_URL for openai and gemini only, and a role's base URL
+// only when its provider differs from the main one (otherwise it shares the
+// main endpoint). azure and generic need a base URL. A Claude deployment that
+// sets none of the V0 variables parses to exactly today's values. It never
+// reads a key and never makes a network call; the error names the env var.
+func ParseModelRoles(c Config) (ModelRoles, error) {
+	allowPrivate, err := parseOnOff("PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP", c.ModelAllowPrivateHTTP)
+	if err != nil {
+		return ModelRoles{}, err
+	}
+	var r ModelRoles
+	main := mainProvider(c)
+	if !knownProvider(main) {
+		return ModelRoles{}, fmt.Errorf("config: PIPEROOM_MODEL_PROVIDER=%q: want anthropic, bedrock, vertex, openai, gemini or bedrock-converse", c.ModelProvider)
+	}
+	r.Main.Provider = main
+	if r.Main.Model, err = modelID("PIPEROOM_MODEL", c.Model, DefaultModel); err != nil {
+		return ModelRoles{}, err
+	}
+	flavor := strings.ToLower(strings.TrimSpace(c.ModelFlavor))
+	if flavor != "" {
+		if _, ok := modelFlavors[flavor]; !ok {
+			return ModelRoles{}, fmt.Errorf("config: PIPEROOM_MODEL_FLAVOR=%q: want one of openai, azure, deepseek, qwen, mistral, groq, together, openrouter, xai, ollama, vllm, generic", c.ModelFlavor)
+		}
+	}
+	if r.Main.BaseURL, err = roleBaseURL("PIPEROOM_MODEL_BASE_URL", c.ModelBaseURL, main, allowPrivate); err != nil {
+		return ModelRoles{}, err
+	}
+	if r.Main.Flavor, err = roleFlavor("PIPEROOM_MODEL_PROVIDER", main, flavor, r.Main.BaseURL); err != nil {
+		return ModelRoles{}, err
+	}
+	if flavor != "" && main != ModelProviderOpenAI && !anyRoleOn(c, ModelProviderOpenAI) {
+		return ModelRoles{}, fmt.Errorf("config: PIPEROOM_MODEL_FLAVOR is for provider openai only")
+	}
+	if r.Triage, err = modelID("PIPEROOM_TRIAGE_MODEL", c.TriageModel, ""); err != nil {
+		return ModelRoles{}, err
+	}
+	for _, role := range []struct {
+		dst                      *ModelRole
+		prefix                   string
+		provider, model, baseURL string
+		firstLook                bool
+	}{
+		{&r.FirstLook, "PIPEROOM_TRIAGE_PASS", c.TriagePassProvider, c.TriagePassModel, c.TriagePassBaseURL, true},
+		{&r.Summary, "PIPEROOM_SUMMARY", c.SummaryProvider, c.SummaryModel, c.SummaryBaseURL, false},
+		{&r.Judge, "PIPEROOM_JUDGE", c.JudgeProvider, c.JudgeModel, c.JudgeBaseURL, false},
+	} {
+		p := strings.ToLower(strings.TrimSpace(role.provider))
+		if p == "" {
+			p = main
+		}
+		if !knownProvider(p) {
+			return ModelRoles{}, fmt.Errorf("config: %s_PROVIDER=%q: want anthropic, bedrock, vertex, openai, gemini or bedrock-converse", role.prefix, role.provider)
+		}
+		def := r.Main.Model
+		switch {
+		case role.firstLook:
+			def = defaultFirstLookModel(p, r.Main.Model)
+			if p != main && !claudeProvider(p) {
+				def = ""
+			}
+		case p != main:
+			def = ""
+		}
+		m, err := modelID(role.prefix+"_MODEL", role.model, def)
+		if err != nil {
+			return ModelRoles{}, err
+		}
+		if m == "" {
+			return ModelRoles{}, fmt.Errorf("config: %s_MODEL is required when %s_PROVIDER (%s) differs from PIPEROOM_MODEL_PROVIDER (%s)", role.prefix, role.prefix, p, main)
+		}
+		out := ModelRole{Provider: p, Model: m}
+		if p == main {
+			if strings.TrimSpace(role.baseURL) != "" {
+				return ModelRoles{}, fmt.Errorf("config: %s_BASE_URL is only for a role whose provider differs from PIPEROOM_MODEL_PROVIDER; this role uses the main endpoint", role.prefix)
+			}
+			out.Flavor, out.BaseURL = r.Main.Flavor, r.Main.BaseURL
+		} else {
+			if out.BaseURL, err = roleBaseURL(role.prefix+"_BASE_URL", role.baseURL, p, allowPrivate); err != nil {
+				return ModelRoles{}, err
+			}
+			if out.Flavor, err = roleFlavor(role.prefix+"_PROVIDER", p, flavor, out.BaseURL); err != nil {
+				return ModelRoles{}, err
+			}
+		}
+		*role.dst = out
+	}
+	return r, nil
+}
+
+// anyRoleOn reports whether a single-shot role names provider p.
+func anyRoleOn(c Config, p string) bool {
+	for _, v := range []string{c.TriagePassProvider, c.SummaryProvider, c.JudgeProvider} {
+		if strings.ToLower(strings.TrimSpace(v)) == p {
+			return true
+		}
+	}
+	return false
+}
+
+// modelID trims v, applies def when empty and refuses whitespace inside.
+func modelID(name, v, def string) (string, error) {
+	m := strings.TrimSpace(v)
+	if m == "" {
+		m = def
+	}
+	if strings.ContainsAny(m, " \t\r\n") {
+		return "", fmt.Errorf("config: %s=%q: want a model id without spaces", name, v)
+	}
+	return m, nil
+}
+
+// roleBaseURL validates a base URL for a role on provider p; "" = default.
+func roleBaseURL(name, v, p string, allowPrivate bool) (*BaseURL, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	if p != ModelProviderOpenAI && p != ModelProviderGemini {
+		return nil, fmt.Errorf("config: %s is for providers openai and gemini only (this role's provider is %s)", name, p)
+	}
+	b, err := ParseBaseURL(name, v, allowPrivate)
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// roleFlavor returns the flavor of a role on provider p: openai only,
+// default openai; azure and generic need a base URL.
+func roleFlavor(providerVar, p, flavor string, base *BaseURL) (string, error) {
+	if p != ModelProviderOpenAI {
+		return "", nil
+	}
+	if flavor == "" {
+		flavor = "openai"
+	}
+	if base == nil && modelFlavors[flavor] == "" {
+		return "", fmt.Errorf("config: %s=openai with PIPEROOM_MODEL_FLAVOR=%s needs a base URL (PIPEROOM_MODEL_BASE_URL or the role's _BASE_URL)", providerVar, flavor)
+	}
+	return flavor, nil
+}
+
+// PIPEROOM_MODEL_PRICING_STRICT values (design 8.2, decision 4).
+const (
+	PricingStrictAll       = "all"
+	PricingStrictNonClaude = "non-claude"
+	PricingStrictOff       = "off"
+)
+
+// PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS values (design 10.1, decision 6).
+// There is no off: the untrusted-data wrapper always applies.
+const (
+	NeutraliseAll       = "all"
+	NeutraliseNonClaude = "non-claude"
+)
+
+// PIPEROOM_GEMINI_BACKEND values.
+const (
+	GeminiBackendAPI    = "api"
+	GeminiBackendVertex = "vertex"
+)
+
+// MaxModelContextTokens bounds PIPEROOM_MODEL_CONTEXT_TOKENS (a typo guard;
+// no model today has more than a few million).
+const MaxModelContextTokens = 100_000_000
+
+// modelCaps are the PIPEROOM_MODEL_CAPS values: each turns a capability on,
+// none can lower a check.
+var modelCaps = map[string]bool{"parallel_tools": true, "structured_output": true, "reasoning": true}
+
+// ModelKnobs holds the typed model settings other than the roles.
+type ModelKnobs struct {
+	Roles                   ModelRoles
+	ContextTokens           int64    // 0 = the adapter's table, else 128000
+	Caps                    []string // sorted as given, deduplicated
+	Unverified              bool
+	MaxConcurrency          int64 // 0 = PIPEROOM_MAX_AGENTS
+	TPM                     int64 // 0 = no budget
+	Proxy                   bool
+	GeminiBackend           string // GeminiBackend*
+	AllowPrivateHTTP        bool
+	AckCNEndpoint           bool
+	PricingStrict           string // PricingStrict*
+	NeutraliseControlTokens string // Neutralise*
+	PostmortemMode          string // PostmortemModelAuto | PostmortemModelOff
+	// Warnings are start-up notes for the caller to log once at Warn (a
+	// deprecated variable name); never a reason to refuse start.
+	Warnings []string
+}
+
+// ParseModelKnobs validates the model settings of design section 9 and the
+// owner rulings of section 15, after ParseModelRoles (whose result it
+// carries). It refuses start on: PIPEROOM_MODEL_PRICING_STRICT=off with
+// PIPEROOM_PIPELINE_DAILY_COST_USD set; a PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS
+// other than all or non-claude; any PIPEROOM_MODEL_PROMPT_VARIANT (reserved,
+// not implemented); an endpoint operated in the People's Republic of China
+// without PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes; PIPEROOM_POSTMORTEM_MODE and its
+// deprecated alias PIPEROOM_POSTMORTEM_MODEL set to different values. No knob
+// widens the metadata deny list (design 15.1). The error names the env var.
+func ParseModelKnobs(c Config) (ModelKnobs, error) {
+	var k ModelKnobs
+	var err error
+	if c.ModelPromptVariant != "" {
+		return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_PROMPT_VARIANT is reserved, not implemented: unset it (one prompt for every model in this release)")
+	}
+	if k.Roles, err = ParseModelRoles(c); err != nil {
+		return ModelKnobs{}, err
+	}
+	if k.AllowPrivateHTTP, err = parseOnOff("PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP", c.ModelAllowPrivateHTTP); err != nil {
+		return ModelKnobs{}, err
+	}
+	if k.Unverified, err = parseOnOff("PIPEROOM_MODEL_UNVERIFIED", c.ModelUnverified); err != nil {
+		return ModelKnobs{}, err
+	}
+	if k.Proxy, err = parseOnOff("PIPEROOM_MODEL_PROXY", c.ModelProxy); err != nil {
+		return ModelKnobs{}, err
+	}
+	if strings.TrimSpace(c.ModelContextTokens) != "" {
+		if k.ContextTokens, err = parseWholeNumber("PIPEROOM_MODEL_CONTEXT_TOKENS", c.ModelContextTokens, "", false); err != nil {
+			return ModelKnobs{}, err
+		}
+		if k.ContextTokens > MaxModelContextTokens {
+			return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_CONTEXT_TOKENS=%q: at most %d", c.ModelContextTokens, MaxModelContextTokens)
+		}
+	}
+	if strings.TrimSpace(c.ModelMaxConcurrency) != "" {
+		if k.MaxConcurrency, err = parseWholeNumber("PIPEROOM_MODEL_MAX_CONCURRENCY", c.ModelMaxConcurrency, "", false); err != nil {
+			return ModelKnobs{}, err
+		}
+		if k.MaxConcurrency > 10000 {
+			return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_MAX_CONCURRENCY=%q: at most 10000", c.ModelMaxConcurrency)
+		}
+	}
+	if strings.TrimSpace(c.ModelTPM) != "" {
+		if k.TPM, err = parseWholeNumber("PIPEROOM_MODEL_TPM", c.ModelTPM, "", false); err != nil {
+			return ModelKnobs{}, err
+		}
+	}
+	seen := map[string]bool{}
+	for _, cp := range splitList(strings.ToLower(c.ModelCaps)) {
+		if !modelCaps[cp] {
+			return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_CAPS: %q: want parallel_tools, structured_output or reasoning (a capability can only be turned on)", cp)
+		}
+		if !seen[cp] {
+			seen[cp] = true
+			k.Caps = append(k.Caps, cp)
+		}
+	}
+	switch v := strings.ToLower(strings.TrimSpace(c.GeminiBackend)); v {
+	case "", GeminiBackendAPI:
+		k.GeminiBackend = GeminiBackendAPI
+	case GeminiBackendVertex:
+		k.GeminiBackend = GeminiBackendVertex
+	default:
+		return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_GEMINI_BACKEND=%q: want api or vertex", c.GeminiBackend)
+	}
+	switch v := strings.ToLower(strings.TrimSpace(c.ModelPricingStrict)); v {
+	case "", PricingStrictNonClaude:
+		k.PricingStrict = PricingStrictNonClaude
+	case PricingStrictAll:
+		k.PricingStrict = PricingStrictAll
+	case PricingStrictOff:
+		capUSD, err := parseUSD("PIPEROOM_PIPELINE_DAILY_COST_USD", c.PipelineDailyCostUSD)
+		if err != nil {
+			return ModelKnobs{}, err
+		}
+		if capUSD > 0 {
+			return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_PRICING_STRICT=off with PIPEROOM_PIPELINE_DAILY_COST_USD set: a cost cap would count an unpriced model as free; use non-claude or all, or unset the cap")
+		}
+		k.PricingStrict = PricingStrictOff
+	default:
+		return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_PRICING_STRICT=%q: want all, non-claude or off", c.ModelPricingStrict)
+	}
+	switch v := strings.ToLower(strings.TrimSpace(c.ModelNeutraliseControlTokens)); v {
+	case "", NeutraliseAll:
+		k.NeutraliseControlTokens = NeutraliseAll
+	case NeutraliseNonClaude:
+		k.NeutraliseControlTokens = NeutraliseNonClaude
+	default:
+		return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS=%q: want all or non-claude (there is no off)", c.ModelNeutraliseControlTokens)
+	}
+	switch v := strings.ToLower(strings.TrimSpace(c.ModelAckCNEndpoint)); v {
+	case "":
+	case "yes":
+		k.AckCNEndpoint = true
+	default:
+		return ModelKnobs{}, fmt.Errorf("config: PIPEROOM_MODEL_ACK_CN_ENDPOINT=%q: want yes or unset", c.ModelAckCNEndpoint)
+	}
+	if !k.AckCNEndpoint {
+		for _, role := range []struct {
+			name string
+			r    ModelRole
+		}{{"PIPEROOM_MODEL", k.Roles.Main}, {"PIPEROOM_TRIAGE_PASS", k.Roles.FirstLook}, {"PIPEROOM_SUMMARY", k.Roles.Summary}, {"PIPEROOM_JUDGE", k.Roles.Judge}} {
+			if host := ChinaOperatedEndpoint(role.r); host != "" {
+				return ModelKnobs{}, fmt.Errorf("config: %s: endpoint %s is operated in the People's Republic of China: set PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes to acknowledge where incident data goes", role.name, host)
+			}
+		}
+	}
+	var deprecated bool
+	if k.PostmortemMode, deprecated, err = parsePostmortemMode(c); err != nil {
+		return ModelKnobs{}, err
+	}
+	if deprecated {
+		k.Warnings = append(k.Warnings, "PIPEROOM_POSTMORTEM_MODEL is deprecated: rename it to PIPEROOM_POSTMORTEM_MODE (same values, auto or off)")
+	}
+	return k, nil
+}
+
+// ChinaOperatedEndpoint returns the host of r's endpoint when it is operated
+// in the People's Republic of China (DeepSeek's API, the DashScope China
+// endpoint, other PRC-operated model APIs on non-.cn domains, any .cn host),
+// else "". The list is best effort: an IP literal or a provider it does not
+// name passes, so the acknowledgement is a reminder, not a compliance
+// control. Only openai and gemini roles have a configurable endpoint; the
+// deepseek flavor's default host counts.
+func ChinaOperatedEndpoint(r ModelRole) string {
+	host := ""
+	switch {
+	case r.BaseURL != nil:
+		host = r.BaseURL.Host
+	case r.Provider == ModelProviderOpenAI:
+		if u, err := url.Parse(modelFlavors[r.Flavor]); err == nil {
+			host = strings.ToLower(u.Hostname())
+		}
+	}
+	if host == "" {
+		return ""
+	}
+	for _, d := range []string{"deepseek.com", "dashscope.aliyuncs.com", "moonshot.ai", "minimax.chat", "minimaxi.com", "volces.com", "baichuan-ai.com", "tencentcloudapi.com"} {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return host
+		}
+	}
+	if strings.HasSuffix(host, ".cn") {
+		return host
+	}
+	return ""
+}
+
+// parsePostmortemMode reads PIPEROOM_POSTMORTEM_MODE first and the
+// deprecated PIPEROOM_POSTMORTEM_MODEL second; deprecated is true when only
+// the old name carried the value. Both set to different values refuse.
+func parsePostmortemMode(c Config) (mode string, deprecated bool, err error) {
+	norm := func(name, raw string) (string, error) {
+		switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+		case "":
+			return "", nil
+		case PostmortemModelAuto, PostmortemModelOff:
+			return v, nil
+		default:
+			return "", fmt.Errorf("config: %s=%q: want auto or off", name, raw)
+		}
+	}
+	newV, err := norm("PIPEROOM_POSTMORTEM_MODE", c.PostmortemMode)
+	if err != nil {
+		return "", false, err
+	}
+	oldV, err := norm("PIPEROOM_POSTMORTEM_MODEL", c.PostmortemModel)
+	if err != nil {
+		return "", false, err
+	}
+	switch {
+	case newV != "" && oldV != "" && newV != oldV:
+		return "", false, fmt.Errorf("config: PIPEROOM_POSTMORTEM_MODE=%q and the deprecated PIPEROOM_POSTMORTEM_MODEL=%q disagree: unset PIPEROOM_POSTMORTEM_MODEL", c.PostmortemMode, c.PostmortemModel)
+	case newV != "":
+		return newV, oldV != "", nil
+	case oldV != "":
+		return oldV, true, nil
+	}
+	return PostmortemModelAuto, false, nil
+}
+
+// parseOnOff parses on | off (any case); empty is off.
+func parseOnOff(name, v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	}
+	return false, fmt.Errorf("config: %s=%q: want on or off", name, v)
+}
+
+// ---- AU wave (AU1) ----
+
+// ParseAutonomy validates PIPEROOM_AUTONOMY and reports whether earned
+// autonomy (events.PolicyEarned) may run: "on" (the default, also when
+// empty) or "off", any case; anything else is an error naming the variable,
+// so the server refuses to start. With write mode off it is false whatever
+// the variable says (no autonomy of any kind without writes); a bad
+// PIPEROOM_WRITE_MODE is that error. "off" disables the whole wave: no
+// autonomy.granted is written and no policy-earned proposal is scheduled.
+func ParseAutonomy(c Config) (bool, error) {
+	var on bool
+	switch v := strings.ToLower(strings.TrimSpace(c.Autonomy)); v {
+	case "", "on":
+		on = true
+	case "off":
+	default:
+		return false, fmt.Errorf("config: PIPEROOM_AUTONOMY=%q: want on or off", c.Autonomy)
+	}
+	write, err := ParseWriteMode(c)
+	if err != nil {
+		return false, err
+	}
+	return on && write, nil
+}
+
+// Connect backend kinds (CONNECT_KIND). Confluent and Aiven clients get their
+// credentials per pipeline from owners.yaml connections: (docs/design/tenancy.md
+// §3.2); there are no server-wide CONFLUENT_* variables.
+const (
+	DefaultConnectKind   = "rest"
+	ConnectKindREST      = "rest"
+	ConnectKindMSK       = "msk"
+	ConnectKindConfluent = "confluent"
+	ConnectKindAiven     = "aiven"
+)
+
+// ParseConnectKind validates CONNECT_KIND and the settings that go with it.
+// Empty means rest. "msk" talks to the AWS MSK Connect API with the default
+// AWS credential chain in AWS_REGION instead of the Connect REST API, so the
+// REST login variables must be empty: a value there means the operator thinks
+// they are used. The error names the env var. "confluent" and "aiven" take
+// their endpoint and keys per pipeline, so there is nothing to check here.
+func ParseConnectKind(c Config) (string, error) {
+	kind := strings.ToLower(strings.TrimSpace(c.ConnectKind))
+	if kind == "" {
+		kind = DefaultConnectKind
+	}
+	switch kind {
+	case ConnectKindREST, ConnectKindConfluent, ConnectKindAiven:
+		return kind, nil
+	case ConnectKindMSK:
+		if strings.TrimSpace(c.AWSRegion) == "" {
+			return "", fmt.Errorf("config: CONNECT_KIND=msk needs AWS_REGION")
+		}
+		restVars := []struct{ name, value string }{
+			{"CONNECT_USERNAME", c.ConnectUsername},
+			{"CONNECT_PASSWORD", c.ConnectPassword},
+			{"CONNECT_TLS_CA_FILE", c.ConnectTLSCAFile},
+			{"CONNECT_TLS_CERT_FILE", c.ConnectTLSCertFile},
+			{"CONNECT_TLS_KEY_FILE", c.ConnectTLSKeyFile},
+		}
+		for _, v := range restVars {
+			if v.value != "" {
+				return "", fmt.Errorf("config: %s is set but CONNECT_KIND=msk uses the AWS SDK, not the Connect REST API; unset it", v.name)
+			}
+		}
+		return kind, nil
+	default:
+		return "", fmt.Errorf("config: CONNECT_KIND=%q: want rest, msk, confluent or aiven", c.ConnectKind)
+	}
 }

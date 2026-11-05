@@ -1,0 +1,525 @@
+# C7 incident scenario (Q4c): the connector's stored config still names the Debezium 1.x logical
+# server key database.server.name, which 2.0 replaced with topic.prefix. After an in-place worker
+# upgrade task 0 fails to configure itself, and re-registering the same 1.x config is refused by
+# Connect's validation (HTTP 400, nothing stored). Format: evals/README.md (C6). The break is the
+# config a registration uses, so this is the Q4a "validate before registering" story
+# (tasks/Q-board.md rows Q4a/Q4b/Q4c).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# connect_config, connect_status, schema_registry_* and dbtools code from main, composed by hand
+# from those tools' format strings and from the messages Debezium 3.2 and Kafka Connect 3.6
+# return (the P3 and X1e approach; the Q4c session had no Docker, so nothing was read from a
+# running stack). Clock: 2026-10-24T09:40:00Z, scoped by dev/owners.yaml. To replace it with a
+# real recording, see evals/scenarios/README.md, "Config-validation scenarios (Q4c)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (a connector config key).
+#   Nothing is wrong in Postgres, Kafka or the warehouse: the slot is inactive only because task 0
+#   cannot configure itself. The connector itself is RUNNING: Debezium's PostgresConnector.start
+#   only keeps the properties; the task's start validates them and fails.
+#
+# Expected label: the key is database.server.name. Debezium 2.0 replaced it with topic.prefix
+#   (known issue dbz-topic-prefix, DBZ-4180); renaming it with the same value (pg) keeps the topic
+#   names, the schema subject names and the stored offsets, so the connector can start where it
+#   stopped. The fix is a config change plus a restart of the connector and its task (the task
+#   cannot start at all while the required key is missing). connect_update_connector_config cannot do it: its
+#   allow-list is output/precision settings and error logging. Re-registering by delete then
+#   create is connect_delete_connector + connect_create_connector (Q5c, not merged yet); its
+#   Preview runs ValidateConfig, which is the check that refuses this config today.
+#   Forbidden: connect_restart_connector, connect_restart_task - a restart re-reads the same
+#     stored config and task 0 fails with the same message.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not STOPPED (Validate
+#     refuses it).
+#   Forbidden: schema_register, schema_set_compatibility - both subjects have one version and the
+#     schema is not what is missing; the required connector key is.
+#   Forbidden: connect_update_connector_config - it cannot rename a key (see above).
+#
+# Traps:
+#   - "topic.prefix is invalid" (the owner's steer) reads like a schema or topic-naming problem;
+#     the fix is the connector's own config key, and pg_recent_ddl shows no DDL at all.
+#   - Task 0's trace says only "Error configuring an instance of PostgresConnectorTask; check the
+#     logs for errors": the field is in the worker log, which no tool reads. The agent has to
+#     read connect_config (it shows database.server.name and no topic.prefix, and hides nothing
+#     here) and tie it to the owner's 400 message or the dbz-topic-prefix known issue.
+#   - The slot is inactive with 1.1 MiB retained: small, so a slot_wal / dead-slot story fails.
+#
+# Sources:
+#   - internal/tools/runbooks/library/known-issues/renamed.yaml, id dbz-topic-prefix:
+#     database.server.name was replaced by topic.prefix (DBZ-4180), affected >=2.0.0.Beta1;
+#     "rename database.server.name to topic.prefix with the same value so topic names and stored
+#     offsets stay the same".
+#   - internal/tools/kafkatools/validate_config_tool.go: connect_validate_config reports an unknown
+#     key with the nearest known key from PluginConfigDef, and names the Q1 known-issue id when
+#     Deps.RenamedKey is wired (A4's wiring does not pass it yet; until then the rename is
+#     resolved from runbook_lookup, which reads the same embedded index and runs for real in the
+#     harness). Since Q6d the harness replays connect_validate_config: the recording below
+#     (input {class}) is the tool's output for the stored config, with the fact
+#     f_validate_unknown_key on it (not required: connect_config and task 0's trace prove the
+#     key too). connect_create_connector's Preview reads the same recording.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: topic.prefix is
+#     required; it replaced database.server.name in 2.0.
+#   - Kafka Connect validates a config only on the REST create/update path (AbstractHerder
+#     validateConnectorConfig): a PUT /connectors/<name>/config without topic.prefix is answered
+#     HTTP 400 "Connector configuration is invalid and contains the following 1 error(s): The
+#     'topic.prefix' value is invalid: A value is required ..." and nothing is stored. A config
+#     already in the config topic is not re-validated when the worker starts: the connector
+#     starts (RUNNING), and Debezium's BaseSourceTask.start validates the fields and throws
+#     "Error configuring an instance of PostgresConnectorTask; check the logs for errors", so
+#     task 0 is FAILED. connect_status keeps a trace's first line and its "Caused by:" lines
+#     (internal/tools/kafkatools/connect_tools.go condenseTrace); this trace has no cause.
+
+name: register-rejected-renamed-key
+description: |
+  At 09:08 UTC the Connect workers were upgraded in place to Debezium 3.2. pg-orders-connector's
+  stored config dates from the 1.x cluster, so it still carries the logical server name in the
+  1.x key database.server.name=pg and has no topic.prefix. The connector starts (RUNNING) but
+  task 0 FAILED: "Error configuring an instance of PostgresConnectorTask; check the logs for
+  errors". The owner then tried to re-register the 1.x export (PUT /connectors/.../config) and
+  Connect refused it with HTTP 400 ("The 'topic.prefix' value is invalid: A value is required"),
+  so the stored config is unchanged. The slot debezium_orders is inactive and order-sync and
+  analytics.orders have been idle for 32 minutes. Nothing else changed: the schema has one
+  version, no DDL ran, the source role can read the table.
+
+  Root cause: the connector's config still uses database.server.name, which Debezium 2.0 renamed
+  to topic.prefix, and topic.prefix is required, so task 0 cannot configure itself and Connect
+  refuses the same config on re-registration.
+
+  Expected label: rename database.server.name to topic.prefix with the value pg (known issue
+  DBZ-4180) and restart the connector; the topic names, subject names and stored offsets stay
+  the same. Re-registering (delete plus create, connect_delete_connector + connect_create_connector
+  from Q5c) runs the same validation, which now passes.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders: pg-orders-connector task 0 is FAILED and analytics.orders is 32m stale after the Debezium 3.2 upgrade; re-registering the 1.x export was refused'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=32m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=32m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "false"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: warn
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - facts:
+            tasks_failed: "1"
+          health: fail
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 32m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 32m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+    data:
+      - failed_tasks: 1
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for errors
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: FAILED
+          error: 'org.apache.kafka.connect.errors.ConnectException: Error configuring an instance of PostgresConnectorTask; check the logs for errors'
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.server.name: pg
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.server.name: pg
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.1 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 3D/4A11C920
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/4A11C7D0
+        retained_wal_bytes: 1153434
+        wal_status: reserved
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+    data:
+      changes: null
+      from_version: 1
+      subject: pg.public.orders-value
+      to_version: 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
+    data:
+      changes: []
+      from_version: 1
+      single_version: true
+      subject: pg.public.orders-value
+      to_version: 1
+      versions:
+        - 1
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      role_info:
+        role: piperoom
+        exists: true
+        can_login: true
+        replication: true
+        selectable:
+          public.orders: true
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1 MB
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 32 min ago
+      partition 1: 0–1417 (1417 records), newest 32 min ago
+      partition 2: 0–1403 (1403 records), newest 32 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-24T09:08:06Z (stale for 32m)
+    data:
+      newest: "2026-10-24T09:08:06Z"
+      stale_for: 32m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1432, status, updated_at=2026-10-24T09:39:41Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1432"
+      status: null
+      updated_at: "2026-10-24T09:39:41Z"
+  - tool: warehouse_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    summary: |-
+      1 error in io.debezium.connector.postgresql.PostgresConnector:
+        topic.prefix: The 'topic.prefix' value is invalid: A value is required
+      unknown key "database.server.name": not a known key of this plugin
+    data:
+      base_connector: pg-orders-connector
+      class: io.debezium.connector.postgresql.PostgresConnector
+      config_keys: 4
+      error_count: 1
+      errors:
+        topic.prefix:
+          - 'The ''topic.prefix'' value is invalid: A value is required'
+      unknown_keys:
+        - key: database.server.name
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, logtools}; the values are composed to agree with the recordings above.
+  # The stored offset is partition server=pg: the 1.x logical server name equals the topic.prefix to be set.
+  - tool: connect_source_offsets
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector partition server=pg: lsn=263235684640, lsn_proc=263235684640, ts_usec=1792832878000000, txId=918223
+  # connect_worker_logs: the replay has no Loki (WORKER_LOGS_LOKI_URL is unset), so the real tool answers with its
+  # not-configured text (internal/tools/logtools/logtools.go) whatever the connector or window.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I did the in-place upgrade. Task 0 failed, so I tried re-registering the connector from our 1.x export with PUT /connectors/pg-orders-connector/config, and Connect answered 400: Connector configuration is invalid and contains the following 1 error(s): The 'topic.prefix' value is invalid: A value is required. I own the connector: tell me which setting to change and I will re-register it the same way."
+
+expect:
+  root_cause:
+    # Either key names the fix: the old one, or the new one Debezium 2.0 requires.
+    - [database server name, topic prefix]
+    - [rename*, replaced, removed, require*, instead]
+  # The wrong stories of a connector that will not start. The Debezium
+  # connector is itself a plugin, so the plugin row names a missing plugin.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - ['permission denied']
+    - ['plugin is missing']
+    - ['missing plugin']
+    - ['plugin is not installed']
+    - ['plugin isn t installed']
+    - ['plugin not found']
+    - ['plugin jar*']
+    - ['plugin path']
+    - ['slot was lost']
+    - ['disk full']
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_task_config_error
+      tool: connect_status
+      match: [task 0, failed, error configuring, postgres connector task]
+      required: true
+    - id: f_old_key_in_config
+      tool: connect_config
+      match: [database server name, pg]
+      required: true
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+    - id: f_one_schema_version
+      tool: schema_registry_versions
+      match: [versions 1, latest id 2]
+    - id: f_validate_unknown_key
+      tool: connect_validate_config
+      match: [unknown key, database server name]
+  claims:
+    - about: root_cause
+      facts: [f_old_key_in_config, f_task_config_error]
+  evidence_tools: [connect_config, connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

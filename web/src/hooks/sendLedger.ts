@@ -102,6 +102,9 @@ export class SendLedger {
    * automatic; null is treated like false (#545, #551).
    */
   dedupes: boolean | null = null
+  // The latest refusal's text and the action it ended, for the composer to show next to its box
+  // (KAN-580). One slot: a composer reads it right after its own send settles.
+  private lastRefusal: { clientId: string; text: string } | undefined
 
   private readonly deps: LedgerDeps
 
@@ -206,6 +209,18 @@ export class SendLedger {
     this.setError(this.banner())
   }
 
+  /**
+   * For the strip under a composer (KAN-586): what a failed action is really waiting for. For an
+   * unknown action, how long a Retry click is still ignored (ms, above 0), or 0 when a click sends
+   * it now; undefined for anything else (kept for a retry: "Retrying" is true).
+   */
+  unconfirmedLeft(clientId: string): number | undefined {
+    const a = this.actions.get(clientId)
+    if (a?.state !== 'unknown') return undefined
+    if (this.dedupes === true) return 0
+    return Math.max(a.since + UNCONFIRMED_WINDOW_MS - this.now(), 0)
+  }
+
   /** The ledger still holds this action (on the wire, kept, or unknown): a Retry of it is owed. */
   isPending(clientId: string): boolean {
     const a = this.actions.get(clientId)
@@ -295,7 +310,7 @@ export class SendLedger {
       // One id, two bodies: a bug in this client. Never retried, so it cannot loop.
       console.error('piperoom: client_id_reused for', a.clientId)
       this.actions.delete(a.clientId)
-      this.setError(errorText(e))
+      this.refuse(a.clientId, e)
       return 'refused'
     }
     if (isUnconfirmed(e)) {
@@ -327,8 +342,19 @@ export class SendLedger {
     }
     // Refused (an error answer) or nothing kept: nothing was stored, the id is unused.
     this.actions.delete(a.clientId)
-    this.setError(errorText(e))
+    this.refuse(a.clientId, e)
     return 'refused'
+  }
+
+  private refuse(clientId: string, e: unknown) {
+    const text = errorText(e)
+    this.lastRefusal = { clientId, text }
+    this.setError(text)
+  }
+
+  /** Why the server refused this action, when its latest send ended in a refusal. */
+  refusal(clientId: string): string | undefined {
+    return this.lastRefusal?.clientId === clientId ? this.lastRefusal.text : undefined
   }
 
   /**

@@ -34,7 +34,21 @@ func input(query string, limit int) string {
 	return string(b)
 }
 
+// seeded seeds rooms, giving a neutral room.labelled to each room without one:
+// most tests are about ranking and caps, not the label gate (label_gate_test.go,
+// which uses seededRaw).
 func seeded(t *testing.T, rooms ...fake.Room) *memstore.Store {
+	t.Helper()
+	labelled := slices.Clone(rooms)
+	for i := range labelled {
+		if labelled[i].Label == nil {
+			labelled[i].Label = &events.RoomLabelledPayload{Cause: "recorded"}
+		}
+	}
+	return seededRaw(t, labelled...)
+}
+
+func seededRaw(t *testing.T, rooms ...fake.Room) *memstore.Store {
 	t.Helper()
 	st, err := fake.NewStore(context.Background(), rooms...)
 	if err != nil {
@@ -497,7 +511,7 @@ func TestIndexIsCachedForTTLAndRefreshed(t *testing.T) {
 		t.Fatalf("lists = %d, want 1 within the TTL", src.lists)
 	}
 	// A room closes; it shows up only after the TTL.
-	if err := fake.Seed(ctx, st, fake.Room{ID: "r-2", Title: "kafka lag again", ClosedAt: day(9, 2), Resolution: "two"}); err != nil {
+	if err := fake.Seed(ctx, st, fake.Room{ID: "r-2", Title: "kafka lag again", ClosedAt: day(9, 2), Resolution: "two", Label: &events.RoomLabelledPayload{Cause: "recorded"}}); err != nil {
 		t.Fatal(err)
 	}
 	res, _ := run(t, tl, scoped("orders"), input("kafka lag", 3))

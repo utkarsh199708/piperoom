@@ -98,7 +98,9 @@ func TestPrincipalsOldAndNewFormats(t *testing.T) {
 }
 
 func TestExistingFilesStayValid(t *testing.T) {
-	for _, path := range []string{"../../dev/owners.yaml", "../../deploy/config/owners.example.yaml"} {
+	// dev/owners.staging.yaml (X8d) declares staging: and must load with
+	// the X8a loader.
+	for _, path := range []string{"../../dev/owners.yaml", "../../dev/owners.staging.yaml", "../../deploy/config/owners.example.yaml"} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}

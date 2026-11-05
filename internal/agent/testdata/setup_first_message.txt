@@ -1,0 +1,16 @@
+Set up this pipeline.
+
+Setup request (typed by the person who opened the room):
+title: <untrusted>orders pipeline</untrusted>
+source: postgres
+target: compose
+topic prefix: <untrusted>pg</untrusted>
+tables: <untrusted>public.orders, public.items</untrusted>
+connectors: <untrusted>pg-orders</untrusted>
+targets:
+  postgres <untrusted>db.acme:5432</untrusted> (class local)
+  connect <untrusted>connect.acme:8083</untrusted> (class shared)
+
+Bounds: at most 3 failed attempts of one step, 12 executed steps of one plan, 45m0s of wall clock, and 2000000 tokens. When a bound is reached the run stops and asks.
+
+Work through your method and report what you find.

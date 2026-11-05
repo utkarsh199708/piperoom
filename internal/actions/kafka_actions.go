@@ -32,10 +32,21 @@ func strProp(desc string) map[string]any {
 type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
+	// Staging is the pipeline's staging client set (X8-0, action.go); nil
+	// when none. Only an action's Stage may use it.
+	Staging *Staging
+	// Binlog is optional and read-only: the MySQL source's binlog state.
+	// connect_update_connector_config compares a new database.server.id with
+	// the source's @@server_id through it (Q8e); nil refuses that key.
+	Binlog clients.BinlogReader
 
 	// validateTimeout overrides timeout for the I/O in Validate; tests only.
 	// Zero means the default.
 	validateTimeout time.Duration
+	// stageWindow, stagePoll, stageSettle and restoreTimeout override
+	// StageObserveWindow, stagePollInterval, stageSettle and
+	// StageRestoreTimeout in Stage; tests only. Zero means the default.
+	stageWindow, stagePoll, stageSettle, restoreTimeout time.Duration
 }
 
 // Register adds the Kafka Connect and Schema Registry write actions to reg.
@@ -44,6 +55,7 @@ func Register(reg *Registry, d Deps) error {
 		&restartTask{d: d},
 		&restartConnector{d: d},
 		&resumeConnector{d: d},
+		&pauseConnector{d: d},
 		&updateConnectorConfig{d: d},
 		&setCompatibility{d: d},
 		&registerSchema{d: d},
@@ -166,6 +178,11 @@ func pollEvery(override time.Duration) time.Duration {
 // and whether RUNNING was reached. A read error is returned unless ctx has
 // already ended, which is reported as a timeout instead.
 func awaitRunning(ctx context.Context, interval time.Duration, read func(context.Context) (string, error)) (string, bool, error) {
+	return awaitState(ctx, interval, "RUNNING", read)
+}
+
+// awaitState is awaitRunning for any target state.
+func awaitState(ctx context.Context, interval time.Duration, want string, read func(context.Context) (string, error)) (string, bool, error) {
 	last := ""
 	for {
 		state, err := read(ctx)
@@ -178,7 +195,7 @@ func awaitRunning(ctx context.Context, interval time.Duration, read func(context
 		if state != "" {
 			last = state
 		}
-		if state == "RUNNING" {
+		if state == want {
 			return state, true, nil
 		}
 		select {

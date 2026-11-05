@@ -53,6 +53,31 @@ func TestPublicationTablesMissingIntegration(t *testing.T) {
 	}
 }
 
+// TestPublicationTablesMissingRoleIntegration: a role that does not exist yet
+// is a verdict (no privilege on anything), not a read error. has_table_privilege
+// would raise "role ... does not exist", so the reader guards it; a setup room
+// reads the publication before the read role is created.
+func TestPublicationTablesMissingRoleIntegration(t *testing.T) {
+	db := sourceDB(t)
+	role := testenv.Name("no_role")
+	tables, err := db.PublicationTables(context.Background(), "dbz_publication", role, []string{"public.orders"})
+	if err != nil {
+		t.Fatalf("PublicationTables with a missing role: %v", err)
+	}
+	var orders *PublicationTable
+	for i := range tables {
+		if tables[i].Schema == "public" && tables[i].Table == "orders" {
+			orders = &tables[i]
+		}
+	}
+	if orders == nil || !orders.InPublication {
+		t.Fatalf("public.orders not found as a member: %+v", tables)
+	}
+	if orders.Selectable {
+		t.Fatalf("a missing role reported SELECT: %+v", *orders)
+	}
+}
+
 // TestPublicationTablesSourceNotInPublicationIntegration creates a table that
 // is not in the publication and verifies the method reports InPublication=false
 // while Selectable reflects the role's real privilege.

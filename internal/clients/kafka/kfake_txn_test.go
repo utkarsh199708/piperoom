@@ -83,16 +83,39 @@ func (p *kfProducer) end(how kgo.TransactionEndTry) {
 	}
 }
 
-// within runs fn with a 3 s budget: every read here is expected to return in
-// milliseconds, and the old behaviour hung until its own 5 s or 15 s deadline.
+const (
+	// withinBound is how long a read under within may take. A read that gets
+	// past an aborted tail or an open transaction returns after about one
+	// stallAfter (0.5 to 0.6 s measured on an idle machine); one stuck there
+	// waits out a timer instead: TopicOffsets the caller's withinDeadline
+	// (and fails with the deadline), PeekDLQ withinDeadline, FindByKey
+	// withinDeadline (at most its own 15 s). Every stuck read therefore runs
+	// the full withinDeadline, so the bound only needs to sit below it: 8 s
+	// gives a loaded CI machine about 15 times the idle time (the old 4 s
+	// bound gave about 7 times, and a busy CI run still pushed a healthy
+	// read past the record read's old 5 s deadline).
+	withinBound = 8 * time.Second
+	// withinDeadline is the ctx deadline under within. It is well past
+	// withinBound, so a stuck PeekDLQ or FindByKey, which still returns no
+	// error, overruns the bound instead of being cut short just under it.
+	// It is short enough that three stuck reads in one test (10 + 10 + 10 s)
+	// end before kgo's default 40 s transaction timeout aborts the open
+	// transaction, which would unstick the reads after them.
+	withinDeadline = 10 * time.Second
+)
+
+// within runs fn under withinDeadline and fails it when it takes longer than
+// withinBound: every read here is expected to get past a marker, an aborted
+// tail or an open transaction in about one stallAfter, and the old behaviour
+// hung until its own 5 s or 15 s deadline or the caller's.
 func within(t *testing.T, fn func(ctx context.Context)) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), withinDeadline)
 	defer cancel()
 	start := time.Now()
 	fn(ctx)
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("took %s: waited on a marker or an open transaction", d)
+	if d := time.Since(start); d > withinBound {
+		t.Fatalf("took %s (bound %s): waited on a marker or an open transaction", d, withinBound)
 	}
 }
 

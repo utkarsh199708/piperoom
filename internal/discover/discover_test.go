@@ -72,20 +72,19 @@ func TestClassFilter(t *testing.T) {
 	d := Deps{
 		Connect: &fakeConnect{configs: map[string]map[string]string{
 			"pg":    pgConfig("topic.prefix", "pg"),
-			"mysql": {"connector.class": "io.debezium.connector.mysql.MySqlConnector"},
+			"mysql": {"connector.class": "io.debezium.connector.mysql.MySqlConnector", "topic.prefix": "shop"},
 			"sink":  {"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector"},
 			"bare":  {},
 		}},
 		Kafka: &fakeKafka{}, Registry: &fakeRegistry{},
 	}
 	r := run(t, d, Options{})
-	if len(r.Pipelines) != 1 || r.Pipelines[0].Connector != "pg" {
+	if len(r.Pipelines) != 2 || r.Pipelines[0].Connector != "mysql" || r.Pipelines[0].SourceKind != "mysql" || r.Pipelines[1].Connector != "pg" || r.Pipelines[1].SourceKind != "" {
 		t.Fatalf("pipelines = %+v", r.Pipelines)
 	}
 	want := []Skipped{
-		{"bare", "not a Debezium Postgres source (no connector.class)"},
-		{"mysql", "not a Debezium Postgres source (class io.debezium.connector.mysql.MySqlConnector)"},
-		{"sink", "not a Debezium Postgres source (class io.confluent.connect.jdbc.JdbcSinkConnector)"},
+		{"bare", "not a Debezium Postgres or MySQL source (no connector.class)"},
+		{"sink", "not a Debezium Postgres or MySQL source (class io.confluent.connect.jdbc.JdbcSinkConnector)"},
 	}
 	if !slices.Equal(r.Skipped, want) {
 		t.Errorf("skipped = %+v", r.Skipped)

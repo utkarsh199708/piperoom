@@ -147,7 +147,8 @@ func TestPipelinesList(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 			t.Fatal(err)
 		}
-		want := []map[string]any{{"id": "orders", "title": "Orders CDC", "shadow": false}}
+		// kind (P4a-4) is the one field added since R4: "cdc" when the file names none.
+		want := []map[string]any{{"id": "orders", "title": "Orders CDC", "shadow": false, "kind": "cdc"}}
 		if !reflect.DeepEqual(raw, want) {
 			t.Fatalf("got %v", raw)
 		}

@@ -28,7 +28,7 @@ func textTurn(text string) anthropic.BetaMessage {
 
 func TestWritePostmortemValidDraft(t *testing.T) {
 	m := &handoffModel{msg: textTurn(`{"what_broke":"orders stale","why":"column amount changed from int to decimal","done":["fix applied"],"ruled_out":[],"open":["add a schema check"],"risks":[]}`)}
-	d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, m)
+	d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatalf("writePostmortem: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestWritePostmortemValidDraft(t *testing.T) {
 
 func TestWritePostmortemReturnsViolationsWithoutLogText(t *testing.T) {
 	m := &handoffModel{msg: textTurn(`{"what_broke":"orders stale","why":"column amount changed, 48213 rows lost, see ` + "`ghost_table`" + `","done":[],"ruled_out":[],"open":[],"risks":[]}`)}
-	d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, m)
+	d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatalf("writePostmortem: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestWritePostmortemErrors(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, &handoffModel{msg: c.msg})
+			d, err := writePostmortem(context.Background(), postmortemLog(), Options{}, viaSDK(&handoffModel{msg: c.msg}))
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want it to mention %q", err, c.want)
 			}
@@ -87,7 +87,7 @@ func TestWritePostmortemErrors(t *testing.T) {
 			}
 		})
 	}
-	if _, err := writePostmortem(context.Background(), nil, Options{}, &handoffModel{}); err == nil {
+	if _, err := writePostmortem(context.Background(), nil, Options{}, viaSDK(&handoffModel{})); err == nil {
 		t.Fatal("an empty room must be an error")
 	}
 }

@@ -1,0 +1,37 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.7",
+    "generated_at": "2026-10-17T00:12:20Z",
+    "project_name": "analytics"
+  },
+  "nodes": {
+    "model.analytics.stg_orders": {"name": "stg_orders", "resource_type": "model", "package_name": "analytics", "raw_code": "select * from {{ source('shop', 'orders') }}"},
+    "model.analytics.dim_customer": {"name": "dim_customer", "resource_type": "model", "package_name": "analytics"},
+    "model.analytics.fct_revenue": {"name": "fct_revenue", "resource_type": "model", "package_name": "analytics", "compiled_code": "select order_id, sum(amount_cents) as revenue_cents from stg_orders group by 1"},
+    "model.analytics.rpt_daily": {"name": "rpt_daily", "resource_type": "model", "package_name": "analytics"},
+    "test.analytics.not_null_fct_revenue_order_id.5c8d1e": {"name": "not_null_fct_revenue_order_id", "resource_type": "test", "package_name": "analytics"},
+    "model.marketing.dim_customer": {"name": "dim_customer", "resource_type": "model", "package_name": "marketing"}
+  },
+  "sources": {
+    "source.analytics.shop.orders": {"name": "orders", "resource_type": "source"}
+  },
+  "parent_map": {
+    "source.analytics.shop.orders": [],
+    "model.analytics.stg_orders": ["source.analytics.shop.orders"],
+    "model.analytics.dim_customer": ["model.analytics.stg_orders"],
+    "model.analytics.fct_revenue": ["model.analytics.stg_orders", "model.analytics.dim_customer"],
+    "model.analytics.rpt_daily": ["model.analytics.fct_revenue"],
+    "test.analytics.not_null_fct_revenue_order_id.5c8d1e": ["model.analytics.fct_revenue"],
+    "model.marketing.dim_customer": []
+  },
+  "child_map": {
+    "source.analytics.shop.orders": ["model.analytics.stg_orders"],
+    "model.analytics.stg_orders": ["model.analytics.fct_revenue", "model.analytics.dim_customer"],
+    "model.analytics.dim_customer": ["model.analytics.fct_revenue"],
+    "model.analytics.fct_revenue": ["test.analytics.not_null_fct_revenue_order_id.5c8d1e", "model.analytics.rpt_daily"],
+    "model.analytics.rpt_daily": [],
+    "test.analytics.not_null_fct_revenue_order_id.5c8d1e": [],
+    "model.marketing.dim_customer": []
+  }
+}

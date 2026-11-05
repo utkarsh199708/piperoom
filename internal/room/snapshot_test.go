@@ -315,3 +315,31 @@ func TestApplyHypothesisVerdicts(t *testing.T) {
 		t.Fatalf("reset: %+v", s4.Hypothesis)
 	}
 }
+
+// open_proposals[].class is proposal.created.class (docs/api.md, X2): kept
+// for recovery and performance, omitted for a fix, so a fix proposal's
+// snapshot JSON is unchanged.
+func TestSnapshotProposalClass(t *testing.T) {
+	s := room.NewSnapshot()
+	for i, class := range []string{"", events.ActionClassFix, events.ActionClassRecovery, events.ActionClassPerformance} {
+		s = room.Apply(s, ev(events.ProposalCreated, int64(i+1), events.AgentActor, events.ProposalCreatedPayload{
+			ProposalID: "p_" + string(rune('a'+i)), Title: "t", RequiredLayers: []string{"kafka"}, Class: class,
+			Steps: []events.ProposalStep{{Action: "a", Params: json.RawMessage(`{}`)}},
+		}))
+	}
+	var got []string
+	for _, p := range s.OpenProposals {
+		got = append(got, p.Class)
+	}
+	if strings.Join(got, ",") != ",,recovery,performance" {
+		t.Fatalf("classes = %q", got)
+	}
+	raw, _ := json.Marshal(s.OpenProposals[1])
+	if strings.Contains(string(raw), `"class"`) {
+		t.Fatalf("a fix proposal marshals a class: %s", raw)
+	}
+	raw, _ = json.Marshal(s.OpenProposals[2])
+	if !strings.Contains(string(raw), `"class":"recovery"`) {
+		t.Fatalf("a recovery proposal lost its class: %s", raw)
+	}
+}

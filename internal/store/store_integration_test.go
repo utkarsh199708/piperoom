@@ -356,6 +356,17 @@ func createTestProposal(t *testing.T, s *store.PG, roomID, proposalID string) {
 	}
 }
 
+// approveTestProposal records the approval of createTestProposal's one
+// required layer, so an executor may claim the proposal.
+func approveTestProposal(t *testing.T, s *store.PG, proposalID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: proposalID, Layer: "postgres", Decision: "approved"}); err != nil {
+		t.Fatalf("store: approve proposal: %v", err)
+	}
+}
+
 // TestEventTimesComeBackUTC pins review item 5: scanEvent normalises event
 // times to UTC, so a snapshot rebuilt after a restart never mixes locations.
 func TestEventTimesComeBackUTC(t *testing.T) {

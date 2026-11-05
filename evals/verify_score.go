@@ -49,6 +49,18 @@ type ReplayResult struct {
 	// UnexecutedInputs are scripted fix results the harness skipped: no
 	// executable proposal of the run had that step.
 	UnexecutedInputs []string `json:"unexecuted_inputs,omitempty"`
+	// RightAction is the "right action proposed" score (rightaction.go):
+	// the expect.fix groups, in order and on their targets, among the
+	// proposed steps. Nil when the scenario expects no fix. Reported only;
+	// it does not change pass or score.
+	RightAction *RightAction `json:"right_action,omitempty"`
+	// RightFiles is the "right files changed" check of a pull-request fix
+	// (rightfiles.go): nil when the scenario sets no expect.fix_files. A
+	// wrong one fails the run.
+	RightFiles *RightFiles `json:"right_files,omitempty"`
+	// ToolCallChecks are the invalid tool calls (invalid_calls.go), set here
+	// with the other checks Judge does not make.
+	ToolCallChecks
 }
 
 // withReplayChecks adds the replay judgement to a run Judge scored, moves
@@ -58,6 +70,13 @@ type ReplayResult struct {
 // untouched: it is E2's, and its other callers keep working.
 func withReplayChecks(sc Scenario, tr Transcript, res RunResult) RunResult {
 	res.ReplayResult = judgeReplay(sc, tr)
+	res.RightAction = judgeRightAction(sc, tr.Events)
+	res.RightFiles = judgeRightFiles(sc, tr.Events)
+	res.ToolCallChecks = checkToolCalls(tr.Events)
+	// The recorded setup session and ladder (U1-20) are part of the scenario's
+	// evidence: a setup scenario whose recording is missing or broken fails
+	// here, and score() returns 0 for it.
+	res.SetupReplay = setupReplay(sc)
 	res.ToolCalls -= res.VerifyCalls
 	res.Score = score(sc, res)
 	res.Failures = failures(sc, res)
@@ -160,6 +179,7 @@ func verifyFailures(sc Scenario, res RunResult) []string {
 	if res.VerifyCalls > budget {
 		f = append(f, fmt.Sprintf("over verify budget: %d > %d reads after the fix", res.VerifyCalls, budget))
 	}
+	f = append(f, rightFilesFailure(res.RightFiles)...)
 	return f
 }
 

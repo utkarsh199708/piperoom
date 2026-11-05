@@ -99,8 +99,17 @@ func scriptedRunner(script []step) agent.Runner {
 				}
 				p.Steps = append([]events.ProposalStep(nil), p.Steps...)
 				for i := range p.Steps {
-					if a, ok := d.Actions.Get(p.Steps[i].Action); ok && p.Steps[i].Layer == "" {
-						p.Steps[i].Layer = a.Layer()
+					a, ok := d.Actions.Get(p.Steps[i].Action)
+					if !ok || p.Steps[i].Layer != "" {
+						continue
+					}
+					p.Steps[i].Layer = a.Layer()
+					// A pull-request step's layer is its globs' (actions.Layered),
+					// as propose_fix derives it with the room's pipeline.
+					if pl, ok := tools.PipelineFrom(ctx); ok {
+						if l, err := actions.StepLayer(a, pl, p.Steps[i].Params); err == nil {
+							p.Steps[i].Layer = l
+						}
 					}
 				}
 				_, _ = d.Proposals.Create(ctx, p)

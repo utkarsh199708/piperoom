@@ -1,0 +1,49 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v6.json",
+    "dbt_version": "1.8.7",
+    "generated_at": "2026-10-17T00:12:31.402117Z",
+    "invocation_id": "5b0d3f52-6a1e-4c3a-9a43-3c1f0d7e9b21",
+    "env": {}
+  },
+  "results": [
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 1.25,
+      "adapter_response": {"_message": "SELECT 1200", "code": "SELECT", "rows_affected": 1200},
+      "message": "SELECT 1200",
+      "failures": null,
+      "unique_id": "model.analytics.dim_customer",
+      "compiled": true,
+      "relation_name": "\"warehouse\".\"analytics\".\"dim_customer\""
+    },
+    {
+      "status": "error",
+      "timing": [],
+      "thread_id": "Thread-2",
+      "execution_time": 0.31,
+      "adapter_response": {},
+      "message": "Database Error in model fct_revenue (models/fct_revenue.sql)\n  column \"amount_cents\" does not exist\n  LINE 4:     sum(amount_cents) as revenue_cents",
+      "failures": null,
+      "unique_id": "model.analytics.fct_revenue",
+      "compiled": true,
+      "relation_name": "\"warehouse\".\"analytics\".\"fct_revenue\""
+    },
+    {
+      "status": "skipped",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 0,
+      "adapter_response": {},
+      "message": null,
+      "failures": null,
+      "unique_id": "test.analytics.not_null_fct_revenue_order_id.5c8d1e",
+      "compiled": false,
+      "relation_name": null
+    }
+  ],
+  "elapsed_time": 2.04,
+  "args": {}
+}

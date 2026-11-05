@@ -65,10 +65,11 @@ func TestEndpointRunCallsUsageOnceOnNil(t *testing.T) {
 
 func TestEndpointRunCallsUsageOnceOnError(t *testing.T) {
 	t.Run("model error", func(t *testing.T) {
-		ep := testEndpoint(&failingModel{err: errors.New("stream reset")}, 0)
+		cause := errors.New("stream reset")
+		ep := testEndpoint(&failingModel{err: cause}, 0)
 		u := &usageRecorder{}
 		err := runEndpoint(ep, "r", Deps{Usage: u.fn}, Options{})
-		if err == nil || !strings.Contains(err.Error(), "stream reset") {
+		if !errors.Is(err, cause) {
 			t.Fatalf("Run = %v, want the model error", err)
 		}
 		u.once(t, 42) // the partial usage of the failed call is reported

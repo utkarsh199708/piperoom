@@ -1,0 +1,2 @@
+go test fuzz v1
+string("config dump:\n  database.password: pa55word\n  api_key: abcdefghijklmnopqrstuvwxyz012345\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz012345")

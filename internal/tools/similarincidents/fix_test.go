@@ -39,7 +39,7 @@ func TestSimilarIndexesLabelAndExecutedFix(t *testing.T) {
 	if h.DurationS != 7200 || h.ClosedBy != "Arjun" {
 		t.Errorf("duration %d closed by %q", h.DurationS, h.ClosedBy)
 	}
-	want := `[1] 2026-09-30 "orders stalled" (2 h, closed by Arjun) fixed by: connect_resume_connector — done`
+	want := `[1] 2026-09-30 "orders stalled" (2 h, closed by Arjun) fixed by: connect_resume_connector — unverified closing note: done`
 	if !strings.Contains(summary, want) {
 		t.Errorf("summary %q lacks %q", summary, want)
 	}
@@ -109,7 +109,7 @@ func TestHitCauseAndLabelFix(t *testing.T) {
 	}{
 		{"labelled", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped", FixThatWorked: "recreated slot"}},
 			"slot dropped", "recreated slot", "recreated slot"},
-		{"unlabelled", fake.Room{}, "", "", ""},
+		{"label without fix", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped"}}, "slot dropped", "", ""},
 		{"executed proposal only", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped"},
 			Fix: &fake.Fix{ProposalID: "p", Title: "Proposal title", Actions: []string{"connect_restart_task"}}},
 			"slot dropped", "", "Proposal title"},
@@ -144,5 +144,25 @@ func TestHitCauseAndLabelFix(t *testing.T) {
 				t.Errorf("summary fix mismatch: %q", summary)
 			}
 		})
+	}
+}
+
+// The setup layer is never where an incident was, so a stored label that names
+// it is not shown as the hit's layer (U0-IL3); a real layer still is.
+func TestSimilarRefusesEnvironmentLayer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		room fake.Room
+		want string
+	}{
+		"room label, environment":   {fake.Room{Label: &events.RoomLabelledPayload{ActualLayer: events.LayerEnvironment, Cause: "x"}}, ""},
+		"room label, kafka":         {fake.Room{Label: &events.RoomLabelledPayload{ActualLayer: "kafka", Cause: "x"}}, "kafka"},
+		"shadow label, environment": {fake.Room{Shadow: true, Layer: events.LayerEnvironment, LabelTerms: []string{"x"}}, ""},
+		"shadow label, kafka":       {fake.Room{Shadow: true, Layer: "kafka", LabelTerms: []string{"x"}}, "kafka"},
+	} {
+		tc.room.ID, tc.room.Title, tc.room.ClosedAt, tc.room.Resolution = "r", "zebrafish pipeline stalled", day(9, 30), "done"
+		hits, _ := hitsOf(t, tc.room)
+		if len(hits) != 1 || hits[0].Layer != tc.want {
+			t.Errorf("%s: hits = %+v, want layer %q", name, hits, tc.want)
+		}
 	}
 }

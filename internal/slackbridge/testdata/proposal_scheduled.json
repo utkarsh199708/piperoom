@@ -1,0 +1,13 @@
+{
+  "room_id": "r1",
+  "seq": 2,
+  "type": "proposal.scheduled",
+  "actor": {"kind": "system", "id": "system", "name": "System"},
+  "payload": {
+    "proposal_id": "p1",
+    "run_at": "2026-11-01T12:00:00Z",
+    "policy": "auto_approve",
+    "cancel_until": "2026-11-01T12:00:00Z"
+  },
+  "at": "2026-11-01T12:00:00Z"
+}

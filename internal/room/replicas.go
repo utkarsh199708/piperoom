@@ -29,11 +29,17 @@ const (
 	DefaultTakeoverScan = 10 * time.Second
 	DefaultExecSweep    = 30 * time.Second
 	// DefaultClaimStale is when an executor claim counts as dead: no refresh
-	// for one step timeout plus a margin for the result writes.
+	// for one step timeout plus a margin for the result writes. A step bound
+	// longer than stepTimeout (a setup T3 step) keeps its claim fresh while it
+	// runs (keepClaimFresh), so this window holds for every room.
 	DefaultClaimStale = stepTimeout + 2*time.Minute
 	// DefaultUnclaimedStale is how long a fully approved proposal may wait for
 	// an executor to claim it.
 	DefaultUnclaimedStale = 2 * time.Minute
+	// writeOffUnclaimedStale is the unclaimed window of the stale sweep with
+	// write mode off (sweepStaleProposals): about a century, so no blocked
+	// proposal ever reaches it.
+	writeOffUnclaimedStale = 100 * 365 * 24 * time.Hour
 )
 
 // maxPendingInputs caps the human inputs a room keeps for priming the inbox
@@ -443,7 +449,9 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		// 3.7); its row is marked interrupted like the Load sweep does.
 		s.interruptShadowRunLocked(ctx, roomID, st)
 		s.dropLeaseLocked(roomID, st)
-	case (agentWasWorking(st) || len(st.pending) > 0) && s.resumeAllowedLocked(ctx, roomID):
+	// A fix PR that merged or closed with no verdict yet counts as work in
+	// flight: the old owner's run held its apply wait (Q7).
+	case (agentWasWorking(st) || len(st.pending) > 0 || len(prReplayInputs(st.snap)) > 0) && s.resumeAllowedLocked(ctx, roomID):
 		if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
 			Text: "the server that ran this room's agent stopped; the agent resumes on another server",
 		}); err != nil {
@@ -534,16 +542,107 @@ func (s *Service) interruptShadowRunLocked(ctx context.Context, roomID string, s
 
 // ---- executor claims ----
 
-// claimExecution claims a proposal for this replica's executor. With a
-// single-process store there is nothing to claim. ok false: another executor
-// has it, run nothing.
+// claimExecution claims a proposal for this replica's executor. ok false:
+// the proposal is not approved in full (or no longer open), or another
+// executor has it; run nothing. The approval check comes first and reads the
+// store, not the room's snapshot, so a caller that reaches the executor
+// without the approve path's allApproved check (a replica that never loaded
+// the room) cannot run, or fail, a proposal the owners have not approved. With
+// a shared store the claim itself checks the approvals again in the same
+// statement (store.Coordinator.ClaimProposal); with a single-process store
+// there is nothing more to claim.
 func (s *Service) claimExecution(ctx context.Context, proposalID string) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
+	defer cancel()
+	ok, err := s.approvedInStore(cctx, proposalID)
+	if err != nil || !ok {
+		return false, err
+	}
 	if s.coord == nil {
 		return true, nil
 	}
-	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
-	defer cancel()
 	return s.coord.ClaimProposal(cctx, proposalID, s.replica)
+}
+
+// approvedInStore reports whether the stored proposal is open and every
+// required layer has an approved decision.
+func (s *Service) approvedInStore(ctx context.Context, proposalID string) (bool, error) {
+	p, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read proposal %s before claim: %w", proposalID, err)
+	}
+	if p.Status != "open" {
+		return false, nil
+	}
+	apps, err := s.store.ListApprovals(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read approvals of %s before claim: %w", proposalID, err)
+	}
+	return layersApproved(p.RequiredLayers, apps), nil
+}
+
+// layersApproved reports whether every required layer has an approved
+// decision. No required layers is never approved.
+func layersApproved(required []string, apps []store.ApprovalRow) bool {
+	if len(required) == 0 {
+		return false
+	}
+	approved := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		if a.Decision == "approved" {
+			approved[a.Layer] = true
+		}
+	}
+	for _, l := range required {
+		if !approved[l] {
+			return false
+		}
+	}
+	return true
+}
+
+// keepClaimFresh refreshes this replica's claim on proposalID every
+// LeaseRenew until the returned stop is called, so a step that may outrun
+// ClaimStale (a setup T3 step waiting for a person) is never swept as dead
+// while it runs. A claim found lost calls lost, which must cancel the running
+// step: the sweep has already recorded the run as interrupted, so the step
+// must not go on (a runner op is sent a FrameCancel, which drops a pending
+// confirmation prompt). The executor's own finish then sees the lost claim.
+// With a single-process store it does nothing.
+func (s *Service) keepClaimFresh(proposalID string, lost context.CancelFunc) (stop func()) {
+	if s.coord == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(s.timing.LeaseRenew)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-s.ctx.Done():
+				return
+			case <-t.C:
+				ok, err := s.touchExecution(s.ctx, proposalID)
+				if err != nil {
+					s.log.Warn("room: refresh a running step's claim failed", "proposal", proposalID, "err", err)
+					continue
+				}
+				if !ok {
+					s.log.Warn("room: a running step's claim was taken by the stale sweep; cancelling the step", "proposal", proposalID)
+					lost()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 // touchExecution refreshes this replica's claim before a step. false: the
@@ -563,8 +662,16 @@ func (s *Service) touchExecution(ctx context.Context, proposalID string) (bool, 
 // conditional UPDATE, so exactly one replica writes its event. A step that was
 // started is never run again: its outcome is unknown and recorded as failed.
 func (s *Service) sweepStaleProposals() {
+	unclaimed := s.timing.UnclaimedStale
+	if s.writeOff {
+		// With write mode off a fully approved proposal is never claimed by
+		// design: it is blocked, not stale. A window no proposal reaches
+		// keeps the store from listing (and spending the LIMIT on) them,
+		// while claims a write-on run left behind are still swept.
+		unclaimed = writeOffUnclaimedStale
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, s.timing.UnclaimedStale, 100)
+	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, unclaimed, 100)
 	cancel()
 	if err != nil {
 		if s.ctx.Err() == nil {
@@ -584,7 +691,7 @@ func (s *Service) sweepStaleProposals() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, s.timing.UnclaimedStale)
+		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, unclaimed)
 		cancel()
 		if err != nil || !ok {
 			s.wg.Done()
@@ -634,7 +741,10 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 	}
 	next := s.interruptedStep(ctx, sp.RoomID, p)
 	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next+1)
-	if sp.ClaimedBy == "" {
+	switch {
+	case sp.WriteBlocked:
+		output = writeOffNotRunOutput
+	case sp.ClaimedBy == "":
 		output = "the proposal was approved, but the server that should have run it stopped before it started; create a new proposal to retry"
 	}
 	for i := range p.Steps {
@@ -917,10 +1027,8 @@ func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState
 	}
 	s.unlockRoom(st)
 	var inputs []agent.HumanInput
-	l, err := s.rebuildWith(ctx, roomID, func(e events.Event) {
-		if in := inputFor(e); in != nil {
-			inputs = append(inputs, *in)
-		}
+	l, err := s.rebuildWith(ctx, roomID, func(snap RoomSnapshot, e events.Event) {
+		inputs = append(inputs, inputsFor(snap, e)...)
 	})
 	if errors.Is(err, store.ErrNotFound) {
 		// Deleted by another replica: evict, as followRoom would.
@@ -993,14 +1101,14 @@ func (s *Service) swapRebuiltLocked(ctx context.Context, roomID string, st *room
 			tmp.snap = Apply(tmp.snap, e)
 			tmp.logBytes += int64(len(e.Payload))
 			trackPending(tmp, e)
-			if in := inputFor(e); in != nil && gaps.contains(e.Seq) {
-				feed = append(feed, *in)
+			if gaps.contains(e.Seq) {
+				feed = append(feed, inputsFor(tmp.snap, e)...)
 			}
 		}
 	}
 	// The rebuild's inputs end at its last seq and the tail's start after
 	// it, but an input after old came from the rebuild: keep log order.
-	slices.SortFunc(feed, func(a, b agent.HumanInput) int { return cmp.Compare(a.Seq, b.Seq) })
+	slices.SortStableFunc(feed, func(a, b agent.HumanInput) int { return cmp.Compare(a.Seq, b.Seq) })
 	s.setDeadline(&tmp.snap)
 	wasOpen := s.roomOpen(st)
 	full := st.snap.LogCap == LogCapFull
@@ -1097,7 +1205,10 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 // room, this replica stops what it runs for the room. Caller holds st's lock.
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
+	// Before Apply: the step's proposal leaves OpenProposals with its last step.
+	s.actionExecutedLocked(st, e)
 	st.snap = Apply(st.snap, e)
+	s.noteRegistered(e)
 	// The store counts the same bytes (len of the payload JSON) for the
 	// room's log cap, whichever replica appended the event.
 	st.logBytes += int64(len(e.Payload))
@@ -1120,11 +1231,11 @@ func trackPending(st *roomState, e events.Event) {
 		}
 		return
 	}
-	in := inputFor(e)
-	if in == nil {
+	ins := inputsFor(st.snap, e)
+	if len(ins) == 0 {
 		return
 	}
-	st.pending = append(st.pending, *in)
+	st.pending = append(st.pending, ins...)
 	if n := len(st.pending); n > maxPendingInputs {
 		st.pending = append([]agent.HumanInput(nil), st.pending[n-maxPendingInputs:]...)
 	}

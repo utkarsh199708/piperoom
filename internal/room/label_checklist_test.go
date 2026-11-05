@@ -77,6 +77,7 @@ func TestLabelValidation(t *testing.T) {
 		"long cause":       {Cause: long},
 		"long fix":         {Cause: "c", FixThatWorked: long},
 		"bad layer":        {Cause: "c", ActualLayer: "moon"},
+		"setup layer":      {Cause: "c", ActualLayer: events.LayerEnvironment},
 		"nul in cause":     {Cause: "a\x00b"},
 		"unknown proposal": {Cause: "c", FixProposalID: "p_nope"},
 	} {
@@ -247,4 +248,20 @@ func TestLabelShadowNeedsBlindLabelFirst(t *testing.T) {
 	if _, err := env.svc.Label(ctx, priya, snap.ID, room.LabelInput{Cause: "schema"}); err != nil {
 		t.Fatalf("label after the blind label: %v", err)
 	}
+}
+
+// The setup layer is where a pipeline is configured, never where an incident
+// was, so the blind label refuses it as an actual layer (U0-IL1).
+func TestShadowLabelRefusesEnvironmentLayer(t *testing.T) {
+	env := newShadowEnv(t, shadowCfg{})
+	ctx := context.Background()
+	snap := env.open(t, "label-shadow-env")
+	env.waitFinished(t, snap.ID)
+	arjun, priya := env.user(t, "arjun"), env.user(t, "priya")
+	if _, err := env.svc.GrantControl(ctx, arjun, snap.ID, "arjun"); err != nil {
+		t.Fatal(err)
+	}
+	env.close(t, snap.ID, "schema change")
+	_, err := env.svc.ShadowLabel(ctx, priya, snap.ID, events.LayerEnvironment, []string{"schema"})
+	wantCode(t, err, "validation")
 }

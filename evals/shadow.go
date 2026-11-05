@@ -32,7 +32,7 @@ var (
 	// label is the only ground truth a scenario can have.
 	ErrShadowUnlabelled = errors.New("evals: shadow run has no human label")
 	// ErrShadowUnknownLayer is returned when the label names a layer that is
-	// not one of events.Layers.
+	// not one of events.IncidentLayers().
 	ErrShadowUnknownLayer = errors.New("evals: shadow label names an unknown layer")
 	// ErrShadowNotFinished is returned for a run that is still queued or running.
 	ErrShadowNotFinished = errors.New("evals: shadow run has not finished")
@@ -237,8 +237,8 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 	if label.ActualLayer == "" {
 		return ShadowResult{}, fmt.Errorf("%w: room.labelled.actual_layer is empty", ErrShadowUnlabelled)
 	}
-	if !contains(events.Layers, label.ActualLayer) {
-		return ShadowResult{}, fmt.Errorf("%w: %q (want one of %s)", ErrShadowUnknownLayer, clip(label.ActualLayer, 40), strings.Join(events.Layers, ", "))
+	if !contains(incidentLayers(), label.ActualLayer) {
+		return ShadowResult{}, fmt.Errorf("%w: %q (want one of %s)", ErrShadowUnknownLayer, clip(label.ActualLayer, 40), strings.Join(incidentLayers(), ", "))
 	}
 	terms, err := cleanTerms(label.RootCauseTerms)
 	if err != nil {

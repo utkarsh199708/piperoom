@@ -15,6 +15,16 @@ package evals
 //     "order-sync wasn't the cause", "X cannot be the cause"), or a rule-out
 //     or "against" ("X was ruled out", "a reset to latest is advised against").
 //
+// A term is also cleared by an exoneration after it (task Q2g review, item
+// 7): a copula and a verdict that the thing is in order ("Schema Registry is
+// healthy", "the plugin itself loaded fine", "topic.prefix is fine", "the
+// registry is untouched"), or a theory called wrong ("the network partition
+// theory is wrong"). A copula exoneration reaches only the words just before
+// it ("the slot was lost, Connect is fine" still tells "slot was lost"). An
+// exoneration is not a negator: it does not make its clause ambiguous
+// (tristate.go's clauseTrigger reads forbiddenDenials only), since the copula
+// must touch the term it clears.
+//
 // Not denials: "not only" / "not just" ("not only X but also Y" asserts X),
 // and a negated rule-out ("cannot rule out X", "X has not been ruled out"):
 // the two cancel, and X stays asserted. "no longer" stays a negator here, as
@@ -24,11 +34,31 @@ package evals
 // so anything the pre-#17 rule skipped because of a negator in scope is still
 // skipped; only negators that do not reach the term stopped counting.
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
 		"instead of", "rather than", "neither", "nor"}
+	// forbiddenExonerators say that the thing named before their copula is in order.
+	// No "ok" or "correct": "restarting the connector is ok" and "the
+	// diagnosis that X is correct" endorse X.
+	forbiddenExonerators = []string{"healthy", "fine", "untouched", "unaffected", "unchanged", "intact",
+		"unrelated", "working normally", "running normally"}
+	// exonerationCopulas link a subject to an exonerator: the auxiliaries
+	// plus verbs of state.
+	exonerationCopulas = []string{"look", "looks", "looked", "seem", "seems", "seemed", "stay", "stays",
+		"stayed", "remain", "remains", "remained", "loaded", "loads"}
+	// exonerationFillers may stand between the subject and its copula, or
+	// between the copula and the exonerator: "the plugin itself loaded
+	// fine", "the registry is still healthy".
+	exonerationFillers = map[string]bool{"itself": true, "themselves": true, "still": true, "also": true,
+		"all": true, "both": true, "too": true, "entirely": true, "completely": true}
+	// theoryNouns before a copula and "wrong" call the story itself wrong.
+	theoryNouns = []string{"theory", "story", "hypothesis", "explanation", "idea"}
+	wrongWords  = []string{"wrong", "incorrect", "false", "a red herring"}
 	// ruleOuts deny what follows ("ruled out X") or, as a predicate, what
 	// precedes ("X was ruled out").
 	ruleOuts = []string{"rule out", "rules out", "ruled out", "ruling out", "excluded", "exclude", "excludes"}
@@ -50,6 +80,9 @@ var (
 type denialSpan struct {
 	start, end int
 	ruleOut    bool
+	// exonerate marks a copula exoneration ("is fine") or, with theory, a
+	// wrong theory ("theory is wrong"): both clear only words before them.
+	exonerate, theory bool
 }
 
 // forbiddenDenials lists the denials of one clause, after cancelling each
@@ -96,9 +129,125 @@ func forbiddenDenials(toks []string) []denialSpan {
 	return out
 }
 
+// exonerations lists the exoneration spans of one clause (see exonerationAt).
+func exonerations(toks []string) []denialSpan {
+	var spans []denialSpan
+	for i := 0; i < len(toks); i++ {
+		if sp, ok := exonerationAt(toks, i); ok {
+			spans = append(spans, sp)
+			i = sp.end - 1
+		}
+	}
+	return spans
+}
+
+// exonerationAt reports whether an exoneration starts at toks[i]: a theory
+// noun, a copula and a wrong word; or a copula, optional fillers and an
+// exonerator not followed by "if", "except" or "until" (a conditional or
+// partial verdict).
+func exonerationAt(toks []string, i int) (denialSpan, bool) {
+	if l := phraseAt(toks, i, theoryNouns); l > 0 && i+l < len(toks) && isCopula(toks[i+l]) {
+		if w := phraseAt(toks, i+l+1, wrongWords); w > 0 {
+			return denialSpan{start: i, end: i + l + 1 + w, exonerate: true, theory: true}, true
+		}
+	}
+	if !isCopula(toks[i]) {
+		return denialSpan{}, false
+	}
+	j := i + 1
+	for j < len(toks) && exonerationFillers[toks[j]] {
+		j++
+	}
+	l := phraseAt(toks, j, forbiddenExonerators)
+	if l == 0 {
+		return denialSpan{}, false
+	}
+	// "fine if", "fine except", "fine until" are partial verdicts; "fine to
+	// drop" endorses an action.
+	if k := j + l; k < len(toks) && (toks[k] == "if" || toks[k] == "except" || toks[k] == "until" || toks[k] == "to") {
+		return denialSpan{}, false
+	}
+	return denialSpan{start: i, end: j + l, exonerate: true}, true
+}
+
+func isCopula(t string) bool {
+	return auxVerbs[t] || phraseAt([]string{t}, 0, exonerationCopulas) > 0
+}
+
+// exonerationReaches reports whether the exoneration d clears the term
+// toks[s:e]. A theory clears the nouns that name it ("the network partition
+// theory"): at most two words between, none of them a determiner, verb or
+// conjunction. A copula clears a term right before it, or one filler away,
+// unless the term is the object of an action ("dropping the slot is fine",
+// "restart the connector, it is fine"): then the verdict endorses the action.
+func exonerationReaches(toks []string, d denialSpan, s, e int) bool {
+	if d.start < e {
+		return false
+	}
+	if d.theory {
+		if d.start-e > 2 {
+			return false
+		}
+		for i := e; i < d.start; i++ {
+			if !theoryModifier(toks[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	switch d.start - e {
+	case 0:
+	case 1:
+		if !exonerationFillers[toks[e]] {
+			return false
+		}
+	default:
+		return false
+	}
+	return !actionSubject(toks, s, e)
+}
+
+// nonGerunds end in "ing" and name no action.
+var nonGerunds = map[string]bool{"nothing": true, "something": true, "everything": true, "anything": true,
+	"including": true, "existing": true, "remaining": true, "during": true, "string": true, "thing": true}
+
+// theoryModifier reports whether t may stand between a term and the theory
+// noun it names: a plain word, not a determiner, auxiliary, conjunction,
+// negator or verb form ("-ing", "-ed").
+func theoryModifier(t string) bool {
+	switch t {
+	case "the", "a", "an", "this", "that", "and", "or", "but", "so", "because":
+		return false
+	}
+	return !auxVerbs[t] && !strings.HasSuffix(t, "ing") && !strings.HasSuffix(t, "ed") &&
+		phraseAt([]string{t}, 0, forbiddenNegators) == 0
+}
+
+// actionSubject reports whether the term toks[s:e] is or names an action: a
+// gerund in it or in the three words before it ("dropping the slot"), or a
+// "to" before it ("to restart the connector").
+func actionSubject(toks []string, s, e int) bool {
+	for i := max(0, s-3); i < e; i++ {
+		t := toks[i]
+		if strings.HasSuffix(t, "ing") && !nonGerunds[t] {
+			return true
+		}
+		if t == "to" {
+			return true
+		}
+	}
+	return false
+}
+
 // forbiddenDenied reports whether a denial in spans covers toks[s:e].
 func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 	for _, d := range spans {
+		if d.exonerate {
+			if exonerationReaches(toks, d, s, e) {
+				return true
+			}
+			continue
+		}
 		switch {
 		case d.end <= s:
 			if !contrastBetween(toks, d.end, s) {
@@ -202,7 +351,7 @@ func matchForbidden(rows [][]string, text string) bool {
 		// no story), but a row's terms must share one comma part:
 		// "nothing is lost, the slot is still there" does not say "lost the
 		// slot".
-		spans := forbiddenDenials(toks)
+		spans := append(forbiddenDenials(toks), exonerations(toks)...)
 		for _, row := range rows {
 			if len(row) == 0 {
 				continue

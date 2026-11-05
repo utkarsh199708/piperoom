@@ -44,10 +44,16 @@ together:
 | A-ID-2 display-name impersonation: the server marks `verified`; the web badge merged with #135 (`7a8f90f`, gate G3) | Medium, mitigated | `docs/api.md` Verified people; audit §A-ID-2 | OIDC pilots with IdP-only (group) members: check the badge in the pilot UI |
 | Capacity 6.1 (`Service.mu` held across every append, the write ceiling), 6.3 (`pool_max_conns` in the URL stops the server, so the pool cannot be raised), 6.4 (join-storm replay cliff) | HIGH, HIGH, MEDIUM | `reviews/capacity-2026-10.md` §6 | nothing at pilot scale; they bound it (2.3) |
 | Numbers measured on a **shared 4-vCPU VM with loopback Postgres**; the managed-Postgres re-run ("most important") and a multi-hour soak are not done; replica **failover not tested under load** | — | same, §8, §9.4 | the scale we may promise, not the start |
-| F7: one set of connection settings per process (tenancy splits it in-process; one deployment per customer is the only hard boundary) | open | `docs/pilot/README.md` F7; `docs/pilot/setup.md` §2a | multi-team pilots in one process |
 | Coverage is low where pilot data flows: `internal/store` 8.3%, `clients/postgres` 7.8%, `clients/warehouse` 10.5%, `clients/kafka` 20.2% | — | `reviews/coverage-2026-10.md` | nothing; risk to watch |
 
-Resolved since the 2026-10-14 draft (each checked against `main`, 2026-10-15):
+Resolved since the 2026-10-14 draft (each checked against `main`, 2026-10-15; F7 and write mode on 2026-10-18):
+
+- **F7, one set of connection settings per process.** Fixed by the per-pipeline `connections:` block in
+  `owners.yaml`: such a pipeline gets its own clients, tools and actions, and two tenants may not share a variable or
+  file unless every pipeline involved sets `shared_connections: true` (`internal/owners/tenancy.go`:
+  `validateConnections`, `Owners.CheckSharedRefs`; `internal/wiring/stacks.go`: `openStacks`). One process still holds
+  every secret it serves, so one deployment per customer stays the only hard boundary (`docs/pilot/README.md` F7).
+- **No server switch for writes.** `PIPEROOM_WRITE_MODE` now exists and defaults to `off` (see section 4).
 
 - **Go toolchain.** `go 1.27.2` at `go.mod:3`; `FROM golang:1.27.2-alpine` at `Dockerfile:23` and
   `cmd/devconsumer/Dockerfile:2`. This is gate G1.
@@ -84,33 +90,52 @@ path.**
 
 | | A. Full live pilot | B. Live rooms, read-only | **C. Shadow first, then live** | D. Wait |
 |---|---|---|---|---|
-| Agent | investigates in live rooms, proposes, runs approved fixes | investigates live and proposes; no write credentials, so nothing executes | runs blind on every alert of 1–2 pipelines; humans work the incident as today, then label and grade | — |
+| Agent | investigates in live rooms, proposes, runs approved fixes | investigates live and proposes; write mode off (the default), so nothing executes | runs blind on every alert of 1–2 pipelines; humans work the incident as today, then label and grade | — |
 | Customer risk | highest: writes to Connect/Registry; F1 and A-ID-2 matter most | low: reads only; people may act on a wrong hypothesis | **lowest**: reads only, nobody sees agent output until after close | none |
 | What we learn | everything, but on the customer's production | usefulness in the room | **measured accuracy** (`layer_correct`, `root_cause`, time to first hypothesis vs human MTTR, from `GET /api/shadow/metrics`): the number the next sale needs (`docs/design/shadow.md` §1) | nothing new |
-| Needs first | all of 2.2, write mode per layer (`docs/pilot/setup.md` §7) | gates G1–G5 below | gates G1–G5 below | — |
+| Needs first | all of 2.2, `PIPEROOM_WRITE_MODE=on` and write credentials (`docs/pilot/permissions.md`) | gates G1–G5 below | gates G1–G5 below | — |
 | Cost | 2M tokens/room cap | 2M tokens/room cap | 500k tokens/room cap, 20 turns | — |
 
 A is ruled out for a first pilot: it puts unmeasured accuracy next to production writes. D wastes the window: the
-blocking items are days of work, not weeks. Choosing between B and C is choosing between "people find it useful"
-and "we know how often it is right". C answers the second without risking the first, and B can follow C on the same
-install by changing one `owners.yaml` block.
+blocking items are days of work, not weeks. B and C are not exclusive: B is what a new install does by default, and
+C is one `owners.yaml` block on top of it, per pipeline (section 4).
 
-## 4. Recommendation: C, then B, then write mode one layer at a time
+## 4. Recommendation: read-only by default, shadow as a toggle, then write mode
 
-**Phase 1: shadow (2–4 weeks).**
-- One deployment for the customer (F7). One replica (2.3). Postgres for the room DB.
+**The default start is B: live rooms, read-only.**
+- Write mode is off unless `PIPEROOM_WRITE_MODE=on`. Unset, empty or `off` all mean off; any other value stops the
+  start (`internal/config/config.go`: `ParseWriteMode`; `cmd/server/writemode.go`: `writeModeSetup`).
+- With it off the agent still proposes, and people still preview and approve. A fully approved proposal is never
+  queued for the executor, nothing runs and no `action.executed` is written (`internal/room/service_executor.go`:
+  `enqueueExecutionLocked`, which marks the proposal blocked; `executeProposal` refuses too). The room view shows
+  `open_proposals[].blocked: "write_mode_off"` (`internal/room/writemode.go`: `RoomFor`), and `GET /healthz` reports
+  `"write_mode": "off"` (`internal/httpapi/health.go`: `handleHealthz`).
+- Grant read-only credentials as well (`docs/pilot/permissions.md`). The switch stops the executor; it does not take
+  write rights away from a role that has them.
+- One deployment for the customer (F7, `docs/pilot/README.md`). One replica (2.3). Postgres for the room DB.
 - `PIPEROOM_AUTH_MODE=oidc` behind the customer's TLS proxy. No dev login on their network.
-- Read-only credentials only (`docs/pilot/permissions.md`). `shadow: {enabled: true}` for 1–2 pipelines.
 - Watcher in `log` for the first week, then `rooms` (`docs/pilot/setup.md` §1), or alerts from their
   Alertmanager/PagerDuty through the signed routes.
-- Every closed room gets a blind label and a grade from a pipeline member.
 
-**Phase 2: live rooms, still read-only.** Turn shadow off for the pipeline once phase 1 meets the bar agreed in 5.3.
+**Shadow is an opt-in toggle per pipeline, not a phase.**
+- Turn it on with `shadow: {enabled: true}` on a pipeline in `owners.yaml` (`internal/owners/shadow.go`:
+  `Pipeline.Shadow`). Every alert room of that pipeline is then a shadow room: the agent runs blind, proposes
+  nothing, and its output is shown only after the room closes (`internal/room/shadow.go`: `pipelineShadow`;
+  `docs/pilot/shadow-rooms.md`).
+- Remove the block, or set `enabled: false`, and restart: new rooms are live. Rooms already open stay shadow
+  (`docs/pilot/shadow-rooms.md`). The file is read at start-up only.
+- Use it when the customer wants measured accuracy before anyone sees the agent: for example 1–2 pipelines for 2–4
+  weeks, with a blind label and a grade from a pipeline member on every closed room. Other pipelines stay live and
+  read-only at the same time. The run limits are `PIPEROOM_SHADOW_TOKEN_BUDGET` (500 000) and
+  `PIPEROOM_SHADOW_MAX_TURNS` (20) (`internal/config/config.go`: `ParseShadow`).
+- Turn it off for a pipeline once it meets the bar agreed in section 5, question 6.
 
-**Phase 3: write mode for one layer** (Kafka Connect restarts first, the least risky action), after the customer's
-approvers have used phase 2.
+**Then write mode** (`PIPEROOM_WRITE_MODE=on`), after the customer's approvers have used read-only rooms. The switch
+is one per process today; per-layer write mode is not built (`tasks/P1-quickstart-readonly.md`, Out of scope). Until
+it is, limit the first layer by credentials: grant write rights for Kafka Connect restarts first, the least risky
+action (`docs/pilot/permissions.md`).
 
-**Go-live gates for phase 1** (each is a PR, owner in brackets):
+**Go-live gates for the first install** (each is a PR, owner in brackets):
 
 | Gate | What | Owner | Status (2026-10-15) |
 |---|---|---|---|
@@ -120,7 +145,7 @@ approvers have used phase 2.
 | G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced, and no dev auth baked into the image | A5 (R9, #145) + C1 (R6, #127) | done (eeeeb66, a64382a) |
 | G5 | Pilot docs: fix the six disagreements in 2.4, add a shadow-rooms page and the 2.3 scale statement | C14 + leads | done (#219) |
 
-Not gates for phase 1, but due before phase 2: the managed-Postgres capacity re-run (capacity §8.2) and capacity
+Not gates for the first install, but due before the pilot grows past the scale in 2.3: the managed-Postgres capacity re-run (capacity §8.2) and capacity
 6.3 (so the pool can be sized). The Snowflake item (GO-2026-6665) is closed: see 2.2.
 
 ## 5. Open questions
@@ -142,7 +167,7 @@ For the customer (from `docs/pilot/data-handling.md` §6, plus what shadow mode 
 
 For us:
 
-6. **The bar from phase 1 to phase 2.** Proposed: at least 20 closed, labelled shadow rooms, with `layer_correct`
+6. **The bar for turning shadow off on a pipeline.** Proposed: at least 20 closed, labelled shadow rooms, with `layer_correct`
    in at least 70% of them, and no room where the agent's hypothesis would have led to a harmful write. The 70% is a
    starting proposal, not derived from data; the evals (C6, `evals/`) should say whether it is realistic.
 7. **Who is on call for Piperoom itself** during the pilot, and which channel the customer uses to reach them.

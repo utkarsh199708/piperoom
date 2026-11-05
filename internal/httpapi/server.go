@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/ws"
@@ -42,6 +44,7 @@ type Server struct {
 	handler http.Handler
 
 	alerts       alertin.Config // signed alert sources; the zero value has every source disabled
+	changes      http.Handler   // POST /api/changes/webhook (WithChangesWebhook); nil = not mounted
 	ready        Pinger
 	probeTimeout time.Duration
 	readyWarn    readyWarner
@@ -66,8 +69,38 @@ type Server struct {
 	// Model spend routes (WithSpend): usage.go.
 	spend Spend
 
+	// Scripted demo presenter controls (WithDemoControls, --demo only):
+	// demo.go. Nil outside --demo, and then the routes are not mounted.
+	demo DemoControls
+
 	// GET /metrics: metrics.go.
 	metrics *metrics
+
+	// Admin settings and connection tests (WithAdmin): admin.go.
+	admin      AdminSettings
+	adminLimit *rateLimiter
+
+	// Watch sample history (WithSamples): trends.go.
+	samples clients.SampleReader
+
+	// Fleet view (WithFleet): fleet.go.
+	fleet fleetView
+
+	// config_drift's accept-config (WithConfigAccept): acceptconfig.go.
+	configAccept ConfigAccepter
+
+	// Connector config versions (WithConfigVersions): configversions.go.
+	configVersions clients.ConfigVersionReader
+
+	// Model panel and picker (WithModels): models.go.
+	models Models
+
+	// Setup runner endpoint (WithSetup): runners.go.
+	setupEnabled bool
+	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
+	// cancels it, so a runner that keeps pinging cannot outlive the server.
+	runnerCtx    context.Context
+	runnerCancel context.CancelFunc
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -78,6 +111,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	if log == nil {
 		log = slog.Default()
 	}
+	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	s := &Server{
 		svc:          svc,
 		gw:           ws.NewGateway(svc, st, log),
@@ -85,6 +119,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
 		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
+		runnerCtx:    runnerCtx,
+		runnerCancel: runnerCancel,
 	}
 	for _, o := range opts {
 		o(s)
@@ -92,7 +128,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
-	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms})
+	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms, approvals: svc.ApprovalsByGrant,
+		soleMembers: svc.SoleMemberGrants})
 
 	r := chi.NewRouter()
 	// Outside Recoverer, so a handler that panics is counted with the 500
@@ -159,6 +196,17 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// no session. They take the sender's own content type (no requireJSON).
 		// A source without a secret answers 401.
 		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
+		// The signed change webhook (X4): the same scheme, its own secret.
+		if s.changes != nil {
+			api.With(middleware.Timeout(requestTimeout)).Post("/changes/webhook", s.changes.ServeHTTP)
+		}
+
+		// The setup runner's WebSocket (PIPEROOM_SETUP_ENABLED=on): the
+		// credential is the pairing code in its first frame, not a session, so
+		// it sits outside the protected group like the signed alerts.
+		if s.setupEnabled {
+			api.Get("/runners/ws", s.handleRunnerWS)
+		}
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(s.authenticate)
@@ -194,9 +242,33 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Use(middleware.Timeout(requestTimeout))
 
 				short.Get("/me", s.handleMe)
+				if s.models != nil {
+					// The model panel (V7): any logged-in user, viewers too.
+					short.Get("/models", s.handleGetModels)
+				}
 				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
+				// Setup rooms (setup.go; U wave). Mounted always: with setup
+				// off the service answers 404 setup_disabled, as docs/api.md
+				// says.
+				short.Post("/setup", s.handleSetupCreate)
+				short.Post("/rooms/{id}/setup/targets", visible(s.handleSetupAddTarget))
+				short.Post("/rooms/{id}/setup/targets/{t}/class", visible(s.handleSetupRaiseClass))
+				short.Post("/rooms/{id}/setup/pipeline", visible(s.handleSetupExtendPipeline))
+				short.Post("/rooms/{id}/setup/maintenance-window", visible(s.handleSetupMaintenanceWindow))
+				// "Roll back this setup": one proposal from the recorded
+				// rollbacks, newest first (U1-14b).
+				short.Post("/rooms/{id}/setup/rollback", visible(s.handleSetupRollback))
+				// The secret route's body is a value: it is excluded from
+				// request logging (setupSecretPath), and the service stores the
+				// value nowhere (setup.go, U1-5d).
+				short.Post("/rooms/{id}/setup/secret", visible(s.handleSetupSecret))
+				short.Post("/rooms/{id}/setup/credentials", visible(s.handleSetupCredentials))
+				// The verification ladder's click (U1-8b): answers 202 and the
+				// run writes setup.verified itself.
+				short.Post("/rooms/{id}/setup/verify", visible(s.handleSetupVerify))
+				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
 					// path is not mounted and falls to /alerts/{source}, which
@@ -211,6 +283,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/suggestions/{sid}/decline", visible(s.handleDeclineSuggestion))
 				short.Post("/rooms/{id}/hypothesis", visible(s.handleHypothesisVerdict))
 				short.Post("/rooms/{id}/nudge", visible(s.handleNudge))
+				short.Post("/rooms/{id}/page-team", visible(s.handlePageTeam))
+				short.Post("/rooms/{id}/proposals", visible(s.handleCreateProposal))
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
 				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
@@ -225,13 +299,29 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/rooms/{id}/usage", visible(s.handleRoomUsage))
 				short.Get("/usage", s.handlePipelineUsage)
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
+				short.Post("/proposals/{pid}/approve-all", s.handleApproveAllProposal)
+				short.Post("/proposals/{pid}/cancel", s.handleCancelProposal)
+				short.Post("/proposals/{pid}/stage", s.handleStageProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
+				short.Get("/pipelines/{pid}/trends", s.handleTrends)
+				short.Get("/fleet", s.handleFleet)
+				short.Get("/fleet/changes", s.handleFleetChanges)
+				short.Post("/pipelines/{pid}/connectors/{name}/accept-config", s.handleAcceptConfig)
+				short.Get("/pipelines/{pid}/connectors/{name}/config-versions", s.handleConfigVersions)
+				// The scripted demo's presenter controls; no-op outside --demo.
+				s.mountDemo(short)
 			})
 		})
+
+		// Admin settings (WithAdmin; admin.go): their own group, so the
+		// admin check answers before the content type and body checks.
+		s.mountAdmin(api)
+		// The model picker's write route (models.go): its own group too.
+		s.mountModelsPut(api)
 	})
 	s.gw.OriginPatterns = s.wsOriginPatterns()
 	s.handler = r
@@ -249,11 +339,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Close shuts the WebSocket gateway down (closing every live connection) and
-// stops the room service.
+// stops the room service. It also cancels every runner WebSocket connection
+// context, so a runner that keeps pinging cannot leave its handler or socket
+// alive through shutdown.
 func (s *Server) Close() {
 	if s.webRoot != nil {
 		_ = s.webRoot.Close()
 	}
+	s.runnerCancel()
 	s.gw.Close()
 	s.svc.Close()
 }
@@ -283,6 +376,13 @@ func (s *Server) wsOriginPatterns() []string {
 // which is trusted here.
 func (s *Server) crossOriginProtection() *http.CrossOriginProtection {
 	cop := http.NewCrossOriginProtection()
+	if s.models != nil && s.models.Editable() {
+		// PUT /api/models runs a stricter check of its own (modelsOrigin:
+		// Origin required and equal to this server's, Sec-Fetch-Site
+		// same-origin, a JSON body), which answers 403 origin as docs/api.md
+		// says; this generic check would answer first with its own body.
+		cop.AddInsecureBypassPattern("PUT " + modelsPath)
+	}
 	if h := s.publicHostInList(); h != "" {
 		if err := cop.AddTrustedOrigin(s.public.Scheme + "://" + h); err != nil {
 			s.log.Error("httpapi: trusted origin", "host", h, "err", err)
@@ -299,6 +399,13 @@ func userFrom(ctx context.Context) room.User {
 func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if setupSecretPath(r.URL.Path) || modelsRoute(r.URL.Path) {
+				// A secret value is in this body: no request line is written
+				// for it (docs/api.md, POST /api/rooms/{id}/setup/secret and
+				// PUT /api/models, whose body may carry a model key).
+				next.ServeHTTP(w, r)
+				return
+			}
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
@@ -314,13 +421,65 @@ func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.H
 
 // ---- helpers ----
 
+// decodeBody decodes the JSON request body into dst, refusing bodies over
+// maxBody (docs/api.md: 1 MB).
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	return decodeBodyLimit(w, r, dst, maxBody)
+}
+
+// decodeBodyLimit is decodeBody with an explicit cap, for routes that accept
+// less than maxBody. A body over the cap is 413 too_large, not invalid JSON:
+// the JSON may be well formed, and "invalid JSON" would send the caller
+// debugging its payload instead of its size (KAN-388, docs/api.md 413).
+func decodeBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return bodyTooLarge(limit)
+		}
 		return validation("invalid JSON body")
 	}
 	return nil
+}
+
+// readBody reads the whole request body up to limit, for handlers that need
+// the raw bytes (the alert webhook). Over the cap is the same 413 as
+// decodeBodyLimit; any other read error is a 400. Neither message echoes the
+// body.
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	raw, err := io.ReadAll(r.Body)
+	if err == nil {
+		return raw, nil
+	}
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		return nil, bodyTooLarge(limit)
+	}
+	return nil, validation("unreadable request body")
+}
+
+// bodyTooLarge is docs/api.md's 413 too_large for a body over its route's cap.
+// The message gives the limit, never any part of the body.
+func bodyTooLarge(limit int64) *room.Error {
+	return &room.Error{
+		Status: http.StatusRequestEntityTooLarge,
+		Code:   "too_large",
+		Msg:    "request body too large (limit " + byteLimit(limit) + ")",
+	}
+}
+
+// byteLimit renders a body cap the way the 413 message reads it ("1 MiB").
+func byteLimit(n int64) string {
+	switch {
+	case n >= 1<<20 && n%(1<<20) == 0:
+		return strconv.FormatInt(n>>20, 10) + " MiB"
+	case n >= 1<<10 && n%(1<<10) == 0:
+		return strconv.FormatInt(n>>10, 10) + " KiB"
+	default:
+		return strconv.FormatInt(n, 10) + " bytes"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

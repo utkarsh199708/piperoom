@@ -201,21 +201,44 @@ func startChangesRetention(ctx context.Context, p changesPurger, days int, every
 	}
 }
 
-// runChangesRetention is one purge with its own deadline.
+// configVersionsPurger is the part of the config version store
+// (store.ConfigVersionStore) the change-log retention also runs: connector
+// config versions follow PIPEROOM_CHANGES_RETENTION_DAYS too (X5c), each
+// connector's newest version kept.
+type configVersionsPurger interface {
+	PurgeConfigVersionsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
+// runChangesRetention is one purge of the change log, then of the config
+// versions when p also holds them, each with its own deadline.
 func runChangesRetention(ctx context.Context, p changesPurger, days int, timeout time.Duration, now func() time.Time, log *slog.Logger) {
+	cutoff := now().UTC().AddDate(0, 0, -days)
+	runPurge(ctx, "changes retention", days, timeout, log, func(c context.Context) (int64, error) {
+		return p.PurgeChangesBefore(c, cutoff)
+	})
+	if vp, ok := p.(configVersionsPurger); ok && ctx.Err() == nil {
+		runPurge(ctx, "config versions retention", days, timeout, log, func(c context.Context) (int64, error) {
+			return vp.PurgeConfigVersionsBefore(c, cutoff)
+		})
+	}
+}
+
+// runPurge runs one purge with its own deadline and logs the outcome under
+// what: counts only.
+func runPurge(ctx context.Context, what string, days int, timeout time.Duration, log *slog.Logger, purge func(context.Context) (int64, error)) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	n, err := p.PurgeChangesBefore(rctx, now().UTC().AddDate(0, 0, -days))
+	n, err := purge(rctx)
 	switch {
 	case err != nil && ctx.Err() != nil:
-		log.Info("changes retention: stopped by shutdown")
+		log.Info(what + ": stopped by shutdown")
 	case errors.Is(err, context.DeadlineExceeded):
-		log.Warn("changes retention: run hit its deadline; the next run continues")
+		log.Warn(what + ": run hit its deadline; the next run continues")
 	case err != nil:
-		log.Error("changes retention: purge failed", "err", err)
+		log.Error(what+": purge failed", "err", err)
 	case n > 0:
-		log.Info("changes retention: deleted old rows", "rows", n, "days", days)
+		log.Info(what+": deleted old rows", "rows", n, "days", days)
 	default:
-		log.Debug("changes retention: nothing to delete", "days", days)
+		log.Debug(what+": nothing to delete", "days", days)
 	}
 }

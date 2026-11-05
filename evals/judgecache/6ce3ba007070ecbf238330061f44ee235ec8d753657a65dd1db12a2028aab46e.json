@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "replication-slot-lost-failover",
   "hypothesis": "Slot debezium_orders was not carried over by any manual step, it was synced by PG 17 failover slots and exists on the new primary; the task failed on a network blip.",
-  "truth_sha256": "fa26ddedfcae6870adcbc11dafafd1a20906d1be5d2195baa67147e10141c233",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "80fc3dfb77bda06bb86aaa85b3613eb145ae3a2e74b71e7781e7baaa93ad6255",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
     "layer_correct": false,
     "root_cause_correct": false,
     "root_cause_layer_correct": false,
-    "reason": "The hypothesis claims the slot exists on the new primary and blames a network blip for the task failure, which contradicts the ground truth that the slot was lost in the failover. It also places the failure in the network or connector rather than in Postgres."
+    "reason": "The hypothesis says the slot exists on the new primary and blames a network blip, which contradicts the ground truth that the slot was lost in the failover. It also does not clearly name kafka-connect as the first failing layer or postgres as the root-cause layer."
   }
 }

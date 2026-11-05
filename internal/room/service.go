@@ -10,17 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -52,15 +53,38 @@ type Deps struct {
 	// built over its own pipeline's clients (docs/design/tenancy.md section
 	// 5), and Tools and Actions are not used. A nil field in the result
 	// means none (fail closed), never the process-wide registry.
-	StackFor     func(pipelineID string) PipelineStack
-	Topology     topology.Builder
-	Users        *Users
-	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
+	StackFor func(pipelineID string) PipelineStack
+	// ActionCatalogue, when set, lists every write action for GET /api/actions
+	// across every pipeline's client set (the union of every stack's Actions,
+	// in stack order). AllActions deduplicates it by name. Nil falls back to
+	// Actions.All(); with StackFor set it must be set too (cmd/server does).
+	ActionCatalogue func() []actions.Action
+	Topology        topology.Builder
+	Users           *Users
+	Owners          *owners.Owners // pipeline definitions for actions.Scoped checks
+	// OwnersNow, when set, returns the current owners config (the snapshot a
+	// Live holder publishes; U1-14). pipeline_register reloads the owners
+	// set, so every check that must see the newly registered pipeline — the
+	// registration's own overlap and approver checks, PipelinesFor, the
+	// approval routing of a setup room — reads through it. Nil falls back to
+	// Owners.
+	OwnersNow func() *owners.Owners
+	// ReloadOwners re-reads OWNERS_FILE and OWNERS_DIR after a registration
+	// wrote its per-pipeline file (owners.Live.Reload). Nil: a registration
+	// refuses on this server ("no OWNERS_DIR").
+	ReloadOwners func() error
+	// OnOwnersReloaded runs once after a successful ReloadOwners. cmd/server
+	// uses it to rebuild the watcher, whose next tick then lists the new
+	// pipeline. It must return quickly and never block the registration.
+	OnOwnersReloaded func()
+	// SetupForge wires the repos: registration path (SetupForge). Nil: a
+	// registration with repos: refuses.
+	SetupForge   *SetupForge
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
 	// off after its fix (F2). Nil gives the events-only draft:
-	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODE=off.
 	WritePostmortem agent.PostmortemWriter
 	// Triage, when set, runs the triage pass (F6) for every room opened in
 	// this process, before its agent waits for a slot; not for shadow rooms
@@ -70,6 +94,11 @@ type Deps struct {
 	Triage            agent.Triager
 	TriagePassTimeout time.Duration
 	Options           agent.Options
+	// Watch is the hypothesis guard's view of the watcher's status row (H1),
+	// passed to live and shadow runs as agent.Deps.Watch, never to the triage
+	// pass. cmd/server gives it a reader that drops rows older than 3 x the
+	// watcher interval; nil means the guard reads no row.
+	Watch clients.WatchStatusReader
 	// ShadowOptions are the agent options of a shadow room's run
 	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
 	// lower token budget (config.ParseShadow).
@@ -112,6 +141,31 @@ type Deps struct {
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
 
+	// Setup is the server's setup settings (config.ParseSetup). With Enabled
+	// false every setup route answers 404 setup_disabled and nothing setup
+	// runs. (U)
+	Setup config.Setup
+	// SetupLocal is true when this server itself listens on loopback only
+	// (quickstart, standalone): a loopback target is then this machine, so the
+	// denylist of design §2.6 allows it. On a team server a loopback target is
+	// another host's and is refused. (U)
+	SetupLocal bool
+	// SetupOwnAddrs are this server's own non-loopback addresses: a target that
+	// resolves to one is refused (design §2.6). (U)
+	SetupOwnAddrs []netip.Addr
+	// SetupResolver resolves a target's host at registration; nil means
+	// net.DefaultResolver. Tests inject a fake. (U)
+	SetupResolver TargetResolver
+	// SetupStack, when set, builds a setup room's agent registries over the
+	// room's paired runner (cmd/server: wiring.OpenSetupStack with
+	// setupwire, which refuses unless PIPEROOM_WRITE_MODE and
+	// PIPEROOM_SETUP_ENABLED are both on). The room calls it only for an open
+	// setup room, with setup on and write mode on; the result replaces the
+	// pipeline's client set for that room's agent run, proposals, executor
+	// and verification ladder (setup_agent.go). Nil keeps the client set of
+	// StackFor or Tools and Actions. (U1-25)
+	SetupStack SetupStackBuilder
+
 	// Sessions lets LookupPerson find a person who is not in users.yaml by their
 	// newest live session (design section 2.1). Nil: users.yaml only.
 	// SessionLive is the rule that decides whether a session is live: the
@@ -126,6 +180,25 @@ type Deps struct {
 	// typed confirm and the grant "solo". The caller has already run
 	// CheckSoloUser.
 	SoloUser string
+	// WriteModeOff is PIPEROOM_WRITE_MODE=off (config.ParseWriteMode, P0 item
+	// 1): proposals are still created, previewed and approved, but a fully
+	// approved one is never queued for the executor, so nothing runs and no
+	// action.executed is written; the room view says why
+	// (open_proposals[].blocked). The zero value is write mode on, the
+	// behaviour before the switch, so callers that predate it keep running
+	// fixes; cmd/server always sets it from the config, whose default is off.
+	WriteModeOff bool
+	// AutoApproveDelay is PIPEROOM_AUTO_APPROVE_DELAY
+	// (config.ParseAutoApproveDelay, P0 item 2): how long a proposal whose
+	// every step is on its pipeline's owners.yaml auto_approve: list waits,
+	// cancellable, before the policy approves it (autoapprove.go). 0 turns
+	// the policy off, which is also the zero value: callers that predate it
+	// never auto-approve. cmd/server has already refused a schema_* entry and
+	// an entry that names no action of the proposal registry.
+	AutoApproveDelay time.Duration
+	// AutoApproveTicker, when set, replaces the ticker of the policy loop
+	// (autoapprove.go), like LeaseTicker. Nil uses time.NewTicker.
+	AutoApproveTicker func(d time.Duration) (<-chan time.Time, func())
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -163,6 +236,34 @@ type Deps struct {
 	// idempotent, so a room reported twice closes its sockets once. Nil means
 	// no-op.
 	OnRoomDeleted func(roomID string, deleted events.Event)
+
+	// OnActionExecuted, when set, is called once per action.executed this
+	// replica folds into a cached room, whichever replica appended it, with
+	// the room's pipeline, the proposal and the step that ran (its action
+	// and frozen params), OK or not. The watcher's config_drift (X3b) uses
+	// it to move a connector's approved config after an approved fix, and
+	// the stored config version (X5c) names the proposal. Each call runs in
+	// its own goroutine with the service lifetime ctx, never under a room's
+	// lock; it must return promptly. Nil means no-op.
+	OnActionExecuted func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	// OnActionResult is OnActionExecuted with the step's result too (ok,
+	// outcome_unknown, proposal and step index), called the same way. The
+	// result's Output is cleared: it is untrusted text. The OpenLineage
+	// emitter (X7b) uses it. Nil means no-op.
+	OnActionResult func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
+
+	// TeamPager posts the driver's page of an application team (X4d,
+	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
+	// slack_off and writes nothing.
+	TeamPager TeamPager
+
+	// PullRequests reads the fix PRs the rooms follow (Q7e, pr_follow.go):
+	// the forge's reader. Nil (FORGE_KIND empty) means no follower: an
+	// opened PR stays in pull_requests as open.
+	PullRequests PullRequestReader
+	// PRPollTicker, when set, replaces the follower's ticker, like
+	// LeaseTicker. Nil uses time.NewTicker.
+	PRPollTicker func(d time.Duration) (<-chan time.Time, func())
 }
 
 type roomState struct {
@@ -214,6 +315,9 @@ type roomState struct {
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
+	// teamPaging holds the teams whose page is being posted to Slack outside
+	// the lock (PageTeam), so a double click on this replica posts once.
+	teamPaging map[string]bool
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.
@@ -257,21 +361,34 @@ type roomState struct {
 // Service is the room domain logic. All state derives from the event log; the
 // in-memory cache is rebuilt from the log on start.
 type Service struct {
-	store        store.Store
-	actions      *actions.Registry
-	tools        *tools.Registry
-	stackFor     func(pipelineID string) PipelineStack
-	topo         topology.Builder
-	users        *Users
-	owners       *owners.Owners
-	run          agent.Runner
-	writeHandoff agent.HandoffWriter
+	store           store.Store
+	actions         *actions.Registry
+	tools           *tools.Registry
+	stackFor        func(pipelineID string) PipelineStack
+	actionCatalogue func() []actions.Action
+	topo            topology.Builder
+	users           *Users
+	owners          *owners.Owners
+	// ownersNowFn, reloadOwners, onOwnersReloaded and setupForge are the
+	// U1-14 registration deps (see Deps). regAt remembers each
+	// pipeline.registered event's time by pipeline id, for GET
+	// /api/pipelines' setup rows (directory.go); it is filled by the fold
+	// (foldLocked), so it survives restarts and replicas.
+	ownersNowFn      func() *owners.Owners
+	reloadOwners     func() error
+	onOwnersReloaded func()
+	setupForge       *SetupForge
+	regMu            sync.Mutex
+	regAt            map[string]time.Time
+	run              agent.Runner
+	writeHandoff     agent.HandoffWriter
 	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
 	writePostmortem agent.PostmortemWriter
 	triage          agent.Triager
 	triageWait      time.Duration
 	triageSem       chan struct{} // maxTriagePasses
 	opts            agent.Options
+	watch           clients.WatchStatusReader // Deps.Watch
 	shadowOpts      agent.Options
 	shadowGrace     time.Duration
 	shadow          store.ShadowStore // nil when the store cannot hold shadow runs
@@ -280,13 +397,39 @@ type Service struct {
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
-	slots           *agentSlots // global cap on concurrent agent runs
+	onActionExec    func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	onActionResult  func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
+	teamPager       TeamPager            // nil = Slack bridge off (X4d)
+	changes         clients.ChangeReader // nil when the store keeps no change log
+	slots           *agentSlots          // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
 	sessionLive     auth.Liveness
 	viewerGroups    map[string]struct{}
 	soloUser        string
+	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
+	// Setup rooms (setup.go; U wave).
+	setupCfg      config.Setup
+	setupLocal    bool
+	setupOwn      []netip.Addr
+	setupResolver TargetResolver
+	// setupStack is Deps.SetupStack; setupStacks caches its result per
+	// setup room's pipeline, guarded by setupStackMu (setup_agent.go).
+	setupStack   SetupStackBuilder
+	setupStackMu sync.Mutex
+	setupStacks  map[string]setupStackEntry
+	// Auto-approve policy (autoapprove.go). autoDelay is
+	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
+	// runs after each check of the loop. autoSkip remembers what the loop
+	// logged about each due proposal it did not approve, so each kind is
+	// logged once (notePolicyOnce).
+	autoDelay    time.Duration
+	autoTicker   func(d time.Duration) (<-chan time.Time, func())
+	autoOnce     sync.Once
+	autoTickDone func()
+	autoSkipMu   sync.Mutex
+	autoSkip     map[string]map[string]bool // proposal -> notePolicyOnce kinds logged
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -307,6 +450,11 @@ type Service struct {
 	leaseTicker   func(d time.Duration) (<-chan time.Time, func())
 	leaseOnce     sync.Once
 	leaseTickDone func()
+
+	// stageStepTimeout, when set (tests only), replaces
+	// actions.StageStepTimeout as the bound of one step's Stage
+	// (service_stage.go).
+	stageStepTimeout time.Duration
 
 	// retryAfter, when set (tests only), replaces time.After for the wait
 	// between failed agent and shadow attempts, so tests need not sit out the
@@ -345,6 +493,38 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+	// approvals counts approval.given by grant for /metrics (metrics.go).
+	approvals approvalCounts
+	// soleMembers counts the sole-member grants for /metrics
+	// (service_solemember.go).
+	soleMembers soleMemberCounter
+	// runners is the setup runner registry: pairing codes and the attached
+	// runners (runners.go; U wave).
+	runners *RunnerRegistry
+	// runnerExec dispatches OpRequests to the attached runner and reconciles
+	// its results and Resume frames (runner_exec.go; U1-5a).
+	runnerExec *RunnerExecutor
+	// credMu guards credPending: at most one RegisterCredentials request per
+	// room awaits the runner's Credentials frame (setup_secrets.go; U1-5d).
+	credMu      sync.Mutex
+	credPending map[string]pendingCredentials
+	// ladderMu guards ladderRuns: the rooms whose verification ladder run is
+	// in flight on this replica (setup_ladder.go; U1-8b). ladderTiming, when
+	// set (tests only), replaces the production waits.
+	ladderMu     sync.Mutex
+	ladderRuns   map[string]bool
+	ladderTiming *setupLadderTimings
+
+	// Pull request follower (pr_follow.go; Q7e). prReader is nil with no
+	// forge: then nothing below runs. changeW records a merged PR in the
+	// pipeline change log (nil when the store keeps none). prTickDone, when
+	// set (tests only), runs after each check of the loop.
+	prReader   PullRequestReader
+	prTicker   func(d time.Duration) (<-chan time.Time, func())
+	prOnce     sync.Once
+	prTickDone func()
+	prf        *prFollower
+	changeW    clients.ChangeWriter
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -382,46 +562,71 @@ func New(d Deps) *Service {
 		topo = noopTopology{}
 	}
 	shadowStore, _ := d.Store.(store.ShadowStore)
+	changes, _ := d.Store.(clients.ChangeReader)
+	changeW, _ := d.Store.(clients.ChangeWriter)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		store:           d.Store,
-		actions:         acts,
-		tools:           tls,
-		stackFor:        d.StackFor,
-		topo:            topo,
-		users:           users,
-		owners:          d.Owners,
-		run:             run,
-		writeHandoff:    wh,
-		writePostmortem: d.WritePostmortem,
-		triage:          d.Triage,
-		triageWait:      triageWaitFor(d.TriagePassTimeout),
-		triageSem:       make(chan struct{}, maxTriagePasses),
-		globalRetry:     globalSlotRetry,
-		opts:            d.Options,
-		shadowOpts:      d.ShadowOptions,
-		shadowGrace:     d.ShadowGrace,
-		shadow:          shadowStore,
-		log:             log,
-		now:             now,
-		onRoomOpened:    d.OnRoomOpened,
-		onRoomClosed:    d.OnRoomClosed,
-		onRoomDeleted:   d.OnRoomDeleted,
-		slots:           newAgentSlots(d.MaxAgents),
-		exportMax:       d.ExportMaxEvents,
-		sessions:        d.Sessions,
-		sessionLive:     d.SessionLive,
-		viewerGroups:    groupSet(d.ViewerGroups),
-		soloUser:        d.SoloUser,
-		limits:          d.Limits,
-		leaseTicker:     d.LeaseTicker,
-		ctx:             ctx,
-		cancel:          cancel,
-		rooms:           map[string]*roomState{},
-		loading:         map[string]*roomLoad{},
-		alertRooms:      map[string]string{},
-		alertLocks:      newAlertLocks(),
-		list:            newListHub(),
+		store:            d.Store,
+		actions:          acts,
+		tools:            tls,
+		stackFor:         d.StackFor,
+		actionCatalogue:  d.ActionCatalogue,
+		topo:             topo,
+		users:            users,
+		owners:           d.Owners,
+		ownersNowFn:      d.OwnersNow,
+		reloadOwners:     d.ReloadOwners,
+		onOwnersReloaded: d.OnOwnersReloaded,
+		setupForge:       d.SetupForge,
+		regAt:            map[string]time.Time{},
+		run:              run,
+		writeHandoff:     wh,
+		writePostmortem:  d.WritePostmortem,
+		triage:           d.Triage,
+		triageWait:       triageWaitFor(d.TriagePassTimeout),
+		triageSem:        make(chan struct{}, maxTriagePasses),
+		globalRetry:      globalSlotRetry,
+		opts:             d.Options,
+		shadowOpts:       d.ShadowOptions,
+		shadowGrace:      d.ShadowGrace,
+		shadow:           shadowStore,
+		changes:          changes,
+		log:              log,
+		now:              now,
+		onRoomOpened:     d.OnRoomOpened,
+		onRoomClosed:     d.OnRoomClosed,
+		onRoomDeleted:    d.OnRoomDeleted,
+		onActionExec:     d.OnActionExecuted,
+		onActionResult:   d.OnActionResult,
+		teamPager:        d.TeamPager,
+		prReader:         d.PullRequests,
+		prTicker:         d.PRPollTicker,
+		prf:              newPRFollower(),
+		changeW:          changeW,
+		slots:            newAgentSlots(d.MaxAgents),
+		exportMax:        d.ExportMaxEvents,
+		sessions:         d.Sessions,
+		sessionLive:      d.SessionLive,
+		viewerGroups:     groupSet(d.ViewerGroups),
+		soloUser:         d.SoloUser,
+		writeOff:         d.WriteModeOff,
+		limits:           d.Limits,
+		setupCfg:         d.Setup,
+		setupLocal:       d.SetupLocal,
+		setupOwn:         d.SetupOwnAddrs,
+		setupResolver:    d.SetupResolver,
+		setupStack:       d.SetupStack,
+		watch:            d.Watch,
+		autoDelay:        d.AutoApproveDelay,
+		autoTicker:       d.AutoApproveTicker,
+		leaseTicker:      d.LeaseTicker,
+		ctx:              ctx,
+		cancel:           cancel,
+		rooms:            map[string]*roomState{},
+		loading:          map[string]*roomLoad{},
+		alertRooms:       map[string]string{},
+		alertLocks:       newAlertLocks(),
+		list:             newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -434,6 +639,26 @@ func New(d Deps) *Service {
 		s.resumeOnTakeover = d.ResumeOnTakeover
 		if d.MaxAgentsGlobal > 0 {
 			s.global = coordSlots{s: s, max: d.MaxAgentsGlobal}
+		}
+	}
+	s.runners = NewRunnerRegistry(now, s.EmitSetup, log)
+	s.runnerExec = NewRunnerExecutor(s.runners, RunnerResults{
+		Result:  s.applyRunnerResult,
+		Unknown: s.applyRunnerUnknown,
+	}, log)
+	s.credPending = map[string]pendingCredentials{}
+	// pipeline_register runs on the service itself (setup_register.go), so
+	// the service puts it in its own proposal registry when setup is on: the
+	// setup route then resolves the step exactly like any other action, and
+	// the demo registry (cmd/server's acts) gains it without further wiring.
+	// A caller that already registered the name (cmd/server with a stack, a
+	// test) is left alone. With setup off the action is not listed and no
+	// setup route reaches it.
+	if d.Setup.Enabled {
+		if _, ok := acts.Get(registerActionName); !ok {
+			if err := acts.Register(NewRegisterAction(s)); err != nil {
+				log.Error("room: register pipeline_register action", "err", err)
+			}
 		}
 	}
 	return s
@@ -497,6 +722,8 @@ func (s *Service) Load(ctx context.Context) error {
 	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
+	s.startAutoApprove()
+	s.startPRFollower()
 	return nil
 }
 
@@ -565,8 +792,12 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 		// With a shared store a proposal may be running on another replica
 		// right now; the stale-claim sweep decides instead. The store reads
 		// are made before the lock (staleProposals), the writes after it.
+		// With write mode off a fully approved proposal is blocked, not
+		// interrupted: it stays open and the room view says why. A
+		// single-process store does not outlive its process, so no proposal
+		// a write-on run left half done can reach here.
 		var stale []staleProposal
-		if s.coord == nil {
+		if s.coord == nil && !s.writeOff {
 			if p := st.pub.Load(); p != nil && p.Status == "open" {
 				stale = s.staleProposals(ctx, r.ID, *p)
 			}
@@ -578,7 +809,9 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
-			if restarted && !snap.Shadow && s.restartNoticeDue(r.ID, st, leases) {
+			// A quiet forecast room had no agent to pause: its trend note
+			// still says how to start one.
+			if restarted && !snap.Shadow && !quietRoom(snap) && s.restartNoticeDue(r.ID, st, leases) {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
@@ -646,6 +879,9 @@ func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 type staleProposal struct {
 	p    Proposal
 	next int
+	// writeBlocked: the row is store.ProposalStatusBlocked, approved while
+	// write mode was off; it never ran.
+	writeBlocked bool
 }
 
 // staleProposals finds the stale proposals of a room just loaded, from its
@@ -663,10 +899,13 @@ func (s *Service) staleProposals(ctx context.Context, roomID string, snap RoomSn
 		// says executed/failed/rejected while the snapshot still shows the
 		// proposal open. Skip those — do not re-mark a finished proposal failed
 		// (review item 6).
-		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil && row.Status != "open" {
-			continue
+		blocked := false
+		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil {
+			if blocked = row.Status == store.ProposalStatusBlocked; !blocked && row.Status != "open" {
+				continue
+			}
 		}
-		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p)})
+		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p), writeBlocked: blocked})
 	}
 	return out
 }
@@ -688,12 +927,16 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 		if !ok || !fullyApproved(p) {
 			continue
 		}
+		output := "proposal was interrupted by a service restart before it finished; create a new proposal to retry"
+		if sp.writeBlocked {
+			output = writeOffNotRunOutput
+		}
 		if _, err := s.emitLocked(ctx, st, roomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 			ProposalID: p.ProposalID,
 			StepIndex:  sp.next,
 			OK:         false,
 			ParamsHash: p.ParamsHash,
-			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
+			Output:     output,
 		}); err != nil {
 			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)
 		}
@@ -794,9 +1037,30 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 	return s.rebuildWith(ctx, roomID, nil)
 }
 
+// noteRegistered remembers a pipeline.registered event's time by pipeline id
+// for GET /api/pipelines' setup rows (directory.go; U1-14). It runs on every
+// path that folds an event: a live append and a remote replica's event
+// (foldLocked) and the rebuild of a room from the store (rebuildWith), so the
+// time is known on every replica and after a restart. The first registration
+// of an id wins.
+func (s *Service) noteRegistered(e events.Event) {
+	if e.Type != events.PipelineRegistered {
+		return
+	}
+	p, ok := decode[events.PipelineRegisteredPayload](e)
+	if !ok || p.PipelineID == "" {
+		return
+	}
+	s.regMu.Lock()
+	if _, seen := s.regAt[p.PipelineID]; !seen {
+		s.regAt[p.PipelineID] = e.At
+	}
+	s.regMu.Unlock()
+}
+
 // rebuildWith is rebuild that also hands every event read to visit (nil for
-// none), in log order.
-func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(events.Event)) (loadedRoom, error) {
+// none), in log order, with the room folded through it.
+func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(RoomSnapshot, events.Event)) (loadedRoom, error) {
 	// The byte count is read before the log: an event appended meanwhile is
 	// then folded (and counted by foldLocked) but not in the count, which can
 	// trail the store, never count an event twice.
@@ -819,9 +1083,10 @@ func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(eve
 				}
 			}
 			st.snap = Apply(st.snap, e)
+			s.noteRegistered(e)
 			trackPending(st, e)
 			if visit != nil {
-				visit(e)
+				visit(st.snap, e)
 			}
 			after = e.Seq
 		}
@@ -891,9 +1156,14 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 		s.fillGapLocked(ctx, roomID, st, e.Seq)
 	}
 	s.foldLocked(ctx, roomID, st, e, false)
+	// Read before the cap check: its warning event folds over e.
+	wake := startsAgent(st.snap, e)
 	// Only the replica that wrote the event decides the cap warning, so the
 	// warning is written once.
 	s.checkCapLocked(ctx, st, roomID)
+	if wake {
+		s.ensureAgentLocked(roomID, st)
+	}
 	return e, nil
 }
 
@@ -980,6 +1250,20 @@ var agentEventTypes = map[events.Type]bool{
 	// The verdict on an executed fix (internal/agent verify.go); the
 	// post-mortem and the verification card read it.
 	events.AgentVerification: true,
+	// One poll of a recovery action's Verify (X2, internal/agent): progress
+	// for the recovery card; the verdict is still the agent.verification.
+	events.AgentRecoveryCheck: true,
+	// The setup run's plan and its stop (internal/agent setup.go, U1-10):
+	// the agent records each plan through its Sink and the room folds it,
+	// so a proposal can be checked against it (ErrNotInPlan); a bound stop
+	// writes setup.blocked. The ladder's verdicts (setup.verified,
+	// setup.awaiting_change) are never the agent's and stay refused here.
+	events.SetupPlan:    true,
+	events.SetupBlocked: true,
+	// setup_request_verification's request (internal/setup/tools, U1-7): the
+	// agent asks the room's ladder runner for verification. It is a request,
+	// never a result: setup.verified stays refused here (U1-8b).
+	TypeSetupVerificationRequested: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -1016,7 +1300,19 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 		}
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
-	return err
+	if err != nil {
+		return err
+	}
+	if typ == TypeSetupVerificationRequested {
+		// The agent asked for the ladder; the room's runner answers, on the
+		// service lifetime. It starts after the request is in the log, and a
+		// run already in flight (the person clicked too) is not an error: that
+		// run will read the request's plan like any other.
+		if serr := s.startSetupLadder(roomID); serr != nil && !errors.Is(serr, errSetupLadderInFlight) {
+			s.log.Warn("room: agent asked for verification; the ladder did not start", "room", roomID, "err", serr)
+		}
+	}
+	return nil
 }
 
 // fenceLocked refuses a write of agent run `run` that may no longer speak for
@@ -1125,8 +1421,13 @@ func (s *Service) knownPipeline(pipelineID string) bool {
 // pipeline is unknown to the owners config, so there is nothing to scope a
 // fix against (docs/api.md:103). It derives from the snapshot's pipeline id,
 // so it survives a restart: a webhook room opened for an unknown pipeline
-// keeps proposals disabled after the service rebuilds from the log.
+// keeps proposals disabled after the service rebuilds from the log. A setup
+// room is the exception: its pipeline is provisional until pipeline_register
+// writes the owners entry, and owners.Provisional is what scopes it (U).
 func (s *Service) proposalsDisabled(st *roomState) bool {
+	if st.snap.IsSetupRoom() {
+		return false
+	}
 	return s.pipelineProposalsDisabled(st.snap.PipelineID)
 }
 
@@ -1219,6 +1520,17 @@ func (in *inbox) pushFront(items []agent.HumanInput) {
 	}
 }
 
+// holds reports whether an input of kind for proposalID and step is waiting
+// to be drained.
+func (in *inbox) holds(kind, proposalID string, step *int) bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return slices.ContainsFunc(in.items, func(it agent.HumanInput) bool {
+		return it.Kind == kind && it.ProposalID == proposalID &&
+			(it.StepIndex == nil) == (step == nil) && (step == nil || *it.StepIndex == *step)
+	})
+}
+
 // pending returns how many inputs are waiting to be drained.
 func (in *inbox) pending() int {
 	in.mu.Lock()
@@ -1305,8 +1617,8 @@ func (in *inbox) reset(items []agent.HumanInput) {
 // it: another replica's inbox would only collect input no run here reads.
 // Caller holds st's lock.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
-	if input := inputFor(e); input != nil {
-		s.feedInput(st, *input)
+	for _, input := range inputsFor(st.snap, e) {
+		s.feedInput(st, input)
 	}
 }
 
@@ -1322,9 +1634,149 @@ func (s *Service) feedInput(st *roomState, in agent.HumanInput) {
 	st.inbox.push(in)
 }
 
+// inputsFor is every agent input one event carries, in the order the agent
+// reads them: inputFor's, then the proposal_executed of a driver-authored
+// proposal whose run the event ended (proposalExecutedInput). snap is the
+// room folded through e (Apply), which is how every fold path (live, catch-up,
+// rebuild) derives the same inputs from the log.
+func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
+	var out []agent.HumanInput
+	if in := inputFor(e); in != nil {
+		out = append(out, *in)
+	}
+	if in := proposalExecutedInput(snap, e); in != nil {
+		out = append(out, *in)
+	}
+	if in := setupVerifiedInput(snap, e); in != nil {
+		out = append(out, *in)
+	}
+	return out
+}
+
+// startsAgent reports whether event e (folded into snap) carries a driver
+// proposal input: "proposal_created" or "proposal_executed". Like a steer,
+// these start the room's agent when it has no run (a room restored by Load,
+// or one whose run was released after a failure), so the agent answers the
+// driver's fix and verifies it after it runs (P3e) instead of the input
+// waiting in the inbox for the next steer. Only the replica that wrote the
+// event decides it (emitLocked), as for a steer.
+func startsAgent(snap RoomSnapshot, e events.Event) bool {
+	// U1-25: a setup room's run starts when its first runner pairs, before
+	// any plan (the run's reads go through the runner). A reattach later in
+	// the setup does not resume a paused run; a steer does, as after a
+	// restart.
+	if e.Type == events.SetupRunnerAttached && snap.IsSetupRoom() && snap.Setup.PlanID == "" {
+		return true
+	}
+	for _, in := range inputsFor(snap, e) {
+		// Q7: a fix PR that merged or closed wakes an idle agent too: it
+		// verifies after a merge and reports a close (agent.HumanInput).
+		// U1-25: the ladder's outcome for the current plan wakes it too, so
+		// it proposes pipeline_register on green (design §3.9).
+		switch in.Kind {
+		case "proposal_created", "proposal_executed", "pr_merged", "pr_closed", inputSetupVerified:
+			return true
+		}
+	}
+	return false
+}
+
+// proposalExecutedInput is the "proposal_executed" input (P3c): sent once,
+// with the action.executed that ended a driver-authored proposal's run, so
+// the agent verifies the driver's fix as after its own. StepsOK has one entry
+// per step: true ok, false failed or never run, nil outcome unknown
+// (agent.HumanInput.StepsOK). An agent proposal yields none: the runner hears
+// of its own through action_result. snap is folded through e.
+func proposalExecutedInput(snap RoomSnapshot, e events.Event) *agent.HumanInput {
+	f := snap.finished
+	if e.Type != events.ActionExecuted || f == nil || f.seq != e.Seq {
+		return nil
+	}
+	stepsOK := make([]*bool, len(f.outcomes))
+	parts := make([]string, len(f.outcomes))
+	for i, o := range f.outcomes {
+		var word string
+		switch o {
+		case outcomeOK:
+			v := true
+			stepsOK[i], word = &v, "ok"
+		case outcomeFailed:
+			v := false
+			stepsOK[i], word = &v, "failed"
+		case outcomeUnknown:
+			word = "outcome unknown"
+		default:
+			v := false
+			stepsOK[i], word = &v, "did not run"
+		}
+		parts[i] = fmt.Sprintf("step %d %s", i+1, word)
+	}
+	return &agent.HumanInput{
+		Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "proposal_executed",
+		Text:       "the driver's proposal finished: " + strings.Join(parts, "; "),
+		ProposalID: f.proposalID, Origin: f.origin, StepsOK: stepsOK,
+	}
+}
+
+// maxDriverProposalText bounds the "proposal_created" input's Text. The route
+// caps only the request body (1 MB), so the driver's title, risk, rollback and
+// params could otherwise put a megabyte of their words into every later model
+// turn; a steer is capped at 4000 characters. Two steer's worth leaves room
+// for a few steps' params; the full proposal stays in the room for people.
+const maxDriverProposalText = 8192
+
+// driverProposalTruncated ends a proposal_created Text cut at
+// maxDriverProposalText, so the agent knows it did not read all of it.
+const driverProposalTruncated = "\n[truncated: the full proposal is in the room]"
+
+// driverProposalText renders a driver-authored proposal for the agent's
+// "proposal_created" input: title, each step's action, layer and params, the
+// risk and the rollback, at most maxDriverProposalText bytes. Everything in it
+// was typed by the driver, so the agent reads it as untrusted data
+// (agent.HumanInput.Origin).
+func driverProposalText(p events.ProposalCreatedPayload) string {
+	s := renderDriverProposal(p)
+	if len(s) <= maxDriverProposalText {
+		return s
+	}
+	return cutUTF8(s, maxDriverProposalText-len(driverProposalTruncated)) + driverProposalTruncated
+}
+
+// renderDriverProposal is driverProposalText before the size bound.
+func renderDriverProposal(p events.ProposalCreatedPayload) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "title: %s\n", p.Title)
+	for i, st := range p.Steps {
+		params := string(p.Steps[i].Params)
+		if params == "" {
+			params = "{}"
+		}
+		fmt.Fprintf(&b, "step %d: action %s, layer %s, params %s\n", i+1, st.Action, st.Layer, params)
+		if st.Description != "" {
+			fmt.Fprintf(&b, "  description: %s\n", st.Description)
+		}
+		if st.Verify != "" {
+			fmt.Fprintf(&b, "  verify: %s\n", st.Verify)
+		}
+	}
+	fmt.Fprintf(&b, "risk: %s\n", p.Risk)
+	fmt.Fprintf(&b, "rollback: %s", p.Rollback)
+	return b.String()
+}
+
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
 func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
+	case events.ProposalCreated:
+		p, ok := decode[events.ProposalCreatedPayload](e)
+		// Only a driver's proposal: the runner already knows its own.
+		if !ok || p.Origin != events.ProposalOriginDriver {
+			return nil
+		}
+		return &agent.HumanInput{
+			Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "proposal_created",
+			Text: driverProposalText(p), ProposalID: p.ProposalID, Origin: p.Origin,
+		}
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
@@ -1378,6 +1830,23 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
+	case events.ProposalStaged:
+		p, ok := decode[events.ProposalStagedPayload](e)
+		if !ok {
+			return nil
+		}
+		// Staging's verdict is evidence, never approval: OK says whether
+		// every staged step was healthy, and the text (staging's own words)
+		// reaches the model only inside the untrusted-data wrapper. (X8)
+		healthy := p.Healthy()
+		return &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "proposal_staged",
+			Text: stagedInputText(p), OK: &healthy, ProposalID: p.ProposalID,
+		}
+	case events.PullRequestUpdated:
+		// Q7: pr_merged or pr_closed, once per fix PR (the follower writes
+		// one event per state, and a merged or closed PR is not followed).
+		return prInput(e)
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -1389,12 +1858,14 @@ func inputFor(e events.Event) *agent.HumanInput {
 		// recovery nor failure (docs/design/replicas.md section 5).
 		var okp *bool
 		if !p.OutcomeUnknown {
-			stepOK := p.OK
-			okp = &stepOK
+			outcomeOK := p.OK
+			okp = &outcomeOK
 		}
 		stepIndex := p.StepIndex
+		// At is the step's execution time, which a recovery's Verify
+		// counts from (X2c).
 		return &agent.HumanInput{
-			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
+			Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "action_result",
 			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
@@ -1425,9 +1896,59 @@ type proposalCreator struct {
 }
 
 func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCreatedPayload) (string, error) {
-	return p.s.createProposal(ctx, p.roomID, payload, events.AgentActor, func(st *roomState) error {
+	id, _, err := p.s.createProposal(ctx, p.roomID, payload, events.AgentActor, func(st *roomState) error {
 		return p.s.fenceLocked(p.roomID, st, p.run)
 	})
+	return id, err
+}
+
+// ProposalSteps returns the stored steps of a proposal in this run's room, so
+// the runner can check the layers a driver's fix touched after its
+// proposal_executed (P3e, agent.ProposalStepsReader). An id that is unknown
+// or belongs to another room is a not-found error: a run never reads another
+// room's proposals.
+func (p proposalCreator) ProposalSteps(ctx context.Context, proposalID string) ([]events.ProposalStep, error) {
+	row, err := p.s.store.GetProposal(ctx, proposalID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && row.RoomID != p.roomID) {
+		return nil, fmt.Errorf("room: proposal steps of %q: %w", proposalID, notFound("unknown proposal"))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("room: read proposal %s: %w", proposalID, err)
+	}
+	var steps []events.ProposalStep
+	if err := json.Unmarshal(row.Steps, &steps); err != nil {
+		return nil, fmt.Errorf("room: decode proposal %s steps: %w", proposalID, err)
+	}
+	return steps, nil
+}
+
+// ProposalOrigin is who wrote a proposal of this run's room,
+// events.ProposalOriginAgent or events.ProposalOriginDriver (the optional
+// agent.ProposalOriginReader): a run rebuilt after a restart or a lease move
+// takes a fix PR's attribution from it, never from whether it remembers the
+// proposal. It answers from the room's snapshot: an open proposal, or the fix
+// PRs its steps opened. Any other id (unknown, another room's, or a proposal
+// that opened no PR and is decided) is a not-found error.
+func (p proposalCreator) ProposalOrigin(ctx context.Context, proposalID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// The published snapshot, read with no lock: the runner never calls the
+	// room under its lock, and this read needs no newer state than that.
+	st := p.s.cached(p.roomID)
+	if st == nil || st.pub.Load() == nil {
+		return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
+	}
+	snap := *st.pub.Load()
+	if op, ok := openProposal(snap, proposalID); ok {
+		return proposalOrigin(op.Origin), nil
+	}
+	for _, pr := range snap.PullRequests {
+		if pr.ProposalID == proposalID && pr.origin != "" {
+			return proposalOrigin(pr.origin), nil
+		}
+	}
+	return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
 }
 
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed
@@ -1444,6 +1965,13 @@ const (
 // The room counts as having a run from this call on, so more steers or
 // mentions while it is queued do not queue it again.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
+	// A setup room's run writes through the runner: with setup or write mode
+	// off it never starts (design §3.8), and nothing setup is built for it.
+	setupRoom := st.snap.IsSetupRoom()
+	if setupRoom && !s.setupAgentAllowed() {
+		s.log.Info("room: setup room agent not started: PIPEROOM_SETUP_ENABLED or PIPEROOM_WRITE_MODE is off", "room", roomID)
+		return
+	}
 	// The supervisor's place in wg is reserved first, so nothing below
 	// happens (no lease taken, no run counted) once Close has begun.
 	if !s.addWorker() {
@@ -1464,26 +1992,39 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
+	openedAt := st.snap.OpenedAt
+	// Q7: a fix PR that merged or closed with no verdict yet is told to
+	// this run again; the run that read it may be gone with its apply wait.
+	s.queuePRReplayLocked(st)
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
 		// Before the slot: a room queued behind the cap still gets its
 		// diagnosis. It runs once per room, never on a restart.
-		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
+		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, openedAt, raw))
 	}
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
 		defer gate.release()
-		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
+		alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
-			Actions:   s.actionsFor(pipelineID),
+			Actions:   s.pipelineActionsFor(pipelineID),
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
 			Logger:    s.log,
+			Watch:     s.watch,
+		}
+		opts := s.opts
+		if setupRoom {
+			// Setup mode (U1-25): the request is the alert's Raw already
+			// (room.created's alert), the bounds are the room's, and the
+			// registries are the setup stack over the paired runner.
+			alert.Mode = agent.ModeSetup
+			opts.Setup = s.setupBounds()
 		}
 		backoff := agentRetryBackoff
 		mapped := false
@@ -1517,7 +2058,36 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
 			}
-			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
+			if attempt > 1 {
+				// A retry is a new run with no memory of the last one: the
+				// fix PRs still waiting for a verdict are told to it again.
+				s.lockState(st)
+				if !st.gone && st.agentRun == run {
+					s.queuePRReplayLocked(st)
+				}
+				s.unlockRoom(st)
+			}
+			// X2c: the run ctx carries the room's whole pipeline, so the
+			// agent's recovery Verify calls read in its scope (actions need
+			// tools.WithPipeline); the agent's read tools re-scope by id.
+			runCtx := s.pipelineCtx(ctx, pipelineID)
+			if setupRoom {
+				// Built per attempt: a grown provisional pipeline or a new
+				// target gives the next attempt the stack over it.
+				if serr := s.setupRunDeps(&deps, pipelineID); serr != nil {
+					s.log.Warn("room: setup agent not started: its setup stack was not built", "room", roomID, "err", serr)
+					mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
+					_ = s.agentEmit(mctx, roomID, run, events.AgentMessage, events.AgentMessagePayload{
+						Text: "The agent stopped: this setup room's tools could not be built over its runner: " + truncateDetail(maskExecOutput(serr.Error())),
+					})
+					mcancel()
+					gate.release()
+					s.releaseAgent(st, run, cancel)
+					return
+				}
+				runCtx = s.setupRunCtx(ctx, roomID, pipelineID)
+			}
+			err := s.runGuarded(runCtx, roomID, alert, deps, opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
 			// already written the idle status and the message, so no retry
@@ -1588,35 +2158,19 @@ func isBudgetStop(err error) bool {
 }
 
 // isUnretryable reports an error a second attempt cannot cure: bad input, a
-// validation failure, a closed room, or a model request the API refused
-// (modelRefused).
+// validation failure, a closed room, or a model request the provider refused
+// (llm.Unretryable: auth, billing, unknown model, bad request, truncated).
+// A too-long prompt is about one run's history and a fresh run starts from one
+// message, so it is retried, as are throttling and network errors.
 func isUnretryable(err error) bool {
 	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
 		return true
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) && modelRefused(apiErr) {
+	if llm.Unretryable(err) {
 		return true
 	}
 	var re *Error
 	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
-}
-
-// modelRefused reports a model error every run repeats: a 4xx (a bad key, an
-// unknown model) other than 408, 409 and 429, which the SDK already retried.
-// A 413, or a 400 saying the prompt is too long, is about one run's history
-// (as internal/agent's triage reads it): a fresh run starts from one message,
-// so it is retried.
-func modelRefused(apiErr *anthropic.Error) bool {
-	switch c := apiErr.StatusCode; {
-	case c < 400 || c >= 500:
-		return false
-	case c == http.StatusRequestTimeout, c == http.StatusConflict, c == http.StatusTooManyRequests, c == http.StatusRequestEntityTooLarge:
-		return false
-	case c == http.StatusBadRequest:
-		return !strings.Contains(strings.ToLower(apiErr.RawJSON()), "too long")
-	}
-	return true
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the

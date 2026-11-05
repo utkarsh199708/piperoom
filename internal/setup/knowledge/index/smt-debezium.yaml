@@ -1,0 +1,432 @@
+# Debezium single message transforms. Schema: Entry in ../index.go.
+#
+# Every key and default was read from the Debezium sources jar named in
+# "source" (Maven Central); "versions" lower bounds are the earliest release
+# whose sources jar was checked to contain the class (a release before it is
+# "unverified", not "missing"); an upper bound is the first release checked
+# not to. "doc" is the Debezium reference page for the class.
+
+- name: extract-new-record-state
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.ExtractNewRecordState
+  versions: ">=1.0.0.Final"
+  summary: Flattens the Debezium change event envelope to the row state after the change, for sinks that expect plain rows.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - name: delete.tombstone.handling.mode
+      default: "tombstone"
+      default_since: 3.2.0.Final
+      values: [drop, tombstone, rewrite, rewrite-with-tombstone, delete-to-tombstone]
+      values_since: {delete-to-tombstone: 3.2.0.Final}
+      since: 2.5.0.Final
+      check: >-
+        Set it explicitly. From 2.5.0.Final to 3.1.x it has no default: unset, the legacy
+        delete.handling.mode=drop and drop.tombstones=true apply and deletes are dropped. The
+        default tombstone and the value delete-to-tombstone exist from 3.2.0.Final, which also
+        removes the legacy keys (known issue dbz-unwrap-tombstone-handling).
+    - name: delete.handling.mode
+      default: "drop"
+      values: [drop, rewrite, none]
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set. Its default drop removes delete events.
+    - name: drop.tombstones
+      default: "true"
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set. Its default true removes tombstones.
+    - {name: route.by.field, default: ""}
+    - {name: add.fields, default: ""}
+    - {name: add.fields.prefix, default: "__"}
+    - {name: add.headers, default: ""}
+    - {name: add.headers.prefix, default: "__"}
+    - {name: replace.null.with.default, default: "true", since: 3.1.0.Final}
+  checks:
+    - How a delete reaches the sink depends on the release. From 3.2.0.Final the default delete.tombstone.handling.mode=tombstone leaves only a tombstone; before 3.2.0.Final, with neither delete key set, the legacy delete.handling.mode=drop and drop.tombstones=true drop deletes entirely. A sink that must see deletes as rows needs delete.tombstone.handling.mode=rewrite (2.5.0.Final and later), which adds a __deleted field.
+    - Relational change events only; MongoDB change events need io.debezium.connector.mongodb.transforms.ExtractNewDocumentState.
+    - The SMT rewrites the value only; the record key keeps the primary key struct.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/event-flattening.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: extract-new-document-state
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.mongodb.transforms.ExtractNewDocumentState
+  versions: ">=1.0.0.Final"
+  summary: Flattens MongoDB change events to the document state, the MongoDB counterpart of ExtractNewRecordState.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: mongodb
+  keys:
+    - name: delete.tombstone.handling.mode
+      default: "tombstone"
+      default_since: 3.2.0.Final
+      values: [drop, tombstone, rewrite, rewrite-with-tombstone, delete-to-tombstone]
+      values_since: {delete-to-tombstone: 3.2.0.Final}
+      since: 2.5.0.Final
+      check: >-
+        Shares ExtractNewRecordState's configuration (AbstractExtractNewRecordState): from
+        2.5.0.Final to 3.1.x it has no default and, unset, the legacy delete.handling.mode=drop
+        and drop.tombstones=true drop deletes. Set it explicitly.
+    - name: delete.handling.mode
+      default: "drop"
+      values: [drop, rewrite, none]
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set.
+    - name: drop.tombstones
+      default: "true"
+      until: 3.2.0.Final
+      check: Deprecated in 2.5.0.Final and removed in 3.2.0.Final; ignored when delete.tombstone.handling.mode is set.
+    - {name: delete.tombstone.handling.mode.rewrite-with-id, default: "false"}
+    - {name: array.encoding, default: "array", values: [array, document]}
+    - {name: flatten.struct, default: "false"}
+    - {name: flatten.struct.delimiter, default: "_"}
+  checks:
+    - Ships in the MongoDB connector plugin, so the Connect worker running the transform needs that plugin.
+    - array.encoding=array needs arrays of one element type; arrays of mixed types need array.encoding=document.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/mongodb-event-flattening.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mongodb/3.2.0.Final/debezium-connector-mongodb-3.2.0.Final-sources.jar
+
+- name: by-logical-table-router
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.ByLogicalTableRouter
+  versions: ">=1.0.0.Final"
+  summary: Reroutes the change events of several physical tables (shards, partitions) to one topic.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: topic.regex, required: true}
+    - {name: topic.replacement, required: true}
+    - {name: key.enforce.uniqueness, default: "true"}
+    - {name: key.field.name, default: "__dbz__physicalTableIdentifier"}
+    - {name: key.field.regex}
+    - {name: key.field.replacement}
+    - {name: schema.name.adjustment.mode}
+    - {name: logical.table.cache.size, default: "16"}
+  checks:
+    - With key.enforce.uniqueness=true (the default) the record key gains the __dbz__physicalTableIdentifier field, so a sink keyed on the source primary key sees an extra key column.
+    - Tables routed to one topic should share a schema; otherwise the topic carries several value schemas, which a Schema Registry compatibility check may refuse.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/topic-routing.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: debezium-filter
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.Filter
+  versions: ">=1.2.0.Final"
+  summary: Keeps or drops change events by a script condition (Groovy, JavaScript or, in recent releases, Wasm).
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: language, required: true, check: "jsr223.groovy or jsr223.graal.js; 3.2 also accepts wasm.chicory."}
+    - {name: condition, required: true}
+    - {name: topic.regex}
+    - {name: null.handling.mode, default: "keep", values: [keep, drop, evaluate]}
+  checks:
+    - The class lives in the debezium-scripting module (it was in debezium-core in 1.2); the debezium/connect image ships the module, and a JSR 223 language engine such as Groovy must be on the plugin path as well.
+    - Not Kafka's org.apache.kafka.connect.transforms.Filter, which takes no condition and drops whatever its predicate matches.
+    - condition is code the Connect worker runs with the worker's privileges (Groovy and JavaScript can reach the JVM). The operator must write it; never generate it from untrusted input such as event content, table names or a chat message.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/filtering.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-scripting/3.2.0.Final/debezium-scripting-3.2.0.Final-sources.jar
+
+- name: content-based-router
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.ContentBasedRouter
+  versions: ">=1.2.0.Final"
+  summary: Routes each change event to a topic computed by a script expression over its content.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: language, required: true}
+    - {name: topic.expression, required: true}
+    - {name: topic.regex}
+    - {name: null.handling.mode, default: "keep", values: [keep, drop, evaluate]}
+  checks:
+    - Same packaging as Debezium's Filter - the debezium-scripting module plus a JSR 223 engine on the plugin path.
+    - Every topic the expression can return must exist or be auto-created on the broker.
+    - topic.expression is code the Connect worker runs with the worker's privileges (Groovy and JavaScript can reach the JVM). The operator must write it; never generate it from untrusted input such as event content, table names or a chat message.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/content-based-routing.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-scripting/3.2.0.Final/debezium-scripting-3.2.0.Final-sources.jar
+
+- name: timezone-converter
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.TimezoneConverter
+  versions: ">=2.4.0.Final"
+  summary: Converts the timestamp fields of change events to another time zone.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: converted.timezone, required: true, check: "A geographic zone (America/Los_Angeles) or a UTC offset (+08:00)."}
+    - {name: include.list}
+    - {name: exclude.list}
+  checks:
+    - Not in Debezium before 2.4; on an older release the class is not found.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/timezone-converter.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: outbox-event-router
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.outbox.EventRouter
+  versions: ">=1.0.0.Final"
+  summary: Turns rows inserted into an outbox table into events routed to one topic per aggregate type (the outbox pattern).
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: table.op.invalid.behavior, default: "warn", values: [warn, error, fatal]}
+    - {name: table.field.event.id, default: "id"}
+    - {name: table.field.event.key, default: "aggregateid"}
+    - {name: table.field.event.type, default: "type"}
+    - {name: table.field.event.timestamp}
+    - {name: table.field.event.payload, default: "payload"}
+    - {name: table.fields.additional.placement}
+    - {name: table.fields.additional.error.on.missing, default: "true"}
+    - {name: table.field.event.schema.version}
+    - {name: route.by.field, default: "aggregatetype"}
+    - {name: route.topic.regex, default: "(?<routedByValue>.*)"}
+    - {name: route.topic.replacement, default: "outbox.event.${routedByValue}"}
+    - {name: route.tombstone.on.empty.payload, default: "false"}
+    - {name: table.expand.json.payload, default: "false"}
+    - {name: table.json.payload.null.behavior, default: "ignore", values: [ignore, optional_bytes]}
+  checks:
+    - The outbox table needs the id, aggregateid, aggregatetype and payload columns, or the table.field.* and route.by.field keys must name its columns.
+    - Only create and delete events are expected from the outbox table; any other operation is handled by table.op.invalid.behavior (warn by default).
+    - The connector should capture only the outbox table, since every captured table's events go through the router.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/outbox-event-router.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: mongodb-outbox-event-router
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.mongodb.transforms.outbox.MongoEventRouter
+  versions: ">=1.9.7.Final"
+  summary: The outbox event router for MongoDB collections.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: mongodb
+  keys:
+    - {name: collection.field.event.id, default: "_id"}
+    - {name: collection.field.event.key}
+    - {name: collection.field.event.type, default: "type"}
+    - {name: collection.field.event.timestamp}
+    - {name: collection.field.event.payload, default: "payload"}
+    - {name: collection.expand.json.payload, default: "false"}
+  checks:
+    - MongoDB outbox collections need this class; io.debezium.transforms.outbox.EventRouter expects the relational envelope.
+    - Ships in the MongoDB connector plugin.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/mongodb-outbox-event-router.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mongodb/3.2.0.Final/debezium-connector-mongodb-3.2.0.Final-sources.jar
+
+- name: extract-changed-record-state
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.ExtractChangedRecordState
+  versions: ">=2.2.0.Final"
+  summary: Adds headers that name the fields an update changed and the fields it left unchanged.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: header.changed.name}
+    - {name: header.unchanged.name}
+  checks:
+    - Update events only; with neither header name set (both default to none) the transform adds nothing.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/index.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: header-to-value
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.HeaderToValue
+  versions: ">=2.2.0.Final"
+  summary: Copies or moves record headers into fields of the value.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: headers, required: true}
+    - {name: fields, required: true}
+    - {name: operation, required: true, values: [move, copy]}
+  checks:
+    - headers and fields are paired by position, so both lists need the same length.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/header-to-value.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: partition-routing
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.partitions.PartitionRouting
+  versions: ">=2.2.0.Final"
+  summary: Chooses the topic partition of each event from a hash of payload fields.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: partition.payload.fields, required: true}
+    - {name: partition.topic.num, required: true, check: "Must equal the partition count of every routed topic."}
+    - {name: partition.hash.function, default: "java"}
+  checks:
+    - It replaced io.debezium.transforms.partitions.ComputePartition (2.1 to 2.4), whose keys differ; a config written for ComputePartition must be rewritten, not renamed.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/partition-routing.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: schema-change-event-filter
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.SchemaChangeEventFilter
+  versions: ">=2.4.0.Final"
+  summary: Drops schema change events of the listed types.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: schema.change.event.exclude.list, required: true}
+  checks:
+    - The list holds schema change types (ALTER, DROP and so on); records that are not schema change events pass through unchanged.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/index.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: extract-schema-to-new-record
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.ExtractSchemaToNewRecord
+  versions: ">=2.5.0.Final"
+  summary: Adds the source table's column metadata to each record in a sourceSchema field.
+  install: bundled
+  runtime_image: connect
+  checks:
+    - The sink must accept the extra sourceSchema field.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/index.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: activate-tracing-span
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.tracing.ActivateTracingSpan
+  versions: ">=1.4.0.Final"
+  summary: Starts a tracing span for each event from a span context carried in the event.
+  install: bundled
+  runtime_image: connect
+  keys:
+    - {name: tracing.span.context.field, default: "tracingspancontext"}
+    - {name: tracing.operation.name, default: "debezium-read"}
+    - {name: tracing.with.context.field.only, default: "false"}
+  checks:
+    - Only useful with Debezium's tracing integration set up on the worker.
+  doc: https://debezium.io/documentation/reference/3.2/integrations/tracing.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: vector-to-json-converter
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.transforms.VectorToJsonConverter
+  versions: ">=3.1.0.Final"
+  summary: Converts Debezium vector values (DoubleVector, FloatVector, SparseDoubleVector) to JSON for sinks without vector types.
+  install: bundled
+  runtime_image: connect
+  checks:
+    - Needed only when the source has vector columns and the sink has no vector type.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/index.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-core/3.2.0.Final/debezium-core-3.2.0.Final-sources.jar
+
+- name: decode-logical-decoding-message-content
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.postgresql.transforms.DecodeLogicalDecodingMessageContent
+  versions: ">=3.0.0.Final"
+  summary: Decodes the content of Postgres logical decoding messages into a structured value.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: postgres
+  keys:
+    - {name: fields.null.include, default: "false"}
+  checks:
+    - Applies to the Postgres connector's logical decoding message events only.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/decode-logical-decoding-message-content.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-sources.jar
+
+- name: timescaledb
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.postgresql.transforms.timescaledb.TimescaleDb
+  versions: ">=2.4.0.Final"
+  summary: Routes TimescaleDB chunk tables to topics named after their hypertables.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: postgres
+  keys:
+    - {name: schema.list, default: "_timescaledb_internal"}
+    - {name: target.topic.prefix, default: "timescaledb"}
+  checks:
+    - The connector must capture the TimescaleDB internal schema (schema.list) for the chunks to be seen.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/timescaledb.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-sources.jar
+
+- name: read-to-insert-event
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.mysql.transforms.ReadToInsertEvent
+  versions: ">=1.6.0.Final"
+  summary: Rewrites snapshot read events (op r) as inserts (op c).
+  install: bundled
+  runtime_image: connect
+  plugin_ref: mysql
+  checks:
+    - For consumers that only handle c, u and d events; a consumer that tells snapshot rows apart by op r loses that signal.
+  doc: https://debezium.io/documentation/reference/3.2/transformations/index.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mysql/3.2.0.Final/debezium-connector-mysql-3.2.0.Final-sources.jar
+
+- name: jdbc-collection-name-transformation
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.jdbc.transforms.CollectionNameTransformation
+  versions: ">=3.2.0.Final"
+  summary: Adds a prefix or suffix to, or restyles, the table names the JDBC sink writes to.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: debezium-jdbc-sink
+  keys:
+    - {name: collection.naming.prefix, default: ""}
+    - {name: collection.naming.suffix, default: ""}
+    - {name: collection.naming.style, default: "default"}
+  checks:
+    - Ships in the Debezium JDBC sink plugin from 3.2.0.Final.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/jdbc.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.2.0.Final/debezium-connector-jdbc-3.2.0.Final-sources.jar
+
+- name: jdbc-field-name-transformation
+  kind: smt
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.jdbc.transforms.FieldNameTransformation
+  versions: ">=3.2.0.Final"
+  summary: Adds a prefix or suffix to, or restyles, the column names the JDBC sink writes.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: debezium-jdbc-sink
+  keys:
+    - {name: column.naming.prefix, default: ""}
+    - {name: column.naming.suffix, default: ""}
+    - {name: column.naming.style, default: "default"}
+  checks:
+    - Ships in the Debezium JDBC sink plugin from 3.2.0.Final.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/jdbc.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.2.0.Final/debezium-connector-jdbc-3.2.0.Final-sources.jar

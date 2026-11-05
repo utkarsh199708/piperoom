@@ -38,24 +38,22 @@ func defaultAWSLoader(ctx context.Context, region string) (aws.Config, error) {
 
 // LoadAWS loads the default AWS credential chain (environment, shared config,
 // instance or task role, IRSA) once, in cfg.AWSRegion, when something in this
-// process needs it: PIPEROOM_MODEL_PROVIDER=bedrock or
+// process needs it: a model role on bedrock or bedrock-converse
+// (PIPEROOM_MODEL_PROVIDER or a role's PIPEROOM_<ROLE>_PROVIDER) or
 // KAFKA_SASL_MECHANISM=AWS_MSK_IAM. Otherwise it returns nil, nil. It fetches
 // the credentials once (bounded by 5 s) so a broken chain stops the process at
-// start. The result is passed to both NewAgentEndpoint and Open so Bedrock and
-// MSK IAM share one config and one credentials cache.
+// start. The result is passed to both NewAgentEndpoint and Open so Bedrock,
+// Bedrock Converse and MSK IAM share one config and one credentials cache.
 func LoadAWS(ctx context.Context, cfg config.Config) (*aws.Config, error) {
 	return loadAWS(ctx, cfg, os.Getenv, defaultAWSLoader)
 }
 
 func loadAWS(ctx context.Context, cfg config.Config, getenv func(string) string, load awsLoader) (*aws.Config, error) {
-	bedrock, mskIAM := awsUsers(cfg)
-	if !bedrock && !mskIAM {
+	models, mskIAM := awsUsers(cfg)
+	if len(models) == 0 && !mskIAM {
 		return nil, nil
 	}
-	var users []string
-	if bedrock {
-		users = append(users, "PIPEROOM_MODEL_PROVIDER=bedrock")
-	}
+	users := models
 	if mskIAM {
 		users = append(users, "KAFKA_SASL_MECHANISM="+netsec.MechAWSMSKIAM)
 	}
@@ -71,8 +69,8 @@ func loadAWS(ctx context.Context, cfg config.Config, getenv func(string) string,
 	}
 	ac.Region = region
 
-	// A Bedrock API key replaces AWS credentials for Bedrock only; MSK IAM
-	// always signs with real credentials.
+	// A Bedrock API key replaces AWS credentials for Bedrock and Bedrock
+	// Converse only; MSK IAM always signs with real credentials.
 	if mskIAM || getenv(bedrockTokenEnv) == "" {
 		if ac.Credentials == nil {
 			return nil, fmt.Errorf("wiring: %s needs AWS credentials (environment, shared config, or an instance/task role); none were found", who)
@@ -88,11 +86,24 @@ func loadAWS(ctx context.Context, cfg config.Config, getenv func(string) string,
 	return &ac, nil
 }
 
-// awsUsers reports which parts of the process need AWS credentials.
-func awsUsers(cfg config.Config) (bedrock, mskIAM bool) {
-	bedrock = strings.EqualFold(strings.TrimSpace(cfg.ModelProvider), agent.ProviderBedrock)
-	mskIAM = usesMSKIAM(cfg)
-	return bedrock, mskIAM
+// awsUsers reports which parts of the process need AWS credentials: models
+// names each provider variable set to bedrock or bedrock-converse (the
+// main one, then the first look, summary and judge roles that set their
+// own), and mskIAM is KAFKA_SASL_MECHANISM=AWS_MSK_IAM. A role that sets no
+// provider runs on the main one, which is already counted.
+func awsUsers(cfg config.Config) (models []string, mskIAM bool) {
+	for _, v := range []struct{ name, value string }{
+		{"PIPEROOM_MODEL_PROVIDER", cfg.ModelProvider},
+		{"PIPEROOM_TRIAGE_PASS_PROVIDER", cfg.TriagePassProvider},
+		{"PIPEROOM_SUMMARY_PROVIDER", cfg.SummaryProvider},
+		{"PIPEROOM_JUDGE_PROVIDER", cfg.JudgeProvider},
+	} {
+		p := strings.ToLower(strings.TrimSpace(v.value))
+		if p == agent.ProviderBedrock || p == config.ModelProviderBedrockConverse {
+			models = append(models, v.name+"="+p)
+		}
+	}
+	return models, usesMSKIAM(cfg)
 }
 
 func usesMSKIAM(cfg config.Config) bool {

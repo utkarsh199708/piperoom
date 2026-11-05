@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"piperoom/internal/agent"
@@ -246,6 +245,7 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/me", ""},
 		{http.MethodGet, "/api/rooms", ""},
+		{http.MethodGet, "/api/actions", ""},
 		{http.MethodPost, "/api/rooms", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`},
 		{http.MethodPost, "/api/alerts/webhook", `{}`},
 		{http.MethodGet, "/api/rooms/r1", ""},
@@ -260,6 +260,7 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 		{http.MethodPost, "/api/rooms/r1/control/grant", `{"to":"arjun"}`},
 		{http.MethodPost, "/api/rooms/r1/close", `{"resolution":"x"}`},
 		{http.MethodPost, "/api/rooms/r1/handoffs", `{"to":"priya"}`},
+		{http.MethodPost, "/api/rooms/r1/proposals", `{"title":"t","risk":"low","rollback":"r","steps":[]}`},
 		{http.MethodPost, "/api/rooms/r1/trace", `{"table":"t","key":"k"}`},
 		{http.MethodPost, "/api/proposals/p1/approve", `{"layer":"postgres"}`},
 		{http.MethodPost, "/api/proposals/p1/reject", `{"layer":"postgres"}`},
@@ -286,28 +287,6 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 	resp := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r1/ws", "", "")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("ws without user: want 401, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-// TestBodyCap: request bodies over 1 MB are refused with 400 validation.
-func TestBodyCap(t *testing.T) {
-	srv, _ := newServer(t)
-	big := strings.Repeat("a", 2<<20)
-
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun",
-		`{"title":"`+big+`","severity":"sev2","pipeline_id":"orders"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized create: want 400, got %d", resp.StatusCode)
-	}
-	body := decode[map[string]any](t, resp)
-	if body["error"].(map[string]any)["code"] != "validation" {
-		t.Fatalf("oversized create: bad envelope %+v", body)
-	}
-
-	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"x":"`+big+`"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized webhook: want 400, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

@@ -238,7 +238,7 @@ func TestSchemaAndBadInput(t *testing.T) {
 	tl := New(embedded(t))
 	s := tl.InputSchema()
 	props := s["properties"].(map[string]any)
-	if len(props) != 2 || props["query"] == nil || props["max_results"] == nil || props["why"] != nil {
+	if len(props) != 3 || props["query"] == nil || props["max_results"] == nil || props["versions"] == nil || props["why"] != nil {
 		t.Fatalf("properties %v", props)
 	}
 	if !slices.Equal(s["required"].([]string), []string{"query"}) || s["additionalProperties"] != false {

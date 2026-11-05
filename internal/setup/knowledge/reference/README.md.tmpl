@@ -1,0 +1,65 @@
+# {{.ArtifactID}}: Piperoom reference project
+
+The smallest Debezium Engine application for this pipeline: a {{.SourceTitle}} source on
+Debezium {{.Release}}, built with {{.BuildTitle}}, Java {{.JavaRelease}} or later. Piperoom
+generated it and never builds or runs it. Compare its build file with yours: the versions here
+are the ones Debezium {{.Release}} was released with.
+
+## Run it
+
+1. Set the database password in the environment (it is never written to a file). Type it at a
+   prompt, so it stays out of your shell history:
+   `read -rs PIPEROOM_SECRET_{{.PasswordSecret}}; export PIPEROOM_SECRET_{{.PasswordSecret}}`
+   (PowerShell 7.1 or later: `$env:PIPEROOM_SECRET_{{.PasswordSecret}} = Read-Host -MaskInput`)
+2. Build: `{{.BuildCommand}}`
+3. Run, from this folder: `{{.RunCommand}}`{{if .RunCommandWindows}} (Windows: `{{.RunCommandWindows}}`){{end}}
+
+Every change event prints one line that starts with `piperoom-reference event` and names only
+its destination topic: no key and no row values are ever printed. To check the pipeline, set
+`PIPEROOM_CANARY` to the canary nonce Piperoom gives you (several: separated by commas) before you
+run it; an event whose value contains that nonce prints `piperoom-reference canary <nonce> seen`.
+Save the output to a file (for example `piperoom-reference.log`) and give Piperoom its path: the
+setup check looks for that line.
+
+## Database connection
+
+{{if eq .TLS "verify" -}}
+The connection uses TLS and checks the server certificate and host name (`{{.TLSKey}}={{.TLSValue}}`).
+{{- else if eq .TLS "require" -}}
+The connection uses TLS but does not check the server certificate (`{{.TLSKey}}={{.TLSValue}}`):
+anyone on the network path can impersonate the server. Set up the CA below and change it to
+`{{if eq .Source "postgres"}}verify-full{{else}}verify_identity{{end}}`.
+{{- else -}}
+The connection does not use TLS (`{{.TLSKey}}={{.TLSValue}}`): the password and every row cross
+the network in plain text. Use it only for a database on this host; otherwise set up the CA below
+and change it to `{{if eq .Source "postgres"}}verify-full{{else}}verify_identity{{end}}`.
+{{- end}}
+{{- if eq .Source "postgres"}}
+
+With `verify-full`, the server certificate is checked against `~/.postgresql/root.crt` by
+default; to use another CA file, add `database.sslrootcert=/path/to/root.crt` to
+`piperoom-reference.properties`.
+
+The user needs the `REPLICATION` attribute and must own the captured tables, so the engine can
+create the publication (`publication.autocreate.mode=filtered`). Without table ownership, have an
+owner run `CREATE PUBLICATION {{.PublicationName}} FOR TABLE ...` and set
+`publication.autocreate.mode=disabled`.
+{{- else}}
+
+With `verify_identity`, the server certificate is checked against the JVM's default trust store;
+to use your own CA, import it into a trust store and add `database.ssl.truststore=/path/to/truststore.jks` and
+`database.ssl.truststore.password=${secret:NAME}` (read from `PIPEROOM_SECRET_NAME`) to
+`piperoom-reference.properties`.
+
+The user needs only `SELECT`, `RELOAD`, `REPLICATION SLAVE` and `REPLICATION CLIENT`:
+`GRANT SELECT, RELOAD, REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{{.User}}'@'%';`
+{{- end}}
+
+Offsets{{if eq .Source "mysql"}} and the schema history{{end}} are kept under `data/`; delete that
+folder to start again with a new snapshot.
+{{- if eq .Source "postgres"}}
+
+The engine creates the replication slot `{{.SlotName}}` and the publication
+`{{.PublicationName}}`. When you no longer need it, drop both, or the slot keeps WAL on the server:
+`SELECT pg_drop_replication_slot('{{.SlotName}}'); DROP PUBLICATION {{.PublicationName}};`
+{{- end}}

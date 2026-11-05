@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -69,10 +70,9 @@ func ownerUserID(layer string) string { return evalOwnerPfx + layer }
 // unsafeUserChars are characters a users.yaml id may not hold.
 var unsafeUserChars = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 
-// newRoomFixture writes the scenario's pipeline into an owners file and loads
-// it with owners.Load, so the room sees a pipeline validated (and its watch
-// block resolved) exactly as the server's would be.
-func newRoomFixture(sc Scenario) (*roomFixture, error) {
+// loadOwnersFor writes the scenario's pipeline into an owners file, every
+// layer owned by its eval owner, and loads it with owners.Load.
+func loadOwnersFor(sc Scenario) (*owners.Owners, error) {
 	pipe, err := sc.pipelineNode()
 	if err != nil {
 		return nil, err
@@ -101,6 +101,17 @@ func newRoomFixture(sc Scenario) (*roomFixture, error) {
 	own, err := owners.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("evals: scenario %q: pipeline is not a valid owners.yaml entry: %w", sc.Name, err)
+	}
+	return own, nil
+}
+
+// newRoomFixture writes the scenario's pipeline into an owners file and loads
+// it with owners.Load, so the room sees a pipeline validated (and its watch
+// block resolved) exactly as the server's would be.
+func newRoomFixture(sc Scenario) (*roomFixture, error) {
+	own, err := loadOwnersFor(sc)
+	if err != nil {
+		return nil, err
 	}
 
 	type userEntry struct {
@@ -172,6 +183,17 @@ func (replayTopology) Trace(context.Context, string, string, string) ([]events.T
 
 func (replayTopology) LayerOwner(string, string) (string, bool) { return "", false }
 
+// executesFix reports whether the scenario has the harness approve and run a
+// proposal (an action_result input with an action).
+func (s Scenario) executesFix() bool {
+	for _, in := range s.Inputs {
+		if in.Kind == "action_result" && in.Action != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // roomAgent wraps the runner the room starts. It passes everything through
 // and only observes: what alert the room built, when an attempt ends, and
 // when the agent waits for human input at the run level (the idle in which a
@@ -184,6 +206,16 @@ type roomAgent struct {
 	release chan struct{}
 	ended   chan error
 	stop    chan struct{}
+
+	// guardWakeIdle makes the agent's deadline-less, run-derived waits count
+	// as idles too. The hypothesis guard's rule 1 arms a recheck after a
+	// refusal (90 s, 3 min, 6 min of real time), and while it runs the agent
+	// waits on a context derived from the run's (agent.waitInbox), which the
+	// run-level test below would miss: the run would stall for the whole
+	// recheck, and the scripted person would never act. The only other
+	// waits of that shape are apply waits, which exist only after a fix step
+	// was executed, so the flag is set only for a scenario that executes none.
+	guardWakeIdle bool
 
 	mu       sync.Mutex
 	alert    agent.Alert
@@ -230,7 +262,11 @@ type harnessInbox struct {
 // bounded step-result waits pass straight through.
 func (w *harnessInbox) Wait(ctx context.Context) error {
 	if ctx.Done() != w.runDone {
-		return w.Inbox.Wait(ctx)
+		// A bounded step-result wait has a deadline; an unbounded one that is
+		// not the run's own is the guard's recheck (see guardWakeIdle).
+		if _, bounded := ctx.Deadline(); bounded || !w.a.guardWakeIdle {
+			return w.Inbox.Wait(ctx)
+		}
 	}
 	w.a.mu.Lock()
 	w.a.idles++
@@ -258,6 +294,9 @@ func (w *harnessInbox) Wait(ctx context.Context) error {
 // the recorded stack to its next phase.
 type execScript struct {
 	rp *replayer
+	// log notes each executed step (action and target) for the report; nil
+	// in tests that do not read it.
+	log *writeLog
 
 	mu    sync.Mutex
 	armed *Input
@@ -272,6 +311,7 @@ func (x *execScript) arm(in Input) {
 func (x *execScript) execute(action string, params json.RawMessage) (string, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	x.note(action, params)
 	if in := x.armed; in != nil && in.Action == action {
 		x.armed = nil
 		if in.Params != nil && !paramsMatch(in.Params, params) {
@@ -285,11 +325,38 @@ func (x *execScript) execute(action string, params json.RawMessage) (string, err
 		if !ok {
 			return "", errors.New(in.Text)
 		}
+		x.ran(action, params)
 		return in.Text, nil
 	}
 	ok := true
 	x.rp.executed(action, &ok)
+	x.ran(action, params)
 	return "succeeded", nil
+}
+
+// ran tells the replay clients a step succeeded, so a recovery action's
+// Verify counts what it re-emitted (X2e).
+func (x *execScript) ran(action string, params json.RawMessage) {
+	if x.log != nil {
+		x.log.stepRan(action, params)
+	}
+}
+
+// note logs an executed step with its target names only: the params of a
+// step can carry record keys or config values, which a report must not.
+func (x *execScript) note(action string, params json.RawMessage) {
+	if x.log == nil {
+		return
+	}
+	var all map[string]any
+	_ = json.Unmarshal(params, &all) // not an object: logged without a target
+	args := map[string]any{}
+	for _, k := range writeTargetKeys {
+		if v, ok := all[k].(string); ok {
+			args[k] = v
+		}
+	}
+	x.log.record(action, args)
 }
 
 // roomRun is the state of one run on the room path.
@@ -316,30 +383,61 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	reg, err := rp.registry(defs)
+	fx, err := newRoomFixture(sc)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, err := LiveActions(sc.Resources, sc.Recordings)
+	live, wl, fg, err := liveActionsForge(sc.resources(), sc.Recordings)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	exec := &execScript{rp: rp}
+	// The repository tools of a pipeline with repos: run live over the run's
+	// replay forge, scoped by the run's owners file (replay_forge.go).
+	var liveTools map[string]tools.Tool
+	if fg != nil {
+		freg := tools.NewRegistry()
+		if err := registerForgeTools(freg, fg, fx.owners); err != nil {
+			return RunResult{}, Transcript{}, err
+		}
+		liveTools = map[string]tools.Tool{}
+		for _, t := range freg.All() {
+			liveTools[t.Name()] = t
+		}
+	}
+	reg, err := rp.registryWith(defs, liveTools)
+	if err != nil {
+		return RunResult{}, Transcript{}, err
+	}
+	exec := &execScript{rp: rp, log: wl}
 	attempts := &attemptLog{exec: exec}
 	areg, err := attempts.wrap(live)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	fx, err := newRoomFixture(sc)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
 
 	st := memstore.New()
+	// The watcher's status row the guard's rule 1 reads (agent.Deps.Watch). A
+	// scenario without watch_status leaves Watch nil: no reader, no rule 1.
+	var watch clients.WatchStatusReader
+	if sc.WatchStatus != nil {
+		row, err := sc.WatchStatus.status(sc.Pipeline.ID, time.Now())
+		if err != nil {
+			return RunResult{}, Transcript{}, err
+		}
+		if err := st.PutWatchStatus(ctx, row); err != nil {
+			return RunResult{}, Transcript{}, fmt.Errorf("evals: scenario %q: write watch_status: %w", sc.Name, err)
+		}
+		watch = st
+	}
 	ag := newRoomAgent(cfg.Runner)
-	log := cfg.Logger.With("scenario", sc.Name, "run", run)
+	ag.guardWakeIdle = !sc.executesFix()
+	// The agent logs to this logger (the room hands it down); the counting
+	// handler reads the guard's refusals off it.
+	var guardLog guardCounter
+	log := slog.New(countingHandler{next: cfg.Logger.With("scenario", sc.Name, "run", run).Handler(), c: &guardLog})
 	svc := room.New(room.Deps{
 		Store: st,
+		Watch: watch,
 		StackFor: func(string) room.PipelineStack {
 			return room.PipelineStack{Tools: reg, Actions: areg}
 		},
@@ -370,7 +468,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, ctx.Err()
 	}
 
-	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Replay: rp.trace()}
+	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Writes: wl.snapshot(), Replay: rp.trace(), GuardMode: cfg.Options.HypothesisGuard, GuardRefusals: int(guardLog.n.Load())}
 	alert, idles := ag.snapshot()
 	tr.Idles = idles
 	if rr.roomID != "" {
@@ -381,11 +479,24 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		tr.Events = evs
 		tr.Room = &RoomTrace{RoomID: rr.roomID, Entry: sc.entry(), Alert: alert}
 	}
+	if status, refused := APIRefusal(runErr); refused {
+		// A refused run says nothing about the agent: latch it so no new run
+		// starts, and keep it out of the grade (and the live judge).
+		cfg.refusal.set(status, runErr)
+		res := infraResult(sc.Name, run, fmt.Sprintf("HTTP %d: %s", status, runErr))
+		res.DurationMS = took.Milliseconds()
+		res.Provenance = provenanceFor(cfg, sc, rr.roomID)
+		return res, tr, nil
+	}
 	res, err := gradeFinal(ctx, cfg, cfg.gate(), sc, Judge(sc, tr, runErr, timedOut))
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
 	res.Run = run
+	if res.Error != "" {
+		// Redacted and short: the error reaches the CI log and the report.
+		res.Error = RunErrorText(res.Error)
+	}
 	res.DurationMS = took.Milliseconds()
 	res = withReplayChecks(sc, tr, res)
 	res.Provenance = provenanceFor(cfg, sc, rr.roomID)

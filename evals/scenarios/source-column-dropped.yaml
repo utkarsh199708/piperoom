@@ -165,7 +165,9 @@ recordings:
       + Value.total_amount: [null, bytes(decimal 12,2)]
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value: v2 → v3 (latest vs previous; pass from_version to pick another pair)
+      - Value.amount: int
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
@@ -231,6 +233,17 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools}; the values are composed to agree with the recordings above.
+  # kafka_throughput: no watcher runs in a replay, so there are no group_lag samples and no consumed rate.
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 187200 records (52/s) over 3 partitions; median 17/s, max p0 17/s → even
+      order-sync (Empty, 0 members): lag 6912; pg.public.orders p2 34% (2361)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
 
 expect:
   root_cause:

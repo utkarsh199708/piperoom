@@ -76,6 +76,18 @@ func (e *evidence) result(p events.AgentToolResultPayload) {
 	}
 }
 
+// citedTools returns the tools of the cited steps that succeeded: the reads a
+// rule-out claim may rest on.
+func (e *evidence) citedTools(cited []string) []string {
+	var out []string
+	for _, id := range cited {
+		if st, ok := e.steps[id]; ok && st.ok {
+			out = append(out, st.tool)
+		}
+	}
+	return out
+}
+
 // citesSteps reports whether cited is non-empty and every cited step exists
 // and succeeded. At low confidence an errored step may be cited too: prompt
 // rule 7 lets an error be evidence for what is unknown, never proof.

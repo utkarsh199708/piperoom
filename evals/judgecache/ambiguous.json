@@ -9,7 +9,6 @@
       "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer",
         "root_cause_layer"
       ],
       "sources": [
@@ -1225,7 +1224,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S20"
@@ -1238,7 +1238,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S2"
@@ -1251,7 +1252,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S21"
@@ -1279,7 +1281,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S14"
@@ -1305,7 +1308,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S12"
@@ -1318,7 +1322,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S7"
@@ -1332,7 +1337,6 @@
       "keyword": false,
       "items": [
         "root_cause",
-        "first_failing_layer",
         "root_cause_layer"
       ],
       "sources": [
@@ -1346,7 +1350,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S18"
@@ -1359,7 +1364,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S9"
@@ -1402,7 +1408,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S23"
@@ -1415,7 +1422,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S17"
@@ -1428,7 +1436,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S19"
@@ -1471,7 +1480,8 @@
       "want": false,
       "keyword": false,
       "items": [
-        "root_cause"
+        "root_cause",
+        "first_failing_layer"
       ],
       "sources": [
         "golden:terms S11"
@@ -1497,10 +1507,11 @@
       "kind": "correct",
       "text": "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.",
       "want": false,
-      "keyword": false,
+      "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer"
+        "first_failing_layer",
+        "root_cause_layer"
       ],
       "sources": [
         "golden:r6.1"
@@ -1511,10 +1522,11 @@
       "kind": "correct",
       "text": "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.",
       "want": false,
-      "keyword": false,
+      "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer"
+        "first_failing_layer",
+        "root_cause_layer"
       ],
       "sources": [
         "golden:r6.1"

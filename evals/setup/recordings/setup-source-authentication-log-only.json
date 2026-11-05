@@ -1,0 +1,158 @@
+{
+  "scenario": "setup/source-authentication-log-only",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-26T09:40:00Z",
+  "note": "Composed, not recorded: the runner ops are the failed connect_restart_task the scenario's action_result input states, and the ladder reads are what the canary check would read in that state, on the fixed clock of the setup scenarios. The exception text is only in connect_worker_logs (the room-tool recording of the scenario), never in an op here. Re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c).",
+  "ops": [
+    {
+      "op": "connect_restart_task",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "6c4156ea01a2e47e3226ae14acf18fedbbfddb8a37566d9c339d902760b08e28",
+      "params": {
+        "connector": "pg-orders-connector",
+        "task": 0
+      },
+      "result": {
+        "ok": false,
+        "summary": "restarted pg-orders-connector task 0; it is FAILED again",
+        "data": {
+          "connector": "pg-orders-connector",
+          "task": 0,
+          "state": "FAILED"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "924f451418aa0a05f6ee0e53a2c851f9f9c840e1b3ab632f2a7065bdec9033be",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "FAILED",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED"
+            }
+          ]
+        },
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "FAILED",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED"
+            }
+          ]
+        },
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "pg.public.orders",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 0
+            }
+          ],
+          "total_records": 0
+        },
+        "at": "2026-10-25T09:44:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {
+          "connector": "pg-orders-connector",
+          "metrics_found": 11,
+          "snapshot": {
+            "SnapshotCompleted": 0,
+            "SnapshotRunning": 0
+          }
+        },
+        "at": "2026-10-25T09:44:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {
+          "topic": "pg.public.orders",
+          "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718",
+          "found": false
+        },
+        "at": "2026-10-25T09:44:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {
+          "subjects": [
+            "pg.public.orders-key",
+            "pg.public.orders-value"
+          ],
+          "deleted_subjects": []
+        },
+        "at": "2026-10-25T09:44:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {
+          "name": "connector_running",
+          "ok": false,
+          "note": "the connector is FAILED"
+        },
+        {
+          "name": "tasks_running",
+          "ok": false,
+          "note": "task 0 is FAILED"
+        },
+        {
+          "name": "canary_topic",
+          "ok": true,
+          "note": "the topic exists with 1 partition(s)"
+        },
+        {
+          "name": "snapshot_complete",
+          "ok": false,
+          "note": "the read kafka_topic_offsets failed: evals/setup: no recorded result for this op: the ladder read kafka_topic_offsets has no recorded answer"
+        },
+        {
+          "name": "canary_event",
+          "ok": false,
+          "note": "no record with the canary key yet"
+        },
+        {
+          "name": "canary_subject",
+          "ok": true,
+          "note": "2 subject(s) under the canary topic's prefix"
+        },
+        {
+          "name": "sink_row",
+          "ok": true,
+          "note": "no sink was set up"
+        },
+        {
+          "name": "person_change",
+          "ok": false,
+          "note": "awaiting the person's change"
+        }
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

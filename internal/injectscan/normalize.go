@@ -6,6 +6,39 @@ import (
 	"unicode/utf8"
 )
 
+// Normalize returns the text Scan runs its rules on: zero-width and format
+// characters dropped, lookalike letters (Cyrillic, Greek, fullwidth,
+// Mathematical Alphanumeric, Unicode tag characters) mapped to ASCII, unusual
+// spaces collapsed. It is the same transform Scan and ScanNames apply
+// internally (namesIn matches names on the normalised text), exported so a
+// caller such as the agent's echo guard can normalise both sides before
+// comparing a value the model typed with a flagged span: a span that hides a
+// zero-width space or a lookalike still matches a cleanly typed value.
+//
+// The result is for comparing text, not for indexing into s: byte offsets
+// into the result do not map back to offsets in s, and Finding offsets are
+// into the string the caller passed, not the normalised one.
+func Normalize(s string) string {
+	out, _, _, _ := normalize(s, false)
+	return out
+}
+
+// maxPrealloc bounds a slice capacity hint taken from an input's length: the
+// slice still grows by append past it, so the result is the same, and the
+// arithmetic on the hint can never overflow (CodeQL go/allocation-size-overflow).
+const maxPrealloc = 1 << 20
+
+// prealloc is n clamped to [0, maxPrealloc], for use as a capacity hint.
+func prealloc(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > maxPrealloc {
+		return maxPrealloc
+	}
+	return n
+}
+
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:
@@ -31,7 +64,7 @@ import (
 func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, hadCf bool) {
 	var b strings.Builder
 	b.Grow(len(s))
-	origin = make([]int, 0, len(s)+1)
+	origin = make([]int, 0, prealloc(len(s)))
 	inSpace, newlines := false, 0
 	for i, r := range s {
 		m, keep := mapRune(r)
@@ -146,11 +179,11 @@ const maxFlagTags = 6
 // own right whatever it says.
 func scanHiddenTags(s string) []Finding {
 	var out []Finding
-	start, inFlag, flagTags := -1, false, 0
+	start, end, inFlag, flagTags := -1, 0, false, 0
 	var run strings.Builder
 	flush := func() {
 		if start >= 0 && run.Len() > 0 && !inFlag {
-			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, End: end, Excerpt: excerpt("tag text: " + run.String())})
 		}
 		start = -1
 		run.Reset()
@@ -164,6 +197,7 @@ func scanHiddenTags(s string) []Finding {
 			if start < 0 {
 				start = i
 			}
+			end = i + utf8.RuneLen(r)
 			run.WriteRune(r - tagBase)
 			if inFlag {
 				if flagTags++; flagTags > maxFlagTags {
@@ -218,11 +252,11 @@ func rgiFlagLen(s string) int {
 // characters scanHiddenTags drops (cancel, language tag, U+E0000) count too.
 func scanStrayTags(s string) []Finding {
 	var out []Finding
-	start := -1
+	start, end := -1, 0
 	var run strings.Builder
 	flush := func() {
 		if start >= 0 {
-			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, End: end, Excerpt: excerpt("tag text: " + run.String())})
 		}
 		start = -1
 		run.Reset()
@@ -240,6 +274,7 @@ func scanStrayTags(s string) []Finding {
 			if start < 0 {
 				start = i
 			}
+			end = i + n
 			if isTagText(r) {
 				run.WriteRune(r - tagBase)
 			}

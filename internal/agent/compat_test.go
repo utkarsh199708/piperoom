@@ -122,7 +122,7 @@ type compatEnv struct {
 
 // newCompatRunner is a verify runner whose proposal p_1 carries the given steps
 // and whose propose_fix can create a second proposal, p_2.
-func newCompatRunner(t *testing.T, model model, inbox Inbox, sink Sink, steps []events.ProposalStep, env compatEnv) (*runner, *fakeProposals) {
+func newCompatRunner(t *testing.T, model sdkModel, inbox Inbox, sink Sink, steps []events.ProposalStep, env compatEnv) (*runner, *fakeProposals) {
 	t.Helper()
 	connect := connectRecoveredResult()
 	if env.connect != nil {
@@ -164,7 +164,7 @@ func newCompatRunner(t *testing.T, model model, inbox Inbox, sink Sink, steps []
 	if err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
-	r.model = model
+	r.model = viaSDK(model)
 	r.clk = &fakeClock{}
 	r.proposals.record("p_1", steps)
 	return r, proposals

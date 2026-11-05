@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xml:lang="en-US" xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:status.aiven.io,2005:/history</id>
+  <link rel="alternate" type="text/html" href="https://status.aiven.io"/>
+  <title>Aiven Status - Incident History</title>
+  <updated>2026-10-20T13:40:00Z</updated>
+  <entry>
+    <id>tag:status.aiven.io,2005:Incident/777</id>
+    <published>2026-10-20T13:10:00Z</published>
+    <updated>2026-10-20T13:40:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://status.aiven.io/incidents/777"/>
+    <title>Kafka Connect degraded in aws-eu-west-1</title>
+    <content type="html">&lt;p&gt;&lt;strong&gt;Identified&lt;/strong&gt; - The cause is known.&lt;/p&gt;</content>
+  </entry>
+</feed>

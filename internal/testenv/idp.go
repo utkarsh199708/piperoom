@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -379,6 +381,18 @@ func (f *FakeIdP) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 	}}})
 }
 
+// testRedirectHost reports whether host is one the fake IdP may redirect to:
+// loopback or a reserved test name (RFC 6761). Even without RedirectURIs the
+// fake never becomes an open redirect to a real host.
+func testRedirectHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".test") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (f *FakeIdP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	// Errors about client_id or redirect_uri are shown, never redirected (RFC 6749 4.1.2.1).
@@ -392,7 +406,7 @@ func (f *FakeIdP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target, err := url.Parse(redirect)
-	if err != nil {
+	if err != nil || !testRedirectHost(target.Hostname()) {
 		http.Error(w, "bad redirect_uri", http.StatusBadRequest)
 		return
 	}

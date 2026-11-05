@@ -1,6 +1,8 @@
 // Mirror of internal/events/events.go (contract) + docs/api.md objects.
 // Field names and JSON match the Go structs exactly.
 
+import type { NodeKind } from './nodeKinds'
+
 // ---- actors ----
 
 export type ActorKind = 'human' | 'agent' | 'system'
@@ -53,9 +55,33 @@ export type EventType =
   | 'room.labelled'
   | 'checklist.step_done'
   | 'proposal.previewed'
+  | 'proposal.stage_started'
+  | 'proposal.staged'
   | 'agent.verification'
+  | 'agent.recovery_check'
   | 'postmortem.drafted'
   | 'postmortem.failed'
+  | 'proposal.scheduled'
+  | 'proposal.cancelled'
+  | 'room.escalated'
+  // U wave: setup rooms (docs/design/setup-agent.md, docs/api.md "U-wave events").
+  | 'setup.pairing'
+  | 'setup.runner_attached'
+  | 'setup.runner_lost'
+  | 'setup.runner_refused'
+  | 'setup.plan'
+  | 'setup.blocked'
+  | 'setup.target_registered'
+  | 'setup.target_classed'
+  | 'setup.pipeline_extended'
+  | 'setup.maintenance_window'
+  | 'setup.secret_set'
+  | 'setup.credentials_registered'
+  | 'setup.verified'
+  | 'setup.awaiting_change'
+  | 'pipeline.registered'
+  // Q7: a fix PR's state changed (state, head, merge or checks).
+  | 'pull_request.updated'
 
 export interface Event {
   room_id: string
@@ -106,6 +132,77 @@ export interface RoomCreatedPayload {
   dedup_key?: string
   /** The pipeline had shadow mode on when the room opened (docs/design/shadow.md); the agent runs silently and its numbers are revealed after close. */
   shadow?: boolean
+  /** X3: "forecast" for a room a forecast signal opened (sev4, no agent until someone asks); absent otherwise. */
+  origin?: string
+  /** U0: "setup" for a room POST /api/setup opened; absent otherwise. Never set with `shadow`. */
+  mode?: 'setup'
+}
+
+/** room.escalated (X3, system actor): a watcher signal raised an open room's severity; a room is never lowered. */
+export interface RoomEscalatedPayload {
+  severity: string // the new level, "sev1".."sev3"
+  from: string
+  signal: string
+}
+
+// ---- watcher evidence (room.created.alert when alert_source is "watcher"; docs/api.md "Watcher alerts") ----
+
+/** The four X1 drift signal names (events.SignalCountDrift etc.). */
+export type DriftKind = 'count_drift' | 'row_drift' | 'dup_keys' | 'order_skew'
+
+/** events.DriftWindow: half-open [from, to), RFC 3339 UTC. */
+export interface DriftWindow {
+  from: string
+  to: string
+}
+
+/**
+ * events.DriftSignal: one flat entry of the watcher evidence's `signals` list. Names, counts and a window only;
+ * `detail` and `table` are untrusted text, rendered as text. `window` is an object here, while dlq_growth's is a
+ * word, so a reader goes by `signal` first.
+ */
+export interface DriftSignal {
+  signal: DriftKind
+  severity: string
+  table?: string
+  topic?: string
+  window: DriftWindow
+  /** count_drift: source rows; dup_keys/order_skew: records scanned. */
+  source: number
+  /** count_drift: sink rows; 0 otherwise. */
+  sink: number
+  /** count_drift: source - sink when positive; row_drift: sampled keys not on the sink; dup_keys: duplicate events. */
+  missing: number
+  /** row_drift: sampled keys whose timestamp differs; order_skew: position regressions. */
+  mismatched: number
+  /** row_drift: keys compared; dup_keys/order_skew: distinct keys affected. */
+  sample: number
+  detail?: string
+}
+
+/** events.ForecastSignal (X3): a metric's trend reaches its limit within the forecast horizon. */
+export interface ForecastSignal {
+  signal: 'forecast'
+  severity: string
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  samples: number
+}
+
+/** events.ConfigDriftSignal (X3): a connector's config changed outside an approved fix. Key names only. */
+export interface ConfigDriftSignal {
+  signal: 'config_drift'
+  severity: string
+  connector: string
+  old_hash: string
+  new_hash: string
+  changed_keys: string[]
+  keys_omitted?: number
 }
 
 export interface RoomClosedPayload {
@@ -235,6 +332,11 @@ export type ControlRequestedPayload = Record<string, never>
 export interface ControlGrantedPayload {
   to: Actor
   lease_until: string
+  /**
+   * P2b: "sole_member" when the first member to join a driverless alert room became its driver
+   * without asking (system actor). Absent for every other grant.
+   */
+  reason?: 'sole_member' | string
 }
 
 export interface ProposalStep {
@@ -264,6 +366,41 @@ export interface PreviewResult {
   reversible: boolean
   rollback?: string
   dry_run?: DryRunResult
+  /** X2: how much a recovery step would re-emit, read from the target by the action's Preview. Absent for a fix. */
+  count?: number
+  /** X2: what `count` counts. Anything else is shown without a unit word. */
+  unit?: RecoveryUnit
+  /** Q7: the whole change of a repo_open_pull_request step; absent on every other action. */
+  diff?: DiffPreview
+}
+
+/**
+ * Q7 (events.DiffPreview): a fix PR step's whole change at `base_sha`, every line redacted, never cut.
+ * Every string here comes from a repository: render it as text.
+ */
+export interface DiffPreview {
+  repo: string
+  repo_url: string
+  base: string
+  base_sha: string
+  /** The branch Execute will create, piperoom/<room>-<proposal>-<step>. */
+  branch: string
+  layer: string
+  files: FileDiff[]
+  /** Hosts of URLs in added lines, sorted, unique. */
+  hosts?: string[]
+  /** Risk flags (a new image, a download, TLS off, ...), one line each; flags, never refusals. */
+  warnings?: string[]
+  draft?: boolean
+}
+
+/** Q7 (events.FileDiff): one file of a DiffPreview. `unified` has 3 lines of context. */
+export interface FileDiff {
+  path: string
+  status: 'modified' | 'added' | string
+  unified: string
+  added: number
+  removed: number
 }
 
 export interface StepPreview {
@@ -275,6 +412,47 @@ export interface StepPreview {
 export interface ProposalPreviewedPayload {
   proposal_id: string
   steps: StepPreview[]
+  at: string
+}
+
+/** The three states a staged step shows (events.StageResult.Outcome). */
+export type StageOutcome = 'healthy' | 'failed' | 'not_applied'
+
+/**
+ * What one step did on the staging stack (X8, docs/api.md "X8 staging"). `detail`, `leftover` and
+ * `target` are staging's own words, untrusted: render them as text.
+ */
+export interface StageResult {
+  target?: string
+  applied: boolean
+  healthy: boolean
+  detail?: string
+  dry_run?: DryRunResult
+  /** What the stage could not put back on staging; absent when staging is as it was. */
+  leftover?: string
+  duration_ms: number
+}
+
+/** One staged step: exactly one of `result` (staging gave a verdict) and `error` (it did not). */
+export interface StageStepResult {
+  step_index: number
+  result?: StageResult
+  error?: string
+}
+
+/** proposal.stage_started (actor: the driver): `steps` are the indexes of the stageable steps. */
+export interface ProposalStageStartedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: number[]
+  expires_at: string
+}
+
+/** proposal.staged (system actor): one entry per index of the matching stage_started. */
+export interface ProposalStagedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: StageStepResult[]
   at: string
 }
 
@@ -300,6 +478,37 @@ export interface DataFlowCheck {
   detail?: string
 }
 
+/** X2: what a recovery count counts (docs/api.md, X2 recovery actions). */
+export type RecoveryUnit = 'rows' | 'records'
+
+/** X2: how a recovery proposal ended (events.RecoveryOutcomeFor). */
+export type RecoveryOutcome = 'recovered' | 'partial' | 'not_recovered' | 'unverifiable'
+
+/**
+ * Q7: how a fix PR proposal ended when it did not apply (`recovered` false for both): `not_applied` the PR
+ * closed without merge; `not_deployed` merged but not seen in the system within the apply timeout.
+ */
+export type FixPROutcome = 'not_applied' | 'not_deployed'
+
+/** X2: proposal.created.class. Absent reads as "fix". */
+export type ProposalClass = 'fix' | 'recovery' | 'performance'
+
+/**
+ * agent.recovery_check (agent actor): one poll of a recovery step's Verify after it ran. Progress only,
+ * never a verdict. `poll` counts from 1 and never exceeds `max_polls`.
+ */
+export interface AgentRecoveryCheckPayload {
+  proposal_id: string
+  step_index: number
+  poll: number
+  max_polls: number
+  /** The gap the action set out to repair. */
+  before: number
+  /** What is still missing at this poll. */
+  after: number
+  unit: RecoveryUnit
+}
+
 /** The agent's verdict on a fix (agent.verification). `repeat` means "already verified", no checks. */
 export interface AgentVerificationPayload {
   proposal_id: string
@@ -308,6 +517,15 @@ export interface AgentVerificationPayload {
   recovered: boolean
   verdict: string
   repeat?: boolean
+  /**
+   * X2, recovery proposals only: the counted verdict. `before`/`after` are nullable pointers on the
+   * wire (absent for `unverifiable`); `after: 0` is a real count, never "missing". `recovered` is true
+   * only with outcome "recovered".
+   */
+  outcome?: RecoveryOutcome | FixPROutcome
+  before?: number | null
+  after?: number | null
+  unit?: RecoveryUnit
 }
 
 export interface ProposalCreatedPayload {
@@ -319,6 +537,42 @@ export interface ProposalCreatedPayload {
   required_layers: string[]
   /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
   params_hash?: string
+  /**
+   * P2b: the required_layers nobody owns; the room's driver approves them (`grant: "fallback"`).
+   * Absent when every layer has an owner.
+   */
+  fallback_layers?: string[]
+  /** X2/X6: set by the room service from the action registry. Absent reads as "fix". */
+  class?: ProposalClass
+  /** P3c: who wrote it. "driver" for POST /api/rooms/{id}/proposals (the event's actor is the driver); absent reads as "agent". */
+  origin?: ProposalOrigin
+}
+
+/** P3c: proposal.created.origin. */
+export type ProposalOrigin = 'agent' | 'driver'
+
+/** One registered write action (GET /api/actions, P3c). Never carries client state or credentials. */
+export interface ActionInfo {
+  name: string
+  layer: string
+  /** The action's Describe(). */
+  describe: string
+  /** The action's ParamsSchema(): a JSON Schema object (lib/paramsForm reads it). */
+  params_schema: Record<string, unknown>
+  /** Whether the action implements actions.Preview. */
+  preview: boolean
+  /** Q7: an actions.Layered action (`layer` is ""): a step's layer comes from its params and the pipeline. */
+  layer_by_params?: boolean
+  /** Q7: an actions.Deferred action: it applies only when a reviewer merges, never by a policy. */
+  deferred?: boolean
+}
+
+/** POST /api/rooms/{id}/proposals (P3c): a driver-authored fix. Only registered actions with their params. */
+export interface CreateProposalBody {
+  title: string
+  risk: string
+  rollback: string
+  steps: { action: string; layer: string; params: Record<string, unknown>; description?: string }[]
 }
 
 /**
@@ -339,6 +593,29 @@ export interface ApprovalGivenPayload {
   layer: string
   params_hash?: string
   identity?: Identity
+  /** P2b: what gave the right to approve. Absent before P2: read `identity.grant` instead. */
+  grant?: 'owner' | 'solo' | 'fallback' | 'policy' | string
+  /** P2b: "auto_approve" with `grant: "policy"`. */
+  policy?: string
+}
+
+/**
+ * proposal.scheduled (P2b): system actor, after proposal.previewed, at most once per proposal. Unless
+ * cancelled, the policy approves every required layer at `run_at` and the steps run. `cancel_until`
+ * equals `run_at` in this wave and is advertised only: a cancel after it still wins if it lands first.
+ */
+export interface ProposalScheduledPayload {
+  proposal_id: string
+  run_at: string
+  policy: 'auto_approve' | string
+  cancel_until: string
+}
+
+/** proposal.cancelled (P2b): `by` (also the actor) stopped the countdown; the proposal stays open. */
+export interface ProposalCancelledPayload {
+  proposal_id: string
+  by: Actor
+  reason: string
 }
 
 export interface ApprovalRejectedPayload {
@@ -358,6 +635,54 @@ export interface ActionExecutedPayload {
   params_hash?: string
   /** The step may or may not have run (its executor stopped mid-step); never retried. */
   outcome_unknown?: boolean
+  /** Q7: the PR a repo_open_pull_request step opened; absent otherwise. */
+  pull_request?: PullRequestRef
+}
+
+/** Q7 (events.PullRequestRef): the PR a fix step opened. `head_sha` is the commit Piperoom wrote. */
+export interface PullRequestRef {
+  repo: string
+  number: number
+  url: string
+  branch: string
+  head_sha: string
+}
+
+/** Q7: pull request states. Merged is its own state: a merged PR is never read as "not applied". */
+export type PullRequestStateName = 'open' | 'merged' | 'closed'
+
+/** Q7 (events.PRChecks): check runs and commit statuses on the PR head. `failed` names are CI text: untrusted. */
+export interface PRChecks {
+  state: 'none' | 'pending' | 'success' | 'failure' | string
+  total: number
+  failed?: string[]
+}
+
+/** pull_request.updated (Q7, system actor): one observed change of a fix PR's state, head, merge or checks. */
+export interface PullRequestUpdatedPayload extends PullRequestRef {
+  proposal_id: string
+  step_index: number
+  state: PullRequestStateName | string
+  /** The branch head is no longer the commit Piperoom wrote: a reviewer pushed to the PR. */
+  head_changed?: boolean
+  merge_sha?: string
+  merged_at?: string
+  checks: PRChecks
+}
+
+/** RoomSnapshot.pull_requests (Q7e): room-level, newest first, at most 20. */
+export interface PullRequestSummary {
+  proposal_id: string
+  step_index: number
+  repo: string
+  number: number
+  url: string
+  branch: string
+  state: PullRequestStateName | string
+  head_changed?: boolean
+  checks: PRChecks
+  merged_at?: string | null
+  updated_at: string
 }
 
 export interface HandoffSummary {
@@ -428,9 +753,20 @@ export const LAYERS = [
   'kafka',
   'consumer',
   'warehouse',
+  // Batch pipelines (P4): the orchestration and transform steps own their own
+  // incident layers, alongside the shared warehouse layer.
+  'orchestrator',
+  'transform',
 ] as const
 
-export type Layer = (typeof LAYERS)[number]
+/**
+ * Q8: the source layer of a source_kind: mysql pipeline, in place of postgres (docs/design/mysql-source.md §4.1).
+ * Nodes, steps, proposals and owners may carry it. It is not in LAYERS yet: LAYERS feeds the label forms, and the
+ * server's events.IncidentLayers does not accept "mysql" until the Q0 item 7 contract change lands.
+ */
+export const LAYER_MYSQL = 'mysql'
+
+export type Layer = (typeof LAYERS)[number] | typeof LAYER_MYSQL
 
 // ---- REST / WS objects (docs/api.md) ----
 
@@ -448,8 +784,49 @@ export interface ProposalSummary {
   rollback: string
   required_layers: string[]
   approvals: Record<string, ApprovalValue>
+  /** KAN-594: the seq of its proposal.created, which orders it against RoomSnapshot.last_fix. Absent on an older server. */
+  seq?: number
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
+  /**
+   * P1a: every required layer approved and nothing ran because write mode is off. Absent
+   * otherwise, and on a server from before P1a. The only value in the P wave.
+   */
+  blocked?: 'write_mode_off'
+  /** P2b: copied from proposal.created.fallback_layers; [] when every layer has an owner, absent before P2b. */
+  fallback_layers?: string[]
+  /**
+   * P2b: while a proposal.scheduled is pending. The room GET leaves it out once run_at is more than
+   * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
+   */
+  scheduled?: { run_at: string; cancel_until: string }
+  /** X2: copied from proposal.created.class; absent reads as "fix". */
+  class?: ProposalClass
+  /** P3c: copied from proposal.created.origin; absent reads as "agent". */
+  origin?: ProposalOrigin
+  /** X8: step indexes whose action implements actions.Stager; [] or absent when none (and before X8c). */
+  stageable?: number[]
+  /** X8: a proposal.stage_started with no proposal.staged yet, before its expires_at. */
+  stage_running?: { by: Actor; started_at: string; expires_at: string; steps: number[] }
+  /** X8: the newest proposal.staged payload, kept while its params_hash differs from the proposal's. */
+  staged?: ProposalStagedPayload
+  /** X8: a step's action is in require_staging: and no healthy stage for the current params_hash exists. */
+  staging_required?: boolean
+}
+
+/**
+ * RoomSnapshot.mode (docs/api.md, P-wave snapshot fields; P1a, P2b). It arrives with the room GET
+ * and does not change over the socket. A server without it (before P1a) has write mode on.
+ */
+export interface RoomMode {
+  /** The server's PIPEROOM_WRITE_MODE: false means approved fixes are recorded and never run. */
+  write: boolean
+  /** True when the caller may approve every layer of the room's pipeline. */
+  solo: boolean
+  /** The pipeline's auto_approve: list from owners.yaml. */
+  auto_approve: string[]
+  /** X8: the pipeline declares staging: and write mode is on, so "Try in staging" may exist. Absent before X8c. */
+  staging?: boolean
 }
 
 export interface SuggestionSummary {
@@ -517,6 +894,205 @@ export interface TriageSummary {
   at: string
 }
 
+// ---- setup rooms (U wave; mirror of internal/events/events.go and the snapshot docs) ----
+
+/** The body of POST /api/setup (events.SetupRequest). `tenant` is required only with a tenants: block. */
+export interface SetupRequest {
+  pipeline_id: string
+  tenant?: string
+  title: string
+  source_kind: string // postgres | mysql | sqlserver | mongodb | oracle
+  target: string // compose | host | strimzi | msk | confluent | aiven | dbzserver | embedded
+  topic_prefix: string
+  tables: string[]
+  connectors?: string[]
+  targets: SetupTargetInput[]
+  repos?: string[]
+}
+
+/** One host or account a setup room may reach (events.SetupTarget). Class is a floor; "" lets the server decide. */
+export interface SetupTargetInput {
+  kind: string // postgres | kafka | connect | registry | kubernetes | aws | confluent | aiven | host
+  address: string
+  class?: string // local | shared | production
+}
+
+/** The body of POST /api/rooms/{id}/setup/pipeline: every list is optional; the server merges. */
+export interface SetupPipelineExtendBody {
+  add_connectors?: string[]
+  add_tables?: string[]
+  add_consumer_groups?: string[]
+  add_sink_tables?: string[]
+}
+
+/** POST /api/setup's answer: the room, its single-use pairing code and the line to paste. */
+export interface CreateSetupResponse {
+  room: RoomSnapshot
+  code: string
+  expires_at: string
+  command: string
+}
+
+/** The document's snapshot shape of a setup room (`setup` on the room GET; absent on list rows). */
+export interface SetupSnapshot {
+  mode: boolean
+  /** null before pairing; a lost runner keeps its record with connected false. */
+  runner: SetupRunnerSummary | null
+  plan_id?: string
+  phase?: string
+  step_index?: number
+  bounds?: SetupBounds
+  targets?: SetupTargetSummary[]
+  provisional?: { topic_prefix?: string; tables?: string[]; connectors?: string[] }
+  maintenance_window?: { start: string; end: string }
+  verified?: SetupRung[]
+  blocked?: { reason: string; question: string }
+  watched_by?: string
+}
+
+export interface SetupRunnerSummary {
+  label: string
+  connected: boolean
+  tools?: Record<string, string>
+}
+
+export interface SetupBounds {
+  attempts_per_step: number
+  steps_per_plan: number
+  wall_clock_s: number
+  token_budget: number
+}
+
+export interface SetupTargetSummary {
+  kind: string
+  address: string
+  class: string
+}
+
+/** setup.plan: the current plan; a new plan names the one it replaces in `supersedes`. */
+export interface SetupPlanStep {
+  index: number
+  op: string
+  target: string
+  tier: string // T0..T3
+  layer: string
+  verify?: string
+}
+
+export interface SetupPlanPhase {
+  name: string
+  steps: SetupPlanStep[]
+}
+
+export interface SetupPlanPayload {
+  plan_id: string
+  supersedes?: string
+  phases: SetupPlanPhase[]
+}
+
+export interface SetupRunnerAttachedPayload {
+  runner_label: string
+  os: string
+  arch: string
+  tools?: Record<string, string>
+  project_dir?: string
+  catalogue_version?: string
+  protocol_version?: number
+  protocol_minor?: number
+}
+
+export interface SetupRunnerLostPayload {
+  runner_label: string
+  last_seen: string
+}
+
+/** setup.blocked: a bound stopped the run; `question` is agent text (untrusted). */
+export interface SetupBlockedPayload {
+  reason: string
+  step_index?: number
+  question: string
+}
+
+export interface SetupRung {
+  name: string
+  ok: boolean
+  step_id?: string
+  receipt_id?: string
+  note?: string
+}
+
+export interface SetupVerifiedPayload {
+  plan_id: string
+  nonce_hash: string
+  rungs: SetupRung[]
+  first_event_latency_ms?: number
+}
+
+/** setup.awaiting_change (rung 8): the person must change the table; example_sql comes from the driver. */
+export interface SetupAwaitingChangePayload {
+  table: string
+  example_sql: string
+}
+
+export interface SetupTargetRegisteredPayload {
+  kind: string
+  address: string
+  class: string
+}
+
+export interface SetupTargetClassedPayload {
+  target: string
+  class: string
+  reason: string
+  by: string // "server" | "person"
+}
+
+export interface SetupPipelineExtendedPayload {
+  add_connectors?: string[]
+  add_tables?: string[]
+  add_consumer_groups?: string[]
+  add_sink_tables?: string[]
+}
+
+export interface SetupMaintenanceWindowPayload {
+  start: string
+  end: string
+}
+
+/** setup.secret_set: the runner stored a secret or the driver sent one; the value is in no event. */
+export interface SetupSecretSetPayload {
+  name: string
+  actor?: string
+}
+
+/** setup.credentials_registered: the runner's Credentials frame landed; names only, never values. */
+export interface SetupCredentialsRegisteredPayload {
+  pipeline_id: string
+  names: string[]
+  runner_label: string
+}
+
+/** pipeline.registered: the owners entry was written (or opened as a PR); `watched_by` is server | local. */
+export interface PipelineRegisteredPayload {
+  pipeline_id: string
+  tenant?: string
+  path?: string
+  pull_request_url?: string
+  watched_by: string
+}
+
+/** RoomSnapshot.last_fix (docs/api.md "Last fix snapshot fields", KAN-594): the newest fix whose run ended. */
+export interface LastFixSummary {
+  proposal_id: string
+  /** The seq of its proposal.created. */
+  seq: number
+  steps: number
+  /** The 1-based step that failed or has an unknown outcome; 0 when every step ran. */
+  failed_step: number
+  /** From its newest agent.verification; absent before one exists. */
+  verification?: { recovered: boolean; verdict: string }
+}
+
 export interface RoomSnapshot {
   id: string
   title: string
@@ -533,6 +1109,8 @@ export interface RoomSnapshot {
   /** F6: absent on an older server; null until the first agent.triage. */
   triage?: TriageSummary | null
   open_proposals: ProposalSummary[]
+  /** KAN-594: absent until a fix's run ended, and on an older server. */
+  last_fix?: LastFixSummary
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
   /** F8: a room.labelled exists. */
@@ -545,6 +1123,51 @@ export interface RoomSnapshot {
   closed_by?: Actor
   /** F2: the post-mortem draft's state; absent on an older server. */
   postmortem?: PostmortemSummary
+  /** P1a/P2b: on the room GET only (list rows have none); absent on an older server, which means write mode on. */
+  mode?: RoomMode
+  /** X3: room.created.origin ("forecast" for a forecast room); absent for every other room. */
+  origin?: string
+  /** X3: the newest forecast signal of the room's evidence; absent when none. */
+  forecast?: ForecastSummary
+  /** U wave: present on a setup room only (docs/api.md "U-wave snapshot fields"). */
+  setup?: SetupSnapshot
+  /** Q7: the fix PRs of the room, newest first, at most 20; absent until Q7e. The web folds the log instead. */
+  pull_requests?: PullRequestSummary[]
+}
+
+/**
+ * The trend metrics the watcher samples (clients.WatchMetrics, docs/api.md "Trends"). Units: bytes for
+ * slot_wal_bytes and db_size_bytes, records for dlq_records and group_lag, seconds for topic_oldest_unread_age.
+ */
+export const WATCH_METRICS = [
+  'slot_wal_bytes',
+  'dlq_records',
+  'group_lag',
+  'db_size_bytes',
+  'topic_oldest_unread_age',
+] as const
+export type WatchMetric = (typeof WATCH_METRICS)[number]
+
+/** One sample of GET /api/pipelines/{pid}/trends (clients.SamplePoint): oldest first, `value` in the metric's unit. */
+export interface TrendPoint {
+  at: string
+  value: number
+}
+
+/**
+ * RoomSnapshot.forecast (X3, events.ForecastSignal minus signal/severity, plus `at`): `current`, `limit` and
+ * `slope_per_hour` in the metric's unit; `eta` is when the fitted line reaches `limit`; `object` names the slot,
+ * topic, group or database the series follows (absent for a pipeline total).
+ */
+export interface ForecastSummary {
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  at?: string
 }
 
 /** RoomSnapshot.postmortem (docs/api.md, F2). */
@@ -605,11 +1228,27 @@ export interface AgentStats {
   cost_available: boolean
   enough_data: boolean
   shadow: { rooms: number; graded: number; layer_correct: number }
+  /** X6 infrastructure cost hints, last 7 days of watch samples; null without history, absent before X6d. */
+  infra?: AgentStatsInfra | null
+}
+
+/**
+ * X6 `infra` of agent-stats (docs/api.md): units only, never a currency. Each metric is null when the
+ * pipeline has no sample of it in the window; `from`/`to` are the first and newest sample used.
+ */
+export interface AgentStatsInfra {
+  from: string
+  to: string
+  samples: number
+  wal_retained_gb_days: number | null
+  dlq_records: number | null
+  oldest_unread_age_s: number | null
 }
 
 export interface TopologyNode {
   id: string
-  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table'
+  /** The exhaustive node-kind union (nodeKinds.ts); docs/api.md "Topology". */
+  kind: NodeKind
   name: string
   layer: string
   owner: string
@@ -630,6 +1269,8 @@ export interface Topology {
   pipeline_id: string
   nodes: TopologyNode[]
   edges: TopologyEdge[]
+  /** P4: a reader the pipeline's kind needs is missing or not supported, so some nodes are left out. Absent when false. */
+  partial?: boolean
 }
 
 export interface Me {
@@ -643,6 +1284,8 @@ export interface Me {
   groups_missing?: boolean
   /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
   solo?: boolean
+  /** `admin: true` in users.yaml (omitted otherwise): may open the Settings pages (/api/admin/*). */
+  admin?: boolean
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
@@ -658,6 +1301,68 @@ export interface PipelineInfo {
   id: string
   title: string
   shadow: boolean
+  /** P0 item 8 (server P4a-4): `cdc` or `batch`. Missing (an older server) means `cdc`. */
+  kind?: 'cdc' | 'batch'
+}
+
+/** FleetPipeline.forecasts[] (X5): one firing forecast; `metric` is an X3 sample metric name. */
+export interface FleetForecast {
+  metric: string
+  eta: string
+}
+
+/** FleetPipeline.last_verdict (X5): the human judgement of the pipeline's last judged room. */
+export interface FleetVerdict {
+  room_id: string
+  /** `confirmed` | `disputed`, or '' when the room has only a grade. */
+  verdict: string
+  /** null when the room was not graded. */
+  layer_correct: boolean | null
+  at: string
+}
+
+export type FleetHealth = 'ok' | 'warn' | 'fail' | 'unknown'
+
+/** One row of GET /api/fleet (docs/api.md "Fleet view", X5-0). */
+export interface FleetPipeline {
+  pipeline_id: string
+  title: string
+  kind: string
+  tenant: string
+  team: string
+  health: FleetHealth
+  /** A topology node id as GET .../topology names it (`connect:<connector>`, `pg:<table>`); '' when nothing fires. */
+  worst_node: string
+  open_rooms: number
+  /** Watcher signal names now firing or acked, worst first. */
+  signals_firing: string[]
+  changes_24h: number
+  /** Soonest ETA first. */
+  forecasts: FleetForecast[]
+  last_verdict: FleetVerdict | null
+  /** Omitted when the watcher never checked the pipeline. */
+  checked_at?: string
+}
+
+/** One F8 `pipeline_changes` row as GET /api/fleet/changes returns it (already masked; untrusted text). */
+export interface PipelineChange {
+  id: number
+  pipeline_id: string
+  kind: string
+  object: string
+  at: string
+  actor?: string
+  source: string
+  fingerprint: string
+  before?: unknown
+  after?: unknown
+  summary: string
+}
+
+/** GET /api/fleet/changes: one page, newest first; `next` is '' on the last page. */
+export interface FleetChangesPage {
+  changes: PipelineChange[]
+  next: string
 }
 
 export interface Person {
@@ -809,4 +1514,169 @@ export interface ShadowMetrics {
   total_tokens: number
   tokens_available: boolean
   per_room: ShadowMetricsRoom[]
+}
+
+// Admin settings and connection tests (docs/api.md, "Admin: settings and connection tests").
+// Field names are the server's JSON names. A Go server may send `null` for an empty list, so
+// the list fields are read through `lines()` in lib/settings.ts, never indexed directly.
+
+/** Where a connection applies. */
+export type ConnectionScope = 'process-wide' | 'pipeline'
+
+/** The kinds of connection the server probes; an unknown kind from a newer server is still shown. */
+export type ConnectionKind = 'source_db' | 'kafka' | 'connect' | 'schema_registry' | 'warehouse'
+
+/** One row of a connection's settings table. A secret never carries a value: `set` says whether one is present. */
+export interface ConnectionSetting {
+  key: string
+  /** Empty for a secret. URLs and brokers come without user info, query or fragment. */
+  display: string
+  secret: boolean
+  /** Only for a secret: whether a value is present. */
+  set?: boolean
+  /** `env NAME`, `file /path` or `value`. */
+  from: string
+}
+
+/** One connection the server runs with. `id` is what POST /api/admin/connections/test takes. */
+export interface AdminConnection {
+  id: string
+  scope: ConnectionScope
+  /** Set when `scope` is `pipeline`, otherwise empty. */
+  pipeline_id: string
+  kind: ConnectionKind | (string & {})
+  used_by: string[]
+  settings: ConnectionSetting[]
+}
+
+/** The principals that own one layer of a pipeline, as written in owners.yaml (`user:<id>`, `group:<name>`). */
+export interface AdminLayerOwners {
+  layer: string
+  principals: string[]
+}
+
+/** One pipeline of owners.yaml. */
+export interface AdminPipeline {
+  id: string
+  title: string
+  tenant: string
+  /** `own` or `process-wide`. */
+  connections: string
+  connectors: string[]
+  consumer_groups: string[]
+  source_tables: string[]
+  sink_tables: string[]
+  owners: AdminLayerOwners[]
+  shadow: boolean
+}
+
+/** One person of users.yaml. */
+export interface AdminPerson {
+  id: string
+  name: string
+  layers: string[]
+  admin: boolean
+}
+
+/** GET /api/admin/config: what the server runs with now. */
+export interface AdminConfig {
+  /** `file` in phase 1. */
+  source: string
+  /** Base name only. */
+  owners_file: string
+  /** Base name only. */
+  users_file: string
+  connections: AdminConnection[]
+  pipelines: AdminPipeline[]
+  people: AdminPerson[]
+}
+
+/** `ok`, `fail`, `warn` (works, but should change) or `skip` (an earlier check failed). */
+export type ProbeStatus = 'ok' | 'fail' | 'warn' | 'skip'
+
+/** One check of a connection test. `problem`, `fix` and `detail` are fixed text, never a server's raw error. */
+export interface ProbeCheck {
+  id: string
+  status: ProbeStatus
+  ms: number
+  problem?: string
+  fix?: string
+  detail?: string
+}
+
+/** POST /api/admin/connections/test: `ok` is false when any check failed. */
+export interface ProbeResult {
+  kind: string
+  ok: boolean
+  took_ms: number
+  checks: ProbeCheck[]
+}
+
+// ---- Models (V8; docs/api.md "Models", docs/design/model-providers.md section 11) ----
+
+/** Server mode of GET /api/models. Only standalone and quickstart can change the model. */
+export type ModelMode = 'team' | 'standalone' | 'quickstart'
+
+/** `reference` is a Claude provider (never checked against the list). */
+export type ModelStatus = 'reference' | 'supported' | 'experimental' | 'unverified'
+
+/** USD per million tokens. */
+export interface ModelPrice {
+  input: number
+  output: number
+  cache_write?: number
+  cache_read?: number
+}
+
+export interface ModelRole {
+  /** main | triage | first_look | summary | judge. */
+  role: string
+  provider: string
+  /** Only for provider `openai`. */
+  flavor?: string
+  model: string
+  /** The host only; the server never sends a whole base URL or a key. */
+  base_url_host?: string
+  region?: string
+  status: ModelStatus
+  prompt_cache: boolean
+  /** null when unpriced. */
+  price: ModelPrice | null
+  /** Present only when supported.json sets one. */
+  sunset?: string
+  /** Whether a key is configured for the role's provider. Never the key. */
+  key_set: boolean
+}
+
+export interface SupportedModel {
+  provider: string
+  flavor?: string
+  model: string
+  status: 'supported' | 'experimental'
+  alias: boolean
+  /** null while the row carries no baseline numbers: shown as "not measured yet". */
+  pass_rate: number | null
+  root_cause_rate: number | null
+  cost_per_run_usd: number | null
+  gated_at: string
+  sunset: string
+}
+
+/** GET /api/models, and the answer of PUT /api/models. */
+export interface ModelPanel {
+  mode: ModelMode
+  /** `no_model` only on a standalone or quickstart server with no usable model. */
+  state: 'ready' | 'no_model'
+  roles: ModelRole[] | null
+  supported: SupportedModel[] | null
+}
+
+/** PUT /api/models body. `key` is sent on this request only and never read back. */
+export interface ModelChoice {
+  provider: string
+  flavor?: string
+  base_url?: string
+  model: string
+  /** Absent keeps the stored key; "" means this target takes no key. */
+  key?: string
 }

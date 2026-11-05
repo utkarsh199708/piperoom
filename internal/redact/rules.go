@@ -82,10 +82,12 @@ var baseRules = []rule{
 			return styleToken
 		},
 	},
-	// Slack incoming webhooks: the last path segment is the secret.
+	// Slack incoming webhooks: the last path segment is the secret. The host
+	// starts the text or follows a non-host character, so a look-alike such
+	// as evilhooks.slack.com is not taken for Slack's host.
 	{
 		kind: KindSlackHook,
-		re: regexp.MustCompile(`hooks\.slack\.com/(?:services/T[A-Z0-9]+/B[A-Z0-9]+/([A-Za-z0-9]{8,})` +
+		re: regexp.MustCompile(`(?:^|[^A-Za-z0-9-])hooks\.slack\.com/(?:services/T[A-Z0-9]+/B[A-Z0-9]+/([A-Za-z0-9]{8,})` +
 			`|(?:workflows|triggers)/([A-Za-z0-9/]{16,}))`),
 		groups: []int{1, 2},
 		style:  styleSecret,
@@ -669,6 +671,14 @@ var keyQualifiers = map[string]bool{
 	"license": true, "service": true,
 }
 
+// keyPredicates before "primary key" make the name a yes/no or count about a
+// table's primary key (has_primary_key, without_primary_key), never the
+// secret. A bare primary_key / primaryKey stays a secret key name (Azure
+// storage and Cosmos DB keys).
+var keyPredicates = map[string]bool{
+	"has": true, "without": true, "no": true, "missing": true, "lacks": true,
+}
+
 // metaWords end key names that describe a secret without holding one:
 // password_encryption, token_type, auth.method, secret_name, key_id...
 var metaWords = map[string]bool{
@@ -725,6 +735,9 @@ func secretKey(k string) keyStrength {
 		case strongWords[w]:
 			return keyStrong
 		case w == "key" && i > 0 && keyQualifiers[words[i-1]]:
+			if words[i-1] == "primary" && i > 1 && keyPredicates[words[i-2]] {
+				continue // has_primary_key: a table property, not Azure's primary key
+			}
 			return keyStrong
 		case w == "id" && i > 0 && words[i-1] == "session":
 			best = keyWeak
@@ -910,6 +923,7 @@ func urlFind(s, lower string) [][]int {
 		for te < limit && !isURLStop(s[te]) {
 			te++
 		}
+		stop := te
 		if i := strings.IndexByte(s[ps:te], '/'); i >= 0 && allDigits(s[ps:ps+i]) {
 			continue
 		}
@@ -933,7 +947,16 @@ func urlFind(s, lower string) [][]int {
 		}
 		if end < 0 {
 			i := strings.IndexByte(s[ps:te], '@')
-			if i <= 0 || strings.IndexByte(s[ps:ps+i], '/') >= 0 {
+			if i < 0 {
+				// No "@host" follows: the text was cut inside the
+				// password (a capped log tail, a field boundary).
+				if pe := urlCutPass(s, ps, stop); pe > ps {
+					out = append(out, []int{m[0], pe, m[2], m[3], ps, pe})
+					last = pe
+				}
+				continue
+			}
+			if i == 0 || strings.IndexByte(s[ps:ps+i], '/') >= 0 {
 				continue
 			}
 			end = ps + i
@@ -942,6 +965,26 @@ func urlFind(s, lower string) [][]int {
 		last = end + 1
 	}
 	return out
+}
+
+// urlCutPass returns where the password of a URL cut before its "@host"
+// ends: at stop (a blank, a quote, '<', '>', the end of the text or the cap).
+// It returns ps, masking nothing, when s[ps:stop] reads as a port (one to
+// five digits, then the end or a delimiter: host:8080, db:1433;database=,
+// broker-1:9093,broker-2:9093) or as a path (file://C:/x, host:/path), as no
+// password follows there.
+func urlCutPass(s string, ps, stop int) int {
+	if ps >= stop || s[ps] == '/' {
+		return ps
+	}
+	d := ps
+	for d < stop && d-ps < 6 && s[d] >= '0' && s[d] <= '9' {
+		d++
+	}
+	if n := d - ps; n >= 1 && n <= 5 && (d == stop || strings.IndexByte("/;,?#:.)]}&|\\", s[d]) >= 0) {
+		return ps
+	}
+	return stop
 }
 
 // urlStarts finds scheme://user: prefixes.

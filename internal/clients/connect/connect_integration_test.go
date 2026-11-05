@@ -39,3 +39,25 @@ func TestIntegrationStatus(t *testing.T) {
 		t.Fatalf("no tasks: %+v", st)
 	}
 }
+
+// X6b: the dev stack's one worker runs the dev connector's task. Read-only;
+// it creates nothing, so there is nothing to clean up.
+func TestIntegrationWorkerTasks(t *testing.T) {
+	cfg := testenv.Require(t)
+	c := New(cfg.ConnectURL, &http.Client{Timeout: 5 * time.Second})
+	got, err := c.WorkerTasks(context.Background())
+	if err != nil {
+		t.Fatalf("WorkerTasks: %v", err)
+	}
+	found := false
+	for w, ts := range got {
+		for _, a := range ts {
+			if a.Connector == "pg-orders-connector" && a.Type == "source" && w != "" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("pg-orders-connector has no assigned task in %+v", got)
+	}
+}

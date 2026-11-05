@@ -121,22 +121,35 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 
 | HTTP | code examples |
 |---|---|
-| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
+| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`); V0: `key_required` (`PUT /api/models` changes provider, flavor or base URL host without a key) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline; AU1: autonomy revoke by someone who is neither an owner of the action's layer nor a tenant admin), `not_provisioned` (login gate); V0: `origin` (`PUT /api/models` without the server's own `Origin`, with a cross-site `Sec-Fetch-Site`, or with a non-JSON body) |
 | 404 | `not_found` |
-| 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body) |
+| 413 | `too_large` (signed alert body over 1 MB; X4: `POST /api/changes/webhook` body over 4 KB) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); AU1: `not_granted` (`POST …/autonomy/{action}/revoke` while the action is not granted); X3: `watch_off` (`accept-config` when this server keeps no baseline for the connector: the watcher is off, runs on another server replica, or does not watch the pipeline or connector); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
-| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket) |
+| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour, or while a page of that team in that room is still being sent); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room); X8: `rate_limited` (a sixth `POST /api/proposals/{pid}/stage` of one proposal) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
-| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
+| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); X3: `connect_unavailable` (`accept-config` could not read Kafka Connect); X4: `slack_unavailable` (`page-team`: Slack did not accept the post, e.g. the bot is not in the team's channel, a Slack error or a timeout; the message names Slack's error code only, nothing is written and the driver may retry) |
 
 Every text field a person types (for example titles, comments, steers, resolutions, trace keys, labels, verdict notes, decline and delete reasons, checklist notes, shadow grades, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Such text that contains a bidirectional control character (U+202A–U+202E, U+2066–U+2069) is refused the same way with `400 validation` ("text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)") (#358). Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD, bidirectional control characters are dropped). Alert room titles, watcher notes, a label's `cause` and `fix_that_worked`, and a close resolution (which the web app pre-fills from agent text) have bidirectional control characters dropped instead of refused.
 
 `lease_held`: `control/grant` called by a non-driver while another user's lease is still live. All other
 driver-only endpoints answer `403 not_driver`. `stale_handoff`: the hand-off's creator is no longer the driver,
 or the hand-off was voided by a newer one. A second `send` of an already-sent suggestion → `409 already_decided`.
+
+Setup rooms (U0; see **Setup rooms** under REST endpoints) add: `400 not_in_plan` (a proposal step that is not in the
+current `setup.plan`), `400 address_refused` (a target address on the denylist of design §2.6), `400 class_lowered`
+(a class below the one the server derived), `400 window_too_long` (a maintenance window over 4 h or more than 24 h
+ahead), `400 not_setup_room` (a setup route on an incident room); `403 not_tenant_member` (`POST /api/setup` for a
+tenant the caller is not in), `403 not_admin` (a T2/T3 approval on a team server by someone who is neither a tenant
+admin nor an owner of an overlapping pipeline); `404 setup_disabled` (every setup route and `/api/runners/ws` while
+`PIPEROOM_SETUP_ENABLED` is off); `409 pipeline_exists` (`POST /api/setup` for a pipeline id `owners.yaml` already
+has), `409 no_runner` (a route that needs the paired runner while none is connected), `409 runner_paired` (a second
+pairing while the first runner is still attached), `409 overlap` (`pipeline_register` refused by the overlap check;
+the message names the overlap kind and the caller's own tenant's pipelines only), `409 not_verified`
+(`pipeline_register` without a green `setup.verified` for the current plan); `429 pairing_closed` (the pairing rate
+limit of design §2.1: pairing is closed for 10 minutes and audited).
 
 ## Objects
 
@@ -151,7 +164,9 @@ Exactly `events.Event` from `internal/events/events.go`:
 `actor.verified` is decided when the event is written (see **Verified people** under Login).
 
 `room.created` (`events.RoomCreatedPayload`) carries, besides `title`, `severity`, `pipeline_id`, `alert`,
-`alert_source`, `dedup_key` and `shadow`, the server's verification of the alert **sender** (R3 #135 contract change
+`alert_source`, `dedup_key`, `shadow`, `mode` (U0: `"setup"` for a setup room, absent otherwise) and `origin` (X3:
+`"forecast"` for a room a forecast signal opened, absent otherwise; see X3 events), the server's
+verification of the alert **sender** (R3 #135 contract change
 request; A5 implements):
 
 - `alert_verified` (bool, omitted when false): `true` when the server checked the sender before opening the room, a
@@ -173,7 +188,9 @@ Clients that do not show cost ignore the type (the web reducer only advances `la
 { "model": "claude-opus-5-5", "role": "main",          // triage | main | handoff | compaction | judge (reserved) | postmortem (F2) | first_look (F6, the triage pass)
   "input_tokens": 1200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 41000,
   "output_tokens": 900, "latency_ms": 8123,             // 0 for compaction (its time is in the request's)
-  "cost_usd": 0.0412 }                                  // omitted when PIPEROOM_MODEL_PRICES has no price for model
+  "cost_usd": 0.0412,                                   // omitted when PIPEROOM_MODEL_PRICES has no price for model
+  "provider": "anthropic",                              // V0: the endpoint's PIPEROOM_MODEL_PROVIDER value; omitted on older events (all Claude)
+  "estimated": true }                                   // V0: omitted unless the provider reported no usage and the counts are estimated
 ```
 
 ### F-wave events (F0; payloads in `internal/events/events.go`)
@@ -219,6 +236,365 @@ never as HTML or Markdown.
   `checklist.step_done {step_id, tool_use_id, hit, item, done, note?}` (a person ticked or unticked item `item` of
   `hits[hit].items` in the `runbook_lookup` result `tool_use_id`).
 
+### P-wave events (P0; payloads in `internal/events/events.go`, items in `tasks/P0-contracts.md`)
+
+Additive like the F wave: unknown types are ignored by clients, and every new field on an existing payload is
+omitted when empty, so events written before P0 and their export hashes are unchanged.
+
+- **Approval grants (item 4; P2b, A5).** `approval.given` gains `grant` and `policy`. `grant` says what gave the
+  right to approve: `owner` (the actor owns the layer: owners.yaml principal or backup, or the users.yaml `layers`
+  list in dev mode), `solo` (`PIPEROOM_SOLO_USER`), `fallback` (nobody owns the layer, see `fallback_layers`, and
+  the actor was the room's driver when the event was appended) or `policy` (the pipeline's `auto_approve:` list,
+  after an uncancelled `proposal.scheduled`; actor: the system; `policy: "auto_approve"`; no `identity`).
+  `identity.grant` keeps the principal detail (`user:priya`, `backup:user:meera`, `solo`, `fallback`). An event
+  without `grant` was written before P2: read `solo` from `identity.grant`, anything else as `owner`.
+- **Scheduled proposals (item 4; P2b).** `proposal.scheduled {proposal_id, run_at, policy: "auto_approve",
+  cancel_until}` (system actor, after `proposal.previewed`, at most once per proposal): unless cancelled, at
+  `run_at` the system appends one `approval.given {grant: "policy"}` per `required_layers` entry, in that order,
+  and the executor runs the steps. `cancel_until` equals `run_at` in this wave. The proposal is cancellable until
+  the policy starts (its first approval is logged); a cancel after `cancel_until` still wins if it lands first.
+  `proposal.cancelled {proposal_id,
+  by, reason}` (actor: the person in `by`) stops it; the proposal stays open for manual approval. A manual
+  `approve-all` before `run_at` stops the timer without an event. Both count against the room log caps like
+  `approval.given` (the 2% reserve applies; neither is exempt like `room.closed`). Never scheduled for a proposal
+  with `origin: "driver"`, a preview that failed or has `dry_run.ok: false`, write mode off, a shadow room, or
+  `PIPEROOM_AUTO_APPROVE_DELAY=0`.
+- **Sole-member driver (item 4; P2b).** `control.granted` gains `reason`: `"sole_member"` when the first member to
+  join a driverless alert room (no `control.requested` pending; never a viewer; never in a shadow room) became its
+  driver without asking. Actor: the system. Absent for every other grant.
+- **Unowned layers and driver-authored proposals (items 4, 5; P2b, P3c).** `proposal.created` gains
+  `fallback_layers` (the `required_layers` nobody owns: the driver approves them with `grant: "fallback"`; absent
+  when every layer has an owner) and `origin`: `"agent"` or `"driver"` (`POST /api/rooms/{id}/proposals`); absent
+  reads as `"agent"`. Neither is part of `params_hash`.
+- **Pipeline kinds (item 8; P4).** The layer set grows by `orchestrator` and `transform` (batch pipelines:
+  `events.LayersOf("batch")` = `orchestrator, transform, warehouse`; `cdc` = the six of before). Wherever a field
+  says "one of the layers" (`approval.*.layer`, `room.labelled.actual_layer`, `agent.triage.suspected_layer`,
+  topology `layer`), these two are valid too.
+
+### U-wave events (U0; payloads in `internal/events/events.go`, design `docs/design/setup-agent.md`)
+
+Additive like the F and P waves: unknown types are ignored by clients, and every new field on an existing payload is
+omitted when empty, so events written before U0 and their export hashes are unchanged. Every `setup.*` event is
+audit: **no event ever carries a secret value, a pairing code or a runner token**; the runner label stands for the
+runner, a name for a secret, a hash for the canary nonce.
+
+- **Setup rooms (`room.created.mode: "setup"`).** `POST /api/setup` opens a room with `mode: "setup"` next to
+  `shadow` (never both) and the `SetupRequest` as `alert`. The agent runs in setup mode (`agent.Alert.Mode`); the
+  room scopes tools and actions to the provisional pipeline (`owners.Provisional`) until `pipeline.registered`.
+- **Layer `environment` (`events.LayerEnvironment`).** `events.LayersOf("cdc")` gains `environment` **at the end**
+  (postgres, kafka-connect, schema-registry, kafka, consumer, warehouse, environment); `events.Layers` has nine
+  entries (ten from Q8-0, which appends `mysql`). It is the layer of the setup actions (compose, service, manifest, plugin, `pipeline_register`). An
+  `owners.yaml` that does not name it leaves it unowned (the driver approves it with `grant: "fallback"` in solo mode;
+  a tenant admin with `grant: "admin"` otherwise); every existing owners file still loads. `environment` is valid
+  for **approvals, `required_layers`, `fallback_layers` and owners entries only**. It is never an incident layer
+  (`events.IncidentLayers()`): the triage `suspected_layer` enum the model sees is unchanged, and
+  `room.labelled.actual_layer`, `shadow.labelled.actual_layer`, the scenario, learned-example, agreement and
+  `similar_incidents` validators check against `events.IncidentLayers()` (the nine incident layers: eight before Q8-0 added `mysql`) and refuse
+  `environment`.
+- **Runner lifecycle.** `setup.pairing {outcome: ok | bad_code | expired | rate_limited | replaced | refused, source,
+  runner_label?}` for every pairing attempt (system actor); `setup.runner_attached {runner_label, os, arch, tools,
+  project_dir, catalogue_version, protocol_version, protocol_minor?}` (the runner's `Hello`, after the person confirmed on its
+  terminal); `setup.runner_lost {runner_label, last_seen}` (silent 90 s; every in-flight step is recorded with
+  `outcome_unknown: true`); `setup.runner_refused {op, reason, proposal_id?, step_index?}` (`reason` is a
+  `protocol.Refuse*` code, never runner text).
+- **Plan and bounds (agent actor).** `setup.plan {plan_id, supersedes?, phases: [{name, steps: [{index, op, target,
+  tier, layer, verify?}]}]}`: `target`, `tier` and `layer` are filled by the server from the resolved endpoint, never
+  from the model; a proposal whose step is not in the current plan is refused (`agent.ErrNotInPlan`, `400
+  not_in_plan`). `setup.blocked {reason: attempts | steps | wall_clock | budget | runner_lost | refused, step_index?,
+  question}`: a bound stopped the run and the agent is idle until a steer. `setup.verification_requested {}` (the
+  agent's `setup_request_verification`): asks the server's ladder runner to verify the room's current plan; a request,
+  never a result, with an empty payload (the store stamps the time; the plan is the current one when the event lands).
+  Its outcome is `setup.verified`, which reaches the agent as the inbox input `setup_verified` (`agent.HumanInput`):
+  `seq` is the `setup.verified` event, `ok` is true when rungs 1 to 7 are green, `text` is the server's rendering of
+  the rungs (untrusted data, wrapped by the agent); delivered only in a setup room and only for the current plan.
+- **Driver clicks (actor: the driver, also in `by`).** `setup.target_registered {kind, address, class, by}`,
+  `setup.pipeline_extended {add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?, by}`,
+  `setup.maintenance_window {start, end, by}`. `setup.target_classed {target, class, reason, by: "server" |
+  "person"}` records every class decision; a class only rises.
+- **Secrets, names only.** `setup.secret_set {name, actor}` (the runner's terminal or `POST
+  /api/rooms/{id}/setup/secret`); `setup.credentials_registered {pipeline_id, names, runner_label}` (the runner's
+  `Credentials` frame landed in `PIPEROOM_SECRETS_DIR/<pipeline>/`). The values are in no event, log, action result
+  or prompt.
+- **Verification (system actor, the ladder runner only).** `setup.verified {plan_id, nonce_hash, rungs: [{name, ok,
+  step_id?, receipt_id?, note?}], first_event_latency_ms?}` is written only by the server's ladder runner: the
+  agent's `Sink` refuses the type, so no model output can claim a pipeline verified. `setup.awaiting_change {table,
+  example_sql}` is rung 8 (the person's own change).
+- **Receipts.** `action.executed` gains `receipt` (`events.SetupReceipt`: `{kind: exec | http | sql | file, argv?,
+  target, exit_code, at, took_ms, out_mac}`) for a step of a `Receipted` action: the exact argv with every secret as
+  `${secret:name}`, the target, and an HMAC of the output under a key only the runner holds; never credentials or raw
+  output. Absent for every other action.
+- **Policies and grants.** `proposal.scheduled.policy` gains `"setup_local"` (a T1 step on a local-class target,
+  countdown `PIPEROOM_SETUP_LOCAL_DELAY`, cancellable like `auto_approve`); `approval.given.grant` gains `"admin"` (a
+  tenant admin, `tenants.<t>.admins`, approving a T2 or T3 step of a setup room on a team server).
+- **Registration.** `pipeline.registered {pipeline_id, tenant?, path | pull_request_url, watched_by: "server" |
+  "local", by, approved_by}` (system actor) after the `pipeline_register` step ran and the server reloaded; the room
+  then closes with resolution `pipeline live` and `room.labelled` gets `cause: setup`.
+
+### Q8 MySQL source (Q8-0, Q0 item 7; design `docs/design/mysql-source.md` §5)
+
+- **Layer `mysql` (`events.LayerMySQL`).** `events.Layers` gains `mysql` at the end (after `environment`), so it has
+  **ten** entries and `events.IncidentLayers()` nine. A CDC pipeline whose `owners.yaml` `source_kind` is `mysql`
+  has `mysql` in place of `postgres` as its source layer (`events.LayersOfSource(kind, source_kind)`; absent
+  `source_kind` reads as `postgres`, so every existing pipeline is unchanged). Wherever a field says "one of the
+  layers" (topology `layer`, `approval.*.layer`, proposal `required_layers` / `fallback_layers`,
+  `agent.triage.suspected_layer`, `room.labelled.actual_layer`, the `/api/people` and `/api/me` `layers`), `mysql`
+  is valid too.
+- **Approving layer of a source action.** A source-neutral source action (`actions.SourceLayered`) is approved by
+  the pipeline's source layer, `actions.LayerFor(a, source_kind)`: `postgres` or `mysql`. Its `Layer()` (what a
+  caller without a pipeline shows) stays `postgres`. The room service and the agent take a step's layer from
+  `actions.StepLayer(a, pipeline, params)` (Q7-0c), which answers this rule and the Q7 `Layered` rule
+  in one place.
+- **Topology.** A MySQL source table is node id `mysql:<db>.<table>` (e.g. `mysql:shop.orders`), `kind:
+  "source_table"`, `layer: "mysql"`; there is no new node kind.
+
+### Q7 pull-request fix (Q7-0c, Q0 item 6; payloads in `internal/events/events.go`, design `docs/design/fix-pr.md` §5)
+
+The action `repo_open_pull_request` (Q7c) proposes a fix as a pull request on a repository of the pipeline's
+`owners.yaml` `repos:`. Piperoom opens the PR and never merges it; nothing changes in any system until the
+repository's own reviewers merge it and the customer's deployment applies it.
+
+- **Approving layer.** The action is `actions.Layered`: its `Layer()` is `""` and a step's layer is the layer of
+  the `repos[].paths` globs its files match, `actions.StepLayer(a, pipeline, params)`. The room service
+  derives it at creation and again before Execute and refuses a step whose `layer` differs, so the proposer never
+  picks the approver. Every other action answers its `Layer()` (or, for a source action, the source layer).
+- **Deferred steps.** The action is `actions.Deferred`: never approved by a policy (`auto_approve:`, `autonomy:`),
+  never scheduled, never a setup T1 step; a proposal holding one holds only deferred steps, at most 3
+  (`actions.MaxDeferredSteps`).
+- **Preview.** `proposal.previewed.steps[].preview` gains `diff?` (`events.DiffPreview`): `{repo, repo_url, base,
+  base_sha, branch, layer, files: [{path, status: "modified" | "added", unified, added, removed}], hosts?,
+  warnings?, draft?}`, the whole change at `base_sha`, every line redacted, never cut (a step whose diff exceeds
+  128 KiB is refused by `Validate`). `branch` is the branch Execute will create, `piperoom/<room>-<proposal>-<step>`.
+  Absent on every other action.
+- **Result.** `action.executed` gains `pull_request?` (`events.PullRequestRef`: `{repo, number, url, branch,
+  head_sha}`, `head_sha` the commit Piperoom wrote) on a step that opened a PR; absent otherwise.
+- **Following.** `pull_request.updated {proposal_id, step_index, repo, number, url, branch, head_sha, state: "open" |
+  "merged" | "closed", head_changed?, merge_sha?, merged_at?, checks: {state: "none" | "pending" | "success" |
+  "failure", total, failed?}}` (system actor): one per observed change of state, head, merge or checks, none while
+  nothing changes. `head_changed: true` means the branch head is no longer the commit Piperoom wrote (a reviewer
+  pushed to it), so the merged change is not exactly the approved diff. `checks.failed` holds at most 10 check
+  names written by the repository's CI: untrusted text. A merge also writes a `pull_request` pipeline change
+  (`clients.ChangePullRequest`: object `<repo id>#<number>`, summary the title, after the merge SHA).
+- **Verification.** The agent hears `pr_merged` / `pr_closed` (`HumanInput`) and does not verify on
+  `action_result`. `agent.verification.outcome` gains `not_applied` (the PR closed without merge) and
+  `not_deployed` (merged, not seen in the system within `PIPEROOM_FIXPR_APPLY_TIMEOUT`, default 2 h); `recovered` is
+  `false` for both.
+- **Settings.** `FORGE_KIND` (`""` off, `github`), `GITHUB_API_URL` (GitHub Enterprise Server allowed),
+  `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (a secret file),
+  `PIPEROOM_FIXPR_APPLY_TIMEOUT` (`config.ParseForge`, `config.ParseFixPRApplyTimeout`). With `FORGE_KIND` empty
+  there is no forge client, tool or fix-PR action.
+
+### X2 recovery actions (X2-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
+
+A **recovery** action re-emits data a fault lost (`pg_resnapshot_rows` X2a, `kafka_replay_range` X2b); a **fix**
+changes a system's state (every action before X2). Recovery steps go through the same proposal, approval and
+executor path as fixes; what differs is the preview count and the counted verification after the step ran. Every
+field below is additive and omitted for a fix, so a fix proposal, preview and verification marshal as before.
+
+- **Class.** `proposal.created` gains `class?: "recovery"` when any step's action is a recovery action
+  (`actions.ClassOf`), set by the room service from the action registry, never from the proposer's text; absent
+  reads as `"fix"`. Not part of `params_hash` (it follows from the steps' action names, which are). The registry
+  refuses a recovery action that does not implement `actions.Verifier`.
+- **Preview count.** `proposal.previewed.steps[].preview` gains `count?` and `unit?` (`"rows"` | `"records"`):
+  how much the step would re-emit, read from the target by the action's `Preview` (10 s, read-only), never estimated
+  by the model ("will re-emit 412 rows"). A recovery action refuses at `Validate`/`Preview` above its cap (X2a:
+  `max_rows`, default 100 000; X2b: 100 000 records per proposal).
+- **Verify polls (agent actor).** `agent.recovery_check {proposal_id, step_index, poll, max_polls, before, after,
+  unit}` once per call of the action's `Verify` after its step's `action.executed` with `ok: true`: first 15 s after
+  the step, the wait doubling up to 60 s, until `after` is 0 or 10 min (`actions.RecoveryVerify*`). `poll` counts
+  from 1 and `poll ≤ max_polls`, so a client shows "checking (2 of N)". Progress only, never a verdict.
+- **Verdict (agent actor).** `agent.verification` gains `outcome?`, `before?`, `after?`, `unit?` for a recovery
+  proposal, once, after the last poll. `outcome` is `recovered` (`after` is 0), `partial` (`0 < after < before` at
+  the timeout), `not_recovered` (`after ≥ before` at the timeout) or `unverifiable` (the source or sink cannot
+  count, `clients.ErrNotSupported`; `before`/`after` absent) — `events.RecoveryOutcomeFor` is the one rule.
+  `before` is the gap the action set out to repair (the preview's `count`), `after` what is still missing; `after:
+  0` is present, not omitted. `recovered` (the existing boolean) is `true` only with `outcome: "recovered"`.
+- **Data.** Counts, table, topic and window only: no event, `detail`, `Verify` result or error carries a row value
+  or key. The agent calls `Verify` with the room's pipeline scope in ctx and a 10 s deadline per call, so it reads
+  only that pipeline's tables and topics; `Verify` calls read methods only, never a writer, even in write mode
+  (`actions.Verifier`). Every member and viewer of the room reads these events like any other agent event.
+- **Replay target (X2b).** `kafka_replay_range` writes only the pipeline's declared `reprocess_topic` (owners.yaml;
+  never a CDC or DLQ topic of any pipeline on the cluster, and one pipeline's only). The Kafka write client's
+  `Produce` and `ProduceAll` (`clients.BulkProducer`) scope admits that topic next to the pipeline's CDC topics; no
+  other write method accepts it. The step is not idempotent (a second run copies again) and its preview says so;
+  `Verify` counts the records written to the `reprocess_topic` since the step by offsets by time, never a record.
+- **Signals.** The re-snapshot condition (`clients.SnapshotConditionWriter.InsertSnapshotSignalWhere`,
+  `clients.SnapshotConditionSignaler.SendSnapshotSignalWhere`, Debezium `additional-conditions`) is built by the
+  action from typed params (an identifier that is the primary key or a timestamp column, values as quoted
+  literals), never passed from the model, and checked again by the writer (`clients.ValidateSnapshotCondition`,
+  at most 1 024 bytes) before any I/O. It never appears in an event or a log.
+
+### X3 events (X3-0; payloads in `internal/events/events.go`)
+
+Additive like the waves before: `origin` is omitted when empty, so events written before X3-0 and their export
+hashes are unchanged; clients ignore `room.escalated` until they know it.
+
+- **Forecast rooms.** `room.created.origin: "forecast"` (`events.RoomOriginForecast`, server X3c): a forecast signal
+  opened the room, `severity: "sev4"`, the trend summary is its first system message and **no agent runs** (no
+  `agent.*` event, no usage) until the first `steer.sent`, the first `comment.added` with `mentions_agent: true`, or a
+  `room.escalated`. The room's driver, proposals and close work as in any room. On a pipeline in shadow mode the
+  one-shot shadow run starts at open as in any shadow room (lead ruling, batch 5): steers never start a shadow run,
+  so a quiet shadow room would otherwise never be measured, even after it escalates.
+- **`room.escalated {severity, from, signal}`** (system actor; X3c). The watcher's normal signal on the same pipeline
+  (for example `slot_wal` once the slot really fills) joined an open room of lower severity: `severity` is the new
+  level, `from` the old, `signal` the signal that caused it. The snapshot's `severity` is the newest one. In a
+  forecast room it also starts the agent when none has run. A room is never lowered.
+- **Watcher signals `forecast` and `config_drift`** (X3a, X3b; implemented by A7): their evidence entries
+  (`events.ForecastSignal`, `events.ConfigDriftSignal`) are under **Watcher alerts**, with every X-wave signal.
+
+### X4 events: hypothesis scope and team pages (X4-0; payloads in `internal/events/events.go`)
+
+Additive like the F wave. Implemented by A4 (agent, X4c), A5 and C12 (page, X4d).
+
+- **Hypothesis scope.** `agent.hypothesis` may carry `scope` ∈ `pipeline | upstream_app | vendor | unknown`, `team?`
+  and `change_id?`. `scope` is where the cause is: `pipeline` (a pipeline fix is the root fix), `upstream_app` (an
+  application deploy or migration outside the pipeline; the agent proposes only mitigations, labelled as such),
+  `vendor` (a vendor's incident; the root fix is the vendor's, so proposals are labelled mitigations too: X4c's
+  `propose_fix` prefixes the title with `Mitigation: ` while the latest hypothesis is `upstream_app` or `vendor`),
+  `unknown` (not established). `unknown` is never written: the key is omitted, and a
+  missing, `null` or unrecognised `scope` (every hypothesis written before X4) reads as `unknown`, so old events and
+  their export hashes are unchanged. `team` is an `owners.yaml` `teams[].id` (see External changes), set only with
+  `upstream_app` or `vendor`. `change_id` is the `PipelineChange.id` the scope rests on (`0`/absent when none).
+- **`room.team_paged {team, hypothesis_seq, change_id?}`** (actor: the driver who clicked
+  `POST /api/rooms/{id}/page-team`). Ids only: the Slack text is rendered when sent and not stored. Never written by
+  the agent (its Sink refuses the type) and never automatic.
+
+### X6 performance actions (X6-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
+
+A **performance** action tunes throughput (`connect_tune_throughput`, X6c by A2): it changes only allow-listed
+connector keys and is verified by throughput before and after. It goes through the same proposal, approval and
+executor path as a fix. Every field below is additive and omitted for other classes, so fix and recovery
+proposals, previews and verifications marshal as before.
+
+- **Allow-list** (`actions.TunableKeys`, owned by the leads; adding a key is a contract change). Integer values only,
+  within the static bounds; `actions.CheckTunable` refuses any other key, a `LooksSecret` key and a key of the other
+  connector type (`ErrNotTunable`), and a value outside the bounds (`ErrTuningBounds`, the message names them). The
+  action checks target bounds on top (`tasks.max` ≤ the topic's partitions for a sink; `max.queue.size` >
+  `max.batch.size`).
+
+  | Key | Connector | Bounds |
+  |---|---|---|
+  | `tasks.max` | source, sink | 1–128 |
+  | `max.batch.size` | source | 1–20 480 |
+  | `max.queue.size` | source | 2–163 840 |
+  | `poll.interval.ms` | source | 10–60 000 |
+  | `snapshot.fetch.size` | source | 1–100 000 |
+  | `snapshot.max.threads` | source | 1–16 |
+  | `consumer.override.max.poll.records` (the consumer's `max.poll.records`, per sink connector) | sink | 1–10 000 |
+- **Class.** `proposal.created.class: "performance"` (`events.ActionClassPerformance`) when any step's action is a
+  performance action, set by the room service from the registry like `recovery`; a proposal that mixes recovery and
+  performance steps is refused (`400 validation`: one verdict per proposal). The registry refuses a performance
+  action without `actions.Verifier` or `actions.Preview`. The snapshot's `open_proposals[].class` copies it.
+- **Preview.** `proposal.previewed.steps[].preview` gains `tuning?: [{key, current, proposed}]`: every key the step
+  changes, its value now (`""` when unset, shown as "unset") and the value it sets, read from the connector's config
+  by `Preview` (10 s, read-only), plus Connect's `validate` in `dry_run`. `current` is the rollback the card offers.
+- **Staging.** `connect_tune_throughput` implements `actions.Stager`, so the driver can try it on the pipeline's
+  staging stack first (`POST /api/proposals/{pid}/stage`, **X8 staging** below). `Preview` never stages: it never
+  writes, staging included.
+- **Verdict (agent actor).** One `agent.verification` per performance proposal with `outcome` ∈ `improved |
+  no_change | worse | unverifiable`, `before`/`after` (the connector's throughput, `unit: "records_per_min"`) and
+  `lag_slope_before?`/`lag_slope_after?` (the sink's consumer lag change, records per minute, positive = growing;
+  absent for a source connector or without lag history). `events.PerformanceOutcomeFor` is the one rule: throughput
+  decides first (`improved` at +10 %, `worse` at −10 %); only when it moved less does the lag decide (`improved` when a
+  growing lag's slope is 10 % lower or the lag now shrinks, `worse` when a lag starts growing or grows 10 % faster);
+  else `no_change`. Windows (`actions.PerformanceVerify*`): before = the 15 min up to the step's
+  `action.executed`, after = the 15 min from 2 min after it; the agent calls `Verify` once the after window closed,
+  retries a failed call every 60 s, and reports `unverifiable` (no counts) when a window cannot be measured or 30 min
+  after the step. On `worse` the card offers the preview's `current` values as a rollback proposal; nothing is
+  rolled back automatically. `recovered` keeps its F4 meaning (every layer check passed after the restart).
+- **Data.** Throughput, lag and config key names and integers only; no record, row value or other config value.
+  `Verify` reads only (`RateReader`, the pipeline's `group_lag` watch samples), with the room's pipeline scope in ctx
+  and a 10 s deadline per call. A source connector's throughput comes from Kafka offsets alone; a sink connector's
+  consumed records are the records written to its topics less the change of the pipeline's `group_lag` samples (X3a:
+  the pipeline's total lag, one sample per 15 min), so with the watcher off, or no sample near a window's ends, a sink
+  tuning is `unverifiable`. Every member and viewer of the room reads these events like any other agent event.
+- **Worker tasks** (`clients.WorkerTaskReader`, optional on a `ConnectReader`; `connect_task_balance` X6b): worker id →
+  `[{connector, type, task, state}]` for the whole Connect cluster, one `GET /connectors?expand=status`, 4 MB and
+  10 s caps. Cluster metadata, so the tool names only the room pipeline's connectors and shows every other connector
+  as a task count per worker, never its name, type or state.
+
+### X8 staging: try a fix on a staging stack first (X8-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
+
+Additive like the waves before: two new event types that clients ignore until they know them, no new field on an
+existing payload, so events written before X8-0 and their export hashes are unchanged. Owners file A3 (X8a), wiring
+A4 (X8a), `Stage` A2 (X8b), route and snapshot A5 (X8c), agent A4 (X8c), dev stack A1 (X8d), web A6 (X8e).
+
+**`owners.yaml` `staging:`** (validated by A3 in `internal/owners`, resolved by wiring like `connections:`):
+```yaml
+pipelines:
+  - id: orders
+    connections: { ... }                  # production, unchanged
+    staging:                              # optional (X8): a second Connect + Schema Registry to try fixes on
+      connections:                        # same {env|file|value} references and secret rules as connections:
+        connect_url:          { value: "http://connect-staging:8083" }
+        schema_registry_url:  { value: "http://schema-registry-staging:8081" }
+        connect_password:     { env: STAGING_CONNECT_PASSWORD }
+        # kafka_brokers: optional; staging Connect may share the production Kafka with its own internal topics
+    require_staging: [connect_update_connector_config]   # optional (X8c): action names that need a healthy stage before approval
+```
+- Keys: the `connect_*`, `schema_registry_*` and `kafka_*` keys of `connections:` (`owners.ConnectionKeys`), each with
+  the same reference and literal rules; at least one of `connect_url` and `schema_registry_url`. No `source_db_*` or
+  `warehouse_*` key: no X8 action stages a database write. A `staging:` on a batch pipeline is a load error.
+- **Never production.** A staging `connect_url` or `schema_registry_url` that resolves to the same endpoint as a
+  production one (this pipeline's or any other pipeline's `connections:`, or the process-wide `CONNECT_URL` /
+  `SCHEMA_REGISTRY_URL`), compared after normalisation (scheme default ports, the #714 rule), is a load error naming
+  both by pipeline id and key, never by value (`owners.Overlap`). `kafka_brokers` may be the production cluster.
+- `require_staging:` names registered actions that implement `actions.Stager` (checked against the registry like
+  `auto_approve:`); it needs a `staging:` block. Absent = staging is never required.
+- Wiring (X8a) builds the staging client set (`actions.Staging`: Connect, Schema Registry, optional Kafka reader)
+  from `staging.connections` only, only when write mode is on, and hands it to the actions as `Deps.Staging`;
+  without `staging:` or with write mode off it is nil and nothing can be staged. Secrets resolve like production
+  references and are never logged.
+
+**Events.**
+- `proposal.stage_started {proposal_id, params_hash, steps: [step_index], expires_at}` (actor: the driver). `steps` are
+  the indexes of every step whose action implements `actions.Stager`, in order, never empty. `expires_at` is
+  `actions.StageExpiry(start, len(steps))`: per step `StageStepTimeout` (2 min) plus `StageRestoreTimeout` (10 s),
+  plus 30 s. A stage with no `proposal.staged` by then is lost (the server stopped) and may be started again.
+- `proposal.staged {proposal_id, params_hash, steps: [{step_index, result?: {target?, applied, healthy, detail?,
+  dry_run?: {ok, source, text, skipped?}, leftover?, duration_ms}, error?}], at}` (system actor), one entry per index
+  of the matching `proposal.stage_started`. Each step is staged on its own against staging as it was (its `Stage`
+  restores staging before the next step starts); a failed step does not stop the next. `applied` and `healthy` are
+  always present; `healthy` implies `applied`. A step has exactly one of `result` (staging gave a verdict) and
+  `error` (no verdict: staging unreachable, timeout; redacted, ≤ 500 bytes).
+- **Outcome** (`events.StageResult.Outcome`, the one rule): `healthy` (applied and healthy for the whole
+  `StageObserveWindow`, 60 s: a connector RUNNING with every task RUNNING), `failed` (applied and unhealthy: a task
+  FAILED within the window, or never RUNNING; or staging's own pre-check refused the change, `dry_run.ok: false`
+  without `skipped`, and nothing was written), `not_applied` (nothing tried; `detail` says why: `"no staging
+  declared"` (`events.StageNoStaging`), `"connector not present in staging"`). The stage as a whole is healthy when
+  every staged step is (`ProposalStagedPayload.Healthy`).
+- `detail` (≤ 2 KiB) is the failed task's trace, the registry's message or what healthy meant; `leftover` (≤ 500
+  bytes) is what the stage could not put back on staging (a registered schema version, a failed restore), absent
+  when staging is as it was; `target` (≤ 200 bytes) names the staging object (`"connector orders-src"`), never a URL.
+  All of them pass `redact.Text` and the caps in `actions.CleanStageResult` before the event is written; they are
+  staging's own words, untrusted: clients render them as text, the agent reads them through its untrusted-data
+  wrapper (`HumanInput` kind `proposal_staged`).
+- **Data.** Names, states, counts, times and redacted traces only: never a record value, a connector config value, a
+  schema body, a staging URL or a credential. Every member and viewer of the room reads both events like
+  `proposal.previewed`; another tenant's room is `404` as everywhere.
+- **Staging never touches production, and production never waits on staging.** `Stage` writes only through
+  `Deps.Staging` and never calls a production client, reader or writer; it never creates a connector or subject on
+  staging. The executor never calls `Stage`: approved steps run exactly as before. Neither event is part of
+  `params_hash`. A stage counts for a proposal only while its `params_hash` equals the proposal's.
+- **`require_staging:`.** While a step's action is in the pipeline's `require_staging:` and no `proposal.staged` with
+  the proposal's current `params_hash` has that step `healthy` (`ProposalStagedPayload.StepHealthy`, newest stage
+  wins), `approve` and `approve-all` answer `409 staging_required` (the message names the step and action) and record
+  nothing, and the auto-approve policy does not schedule the proposal. With write mode off no staging client exists,
+  so such a proposal cannot be approved (nothing would run either).
+
+### V-wave fields (V0; payloads in `internal/events/events.go`, design `docs/design/model-providers.md`)
+
+Additive, omitted when empty, so events written before V0 and their export hashes are unchanged.
+
+- **`agent.tool_result.rejected`** (string, omitted when empty): the agent refused the tool call before running it,
+  one of `unknown_tool` (no registered tool has that name), `invalid_json` (the arguments are not valid JSON) or
+  `invalid_input` (the arguments failed schema or input validation). `is_error` is then `true` and `summary` says
+  why. A tool that ran and failed has no `rejected`. Set by A4 (V1t); the evals count it as `invalid_tool_calls`.
+- **`agent.usage.provider`** (string, omitted when empty): `anthropic | bedrock | vertex | openai | gemini |
+  bedrock-converse`, the endpoint that served the call. An event without it came from a Claude provider.
+- **`agent.usage.estimated`** (boolean, omitted when false): the provider reported no usage, so the token counts are
+  estimated from request and response sizes (3 bytes per token, rounded up). They are charged against every cap
+  like reported usage. Clients may mark the row "estimated".
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -246,6 +622,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",   // after auth PR 4 also "params_hash"
                         "required_layers": ["schema-registry","kafka-connect"],
                         "approvals": { "schema-registry": "approved", "kafka-connect": "pending" } } ],
+  "last_fix": { "proposal_id": "p_01J...", "seq": 17, "steps": 2, "failed_step": 0, "verification": { "recovered": true, "verdict": "..." } },   // the newest fix whose run ended, absent until one exists; see "Last fix snapshot fields"
   "pending_suggestions": [ { "suggestion_id": "g_01J...", "from": {"id":"kabir","name":"Kabir","verified":true}, "text": "..." } ],
   "members": [ { "id": "priya", "name": "Priya", "verified": true, "role": "watching" } ]
 }
@@ -290,6 +667,135 @@ as its empty value. The shapes are fixed here.
   `Usage` rule); zeros in a shadow room. `GET /api/rooms` rows carry it.
 - `open_proposals[].preview` (F4, implemented by A5): the `proposal.previewed` payload of that proposal.
 
+#### P-wave snapshot fields (P0; implemented by A5)
+
+Additive, same rule as the F-wave fields: absent until the task lands, and an absent field reads as its empty value.
+```json
+  "mode": { "write": false, "solo": false, "auto_approve": ["connect_restart_task"] },   // P1a (write), P2b (solo, auto_approve)
+  "open_proposals": [ { "...": "...",
+                        "origin": "agent",                                   // P3c: "agent" | "driver" (proposal.created.origin; absent reads as "agent")
+                        "fallback_layers": ["consumer"],                     // P2b: proposal.created.fallback_layers; [] when every layer has an owner
+                        "blocked": "write_mode_off",                         // P1a: every layer approved, nothing ran because write mode is off; absent otherwise
+                        "scheduled": { "run_at": "...", "cancel_until": "..." } } ]  // P2b: while a proposal.scheduled is pending; absent otherwise
+```
+- `mode` (item 1, item 4): `write` is the server's `PIPEROOM_WRITE_MODE` (`--demo` forces `true`); `solo` is
+  **derived per caller**: true when the caller may approve every layer of the room's pipeline kind
+  (`events.LayersOf(kind)` without the setup layer `environment`, U0: no incident action targets it, so an owners
+  file from before the U wave keeps its solo mode), as owner or backup, or is `PIPEROOM_SOLO_USER`; `auto_approve` is the pipeline's
+  `auto_approve:` list from `owners.yaml` (`[]` when none, or when `PIPEROOM_AUTO_APPROVE_DELAY=0`). `GET /api/rooms`
+  rows do not carry `mode` (room view only).
+- `open_proposals[].blocked` (item 1, P1a): `"write_mode_off"` when every required layer approved and the executor
+  did not run the steps because write mode is off. The proposal stays open with every required layer approved; no `action.executed` is written.
+  It is the only value in this wave.
+- `open_proposals[].scheduled` (item 4, P2b): from the pending `proposal.scheduled`; cleared by
+  `proposal.cancelled`, by the policy's approvals, or by any human `approval.*` on the proposal; the room view
+  (`GET /api/rooms/{id}`) leaves it out once `run_at` is more than 45 s in the past; the proposal stays open for manual
+  approval and can still be cancelled; WebSocket snapshot frames still carry it (P2b-4b, #652).
+- `open_proposals[].fallback_layers`, `open_proposals[].origin` (items 4, 5): copied from `proposal.created`.
+
+#### U-wave snapshot fields (U0; implemented by A5)
+
+Additive, same rule: absent until the row lands, and an absent field reads as its empty value. Present only on a
+setup room (`room.created.mode: "setup"`).
+```json
+  "setup": { "mode": true,
+             "runner": { "label": "arjun-laptop", "connected": true, "tools": { "docker": "27.1.1", "kubectl": "" } },  // setup.runner_attached / setup.runner_lost; null before pairing
+             "plan_id": "pl_…", "phase": "stack", "step_index": 3,              // the current setup.plan and the step the agent is on
+             "bounds": { "attempts_per_step": 3, "steps_per_plan": 12, "wall_clock_s": 2700, "token_budget": 2000000 },
+             "targets": [ { "kind": "postgres", "address": "db.acme:5432", "class": "shared" } ],   // the request's plus every setup.target_registered, classes after setup.target_classed
+             "provisional": { "topic_prefix": "orders", "tables": ["public.orders"], "connectors": ["orders-src"] },  // owners.Provisional after every setup.pipeline_extended
+             "maintenance_window": { "start": "...", "end": "..." },             // the latest setup.maintenance_window, absent when none or past
+             "verified": [ { "name": "connector_running", "ok": true } ],       // rungs of the latest setup.verified for plan_id; [] before one exists
+             "blocked": { "reason": "attempts", "question": "..." },            // the latest setup.blocked while the agent is idle on it; absent otherwise
+             "watched_by": "server" }                                           // after pipeline.registered: "server" | "local"; "" before
+```
+`GET /api/rooms` rows carry `setup.mode`, `setup.runner.connected` and `setup.phase` only. Nothing in the snapshot is
+a secret value, a pairing code or a token: `runner.tools` are versions, `targets[].address` is what the person typed.
+
+#### X2 snapshot field (X2-0; implemented by A5)
+
+Additive, same rule: absent until the server row lands, and an absent field reads as its empty value.
+```json
+  "open_proposals": [ { "...": "...", "class": "recovery" } ]   // X2: proposal.created.class; absent reads as "fix"
+```
+- `open_proposals[].class`: copied from `proposal.created`. The recovery card (X2d) reads the step's preview
+  `count`/`unit` from `open_proposals[].preview` and, after the proposal leaves `open_proposals` (its last step
+  ran), its `verify` state from the room log: the newest `agent.recovery_check` (`before`, `after`, `poll` of
+  `max_polls`) until the proposal's recovery `agent.verification` (`outcome`, `before`, `after`) arrives.
+
+#### X3 snapshot fields (X3-0; implemented by A5 in X3c)
+
+Additive, same rule: absent until X3c lands, and an absent field reads as its empty value.
+```json
+  "origin": "forecast",            // room.created.origin; absent for every other room
+  "severity": "sev2",              // unchanged field: after a room.escalated it is that event's severity
+  "forecast": { "metric": "slot_wal_bytes", "object": "orders_slot", "current": 64424509440,
+                "limit": 107374182400, "eta": "2026-10-24T03:00:00Z", "slope_per_hour": 1073741824,
+                "r2": 0.97, "at": "..." }    // the newest forecast signal of the room's evidence, "at" its time; absent when none
+```
+`GET /api/rooms` rows carry `origin` and `forecast` too, so a room list can show the ETA without opening the room.
+
+#### X4 snapshot fields (X4-0; implemented by A5)
+
+Additive, same rule: absent until X4d lands.
+```json
+  "hypothesis": { "...": "...", "scope": "upstream_app", "team": "checkout", "change_id": 812 },  // copied from agent.hypothesis; scope "unknown" when the payload has none, team "" and change_id 0 when unset
+  "team_pages": [ { "team": "checkout", "hypothesis_seq": 17, "by": { "id": "arjun", "name": "Arjun", "verified": true }, "at": "..." } ]  // room.team_paged events in seq order; [] when none
+```
+
+#### X8 snapshot fields (X8-0; implemented by A5 in X8c)
+
+Additive, same rule: absent until X8c lands, and an absent field reads as its empty value.
+```json
+  "mode": { "...": "...", "staging": true },     // X8: the room's pipeline declares staging: and write mode is on (agent.Alert.Staging)
+  "open_proposals": [ { "...": "...",
+                        "stageable": [0, 2],                                 // X8: step indexes whose action implements actions.Stager; [] when none
+                        "stage_running": { "by": { "id": "arjun", "name": "Arjun", "verified": true },
+                                           "started_at": "...", "expires_at": "...", "steps": [0, 2] },  // a proposal.stage_started with no proposal.staged yet, before expires_at; absent otherwise
+                        "staged": { "proposal_id": "p_…", "params_hash": "…", "steps": [ … ], "at": "..." },  // the newest proposal.staged payload; absent until one exists
+                        "staging_required": true } ]                         // X8: a step's action is in require_staging: and no healthy stage for the current params_hash exists
+```
+- `mode.staging` is the same for every caller; the web shows "Try in staging" to the driver only when it is `true`
+  and `stageable` is not empty.
+- `staged` is kept while its `params_hash` differs from the proposal's (the card shows it as stale); only a matching
+  one counts for `staging_required`. `staging_required` is `false` (omitted) when the pipeline has no
+  `require_staging:` entry for any step. `GET /api/rooms` rows carry none of these fields.
+
+#### Q7 snapshot field (Q7-0c; implemented by A5 in Q7e)
+
+Additive, same rule: absent until Q7e lands, and an absent field reads as its empty value.
+```json
+  "pull_requests": [ { "proposal_id": "p_…", "step_index": 0, "repo": "connect-config", "number": 12,
+                       "url": "https://github.com/acme/connect-config/pull/12", "branch": "piperoom/r_…-p_…-0",
+                       "state": "open", "head_changed": false,
+                       "checks": { "state": "pending", "total": 3, "failed": [] },
+                       "merged_at": null, "updated_at": "..." } ]   // Q7: room-level, newest first, at most 20
+```
+- Room-level, not under `open_proposals`: an executed proposal leaves `open_proposals` (the snapshot's fold of
+  `action.executed`), but its PR stays followed. One entry per PR a step opened (`action.executed.pull_request`),
+  updated from each `pull_request.updated`; `updated_at` is that event's time (the `action.executed` time before
+  the first one). `merged_at` is set once merged. `GET /api/rooms` rows carry none of it.
+
+#### Last fix snapshot fields (KAN-594; implemented by A5)
+
+Additive, same rule: an absent field reads as its empty value. They let a room list say what the newest fix did
+without reading every room's log, because an executed proposal has left `open_proposals`.
+```json
+  "last_fix": { "proposal_id": "p_…", "seq": 17, "steps": 2, "failed_step": 0,
+                "verification": { "recovered": true, "verdict": "recovered: every layer check passed and data is flowing again" } },
+  "open_proposals": [ { "...": "...", "seq": 21 } ]
+```
+- `last_fix`: the newest proposal, by its `proposal.created`, whose run ended: its last step ran or a step failed,
+  the same `action.executed` that takes it out of `open_proposals`. An older fix that finishes later does not replace
+  it. Absent until one exists.
+- `last_fix.seq`, `open_proposals[].seq`: the seq of the proposal's `proposal.created`. Comparing them says whether an
+  open proposal is newer than the fix.
+- `last_fix.failed_step`: the 1-based step whose `action.executed` had `ok: false`, including `outcome_unknown`; `0`
+  when every step ran.
+- `last_fix.verification`: `recovered` and `verdict` of the proposal's newest `agent.verification`. A `repeat` never
+  overwrites a full verdict. Absent before one exists.
+- `GET /api/rooms` rows and `GET /api/rooms/ws` frames carry both fields.
+
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
 ### AgentStats (F11, implemented by A5)
@@ -313,6 +819,27 @@ counts, never a rate, below it). A graded room needs a human grade of the hypoth
 carries no grade, so a labelled live room counts in `labelled` only, and `graded`, `layer_correct`, `root_cause`
 and `by_confidence` come from shadow rooms until a grade for live rooms is added by a later contract change.
 
+#### X6 `infra` (X6-0; server X6d by A5, web X6d by A6)
+Additive: `infra` is absent until X6d lands. Infrastructure cost hints from the pipeline's watch samples
+(`clients.SampleReader`, X3a), in units only, never a currency (prices are the customer's):
+```json
+  "infra": { "from": "…", "to": "…", "samples": 672,
+             "wal_retained_gb_days": 30.0,      // null when no slot_wal_bytes sample
+             "dlq_records": 1200,               // newest dlq_records sample; null when none
+             "oldest_unread_age_s": 5400 }      // newest topic_oldest_unread_age sample; null when none
+```
+- **Window.** The samples since `to − 7 d` (`config.WatchSampleRetention`), whatever `days` is: the samples are kept
+  7 days. `from`/`to` are the first and newest sample used; `samples` counts the samples of all three metrics used.
+- **GB-days.** Each `slot_wal_bytes` sample holds until the next sample, at most one hour (a gap in sampling counts
+  nothing), the newest sample counts nothing; the sum of bytes × days, over 10⁹ (GB, not GiB). 10 GB for 24 h then
+  20 GB for 24 h is `30.0`.
+- **DLQ.** In records, not bytes: the watcher samples `dlq_records` (X3a) and no DLQ byte size. A byte size needs a new
+  watch metric (a later contract change).
+- **No history.** `infra: null` (not zeros) when the pipeline has no sample of any of the three metrics in the window;
+  clients show "not enough history". The existing fields do not change.
+- **Access.** As the route: visibility first (`404 not_found` outside the caller's tenants), then any logged-in user.
+  Numbers only: no slot, topic or table name, no record.
+
 ### Topology (pipeline map)
 ```json
 { "pipeline_id": "orders",
@@ -322,7 +849,20 @@ and `by_confidence` come from shadow rooms until a grade for live rooms is added
              { "from": "group:order-sync", "to": "wh:analytics.orders", "mapping": "inferred" },
              { "from": "connect:pg-orders-connector", "to": "sr:pg.public.orders-value", "kind": "depends_on" } ] }
 ```
-Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`. `health`: `ok | warn | fail | unknown`.
+A MySQL pipeline (`source_kind: mysql`, Q8) draws its source tables as
+`{ "id": "mysql:shop.orders", "kind": "source_table", "name": "shop.orders", "layer": "mysql", ... }`.
+Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`, and for a
+`batch` pipeline (P0 item 8, builder P4a) `dag` (id `dag:<dag_id>`, layer `orchestrator`), `task` (id
+`task:<dag_id>.<task_id>`, layer `orchestrator`, one per task instance of the latest run, its state in `facts`) and
+`model` (id `model:<name>`, layer `transform`), drawn `dag → task → model → sink_table` with data edges. With a
+ClickHouse warehouse (`warehouse_kind: clickhouse`, CH-3) the Kafka ingestion hop adds `kafka_engine` (id
+`kafka_engine:<db>.<table>`) and `materialized_view` (id `materialized_view:<db>.<view>`), both on the warehouse's
+layer, drawn `topic → kafka_engine → materialized_view → sink_table` with data edges; edges found by naming
+convention rather than read from the view's definition are `mapping: "inferred"`, and a Kafka engine table not
+confirmed to exist is `health: "unknown"`. `health`:
+`ok | warn | fail | unknown`. `partial` (P4, omitted when false): an optional reader the pipeline's kind needs is not
+configured or not supported (no Airflow or dbt reader), so its nodes are left out; clients say the map is incomplete
+rather than healthy.
 Edge `kind`: `data` (records flow `from` → `to`) or `depends_on` (`from` needs `to` to work; no records flow, so `to` is
 upstream of `from` when looking for a root cause). Edge `mapping`: `mapped` (proven from connector config, committed
 group offsets, Schema Registry subjects, or an explicit owners.yaml declaration) or `inferred` (not proven; implied by
@@ -347,19 +887,52 @@ positions and Kafka Connect error headers only, never a key or value; per-record
 summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.data` holds counts and positions
 (design: `docs/design/dlq.md`).
 
+#### X7: column lineage and governance tags (X7-0; builder X7a/X7c by A3; design `docs/design/lineage.md`)
+
+Additive like the waves before: `tags`, `columns` and `columns_omitted` are omitted when empty, so a graph from
+before X7 has the same JSON and a client that ignores them reads the map as before.
+```json
+{ "id": "pg:public.orders", "kind": "source_table", "...": "...",
+  "tags": { "pii": "customer_email:email,phone_number:phone", "retention": "7d" } }
+{ "from": "connect:pg-orders-connector", "to": "topic:pg.public.orders",
+  "columns": [ { "input": "pg:public.orders", "from": "id", "to": "after.id" },
+               { "input": "pg:public.orders", "from": "amount", "to": "after.total", "transform": "rename" },
+               { "input": "pg:public.orders", "from": "discount", "transform": "dropped" } ] }
+```
+- Node `tags` (`topology.Node.Tags`): governance labels, at most 16, keys `^[a-z][a-z0-9_]{0,31}$`, values one line of
+  at most 2048 bytes, without control or bidirectional control characters (`topology.ValidTag`). `pii`: the table's
+  columns classed as personal data from column **names and types only**, `column:class` pairs sorted by column
+  (`topology.FormatPIITag`); classes `email | phone | name | address | national_id | card | ip | dob | other`;
+  `pii_omitted`: how many pairs the cap left out. `retention`: the `owners.yaml` `declared_retention` of the node's
+  topic or table (`7d`, `36h`, `infinite`). Other keys may appear later; show an unknown key as a neutral label.
+- Edge `columns` (`topology.ColumnMap`): the column lineage of a data edge **into a dataset node** (`source_table`,
+  `topic`, `dlq_topic`, `sink_table`, `model`, `kafka_engine`, `materialized_view`). `to` is a column of the edge's
+  `to` node (a topic field by its dotted path, `after.amount`); `input` the upstream dataset node `from` belongs to.
+  `transform`: omitted = same name, `rename`, `unwrap` (Debezium `ExtractNewRecordState`), `dropped` (no `to`: the
+  column does not arrive, "orders.discount not in sink"), `added` (no `from`/`input`: fed by no upstream column).
+  `mapping: "inferred"` on a map = matched by name only (no Schema Registry, or an SMT Piperoom does not model). At
+  most 1000 per edge; `columns_omitted` counts the rest. Absent when unknown (no catalog or schema read).
+- Names, classes and durations only: **never a row value, a sample, a default or a config value.** Same visibility as
+  the map itself: `404 not_found` for an unknown pipeline and for one outside the caller's tenants, then any logged-in
+  user. The catalog readers behind them (`clients.ColumnReader`, `clients.TableRetentionReader`) read the catalog only,
+  for the pipeline's own tables, with a 10 s deadline; they are not called on request (the builder reads them).
+- Optional OpenLineage export (`OPENLINEAGE_URL`, X7b): the mapping, namespaces and spec versions are in
+  `docs/design/lineage.md` section 6. It has no route and changes no response here.
+
 ## REST endpoints
 
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
 | GET | `/rooms/{id}` | – | `302` | R4. Deep link (the room link Slack posts); outside `/api`, so no JSON. Signed in, or in dev mode: `302 /#/rooms/{id}`. Signed out in `oidc` mode: `302 /auth/login?return=/rooms/{id}`, and the callback lands back on the link. `{id}` must match `^[A-Za-z0-9_-]{1,64}$`; anything else is never redirected and falls to the web UI or `404`. `HEAD` answers the same |
-| GET | `/healthz` | – | `{status: "ok", version}` | outside `/api`, no auth, exempt from the Host allow-list (probes). `version` (R0; server R9) is the build version linked in with `-ldflags "-X piperoom/internal/version.Version=<v>"` (`internal/version`), `"dev"` for a plain `go build`. Liveness only: it checks nothing else. `GET /readyz` is unchanged (`{status, checks}`, `503` when the store does not answer) |
-| GET | `/metrics` | – | Prometheus text format (0.0.4): counters/histogram `piperoom_http_requests_total{method,route,code}`, `piperoom_http_request_duration_seconds{method,route,code}` (histogram); gauges `piperoom_ws_connections`, `piperoom_agent_slots_in_use`, `piperoom_agent_rooms_queued`, `piperoom_rooms_open`, `piperoom_goroutines`, `piperoom_uptime_seconds` (all per replica) | R9 (#142). Outside `/api`, **no auth**, skips the Host allow-list like `/healthz` so a scraper can reach pods by IP; a deployment that publishes the server port beyond the cluster restricts `/metrics` at its proxy or ingress. `route` is the chi route pattern (`/api/rooms/{id}`, or `unmatched`), never a concrete path; `code` is the class (`2xx`…`5xx`); no label holds a room or user id. Gauges come from in-memory state (no store call per scrape) |
+| GET | `/healthz` | – | `{status: "ok", version, write_mode, demo?}` | outside `/api`, no auth, exempt from the Host allow-list (probes). `version` (R0; server R9) is the build version linked in with `-ldflags "-X piperoom/internal/version.Version=<v>"` (`internal/version`), `"dev"` for a plain `go build`. `write_mode` (P0 item 1; server P1a) is `"off"` or `"on"`: whether fully approved proposals run (`PIPEROOM_WRITE_MODE`, default `off`; `--demo` forces `on`). `demo: true` (omitted elsewhere) marks a `--demo` server whose presenter controls are mounted (KAN-398), so the web UI shows its dev-only control strip. Liveness only: it checks nothing else. `GET /readyz` is unchanged (`{status, checks}`, `503` when the store does not answer) |
+| GET | `/metrics` | – | Prometheus text format (0.0.4): counters/histogram `piperoom_http_requests_total{method,route,code}`, `piperoom_http_request_duration_seconds{method,route,code}` (histogram); counter `piperoom_sole_member_grants_total` (P2b; driverless alert rooms whose first member this replica made the driver; no labels); counter `piperoom_approvals_total{grant}` (P2b; `grant` = `owner` \| `solo` \| `fallback` \| `policy`, all four series present from start; per replica); gauges `piperoom_ws_connections`, `piperoom_agent_slots_in_use`, `piperoom_agent_rooms_queued`, `piperoom_rooms_open`, `piperoom_goroutines`, `piperoom_uptime_seconds` (all per replica) | R9 (#142). Outside `/api`, **no auth**, skips the Host allow-list like `/healthz` so a scraper can reach pods by IP; a deployment that publishes the server port beyond the cluster restricts `/metrics` at its proxy or ingress. `route` is the chi route pattern (`/api/rooms/{id}`, or `unmatched`), never a concrete path; `code` is the class (`2xx`…`5xx`); no label holds a room or user id. Gauges come from in-memory state (no store call per scrape) |
 | GET | `/api/people` | – | `[{id, name, email?, verified, layers}]` | F9 (implemented by A5): `layers` are the layers the person may approve (`LayersFor`; for IdP members from their session groups), `[]` when none. After auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
-| GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
-| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above). Rows carry `triage` (F6) and `insight` (F11) like `GET /api/rooms/{id}`; the same list is pushed by `GET /api/rooms/ws` (F6, see WebSocket) |
+| GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request (for `PIPEROOM_SOLO_USER` it is every entry of `events.Layers`, eight since P0, ten since Q8-0 (`environment`, `mysql`); every layer of the kinds owners.yaml uses, cdc when there are no pipelines (P4a-4)); `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
+| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above). Rows carry `triage` (F6), `insight` (F11) and `last_fix` (KAN-594) like `GET /api/rooms/{id}`; the same list is pushed by `GET /api/rooms/ws` (F6, see WebSocket) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
-| POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
-| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
+| POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; without a valid `pipeline_id` (the `alertin.ValidPipelineID` shape), a top-level string `dag_id` selects the one `kind: batch` pipeline whose `dags` lists it (exact, case-sensitive match; a DAG listed by two pipelines, or by none, is ignored and the body resolves as if it had no `dag_id`), the same rule as the signed routes (P4a-3, P4a-4); the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
+| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert, in this order: a `pipeline`/`pipeline_id` label or field; a `dag_id` label (Alertmanager, Grafana) or field (generic) → the one batch pipeline whose `dags` lists it (P4a-3; an unknown id is skipped, a DAG listed by two pipelines is not guessed); the `PAGERDUTY_SERVICES` map; an owners match; or `DEFAULT_ALERT_PIPELINE`. The dev `POST /api/alerts/webhook` maps `pipeline_id` only; the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
+| POST | `/api/changes/webhook` | `{pipeline_id, kind, at, title, service, url?, actor?, id?, status?}` | `202 {"stored": true\|false}` | X4 (X4-0 contract; implemented by C5 in `internal/alertin`, X4a). Records a deploy, migration or vendor incident in the pipeline's change log; opens no room and wakes no agent. **No `X-User`**: signed like `/api/alerts/generic` with `CHANGES_WEBHOOK_SECRET`. Full rules under External changes below. `stored: false` = a repeat of a stored change (deduplicated). Errors: bad / missing / stale signature or no secret `401 unauthenticated`; body over 4 KB `413 too_large`; verified but invalid `400 validation`; unknown pipeline `404 not_found`; the 61st verified request of one pipeline within a minute `429 rate_limited` |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text, client_id?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
@@ -370,22 +943,33 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
+| POST | `/api/rooms/{id}/page-team` | `{team}` | `Event` (`room.team_paged`) | X4 (X4-0 contract; server and Slack post X4d by A5 and C12; web follow-up A6). The driver pages a team that owns an upstream cause: one Slack post to the team's `slack_channel` with: the driver's display name, the room id and pipeline id, the hypothesis's `scope` as fixed words, its `confidence` and text, the cited change (`change_id`: its kind, `service`, time, summary and `url`; only `#<change_id>` when the change log no longer holds it), the cited step numbers (as the room numbers its steps) and the room link. Nothing else: no tool result, row or config value. Never automatic; the team's reply is not ingested. Driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); `team` must be a `teams[].id` of `owners.yaml` visible to the room's pipeline (its tenant's teams with a `tenants:` block), else `400 validation` (another tenant's team reads as unknown); no hypothesis `409 no_hypothesis`; the current hypothesis's `scope` is not `upstream_app` or `vendor` `409 not_upstream`; the Slack bridge is off (`SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` not both set) `409 slack_off`, nothing written; the same team paged in this room in the last hour `429 rate_limited` (the message says when), and a second click while that team's page is still being sent `429 rate_limited` ("a page of team … is being sent"); Slack did not accept the post `503 slack_unavailable`, nothing written. The event is written only after Slack accepted the post, so a recorded page always went out. The event carries `hypothesis_seq` and `change_id` of the hypothesis paged. The page text is untrusted: titles and hypothesis text are escaped (no mentions, no links but the room's and the change's `url`) |
 | POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
-| POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
+| POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`, nine; `mysql` since Q8-0; `environment` is refused) or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
 | POST | `/api/rooms/{id}/checklist` | `{step_id, tool_use_id, hit, item, done, note?}` | `Event` (`checklist.step_done`) | F8 (implemented by A5). Open rooms only (`409 room_closed`); any member (viewers `403 viewer`); `tool_use_id` must be a `runbook_lookup` result of this room and `hit`/`item` within its `data` (`400 validation`); `note` ≤ 300 characters, typed-text rule; idempotent (the same state again still appends) |
 | GET | `/api/rooms/{id}/postmortem.md` | – | `text/markdown` | F2 (server F2b, implemented by A5; web F2a, A6). The room rendered as a post-mortem draft: timeline, root cause, actions + approvers, verification, open items, risks, agent cost; see `docs/design/postmortem.md` for the section list. Same access as `GET /api/rooms/{id}/events` (viewers included; tenancy `404 not_found`). Open rooms answer the draft so far. `?download=1` adds `Content-Disposition: attachment`. Every string from the log is Markdown-escaped; clients show it as text, never as HTML. Own timeout like the export. Headers `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` |
 | POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
+| POST | `/api/rooms/{id}/demo/skip` `/demo/pause` `/demo/resume` `/demo/reset` | – (empty JSON body; `Content-Type: application/json`) | `{room_id, control}` | **--demo only** (KAN-398): the scripted demo's presenter controls. Mounted only when the server runs with `--demo` (`httpapi.WithDemoControls`); on any other server the four paths are `404 not_found` like unknown routes. Driver only (`403 not_driver`), open rooms only (`409 room_closed`), viewers `403 viewer`. `skip` advances to the next scripted step without waiting the step delay; `pause` holds the steps before the next one; `resume` continues them exactly once each; `reset` puts the demo's fake clients back to their starting state (connector task 0 FAILED, subject compatibility BACKWARD) and replays the story from step 1 in the same room. Each call appends an `agent.message` ("demo: skipped to step N", "demo: paused …", "demo: resumed", "demo: reset …"). No active scripted run `409 demo_idle`; `skip`/`pause`/`resume` after the story finished `409 demo_finished` (`reset` is the way back). A body carrying parameters `400 validation`. Dev-only: never present on a production server |
 | DELETE | `/api/rooms/{id}?reason=&archive=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived, archive_removed}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked first, before the `archive` value and before the room is looked up. Then tenancy: a room whose pipeline the admin may not see (the live room's pipeline, or the pipeline in its audit row) answers `404 not_found` like a room that never existed. `reason` 1–500 characters, else `400 validation`. **A delete is an erase**: it hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, keeps no copy, and writes one content-free audit row (`room_deletions`). `archive=true` writes the room's export to `PIPEROOM_ARCHIVE_DIR` first (`400 validation` when the server has no archive directory, or for a value other than `true`/`false`; a failed write is `500 archive_failed` and nothing is deleted). `event_count` is the number of events deleted; `archived` is true when an export of the room is in the archive directory. An erase (no `archive=true`) also removes an export of the room left in `PIPEROOM_ARCHIVE_DIR` by an earlier failed attempt or retention run, after the database delete commits; `archive_removed` is then true. Idempotent: a room already deleted, by an admin or by retention, answers `200` with its audit row (`deleted_by: "system"` for retention) and changes nothing; an id that never existed is `404 not_found`. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
-| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email` |
-| POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email`. P2 (server P2b): `approval.given` also carries `grant` (`owner`, `solo`, `fallback`; see P-wave events); the room's driver may approve a layer in the proposal's `fallback_layers` (`grant: "fallback"`), checked when the event is appended. P1 (server P1a): with write mode off the last approval records as usual and the steps do not run (snapshot `open_proposals[].blocked: "write_mode_off"`, no `action.executed`). Before every step the executor checks again (#638; `docs/design/replicas.md` §5). First, in replica mode only (with a coordinator; without one the refresh always succeeds), it refreshes its claim, which holds only while the proposal is open: if the refresh fails (the proposal is no longer open, or the claim was declared dead) the step is skipped with no `action.executed`, and the stale-claim sweep records the outcome. Then `recheckStep` re-reads the proposal and its approvals; the step runs only when the recomputed hash equals the stored one and every `approved` row's `params_hash`, and every `required_layers` entry has an `approved` row (any grant). Otherwise the step does not run and `action.executed` has `ok: false` with one of these outputs: `params hash mismatch`, `params hash mismatch (cannot recompute: …)`, `not approved by every required layer`, `cannot re-read the proposal before running the step: …`, `cannot read the approvals before running the step: …` |
+| POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve; the caller must be allowed the layer as for `approve`, so the room's driver may reject a `fallback_layers` entry (P2b-3b), checked when the event is appended |
+| POST | `/api/proposals/{pid}/approve-all` | `{params_hash, confirm?}` | `[Event]` (the `approval.given` events, in `required_layers` order) | P0 item 4; server P2b. The caller must be allowed **every** `required_layers` entry (owner or backup, `PIPEROOM_SOLO_USER`, or the driver for a `fallback_layers` entry), else `403 not_layer_owner` naming the first layer the caller lacks, and nothing is recorded. Same `params_hash` rule as `approve` (`409 params_mismatch`); in solo mode `confirm: "<pipeline_id>/*"` once per call (`400 validation` otherwise). Then one `approval.given` per `required_layers` entry not yet approved, in that order, each with its `grant`, under one lock, and the steps run as after the last `approve`. Stops a pending policy countdown without a `proposal.cancelled`. Open rooms only (`409 room_closed`); a proposal already decided (rejected, or every layer approved) `409 already_decided` |
+| POST | `/api/proposals/{pid}/cancel` | `{reason?}` | `Event` (`proposal.cancelled`) | P0 item 4; server P2b. The driver or an owner of any `required_layers` entry (`403 not_layer_owner` otherwise; viewers `403 viewer`); only while a `proposal.scheduled` of the proposal is pending (`409 not_scheduled` otherwise, also after the policy ran); a pending countdown the room view hides (`run_at` more than 45 s past) is still accepted. Cancellable until the policy starts (its first approval is logged); a cancel after `cancel_until` still wins if it lands first. `reason` ≤ 500 characters, typed-text rule. The proposal stays open for manual approval |
+| POST | `/api/proposals/{pid}/stage` | `{}` | `202` `Event` (`proposal.stage_started`) | X8 (X8-0 contract; server X8c by A5). The driver tries the proposal's steps on the pipeline's staging stack before approval: driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); the proposal open (`409 already_decided` once rejected or every layer approved); the pipeline declares `staging:` and write mode is on (`409 no_staging`); at least one step's action implements `actions.Stager` (`409 not_stageable`); no stage of the proposal pending (`409 stage_in_progress` while a `proposal.stage_started` has no `proposal.staged` and is before its `expires_at`); at most 5 stages per proposal (`429 rate_limited`). Each stageable step's `Validate` and `CheckScope` run again first (`400 validation` naming the step index, nothing written). Answers at once; the server then calls `Stage` once per stageable step, in order (each bounded by `actions.StageStepTimeout`, 2 min), and writes one `proposal.staged`, which reaches every client over the WebSocket. Never changes production or the executor; see **X8 staging** under Objects |
+| POST | `/api/rooms/{id}/proposals` | `{title, risk, rollback, steps: [{action, layer, params, description?}]}` | `Event` (`proposal.created`, `origin: "driver"`) | P0 item 5; server P3c. A driver-authored fix: driver only (`403 not_driver`), open rooms only (`409 room_closed`), never in a shadow room (`400 validation`: a shadow room has no proposals). Validated exactly like an agent proposal: a registered action, `layer` equal to the action's `Layer()`, `Validate`, `CheckScope` against the room's pipeline, `params_hash`, then the preview (`proposal.previewed`); a refused step answers `400 validation` naming the step index. At most 5 open driver-authored proposals per room (`429 too_many_proposals`). The agent hears of it (`HumanInput` kind `proposal_created`) and verifies after it runs (`proposal_executed`). The auto-approve policy never applies to it. There is no free-form command: only registered actions with their params |
+| GET | `/api/actions` | – | `[{name, layer, describe, params_schema, preview, layer_by_params?, deferred?}]` | P0 item 5; server P3c, web P3d. The write actions the agent proposes from (the full registry, also when write mode is off), in registration order, for any logged-in member (viewers included). `describe` is the action's `Describe()`, `params_schema` its `ParamsSchema()` (a JSON Schema object), `preview` whether it implements `actions.Preview`. Never includes client state, connection settings or credentials. The P3d form is generated from `params_schema`. Q7 (Q7-0c; server Q7k): an `actions.Layered` action shows `layer: ""` and `layer_by_params: true` (its step's layer comes from its params and the room's pipeline, `actions.StepLayer`); an `actions.Deferred` one shows `deferred: true`; both fields are omitted when false |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout). R0 (server R4): after its checks the server appends `handoff.requested` (see Hand-off requests below) and answers with the final `handoff.created`. While a request of the room is in flight, every further POST answers `409 handoff_in_progress`, from the driver or anyone else, before any other check but visibility. A request that ends without a hand-off appends `handoff.failed` and answers the matching error (`403 not_driver`, `409 room_closed`, else `500 internal_error`) |
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
-| GET | `/api/pipelines` | – | `[{id, title, shadow}]` | R0; server R4, web R3. The pipelines this server knows: every pipeline of `owners.yaml`, in file order (with a `tenants:` block, only those of the caller's tenants; the solo user sees all). `title` is the pipeline's `title:` (`""` when unset); `shadow` is `true` when its `shadow:` block is enabled (rooms from alerts open as shadow rooms). Any logged-in user, viewers included. No other field (connections, owners, watch settings) is returned. `[]` when there are none: clients must not fall back to a made-up pipeline id such as `orders`; the new-room form then has no pipeline to offer |
+| GET | `/api/pipelines` | – | `[{id, title, shadow, kind}]` | R0; server R4, web R3. The pipelines this server knows: every pipeline of `owners.yaml`, in file order (with a `tenants:` block, only those of the caller's tenants; the solo user sees all). `title` is the pipeline's `title:` (`""` when unset); `shadow` is `true` when its `shadow:` block is enabled (rooms from alerts open as shadow rooms). `kind` (P0 item 8; server P4a-4 (A5)) is the pipeline's `kind:`, `"cdc"` or `"batch"` (`"cdc"` when the file names none). Any logged-in user, viewers included. No other field (connections, owners, watch settings) is returned. `[]` when there are none: clients must not fall back to a made-up pipeline id such as `orders`; the new-room form then has no pipeline to offer |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |
 | GET | `/api/pipelines/{pid}/agent-stats?days=90` | – | `AgentStats` | F11 (server F11a, implemented by A5; web F11b, A6). The agent's track record on one pipeline over the last `days` (1–365, default 90, else `400 validation`) of **closed** rooms: counts, graded hit rate, reliability by confidence (`by_confidence[]` with the field names of `evals.ReliabilityBucket`), medians of time to first hypothesis, human MTTR and cost, plus the shadow subset. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included. `enough_data` is false under 10 graded rooms: clients show counts, never a rate. Cached 2 minutes per pipeline. Sources: `shadow.labelled/graded` and F8's `room.labelled`; before F8 only shadow rooms are graded |
+| GET | `/api/pipelines/{pid}/trends?metric=slot_wal_bytes&days=1` | – | `[{at, value}]` | X3 (contract X3-0; server X3a, A5; web X3d, A6). **Trends**: the watcher's samples of one metric of one pipeline (`clients.SamplePoint`), oldest first, at most one per 15 min and 672 in all (`clients.MaxSamplesPerSeries`); `at` RFC 3339 UTC, `value` a number in the metric's unit. `metric` is required, one of `slot_wal_bytes` (bytes), `dlq_records` (records), `group_lag` (records), `db_size_bytes` (bytes), `topic_oldest_unread_age` (seconds) (`clients.WatchMetrics`); anything else → `400 validation`. `days` 1–7 (default 1; samples are kept 7 days), else `400 validation`. `[]` when there are no samples yet (watcher off, new pipeline). Visibility first: `404 not_found` for an unknown pipeline **and** for one outside the caller's tenants (the Tenants rule: never `403`, so the route does not confirm another tenant's pipeline id), then any logged-in user, viewers included. Served from Piperoom's own `watch_samples` table: a request makes no call to a customer system and returns numbers only, never a row value, a record, a config value or free text. Store read deadline 10 s |
+| POST | `/api/pipelines/{pid}/connectors/{name}/accept-config` | – | `{connector, hash}` | X3 (contract X3-0; server X3b, A5 with the watcher, A7). Makes the connector's **current** config the approved baseline of `config_drift`, so the next poll is quiet until it changes again; `hash` is the new baseline's id: `actions.ConfigHash` of the redacted config (`actions.DigestConfig`), the same id as `config_drift`'s hashes and the fleet view's config versions. Visibility first (`404 not_found` for an unknown pipeline, one outside the caller's tenants, or a connector that is not one of the pipeline's), then only an approver or backup of the pipeline's `kafka-connect` layer, or `PIPEROOM_SOLO_USER`: anyone else `403 not_layer_owner` (a viewer `403 viewer`). `409 watch_off` when this server keeps no baseline to move: `PIPEROOM_WATCH_MODE=off`, the watcher runs on another server replica (with several replicas only the elected leader runs it, and the baseline lives in its memory), or the watcher does not watch the pipeline or the connector (the pipeline's `watch:` is off or every signal is, or its scope drops the connector); `503 connect_unavailable` when Kafka Connect cannot be read within 10 s, and the baseline is unchanged. Writes no room event and changes no customer system; the server logs the caller, pipeline, connector and both hashes, never a config value |
+| GET | `/api/pipelines/{pid}/autonomy` | – | `[{action, state, streak, needed, window, last_verdicts: [{proposal_id, verdict, at}], granted_at?, revoked_reason?}]` | AU1 (AU1-0 contract; server AU1b, A5; web AU1c, A6). The trust ledger of one pipeline, one row per `owners.yaml` `autonomy:` entry in file order; see Earned autonomy below. `state` ∈ `earning \| granted \| revoked`; `streak` is the current run of verified recoveries inside `window`, `needed` the entry's `after_verified`; `window` as written (`"30d"`); `last_verdicts` are the newest 10, newest first, `verdict` ∈ `recovered \| partial \| not_recovered \| unverifiable \| disputed`; `granted_at` while granted, `revoked_reason` (an `autonomy.revoked` reason) while revoked. `[]` without an `autonomy:` block. With autonomy off (`PIPEROOM_AUTONOMY=off` or write mode off) rows still show their streaks, never `granted`, and the response carries `X-Piperoom-Autonomy: off`. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included |
+| POST | `/api/pipelines/{pid}/autonomy/{action}/revoke` | `{reason?}` | `Event` (`autonomy.revoked`, `reason: "human"`) | AU1 (AU1-0 contract; server AU1b, A5). Ends earned autonomy of `action` on the pipeline at once; a countdown pending under `earned_autonomy` is cancelled (`proposal.cancelled`, `by` the caller). Visibility first (`404 not_found`), then **an owner of the action's layer on this pipeline or a tenant admin** (`tenants.<t>.admins`; without a `tenants:` block a users.yaml admin); anyone else `403 not_allowed`, viewers `403 viewer`; never the agent. `action` not in the pipeline's `autonomy:` block `404 not_found`; not granted `409 not_granted`. `reason` ≤ 500 characters, typed-text rule; kept in the server log, not in the event. The event goes to the pipeline's newest open room, else to the room of the action's last `autonomy.granted` |
 | POST | `/api/rooms/{id}/trace` | `{table, key}` | `Event` | runs a record trace; emits `trace.pinned`; table not in the pipeline or empty key → `400 validation` |
-| POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers, `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
+| POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`), `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
 | GET | `/api/rooms/{id}/shadow?include=data,room` | – | `{run: ShadowRun, events: [Event + "shadow": true]}` | closed shadow rooms only; `409 not_labelled` until the blind label; any logged-in user, viewers included (`include=data` too, as with `tool_result.data` on `GET /events`); `events` have their own `seq` and are never fed to the room reducer; `tool_result.data` is omitted unless `include=data`; `include=room` adds `room: {created, labelled, graded}` for the eval builder. `ShadowRun` = `{room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at, finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, revealed_at}` (null times when unset; `status` ∈ `queued\|running\|hypothesised\|no_hypothesis\|error\|budget\|interrupted`) |
 | POST | `/api/rooms/{id}/shadow/grade` | `{layer_correct, root_cause, notes?}` | `Event` (`shadow.graded`) | closed, labelled and revealed shadow rooms (before `shadow.revealed` → `409 not_revealed`); same caller rule as `blind`; `root_cause` ∈ `yes\|partial\|no`, `notes` ≤ 2000 chars; re-grade allowed, last wins |
 | GET | `/api/rooms/{id}/usage` | – | `{room_id, pipeline_id, charged: {tokens, cost_usd}, limit: {tokens}, totals: Usage, by_model: [Usage + model]}` | model spend of the room (design `docs/design/cost.md`). `charged` is what the room budget checks: finished calls plus the estimate of a call in flight, so it can run ahead of `totals`; `limit.tokens` is `PIPEROOM_ROOM_TOKEN_BUDGET` (0 = no cap; a shadow run's own cap is not shown). Any logged-in user who may see and read the room, viewers included (the same numbers are in its `agent.usage` events). A room the caller cannot see (tenancy, `docs/design/tenancy.md`) answers `404 not_found` exactly like a missing room; a shadow room answers `409 room_open` while it is open. `by_model` is sorted by model id |
@@ -416,6 +1000,14 @@ Proposals: a step's action must implement `actions.Scoped`; the server calls `Va
 `CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
 frozen at creation; approvals bind to those exact steps.
 
+Write mode (P0 item 1; server P1a): `PIPEROOM_WRITE_MODE` is `off` by default (`config.ParseWriteMode`; any value
+but `off`/`on` stops the start). Off: the agent still proposes from the full action registry, proposals are
+created, previewed, approved and recorded as usual, but the executor refuses to queue or run a step, so no step runs and no
+`action.executed` is written (snapshot `open_proposals[].blocked: "write_mode_off"`, `mode.write: false`,
+`/healthz` `write_mode: "off"`). On: today's behaviour. `--demo` forces on (fake clients only).
+`deploy/pilot.env.example`, `deploy/docker-compose.pilot.yml`, the Helm values and `dev/` set `on` explicitly, so
+installs from before the P wave keep running fixes.
+
 ### Hand-off requests (R0; server R4, web R3)
 
 `handoff.requested {request_id, to, stay_as_watcher, expires_at}` (actor: the driver) is appended when
@@ -424,6 +1016,106 @@ the first of: `handoff.created` with the same `request_id` (the normal end), `ha
 (system actor; `reason` ∈ `summary_failed | not_driver | room_closed | internal_error`, never error text), or
 `expires_at` (request time + 3 min, the summary deadline; covers a server that stopped mid-request). The server and
 clients use this same rule. `handoff.created` gains `request_id` (absent on events from before R0).
+
+### Fleet view (X5-0; server X5a and X5c by A5, web X5b by A6)
+
+One row per pipeline, what changed across pipelines, and the config history of one connector. Every answer is
+built from data Piperoom already holds (the watcher's status rows `clients.WatchStatus`, X3a samples, F8's
+`pipeline_changes`, rooms and their events, X5c's config versions): **no route here reads a customer system**, so
+it stays cheap with 50+ pipelines. Timestamps, counts, key names and node ids only: never a row value, and a
+connector config value only redacted (`actions.RedactConfig`). Every store read of these routes runs under a 10 s
+deadline (the store's default when the request has none).
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| GET | `/api/fleet?tenant=&team=&kind=` | – | `[FleetPipeline]` | Every pipeline of `owners.yaml` the caller can see (`room.Service.CanSeePipeline`; with a `tenants:` block only those of the caller's tenants, the solo user sees all), sorted by `health` (`fail`, `warn`, `unknown`, `ok`), then `pipeline_id`. Filters, each optional and exact (case-sensitive): `tenant` (a pipeline's `tenant:`), `team` (its `team:`), `kind` (`cdc` \| `batch`, else `400 validation` "unknown kind"). A `tenant` the caller is not a member of, or one that does not exist, answers `[]`, never `403`/`404`, so tenant names do not leak. Any logged-in user, viewers included. No paging: the list is bounded by `owners.yaml`. Cached 10 s per caller and query string; `[]` when there are no pipelines (the web shows its first-run panel) |
+| GET | `/api/fleet/changes?since=&kind=&pipeline=&limit=&cursor=` | – | `FleetChangesPage` | `PipelineChange` rows (the F8 shape, already masked) of every pipeline the caller can see, newest first by (`at`, `id`), paged. `since` RFC 3339, default now − 7 days, not before now − `PIPEROOM_CHANGES_RETENTION_DAYS` (an earlier value is raised to it); `kind` one or more change kinds of `clients.ChangeKinds()` (the F8 kinds and X4's `deploy`, `migration`, `vendor_incident`), comma-separated (an unknown one → `400 validation` "unknown kind"); `pipeline` narrows to one pipeline (outside the caller's tenants or unknown → an empty page, as for an aggregate); `limit` 1–200, default 100 (else `400 validation`); `cursor` is the `next` of the previous page, opaque (a bad one → `400 validation` "bad cursor"). Pages are stable: a row recorded after the first page never shifts a later page (the cursor is a position, not an offset). Any logged-in user, viewers included |
+| GET | `/api/pipelines/{pid}/connectors/{name}/config-versions?limit=` | – | `[ConfigVersion]` | X5c. The config versions of one connector of the pipeline the watcher recorded (X3b), newest first, at most `limit` (1–200, default 50, else `400 validation`); key **names** only. Visibility first: an unknown pipeline or one outside the caller's tenants → `404 not_found` "pipeline not found"; a `{name}` that is not one of the pipeline's connectors (`owners.yaml` `connectors:`, or one the watcher recorded for it) → `404 not_found` "connector not found"; a known connector with no version yet → `[]`. Then any logged-in user, viewers included |
+| GET | `/api/pipelines/{pid}/connectors/{name}/config-versions?diff=a..b` | – | `ConfigDiff` | X5c. The key-by-key difference from version `a` to version `b` (full 64-hex `hash` values, `a` older or newer: the answer is always `from` = `a`, `to` = `b`). Same `404`s as above, first; then only an approver or backup of any layer of that pipeline (in dev mode also a `users.yaml` user whose `layers:` grant one), the solo user, or an `auditors:` principal (the `/api/usage` rule): values are shown, redacted, so viewers and other members get `403 not_allowed`. A malformed `diff` (not two 64-hex hashes joined by `..`) → `400 validation`; a hash that is no version of this connector → `404 not_found` "version not found". `a == b` → `keys: []`. A hash held by several versions (a revert) names the newest of them; their redacted content is the same. With `diff` set, `limit` is ignored |
+
+**`FleetPipeline`** (one row of `GET /api/fleet`):
+```json
+{ "pipeline_id": "orders", "title": "Orders CDC", "kind": "cdc", "tenant": "payments", "team": "orders-core",
+  "health": "fail", "worst_node": "connect:pg-orders-connector", "open_rooms": 1,
+  "signals_firing": ["connector_down", "slot_wal"], "changes_24h": 3,
+  "forecasts": [ {"metric": "slot_wal_bytes", "eta": "2026-10-23T04:10:00Z"} ],
+  "last_verdict": { "room_id": "r_01J…", "verdict": "confirmed", "layer_correct": true, "at": "2026-10-21T09:12:00Z" },
+  "checked_at": "2026-10-22T10:01:00Z" }
+```
+- `title`, `kind`, `tenant` as `GET /api/pipelines` (`""` when unset; `kind` `cdc` when the file names none).
+  `team` is the pipeline's optional `team:` key in `owners.yaml` (X5-0; an id from X4's `teams:` list when that list
+  exists, which A3's loader checks), `""` when unset.
+- `health` ∈ `ok | warn | fail | unknown`, the topology node words: `fail` when a signal at `sev1` or `sev2` is
+  firing; `warn` when any other signal is firing or acked, a forecast is firing, or a room of the pipeline is open;
+  `ok` when the watcher checked the pipeline recently and nothing fires; `unknown` when it did not (watcher `off`,
+  `checked_at` zero or older than 3 × `PIPEROOM_WATCH_INTERVAL`). Open rooms raise `ok`/`unknown` to `warn` only.
+- `worst_node`: the topology node id (as `GET /api/pipelines/{pid}/topology` names it, e.g. `connect:<connector>`,
+  `group:<group>`, `dlq:<topic>`) of the worst firing signal (highest severity, then oldest `since`), `""` when
+  nothing fires or the watcher could not name a node. The web links it to the pipeline lane; it is never resolved by
+  reading the topology on request.
+- `signals_firing`: the distinct names of the watcher signals now `firing` or `acked` (the `owners.Signal*` names
+  and the X-wave `events.Signal*` names: `count_drift`, `row_drift`, `dup_keys`, `order_skew`, `forecast`,
+  `config_drift`), worst first, at most 32. `[]` when none.
+- `open_rooms`: rooms of the pipeline not closed (shadow rooms included, setup rooms not).
+- `changes_24h`: `pipeline_changes` rows of the pipeline with `at` in the last 24 hours, every kind.
+- `forecasts`: the pipeline's firing `forecast` signals (X3a), soonest `eta` first, at most 8; `metric` is the X3a
+  sample metric name. `[]` when none.
+- `last_verdict`: the human judgement of the pipeline's most recently closed room that has one, `null` when none in
+  the retention window. `verdict` is the last `hypothesis.verdict` of that room (`confirmed` \| `disputed`, `""` when
+  it has only a grade); `layer_correct` is the last `shadow.graded.layer_correct` (`null` when the room was not
+  graded: `room.labelled` carries no grade, see AgentStats); `at` is the time of that event.
+- `checked_at`: when the watcher last checked the pipeline; omitted when it never did.
+
+**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page —
+except at `limit=200` (the reader's cap), where a final exactly-full page may still carry a non-empty `next`; the
+page it names is then empty with `next` `""`, and that empty page ends the pagination. A
+`PipelineChange` here is exactly the F8 row (`id, pipeline_id, kind, object, at, actor?, source, fingerprint,
+before?, after?, summary`): config values masked `***`, a DDL statement only in `summary` (≤ 300 runes), and for
+X4's external kinds `after` is a `clients.ExternalChange` (untrusted sender text; see External changes); clients
+render every string as text and link only an `http`/`https` `url`.
+
+**`ConfigVersion`** (one row of `config-versions`):
+```json
+{ "hash": "9f2c…64 hex…", "at": "2026-10-20T14:03:00Z", "by": "",
+  "changed_keys": ["decimal.handling.mode", "<secret key changed>"] }
+```
+- `hash` is `actions.ConfigHash` of the redacted config: the same value for the same redacted content, so a config
+  reverted to an earlier state repeats an earlier hash, and a change only to a secret value repeats the previous
+  hash (its `changed_keys` still says so). A secret value never enters the hash.
+- `at`: when the watcher first saw this config. `by`: `"proposal:<id>"` when an executed Piperoom proposal produced it,
+  `""` when it changed outside Piperoom or the watcher cannot tell (the watcher sees results, not people).
+- `changed_keys`: key names that differ from the previous version (added, removed or changed), sorted
+  (`actions.ChangedConfigKeys`); a key for which `actions.LooksSecret` is true reads `<secret key changed>`
+  (`events.SecretKeyChanged`; its name is not shown), at most 1000. `[]` when the watcher had no earlier digest of
+  the connector in memory (the first version it records, or its first poll after a restart; `?diff=` still compares
+  the stored forms).
+
+**`ConfigDiff`** (`?diff=a..b`):
+```json
+{ "connector": "pg-orders-connector",
+  "from": {"hash": "…", "at": "…"}, "to": {"hash": "…", "at": "…"},
+  "keys": [ {"key": "decimal.handling.mode", "change": "changed", "old": "precise", "new": "double"},
+            {"key": "database.sslpassword", "change": "added", "new": "<redacted>"},
+            {"key": "transforms", "change": "added", "new": "unwrap"} ] }
+```
+`keys[]` sorted by `key`, at most 1000; `change` ∈ `added | removed | changed`; `old` is omitted for `added`, `new`
+for `removed`. Values are the stored, redacted ones (`actions.RedactConfig`: a `LooksSecret` key reads `<redacted>`,
+every other value has passed `redact.Text`, so a password inside a JDBC URL is masked, and is cut at 4096 bytes). A
+secret key appears by name here (the caller passed the role check) but never with a value. The diff compares stored
+values, so a key whose redacted values are equal (a change only to a secret value) is not listed; the newer
+version's `changed_keys` records it.
+
+**Tenancy and wiring.** In the tenancy route test (`docs/design/tenancy.md` §6) `/api/fleet` and
+`/api/fleet/changes` are aggregates that filter by tenant (a pipeline outside the caller's tenants is left out and
+its rows never counted), and both `config-versions` forms are pipeline routes that answer `404 not_found` first. No
+route here returns another tenant's pipeline id, title, team, room id or change, in a row, a count or an error. The
+Go shapes the server codes against are in `internal/clients/clients.go` ("Fleet view": `FleetChangeReader`,
+`WatchStatus` with its writer and reader, `ConnectorConfigVersion` with its writer and reader, the caps) and
+`internal/actions/action.go` (`RedactConfig`, `ConfigHash`, `RedactedValue`, and the watcher's `DigestConfig` and
+`ChangedConfigKeys`, shared with `config_drift`). The watcher writes one
+`clients.WatchStatus` per pipeline per tick and one `clients.ConnectorConfigVersion` per config change it sees;
+both are Piperoom's own rows. Config versions older than `PIPEROOM_CHANGES_RETENTION_DAYS` are removed, except the
+newest version of each connector (the current config stays diffable); status rows are replaced, not kept.
 
 ### Watcher alerts (`alert_source: "watcher"`)
 
@@ -435,6 +1127,11 @@ closes; `--demo` forces it off.
 - `room.created.alert_source` is `"watcher"`. `dedup_key` is `watcher:<pipeline>`, for example
   `watcher:orders`. There is **one open watcher room per pipeline**; every signal (connector down, slot
   inactive, slot WAL, DLQ growth, config risk) shares that key. `room.created.alert` holds the watcher's evidence JSON.
+  The one exception (X3a): a room opened by `forecast` signals alone has the dedup key
+  `watcher:<pipeline>:forecast:<metric>` (`watch.ForecastDedupKey`; `<metric>` is the first pending forecast's
+  `clients.WatchMetrics()` name, e.g. `watcher:orders:forecast:slot_wal_bytes`), so its cooldown is per pipeline and
+  metric and closing it never mutes the pipeline's real signals; a real signal that fires while it is open joins it
+  (one room per pipeline still), and its resolved alert carries the same key.
 - **Join-on-open-room.** Before it opens a room, the watcher asks whether any room for that pipeline is
   already open, including one opened by Alertmanager or a person. If so it posts its evidence into that room
   as a join and opens nothing. A later signal or re-fire on the same pipeline joins the same room the same
@@ -448,6 +1145,133 @@ closes; `--demo` forces it off.
   reports a connector set to drop records silently (`errors.tolerance=all` with no DLQ and no error log, or on a
   source connector) or a sink whose configured DLQ topic does not exist. Records that were in the DLQ before
   the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
+- **X-wave signals (contracts X1-0 and X3-0; watcher X1b, X3a and X3b by A7).** Six more signals. Each is one flat
+  entry of the evidence's `signals` list like the older ones: `"signal"` and `"severity"` first, then the keys of its
+  payload type in `internal/events/events.go`. The default severities are `events.SignalSeverity` (the one table);
+  the names are also `owners.yaml` `watch.signals` names (A3 adds them to the loader) and the fleet view's
+  `WatchSignal.signal` values. The agent sees a key only once `agent.AlertEvidenceText` (A4) allow-lists it, as for
+  every watcher key.
+
+  | `signal` | Default severity | Entry | Fires when |
+  |---|---|---|---|
+  | `count_drift` | `sev2` | `DriftSignal` | source and sink row counts over the last closed hour, shifted by the sink's lag (on an idle sink: the hour ending at its newest row), differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
+  | `row_drift` | `sev2` | `DriftSignal` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs; or rows that landed on the sink in the last hour hold `sink_ts_column` NULL; or sink rows hold Debezium's unavailable-value placeholder in a toastable column; or a column is missing on the sink |
+  | `dup_keys` | `sev3` | `DriftSignal` | the CDC topic holds the same (key, source position) more than once in the window |
+  | `order_skew` | `sev3` | `DriftSignal` | the source position goes backwards for one key on the CDC topic |
+  | `forecast` | `sev4` | `ForecastSignal` | a pipeline metric's trend reaches its limit within `PIPEROOM_WATCH_FORECAST_HORIZON` (below) |
+  | `config_drift` | `sev3` | `ConfigDriftSignal` | a connector's config changed outside an approved fix (below) |
+
+  **Drift (X1: silent corruption).** A "green but wrong" pipeline becomes a symptom. The four drift signals open or
+  join the pipeline's room exactly like `slot_wal`; the cooldown is per (pipeline, table, kind).
+  `DriftSignal` is `{signal, severity, table?, topic?, window: {from, to}, source, sink, missing, mismatched, sample,
+  detail?}`: `window` is half-open `[from, to)` (RFC 3339, UTC), an object here while `dlq_growth`'s `window` is a
+  word such as `"15m"`, so a reader goes by `signal` first; the five numbers are always present (0 is evidence).
+  `count_drift`: `source`/`sink` are the row counts and `missing` is `source - sink` when positive. `row_drift`:
+  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp; X1b-fix:
+  `mismatched` also counts sampled rows that landed in the last hour (by the wall clock, not shifted by the lag) and
+  that the sink holds with `sink_ts_column` NULL (a sampled row the sink does not hold yet is not judged), and the
+  sink rows of that hour holding Debezium's default `__debezium_unavailable_value` in one of the source's toastable
+  columns (at most 4 columns per table and check, in turn; never `sink_ts_column` or a column whose name looks like
+  personal data); `detail` names the column. A column missing on the sink (`sink_ts_column`, or a column both tables
+  had at an earlier check of this server process) fires with all counts 0, `detail` naming the columns and an empty
+  window (`from` = `to` = the time of the catalog read); with `sink_ts_column` gone no other check runs, since each
+  keys on it. The parts of one check are one `row_drift` entry: their counts are summed and `window` is the first
+  breaching part's.
+  `dup_keys`: `source` records scanned, `missing` duplicate events, `sample` keys affected. `order_skew`:
+  `source` records scanned, `mismatched` regressions, `sample` keys affected. `detail` is one line of
+  watcher-written text, at most 200 bytes; clients render it as text, never HTML. The web shows `count_drift`
+  and `row_drift` on the sink node of `table`, `dup_keys` and `order_skew` on the node of `topic`, and an unknown
+  kind as a neutral fact.
+
+  The drift entry carries names, counts and a window only: **never a key value, a row value or record content.**
+  The counts come from the optional reader `clients.Reconciler` (source and sink, read-only, scoped to the
+  pipeline's `source_tables`/`sink_tables`, deadline 10 s per call): `CountBetween` returns counts,
+  `SampleKeys` at most 200 primary-key values of the newest rows in a window `[since, until)` (the watcher samples
+  the hour before `now - sink lag - 2 min`, rows that had time to reach the sink; never a table whose key column
+  looks like personal data) that stay inside the watcher, and `RowTimes` at most 1000 keys' timestamp columns,
+  never another column. An idle sink (the source has no row newer than the sink's newest, and that row is more than
+  2 min old: nothing is in flight) is not shifted by a lag that grows while idle: `count_drift` and `row_drift` read
+  the hour ending at the sink's newest row. A sink that is behind keeps the shifted windows, so a row in flight is
+  never judged. A client without the reader, or answering `ErrNotSupported`, turns
+  the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
+  (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
+
+  `dup_keys` and `order_skew` come from the optional Kafka reader `clients.DupScanner` (X1c; also behind the
+  agent's `kafka_dup_keys` tool): one `DupScan` of the pipeline's CDC topic, at most 50 000 records and 10 s, which
+  decodes only `source.lsn` and returns a `clients.DupReport` of counts, offsets and key fingerprints. The watcher
+  copies counts only: `topic` = `DupReport.topic`, `source` = `scanned`, then `missing` = `duplicates` and `sample` =
+  `keys` (`dup_keys`) or `mismatched` = `order_regressions` and `sample` = `regression_keys` (`order_skew`); `window`
+  is `[since, the scan's start)`, and a `capped` or `partial` scan says so in `detail`. Fingerprints and offsets
+  never enter the signal. Records with no usable key or `source.lsn` (not Debezium Postgres, a registry outage) are
+  counted as `undecodable` and never fire anything.
+
+  **Sample history and forecasts (X3).** Every pipeline gets one sample per metric at most every 15 minutes in
+  `watch_samples` (kept 7 days; read with **Trends** under REST endpoints). A `forecast` signal opens a quiet
+  forecast room (`origin: "forecast"`, sev4, no agent run; see X3 events) with its own cooldown per pipeline and
+  metric; when the metric's real signal fires later on the same pipeline it joins that room as usual and escalates it
+  (`room.escalated`).
+  ```json
+  { "signal": "forecast", "severity": "sev4", "metric": "slot_wal_bytes", "object": "orders_slot",
+    "current": 64424509440, "limit": 107374182400, "eta": "2026-10-24T03:00:00Z",
+    "slope_per_hour": 1073741824, "r2": 0.97, "samples": 96 }
+  ```
+  `forecast` (`events.ForecastSignal`): `metric` is one of the five names under **Trends** (`clients.WatchMetrics()`);
+  `current`, `limit` and `slope_per_hour` are in its unit; `object` names the slot, topic, group or database when
+  the series follows one (omitted for a pipeline total); `eta` is when the least-squares line over the last 24 h
+  reaches `limit`. It fires only when `slope_per_hour > 0`, `r2 >= 0.6`, at least 8 samples, and `eta` is within
+  `PIPEROOM_WATCH_FORECAST_HORIZON` (default 48 h, 1 h to 168 h). A metric with no limit (`dlq_records`,
+  `group_lag`) is sampled for trends but never forecast. Once fired it holds until the slope is not positive, `r2`
+  falls below 0.5, or `eta` moves past twice the horizon (hysteresis, so a fit at the bar does not flap). A
+  forecast-only room's dedup key is `watcher:<pipeline>:forecast:<metric>` (see Watcher alerts).
+  `db_size_bytes` and `topic_oldest_unread_age` come from the optional `clients.DBSizeReader` (source) and
+  `clients.UnreadAgeReader` (Kafka, with the topic's `retention.ms` from `clients.TopicConfigReader` as the
+  limit); a client without them has no sample of that metric.
+
+  **Config drift (X3).** A `config_drift` signal opens a room "connector config changed outside an approved fix".
+  ```json
+  { "signal": "config_drift", "severity": "sev3", "connector": "orders-src",
+    "old_hash": "9f2c…", "new_hash": "41ab…",
+    "changed_keys": ["<secret key changed>", "decimal.handling.mode"] }
+  ```
+  `config_drift` (`events.ConfigDriftSignal`) fires when a key was added, removed or changed since the connector's
+  last **approved** config (`actions.ChangedConfigKeys` of the two `actions.DigestConfig`s is not empty, so key
+  order never fires it). The approved config moves at server start (the first read of each leadership term), on
+  every `action.executed` that touches the connector, and on `accept-config` (REST endpoints). "Touches the
+  connector" means the executed step's frozen `params` carry `"connector": "<name>"` (the one name every connector
+  action uses), whether the step succeeded or failed and whichever replica ran it; the first config read that starts
+  after the event becomes the baseline. A step without a `connector` param moves nothing. `old_hash`/`new_hash` are `actions.ConfigHash` of the two
+  **redacted** configs (`actions.RedactConfig`), the same id as the fleet view's config versions: no secret value
+  enters them, so they are equal when only a secret value changed. `changed_keys` are key **names** only, sorted, at
+  most 50 (`keys_omitted?` counts the rest, omitted when 0): config values, old or new, are never stored, logged or
+  sent, and every changed key that looks like a credential (`actions.LooksSecret`) is reported once as
+  `"<secret key changed>"` (`events.SecretKeyChanged`). A Connect read error changes neither the signal nor the
+  baseline.
+
+  **Retention evidence (X7; contract X7-0, watcher X7d by A7; design `docs/design/lineage.md` section 5).** Not a new
+  signal: entries of `config_risk`'s `risks` list (`events.RetentionRisk`), next to the connector risks. Each compares
+  a pipeline topic's configured retention (`retention.ms`, `-1` = infinite; `retention.bytes`; `cleanup.policy`) or,
+  when the warehouse can say, a sink table's, with the `owners.yaml` `declared_retention`, in both directions.
+  ```json
+  { "code": "retention_shorter_than_declared", "sev": "sev4", "topic": "pg.public.orders",
+    "configured": "1d", "declared": "7d", "text": "pg.public.orders retains 1d; declared 7d" }
+  ```
+  `code`: `retention_shorter_than_declared`, `retention_longer_than_declared` (infinite included) or
+  `compact_cdc_topic` (a CDC topic with `cleanup.policy` `compact` and no `delete`: deletes are compacted away, with or
+  without a declaration). `configured`/`declared` are durations (`1d`, `36h`, `infinite`); `topic` or `table`;
+  `retention_bytes?` when a size cap is set; `cleanup_policy?`; `text` one watcher-written line, at most 200 bytes,
+  shown as text. No declaration, or equal values, is no finding. **Lead rulings (batch 8):** a topic whose
+  `cleanup.policy` is `compact` without `delete` keeps the latest record of every key forever, so its configured
+  retention is `infinite` whatever `retention.ms` says (`retention.ms` deletes nothing without `delete`); a sink table
+  whose warehouse reports no retention setting keeps its rows forever, so it is `infinite` too. Both are judged
+  against the declaration in both directions like any other value (a compacted CDC topic declared `7d` is
+  `compact_cdc_topic` and `retention_longer_than_declared`). Under `delete`, a `retention.ms` of `0` or one that does not
+  parse is not judged. A retention finding is `sev4`: it makes `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
+  `config_risk`'s action; it rides along when another signal of the pipeline opens or joins a room. A topic config
+  the watcher cannot read (no `DescribeConfigs` ACL) gives one INFO log and no finding. Names, durations and the
+  policy word only, never another config value. The agent sees each finding through `agent.AlertEvidenceText`
+  as `retention_risk=<topic or table>:<code>` with `configured`, `declared`, `retention_bytes` and `cleanup_policy`
+  when they have their documented shape (never `text`), both inside a `config_risk` signal and from the body's
+  top-level `config_risks` list (another signal opened or joined the room).
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
@@ -460,6 +1284,140 @@ closes; `--demo` forces it off.
 - **Triage pass (F6, implemented by A4 and A5).** Before an agent slot is taken, a bounded first look
   (`PIPEROOM_TRIAGE_PASS`, model `PIPEROOM_TRIAGE_PASS_MODEL`, deadline `PIPEROOM_TRIAGE_PASS_TIMEOUT`) writes its
   own steps and one `agent.triage`; not in shadow rooms or rooms restored after a restart.
+
+### External changes (X4-0; webhook and poller C5 (X4a), migration readers A3 (X4b), agent A4 (X4c), page A5 + C12 (X4d))
+
+Many incidents start outside the pipeline. Deploys, schema migrations and vendor incidents are rows of the same
+pipeline change log as F8's (`clients.PipelineChange`, written through `ChangeWriter`, read through `ChangeReader`
+and the "what changed" tool), with three more kinds and five more sources (`internal/clients/clients.go`, X4 block):
+
+| `kind` | `source` | `object` | `summary` | `actor` | `after` (`clients.ExternalChange`) |
+|---|---|---|---|---|---|
+| `deploy` | `webhook` | the service | the title | who deployed | `{url?, service}` |
+| `migration` | `webhook` | the service | the title | who ran it | `{url?, service, version?}` |
+| `migration` | `flyway`, `liquibase`, `dbt` | the history table (`public.flyway_schema_history`, `public.databasechangelog`) or the dbt project | the migration's description | `installed_by` / author | `{version}` |
+| `vendor_incident` | `webhook`, `statuspage` | the vendor component (`confluent-cloud`, `msk`, `aiven-kafka`) | the incident title | `""` | `{url?, service, status?}` |
+
+`before` is empty for these kinds. `status` ∈ `investigating | identified | monitoring | resolved`. Every text field
+is untrusted (the sender's or the customer database's): stored and shown as text, given to the model only inside the
+agent's untrusted-data wrapper, never logged (logs carry pipeline, kind and whether a row was stored). Caps:
+`summary` 300 runes (control characters removed, as for every change), `url` 1024 bytes and only absolute `http`/`https`
+without user info, `service` and `version` 128 bytes (`ExternalChange.Validate`). **Timestamps and metadata only**:
+a migration reader never reads a script's contents or checksums, and no row value of any table is ever stored.
+
+**Who may read them.** The same as the pipeline's other changes: the "what changed" tool of a room of that pipeline
+(the room's tenancy) and `GET /api/fleet/changes` (X5, the pipelines the caller can see; see Fleet view); the
+retention loop (`PIPEROOM_CHANGES_RETENTION_DAYS`) and the 5000-rows-per-pipeline cap apply. The room store and the
+tool validate kinds against `clients.ChangeKinds()`.
+
+**`POST /api/changes/webhook`** (C5, X4a). Signed like `/api/alerts/generic`:
+`X-Piperoom-Signature: t=<unix ts>,v1=<hex HMAC-SHA256("<ts>.<body>")>`, timestamp within ±5 min, secret
+`CHANGES_WEBHOOK_SECRET` (comma-separated for rotation; empty = every request `401`). Body (JSON object, unknown
+fields `400 validation`):
+
+| Field | Rule |
+|---|---|
+| `pipeline_id` | required; an `owners.yaml` pipeline, else `404 not_found` |
+| `kind` | required; `deploy`, `migration` or `vendor_incident` (the F8 kinds are the watcher's, `400 validation`) |
+| `at` | required; RFC 3339, not more than 5 min in the future and not older than 7 days |
+| `title` | required; 1–300 runes after control characters are removed |
+| `service` | required; 1–128 bytes, the name `owners.yaml` `teams[].owns` uses (or the vendor component) |
+| `url`, `actor`, `status`, `id` | optional; `url` as above, `actor` ≤ 128 bytes, `status` for `vendor_incident` only, `id` the sender's own id (≤ 128 bytes) |
+
+The fingerprint is a hash of `kind`, `service` and `id` when `id` is sent, else of `kind`, `service`, `at` and `title`:
+a redelivery is not stored twice (`202 {"stored": false}`). Limits: body `config.ChangesWebhookMaxBodyBytes` (4 KB,
+`413 too_large`); `config.ChangesWebhookPerMinute` (60) verified requests per pipeline per minute, then
+`429 rate_limited`; the store write has the room store's deadline. Like the alert routes, the secret is shared by
+every tenant, so the reply carries nothing but `stored`.
+
+**Status-page poller** (C5, X4a). A pipeline's optional `vendor_status_url:` in `owners.yaml` (an absolute `https`
+URL of a status page RSS/Atom feed) is fetched every `config.VendorStatusPollInterval` (5 min, 10 s deadline, body
+capped at 4 MB). Each active incident becomes one `vendor_incident` row (`source: statuspage`; deduplicated by the
+feed's incident id and status); an unreachable feed writes nothing and logs one warning per hour. The fetch dials
+public addresses only (a host or redirect target that resolves to a loopback, private, link-local or cloud-metadata
+address is refused), follows at most 5 redirects and only to `https`, and goes direct (no HTTP proxy).
+
+**Migration readers** (A3, X4b). When the pipeline's source database has `flyway_schema_history` or
+`databasechangelog` (found by catalog lookup in the pipeline's own database, only in the schemas of its own source
+tables), or a dbt run-results reader is configured, applied migrations in the window appear as `migration` rows,
+newest first. The source side is the optional `clients.MigrationReader` (`RecentMigrations`, shapes
+`clients.MigrationHistory`); the dbt side is the latest run of the pipeline's models (`clients.RunResults`), one row
+whose `after.version` is the run's `invocation_id` and whose summary counts models per status. Read live by the
+"what changed" tool, not stored. Read-only, 10 s deadline, at most 200 rows a call (`clients.MaxMigrations`). A
+table the login cannot read is a fact ("migration history not readable (grant SELECT on flyway_schema_history)"),
+not an error.
+
+**`owners.yaml` `teams:`** (validated by A3 in `internal/owners`; read by the agent through `agent.Alert.Teams` and by
+`POST /api/rooms/{id}/page-team`):
+```yaml
+teams:
+  - id: checkout                       # required, unique; ^[a-z0-9][a-z0-9_-]{0,63}$
+    slack_channel: C0123ABCD            # required; a Slack channel id, not a name
+    owns: [checkout-api, orders-writer]  # required, ≥ 1; service names as the webhook's `service` sends them; a service owned by two teams is a load error
+    tenant: acme                        # required with a tenants: block (a team serves one tenant), refused without one
+pipelines:
+  - id: orders
+    vendor_status_url: https://status.confluent.cloud/history.rss   # optional (X4a poller)
+    team: checkout                      # optional (X5-0): the team that owns the pipeline, for GET /api/fleet?team=; a teams[].id of the same tenant when a teams: list exists
+```
+A room sees the teams of its pipeline's tenant (all teams without a `tenants:` block). The agent may set
+`agent.hypothesis.team` only to one of them; the page route refuses any other id as unknown. The page posts to the
+team's `slack_channel` with the bridge's bot token: that channel sees the driver's name, the room and pipeline ids, the
+hypothesis (scope, confidence, text), the cited change (kind, service, time, summary, URL), the cited step numbers and
+the room link (`docs/pilot/data-handling.md`, Slack).
+
+### Earned autonomy (AU1-0; owners A3 (AU1a), ledger and scheduling A5 (AU1b), web A6 (AU1c), wording A4 + C12 (AU1d))
+
+An action can earn the auto-approve policy on one pipeline after a streak of verified recoveries and lose it on the
+first failure. Additive: a pipeline without an `autonomy:` block, and every log written before AU1, behave and replay
+exactly as before. Hard rules (KAN-461), never relaxed by a row:
+- The agent never approves its own proposal and never edits `owners.yaml`.
+- Only registered actions; every autonomous run still goes Preview → policy approval → Execute → Verify, fully logged.
+- Autonomy is per (pipeline, action), capped at the entry's `max_tier`.
+- Write mode off means no autonomy of any kind. A person can revoke at once, and `PIPEROOM_AUTONOMY=off` disables the wave.
+
+**`owners.yaml` `autonomy:`** per pipeline (validated by A3 in `internal/owners`):
+```yaml
+pipelines:
+  - id: orders
+    autonomy:
+      connect_resume_connector: {after_verified: 10, window: 30d, max_tier: T1}
+```
+- `after_verified` is 3–100: how many verified recoveries in a row are needed.
+- `window` is `1d`–`90d`, in whole days written `<n>d`.
+- `max_tier` is `T0`–`T2`, default `T1`; `T3` is refused at load. A step's tier is the per-action tier AU1b assigns
+  in the actions catalogue, on the setup scale (`internal/setup/protocol`); incident-room proposal steps carry no tier
+  of their own today, and an action without an assigned tier is above every `max_tier`, so it never auto-approves
+  (fail closed).
+- Each key must be a registered action, like `auto_approve:`; an action in both `auto_approve:` and `autonomy:` is a
+  load error.
+- A load error names the pipeline, the action and the field.
+- Changing or removing an entry revokes its grant (`config_changed`).
+
+**Ledger events.**
+- `autonomy.granted {action, streak, window, evidence: [proposal_id]}`: system actor, written when the streak reaches
+  `after_verified` inside `window`.
+- `autonomy.revoked {action, reason, by?}`: `reason` ∈ `verify_failed | human | config_changed | expired`. For
+  `human`, `by` and the event actor are the person; otherwise the actor is the system.
+- A verified recovery is an `agent.verification` with `recovered: true` (for a recovery proposal, `outcome:
+  "recovered"`) on an agent proposal of the action that no member disputed. A member disputes with the F9 verdict route: a
+  `hypothesis.verdict` of `disputed` standing in the proposal's room when the verification is written marks that
+  recovery `disputed` (it zeroes the streak and shows in `last_verdicts`); a later `agent.hypothesis` clears verdicts
+  as always. Driver-authored proposals never count.
+- Any other verification of a granted action revokes it (`verify_failed`). `partial`, `not_recovered` and
+  `unverifiable` fail closed.
+
+**Earned policy.** While granted, a proposal whose every step is a granted action at or below its `max_tier` is
+scheduled like `auto_approve`: `proposal.scheduled {policy: "earned_autonomy"}`, the same countdown
+`PIPEROOM_AUTO_APPROVE_DELAY` and the same cancel rules. The system actor then approves it with `approval.given
+{grant: "policy", policy: "earned_autonomy"}` (`events.PolicyEarned`). It never applies:
+- with write mode off, `PIPEROOM_AUTONOMY=off` or `PIPEROOM_AUTO_APPROVE_DELAY=0`;
+- in a shadow or setup room;
+- to a driver-authored proposal, or after a failed preview.
+
+**`PIPEROOM_AUTONOMY`** is `on` (the default) or `off`, any case; `config.ParseAutonomy` refuses any other value with
+an error naming the variable, and the server refuses to start on it once AU1b wires `ParseAutonomy` into `cmd/server`
+(the `ParseSetup` pattern; until then a bad value is ignored). It takes effect only with `PIPEROOM_WRITE_MODE=on`.
 
 ### Spend limits (design `docs/design/cost.md`)
 
@@ -559,6 +1517,153 @@ export). Another user's request with the same value is a different key.
   must not re-send it without a key. A server without this feature ignores the field, so a client retries
   automatically only when the answer's event carries `client_id`.
 
+### Admin: settings and connection tests (onboarding phase 1, design `docs/design/onboarding.md`)
+
+Read-only views of what the server runs with, and live tests of its connections. **Admin only**
+(`admin: true` in users.yaml): any other member gets `403 not_allowed`, a viewer `403 viewer`, checked before
+anything else. Phase 1 changes no configuration: the files and environment stay the source of truth, and nothing
+here writes them. **No response ever contains a secret value**: DSNs, passwords, user names and tokens are shown as
+`set`/`unset` with where they come from; URLs and brokers are shown without user info, query or fragment.
+
+| Method | Route | Body | Response | Notes |
+|---|---|---|---|---|
+| GET | `/api/admin/config` | – | `AdminConfig` | what the server runs with now |
+| POST | `/api/admin/connections/test` | `{"id": "<connection id>"}` | `ProbeResult` | `404 not_found` for an unknown id; `429 rate_limited` after 10 tests per minute per admin; the test itself never answers 5xx for a failed check, a failed check is `ok: false` |
+| GET | `/api/admin/config/export` | – | `text/yaml` attachment `piperoom-config.yaml` | the owners file, then `---`, then the users file, as read at start (they hold no secrets by design: connection settings are `env:`/`file:` references) |
+
+`AdminConfig`:
+
+```json
+{
+  "source": "file",
+  "owners_file": "owners.yaml",
+  "users_file": "users.yaml",
+  "connections": [
+    {
+      "id": "process-wide.kafka",
+      "scope": "process-wide",
+      "pipeline_id": "",
+      "kind": "kafka",
+      "used_by": ["orders"],
+      "settings": [
+        {"key": "kafka_brokers", "display": "localhost:29092", "secret": false, "from": "env KAFKA_BROKERS"},
+        {"key": "kafka_sasl_password", "display": "", "secret": true, "set": true, "from": "env KAFKA_SASL_PASSWORD"}
+      ]
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "orders", "title": "Orders CDC", "tenant": "default",
+      "connections": "process-wide",
+      "connectors": ["pg-orders-connector"], "consumer_groups": ["order-sync"],
+      "source_tables": ["public.orders"], "sink_tables": ["analytics.orders"],
+      "owners": [{"layer": "postgres", "principals": ["user:priya"]}],
+      "shadow": false
+    }
+  ],
+  "people": [{"id": "priya", "name": "Priya", "layers": ["postgres", "schema-registry"], "admin": false}]
+}
+```
+
+- `source` is `file` in phase 1. `owners_file` / `users_file` are base names only.
+- **Connections.** One per kind (`source_db`, `kafka`, `connect`, `schema_registry`, `warehouse`) for the
+  process-wide settings (`id` `process-wide.<kind>`, `scope` `process-wide`) and one per kind for each pipeline
+  with a `connections:` block (`id` `pipeline.<pipeline id>.<kind>`, `scope` `pipeline`, `pipeline_id` set). A kind
+  whose required setting (the DSN, brokers or URL) is empty is left out. `used_by` lists the pipelines whose client
+  set the connection serves, in owners order.
+- **Settings.** One row per `owners.ConnectionKeys()` key of the kind that is set or required (so a process-wide
+  secret row always has `set: true`; `set: false` appears for a pipeline reference whose variable or file is
+  missing). `secret` is true for
+  every key that may hold a credential (DSNs, user names, passwords); then `display` is `""` and `set` says whether
+  a value is present. For URLs and `kafka_brokers`, `display` is scheme, host, port and path only. For literal keys
+  (`owners.IsLiteralKey`) and TLS file paths, `display` is the value. `from` is `env NAME`, `file /path` or `value`
+  for a pipeline reference, and `env NAME` for a process-wide setting.
+- **Pipelines and people** mirror owners.yaml and users.yaml; `owners` lists each layer's principals as written
+  (`user:<id>`, `group:<name>`); `connections` is `own` or `process-wide`.
+
+`ProbeResult` (`internal/connprobe.Result`):
+
+```json
+{"kind": "source_db", "ok": false, "took_ms": 212, "checks": [
+  {"id": "reach", "status": "ok", "ms": 4},
+  {"id": "login", "status": "ok", "ms": 31},
+  {"id": "read_only", "status": "ok", "ms": 2, "detail": "default_transaction_read_only = on"},
+  {"id": "read_slots", "status": "fail", "ms": 3, "problem": "role piperoom_ro cannot read pg_replication_slots",
+   "fix": "GRANT SELECT ON pg_catalog.pg_replication_slots TO piperoom_ro;"}]}
+```
+
+Check ids are stable per kind. Every kind starts with `config` (the settings are present and parse; a pipeline
+reference that cannot be resolved is a failed `config` check naming the key and its reference, never a value), then
+`reach` and `login`; later checks are `skip` when one of those three fails. Kind-specific ids: `source_db`
+`read_only`, `statement_timeout`, `read_slots`, `read_publications`, `select_tables`, `can_write`; `warehouse`
+`read_only` (Postgres only), `select_sink`; `kafka`, `connect` and `schema_registry` as their probes document.
+
+`status` is `ok`, `fail`, `warn` (works, but should change, e.g. the login can write) or `skip` (not run because an
+earlier check failed). `ok` is false when any check failed. `problem`, `fix` and `detail` are fixed text with object
+names only, never a server's raw error. Every dial goes through an address guard that refuses link-local and cloud
+metadata addresses; phase 1 allows loopback and private addresses because it tests only operator-configured
+connections. A test is logged (`admin: connection test`, actor, id, ok), never with settings.
+
+### Setup rooms (U0; server A5, runner A9, web A6; design `docs/design/setup-agent.md`)
+
+Every route below exists only while `PIPEROOM_SETUP_ENABLED=on` (which needs `PIPEROOM_WRITE_MODE=on`; the server
+refuses to start otherwise); with setup off they answer `404 setup_disabled` and `/api/runners/ws` is not served.
+Every `POST` under `/api/rooms/{id}/setup/` is **driver only** (`403 not_driver`; viewers `403 viewer`), open setup
+rooms only (`409 room_closed`; an incident room `400 not_setup_room`), under the same CSRF rule as every non-GET, and
+renews the driver lease. The model never calls them: it may ask for a click in a message.
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| POST | `/api/setup` | `SetupRequest` (`events.SetupRequest`: `{pipeline_id, tenant?, title, source_kind, target, topic_prefix, tables, connectors?, targets: [{kind, address, class?}], repos?}`) | `201 {room: RoomSnapshot, code, expires_at, command, fingerprint}` | opens a setup room (`room.created {mode: "setup"}`, the creator is driver, `control.granted`) and returns a single-use pairing code: 8 characters of `protocol.CodeAlphabet`, valid 10 min, bound to `(tenant, room, creator)`; `command` is the `piperoom-setup --server <origin> --code <code>` line to paste (for `target: strimzi`, the lines of `docs/design/setup-strimzi.md` §3.1–§3.2 joined by `
+`); `fingerprint` is the first 12 hex of SHA-256 over the public origin (`PIPEROOM_PUBLIC_URL`), room id, pipeline id, creator id and a server nonce drawn with the code, computed for **every** setup room (A5 row; the server code is not in this contract PR) and also carried in `protocol.Welcome` with `public_origin`. With a `tenants:` block `tenant` is required and the caller must be a member (`403 not_tenant_member`); without one it must be absent. `pipeline_id` must match the owners id rule and must not exist (`409 pipeline_exists`); `targets[].address` goes through the denylist of design §2.6 (`400 address_refused`; the non-host forms `strimzi://<name>`, `<account id>/<region>[/<arn>]`, `<environment id>/<cluster id>` and `<project>/<service>` skip DNS resolution, the runner's dial hook stays the guarantee); `targets[].kind` also accepts `image_registry` (A5 follow-up row; not yet accepted by the targets route) (`registry` stays the Schema Registry); classes are floors and never below `shared` once registered. Any member, viewers `403 viewer`. The code is never logged and never in an event (`setup.pairing` carries the outcome only) |
+| GET | `/api/runners/ws` | first frame `{type: "pair", pair: {code}}` or `{type: "pair", pair: {token}}` | WebSocket (`internal/setup/protocol` frames) | the runner's socket; see **Runner socket** under WebSocket. No session cookie: the code or token is the credential. TLS required unless loopback. Rate-limited (5 attempts per code, 20 per source address, 100 in all per 10 min, then `429 pairing_closed` for 10 min, audited); constant-time compare; one runner per room (`409 runner_paired`; a lost runner may be replaced, `setup.pairing {outcome: "replaced"}`) |
+| POST | `/api/rooms/{id}/setup/targets` | `{kind, address, class?}` | `Event` (`setup.target_registered`) | adds a target the ops may reach. The server resolves `address` and refuses loopback of another host, link-local, cloud metadata endpoints, multicast, unspecified and its own addresses (`400 address_refused`); `class` is a floor combined with `max` against the derived class and never below `shared` (`400 class_lowered`); the runner re-checks the resolved IP at dial time. Also emits `setup.target_classed` |
+| POST | `/api/rooms/{id}/setup/targets/{t}/class` | `{class}` | `Event` (`setup.target_classed {by: "person"}`) | raise only: `local` → `shared` → `production`; a lower value `400 class_lowered`; `{t}` is the target's address as registered (`404 not_found` otherwise) |
+| POST | `/api/rooms/{id}/setup/pipeline` | `{add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?}` | `Event` (`setup.pipeline_extended`) | extends the provisional pipeline; every name follows the owners.yaml rules for that list (`400 validation` names the entry); the room re-derives the tool and action scope. Hosts are targets, not here |
+| POST | `/api/rooms/{id}/setup/secret` | `{name, value}` | `204` | `name` matches `^[a-zA-Z_][a-zA-Z0-9_]{0,127}$` and is none of `ccloud_*`, `aiven_token`, `aws_*`/`AWS_*` (`400 validation`: "enter cloud credentials on the runner"; case-insensitive prefix match), `value` ≥ 6 bytes and ≤ 4 KiB (`400 validation`); forwarded to the paired runner in one `secret` frame (`409 no_runner` when none) and **stored nowhere on the server**; the route is excluded from request logging (a test asserts no log line carries the body); emits `setup.secret_set {name, actor}`. The value is in no event, log or prompt |
+| POST | `/api/rooms/{id}/setup/credentials` | – (no body) | `202` | asks the paired runner (`register_credentials {request_id, pipeline_id, names}` frame; `409 no_runner`) to register the read credentials it generated (design §3.7). The values travel in the runner's `credentials {request_id, secrets}` frame after the person's `y` on the runner's terminal, never in this request. The server accepts that frame only while this request is pending (one per room; `409 already_decided` while one is), once, with exactly the requested names, else `setup.runner_refused {reason: "credentials"}`; the pipeline id is the room's, never the runner's; names and the pipeline id are validated before any path is built; each value is written through an `os.Root` at `PIPEROOM_SECRETS_DIR` (no symlink followed) as `<pipeline_id>/<name>`, 0600, temp file then rename; then `setup.credentials_registered {pipeline_id, names, runner_label}`. A refusal on the terminal is `setup.runner_refused {reason: "credentials"}` |
+| POST | `/api/rooms/{id}/setup/maintenance-window` | `{start, end}` | `Event` (`setup.maintenance_window`) | RFC 3339 times; `end − start` ≤ 4 h and `start` ≤ 24 h ahead, `end` in the future (`400 window_too_long`, `400 validation`). A T3 step whose guard row needs a window is created and executed only inside the latest window; a later window replaces it |
+| POST | `/api/rooms/{id}/setup/verify` | – | `202` | asks the server's ladder runner to run the verification ladder now (the person's equivalent of the agent's `setup_request_verification`); `409 no_runner` when no runner is paired; `409 already_decided` while a ladder run is in flight. Its outcome is `setup.verified`, written by the ladder runner only |
+| GET | `/api/pipelines` | – | rows gain `setup: {room_id, target, registered_at, watched_by, unreachable_layers?}` | present for a pipeline a setup room registered (the owners.yaml `setup:` block; `unreachable_layers` lists layers the server cannot read, which the watcher skips with a reason); absent otherwise |
+
+### Models (V0 contract; server A5 in V7, web A6 in V8; design `docs/design/model-providers.md` §9 and §11)
+
+Which model serves each role, and, on a standalone or quickstart server only, the picker that sets it. **No
+response ever contains a key or a full base URL**: a base URL is shown as its host only.
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| GET | `/api/models` | – | `ModelPanel` | any logged-in user, viewers included. On a team server it is read-only data: changing the model is an operator task (environment, Helm values). A standalone or quickstart server with no usable model starts and answers with `state: "no_model"` and the `supported` list, so the web opens the picker first |
+| PUT | `/api/models` | `ModelChoice` | `ModelPanel` | **standalone and quickstart only** (`piperoom-setup --standalone`, `cmd/server --quickstart`); a team server answers `404 not_found`. Loopback requests only (a non-loopback peer gets `403 not_allowed`), from the solo user only (`403 not_allowed` otherwise; viewers `403 viewer`). **Origin rule**: the `Origin` header is required and must equal the server's own origin (scheme, host and port); a `Sec-Fetch-Site` other than `same-origin` is refused when present; the body must be `Content-Type: application/json`. Each failure is `403 origin`, checked before the body is read. **Key binding**: a stored key is bound to the provider, flavor and the whole normalised base URL it was entered with (scheme, host, port and path: on a shared gateway host the path picks the account, and on loopback the port picks the process). A request that changes any of them must carry `key`, else `400 key_required`, and no request leaves for the new base URL; a request that changes only `model` or a role may omit it. **Environment keys stay at their provider's default endpoint**: an empty `key` with a picker `base_url` on a main role whose provider reads a standard key variable (`OPENAI_API_KEY` and the flavor variables, `GEMINI_API_KEY`) is `400 key_required`, changed binding or not; a role on another provider than main with a `base_url` while its standard key variable is set is `400 validation` (`roles.<role>.base_url`, naming the variable, never its value); a gemini role with a `base_url` while `PIPEROOM_GEMINI_BACKEND=vertex` is `400 validation` (Vertex signs with Google credentials; set the endpoint in the environment). A `Host` header that is not loopback is `403 origin` (after the server's host guard, which answers `421` first). Validation goes through the config parsers (`ParseModelRoles`, `ParseBaseURL`, `ParseModelKnobs`): an invalid provider, flavor or base URL, or a model on a new provider that is not supported (without `PIPEROOM_MODEL_UNVERIFIED=on`) or fails the start probe, is `400 validation` naming the field, never echoing `key` or the base URL. On success the server writes `.piperoom/model.env` (mode 0600, through `os.Root`), rebuilds the model endpoint and returns the panel. The route is excluded from request logging; `key` is never echoed, logged or put in an event |
+
+`ModelPanel`:
+
+```json
+{ "mode": "standalone",                 // team | standalone | quickstart
+  "state": "ready",                     // ready | no_model (standalone and quickstart only)
+  "roles": [
+    { "role": "main",                   // main | triage | first_look | summary | judge
+      "provider": "openai", "flavor": "groq",            // flavor only for provider openai
+      "model": "openai/gpt-oss-120b",
+      "base_url_host": "api.groq.com",  // host only; omitted for a provider default
+      "region": "",                     // bedrock, vertex, bedrock-converse and gemini on Vertex; omitted when unknown
+      "status": "supported",            // reference (a Claude provider: never checked against the list) | supported | experimental | unverified
+      "prompt_cache": false,
+      "price": {"input": 0.15, "output": 0.6, "cache_write": 0.15, "cache_read": 0.15},   // USD per million tokens; null when unpriced
+      "sunset": "2027-03-01",           // omitted unless supported.json sets one
+      "key_set": true } ],              // whether a key is configured for the role's provider; never the key
+  "supported": [                        // internal/agent/llm/supported.json with each entry's committed baseline
+    { "provider": "openai", "flavor": "ollama", "model": "qwen3:32b", "status": "supported", "alias": false,
+      "pass_rate": 0.81, "root_cause_rate": 0.76, "cost_per_run_usd": 0, "gated_at": "2026-11-02",
+      "sunset": "" } ] }
+```
+
+`ModelChoice` (`PUT`): `{provider, flavor?, base_url?, model, key?, roles?: {first_look?, summary?, judge?}}`, where
+each role is `{provider?, model?, base_url?}` with the same fallbacks as the `PIPEROOM_TRIAGE_PASS_*`,
+`PIPEROOM_SUMMARY_*` and `PIPEROOM_JUDGE_*` variables (a role on another provider names its model). `key` is a
+string sent only over this request; a role on a provider other than the main one reads that provider's standard key
+variable and cannot be given a key here.
+
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?after=<seq>`
@@ -619,7 +1724,54 @@ Server → client:
 ```
 Client → server: `{ "type": "ping" }` every 20 s (read timeout 60 s). Rules: rooms outside the caller's tenants are
 never sent; a `room` frame is sent only when the room's list-relevant state changed (status, title, severity,
-driver, agent state, triage, hypothesis text and confidence, open proposals and their approvals, pending suggestion
-count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
+driver, agent state, triage, hypothesis text and confidence, open proposals and their approvals, `last_fix`, pending
+suggestion count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
 500 ms; a full send buffer closes the socket with a policy-violation status and the client reconnects (it gets a
 fresh `rooms` frame). Clients fall back to polling `GET /api/rooms` when the socket cannot be opened.
+
+### Runner socket (U0; implemented by A5, runner A9; frames in `internal/setup/protocol/protocol.go`)
+
+`GET /api/runners/ws` — the one outbound connection a `piperoom-setup` runner holds to the server. No session
+cookie and no `X-User`: the first frame carries the pairing code (first connection) or the runner token
+(reconnect), both compared in constant time, both absent from every log and event. Frames are JSON `protocol.Frame`
+objects, at most 1 MiB; exactly one payload field is set, the one `type` names. Served only with
+`PIPEROOM_SETUP_ENABLED=on`.
+
+Runner → server: `pair {code | token, protocol_version?, protocol_minor?}` (first; the version since 1.1),
+`hello {os, arch, label, tools, project_dir, catalogue_version, protocol_version, protocol_minor?}` (only after the person confirmed the `welcome` on the runner's terminal), `result {id, ok,
+summary, data?, receipt, truncated?}`, `refused {id, op, reason, proposal_id?, step_index?}`, `resume {in_flight:
+[{id, proposal_id?, step_index, state: running | done, result?}]}` (first frame after a reconnect with a token),
+`credentials {request_id, secrets: [{name, value}]}` (only after a `register_credentials` and the terminal `y`;
+the one frame that ever carries a secret value; the server accepts it only while a `register_credentials` with
+that `request_id` is pending for the runner's room, once per request, with exactly the requested names, and
+refuses anything else as `setup.runner_refused {reason: "credentials"}`; the pipeline id is the room's, never the
+runner's; names and the pipeline id are validated before any path is built; each value is written through an
+`os.Root` at `PIPEROOM_SECRETS_DIR`, no symlink followed, as `<pipeline>/<name>` 0600, temp file then rename),
+`ping`/`pong`.
+
+Server → runner: `welcome {room_id, title, pipeline_id, tenant?, creator, protocol_version, protocol_minor?, targets?}` (what the
+runner shows before asking `y/N`), `token {token, expires_at}` (after `hello` and after every reconnect; idle expiry
+30 min), `op {id, op, params, tier, class, deadline, proposal_id?, step_index, params_hash?, proposal?}`, `cancel
+{id}`, `register_credentials {request_id, pipeline_id, names}` (one pending per room), `secret {name, value}` (one value the driver typed in the UI,
+stored nowhere on the server), `ping`/`pong`.
+
+**Versions (U1-0).** The protocol is `major.minor`: `protocol_version` is the major (the U0 field) and
+`protocol_minor` the minor (absent means 0); this build is `protocol.Current()`, 1.1. 1.0 is the U0 shape (no
+version in `pair`). Compatibility rule: a runner and a server pair when the majors are equal and each side's minor
+is at most one behind the other's, so a runner one minor behind the server still pairs, and so does one a minor
+ahead; a major below 1 or a negative minor never pairs. The server checks `protocol.ServerAccepts` at `pair` when it carries a version (a 1.0 `pair` does not, so
+the check waits for `hello`) and always at `hello` (which must repeat the `pair`'s version); a refusal is
+`setup.pairing {outcome: "refused"}` and a close with status 4001 (`protocol.CloseProtocolVersion`) whose reason
+names both versions, before the runner learns anything about the room. The runner checks `protocol.RunnerAccepts`
+on `welcome` before it prints the room and answers `refused {reason: "protocol_version"}`. A paired session speaks
+the lower minor (`protocol.Negotiate`). A minor bump only adds (a frame type, an optional field whose absence keeps
+the old meaning, an op, a refusal code); anything else, including a field a receiver must understand to stay safe,
+is a major bump. Toward a newer peer: unknown fields are ignored, an unknown frame type is dropped unread and never
+executed (`Frame.Check`, run before any handler → `ErrUnknownFrame`, the type logged at most 32 bytes; a known type with a missing or extra payload closes the socket), an
+unknown op is refused (`unknown_op`); neither side sends a frame type, nor the server an op, that the negotiated
+minor lacks (`Version.Has`, `protocol.FrameSince`, the op's `since` minor in the catalogue).
+
+Rules: ping every 20 s, a runner silent 90 s is `setup.runner_lost`; versions as above; one runner per room; the server
+re-sends an `op` the runner never saw at most once after `resume` and never one the runner reports running or
+done (`docs/design/replicas.md` §5 holds with the runner on the path); every `result` and `refused` becomes an
+`action.executed` (with `receipt`) or `setup.runner_refused` in the room log.

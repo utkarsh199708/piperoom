@@ -41,7 +41,7 @@ describe('SteerBox', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
     expect(screen.getByText(/your message goes to their queue/)).toBeInTheDocument()
-    fireEvent.focus(screen.getByLabelText('Steer the agent'))
+    fireEvent.focus(screen.getByLabelText('Suggest a step for Arjun'))
     expect(screen.getByRole('button', { name: 'Suggest' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Request control' })).toBeInTheDocument()
   })
@@ -281,6 +281,19 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
   })
 
+  it('names the composer for what it does: suggesting to the driver, or steering', () => {
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    const { rerender } = render(<SteerBox state={state} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Suggest a step for Arjun' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Steer the agent' })).not.toBeInTheDocument()
+    // Control moves to me: the name follows without a remount.
+    rerender(<SteerBox state={{ ...state, driver: { id: 'kabir', name: 'Kabir', lease_until: inAnHour() } }} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Steer the agent' })).toBeInTheDocument()
+    // Control moves away from me.
+    rerender(<SteerBox state={state} user={kabir} actions={actions} />)
+    expect(screen.getByRole('textbox', { name: 'Suggest a step for Arjun' })).toBeInTheDocument()
+  })
+
   it('with no driver a member can suggest', () => {
     const state = emptyRoomState('r1')
     render(<SteerBox state={state} user={kabir} actions={actions} />)
@@ -351,6 +364,20 @@ describe('SteerBox idle row (F1b)', () => {
     expect(section).not.toHaveAttribute('data-idle')
   })
 
+  it('idle composer stacks on phones and goes one row from sm up (KAN-564)', () => {
+    render(<SteerBox state={driving} user={arjun} actions={actions} />)
+    const section = screen.getByRole('region', { name: 'Steer' })
+    // Phone: column, so the composer gets the full width on its own row. sm+: the one-row bar.
+    expect(section).toHaveClass('flex-col', 'sm:flex-row', 'sm:h-14', 'sm:items-center')
+    expect(section).not.toHaveClass('flex-row', 'h-14')
+    const form = screen.getByLabelText('Steer the agent').closest('form')
+    expect(form).toHaveClass('sm:flex-1')
+    expect(form).not.toHaveClass('flex-1')
+    const statusBlock = section.querySelector('[data-slot="steer-status"]')?.parentElement
+    expect(statusBlock).toHaveClass('sm:shrink-0', 'sm:max-w-[45%]')
+    expect(statusBlock).not.toHaveClass('max-w-[55%]')
+  })
+
   it('sets --composer-h from the section height and clears it on unmount', () => {
     let notify: () => void = () => undefined
     vi.stubGlobal(
@@ -376,7 +403,7 @@ describe('SteerBox idle row (F1b)', () => {
 
   describe('F5 composer', () => {
     const driverState = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
-    const field = () => screen.getByLabelText('Steer the agent')
+    const field = () => screen.getByRole('textbox', { name: /^(Steer the agent|Suggest a step for Arjun)$/ })
 
     afterEach(() => {
       localStorage.clear()

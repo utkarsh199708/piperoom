@@ -69,10 +69,26 @@ func TestFakeWritesRefusedByDefault(t *testing.T) {
 			err := f.UpdateConfig(ctx, "pg-orders-connector", "decimal.handling.mode", "double")
 			return f.cfg["decimal.handling.mode"] == "double", err
 		}},
+		{"configConnect.UpdateConnectorConfigKeys", func(allow bool) (bool, error) {
+			f := newConfigConnect()
+			f.allowWrites = allow
+			err := f.UpdateConnectorConfigKeys(ctx, "pg-orders-connector", map[string]string{"decimal.handling.mode": "string", "tombstones.on.delete": "false"})
+			return f.cfg["decimal.handling.mode"] == "string" && f.cfg["tombstones.on.delete"] == "false", err
+		}},
+		{"pauseConnect.PauseConnector", func(allow bool) (bool, error) {
+			f := &pauseConnect{scriptedConnect: scriptedConnect{allowWrites: allow}}
+			err := f.PauseConnector(ctx, "pg-orders-connector")
+			return f.paused == "pg-orders-connector", err
+		}},
 		{"inheritedUntilSet.SetCompatibility", func(allow bool) (bool, error) {
 			f := &inheritedUntilSet{fakeRegistry: &fakeRegistry{allowWrites: allow}}
 			err := f.SetCompatibility(ctx, "pg.public.orders-value", "FULL")
 			return f.set && f.compatLevel == "FULL", err
+		}},
+		{"fakeProducer.Produce", func(allow bool) (bool, error) {
+			f := &fakeProducer{allowWrites: allow, failAt: -1}
+			_, err := f.Produce(ctx, "pg.public.orders", []clients.Record{{Key: []byte("k")}})
+			return len(f.produced) == 1, err
 		}},
 		{"compatSetFails.SetCompatibility", func(allow bool) (bool, error) {
 			// The fake's own error stands in for the registry failure; with

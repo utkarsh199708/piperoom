@@ -11,7 +11,33 @@ Nothing in this repo measures setup time. The slow part is usually the credentia
 requests in [permissions.md](permissions.md), and naming a reachable owner for each layer. Plan
 for those before you plan the install.
 
-## 0. Prerequisites
+New here? Start with [quickstart.md](quickstart.md): two commands, read-only, no room database.
+
+## Which variables matter first
+
+These ten settings are what a first install sets. Every other setting is under [Reference](#reference).
+All are read by `config.Load()` in `internal/config/config.go`, except `ANTHROPIC_API_KEY`, which the SDK reads.
+
+| Variable | Default | What it does | Required? |
+|---|---|---|---|
+| `PIPEROOM_HTTP_ADDR` | `127.0.0.1:8090` | Listen address. Dev login off loopback is refused unless both dev variables are set ([section 1](#1-configure-the-environment)); `--quickstart` always refuses it (`cmd/server/quickstart.go`). | No |
+| `PIPEROOM_AUTH_MODE` | `dev` | `dev` (pick a user, no password) or `oidc` (single sign-on; see [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv)). `--quickstart` forces `dev`. | Yes on any shared network: `oidc` |
+| `OWNERS_FILE`, `USERS_FILE` | `dev/owners.yaml`, `dev/users.yaml` | Who owns each layer, and who may log in, drive and approve. The server refuses to start when the two disagree ([section 2](#2-describe-your-pipeline-ownersyaml-and-usersyaml)). `discover -write-owners` writes both; `--quickstart` takes `--owners` and writes its own users file when `USERS_FILE` is unset. | Yes |
+| `CONNECT_URL` | `http://localhost:8083` | Kafka Connect REST. Not contacted at start-up, so a wrong URL shows on the first tool call. | Yes |
+| `KAFKA_BROKERS` | `localhost:29092` | Kafka bootstrap brokers, comma separated. | Yes |
+| `SCHEMA_REGISTRY_URL` | `http://localhost:8081` | Schema Registry. `""` or `off` means you have none. | Yes, or `off` |
+| `SOURCE_DB_URL` | the dev stack's `orders` database | The CDC source Postgres, read-only role. Pinged at start-up (`internal/clients/postgres/postgres.go`). | Yes |
+| `WAREHOUSE_DB_URL` | the dev stack's `warehouse` database | The warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`), read-only role. Pinged at start-up. | Yes |
+| `PIPEROOM_WRITE_MODE` | `off` | `off`: approved fixes are recorded but never run. `on`: they run. Any other value stops the start (`config.ParseWriteMode`). One switch per process ([section 7](#7-run-the-pilot)). | No |
+| `ANTHROPIC_API_KEY` | none | The model key for the default `anthropic` provider. Other providers: [section 1](#1-configure-the-environment). | Yes (`anthropic` provider) |
+
+Each URL and file setting falls back to the local dev stack when unset, so set every one you rely on.
+The full server (without `--quickstart`) also needs `PIPEROOM_DB_URL`, its own room database ([section 0](#0-prerequisites)).
+To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4](#4-start-the-service)).
+
+## Reference
+
+### 0. Prerequisites
 
 - **Go 1.27** to build `cmd/server` (`go.mod:3`: `go 1.27.2`), or **Docker with Compose v2** for the
   image in [deploy/README.md](../../deploy/README.md).
@@ -22,11 +48,15 @@ for those before you plan the install.
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
   tables at start-up (`cmd/server/main.go`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
-  the Snowflake account if `WAREHOUSE_KIND=snowflake`), Kafka brokers, Kafka Connect REST, Schema
-  Registry, the room database, and the model provider you choose (section 1): `api.anthropic.com`
+  the host set by `WAREHOUSE_KIND`: the Snowflake account, the Google BigQuery API endpoint and
+  `oauth2.googleapis.com` (where a service-account key file exchanges its ADC token), the Databricks
+  workspace, or the ClickHouse host), Kafka brokers, Kafka Connect REST, Schema Registry, the room
+  database, and the model provider you choose (section 1): `api.anthropic.com`
   (unless you pin `ANTHROPIC_BASE_URL`), the AWS Bedrock runtime in `AWS_REGION`, or the Vertex AI
   endpoint in `VERTEX_REGION`. Add `slack.com` only if you enable Slack. For Snowflake, add the
-  account host in the DSN, for example `<account>.snowflakecomputing.com`.
+  account host in the DSN, for example `<account>.snowflakecomputing.com`. For ClickHouse, add
+  the host in the DSN ([clickhouse.md](clickhouse.md)). For a batch pipeline, also allow the
+  `AIRFLOW_URL` host and, if set, the `DBT_CLOUD_URL` host.
 - **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `WAREHOUSE_KIND` (default
   `postgres`), `PIPEROOM_DB_URL`, `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`,
   `OWNERS_FILE`, `USERS_FILE`, and the model provider's settings (section 1). Unset, each of the URL
@@ -45,7 +75,7 @@ for those before you plan the install.
 - Read [README.md](README.md#read-this-first-pilot-limits) for the current limits, and
   [Supported scale](#supported-scale) for what one replica is tested to carry.
 
-## 1. Configure the environment
+### 1. Configure the environment
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`).
 `config.go` holds the fields and `config.go` the defaults. The settings are grouped below.
@@ -64,9 +94,9 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 |---|---|
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused in dev auth mode unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` **and** `PIPEROOM_DEV_ACK=dev-login-has-no-password` are both set (`cmd/server/listen.go`, `cmd/server/authsetup.go`; the deprecated `--allow-remote` flag is an alias of the first). The Docker image listens on `0.0.0.0` in `oidc` mode and sets neither dev variable (`Dockerfile`); `oidc` mode ignores both |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
-| `SOURCE_DB_URL` | source Postgres, the **read-only** role |
-| `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
-| `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go`). See [permissions.md](permissions.md#warehouse) |
+| `SOURCE_DB_URL` | source Postgres, the **read-only** role. A MySQL source (`mysql://`, with `source_kind: mysql` in `owners.yaml`) is designed but not accepted on this commit: the users and the URL rules are in [mysql-users.md](mysql-users.md) |
+| `WAREHOUSE_KIND` | `postgres` (default), `snowflake`, `bigquery`, `databricks` or `clickhouse`. A value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
+| `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). With `clickhouse`: a clickhouse-go/v2 DSN, `clickhouse://<user>:<password>@<host>:<port>/<db>?secure=true` (see [clickhouse.md](clickhouse.md)). With `bigquery`: `bigquery://<project>/<location>[?...]`, no credential in the DSN (Application Default Credentials, `internal/clients/bigquery/README.md`). With `databricks`: OAuth M2M `<host>/<http-path>?catalog=<catalog>&clientId=<id>&clientSecret=<secret>&authType=OAuthM2M` (preferred), or `token:<pat>@<host>/<http-path>?catalog=<catalog>`; one credential, in the DSN (`internal/clients/databricks/README.md:15-21`; `dsn.go:185-197`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (for Snowflake, `internal/clients/snowflake/snowflake.go`; for ClickHouse, a `readonly=2` profile, `internal/clients/clickhouse/client.go`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
 | `SCHEMA_REGISTRY_URL` | Schema Registry base URL, or `off` when the pipelines use no Schema Registry (the pipeline map then has no schema-subject nodes and the schema tools answer "Schema Registry not configured"). **Docker Compose: required** (`deploy/docker-compose.pilot.yml` refuses to start without it; a blank value is an error, so a forgotten registry is never read as none). **Helm:** the chart skips empty values, so an empty value is unset and the server falls back to the dev default `http://localhost:8081`, which a pod cannot reach: the registry then shows as unknown in the map. Set the URL or `off`. In the server itself (`internal/config/config.go`) an explicitly empty value also means none |
@@ -76,6 +106,27 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | Login: `PIPEROOM_AUTH_MODE`, `PIPEROOM_OIDC_*`, `PIPEROOM_AUTH_VIEWER_GROUPS`, `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX`, `PIPEROOM_TRUSTED_PROXIES`, `PIPEROOM_ALLOWED_HOSTS`, `PIPEROOM_SOLO_USER` | `PIPEROOM_AUTH_MODE` is `dev` (default) or `oidc`. Every one of these is described in [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv), with the identity provider setup. They are read in `internal/config/config.go` and checked in `internal/auth/settings.go` and `cmd/server/authsetup.go` |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`checkWebDir` in `cmd/server/main.go`; `internal/httpapi/static.go`). The Docker image sets it to `/web` (`Dockerfile`). Unset, the server serves the API and the probes only |
 | `PIPEROOM_RETENTION_DAYS` | **Live.** Deletes whole closed rooms (events, proposals, approvals, hand-offs) closed more than this many days ago, checked every 6 hours (`cmd/server/retention.go`; `internal/store/retention.go`). Open rooms are never deleted. Empty or `0` keeps everything; a value must be a whole number from 0 to 36500, or the start stops. Deletion cannot be undone: export a room first with `GET /api/rooms/{id}/export` (SHA-256 over the JCS form, `internal/room/service_export.go`) |
+
+**Batch pipeline readers (Airflow and dbt)**
+
+Set these only for a `kind: batch` pipeline. An empty `AIRFLOW_URL` turns the Airflow reader off;
+an empty `DBT_ARTIFACTS_DIR` and `DBT_CLOUD_URL` turns the dbt reader off. In both cases the batch
+tools stay registered and answer "not configured" (`internal/wiring/kinds.go`).
+
+| Variable | Meaning |
+|---|---|
+| `AIRFLOW_URL` | base URL of the Airflow webserver REST API v1 (its root, without `/api/v1`), `http` or `https` with no user info. Empty = the Airflow tools answer "not configured" (`internal/config/config.go`) |
+| `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` | basic auth for Airflow's `basic_auth` API backend. The two go together and need an `https` `AIRFLOW_URL` (`config.go` `ParseAirflow`) |
+| `AIRFLOW_TOKEN` | bearer token instead of basic auth, as managed Airflow services expect. Needs an `https` `AIRFLOW_URL` and excludes basic auth (`config.go` `ParseAirflow`) |
+| `DBT_ARTIFACTS_DIR` | absolute path to the directory holding `run_results.json` and `manifest.json` (dbt's `target/`); or dbt Cloud below, not both (`config.go` `ParseDBT`) |
+| `DBT_CLOUD_URL` | dbt Cloud base URL, e.g. `https://cloud.getdbt.com` (`config.go`) |
+| `DBT_CLOUD_TOKEN` | read-only dbt Cloud service token (**secret**) (`config.go`) |
+| `DBT_CLOUD_ACCOUNT_ID` | the `{a}` of `/api/v2/accounts/{a}/runs/` (`config.go`) |
+| `DBT_CLOUD_JOB_ID` | the job whose newest finished run's artifacts are read (`config.go`) |
+
+A batch pipeline has three layers — `orchestrator`, `transform` and `warehouse` — instead of the six
+CDC layers (`internal/events/events.go` `LayersOf`), and its `layers:` / `users.yaml` owners name
+those three. The least-privilege identity for each is in [permissions.md](permissions.md).
 
 **Model provider, triage and token budget**
 
@@ -122,6 +173,8 @@ an error that names the variable.
 | `PIPEROOM_WATCH_INTERVAL` | how often the watcher checks. Go duration, default `60s`, minimum `15s` |
 | `PIPEROOM_WATCH_CHECK_TIMEOUT` | deadline for one check, default `10s`, at most `10s` (the source role's statement timeout) |
 | `PIPEROOM_WATCH_COOLDOWN` | quiet time after a watcher room is closed, default `60m` |
+| `PIPEROOM_WATCH_MAX_OPEN_ROOMS` | most rooms the watcher keeps open at once: a whole number from `1` to `1000`, default `6`. It is not `PIPEROOM_MAX_AGENTS` (`config.ParseWatchMaxOpenRooms`, `cmd/server/main.go`) |
+| `PIPEROOM_WATCH_FORECAST_HORIZON` | how far ahead the `forecast` signal looks: a Go duration from `1h` to `168h`, default `48h`. A bad value stops the start (`config.ParseWatchForecast`, `cmd/server/main.go`). Today only the `slot_wal_bytes` metric can forecast, see [governance.md](governance.md#11-status-and-known-gaps-at-this-commit) |
 
 Modes:
 
@@ -152,6 +205,39 @@ What the source database needs:
 - No new grants: the watcher reads `pg_replication_slots` and calls the Connect status and config
   endpoints, the same reads the agent's tools already make ([permissions.md](permissions.md)).
 
+The watcher also runs the X-wave checks, from the same reads and the same credentials as the agent's tools
+(no new grant for Postgres; `DescribeConfigs` on the pipeline's topics for the retention check, else it logs one
+INFO line, `watch: retention check cannot read a config, no finding for it`, and judges nothing). They are
+`count_drift`, `row_drift`, `dup_keys`, `order_skew`, `config_drift`, `forecast` and the retention entries of
+`config_risk`. Their per-pipeline settings are the `watch:` and `declared_retention:` keys of
+[section 2b](#2b-x-wave-keys-in-ownersyaml); what each proves and where it stops is
+[governance.md](governance.md). The drift checks run only against a source Postgres and a Postgres warehouse;
+with another `WAREHOUSE_KIND` they are off, with one INFO line.
+
+**Changes, metrics and lineage export (X wave)**
+
+| Variable | Meaning |
+|---|---|
+| `CHANGES_WEBHOOK_SECRET` | optional, **secret**. Signs `POST /api/changes/webhook`, where your CI or deploy tool reports a deploy, a migration or a vendor incident. Several secrets, comma separated, while one rotates. Empty: the route answers `401` to everyone (`cmd/server/alerts.go` `changeWebhook`, `internal/alertin/changes.go`). Body, signature and a ready `curl`: [internal/alertin/README.md](../../internal/alertin/README.md#change-webhook-deploys-migrations-and-vendor-incidents-x4). The route is exempt from the Host allow-list, like the signed alert routes |
+| `PIPEROOM_CHANGES_RETENTION_DAYS` | deletes the change log and connector config versions older than this many days. Default `30`; `0` keeps them; at most `3650`. At most 5000 change rows per pipeline whatever it says; the newest config version of each connector is always kept (`config.ParseChangesRetentionDays`) |
+| `DEBEZIUM_METRICS_URL` | optional. The Prometheus text endpoint of the JMX exporter next to Kafka Connect, `http(s)://host:port/metrics`, no user info. It powers the tool `debezium_snapshot_progress` (is a snapshot running, rows scanned, rate). Empty: the tool answers "not configured". Read only for a deployment that has a CDC pipeline (`config.ParseDebeziumMetrics`, `internal/wiring/wiring.go`) |
+| `DEBEZIUM_METRICS_PREFIX` | metric name prefix, default `debezium_metrics_` |
+| `OPENLINEAGE_URL`, `OPENLINEAGE_NAMESPACE`, `OPENLINEAGE_API_KEY` | optional OpenLineage export (X7b), off while `OPENLINEAGE_URL` is unset. `OPENLINEAGE_URL` is the full endpoint events are POSTed to (Marquez `http://marquez:5000/api/v1/lineage`; DataHub `.../openapi/openlineage/api/v1/lineage`), `OPENLINEAGE_NAMESPACE` the job namespace (default `piperoom`), `OPENLINEAGE_API_KEY` a secret sent as `Authorization: Bearer`, only over https or http to a loopback host. A bad value stops the start. Sent from the elected leader only; what is sent and what is never sent: [governance.md](governance.md#7-openlineage-export) |
+
+On the Docker path `deploy/docker-compose.pilot.yml` passes only the variables it lists, and the list does not
+yet carry the variables above or `PIPEROOM_WATCH_MAX_OPEN_ROOMS` / `PIPEROOM_WATCH_FORECAST_HORIZON`
+(`deploy/pilot.env.example` and the Helm values do not name them either): add the ones you need to the
+`environment:` block of the compose file, or under `env:` (non-secret) or `secrets` (secret) in the Helm
+values. The deploy files belong to the C1 task.
+
+**Fix pull requests (Q7; proposed, not read on this commit)**
+
+`FORGE_KIND`, `GITHUB_API_URL`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE` (a
+**secret file**, never an environment value) and `PIPEROOM_FIXPR_APPLY_TIMEOUT` turn on the pull-request fix through
+one GitHub App installation. They are proposed in `docs/design/fix-pr.md` §5.6 and not in `internal/config/config.go`
+yet, and `owners.yaml` does not accept `repos:` yet, so set none of them on this commit. The App, its permissions,
+the key file, the ruleset and the `repos:` block are in [fix-pr-github.md](fix-pr-github.md).
+
 **Slack, Kafka, Connect and Registry**
 
 | Variable | Meaning |
@@ -176,7 +262,7 @@ Put secrets in your secret manager and inject them into the process environment.
 commit them, and do not put DSNs with passwords in shell history or tickets. Use
 `sslmode=require` (or stricter) for remote Postgres, not the dev default `sslmode=disable`.
 
-### 1a. Triage model and the token budget
+#### 1a. Triage model and the token budget
 
 **Triage model** (`PIPEROOM_TRIAGE_MODEL`, optional). The first turns of an investigation run on the
 triage model. The main model (`PIPEROOM_MODEL`) takes over for good when any of these happens
@@ -207,7 +293,7 @@ summary (`budget.go`; `internal/agent/endpoint.go`). Closing a room drops
 its count: the server calls `Endpoint.Forget` (`internal/agent/endpoint.go`) from the room-closed
 hook (`cmd/server/watch.go`), so the counts of closed rooms do not pile up in memory. Set `0` only if you accept an uncapped cost per room.
 
-## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
+### 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
 Start from `dev/owners.yaml` and `dev/users.yaml`. The loader refuses a pipeline that has no
 `topic_prefix`, no `source_tables` or no `connectors`, and refuses `sink_tables` without
@@ -241,6 +327,33 @@ users:
     layers: [kafka-connect, kafka, schema-registry]   # layers this person may approve
 ```
 
+A `kind: batch` pipeline (Airflow → dbt → warehouse) uses different fields and three layers instead
+of the CDC fields above:
+
+```yaml
+# owners.yaml — a batch pipeline
+pipelines:
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch                       # required to use the batch fields
+    dags: [revenue_daily]             # Airflow dag_ids the batch tools may read
+    dbt_project: dev/batch/dbt/analytics   # the dbt project path (dbt Cloud uses DBT_CLOUD_*)
+    models: [stg_orders, fct_revenue]      # dbt model names the dbt tools may read
+    sink_tables: [analytics.fct_revenue]   # the ONLY tables warehouse_row may read
+    sink_ts_column: loaded_at         # required when sink_tables is set
+layers:                               # the three batch layers (not the six CDC layers)
+  orchestrator: <user id>
+  transform: <user id>
+  warehouse: <user id>
+```
+
+A batch pipeline needs at least one of `dags` or `models`; it refuses the CDC fields
+(`topic_prefix`, `source_tables`, `connectors`, `consumer_groups`) and a `watch:` block
+(`internal/owners/kind.go` `validateBatch`). The Airflow and dbt connection settings
+(`airflow_url`, `dbt_artifacts_dir`, `dbt_cloud_url`, `dbt_cloud_token`, `dbt_cloud_account_id`,
+`dbt_cloud_job_id`) and the warehouse (`warehouse_db_url`, `warehouse_kind`) may also be set per
+pipeline under `connections:` (section 2a; `internal/wiring/connections.go`).
+
 Rules of thumb:
 
 - Every layer a fix can touch must have an owner who is actually on call and reachable.
@@ -260,14 +373,18 @@ Rules of thumb:
   watcher on or off for the pipeline and sets, per signal, `enabled`, `action` (`log` or `room`) and
   `for`; for `slot_wal` also `fire`, `clear` and `eta_sev1`; and the pipeline's `slot` name and
   `wal_headroom_bytes`. `watch.slot_wal.fire` also sets the slot-WAL warning threshold of the pipeline
-  map (`internal/topology/builder.go`). Without the block, the defaults apply. See
-  [docs/design/watcher.md](../design/watcher.md).
+  map (`internal/topology/builder.go`). Without the block, the defaults apply. The drift checks add
+  `reconcile_interval`, `count_tolerance`, `tables.<table>.reconcile` and four more signal names
+  ([section 2b](#2b-x-wave-keys-in-ownersyaml)). See [docs/design/watcher.md](../design/watcher.md).
+- The governance keys `declared_retention:` and `pii:`, the fleet key `team:` with the top-level `teams:`, and
+  the recovery keys `reprocess_topic:`, `recovery:`, `staging:` and `require_staging:` are in
+  [section 2b](#2b-x-wave-keys-in-ownersyaml).
 - A pipeline may also have an optional `shadow:` block (`enabled: true`) that makes every alert room
   of the pipeline a **blind agent room**: the agent investigates but proposes nothing and shows
   nothing until the room is closed and labelled. This is not the watcher's `log` mode. See
   [shadow-rooms.md](shadow-rooms.md).
 
-### 2a. Tenancy
+#### 2a. Tenancy
 
 Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
 
@@ -305,16 +422,47 @@ Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
 - Not per tenant in one deployment: the model key and its cost, `PIPEROOM_MAX_AGENTS`, the room
   database, the Slack channel and the people list.
 
-## 3. Prepare the source database
+#### 2b. X-wave keys in `owners.yaml`
 
-1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)).
+Every key below is optional. The loader decodes with `KnownFields(true)`, so a typo, or a key this table does
+not list, stops the start with the line number (`internal/owners/owners.go`).
+
+| Key | Where | What it does and the rules (a load error names the pipeline and the entry) |
+|---|---|---|
+| `team: checkout` | pipeline | The team that owns the pipeline, for `GET /api/fleet?team=`. With a `teams:` list it must be one of its ids and serve the pipeline's tenant; without one it is a free label with the id charset `^[a-z0-9][a-z0-9_-]{0,63}$` (`internal/owners/teams.go`) |
+| `teams:` | top level | The application teams that own services outside the pipelines, so the agent can name one and the driver can page it. Each entry is `{id, slack_channel, owns, tenant}`: `id` unique, in the charset above; `slack_channel` a Slack channel **id** (`C0123ABCD`, never `#name`); `owns` at least one service name as the change webhook's `service` sends it (at most 128 bytes), and a service in two teams is a load error; `tenant` required with a `tenants:` block and refused without one. A room sees the teams of its pipeline's tenant (`teams.go`) |
+| `reprocess_topic: pg.orders.reprocess` | pipeline (cdc) | The only topic the recovery action `kafka_replay_range` copies records into, so a consumer re-reads them there and the CDC topic stays untouched. A valid Kafka topic name that is none of the pipeline's CDC topics and no CDC, DLQ or reprocess topic of another pipeline on the same cluster. **Create the topic yourself**: the action refuses a missing one. Unset: the action refuses (`internal/owners/reprocess.go`, `internal/actions/kafka_replay_range.go`) |
+| `recovery: {max_rows: 250000}` | pipeline (cdc) | The most source rows one `pg_resnapshot_rows` step may re-emit. A whole number from `1` to `10000000`, default `100000`; a batch pipeline refuses the block (`internal/owners/recovery.go`) |
+| `staging:`, `require_staging:` | pipeline (cdc) | "Try in staging". `staging.connections` holds `connect_url` and/or `schema_registry_url` (plus their login and TLS keys, and `kafka_*`), each `{env: NAME}`, `{file: PATH}` or, for the two URLs only, `{value: "http://..."}` without a login. A staging URL equal to a production one is refused. `require_staging` lists action names whose steps need a healthy stage before approval; it needs a `staging:` block, and each name must be an action that can stage (today `connect_update_connector_config`, `schema_register` and `schema_set_compatibility`, `internal/actions/stage.go`). Needs write mode. A working file: `dev/owners.staging.yaml` (`internal/owners/staging.go`) |
+| `declared_retention: {topics: {...}, tables: {...}}` | pipeline | What the data owner promised, for the retention check: a topic or table name to `7d`, `36h`, `30m`, `45s` or `infinite` (a whole number of at least 1, at most 100 years). A `tables` key must be one of the pipeline's `source_tables` or `sink_tables`; a `topics` key a valid topic name (whether it belongs to the pipeline is checked at run time, with one INFO line). At most 200 entries (`internal/owners/declared_retention.go`) |
+| `pii: {include: [...], exclude: [...]}` | pipeline | Corrections to the column-name PII classifier. An entry is `<schema>.<table>.<column>` (the table one of the pipeline's) or a bare `<column>` (that column in every table); `include` may end in `:<class>` (`email`, `phone`, `name`, `address`, `national_id`, `card`, `ip`, `dob`; default `other`). A column in both lists, an unknown class or a two-part entry is an error. At most 500 entries per list (`internal/owners/pii.go`) |
+| `watch.reconcile_interval: 15m` | pipeline | How often the drift checks run; default `15m`, at least `1m` (`internal/owners/reconcile.go`) |
+| `watch.count_tolerance: 0.5%` | pipeline | The `count_drift` tolerance as a percentage from `0%` to `100%`, the `%` sign required; default `0.5%` |
+| `watch.tables.<table>.reconcile: off` | pipeline | Keeps the drift checks off a table (a sink that filters on purpose). The key must be one of the pipeline's `source_tables` or `sink_tables` |
+| `watch.signals.<name>: {enabled, action}` | pipeline | For `count_drift`, `row_drift`, `dup_keys` and `order_skew`: on by default, action `room`; `action: log` only logs (`internal/owners/watch.go`) |
+
+These look like settings but the loader **refuses** them today: `vendor_status_url` (the status-page poller in
+`internal/alertin/statuspage.go` exists, but the loader has no such key and the server does not start the
+poller; report vendor incidents through the change webhook instead), `watch.db_size_limit`, and
+`watch.signals.forecast` or `watch.signals.config_drift` (both run on fixed settings).
+
+A file that sets the governance keys, checked by `owners.Load` at this commit, is in
+[governance.md](governance.md#2-turn-it-on). The Slack bot must be a member of **every** `teams[].slack_channel`
+(section 6b).
+
+### 3. Prepare the source database
+
+1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)). For a MySQL
+   source (designed, not built on this commit), create the connector, read and write users of
+   [mysql-users.md](mysql-users.md) instead; there is no DDL audit trigger on MySQL (its DDL history is the
+   connector's schema history topic, `docs/design/mysql-source.md` §1).
 2. (Optional) have your DBA install the DDL audit trigger (`dev/postgres-init/02-ddl-audit.sql`)
    so the agent can see recent schema changes.
 3. Create an empty Postgres database and a role for Piperoom's own state, and put its URL in
    `PIPEROOM_DB_URL`. You do not run migrations by hand: `cmd/server` applies them at start-up
    (see step 4 and [permissions.md](permissions.md#room-database)).
 
-## 4. Start the service
+### 4. Start the service
 
 `cmd/server` is the room service: HTTP API, WebSocket, agent runner, the Slack mirror (if
 configured), the model endpoint, the web UI (if `PIPEROOM_WEB_DIR` is set) and the executor for
@@ -401,7 +549,7 @@ unknown id returns `401`. Every `POST` from curl needs `-H 'Content-Type: applic
 content type. In dev mode more than one `X-User` value (several header lines, or a comma in one
 line) answers `403 proxy_identity`.
 
-### Routes you need
+#### Routes you need
 
 All under `/api`, all JSON, and all need a logged-in user: the session cookie, or in dev mode `X-User`
 when curl sends no cookie. The signed alert routes need neither. (The full contract is `docs/api.md`.)
@@ -420,7 +568,7 @@ when curl sends no cookie. The signed alert routes need neither. (The full contr
 | pipeline map | `GET /api/pipelines/{pid}/topology` |
 | probes (no `X-User`, outside `/api`) | `GET /healthz`, `GET /readyz`; `/readyz` checks the room store with a timeout (`server.go`; `internal/httpapi/health.go`) |
 
-### What happens on a restart
+#### What happens on a restart
 
 On start-up the service reloads every room from the event log (`Load` in `internal/room/service.go`).
 **It starts no agent by itself**, because a restart must not spend model calls on rooms nobody is
@@ -473,7 +621,7 @@ marked failed, but not immediately: a sweep fails a fix once it has been stale l
 - Only the in-memory `--demo` store uses the older text "proposal was interrupted by a service restart
   before it finished; create a new proposal to retry".
 
-### Network exposure
+#### Network exposure
 
 The server has two login modes (F1; `docs/api.md` §Login; `docs/design/auth.md`).
 
@@ -502,7 +650,7 @@ authentication. The Docker image does not set it: it starts in `oidc` mode, whic
 switch. To run the image in dev mode on purpose, use `deploy/docker-compose.dev-auth.yml` and put the
 acknowledgement in `deploy/.env` ([deploy/README.md](../../deploy/README.md)).
 
-### Supported scale
+#### Supported scale
 
 What one Piperoom replica is proposed to carry, from what was tested. These are floors measured on a shared 4-vCPU VM with
 Postgres on the same machine, not limits and not a target. The run on managed Postgres over the network,
@@ -547,7 +695,7 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
   hit a 30-second replay limit; reconnecting finishes the replay (review §6.4). The tested case is 20
   people at once.
 
-## 5. Verify with a dry run (no real alert needed)
+### 5. Verify with a dry run (no real alert needed)
 
 1. Check the agent can read every system without opening a room:
    `go run ./cmd/investigate` with a test alert for your `pipeline_id`
@@ -561,7 +709,8 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
    sink table. Both must fail. Do not test with the room-database role (`PIPEROOM_DB_URL`); that
    role is meant to write. Same for Kafka produce with the Piperoom principal.
 4. Confirm the approval gate: have the agent propose a fix and confirm it does not run
-   until every required owner has approved. Reject it, and confirm nothing changed.
+   until every required owner has approved. Reject it, and confirm nothing changed. With write mode
+   off (the default) an approved fix never runs at all (section 7).
    In dev mode, dev login is not proof of identity (F1), so the approval check is only as good as
    your network control. In `oidc` mode the approver is the signed-in person.
 5. Practise a hand-off between two engineers.
@@ -570,7 +719,7 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
 7. If you run the container: `docker compose` health reports `healthy` once `/healthz` answers
    (`Dockerfile`), and the UI loads from the published port.
 
-## 6. Wire up alerts
+### 6. Wire up alerts
 
 Use the signed route when you can: `POST /api/alerts/{source}`, where `{source}` is one of
 `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (`internal/alertin/alertin.go`,
@@ -627,7 +776,7 @@ an identical body (`service_room.go`; index key);
   differs. The generic key is a hash of the body (`internal/alertin/parse.go`).
 - **Driver.** The room has no driver until someone takes control (`POST /api/rooms/{id}/control/grant`).
 
-## 6b. Slack (optional, outbound only)
+### 6b. Slack (optional, outbound only)
 
 - Turn it on by setting `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` (section 1), then restart. The log
   says "slack bridge enabled" (`cmd/server/slack.go`). With neither set, it logs "slack bridge
@@ -635,6 +784,12 @@ an identical body (`service_room.go`; index key);
 - Use one **private** channel and add the bot to it. A bot that is not in the channel gets
   `not_in_channel`, and that room's mirror stops (`internal/slackbridge/bridge.go`). A bad
   token, a missing scope or an archived channel also stop the mirror (`bridge.go`).
+- Invite the bot to **every** channel named in `teams[].slack_channel` too ([section 2b](#2b-x-wave-keys-in-ownersyaml)).
+  A driver's `POST /api/rooms/{id}/page-team` posts there: with the bot missing, the page fails with
+  `503 slack_unavailable` and the Slack code `not_in_channel`, nothing is recorded and the driver can retry;
+  with the bridge off (`SLACK_BOT_TOKEN` or `SLACK_CHANNEL_ID` unset) it answers `409 slack_off`
+  (`internal/room/service_pageteam.go`). Give a team channel the same care as the room channel
+  ([data-handling.md](data-handling.md#5-controls-you-should-apply)).
 - Slack only receives events. Nothing in Slack reaches a room: no approvals, no steers
   (`internal/slackbridge/bridge.go`). Approvals happen only in Piperoom.
 - Each room gets one thread. After a restart the bridge reads its saved thread state and
@@ -643,7 +798,7 @@ an identical body (`service_room.go`; index key);
 - What it posts, including approver names, the close resolution and the byte limits, is in
   [data-handling.md](data-handling.md#1-where-data-goes).
 
-## 6c. Status of the login design and other features
+### 6c. Status of the login design and other features
 
 - **The login design is built** (`docs/design/auth.md`), including auth PR 4 (merged at `8283a58`):
   an approve must send the `params_hash` of the proposal the approver saw (a missing one is `400`,
@@ -656,21 +811,32 @@ an identical body (`service_room.go`; index key);
   nothing deletes closed rooms by age.
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
   [permissions.md](permissions.md#warehouse)).
+- **ClickHouse** is selectable with `WAREHOUSE_KIND=clickhouse` (section 1 and
+  [clickhouse.md](clickhouse.md)).
 
-## 7. Run the pilot
+### 7. Run the pilot
 
-- Before live rooms, consider running the agent **blind** on one or two pipelines for a few weeks
-  ([shadow-rooms.md](shadow-rooms.md)): it proposes nothing, nobody sees its output until after the
-  incident, and you get a measured hit rate at the end. Turn it on per pipeline in `owners.yaml`.
-- Start in **read-only mode** for Connect and Registry (no write grants). Let proposals show
-  what the agent would do, and have the owners make the change by hand.
-- After a few incidents, enable write mode for one layer at a time. The exact calls to allow are
-  in [permissions.md](permissions.md#kafka-connect) and [permissions.md](permissions.md#schema-registry).
+- Start **read-only**: live rooms, with `PIPEROOM_WRITE_MODE` unset or `off` (the default). The agent still
+  proposes and people still approve, but a fully approved proposal never runs: the room shows
+  `open_proposals[].blocked: "write_mode_off"` and `GET /healthz` reports `"write_mode": "off"`
+  (`cmd/server/writemode.go`: `writeModeSetup`; `internal/room/writemode.go`; `internal/httpapi/health.go`).
+  Owners make the change by hand. Grant read-only credentials too: the switch stops the executor, it does
+  not take write rights away from a role that has them ([decision.md §4](decision.md#4-recommendation-read-only-by-default-shadow-as-a-toggle-then-write-mode)).
+- **Shadow is an opt-in toggle per pipeline, not a phase.** With `shadow: {enabled: true}` on a pipeline in
+  `owners.yaml`, the agent runs blind on that pipeline's alerts, proposes nothing, and its output is shown
+  only after the room closes ([shadow-rooms.md](shadow-rooms.md)). Other pipelines stay live and read-only.
+- After the approvers have used read-only rooms, set `PIPEROOM_WRITE_MODE=on` and restart. It is **one
+  switch per process**; every replica that shares the room database must use the same value
+  (`cmd/server/writemode.go`). Write mode per layer is not built (out of scope in
+  `tasks/P1-quickstart-readonly.md`). To limit the first layer, limit the credentials: grant the Kafka
+  Connect restart calls first. The exact calls are in [permissions.md](permissions.md#kafka-connect) and
+  [permissions.md](permissions.md#schema-registry). `--quickstart` never runs with write mode on
+  (`cmd/server/quickstart.go`).
 - Start with the cheapest model you trust for triage (section 1a), and keep the token budget on.
   Watch the per-room token use until you know what an investigation costs.
 - Keep a list of every wrong or unhelpful agent answer and send it to the Piperoom team.
 
-## Troubleshooting
+### Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -679,12 +845,18 @@ an identical body (`service_room.go`; index key);
 | `kafka_topic_config` permission error | missing `DescribeConfigs` on the pipeline's topics (see [permissions.md](permissions.md#kafka)) |
 | `pg_row` / `warehouse_row` "table is not in pipeline" | table is missing from `source_tables` / `sink_tables`, or the `pipeline_id` the agent used is not the room's pipeline |
 | `connect_config` shows `***` | expected: secret-looking keys are redacted; their values are never shown (`internal/tools/kafkatools/connect_tools.go`) |
-| Proposal cannot execute | write mode not granted on Connect/Registry (by design) |
+| Proposal approved by every layer but nothing runs; the room shows "waiting for write mode" (`blocked: "write_mode_off"`) | `PIPEROOM_WRITE_MODE` is unset or `off`, the default, by design. Set `on` and restart the full server (section 7). It is one switch per process, not per layer (`cmd/server/writemode.go`) |
+| Write mode is on, but a fix step fails with a permission error | the Connect or Registry role has no write grant for that call ([permissions.md](permissions.md#kafka-connect)) |
+| Server exits at start with "PIPEROOM_WRITE_MODE=... want off or on" | the value is not `off` or `on`; `true` and `1` are refused too (`internal/config/config.go`: `ParseWriteMode`) |
+| `--quickstart` exits with "PIPEROOM_WRITE_MODE=on cannot be used with it" | the quickstart is read-only; unset the variable, or run the full server (`cmd/server/quickstart.go`) |
+| `--quickstart` exits with "listens on loopback only" | `PIPEROOM_HTTP_ADDR` is not a loopback address; use `127.0.0.1:<port>` (`cmd/server/quickstart.go`: `checkQuickstartAddr`) |
+| `--quickstart` exits with "writes a users file only when the owners file names one user" | the owners file names several owners or a group; set `USERS_FILE` to a users file that lists them (`cmd/server/quickstart.go`: `quickstartUsers`) |
+| `discover -write-owners` wrote `owners.yaml.draft` and exited 1 | the draft failed `owners.Load`; the error is at the top of the `.draft` file (`cmd/discover/write.go`: `installOwners`) |
 | `connect_update_connector_config` fails with a 405 | Connect older than 3.5 does not support `PATCH /connectors/{name}/config` (`connect.go`) |
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
 | Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go`) |
 | Server exits at start with "ping for migrations" | `PIPEROOM_DB_URL` cannot be reached, or the role lacks rights to create tables |
-| Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres` or `snowflake` (`internal/wiring/warehouse.go`) |
+| Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres`, `snowflake`, `bigquery`, `databricks` or `clickhouse` (`internal/wiring/warehouse.go`) |
 | Server exits at start with "warehouse (snowflake)" | the DSN is wrong, the password is not URL-encoded, or the account host is unreachable. The error is redacted, so check the DSN by hand (`internal/wiring/warehouse.go`) |
 | Snowflake sink table reports not found | a missing table, or one the role cannot see, maps to `clients.ErrNotFound`. Names are upper-cased and double-quoted, so a table created with quotes and a mixed case cannot be reached (`internal/clients/snowflake/README.md`, `identifier.go`) |
 | Server exits at start with "PIPEROOM_MODEL_PROVIDER" | an unknown provider, or `bedrock` without `AWS_REGION`, or `vertex` without `VERTEX_PROJECT_ID` or `VERTEX_REGION` (`internal/agent/endpoint.go`) |
@@ -693,6 +865,10 @@ an identical body (`service_room.go`; index key);
 | Bedrock rejects the first request with a model error | `PIPEROOM_MODEL` still holds the first-party name; use a Bedrock model or inference-profile id (`internal/wiring/model.go`) |
 | A room stops with "token budget" | the room used its `PIPEROOM_ROOM_TOKEN_BUDGET`; raise it or open a new room (`internal/agent/budget.go`) |
 | Server exits at start with "slack bridge" | only one of `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` is set, or the channel is a `#name` not an ID |
+| A drift signal never fires, and the log says `drift check off for this pipeline` | the source or the warehouse cannot be read for it: the checks run only on a source Postgres and a Postgres warehouse (`WAREHOUSE_KIND=postgres`); the line names the reason (`internal/watch/drift.go`, [governance.md](governance.md#2-turn-it-on)) |
+| Server exits at start with `field vendor_status_url not found`, or `unknown signal` for `forecast` or `config_drift` | the key is not in the loader; remove it ([section 2b](#2b-x-wave-keys-in-ownersyaml)) |
+| `POST /api/changes/webhook` answers `401` | `CHANGES_WEBHOOK_SECRET` is empty, or the signature does not match `<ts>.<body>` byte for byte (send with `--data-binary`) |
+| Paging a team answers `503 slack_unavailable` | the bot is not in that team's `slack_channel` ([section 6b](#6b-slack-optional-outbound-only)) |
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
 | Web UI cannot reach the API (network errors, `421`, `403`) | the UI must be same-origin with the API: use `npm run dev` (Vite proxies `/api` and `/auth`) or the served `PIPEROOM_WEB_DIR`. There is no CORS. A tunnel or proxy that rewrites `Host` needs `PIPEROOM_ALLOWED_HOSTS` |

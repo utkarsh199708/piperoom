@@ -1,0 +1,39 @@
+# Kafka Connect worker metrics as the JMX exporter names them without rules
+# (domain kafka.connect -> kafka_connect_, MBean type and attribute, '-' -> '_').
+# HELP kafka_connect_task_error_metrics_total_record_errors The number of record processing errors in this task.
+# TYPE kafka_connect_task_error_metrics_total_record_errors untyped
+kafka_connect_task_error_metrics_total_record_errors{connector="pg-orders-connector",task="0",} 120.0
+kafka_connect_task_error_metrics_total_record_errors{connector="pg-orders-connector",task="1",} 0.0
+kafka_connect_task_error_metrics_total_record_failures{connector="pg-orders-connector",task="0",} 120.0
+kafka_connect_task_error_metrics_total_record_failures{connector="pg-orders-connector",task="1",} 0.0
+kafka_connect_task_error_metrics_total_records_skipped{connector="pg-orders-connector",task="0",} 118.0
+kafka_connect_task_error_metrics_total_records_skipped{connector="pg-orders-connector",task="1",} 0.0
+kafka_connect_task_error_metrics_total_retries{connector="pg-orders-connector",task="0",} 0.0
+kafka_connect_task_error_metrics_total_errors_logged{connector="pg-orders-connector",task="0",} 120.0
+kafka_connect_task_error_metrics_deadletterqueue_produce_requests{connector="pg-orders-connector",task="0",} 2.0
+kafka_connect_task_error_metrics_deadletterqueue_produce_failures{connector="pg-orders-connector",task="0",} 2.0
+kafka_connect_task_error_metrics_last_error_timestamp{connector="pg-orders-connector",task="0",} 1.7929152E12
+# another connector on the same worker: never mixed in
+kafka_connect_task_error_metrics_total_records_skipped{connector="pay-connector",task="0",} 999.0
+kafka_connect_task_error_metrics_deadletterqueue_produce_failures{connector="pay-connector",task="0",} 999.0
+# HELP kafka_connect_connect_worker_metrics_connector_running_task_count The number of running tasks of the connector on the worker.
+kafka_connect_connect_worker_metrics_connector_total_task_count{connector="pg-orders-connector",} 2.0
+kafka_connect_connect_worker_metrics_connector_running_task_count{connector="pg-orders-connector",} 2.0
+kafka_connect_connect_worker_metrics_connector_failed_task_count{connector="pg-orders-connector",} 0.0
+kafka_connect_connect_worker_metrics_connector_paused_task_count{connector="pg-orders-connector",} 0.0
+kafka_connect_connect_worker_metrics_connector_unassigned_task_count{connector="pg-orders-connector",} 0.0
+kafka_connect_connect_worker_metrics_connector_restarting_task_count{connector="pg-orders-connector",} 0.0
+kafka_connect_connect_worker_metrics_connector_failed_task_count{connector="pay-connector",} 1.0
+kafka_connect_connect_worker_metrics_task_startup_failure_total 1.0
+kafka_connect_connect_worker_metrics_task_startup_attempts_total 5.0
+kafka_connect_connect_worker_metrics_connector_startup_failure_total 0.0
+kafka_connect_connect_worker_metrics_connector_startup_attempts_total 2.0
+kafka_connect_connect_worker_metrics_connector_count 2.0
+kafka_connect_connect_worker_metrics_task_count 3.0
+kafka_connect_connect_worker_rebalance_metrics_rebalancing 0.0
+kafka_connect_connect_worker_rebalance_metrics_completed_rebalances_total 4.0
+kafka_connect_connect_worker_rebalance_metrics_epoch 7.0
+kafka_connect_connect_worker_rebalance_metrics_rebalance_avg_time_ms 230.0
+kafka_connect_connect_worker_rebalance_metrics_rebalance_max_time_ms 410.0
+kafka_connect_connect_worker_rebalance_metrics_time_since_last_rebalance_ms 720000.0
+jvm_memory_bytes_used{area="heap",} 1.23456789E8

@@ -5,10 +5,13 @@ const PREFIXES: [string, string][] = [
   ['connect_', 'kafka-connect'],
   ['schema_', 'schema-registry'],
   ['pg_', 'postgres'],
+  ['mysql_', 'mysql'],
   ['kafka_', 'kafka'],
   ['consumer_', 'consumer'],
   ['warehouse_', 'warehouse'],
   ['wh_', 'warehouse'],
+  ['dag_', 'orchestrator'],
+  ['dbt_', 'transform'],
 ]
 
 export function toolLayer(tool: string): string {

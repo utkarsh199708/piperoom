@@ -24,6 +24,10 @@ describe('worstNode', () => {
   it('is null for an empty lane', () => {
     expect(worstNode([])).toBeNull()
   })
+  it('ranks a schema_subject node by health like any other kind', () => {
+    const subject = n('sr', 'fail', { kind: 'schema_subject' })
+    expect(worstNode([n('a', 'ok'), subject, n('b', 'warn')])?.id).toBe('sr')
+  })
 })
 
 describe('DLQ visibility', () => {
@@ -39,5 +43,10 @@ describe('DLQ visibility', () => {
   })
   it('never hides other kinds', () => {
     expect(visibleNodes([n('a', 'ok'), dlq('ok', '0')]).map((x) => x.id)).toEqual(['a'])
+  })
+  it('never hides a schema_subject node', () => {
+    const subject = n('sr', 'ok', { kind: 'schema_subject' })
+    expect(dlqVisible(subject)).toBe(true)
+    expect(visibleNodes([n('a', 'ok'), subject]).map((x) => x.id)).toEqual(['a', 'sr'])
   })
 })

@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
 )
 
@@ -113,13 +114,14 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	st.agentRun++
 	run := st.agentRun
 	st.shadowActive = true
+	openedAt := st.snap.OpenedAt
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
 		defer gate.release()
 		var tokens atomic.Int64
-		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens, run)
+		status := s.superviseShadow(ctx, roomID, title, pipelineID, openedAt, raw, st, gate, &tokens, run)
 		gate.release()
 		s.finishShadow(roomID, st, status, tokens.Load())
 	}()
@@ -129,7 +131,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 // "" when the run row could not be created (then nothing ran and nothing is
 // written). A nil return maps to ShadowHypothesised here; finishShadow lowers
 // it to no_hypothesis when the run emitted none.
-func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, run uint64) string {
+func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, openedAt time.Time, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, run uint64) string {
 	// Second try (the first was at open): no row means nothing could store
 	// the run's output, so no tokens are spent on it.
 	cctx, ccancel := context.WithTimeout(ctx, shadowWriteTimeout)
@@ -138,7 +140,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	if err != nil {
 		return ""
 	}
-	alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
+	alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 	// Actions and Proposals stay nil: propose_fix lists "(none)" and refuses,
 	// so a shadow run can never reach a write (design section 4).
 	deps := agent.Deps{
@@ -146,6 +148,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		Inbox:  gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 		Sink:   roomSink{s: s, roomID: roomID, run: run},
 		Logger: s.log,
+		Watch:  s.watch,
 		Usage:  func(used int64) { tokens.Store(used) },
 	}
 	backoff := agentRetryBackoff
@@ -532,11 +535,11 @@ func errShadowNotAllowed() *Error {
 }
 
 // canGradeShadow decides whether user may label or grade a room of pipelineID:
-// the first layer of events.Layers that authorizeLayer grants, which is exactly
+// the first layer of owners.KnownLayers that authorizeLayer grants, which is exactly
 // CheckExportAccess without the auditor shortcut (design 3.5). grant is the
 // string recorded in identity.grant.
 func (s *Service) canGradeShadow(pipelineID string, user User) (string, bool) {
-	for _, layer := range events.Layers {
+	for _, layer := range owners.KnownLayers() {
 		if g, err := s.authorizeLayer(pipelineID, user, layer, "", false); err == nil {
 			return g, true
 		}
@@ -585,7 +588,7 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 		return events.Event{}, errShadowNotAllowed()
 	}
 	if !isLayer(actualLayer) {
-		return events.Event{}, validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.Layers, ", ")))
+		return events.Event{}, validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.IncidentLayers(), ", ")))
 	}
 	if len(terms) < 1 || len(terms) > maxRootCauseTerms {
 		return events.Event{}, validation(fmt.Sprintf("root_cause_terms must hold 1 to %d terms", maxRootCauseTerms))
@@ -655,12 +658,9 @@ func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, lay
 }
 
 func isLayer(l string) bool {
-	for _, x := range events.Layers {
-		if x == l {
-			return true
-		}
-	}
-	return false
+	// An actual layer is where the incident was, so the setup layer
+	// (environment) is refused (U0).
+	return slices.Contains(events.IncidentLayers(), l)
 }
 
 // ShadowEvent is a shadow log entry as GET /api/rooms/{id}/shadow returns it:

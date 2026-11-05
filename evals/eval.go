@@ -8,8 +8,12 @@ import (
 	"sync"
 	"time"
 
+	evalsetup "piperoom/evals/setup"
+	"piperoom/internal/actions"
+	"piperoom/internal/actions/fixpr"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -40,8 +44,10 @@ type Config struct {
 	// it, see Provenance); it is copied into every result.
 	Commit string
 	// Tap, when set, is the model tap the runner's requests go through; it
-	// gives every result the models used and the prompt hash (modeltap.go).
-	Tap *ModelTap
+	// gives every result the models used and the prompt hash: the Anthropic
+	// HTTP tap (modeltap.go) or the in-process tap of the other adapters
+	// (neutraltap.go). Never a typed nil: leave it unset for an untapped run.
+	Tap PromptTap
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
 	// Judge forces the judge mode for every scenario ("terms", "claude" or
@@ -65,8 +71,18 @@ type Config struct {
 	// evaluation (0: DefaultJudgeMaxCalls; negative: none). Past the cap an
 	// ambiguous hypothesis is unjudged and counts as not passed.
 	JudgeMaxCalls int
+	// SetupDir is the directory of runner-session recordings (U1-20;
+	// evals/setup/recordings). A scenario with a recording gets the source and
+	// target kinds it reports under when it names none, and the recording is
+	// replayed as part of every run's score (setup_replay.go): a setup
+	// scenario whose recording is missing or broken fails, so the setup
+	// evidence is never assumed. Empty reads none; the setup scenarios then
+	// fail with "no runner-session recording".
+	SetupDir string
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
+	// refusal latches the first API refusal of the evaluation (infra.go).
+	refusal *refusalLatch
 	// OnRun, if set, is called after each run, for progress output. Calls are
 	// serialized.
 	OnRun func(RunResult, Transcript)
@@ -88,6 +104,9 @@ func (c Config) withDefaults() Config {
 	if c.judge == nil {
 		c.judge = newJudgeGate(c)
 	}
+	if c.refusal == nil {
+		c.refusal = &refusalLatch{}
+	}
 	return c
 }
 
@@ -106,6 +125,39 @@ func (c Config) gate() *judgeGate {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	// Copy the slice: attaching the recordings and the per-scenario setup
+	// error must not mutate the caller's scenarios.
+	scenarios = append([]Scenario(nil), scenarios...)
+	var setupErr error
+	if cfg.SetupDir != "" {
+		recs, err := evalsetup.LoadDir(cfg.SetupDir)
+		if err != nil {
+			// A broken recording costs the setup scenarios their runs, not
+			// every other scenario's: warn, and fail the setup scenarios below
+			// with the load error. evalrun -check fails on the same error
+			// before any run starts.
+			cfg.Logger.Warn("evals: setup recordings not loaded; the setup scenarios fail their runs", "dir", cfg.SetupDir, "err", err)
+			setupErr = err
+		}
+		for i := range scenarios {
+			if rec, ok := recs[scenarios[i].Name]; ok {
+				attachSetup(&scenarios[i], rec)
+			}
+		}
+	}
+	for i := range scenarios {
+		if !scenarios[i].isSetupScenario() || scenarios[i].setupRec != nil {
+			continue
+		}
+		switch {
+		case setupErr != nil:
+			scenarios[i].setupErr = fmt.Sprintf("the recordings did not load: %v", setupErr)
+		case cfg.SetupDir == "":
+			scenarios[i].setupErr = "no runner-session recording (Config.SetupDir is empty)"
+		default:
+			scenarios[i].setupErr = fmt.Sprintf("no runner-session recording for %s in %s", scenarios[i].Name, cfg.SetupDir)
+		}
+	}
 	if cfg.Runner == nil {
 		run, err := NewEndpointRunner(ctx, config.Load(), cfg.Logger)
 		if err != nil {
@@ -125,14 +177,23 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	if err := ValidateAll(scenarios, defs); err != nil {
 		return Report{}, err
 	}
+	// Each scenario's room gets its source kind's tools (Q8j): built here,
+	// once, so the workers below only read them.
+	var mysqlDefs []tools.Tool
+	roomDefs := make(map[string][]tools.Tool, len(scenarios))
+	for _, sc := range scenarios {
+		if roomDefs[sc.Name], err = scenarioTools(sc, defs, &mysqlDefs); err != nil {
+			return Report{}, err
+		}
+	}
 	for _, m := range []string{cfg.Judge, cfg.DefaultJudge} {
 		if !validJudge(m) {
-			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q or %q)", m, JudgeTerms, JudgeClaude, JudgeAuto)
+			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q (alias %q) or %q)", m, JudgeTerms, JudgeLLM, JudgeClaude, JudgeAuto)
 		}
 	}
 	for _, sc := range scenarios {
-		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeClaude && cfg.JudgeClient == nil {
-			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags claude and set ANTHROPIC_API_KEY)", sc.Name, JudgeClaude)
+		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeLLM && cfg.JudgeClient == nil {
+			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags livejudge and set the model provider's credentials)", sc.Name, JudgeLLM)
 		}
 	}
 
@@ -167,12 +228,29 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 				if ctx.Err() != nil {
 					continue
 				}
-				res, tr, err := runOne(ctx, j.sc, j.run, defs, cfg)
-				if err != nil {
-					errMu.Lock()
-					runErr = errors.Join(runErr, err)
-					errMu.Unlock()
-					continue
+				var (
+					res RunResult
+					tr  Transcript
+				)
+				if s := cfg.refusal.get(); s != nil {
+					// The API refused an earlier run: start no model run, and
+					// do not let the rest read as failures of the agent.
+					res = infraResult(j.sc.Name, j.run, "not started: the API refused an earlier run ("+s.String()+")")
+				} else {
+					var err error
+					res, tr, err = runOne(ctx, j.sc, j.run, roomDefs[j.sc.Name], cfg)
+					if err != nil {
+						status, refused := APIRefusal(err)
+						if !refused {
+							errMu.Lock()
+							runErr = errors.Join(runErr, err)
+							errMu.Unlock()
+							continue
+						}
+						// The live judge was refused after the run.
+						cfg.refusal.set(status, err)
+						res = infraResult(j.sc.Name, j.run, fmt.Sprintf("HTTP %d: %s", status, err))
+					}
 				}
 				results[j.idx] = &res
 				if cfg.OnRun != nil {
@@ -204,6 +282,10 @@ feeding:
 	if err := ctx.Err(); err != nil {
 		return rep, fmt.Errorf("evals: evaluation stopped: %w", err)
 	}
+	if s := cfg.refusal.get(); s != nil {
+		rep.InfraStop = s.String()
+		return rep, fmt.Errorf("%w (%s): the affected and remaining runs are infra, not scored", ErrAPIRefused, s)
+	}
 	if runErr != nil {
 		return rep, runErr
 	}
@@ -211,17 +293,36 @@ feeding:
 }
 
 // ValidateAll checks every scenario against the given tool definitions and
-// the production action names.
+// the production action names. defs are a Postgres room's tools (LiveTools in
+// production); a MySQL scenario is checked against LiveToolsFor(mysql), the
+// tools its room gets, and its fix_targets against a MySQL room's actions.
+// Action names are every production action of either source, so a MySQL
+// scenario can still forbid a pg_* action its room never offers.
 func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	toolInputs := ToolInputs(defs)
 	areg, err := LiveActions(Resources{}, nil)
 	if err != nil {
 		return err
 	}
-	var actionNames []string
-	for _, a := range areg.All() {
-		actionNames = append(actionNames, a.Name())
+	myAreg, err := LiveActions(Resources{SourceKind: owners.SourceKindMySQL}, nil)
+	if err != nil {
+		return err
 	}
+	var actionNames []string
+	known := map[string]bool{}
+	for _, r := range []*actions.Registry{areg, myAreg} {
+		for _, a := range r.All() {
+			if !known[a.Name()] {
+				known[a.Name()] = true
+				actionNames = append(actionNames, a.Name())
+			}
+		}
+	}
+	// repo_open_pull_request is offered only in a room whose pipeline lists
+	// repos: (Q7j); any scenario may still name it.
+	actionNames = append(actionNames, fixpr.Name)
+	var mysqlDefs []tools.Tool
+	var mysqlInputs map[string][]string
 	var errs []error
 	seen := map[string]bool{}
 	for _, sc := range scenarios {
@@ -231,8 +332,32 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 			errs = append(errs, fmt.Errorf("evals: duplicate scenario name %q", sc.Name))
 		}
 		seen[sc.Name] = true
-		errs = append(errs, sc.Validate(toolInputs, actionNames))
-		if fe := sc.checkFixTargets(areg); len(fe) > 0 {
+		inputs, scAreg := toolInputs, areg
+		if sc.sourceKind() == owners.SourceKindMySQL {
+			if mysqlInputs == nil {
+				d, err := sourceTools(sc, defs, &mysqlDefs)
+				if err != nil {
+					return err
+				}
+				mysqlInputs = ToolInputs(d)
+			}
+			inputs, scAreg = mysqlInputs, myAreg
+		}
+		if len(sc.Pipeline.Repos) > 0 {
+			// The room of a pipeline with repos: has the repository tools
+			// and repo_open_pull_request over its fixture repos.
+			d, err := scenarioTools(sc, defs, &mysqlDefs)
+			if err != nil {
+				return err
+			}
+			inputs = ToolInputs(d)
+			if scAreg, err = LiveActions(sc.resources(), nil); err != nil {
+				errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
+				continue
+			}
+		}
+		errs = append(errs, sc.Validate(inputs, actionNames))
+		if fe := sc.checkFixTargets(scAreg); len(fe) > 0 {
 			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, errors.Join(fe...)))
 		}
 		// Malformed connect_status data would only surface mid-run otherwise.

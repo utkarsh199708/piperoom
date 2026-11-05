@@ -48,6 +48,25 @@ describe('catchUpSummary', () => {
     expect(s?.items).toEqual(['a fix was proposed'])
   })
 
+  it('a viewer owner, and an owner in a room that is not open, are not told a proposal needs them', () => {
+    const next = { ...prev(), proposals: [proposal(['kafka-connect'])] }
+    expect(catchUpSummary(prev(), next, { ...me, role: 'viewer' })?.items).toEqual(['a fix was proposed'])
+    const closed = { ...prev(), status: 'closed' as const }
+    expect(catchUpSummary(closed, { ...closed, proposals: [proposal(['kafka-connect'])] }, me)?.items).toEqual(['a fix was proposed'])
+  })
+
+  it('points the driver at a proposal whose only pending layer is a fallback layer, in an open room only', () => {
+    // Arjun drives but does not own "consumer"; nobody does, so the driver decides it (P2b fallback_layers).
+    const p = { ...proposal(['consumer']), fallback_layers: ['consumer'] }
+    const s = catchUpSummary(prev(), { ...prev(), proposals: [p] }, me)
+    expect(s?.items).toEqual(['a proposal needs you'])
+    expect(s?.target).toBe('proposal')
+    const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['postgres'] }
+    expect(catchUpSummary(prev(), { ...prev(), proposals: [p] }, kabir)?.items).toEqual(['a fix was proposed'])
+    const closed = { ...prev(), status: 'closed' as const }
+    expect(catchUpSummary(closed, { ...closed, proposals: [p] }, me)?.items).toEqual(['a fix was proposed'])
+  })
+
   it('reports a fix that ran or failed', () => {
     const base = { ...prev(), proposals: [proposal(['postgres'])] }
     const ran = { ...base, proposals: [{ ...base.proposals[0], executed: [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'x' }] }] }

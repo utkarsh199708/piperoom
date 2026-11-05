@@ -355,12 +355,8 @@ func (f roomFacts) eligible() (eligibility, error) {
 	if !f.hasLabel || strings.TrimSpace(f.label.Cause) == "" || strings.TrimSpace(f.label.ActualLayer) == "" {
 		return eligibility{}, ErrLearnedUnlabelled
 	}
-	known := false
-	for _, l := range events.Layers {
-		known = known || l == f.label.ActualLayer
-	}
-	if !known {
-		return eligibility{}, fmt.Errorf("%w: actual_layer %q is not one of %s", ErrLearnedUnlabelled, f.label.ActualLayer, strings.Join(events.Layers, ", "))
+	if !contains(incidentLayers(), f.label.ActualLayer) {
+		return eligibility{}, fmt.Errorf("%w: actual_layer %q is not one of %s", ErrLearnedUnlabelled, f.label.ActualLayer, strings.Join(incidentLayers(), ", "))
 	}
 	var el eligibility
 	confirmed := false

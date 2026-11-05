@@ -55,6 +55,8 @@ type fakeConnect struct {
 	configFn   func(context.Context, string) (map[string]string, error)
 	restartTFn func(context.Context, string, int) error
 	restartCFn func(context.Context, string) error
+	validateFn func(context.Context, string, map[string]string) (connect.ValidateResult, error)
+	defsFn     func(context.Context, string) ([]connect.ConfigKeyDef, error)
 	// allowWrites lets the write methods call their hooks. Off by default.
 	allowWrites bool
 	refusals    atomic.Int32
@@ -80,6 +82,23 @@ func (f *fakeConnect) RestartConnector(ctx context.Context, n string) error {
 		return refuseWrite(&f.refusals, "fakeConnect", "RestartConnector")
 	}
 	return f.restartCFn(ctx, n)
+}
+
+// ValidateConfig and PluginConfigDef make fakeConnect satisfy ConfigValidator,
+// so a test that asserts the validator path registers the tool. The hooks are
+// optional: a read-only sweep that never reaches them is fine.
+func (f *fakeConnect) ValidateConfig(ctx context.Context, class string, cfg map[string]string) (connect.ValidateResult, error) {
+	if f.validateFn == nil {
+		return connect.ValidateResult{}, errors.New("fakeConnect: ValidateConfig hook not configured")
+	}
+	return f.validateFn(ctx, class, cfg)
+}
+
+func (f *fakeConnect) PluginConfigDef(ctx context.Context, class string) ([]connect.ConfigKeyDef, error) {
+	if f.defsFn == nil {
+		return nil, errors.New("fakeConnect: PluginConfigDef hook not configured")
+	}
+	return f.defsFn(ctx, class)
 }
 
 type fakeRegistry struct {

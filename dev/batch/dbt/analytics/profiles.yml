@@ -1,0 +1,14 @@
+# The dev warehouse (dev/postgres-init/03-databases.sql). Local dev credentials
+# only, set by the compose service (dev/docker-compose.yml, service airflow).
+analytics:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_HOST') }}"
+      port: 5432
+      user: "{{ env_var('WAREHOUSE_USER') }}"
+      password: "{{ env_var('WAREHOUSE_PASSWORD') }}"
+      dbname: warehouse
+      schema: analytics
+      threads: 1

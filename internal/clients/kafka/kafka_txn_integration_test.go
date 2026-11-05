@@ -16,11 +16,12 @@ import (
 func TestAdminReadsOnTransactionalTopic(t *testing.T) {
 	brokers := requireKafka(t)
 	c := dlqTestClient(t, brokers)
-	w, _ := newTxnWriter(t, brokers)
+	w, adm := newTxnWriter(t, brokers)
 
 	w.begin(3, "committed")
 	w.end(kgo.TryCommit) // offsets 0..2, commit marker at 3
 	waitForTopic(t, c, w.topic)
+	waitForBrokerOffsets(t, adm, w.topic, 4, 4) // the commit marker is on the partition
 	check := func(wantEnd int64) {
 		t.Helper()
 		start := time.Now()
@@ -42,6 +43,7 @@ func TestAdminReadsOnTransactionalTopic(t *testing.T) {
 	check(4)
 
 	w.begin(2, "open") // offsets 4..5 stay undecided
+	waitForBrokerOffsets(t, adm, w.topic, 6, 4)
 	check(6)
 	w.end(kgo.TryAbort)
 }

@@ -62,6 +62,11 @@ function busyRoom(): RoomState {
     title: 'Orders stale',
     pipeline_id: 'orders',
     driver: { id: 'arjun', name: 'Arjun' },
+    // Two people, so the driver is offered a hand-off (P2).
+    members: [
+      { id: 'arjun', name: 'Arjun', role: 'driver' },
+      { id: 'priya', name: 'Priya', role: 'watching' },
+    ],
     steps: [{ id: 's1', title: 'Check lag', tool_calls: [], messages: [] }],
     proposals: [
       {
@@ -109,6 +114,28 @@ describe('role-aware room screen', () => {
     expect(screen.getByLabelText('Steer the agent')).toBeInTheDocument()
     expect(screen.getByLabelText('Comment on this step')).toBeInTheDocument()
     expect(screen.queryByText('View only')).not.toBeInTheDocument()
+  })
+
+  it('a closed room has no step comment box for a member, and the box goes when the room closes (KAN-559)', () => {
+    const { rerender } = showRoom(busyRoom())
+    expect(screen.getByLabelText('Comment on this step')).toBeInTheDocument()
+    vi.mocked(useRoom).mockReturnValue({
+      state: { ...busyRoom(), status: 'closed', closed_at: '2026-10-11T10:30:00Z', resolution: 'fixed' },
+      presence: [],
+      conn: 'live',
+      error: null,
+      actions,
+      ...staleOff,
+    })
+    rerender(
+      <MemoryRouter initialEntries={['/rooms/r1']}>
+        <Routes>
+          <Route path="/rooms/:roomId" element={<RoomScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    expect(screen.queryByLabelText('Comment on this step')).not.toBeInTheDocument()
+    expect(screen.getByText('Check lag')).toBeInTheDocument()
   })
 
   it('a viewer sees a View only badge and no action control', () => {

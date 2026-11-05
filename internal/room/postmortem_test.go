@@ -233,9 +233,16 @@ func TestPostmortemSourceHandoffWhenFresh(t *testing.T) {
 	if !strings.Contains(md, "summary source: handoff `h_") {
 		t.Fatalf("footer:\n%s", md)
 	}
-	snap, err := svc.GetRoom(context.Background(), r.ID)
-	if err != nil || snap.Postmortem.Status != "drafted" || snap.Postmortem.Source != "handoff" {
-		t.Fatalf("snapshot postmortem = %+v, %v", snap.Postmortem, err)
+	// waitPM saw the event in the store; the drafting goroutine publishes the
+	// room's snapshot only when it releases the room's lock, a moment later.
+	var snap room.RoomSnapshot
+	waitFor(t, 3*time.Second, func() bool {
+		var err error
+		snap, err = svc.GetRoom(context.Background(), r.ID)
+		return err == nil && snap.Postmortem.Status == "drafted"
+	})
+	if snap.Postmortem.Source != "handoff" {
+		t.Fatalf("snapshot postmortem = %+v, want source handoff", snap.Postmortem)
 	}
 }
 

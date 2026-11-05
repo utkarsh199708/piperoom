@@ -173,7 +173,8 @@ recordings:
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '3301877'}
     summary: |-
@@ -303,11 +304,82 @@ recordings:
     summary: |
       publication dbz_publication (connector user piperoom)
       public.orders: in_publication=yes, selectable=yes
+  # W4p (KAN-499): reads of the standard path (or a named pre-fix check) that run 39994729845 asked and no recording above answered.
+  # Summaries follow the Go summary code of each tool on main, composed by hand over this scenario's values (nothing was
+  # read from a running stack); connect_worker_logs is the not-configured answer.
+  # connect_worker_logs is recorded as the tool's own not-configured answer (no log reader), as the lead convention says.
+  - tool: kafka_throughput
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 123300 records (137/s) over 3 partitions; median 46/s, max p0 46/s → even
+      order-sync (Stable, 1 members): lag 2949113; pg.public.orders p1 33% (983668)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "15m"}
+    summary: |-
+      orders last 15m: no skew found
+      pg.public.orders: 123300 records (137/s) over 3 partitions; median 46/s, max p0 46/s → even
+      order-sync (Stable, 1 members): lag 2949113; pg.public.orders p1 33% (983668)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "30m"}
+    summary: |-
+      orders last 30m: no skew found
+      pg.public.orders: 246600 records (137/s) over 3 partitions; median 46/s, max p0 46/s → even
+      order-sync (Stable, 1 members): lag 2949113; pg.public.orders p1 33% (983668)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "1h"}
+    summary: |-
+      orders last 1h: no skew found
+      pg.public.orders: 493200 records (137/s) over 3 partitions; median 46/s, max p0 46/s → even
+      order-sync (Stable, 1 members): lag 2949113; pg.public.orders p1 33% (983668)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: kafka_throughput
+    input: {window: "6h"}
+    summary: |-
+      orders last 6h: no skew found
+      pg.public.orders: 2959200 records (137/s) over 3 partitions; median 46/s, max p0 46/s → even
+      order-sync (Stable, 1 members): lag 2949113; pg.public.orders p1 33% (983668)
+      no consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples (the watcher does not run here)
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-11T01:00:00Z", until: "2026-10-11T03:00:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 10m0s from 2026-10-11T01:00:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      01:00 | 659370 | 0 | 659370 | +0
+      01:10 | 659370 | 0 | 659370 | +0
+      01:20 | 659370 | 0 | 659370 | +0
+      01:30 | 659370 | 0 | 659370 | +0
+      01:40 | 659370 | 0 | 659370 | +0
+      01:50 | 659370 | 0 | 659370 | +0
+      02:00 | 659370 | 0 | 659370 | +0
+      02:10 | 659370 | 0 | 659370 | +0
+      02:20 | 659370 | 0 | 659370 | +0
+      02:30 | 659370 | 0 | 265559 | -393811
+      02:40 | 659370 | 0 | 265559 | -393811
+      02:50 | 659370 | 0 | 265559 | -393811
+      verdict: sink is missing 1181433 rows in 02:30–03:00; the topic carried only 0 change events for 1978110 source rows (connector side)
+      keys not compared: 7912440 source / 6731007 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 4120338 rows inserted since stats reset, 796677 dead tuples, last autovacuum 2026-10-11T05:12:41Z, 0 session(s) waiting on a lock
+  - tool: dlq_peek
+    input: {topic: "pg.public.orders.dlq"}
+    error: "out of scope: DLQ topic \"pg.public.orders.dlq\" is not part of this room's pipeline \"orders\" (none declared (use connector for a sink's DLQ))"
 
 expect:
   root_cause:
     - [retention, log start, expired, aged out, deleted before]
-    - [lost, loss*, skipped, gap*, never reached]
+    # Group 2 accepts loss that has already happened. Not bare 'deleted', 'missing from' or 'not
+    # applied' (group 1 has 'deleted before'; the alert echoes 'differ'), and none that a plan
+    # ('retention will delete') could satisfy. The ticket's three 'before ... read/applied' terms
+    # (before it read, before order-sync read, before order-sync applied) are NOT here: each also
+    # matches the slow-consumer traps 'nothing was deleted before order-sync read it' (T1, T2, T13
+    # in scenario_terms_test.go), because the matcher's denials do not reach 'before ...'. The
+    # judge decides those wordings.
+    - [lost, loss*, skipped, gap*, never reached, unrecoverable, 'no longer replay*', 'can no longer be replayed', 'gone from', 'never read']
   # "Reset order-sync to latest" is the named trap: it skips even more.
   root_cause_forbidden:
     - [reset*, latest]

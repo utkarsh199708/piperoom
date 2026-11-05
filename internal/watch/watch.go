@@ -26,6 +26,10 @@
 // The consumer-group signals (F6): consumer_lag, group_unstable and
 // offset_below_log_start read GroupLag per group (Deps.Lag) and the log-start
 // offsets of the CDC topics (lag_signals.go).
+//
+// The drift signals (X1b): count_drift, row_drift, dup_keys and order_skew
+// compare source and sink rows and scan the CDC topics every
+// reconcile_interval through optional readers (drift.go).
 package watch
 
 import (
@@ -34,6 +38,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +124,9 @@ type PipelineClients struct {
 	// Lag reads consumer-group lag on the set's cluster (nil: the
 	// consumer-group signals stay unknown, as with Deps.Lag).
 	Lag LagReader
+	// Warehouse is the set's sink warehouse (nil: count_drift and row_drift
+	// are off for the set's pipelines, as with Deps.Warehouse).
+	Warehouse clients.WarehouseReader
 }
 
 // Deps are the watcher's dependencies.
@@ -144,6 +152,13 @@ type Deps struct {
 	// with one log line. offset_below_log_start also needs Kafka for the
 	// log-start offsets.
 	Lag LagReader
+	// Warehouse is the sink warehouse client. The drift signals (X1b,
+	// drift.go) find their optional readers on it and on Source and Kafka by
+	// type assertion: clients.Reconciler on Source and Warehouse for
+	// count_drift and row_drift, clients.DupScanner on Kafka (or Lag) for
+	// dup_keys and order_skew. Nil, or a client without the reader, turns
+	// those checks off for the pipeline with one INFO line.
+	Warehouse clients.WarehouseReader
 	// ClientsFor, when set, gives each pipeline the clients of its own client
 	// set (docs/design/tenancy.md section 5) and Source, Connect and Kafka are
 	// not used (nor Lag). Pipelines of one set share each read of a tick.
@@ -158,6 +173,19 @@ type Deps struct {
 	// from PIPEROOM_MAX_AGENTS: a room beyond the agent pool still opens, gets
 	// the triage pass and queues for an agent. Zero means 6.
 	MaxOpenRooms int
+	// Samples, when set, turns on the sample history and forecasts (X3a,
+	// forecast.go): the room store's watch_samples. Forecast comes from
+	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
+	Samples  SampleStore
+	Forecast config.WatchForecast
+	// Status, when set, gets one clients.WatchStatus per watched pipeline at
+	// the end of every tick (X5a, status.go): the room store's watch_status,
+	// which the fleet view reads on any replica.
+	Status clients.WatchStatusWriter
+	// ConfigVersions, when set, keeps every connector config the watcher
+	// reads whose hash or keyed fingerprints changed (X5c,
+	// config_versions.go): the room store's connector_config_versions.
+	ConfigVersions clients.ConfigVersionWriter
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -180,10 +208,12 @@ const (
 )
 
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
-// New signals go at the end so existing titles keep their order.
-var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
+// New signals go at the end so existing titles keep their order; the
+// forecasts (one id per metric, forecast.go) come last. config_drift has one
+// id per connector (config_drift.go), after these (pipeState.ids).
+var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart, owners.SignalLongTx}, forecastIDs()...)
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -195,6 +225,8 @@ type pipeState struct {
 	samples []sample
 	// slot is the slot name found for the pipeline (cached across ticks).
 	slot string
+	// ltx is the long_tx memory of the restart_lsn held now (long_tx.go).
+	ltx *longTxMem
 	// dlqFirst is, per DLQ topic, when the current growth episode was first
 	// seen (the first rising sample). It is cleared when the signal quiets.
 	dlqFirst map[string]time.Time
@@ -219,6 +251,9 @@ type pipeState struct {
 	// bypassCooldown: a severity rise re-opened an acked incident
 	// (reviveWorse); the next open skips the cooldown.
 	bypassCooldown bool
+	// reopenOf, when set, is when the room whose close acked the signals now
+	// firing again was closed (rearmClosed). The next room, or join, says so.
+	reopenOf time.Time
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
 	lastPost  time.Time
@@ -229,6 +264,23 @@ type pipeState struct {
 	// ackLocked, in memory). A storm follower never had a room under its own
 	// dedup key, so the room service cannot tell its cooldown; this can.
 	lastClosed time.Time
+	// roomKey is the dedup key the watcher opened roomID under (DedupKey or a
+	// ForecastDedupKey); "" for a room it only joined.
+	roomKey string
+	// lastSample is when each metric was last sampled (forecast.go).
+	lastSample map[string]time.Time
+	// fcClosed is, per forecast metric, when a room carrying its forecast
+	// closed: the per-metric cooldown the watcher saw itself.
+	fcClosed map[string]time.Time
+	// drift is the memory of the drift checks (drift.go); driftClosed is,
+	// per drift id, when a room carrying it closed: the (pipeline, table,
+	// kind) cooldown.
+	drift       *driftMem
+	driftClosed map[string]time.Time
+	// cfgBase is each connector's approved config (config_drift.go).
+	cfgBase map[string]*driftBase
+	// ret is the retention memory (retention.go); nil while config_risk is off.
+	ret *retentionMem
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
@@ -248,6 +300,7 @@ type Watcher struct {
 	conn       ConnectClient
 	kafka      clients.DLQReader
 	lag        LagReader
+	wh         clients.WarehouseReader
 	clientsFor func(pipelineID string) PipelineClients
 	own        *owners.Owners
 	rooms      RoomSink
@@ -289,6 +342,24 @@ type Watcher struct {
 	chgFailing bool
 	// lagNoReaderLogged keeps the "no lag reader" line to one.
 	lagNoReaderLogged bool
+	// retNoReaderLogged keeps the "cannot read topic configs" line to one.
+	retNoReaderLogged bool
+
+	// Sample history and forecasts (forecast.go); nil samples = off.
+	samples SampleStore
+	horizon time.Duration
+
+	// status receives the tick's status rows (status.go); nil = off.
+	status clients.WatchStatusWriter
+	// Connector config versions (config_versions.go); nil versions = off.
+	// versionJobs are planned under mu by evaluate and written by the tick.
+	versions    clients.ConfigVersionWriter
+	versionJobs []versionJob
+
+	// slotOff keeps the "slot signals off" INFO line of a MySQL pipeline to
+	// one per pipeline (source_kind.go). Its own lock: targets runs outside mu.
+	slotOffMu sync.Mutex
+	slotOff   map[string]bool
 }
 
 const maxClosedRemembered = 256
@@ -328,12 +399,18 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, wh: d.Warehouse, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
+		samples: d.Samples, horizon: d.Forecast.Horizon, status: d.Status,
+		versions: d.ConfigVersions,
+		slotOff:  map[string]bool{},
+	}
+	if w.horizon <= 0 {
+		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms
@@ -427,11 +504,37 @@ func (w *Watcher) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Before evaluate, which judges config_risk with these reads.
+	w.readRetention(ctx, now, ts, obs)
+	if ctx.Err() != nil {
+		return
+	}
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
+	jobs := w.planSamples(now, ts, obs)
+	vjobs := w.versionJobs
+	w.versionJobs = nil
 	w.mu.Unlock()
+	w.writeVersions(ctx, vjobs)
+	if ctx.Err() != nil {
+		return
+	}
+	w.writeSamples(ctx, now, jobs)
+	if ctx.Err() != nil {
+		return
+	}
+	w.checkDrift(ctx, now, ts, fired)
+	if ctx.Err() != nil {
+		return
+	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
+	}
+	if w.status != nil && ctx.Err() == nil {
+		w.mu.Lock()
+		rows := w.buildStatusesLocked(now, ts)
+		w.mu.Unlock()
+		w.writeStatuses(ctx, rows)
 	}
 	w.log.Debug("watch: tick done", "mode", string(w.cfg.Mode), "pipelines", len(ts),
 		"took", w.clock.Now().Sub(now).String())
@@ -439,8 +542,10 @@ func (w *Watcher) tick(ctx context.Context) {
 
 // OnRoomClosed tells the watcher that the driver closed a room. Wire it to the
 // room service's room-closed hook. Signals that still fire in the pipeline
-// become acked: the same incident does not open another room, and the watcher
-// stays quiet until the signal clears. pipelineID and dedupKey are unused: the
+// become acked: the same incident does not open another room at once. The
+// watcher stays quiet for one cooldown; a signal that still fires after it
+// opens a new room that says it reopens after a close (rearmClosed). A signal
+// that clears first is simply ok again. pipelineID and dedupKey are unused: the
 // room is found by roomID, so a storm room acks every pipeline that posts into
 // it, whatever key it was opened under.
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
@@ -462,16 +567,41 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 }
 
 // ackLocked turns firing signals into acked and forgets the room.
+//
+// A room the watcher opened for forecasts alone (ForecastDedupKey) starts the
+// cooldown of those forecasts only: a real signal later on the pipeline must
+// still open a room (X3).
 func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
+	now := w.clock.Now()
+	real := !strings.HasPrefix(ps.roomKey, ForecastDedupKey(pipelineID, ""))
 	for id, ss := range ps.sigs {
-		if ss.phase == phaseFiring {
-			ss.ack()
+		m := forecastMetric(id)
+		if m == "" && ss.phase != phaseOK && ss.notified {
+			real = true
+		}
+		if ss.phase == phaseFiring && id != retentionID {
+			// A retention finding never had a room of its own to close.
+			ss.ack(now)
+			if driftKind(id) != "" {
+				if ps.driftClosed == nil {
+					ps.driftClosed = map[string]time.Time{}
+				}
+				ps.driftClosed[id] = now
+			}
+			if m != "" {
+				if ps.fcClosed == nil {
+					ps.fcClosed = map[string]time.Time{}
+				}
+				ps.fcClosed[m] = now
+			}
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
 	}
-	ps.roomID, ps.owned, ps.follower = "", false, false
-	ps.lastClosed = w.clock.Now()
+	ps.roomID, ps.owned, ps.follower, ps.roomKey = "", false, false, ""
+	if real {
+		ps.lastClosed = now
+	}
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 }
 

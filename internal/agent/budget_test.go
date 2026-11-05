@@ -107,7 +107,7 @@ func TestMessageUsageCountsCacheAndCompaction(t *testing.T) {
 			{"type":"compaction","input_tokens":1000,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},
 			{"type":"message","input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":20,"cache_read_input_tokens":300}
 		]}}`)
-	got := messageUsage(msg)
+	got := messageUsage(sdkUsage(msg))
 	if got.input != 330+1000 || got.output != 5+50 {
 		t.Fatalf("messageUsage = %+v, want input 1330 and output 55 (compaction added once, message iteration not double counted)", got)
 	}
@@ -115,10 +115,10 @@ func TestMessageUsageCountsCacheAndCompaction(t *testing.T) {
 
 // ---- loop tests ----
 
-func budgetRunner(t *testing.T, scripted model, b *tokenBudget, sink *fakeSink, opts Options) (*runner, *recordingTool) {
+func budgetRunner(t *testing.T, scripted sdkModel, b *tokenBudget, sink *fakeSink, opts Options) (*runner, *recordingTool) {
 	t.Helper()
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	r := newTestRunner(t, &budgetModel{inner: scripted, budget: b, loop: true}, &fakeInbox{waitErr: context.Canceled}, sink, rec, opts)
+	r := newTestRunnerM(t, &budgetModel{inner: viaSDK(scripted), budget: b, loop: true}, &fakeInbox{waitErr: context.Canceled}, sink, rec, opts)
 	return r, rec
 }
 
@@ -224,8 +224,8 @@ func TestUsageAccumulatesAcrossTurnsAndCacheTokens(t *testing.T) {
 
 // ---- endpoint: the budget outlives a run ----
 
-func testEndpoint(m model, limit int64) *Endpoint {
-	return &Endpoint{provider: ProviderAnthropic, limit: limit, model: m, log: discardLogger(), budgets: map[string]*tokenBudget{}, triageTurns: defaultTriageTurns}
+func testEndpoint(m sdkModel, limit int64) *Endpoint {
+	return &Endpoint{provider: ProviderAnthropic, limit: limit, model: viaSDK(m), log: discardLogger(), budgets: map[string]*tokenBudget{}, triageTurns: defaultTriageTurns}
 }
 
 // endpointRun runs one room on ep and returns Run's error.

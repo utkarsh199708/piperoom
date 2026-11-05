@@ -33,6 +33,55 @@ type stack struct {
 	cfg  config.Config
 	http *http.Client
 	log  *slog.Logger
+
+	// Test seams; nil or zero means the real thing. Unit tests play Postgres
+	// and docker compose with them, since neither runs without Docker.
+	sqlFn     func(ctx context.Context, db string, sql ...string) (string, error)
+	composeFn func(ctx context.Context, env map[string]string, args ...string) error
+	// composeOverrideFn replaces `docker compose` with an extra override file
+	// (the wal-level-replica break) in unit tests.
+	composeOverrideFn func(ctx context.Context, override string, args ...string) error
+	// execInFn replaces `docker exec` output reads (the setup-break plugin
+	// layout and reachability checks) in unit tests.
+	execInFn func(ctx context.Context, container string, argv ...string) (string, int, error)
+	// execAsFn is execInFn with the user the command runs as ("" = the
+	// image's user, "0" = root); it wins over execInFn when both are set.
+	execAsFn         func(ctx context.Context, user, container string, argv ...string) (string, int, error)
+	clickhouseExecFn func(ctx context.Context, query string) error
+	// llmHTTP replaces the pull client (llm-up) in unit tests.
+	llmHTTP *http.Client
+	groupFn func(ctx context.Context, group string) (groupView, error)
+	// detachFn replaces runDetached (`docker exec -d …`, a session that
+	// outlives devctl) in unit tests.
+	detachFn func(ctx context.Context, name string, args ...string) error
+	// airflowCLIFn replaces `docker exec … airflow …` in unit tests.
+	airflowCLIFn func(ctx context.Context, args ...string) (string, error)
+	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
+	// in unit tests, since the fake broker does not delete retained segments.
+	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)
+	// logStartFn replaces the log start read (rows-lost-after-retention) in
+	// unit tests, for the same reason.
+	logStartFn func(ctx context.Context, topic string) (map[int32]int64, error)
+	// batchGap spaces the batches of rows-lost-after-retention (default
+	// 1.5 s, past segment.ms).
+	batchGap time.Duration
+	// stagingStepTimeout bounds the slot drop and the topic delete of
+	// stagingDown (default 30 s each).
+	stagingStepTimeout time.Duration
+	// poll is how often waitFor checks its condition (default 2 s).
+	poll time.Duration
+	// connectStart bounds a Connect worker start in the setup breaks
+	// (default connectStartTimeout).
+	connectStart time.Duration
+	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
+	// retry (default every 2 s for up to 60 s).
+	clickhouseRetryEvery, clickhouseRetryFor time.Duration
+	// mongoFn replaces the mongo profile's client (the checks of the MongoDB
+	// setup breaks, setupbreaks_mongo.go) in unit tests.
+	mongoFn func(ctx context.Context) (mongoSource, error)
+	// mongoStartTimeout bounds the wait for a restarted mongod (default
+	// mongoStartTimeout, setupbreaks_mongo.go); unit tests shorten it.
+	mongoStartTimeout time.Duration
 }
 
 func newStack(log *slog.Logger) (*stack, error) {
@@ -63,6 +112,9 @@ func repoRoot() (string, error) {
 
 // compose runs docker compose on dev/docker-compose.yml with extra env vars.
 func (s *stack) compose(ctx context.Context, env map[string]string, args ...string) error {
+	if s.composeFn != nil {
+		return s.composeFn(ctx, env, args...)
+	}
 	full := append([]string{"compose", "-f", filepath.Join(s.root, "dev", "docker-compose.yml")}, args...)
 	cmd := exec.CommandContext(ctx, "docker", full...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -76,8 +128,19 @@ func (s *stack) compose(ctx context.Context, env map[string]string, args ...stri
 	return nil
 }
 
+// detached starts a command that keeps running after devctl exits.
+func (s *stack) detached(ctx context.Context, name string, args ...string) error {
+	if s.detachFn != nil {
+		return s.detachFn(ctx, name, args...)
+	}
+	return runDetached(ctx, name, args...)
+}
+
 // psql runs SQL inside the Postgres container as the superuser.
 func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, error) {
+	if s.sqlFn != nil {
+		return s.sqlFn(ctx, db, sql...)
+	}
 	args := []string{"exec", pgContainer, "psql", "-U", "piperoom", "-d", db, "-v", "ON_ERROR_STOP=1", "-At"}
 	for _, q := range sql {
 		args = append(args, "-c", q)
@@ -91,8 +154,89 @@ func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, err
 	return strings.TrimSpace(out.String()), nil
 }
 
-func (s *stack) up(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "up", "-d", "--build", "--wait"); err != nil {
+// execIn runs argv inside a container and returns its combined output and
+// exit code. A non-zero exit code is a result, not an error: callers read it
+// (a missing directory, a name that does not resolve). err means docker
+// itself could not run the command.
+func (s *stack) execIn(ctx context.Context, container string, argv ...string) (string, int, error) {
+	return s.execInUser(ctx, "", container, argv...)
+}
+
+// execInUser is execIn as a user ("" = the image's user, "0" = root). The
+// setup breaks write /etc/hosts in the Connect container, which is root-owned
+// while the worker runs unprivileged.
+func (s *stack) execInUser(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+	if s.execAsFn != nil {
+		return s.execAsFn(ctx, user, container, argv...)
+	}
+	if s.execInFn != nil {
+		return s.execInFn(ctx, container, argv...)
+	}
+	args := []string{"exec"}
+	if user != "" {
+		args = append(args, "-u", user)
+	}
+	args = append(args, container)
+	args = append(args, argv...)
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	if err == nil {
+		return out.String(), 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return out.String(), exitErr.ExitCode(), nil
+	}
+	return out.String(), -1, fmt.Errorf("devctl: docker exec %s %s: %w", container, strings.Join(argv, " "), err)
+}
+
+// composeWith runs docker compose with an extra override file before the
+// subcommand (override "" = the base dev file alone). The wal-level-replica
+// break needs it: postgres command-line settings only change by recreating
+// the container with a different command, and Compose merges the override's
+// command over the base one.
+func (s *stack) composeWith(ctx context.Context, override string, args ...string) error {
+	if s.composeOverrideFn != nil {
+		return s.composeOverrideFn(ctx, override, args...)
+	}
+	cmd := exec.CommandContext(ctx, "docker", composeWithArgv(s.root, override, args...)...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("devctl: docker %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+// composeWithArgv is the docker argv of composeWith: the base dev file, then
+// the override when there is one (Compose merges later files over earlier
+// ones), then the subcommand.
+func composeWithArgv(root, override string, args ...string) []string {
+	full := []string{"compose", "-f", filepath.Join(root, "dev", "docker-compose.yml")}
+	if override != "" {
+		full = append(full, "-f", override)
+	}
+	return append(full, args...)
+}
+
+func (s *stack) up(ctx context.Context) error { return s.upWith(ctx, false) }
+
+// upWith is `devctl up`; staging adds the staging profile (second Connect and
+// Schema Registry, staging.go) and registers the connector there too. Without
+// it the compose call and the steps are the ones `up` always had.
+func (s *stack) upWith(ctx context.Context, staging bool) error {
+	var stg stagingEndpoints
+	args := []string{"up", "-d", "--build", "--wait"}
+	if staging {
+		// Refuse before the image build when staging would point at production.
+		var err error
+		if stg, err = resolveStaging(s.cfg, os.Getenv); err != nil {
+			return err
+		}
+		args = append([]string{"--profile", stagingProfile}, args...)
+	}
+	if err := s.compose(ctx, nil, args...); err != nil {
 		return err
 	}
 	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connectors", 2*time.Minute); err != nil {
@@ -105,14 +249,25 @@ func (s *stack) up(ctx context.Context) error {
 		return err
 	}
 	s.log.Info("stack is up", "connect", s.cfg.ConnectURL, "registry", s.cfg.SchemaRegistryURL, "kafka", s.cfg.KafkaBrokers)
+	if staging {
+		return s.stagingUp(ctx, stg)
+	}
 	return nil
 }
 
-func (s *stack) reset(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "down", "-v", "--remove-orphans"); err != nil {
+func (s *stack) reset(ctx context.Context) error { return s.resetWith(ctx, false) }
+
+// resetWith wipes the stack and starts it again. The teardown always names the
+// staging profile: compose's `down` leaves the containers of a profile that is
+// not enabled alone, so without it connect-staging would outlive its Kafka and
+// Postgres. The staging stack comes back only with `reset --staging`. Reset
+// never touches the room database: that lives in its own compose project
+// (dev/demo-room-db.yml) or in your own Postgres, and nothing here names it.
+func (s *stack) resetWith(ctx context.Context, staging bool) error {
+	if err := s.compose(ctx, nil, "--profile", stagingProfile, "down", "-v", "--remove-orphans"); err != nil {
 		return err
 	}
-	if err := s.up(ctx); err != nil {
+	if err := s.upWith(ctx, staging); err != nil {
 		return err
 	}
 	// Wait until the initial snapshot reached the warehouse, so "reset" ends
@@ -124,6 +279,12 @@ func (s *stack) reset(ctx context.Context) error {
 		}
 		return n != "0", nil
 	})
+}
+
+// down stops the whole stack, staging included (see resetWith for why the
+// profile is named).
+func (s *stack) down(ctx context.Context) error {
+	return s.compose(ctx, nil, "--profile", stagingProfile, "down")
 }
 
 func (s *stack) registerConnector(ctx context.Context) error {
@@ -139,22 +300,7 @@ func (s *stack) registerConnector(ctx context.Context) error {
 // registerConnectorUser re-registers the connector with database.user/password
 // overridden, so a scenario can point the connector at a different role.
 func (s *stack) registerConnectorUser(ctx context.Context, user, pass string) error {
-	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
-	if err != nil {
-		return fmt.Errorf("devctl: read connector config: %w", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		return fmt.Errorf("devctl: decode connector config: %w", err)
-	}
-	cfg["database.user"] = user
-	cfg["database.password"] = pass
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("devctl: encode connector config: %w", err)
-	}
-	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
-	return err
+	return s.registerConnectorWith(ctx, map[string]string{"database.user": user, "database.password": pass})
 }
 
 type connectorStatus struct {
@@ -169,8 +315,14 @@ type connectorStatus struct {
 }
 
 func (s *stack) connectorStatus(ctx context.Context) (connectorStatus, error) {
+	return s.connectorStatusAt(ctx, s.cfg.ConnectURL)
+}
+
+// connectorStatusAt reads the connector's status from the Connect worker at
+// base (production or staging).
+func (s *stack) connectorStatusAt(ctx context.Context, base string) (connectorStatus, error) {
 	var st connectorStatus
-	b, err := s.do(ctx, http.MethodGet, s.cfg.ConnectURL+"/connectors/"+connectorName+"/status", nil, http.StatusOK)
+	b, err := s.do(ctx, http.MethodGet, base+"/connectors/"+connectorName+"/status", nil, http.StatusOK)
 	if err != nil {
 		return st, err
 	}
@@ -182,8 +334,13 @@ func (s *stack) connectorStatus(ctx context.Context) (connectorStatus, error) {
 
 // waitConnector waits until the connector and task 0 are in state want.
 func (s *stack) waitConnector(ctx context.Context, want string, timeout time.Duration) error {
+	return s.waitConnectorAt(ctx, s.cfg.ConnectURL, want, timeout)
+}
+
+// waitConnectorAt is waitConnector on the Connect worker at base.
+func (s *stack) waitConnectorAt(ctx context.Context, base, want string, timeout time.Duration) error {
 	return s.waitFor(ctx, timeout, func() (bool, error) {
-		st, err := s.connectorStatus(ctx)
+		st, err := s.connectorStatusAt(ctx, base)
 		if err != nil {
 			return false, nil
 		}
@@ -254,7 +411,11 @@ func (s *stack) waitHTTP(ctx context.Context, u string, timeout time.Duration) e
 func (s *stack) waitFor(ctx context.Context, timeout time.Duration, cond func() (bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	t := time.NewTicker(2 * time.Second)
+	every := s.poll
+	if every <= 0 {
+		every = 2 * time.Second
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		ok, err := cond()

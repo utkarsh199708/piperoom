@@ -97,7 +97,8 @@ func estimateInputTokens(sc Scenario, hypothesis string) int64 {
 	return int64(len(judgeSystem)+len(judgePrompt(sc, hypothesis))+2) / 3
 }
 
-// FillJudgeCache records a judge verdict, from the judge model model, for
+// FillJudgeCache records a judge verdict, from the judge model (recorded as
+// given: "provider:model", JudgeID), for
 // every manifest entry the cache lacks or holds stale, at most maxCalls of
 // them (maxCalls <= 0: none). With judge nil it is a dry run: nothing is
 // called or written, and the result estimates what a fill would spend.

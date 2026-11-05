@@ -19,7 +19,9 @@ const untrustedAttr = ` untrusted="true">`
 // injectscan flags instruction-like text in it, the opening tag gets
 // suspected_instructions="true" and the runner logs the tool, step and finding
 // kinds. The data is unchanged (it may be the evidence) and the matched text
-// is never logged: it is untrusted and may hold record values.
+// is never logged: it is untrusted and may hold record values. The flagged
+// spans stay in the step ledger, in memory only, for the echo guard of
+// propose_fix (echoguard.go).
 //
 // runbook_lookup is not scanned: its text is curated repo content
 // (internal/tools/runbooks/library), full of legitimate imperatives.
@@ -28,7 +30,7 @@ func (r *runner) wrapReadToolOutput(tool, stepID, text string) string {
 	if tool == runbooks.ToolName {
 		return wrapped
 	}
-	findings := injectscan.Scan(text)
+	findings := r.steps.scanRead(stepID, tool, text)
 	if len(findings) == 0 {
 		return wrapped
 	}

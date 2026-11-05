@@ -1,11 +1,11 @@
 import { PersonName } from '@/components/VerifiedBadge'
 import { neutralizeBadgeText } from '@/lib/verification'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
+import { canRequestControl, canSteer, canTakeControl, isViewer, roomPeopleCount } from '../state/permissions'
 import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { useRetryId } from '../hooks/useRetryId'
 import { modKeyLabel } from '@/lib/envLabel'
@@ -43,6 +43,9 @@ function GrantPicker({
   onGrant: (to: string) => void
 }) {
   const [to, setTo] = useState('')
+  // Solo mode lists people in /api/people who can never sign in; giving them control would lock the
+  // solo user out until the lease expires. Only the solo user is a real recipient, and that is you.
+  const signInIds = useMemo(() => (user.solo ? new Set([user.id]) : undefined), [user.solo, user.id])
   if (!open) return null
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
@@ -50,7 +53,14 @@ function GrantPicker({
         Give control to
       </label>
       <div className="min-w-[10rem] [&_select]:h-8 [&_select]:w-full">
-        <PersonSelect id="grant-to" selfId={user.id} value={to} onChange={setTo} />
+        <PersonSelect
+          id="grant-to"
+          selfId={user.id}
+          value={to}
+          onChange={setTo}
+          signInIds={signInIds}
+          noSignInText={user.solo ? 'No other person can sign in on this server (solo mode).' : undefined}
+        />
       </div>
       <Button
         size="sm"
@@ -214,11 +224,14 @@ export function SteerBox({
   actions,
   prefill,
   conn,
+  people,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
   conn?: ConnState
+  /** roomPeopleCount from RoomScreen (presence included); without it, the log's members plus you. */
+  people?: number
   /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
   prefill?: { text: string; n: number }
 }) {
@@ -381,7 +394,7 @@ export function SteerBox({
 
   const noDriver = state.driver === null
   const take = !isDriver && canTakeControl(state, user)
-  const request = !isDriver && !take && canRequestControl(state, user)
+  const request = !isDriver && !take && canRequestControl(state, user, people ?? roomPeopleCount(state, [], user.id))
   const mod = modKeyLabel()
   const leaseIso = state.driver?.lease_until
   const left = minutesLeft(leaseIso, now)
@@ -474,6 +487,8 @@ export function SteerBox({
   // `status` is the plain text (a tooltip); `statusNode` is what is drawn, with the driver's server badge.
   let status: string
   let statusNode: ReactNode
+  // P2b: the server made the only person here the driver on join; nobody asked or granted.
+  const drivingText = state.driver?.reason === 'sole_member' ? 'You are the driver' : 'You are driving'
   if (isDriver) {
     status = signalled
       ? 'Your lease expired — you still drive until someone takes over'
@@ -482,8 +497,8 @@ export function SteerBox({
           ? `Lease ends in ${left}m — any action renews`
           : 'Lease ends in under a minute — any action renews'
         : leaseText
-          ? `You are driving · ${leaseText}`
-          : 'You are driving'
+          ? `${drivingText} · ${leaseText}`
+          : drivingText
     statusNode = <span className="min-w-0 truncate">{status}</span>
   } else if (noDriver) {
     status = 'No driver · your suggestion is queued for whoever takes control'
@@ -514,7 +529,7 @@ export function SteerBox({
       ref={setSection}
       aria-label="Steer"
       data-idle={idle || undefined}
-      className={cn(BAR, idle ? 'flex h-14 flex-row items-center gap-3 py-0' : 'flex flex-col gap-2')}
+      className={cn(BAR, idle ? 'flex flex-col gap-2 sm:h-14 sm:flex-row sm:items-center sm:gap-3 sm:py-0' : 'flex flex-col gap-2')}
     >
       {isDriver && pending.length > 0 && (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
@@ -559,7 +574,7 @@ export function SteerBox({
         </div>
       )}
 
-      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[55%] shrink-0 sm:max-w-[45%]' : 'flex-wrap')}>
+      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 sm:max-w-[45%] sm:shrink-0' : 'flex-wrap')}>
         <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
         <span
           data-slot="steer-status"
@@ -617,7 +632,7 @@ export function SteerBox({
         </div>
       )}
 
-      <form className={cn('flex gap-2', idle ? 'min-w-0 flex-1' : 'flex-col')} onSubmit={submit}>
+      <form className={cn('flex gap-2', idle ? 'min-w-0 sm:flex-1' : 'flex-col')} onSubmit={submit}>
         <Textarea
           ref={ref}
           value={text}
@@ -636,7 +651,7 @@ export function SteerBox({
                 ? 'Steer the agent…'
                 : `Suggest a step for ${state.driver ? driverName : 'the driver'}…`
           }
-          aria-label="Steer the agent"
+          aria-label={isDriver || noDriver ? 'Steer the agent' : `Suggest a step for ${driverName}`}
           rows={1}
         />
         {!idle && (
@@ -659,7 +674,12 @@ export function SteerBox({
       </form>
       {offline && (
         <div>
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip
+            onRetry={() => void send()}
+            disabled={sending}
+            sends={actions.sends}
+            actionId={() => adoptedRef.current?.clientId ?? retryId.current()}
+          />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent message.</p>
         </div>
       )}

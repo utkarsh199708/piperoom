@@ -18,6 +18,7 @@ var (
 	_ Preview = (*restartConnector)(nil)
 	_ Preview = (*resumeConnector)(nil)
 	_ Preview = (*updateConnectorConfig)(nil)
+	_ Preview = (*pauseConnector)(nil)
 	_ Preview = (*setCompatibility)(nil)
 	_ Preview = (*registerSchema)(nil)
 )
@@ -131,70 +132,135 @@ func (a *resumeConnector) Preview(ctx context.Context, raw json.RawMessage) (Pre
 		Target:     "connector " + p.Connector,
 		Current:    fmt.Sprintf("%s (GET /connectors/%s/status)", orUnknown(st.State), p.Connector),
 		Expected:   "RUNNING (tasks assigned)",
-		Reversible: false, // there is no pause action
+		Reversible: false, // re-pausing is its own proposal (connect_pause_connector), not offered as an undo
 	}, nil
 }
 
 func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage) (PreviewResult, error) {
-	p, err := a.parseParams(raw)
+	set, err := a.parseParams(raw)
 	if err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	if err := ctxConnectorScope(ctx, set.connector); err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cfg, err := a.d.Connect.Config(ctx, p.Connector)
+	if err := ctxHeartbeatScope(ctx, set, false); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	cfg, err := a.d.Connect.Config(ctx, set.connector)
 	if err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
-	res := PreviewResult{
-		Target:   fmt.Sprintf("connector %s key %s", p.Connector, p.Key),
-		Current:  fmt.Sprintf("%s = %s (GET /connectors/%s/config)", p.Key, configText(cfg, p.Key), p.Connector),
-		Expected: fmt.Sprintf("%s = %s; Connect restarts the tasks", p.Key, p.Value),
+	// A heartbeat or MySQL key on a connector it does not apply to would be
+	// refused at Execute: the preview must not promise it.
+	if err := set.checkSourceGuards(cfg); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
 	}
-	if cur, set := cfg[p.Key]; set && cur == p.Value {
+	if err := a.d.checkServerID(ctx, set, false); err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	recoveryNote, err := a.d.checkRecoveryName(ctx, set, cfg)
+	if err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	keys := set.keys()
+	todo, same := set.plan(cfg)
+	noun := "key"
+	if len(keys) > 1 {
+		noun = "keys"
+	}
+	cur := make([]string, 0, len(keys))
+	for _, k := range keys {
+		cur = append(cur, fmt.Sprintf("%s = %s", k, configText(cfg, k)))
+	}
+	res := PreviewResult{
+		Target:  fmt.Sprintf("connector %s %s %s", set.connector, noun, strings.Join(keys, ", ")),
+		Current: fmt.Sprintf("%s (GET /connectors/%s/config)", strings.Join(cur, "; "), set.connector),
+	}
+	sameText := make([]string, 0, len(same))
+	for _, k := range same {
+		sameText = append(sameText, fmt.Sprintf("%s is already %s", k, set.changes[k]))
+	}
+	if len(todo) == 0 {
 		// Execute writes nothing then; the preview must not promise a change.
-		res.Expected = fmt.Sprintf("no change: %s is already %s; no task restart", p.Key, p.Value)
+		res.Expected = fmt.Sprintf("no change: %s; no task restart", strings.Join(sameText, ", "))
 		return res, nil
 	}
-	// Undo needs a stored value the allow-list would accept again; an unset
-	// key (or a value we truncated or do not offer) cannot be restored by an action.
-	if cur, set := cfg[p.Key]; set && a.allowList()[p.Key][cur] {
-		res.Reversible = true
-		res.Rollback = rollbackText(a.Name(), map[string]string{"connector": p.Connector, "key": p.Key, "value": cur})
+	todoKeys := sortedStringKeys(todo)
+	exp := make([]string, 0, len(todoKeys))
+	for _, k := range todoKeys {
+		exp = append(exp, fmt.Sprintf("%s = %s", k, todo[k]))
 	}
-	res.DryRun = a.dryRun(ctx, p, cfg)
+	res.Expected = strings.Join(exp, "; ") + "; Connect restarts the tasks"
+	if len(sameText) > 0 {
+		res.Expected += " (unchanged: " + strings.Join(sameText, ", ") + ")"
+	}
+	if recoveryNote != "" {
+		res.Expected += "; " + recoveryNote
+	}
+	res.Downstream = append(res.Downstream, mysqlKeyPreview(todo)...)
+	prev, note := a.undoValues(ctx, cfg, todoKeys)
+	if prev != nil {
+		res.Reversible = true
+		if note != "" {
+			res.Expected += "; undo: " + note
+		}
+		if set.legacy && len(prev) == 1 {
+			k := sortedStringKeys(prev)[0] // not todoKeys[0]: undo may write another key
+			res.Rollback = rollbackText(a.Name(), map[string]string{"connector": set.connector, "key": k, "value": prev[k]})
+		} else {
+			b, _ := json.Marshal(map[string]any{"connector": set.connector, "changes": prev}) // strings only: cannot fail
+			res.Rollback = a.Name() + " " + string(b)
+		}
+	}
+	res.DryRun = a.dryRun(ctx, cfg, todo)
 	return res, nil
 }
 
-// dryRun sends the connector's config with the one key replaced to Connect's
-// validate endpoint. It never reads or returns a value other than through
-// Connect's error messages, and it sends nothing when the config holds a
-// credential-looking key: those values would leave this process for a call
+// dryRun sends the connector's config with the changed keys merged in to
+// Connect's validate endpoint. It never reads or returns a value other than
+// through Connect's error messages, and it sends nothing when the config holds
+// a credential-looking key: those values would leave this process for a call
 // that exists only for the preview.
-func (a *updateConnectorConfig) dryRun(ctx context.Context, p updateConnectorConfigParams, cfg map[string]string) *DryRunResult {
-	for k := range cfg {
-		if looksSecret(k) {
-			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}
-		}
-	}
-	v, ok := a.d.Connect.(configValidator)
-	if !ok {
-		return &DryRunResult{Source: sourceValidate, Skipped: noDryRun}
-	}
-	class := cfg["connector.class"]
-	if class == "" {
-		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}
-	}
-	next := make(map[string]string, len(cfg)+1)
-	for k, val := range cfg {
-		next[k] = val
-	}
-	next[p.Key] = p.Value
-	vr, err := v.ValidateConfig(ctx, class, next)
+func (a *updateConnectorConfig) dryRun(ctx context.Context, cfg, changes map[string]string) *DryRunResult {
+	d, err := validateMerged(ctx, a.d.Connect, cfg, changes)
 	if err != nil {
 		return &DryRunResult{Source: sourceValidate, Skipped: dryRunText("validate failed: " + err.Error())}
 	}
-	return &DryRunResult{OK: vr.ErrorCount == 0, Source: sourceValidate, Text: validateText(vr)}
+	return d
+}
+
+// validateMerged is the dry run of a config change on Connect client c (the
+// production one for Preview, the staging one for Stage). A non-nil error is
+// the validate call's own failure; the caller words it.
+func validateMerged(ctx context.Context, c any, cfg, changes map[string]string) (*DryRunResult, error) {
+	for k := range cfg {
+		if LooksSecret(k) {
+			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}, nil
+		}
+	}
+	v, ok := c.(configValidator)
+	if !ok {
+		return &DryRunResult{Source: sourceValidate, Skipped: noDryRun}, nil
+	}
+	class := cfg["connector.class"]
+	if class == "" {
+		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}, nil
+	}
+	next := make(map[string]string, len(cfg))
+	for k, val := range cfg {
+		next[k] = val
+	}
+	for k, val := range changes {
+		next[k] = val
+	}
+	vr, err := v.ValidateConfig(ctx, class, next)
+	if err != nil {
+		return nil, err
+	}
+	return &DryRunResult{OK: vr.ErrorCount == 0, Source: sourceValidate, Text: validateText(vr)}, nil
 }
 
 // validateText renders "0 errors" or "2 errors: key: msg; key2: msg".
@@ -276,6 +342,11 @@ func (a *registerSchema) dryRun(ctx context.Context, p registerSchemaParams) *Dr
 	if err != nil {
 		return &DryRunResult{Source: sourceCompat, Skipped: dryRunText("compatibility check failed: " + err.Error())}
 	}
+	return &DryRunResult{OK: compatible, Source: sourceCompat, Text: dryRunText(compatText(compatible, msgs))}
+}
+
+// compatText renders a Registry compatibility verdict and its messages.
+func compatText(compatible bool, msgs []string) string {
 	text := fmt.Sprintf("compatible: %t", compatible)
 	switch {
 	case len(msgs) > 0:
@@ -283,5 +354,5 @@ func (a *registerSchema) dryRun(ctx context.Context, p registerSchemaParams) *Dr
 	case !compatible:
 		text += " (no detail from this Registry version)"
 	}
-	return &DryRunResult{OK: compatible, Source: sourceCompat, Text: dryRunText(text)}
+	return text
 }

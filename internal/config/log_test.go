@@ -70,3 +70,52 @@ func TestParseDevAck(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFakeAgent(t *testing.T) {
+	ok := Config{FakeAgent: FakeAgentScripted, AuthMode: DefaultAuthMode, DevAck: DevAckValue}
+	with := func(f func(*Config)) Config { c := ok; f(&c); return c }
+	tests := []struct {
+		name    string
+		c       Config
+		want    bool
+		wantErr string
+	}{
+		{name: "unset", c: Config{}, want: false},
+		{name: "unset ignores the rest", c: Config{AuthMode: "oidc", WriteMode: "on"}, want: false},
+		{name: "scripted in dev", c: ok, want: true},
+		{name: "spaces and default auth", c: with(func(c *Config) { c.FakeAgent = " scripted "; c.AuthMode = "" }), want: true},
+		{name: "write mode off spelled out", c: with(func(c *Config) { c.WriteMode = "off" }), want: true},
+		{name: "typo", c: with(func(c *Config) { c.FakeAgent = "Scripted" }), wantErr: "want"},
+		{name: "true", c: with(func(c *Config) { c.FakeAgent = "true" }), wantErr: "want"},
+		{name: "oidc", c: with(func(c *Config) { c.AuthMode = "oidc" }), wantErr: "PIPEROOM_AUTH_MODE"},
+		{name: "proxy", c: with(func(c *Config) { c.AuthMode = "proxy" }), wantErr: "PIPEROOM_AUTH_MODE"},
+		{name: "no ack", c: with(func(c *Config) { c.DevAck = "" }), wantErr: "PIPEROOM_DEV_ACK"},
+		{name: "bad ack", c: with(func(c *Config) { c.DevAck = "1" }), wantErr: "PIPEROOM_DEV_ACK"},
+		{name: "write mode on", c: with(func(c *Config) { c.WriteMode = "on" }), wantErr: "PIPEROOM_WRITE_MODE"},
+		{name: "bad write mode", c: with(func(c *Config) { c.WriteMode = "yes" }), wantErr: "PIPEROOM_WRITE_MODE"},
+		{name: "auth mode in capitals", c: with(func(c *Config) { c.AuthMode = "DEV" }), want: true},
+		{name: "slack token", c: with(func(c *Config) { c.SlackBotToken = "xoxb-test" }), wantErr: "SLACK_BOT_TOKEN"},
+	}
+	for _, tt := range tests {
+		got, err := ParseFakeAgent(tt.c)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || got {
+				t.Errorf("%s: ParseFakeAgent = %v, %v; want an error naming %s", tt.name, got, err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "PIPEROOM_") {
+				t.Errorf("%s: error does not name a variable: %v", tt.name, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("%s: ParseFakeAgent = %v, %v; want %v", tt.name, got, err, tt.want)
+		}
+	}
+}
+
+func TestLoadFakeAgent(t *testing.T) {
+	t.Setenv("PIPEROOM_FAKE_AGENT", FakeAgentScripted)
+	if got := Load().FakeAgent; got != FakeAgentScripted {
+		t.Errorf("Load().FakeAgent = %q, want %q", got, FakeAgentScripted)
+	}
+}

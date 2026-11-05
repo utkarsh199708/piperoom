@@ -405,8 +405,10 @@ func windowed(st *dlqTopicState, now time.Time, window, slack time.Duration) (ne
 // evaluateDLQ steps config_risk and dlq_growth for one pipeline. Caller holds w.mu.
 func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, fired map[string][]string) {
 	ps.risks = nil
+	// Retention findings (retention.go) are config_risk entries too.
+	ret := w.evaluateRetention(now, t, ps, fired)
 	if t.cfg.ConfigRisk.Enabled {
-		w.evaluateConfigRisk(now, t, ps, obs, snaps, fired)
+		w.evaluateConfigRisk(now, t, ps, obs, snaps, ret, fired)
 	}
 	if !t.cfg.DLQGrowth.Enabled {
 		return
@@ -633,17 +635,28 @@ func commas(n int64) string {
 
 // ---- config_risk ----
 
-// connRisk is one finding on one connector.
+// connRisk is one finding on one connector. table is set for a finding about
+// one table (connector_table_outside_scope); it is this pipeline's own
+// connector table, never another pipeline's.
 type connRisk struct {
-	conn string
-	risk dlq.Risk
+	conn  string
+	table string
+	risk  dlq.Risk
 }
+
+// riskConnectorTableOutsideScope marks a table the pipeline's connector
+// streams but owners.yaml does not declare, so the agent cannot see or fix a
+// fault on it. It is a fixed code and text like every other config risk.
+const riskConnectorTableOutsideScope = "connector_table_outside_scope"
 
 // evaluateConfigRisk reads the risks of every connector config of the tick.
 // Its verdict is breach on any sev2/sev3 finding (info never breaches), clear
 // when none, unknown when nothing is breaching and a config could not be read.
 // The findings (codes only) are kept on the pipeline so any room carries them.
-func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, fired map[string][]string) {
+// ret are the retention findings (retention.go): listed after the connector
+// risks, in the pipeline's risks and in a breach's evidence, but never a
+// breach of their own (they step retentionID, which opens no room).
+func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, ret []map[string]any, fired map[string][]string) {
 	var found []connRisk
 	var firstErr error
 	existsUnknown := false
@@ -671,12 +684,32 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 		for _, rk := range dlq.Risks(ec, ex) {
 			found = append(found, connRisk{conn: c, risk: rk})
 		}
+		// The connector's table filter and owners.yaml can disagree: a table
+		// the connector captures but the pipeline does not declare is invisible
+		// to the tools and to the agent.
+		for _, table := range owners.ParseConnectorInclude(co.cfg).OutsideDeclared(t.p.SourceTables) {
+			found = append(found, connRisk{conn: c, table: table, risk: dlq.Risk{
+				Code: riskConnectorTableOutsideScope,
+				Sev:  dlq.SevSev3,
+				Text: "table.include.list lists a table owners.yaml source_tables does not declare: the tools cannot inspect it; the pipeline owner must add it to source_tables",
+			}})
+		}
 	}
 	for _, f := range found {
 		if len(ps.risks) >= maxEvidenceRisks {
 			break
 		}
-		ps.risks = append(ps.risks, map[string]any{"connector": f.conn, "code": f.risk.Code, "sev": f.risk.Sev})
+		ev := map[string]any{"connector": f.conn, "code": f.risk.Code, "sev": f.risk.Sev}
+		if f.table != "" {
+			ev["table"] = f.table
+		}
+		ps.risks = append(ps.risks, ev)
+	}
+	for _, ev := range ret {
+		if len(ps.risks) >= maxEvidenceRisks {
+			break
+		}
+		ps.risks = append(ps.risks, ev)
 	}
 
 	var bad []connRisk
@@ -694,11 +727,25 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 		parts := make([]string, 0, len(bad))
 		evs := make([]map[string]any, 0, len(bad))
 		for _, f := range bad {
-			parts = append(parts, f.conn+": "+f.risk.Code)
+			part := f.conn + ": " + f.risk.Code
+			if f.table != "" {
+				part += " (" + f.table + ")"
+			}
+			parts = append(parts, part)
 			if len(evs) < maxEvidenceRisks {
 				// Text is a fixed string per code; no config value reaches it.
-				evs = append(evs, map[string]any{"connector": f.conn, "code": f.risk.Code, "sev": f.risk.Sev, "text": f.risk.Text})
+				ev := map[string]any{"connector": f.conn, "code": f.risk.Code, "sev": f.risk.Sev, "text": f.risk.Text}
+				if f.table != "" {
+					ev["table"] = f.table
+				}
+				evs = append(evs, ev)
 			}
+		}
+		for _, ev := range ret {
+			if len(evs) >= maxEvidenceRisks {
+				break
+			}
+			evs = append(evs, ev)
 		}
 		shown := parts[:min(len(parts), maxEvidenceConnectors)]
 		label := "config risk " + strings.ReplaceAll(strings.Join(shown, ", "), ": ", " ")

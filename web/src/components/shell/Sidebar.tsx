@@ -1,4 +1,4 @@
-import { EyeOff, Inbox, Search } from 'lucide-react'
+import { EyeOff, Inbox, LayoutGrid, Search, Settings } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -79,6 +79,7 @@ function PipelineItem({
 export function SidebarContent({
   openRooms,
   needsYou = 0,
+  admin = false,
   pipelines,
   currentPipelineId,
   navKey,
@@ -88,6 +89,8 @@ export function SidebarContent({
   openRooms: number
   /** Open rooms with a layer waiting on this person. */
   needsYou?: number
+  /** `/api/me.admin`: shows the Settings link. The server enforces it either way. */
+  admin?: boolean
   pipelines: PipelineSummary[]
   /** The pipeline of the room on screen, if any. */
   currentPipelineId?: string
@@ -102,6 +105,7 @@ export function SidebarContent({
   const { pathname, search } = useLocation()
   const filter = pathname === '/' ? new URLSearchParams(search).get('pipeline') : null
   const onList = pathname === '/' && !filter // the unfiltered list is the current page of the Rooms link
+  const onFleet = pathname === '/fleet' || pathname.startsWith('/pipelines/')
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-foreground">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
@@ -121,7 +125,7 @@ export function SidebarContent({
           onClick={onSearch}
           aria-label="Search"
         >
-          <Search className="!size-3.5" aria-hidden="true" />
+          <Search className="size-3.5!" aria-hidden="true" />
           Search
           <span className="ml-auto inline-flex gap-0.5" aria-hidden="true">
             <Kbd>{modKeyLabel()}</Kbd>
@@ -132,6 +136,17 @@ export function SidebarContent({
 
       <nav aria-label="Main" className="px-2 pt-3">
         <ul className="flex flex-col gap-0.5">
+          <li>
+            <Link
+              to="/fleet"
+              className={cn(itemClass, onFleet && activeClass)}
+              aria-current={onFleet ? 'page' : undefined}
+              onClick={onNavigate}
+            >
+              <LayoutGrid aria-hidden="true" />
+              Fleet
+            </Link>
+          </li>
           <li>
             <Link
               to="/"
@@ -162,6 +177,19 @@ export function SidebarContent({
               Shadow results
             </Link>
           </li>
+          {admin && (
+            <li>
+              <Link
+                to="/settings"
+                className={cn(itemClass, pathname === '/settings' && activeClass)}
+                aria-current={pathname === '/settings' ? 'page' : undefined}
+                onClick={onNavigate}
+              >
+                <Settings aria-hidden="true" />
+                Settings
+              </Link>
+            </li>
+          )}
         </ul>
       </nav>
 

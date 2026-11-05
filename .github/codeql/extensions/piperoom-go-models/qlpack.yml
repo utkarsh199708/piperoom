@@ -1,0 +1,9 @@
+# CodeQL model pack for Piperoom's own Go code. Default setup loads every pack
+# under .github/codeql/extensions; a local run passes --model-packs.
+name: piperoom/go-models
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/go-all: "*"
+dataExtensions:
+  - models/*.model.yml

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"piperoom/internal/agent/llm"
 )
 
 // DefaultRoomTokenBudget is the per-room token cap used when
@@ -52,7 +52,9 @@ func ParseRoomTokenBudget(s string) (int64, error) {
 // it is not a failure of the model call itself.
 type BudgetError struct {
 	// Used and Limit are tokens; for a pipeline's daily cost budget they are
-	// millionths of a USD.
+	// millionths of a USD. For a setup bound (scope budgetSetupRun) they are
+	// the count and the bound that stopped the run, where the reason has a
+	// natural pair (failed attempts, executed steps).
 	Used  int64
 	Limit int64
 
@@ -63,6 +65,9 @@ type BudgetError struct {
 	scope budgetScope
 	// pipeline and day name the pipeline-day of a daily budget.
 	pipeline, day string
+	// setupReason is the events.SetupBlocked* reason of a setup bound stop
+	// (scope budgetSetupRun).
+	setupReason string
 }
 
 // budgetScope is the limit a BudgetError is about.
@@ -72,7 +77,8 @@ const (
 	budgetRoom budgetScope = iota
 	budgetPipelineTokens
 	budgetPipelineCost
-	budgetStore // the spend store failed while a limit was set
+	budgetStore    // the spend store failed while a limit was set
+	budgetSetupRun // a setup run's SetupBounds stopped the run (attempts, steps, wall clock)
 )
 
 // Settings named in the budget texts.
@@ -95,6 +101,12 @@ func (e *BudgetError) Error() string {
 			e.pipeline, e.day, usdText(e.Used), usdText(e.Limit), pipelineCostEnv)
 	case budgetStore:
 		return storeUnavailableText
+	case budgetSetupRun:
+		reason := e.setupReason
+		if reason == "" {
+			reason = "a setup bound"
+		}
+		return fmt.Sprintf("setup bound reached: %s", reason)
 	}
 	if e.runLimit {
 		return runBudgetText(e.Used, e.Limit)
@@ -225,19 +237,16 @@ func (u usageTokens) total() int64 { return u.input + u.output }
 // messageUsage reads the tokens of one response. Cache reads and writes count
 // as input: they are still tokens the model processed, and counting only the
 // uncached tail would let a long cached history bypass the cap. A compaction
-// pass is billed but is not part of the top-level usage fields, so its entries
-// are added.
-func messageUsage(m anthropic.BetaMessage) usageTokens {
-	u := m.Usage
+// pass is billed but is not part of the top-level usage fields, so it is
+// added.
+func messageUsage(u llm.Usage) usageTokens {
 	out := usageTokens{
-		input:  u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
-		output: u.OutputTokens,
+		input:  u.Input + u.CacheWrite + u.CacheRead,
+		output: u.Output,
 	}
-	for _, it := range u.Iterations {
-		if it.Type == "compaction" {
-			out.input += it.InputTokens + it.CacheCreationInputTokens + it.CacheReadInputTokens
-			out.output += it.OutputTokens
-		}
+	if c := u.Compaction; c != nil {
+		out.input += c.Input + c.CacheWrite + c.CacheRead
+		out.output += c.Output
 	}
 	return out
 }
@@ -255,30 +264,36 @@ type budgetModel struct {
 	guard *spendGuard
 }
 
-func (m *budgetModel) Turn(ctx context.Context, params anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+func (m *budgetModel) Turn(ctx context.Context, req llm.Request) (llm.Response, error) {
 	var ch spendCharge
 	if m.loop {
 		est := m.budget.nextEstimate()
 		if m.guard == nil {
 			if err := m.budget.admit(est); err != nil {
-				return anthropic.BetaMessage{}, err
+				return llm.Response{}, err
 			}
 		} else {
 			var err error
-			if ch, err = m.guard.admit(ctx, m.budget, params.Model, est); err != nil {
-				return anthropic.BetaMessage{}, err
+			if ch, err = m.guard.admit(ctx, m.budget, req.Model, est); err != nil {
+				return llm.Response{}, err
 			}
 		}
 	}
-	msg, err := m.inner.Turn(ctx, params)
+	resp, err := m.inner.Turn(ctx, req)
 	// A failed stream may still have used tokens; count what the partial
 	// message reports.
-	m.budget.record(messageUsage(msg), m.loop)
+	m.budget.record(messageUsage(resp.Usage), m.loop)
 	if m.guard != nil {
-		m.guard.settle(ctx, ch, params.Model, msg)
+		m.guard.settle(ctx, ch, req.Model, resp.Usage)
 	}
-	return msg, err
+	return resp, err
 }
+
+// Capabilities is the wrapped model's.
+func (m *budgetModel) Capabilities(model string) llm.Capabilities { return m.inner.Capabilities(model) }
+
+// Provider is the wrapped model's.
+func (m *budgetModel) Provider() string { return m.inner.Provider() }
 
 // asBudgetError returns the *BudgetError in err's chain, if any.
 func asBudgetError(err error) (*BudgetError, bool) {

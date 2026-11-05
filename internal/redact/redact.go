@@ -47,6 +47,9 @@
 //   - an encoded '&' (%26) inside a URL-encoded password ends it there;
 //   - a URL password holding '@' then '?' or '#', or an all-digit segment
 //     before a '/' (postgres://app:2024/Spring7x@db/..., read as a port);
+//     a URL cut before its "@host" is masked to its first blank or quote,
+//     except a password of one to five digits alone or before / ; , ? # :
+//     . ) ] } & | or a backslash (postgres://app:1234;x, read as a port);
 //   - key names longer than 64 characters
 //     (io.confluent.connect.jdbc.sink.JdbcSinkConnectorConfig.conn.password=);
 //   - a Bearer token split across a line; .pgpass lines
@@ -79,7 +82,8 @@
 //     flag values ($'...', a\ b, glued quote runs, typographic quotes),
 //     Windows "set NAME=a b" and braced values (password={a;b});
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
-//     host to the mask, and a wrapped tail such as orders_v2 after a
+//     host to the mask, a scheme://word:text token with no '@' and no
+//     numeric port is masked after the ':' (http://host:${PORT}/x), and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence; the word after a
 //     #372 flag is masked whatever it is (--password requires an argument,
 //     --no-password orders, -u postgres:postgres; #490), and so are a $VAR,

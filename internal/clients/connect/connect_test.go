@@ -253,8 +253,9 @@ func TestOversizedBody(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, strings.Repeat("x", 5<<20))
 	})
-	if _, err := c.ListConnectors(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
-		t.Fatalf("want decode error, got %v", err)
+	// Over the cap is named as such, not as the syntax error of a cut body.
+	if _, err := c.ListConnectors(context.Background()); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("want ErrResponseTooLarge, got %v", err)
 	}
 }
 

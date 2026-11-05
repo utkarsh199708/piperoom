@@ -159,6 +159,33 @@ describe('CloseRoomDialog', () => {
   })
 })
 
+describe('CloseRoomDialog in a shadow room', () => {
+  const shadowRoom = () => ({ ...emptyRoomState('r1'), shadow: true, hypothesis: { text: 'Compatibility changed to FULL', based_on_steps: [], confidence: 'high' as const, confirmed: true } })
+
+  it('asks only for the resolution and says a blind label follows', () => {
+    render(<CloseRoomDialog state={shadowRoom()} actions={actions} onClose={() => {}} />)
+    expect(field()).toBeInTheDocument()
+    expect(screen.getByText(/you will record a blind label/)).toBeInTheDocument()
+    expect(screen.queryByText('Label for later incidents')).toBeNull()
+    expect(screen.queryByText(/Did the agent help/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Skip label' })).toBeNull()
+  })
+
+  it('closes without sending a label or showing a label error', async () => {
+    render(<CloseRoomDialog state={shadowRoom()} actions={actions} onClose={() => {}} />)
+    fireEvent.change(field(), { target: { value: 'fixed' } })
+    fireEvent.click(submitButton())
+    await waitFor(() => expect(actions.close).toHaveBeenCalledWith('fixed'))
+    expect(actions.label).not.toHaveBeenCalled()
+  })
+
+  it('an ordinary room keeps the label fields and no blind-label note', () => {
+    render(<CloseRoomDialog state={{ ...shadowRoom(), shadow: false }} actions={actions} onClose={() => {}} />)
+    expect(screen.getByText('Label for later incidents')).toBeInTheDocument()
+    expect(screen.queryByText(/blind label/)).toBeNull()
+  })
+})
+
 describe('CloseRoomDialog initialText', () => {
   it('starts with the given resolution, so the close nudge can pre-fill it', () => {
     render(<CloseRoomDialog actions={actions} onClose={() => {}} initialText={'Fixed by "Restart task"'} />)

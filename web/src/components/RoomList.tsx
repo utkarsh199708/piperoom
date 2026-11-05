@@ -16,6 +16,7 @@ import {
   ROOM_TABS,
   agentCell,
   canTakeControlOf,
+  hasLiveDriver,
   layersNeedingYou,
   needsYou,
   pipelineIds,
@@ -55,11 +56,13 @@ import { Input } from './ui/input'
 import { Kbd } from './ui/kbd'
 import { Skeleton } from './ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { FirstRunPanel } from './FirstRunPanel'
 import { TopBarSlot } from './shell/TopBarSlot'
 import { PersonName } from './VerifiedBadge'
 import { neutralizeBadgeText } from '../lib/verification'
 import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
+import { pipelineKind } from './shell/pipelines'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
 
@@ -171,6 +174,19 @@ export function RoomList() {
     [reload, user.id, user.name],
   )
 
+  // T on a room another member drives (live lease): ask the driver, as the room's "Request control" does.
+  const requestControl = useCallback(async (room: RoomSnapshot) => {
+    setTaking(room.id)
+    try {
+      if (!isFixtures()) await api.requestControl(room.id)
+      toast.success(`Asked ${neutralizeBadgeText(room.driver?.name ?? 'the driver')} for control of "${room.title}"`)
+    } catch (err) {
+      toast.error(errorText(err))
+    } finally {
+      setTaking(null)
+    }
+  }, [])
+
   const focusRow = (index: number) => {
     const room = visible[index]
     if (!room) return
@@ -200,7 +216,12 @@ export function RoomList() {
       } else if (key === 't') {
         const room = visible[active]
         // One take at a time: a second T while the first is in flight does nothing.
-        if (room && taking === null && canTakeControlOf(room, user)) void takeControl(room)
+        if (room && taking === null) {
+          if (canTakeControlOf(room, user)) void takeControl(room)
+          else if (!viewer && room.status === 'open' && room.driver && room.driver.id !== user.id && hasLiveDriver(room)) {
+            void requestControl(room)
+          }
+        }
       } else if (key === 'c' && !viewer) {
         e.preventDefault()
         setNewOpen(true)
@@ -271,6 +292,10 @@ export function RoomList() {
             </p>
           )}
 
+          {/* First run (P1e-2): no room at all on this server, not just none in this tab or filter.
+              It goes away with the first room the list receives. A viewer cannot post an alert. */}
+          {rooms.length === 0 && !viewer && <FirstRunPanel userId={user.id} />}
+
           <StatStrip stats={stats} />
 
           <Card className="flex min-h-0 flex-col">
@@ -295,7 +320,7 @@ export function RoomList() {
                       aria-label={`Clear pipeline filter ${pipeline}`}
                       onClick={() => setPipeline(null)}
                     >
-                      <X className="!size-3" aria-hidden="true" />
+                      <X className="size-3!" aria-hidden="true" />
                       Clear
                     </Button>
                   )}
@@ -465,7 +490,7 @@ function PipelineFilter({
           ) : (
             'Pipeline'
           )}
-          <ChevronDown className="!size-3" aria-hidden="true" />
+          <ChevronDown className="size-3!" aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[10rem]">
@@ -585,7 +610,9 @@ function RoomRow({
   const status = roomStatusCell(room)
   // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
   const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
-  const agent = agentCell(room)
+  // A shadow room's log holds no agent events, so agentCell would say "idle" while the silent run works.
+  const silentRun = room.shadow === true && !resolved
+  const agent = silentRun ? { dot: 'agent' as const, label: 'silent run', agent: true } : agentCell(room)
   const layers = layersNeedingYou(room, user)
   const canTake = canTakeControlOf(room, user)
   return (
@@ -621,10 +648,15 @@ function RoomRow({
               Needs you
             </Badge>
           )}
+          {room.shadow === true && (
+            <Badge variant="agent" title="Shadow room: the agent works silently and proposes nothing" aria-label="Shadow room">
+              Shadow
+            </Badge>
+          )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
           {room.status === 'open' && !room.shadow && (room.insight?.time_to_first_hypothesis_s ?? -1) >= 0 && (
-            <span className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">
-              · insight {room.insight?.time_to_first_hypothesis_s} s
+            <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground" title="Time from the alert to the agent's first hypothesis">
+              · first hypothesis in {room.insight?.time_to_first_hypothesis_s}s
             </span>
           )}
         </div>
@@ -635,7 +667,7 @@ function RoomRow({
       </td>
       <td className={TD}>
         <Badge variant={severityVariant(room.severity)} className="uppercase">
-          {room.severity}
+          {room.severity || 'unknown'}
         </Badge>
       </td>
       <td className={cn(TD, 'max-md:hidden')}>
@@ -903,6 +935,8 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
   const [createError, setCreateError] = useState<string | null>(null)
   // The choice must be one the server lists; until the person picks, the first (or the filter on screen).
   const chosen = pipelines.some((p) => p.id === pipelineId) ? pipelineId : (pipelines[0]?.id ?? '')
+  const chosenPipeline = pipelines.find((p) => p.id === chosen)
+  const kind = pipelineKind(chosenPipeline?.kind)
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -974,9 +1008,16 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
               </select>
             </div>
             <div className="grid gap-1.5">
-              <label htmlFor="new-pipeline" className={FIELD_LABEL}>
-                Pipeline
-              </label>
+              <div className="flex items-center gap-1.5">
+                <label htmlFor="new-pipeline" className={FIELD_LABEL}>
+                  Pipeline
+                </label>
+                {chosenPipeline && (
+                  <Badge variant={kind === 'batch' ? 'info' : 'neutral'} mono>
+                    {kind}
+                  </Badge>
+                )}
+              </div>
               <select
                 id="new-pipeline"
                 value={chosen}

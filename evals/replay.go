@@ -7,17 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/mysql"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
+	"piperoom/internal/tools/mysqltools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
 )
@@ -27,10 +32,6 @@ import (
 // so the run carries on; the miss is counted in the report so the scenario
 // author can add a recording.
 var errNoRecording = errors.New("no data available for this request")
-
-// errWritesDisabled guards the replay clients: an eval must never write, and
-// no write can reach a real system from here anyway.
-var errWritesDisabled = errors.New("evals: writes are disabled in replay")
 
 // errNotReplayed is returned by replay client reads that action validation
 // does not need.
@@ -42,26 +43,68 @@ type Miss struct {
 	Input json.RawMessage `json:"input"`
 }
 
-// LiveTools returns the read-only tools the agent gets in production, in
-// production order. For tools that read live systems only the names,
-// descriptions and schemas are used: the harness wraps each one and never
-// calls its Run, which is why the clients can be nil here. Pure tools (see
-// runsLive) are the exception and run for real.
+// LiveTools returns the read-only tools the agent gets in production in a
+// Postgres room (the default source kind), in production order. For tools
+// that read live systems only the names, descriptions and schemas are used:
+// the harness wraps each one and never calls its Run, which is why the
+// clients can be nil here. Pure tools (see runsLive) are the exception and
+// run for real. LiveToolsFor gives another source kind's list.
 func LiveTools() ([]tools.Tool, error) {
+	return LiveToolsFor(owners.SourceKindPostgres)
+}
+
+// LiveToolsFor returns the read-only tools of a room whose source is of
+// sourceKind (owners.yaml source_kind; "" is postgres), the way wiring builds
+// them for a client set of that kind (Q8g): a MySQL room gets dbtools' MySQL
+// list (no pg_* tool; source_row and source_long_transactions),
+// mysql_binlog_status and kafka_schema_history; a Postgres room gets none of
+// them, so its list is the one it had before MySQL, byte for byte. Every tool
+// then passes agent.ToolServesSource, as wiring filters it.
+func LiveToolsFor(sourceKind string) ([]tools.Tool, error) {
+	sk, err := agent.SourceKind(sourceKind)
+	if err != nil {
+		return nil, fmt.Errorf("evals: %w", err)
+	}
+	mysqlRoom := sk == owners.SourceKindMySQL
 	reg := tools.NewRegistry()
-	// kafkatools registers the F12 reads only for a client that has them, so the
-	// definition-only client below says it does.
-	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: definitionKafka{}}); err != nil {
+	// kafkatools registers the F12 reads, and the Q1c, Q3a, Q4a and Q5a reads
+	// (Q6d), only for clients that have them, so the definition-only clients
+	// below say they do. kafka_schema_history (Q8e) is registered for a
+	// SchemaHistoryReader, which only the MySQL room's client says it is.
+	var kc clients.KafkaAdmin = definitionKafka{}
+	if mysqlRoom {
+		kc = definitionHistoryKafka{}
+	}
+	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: kc, Connect: definitionConnect{}}); err != nil {
 		return nil, fmt.Errorf("evals: kafka tool definitions: %w", err)
 	}
 	// dbtools refuses a nil Owners (a wiring guard); an empty one is enough
-	// for definitions.
-	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
+	// for definitions. Its SourceKind picks the list (Q8n); a Postgres room
+	// keeps the zero value it always had.
+	dd := dbtools.Deps{Owners: &owners.Owners{}}
+	if mysqlRoom {
+		dd.SourceKind = sk
+	}
+	if err := dbtools.Register(reg, dd); err != nil {
 		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
+	// pg_object_owners (H2) is registered apart from dbtools.Register, as
+	// wiring does; it skips a MySQL source itself.
+	if err := dbtools.RegisterObjectOwners(reg, dd); err != nil {
+		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
+	// mysql_binlog_status (Q8c), as wiring registers it: on a MySQL room only.
+	if mysqlRoom {
+		if err := mysqltools.Register(reg, mysqltools.Deps{Owners: &owners.Owners{}}); err != nil {
+			return nil, fmt.Errorf("evals: mysql tool definitions: %w", err)
+		}
 	}
 	// Definition only: no Connect client and no metrics URL; the harness never runs it.
 	if err := debeziumtools.Register(reg, debeziumtools.Deps{Owners: &owners.Owners{}}); err != nil {
 		return nil, fmt.Errorf("evals: debezium tool definitions: %w", err)
+	}
+	if err := registerWorkerToolDefs(reg); err != nil {
+		return nil, err
 	}
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
@@ -71,7 +114,58 @@ func LiveTools() ([]tools.Tool, error) {
 	if err := similarincidents.Register(reg, similarincidents.Deps{}); err != nil {
 		return nil, fmt.Errorf("evals: similar_incidents tool definition: %w", err)
 	}
-	return reg.All(), nil
+	var out []tools.Tool
+	for _, t := range reg.All() {
+		if agent.ToolServesSource(t.Name(), sk) {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// definitionHistoryKafka is definitionKafka plus the schema history reader,
+// so kafkatools registers kafka_schema_history (Q8e) for a MySQL room. It is
+// never called either.
+type definitionHistoryKafka struct{ definitionKafka }
+
+func (definitionHistoryKafka) SchemaHistoryTail(context.Context, string, int) ([]kafka.SchemaHistoryRecord, error) {
+	return nil, errNotReplayed
+}
+
+// scenarioTools returns the tool definitions of sc's room: pg are the
+// Postgres room's (the caller's list, LiveTools() in production), a MySQL
+// scenario gets LiveToolsFor(mysql). my caches that list across calls; a nil
+// my builds it every time. A pipeline that lists repos: also gets the
+// repository tools after them, as Q7f's wiring registers them last
+// (replay_forge.go); every other room's list is the one it had before.
+func scenarioTools(sc Scenario, pg []tools.Tool, my *[]tools.Tool) ([]tools.Tool, error) {
+	defs, err := sourceTools(sc, pg, my)
+	if err != nil || len(sc.Pipeline.Repos) == 0 {
+		return defs, err
+	}
+	fdefs, err := forgeToolDefs()
+	if err != nil {
+		return nil, err
+	}
+	return append(slices.Clone(defs), fdefs...), nil
+}
+
+// sourceTools is scenarioTools without the repository tools.
+func sourceTools(sc Scenario, pg []tools.Tool, my *[]tools.Tool) ([]tools.Tool, error) {
+	if sc.sourceKind() != owners.SourceKindMySQL {
+		return pg, nil
+	}
+	if my != nil && *my != nil {
+		return *my, nil
+	}
+	defs, err := LiveToolsFor(owners.SourceKindMySQL)
+	if err != nil {
+		return nil, err
+	}
+	if my != nil {
+		*my = defs
+	}
+	return defs, nil
 }
 
 // definitionKafka is a Kafka client for tool definitions only. It implements the
@@ -91,29 +185,142 @@ func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLE
 	return nil, errNotReplayed
 }
 
+// DupScan registers kafka_dup_keys (X1c), as the production Kafka client does.
+func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients.DupReport, error) {
+	return clients.DupReport{}, errNotReplayed
+}
+
 // LiveActions returns the production write actions, backed by replay clients
-// that know only res and the connector states in recs. The agent can propose
-// them (their real Validate runs against that) but nothing can execute: every
-// write returns an error.
+// that know only res and what recs recorded: actions.Register's seven, the
+// P3 actions (replay_actions.go), the Q2 source admin actions
+// (replay_source.go), the Q5 connector lifecycle actions
+// (replay_connect.go) and, for a pipeline that lists repos:,
+// repo_open_pull_request over the replay forge (replay_forge.go). The agent
+// can propose them (their real
+// Validate runs against that) but nothing is ever written: every write of a
+// replay client is a no-op that only records the call.
 func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
+	reg, _, err := liveActions(res, recs)
+	return reg, err
+}
+
+// liveActions is LiveActions plus the log of the writes its clients took.
+func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog, error) {
+	reg, wl, _, err := liveActionsForge(res, recs)
+	return reg, wl, err
+}
+
+// liveActionsForge is liveActions plus the run's replay forge (nil when the
+// pipeline lists no repos), which the run's repository tools read too.
+func liveActionsForge(res Resources, recs []Recording) (*actions.Registry, *writeLog, *replayForge, error) {
 	statuses, err := connectStatuses(recs)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
+	}
+	sk, err := agent.SourceKind(res.SourceKind)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("evals: resources: %w", err)
+	}
+	wl := &writeLog{}
+	fg, err := newReplayForge(res, wl)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	reg := actions.NewRegistry()
-	if err := actions.Register(reg, actions.Deps{
-		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses},
-		Registry: replayRegistry{subjects: res.Subjects},
-	}); err != nil {
-		return nil, fmt.Errorf("evals: action definitions: %w", err)
+	deps := actions.Deps{
+		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl, res: res, recs: recs},
+		Registry: replayRegistry{subjects: res.Subjects, log: wl},
 	}
-	return reg, nil
+	// A MySQL room's actions get the source's binlog reader (Q8g wires the
+	// MySQL client as actions.Deps.Binlog): connect_update_connector_config
+	// then offers database.server.id and snapshot.mode, whose guards read
+	// the connector's config, so its Connect also answers Config from the
+	// recordings (replayConfig). A Postgres room keeps replayConnect, whose
+	// Config is not replayed, so its Validate behaves as before.
+	var binlog mysql.BinlogReader
+	if sk == owners.SourceKindMySQL {
+		binlog = replayBinlog{recs: recs}
+		deps.Connect = replayMySQLConnect{
+			replayConnect: replayConnect{connectors: res.Connectors, statuses: statuses, log: wl, res: res, recs: recs},
+			cfg:           replayConfig{res: res, recs: recs},
+		}
+		deps.Binlog = binlog
+	}
+	if err := actions.Register(reg, deps); err != nil {
+		return nil, nil, nil, fmt.Errorf("evals: action definitions: %w", err)
+	}
+	if err := registerP3(reg, res, recs, wl); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := registerSourceActions(reg, res, recs, wl); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := registerLifecycle(reg, res, recs, wl, binlog); err != nil {
+		return nil, nil, nil, err
+	}
+	// Last, as wiring's registerFixPR, and only for a pipeline with repos:.
+	if err := registerFixPR(reg, fg); err != nil {
+		return nil, nil, nil, err
+	}
+	if sk == owners.SourceKindPostgres {
+		return reg, wl, fg, nil
+	}
+	// Only the source's actions reach the room (agent.ActionServesSource), as
+	// wiring registers them: a MySQL room has no pg_* action.
+	out, err := agent.ActionsForSource(reg, sk)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("evals: %w", err)
+	}
+	return out, wl, fg, nil
+}
+
+// replayMySQLConnect is a MySQL room's Connect client for actions.Register's
+// actions: replayConnect with Config answered from the recordings, which the
+// MySQL key guards of connect_update_connector_config read (the connector
+// class, the current snapshot.mode, the pipeline's other server ids).
+type replayMySQLConnect struct {
+	replayConnect
+	cfg replayConfig
+}
+
+func (c replayMySQLConnect) Config(ctx context.Context, name string) (map[string]string, error) {
+	return c.cfg.Config(ctx, name)
+}
+
+// replayBinlog is a MySQL room's binlog reader (mysql.BinlogReader): the
+// server state of the first mysql_binlog_status recording with data (its
+// Data.server carries mysql.BinlogStatus's fields under the same names), so
+// an action checks a position or a database.server.id against what the
+// agent's read showed.
+type replayBinlog struct{ recs []Recording }
+
+var _ mysql.BinlogReader = replayBinlog{}
+
+func (b replayBinlog) BinlogStatus(context.Context) (mysql.BinlogStatus, error) {
+	var st mysql.BinlogStatus
+	found := firstData(b.recs, mysqltools.NameBinlogStatus, func(_ Recording, data []byte) bool {
+		var d struct {
+			Server *mysql.BinlogStatus `json:"server"`
+		}
+		if json.Unmarshal(data, &d) != nil || d.Server == nil {
+			return false
+		}
+		st = *d.Server
+		return true
+	})
+	if !found {
+		return mysql.BinlogStatus{}, fmt.Errorf("evals: binlog status: %w (record %s with data.server)", errNotReplayed, mysqltools.NameBinlogStatus)
+	}
+	return st, nil
 }
 
 // connectStatusData is the part of connect_status's Data that action
-// validation reads (name, state, and task ids/states).
+// validation reads (name, state, and task ids/states). The real tool's Data
+// carries no type; Type is set only when a scenario adds one, otherwise it
+// comes from the summary (statusType).
 type connectStatusData struct {
 	Name  string `json:"name"`
+	Type  string `json:"type"`
 	State string `json:"state"`
 	Tasks []struct {
 		ID    int    `json:"id"`
@@ -150,9 +357,12 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		if err := json.Unmarshal(b, &d); err != nil {
 			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data is not a connector status: %w", i, err)
 		}
-		st := clients.ConnectorStatus{Name: d.Name, State: d.State}
+		st := clients.ConnectorStatus{Name: d.Name, Type: d.Type, State: d.State}
 		if st.Name == "" {
 			st.Name = name
+		}
+		if st.Type == "" {
+			st.Type = statusType(st.Name, recordingResults(r)[0].Summary)
 		}
 		for _, t := range d.Tasks {
 			st.Tasks = append(st.Tasks, clients.TaskStatus{ID: t.ID, State: t.State})
@@ -160,6 +370,19 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		out[name] = st
 	}
 	return out, nil
+}
+
+// statusType reads a connector's type from connect_status's summary, whose
+// first line the tool writes as "<name> (<type>): <state>". Its Data leaves
+// the type out, and connect_reset_source_offsets refuses anything but a
+// source connector (Q6d).
+func statusType(name, summary string) string {
+	for _, typ := range []string{"source", "sink"} {
+		if strings.HasPrefix(summary, name+" ("+typ+"): ") {
+			return typ
+		}
+	}
+	return ""
 }
 
 // replayer serves recordings for one run. It owns the run's replay state: the
@@ -187,10 +410,20 @@ type replayer struct {
 	marks      []ReplayMark
 	unexecuted []string
 	misses     []Miss
-	// isLookup tells the agent's own room-start past-incidents lookup from a
-	// call the model made. It is a field so a test can mark a context; the
-	// production value is agent.IsPastIncidentsLookup.
+	// isLookup tells the agent's own reads (the room-start past-incidents
+	// lookup, the connect_plugins read of the running versions) from a call
+	// the model made. It is a field so a test can mark a context; the
+	// production value is agentOwnRead.
 	isLookup func(context.Context) bool
+}
+
+// agentOwnRead reports a read the agent runner makes on its own (including
+// the logs and known-issues reads after a failed step): it is
+// answered when recorded but is never a miss, never counts toward
+// after_calls and never moves a sequence.
+func agentOwnRead(ctx context.Context) bool {
+	return agent.IsPastIncidentsLookup(ctx) || agent.IsRunningVersionsRead(ctx) ||
+		agent.IsReplanRead(ctx)
 }
 
 // replayRecord is a Recording with its results already converted to JSON, so
@@ -276,7 +509,7 @@ func newPhasedReplayer(recs []Recording, phases []string, transitions []Transiti
 		transitions: transitions,
 		calls:       map[string]int{},
 		seqPos:      map[int]int{},
-		isLookup:    agent.IsPastIncidentsLookup,
+		isLookup:    agentOwnRead,
 	}
 	if len(phases) > 0 {
 		r.phase = phases[0]
@@ -313,10 +546,18 @@ func runsLive(name string) bool { return name == runbooks.ToolName }
 // registry wraps every definition in a replay tool, except pure tools, which
 // are registered as they are.
 func (r *replayer) registry(defs []tools.Tool) (*tools.Registry, error) {
+	return r.registryWith(defs, nil)
+}
+
+// registryWith is registry with live tools that take the place of their
+// definitions by name: the repository tools over the run's replay forge.
+func (r *replayer) registryWith(defs []tools.Tool, live map[string]tools.Tool) (*tools.Registry, error) {
 	reg := tools.NewRegistry()
 	for _, d := range defs {
 		var t tools.Tool = &replayTool{def: d, r: r}
-		if runsLive(d.Name()) {
+		if lt, ok := live[d.Name()]; ok {
+			t = lt
+		} else if runsLive(d.Name()) {
 			t = d
 		}
 		if err := reg.Register(t); err != nil {
@@ -602,11 +843,21 @@ func (t *replayTool) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 }
 
 // replayConnect answers the Connect reads that action validation needs: the
-// connector names and, where a recording gives it, each connector's status.
+// connector names, where a recording gives it each connector's status, and
+// the config of a connector the scenario declares in resources.connector_configs.
+// Its writes are recorded no-ops.
 type replayConnect struct {
 	connectors []string
 	statuses   map[string]clients.ConnectorStatus
+	log        *writeLog
+	// res and recs serve Config as replayConfig does for the P3 actions, but
+	// only for a connector in res.ConnectorConfigs: the declaration is the
+	// scenario's opt-in, so a scenario without one validates as before.
+	res  Resources
+	recs []Recording
 }
+
+var _ clients.ConnectFixWriter = replayConnect{}
 
 func (c replayConnect) ListConnectors(context.Context) ([]string, error) {
 	return append([]string(nil), c.connectors...), nil
@@ -617,20 +868,46 @@ func (c replayConnect) Status(_ context.Context, name string) (clients.Connector
 	}
 	return clients.ConnectorStatus{}, errNotReplayed
 }
-func (replayConnect) Config(context.Context, string) (map[string]string, error) {
-	return nil, errNotReplayed
+func (c replayConnect) Config(ctx context.Context, name string) (map[string]string, error) {
+	if _, declared := c.res.ConnectorConfigs[name]; !declared {
+		return nil, errNotReplayed
+	}
+	return replayConfig{res: c.res, recs: c.recs}.Config(ctx, name)
 }
-func (replayConnect) RestartTask(context.Context, string, int) error { return errWritesDisabled }
-func (replayConnect) RestartConnector(context.Context, string) error { return errWritesDisabled }
+func (c replayConnect) RestartTask(_ context.Context, name string, task int) error {
+	c.log.record("RestartTask", map[string]any{"connector": name, "task": task})
+	return nil
+}
+
+func (c replayConnect) RestartConnector(_ context.Context, name string) error {
+	c.log.record("RestartConnector", map[string]any{"connector": name})
+	return nil
+}
 
 // Resume matches the connectorResumer interface that connect_resume_connector
-// Execute asserts for, so a replayed resume reaches this refusal and never a
-// client that does not know the method.
-func (replayConnect) Resume(context.Context, string) error { return errWritesDisabled }
+// Execute asserts for, so a replayed resume is recorded here and never
+// refused for a client that does not know the method.
+func (c replayConnect) Resume(_ context.Context, name string) error {
+	c.log.record("Resume", map[string]any{"connector": name})
+	return nil
+}
+
+func (c replayConnect) PauseConnector(_ context.Context, name string) error {
+	c.log.record("PauseConnector", map[string]any{"connector": name})
+	return nil
+}
+
+func (c replayConnect) UpdateConnectorConfigKeys(_ context.Context, name string, changes map[string]string) error {
+	c.log.record("UpdateConnectorConfigKeys", map[string]any{"connector": name, "changes": len(changes)})
+	return nil
+}
 
 // replayRegistry answers the one Schema Registry read that action validation
-// needs.
-type replayRegistry struct{ subjects []string }
+// needs. Its writes are recorded no-ops.
+type replayRegistry struct {
+	subjects []string
+	log      *writeLog
+}
 
 func (r replayRegistry) Subjects(context.Context) ([]string, error) {
 	return append([]string(nil), r.subjects...), nil
@@ -642,11 +919,13 @@ func (replayRegistry) Schema(context.Context, string, int) (clients.SchemaVersio
 func (replayRegistry) Compatibility(context.Context, string) (string, bool, error) {
 	return "", false, errNotReplayed
 }
-func (replayRegistry) SetCompatibility(context.Context, string, string) error {
-	return errWritesDisabled
+func (r replayRegistry) SetCompatibility(_ context.Context, subject, level string) error {
+	r.log.record("SetCompatibility", map[string]any{"subject": subject, "level": level})
+	return nil
 }
-func (replayRegistry) Register(context.Context, string, string) (int, error) {
-	return 0, errWritesDisabled
+func (r replayRegistry) Register(_ context.Context, subject, _ string) (int, error) {
+	r.log.record("Register", map[string]any{"subject": subject})
+	return 0, nil
 }
 
 // ActionAttempt is one Validate call made while the agent proposed a fix.
@@ -677,7 +956,7 @@ type attemptLog struct {
 func (l *attemptLog) wrap(reg *actions.Registry) (*actions.Registry, error) {
 	out := actions.NewRegistry()
 	for _, a := range reg.All() {
-		if err := out.Register(&recordingAction{Action: a, log: l}); err != nil {
+		if err := out.Register(l.wrapAction(a)); err != nil {
 			return nil, fmt.Errorf("evals: wrap action: %w", err)
 		}
 	}
@@ -736,6 +1015,22 @@ func (a *recordingAction) Execute(ctx context.Context, params json.RawMessage) (
 		return a.Action.Execute(ctx, params)
 	}
 	return a.log.exec.execute(a.Name(), params)
+}
+
+// Class passes the wrapped action's class through: without it every wrapped
+// action reads as a fix, and the agent would never verify a recovery step by
+// its counts (X2c).
+func (a *recordingAction) Class() string { return actions.ClassOf(a.Action) }
+
+// Verify runs the wrapped action's Verify on its replay clients (X2e), so a
+// recovery step executed in a run is counted as in production. An action
+// without one is not countable.
+func (a *recordingAction) Verify(ctx context.Context, params json.RawMessage, executedAt time.Time) (actions.VerifyResult, error) {
+	v, ok := a.Action.(actions.Verifier)
+	if !ok {
+		return actions.VerifyResult{}, fmt.Errorf("evals: action %q has no Verify: %w", a.Name(), clients.ErrNotSupported)
+	}
+	return v.Verify(ctx, params, executedAt)
 }
 
 // CheckScope keeps the wrapper honest about scope: it delegates when the

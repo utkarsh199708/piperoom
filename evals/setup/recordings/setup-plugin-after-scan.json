@@ -1,0 +1,271 @@
+{
+  "scenario": "setup/plugin-after-scan",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-25T09:40:00Z",
+  "note": "Composed from jar_list's listing (internal/setup/ops/envops.go), container_logs' format (internal/setup/targets/compose/logs.go, U5a) over Kafka Connect plugin-scan messages, and compose_restart's argv, on the fixed clock of the setup scenarios. The install is recorded as already done (jar_list sees the plugin directory); no Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios: logs (U5c). The out_mac, params_hash and nonce_hash values are synthetic 64-hex placeholders, not real MACs or hashes.",
+  "ops": [
+    {
+      "op": "jar_list",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "path": "."
+      },
+      "result": {
+        "ok": true,
+        "summary": "1 plugin directory under /kafka/connect, 12 jar(s), layout fine; newest jar written 09:31:12Z",
+        "data": {
+          "path": "/kafka/connect",
+          "jars": [
+            "debezium-connector-postgres/12 jars"
+          ],
+          "flat": [],
+          "debezium_versions": [
+            "3.2.0.Final"
+          ],
+          "issues": [],
+          "scanned_dirs": 1
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "/kafka/connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:07Z",
+          "took_ms": 12,
+          "out_mac": "8aab59c009cb80da763d06b7b79e625c9f307448d5a8a82b35b191c811546b09"
+        }
+      }
+    },
+    {
+      "op": "container_logs",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "service": "connect"
+      },
+      "result": {
+        "ok": true,
+        "summary": "connect logs (container 3f9a1c7e2b40): 12 lines, newest last",
+        "data": {
+          "service": "connect",
+          "file": "compose.yaml",
+          "container": "3f9a1c7e2b40",
+          "containers": 1,
+          "lines": [
+            "2026-10-25T08:55:36.904Z INFO  Kafka Connect worker initialization took 4012ms",
+            "2026-10-25T08:55:37.118Z INFO  Scanning for plugin classes. This might take a moment ...",
+            "2026-10-25T08:55:38.664Z INFO  Loading plugin from: classpath",
+            "2026-10-25T08:55:39.021Z INFO  Added plugin 'org.apache.kafka.connect.file.FileStreamSourceConnector'",
+            "2026-10-25T08:55:39.022Z INFO  Added plugin 'org.apache.kafka.connect.file.FileStreamSinkConnector'",
+            "2026-10-25T08:55:39.140Z INFO  Added plugin 'org.apache.kafka.connect.json.JsonConverter'",
+            "2026-10-25T08:55:40.087Z INFO  Finished scanning for plugins in 2969 ms",
+            "2026-10-25T08:55:44.350Z INFO  [Worker clientId=connect-1, groupId=connect-cluster] Herder started",
+            "2026-10-25T08:55:45.002Z INFO  Kafka Connect started",
+            "2026-10-25T09:07:03.518Z INFO  [Worker clientId=connect-1, groupId=connect-cluster] Connector pg-orders-connector stopped and deleted",
+            "2026-10-25T09:34:12.771Z INFO  [Worker clientId=connect-1, groupId=connect-cluster] Creating connector pg-orders-connector of type io.debezium.connector.postgresql.PostgresConnector",
+            "2026-10-25T09:34:12.905Z ERROR [Worker clientId=connect-1, groupId=connect-cluster] Failed to start connector 'pg-orders-connector': org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector"
+          ],
+          "count": 12,
+          "tail": 200
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "logs",
+            "--timestamps",
+            "--tail",
+            "200",
+            "3f9a1c7e2b40"
+          ],
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:12Z",
+          "took_ms": 41,
+          "out_mac": "5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b"
+        }
+      }
+    },
+    {
+      "op": "compose_restart",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "55e1f3e3076ef459f54896b49b0c44df3b83fe825dc5321bc93c7e38644eb087",
+      "params": {
+        "services": [
+          "connect"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "compose restart: connect",
+        "data": {
+          "project": "piperoom-orders",
+          "services": [
+            {
+              "service": "connect",
+              "state": "running"
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "--project-directory",
+            "C:\\orders",
+            "-f",
+            "compose.yaml",
+            "--env-file",
+            ".env",
+            "restart",
+            "connect"
+          ],
+          "target": "connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:43:04Z",
+          "took_ms": 9231,
+          "out_mac": "6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "29654c444daab10f544bc97271139ee943c860e9c9681e284dace9c14667ea5a",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "RUNNING"
+            }
+          ]
+        },
+        "at": "2026-10-25T09:46:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "RUNNING"
+            }
+          ]
+        },
+        "at": "2026-10-25T09:46:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "pg.public.orders",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 2
+            }
+          ],
+          "total_records": 2
+        },
+        "at": "2026-10-25T09:46:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {
+          "connector": "pg-orders-connector",
+          "metrics_found": 11,
+          "snapshot": {
+            "SnapshotCompleted": 1,
+            "SnapshotRunning": 0
+          }
+        },
+        "at": "2026-10-25T09:46:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {
+          "topic": "pg.public.orders",
+          "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718",
+          "found": true,
+          "records": [
+            {
+              "partition": 0,
+              "offset": 1
+            }
+          ]
+        },
+        "at": "2026-10-25T09:46:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {
+          "subjects": [
+            "pg.public.orders-key",
+            "pg.public.orders-value"
+          ],
+          "deleted_subjects": []
+        },
+        "at": "2026-10-25T09:46:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {
+          "name": "connector_running",
+          "ok": true,
+          "note": "the connector is RUNNING"
+        },
+        {
+          "name": "tasks_running",
+          "ok": true,
+          "note": "1 task(s) RUNNING"
+        },
+        {
+          "name": "canary_topic",
+          "ok": true,
+          "note": "the topic exists with 1 partition(s)"
+        },
+        {
+          "name": "snapshot_complete",
+          "ok": true,
+          "note": "SnapshotCompleted"
+        },
+        {
+          "name": "canary_event",
+          "ok": true,
+          "note": "the canary event with the nonce as key is on the topic"
+        },
+        {
+          "name": "canary_subject",
+          "ok": true,
+          "note": "2 subject(s) under the canary topic's prefix"
+        },
+        {
+          "name": "sink_row",
+          "ok": true,
+          "note": "no sink was set up"
+        },
+        {
+          "name": "person_change",
+          "ok": false,
+          "note": "awaiting the person's change"
+        }
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

@@ -2,9 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"math"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 	"piperoom/internal/tools"
 )
 
@@ -21,19 +22,16 @@ type toolEntry struct {
 }
 
 // toolList is the stable, ordered set of tools sent to the model plus the
-// lookup table used to execute tool_use blocks.
+// lookup table used to execute tool calls. The request asks the provider to
+// cache through the last tool (llm.CacheHints.Tools).
 type toolList struct {
-	params []anthropic.BetaToolUnionParam
+	defs   []llm.ToolDef
 	byName map[string]toolEntry
 }
 
-// maxStrictTools caps the tools sent with strict: true. The API enforces two
-// limits on them: a count limit and a size limit on the grammar compiled from
-// their schemas. LEAD-ARCH's live bisect (TestLiveStrictToolCap, 2026-10-12,
-// fullRegistry + room tools) accepted 0–16 strict tools, rejected 20 with
-// "The compiled grammar is too large" and 21 with "Too many strict tools".
-// Eight sits well inside the accepted range; maxStrictSchemaBytes guards the
-// grammar size as schemas grow. Room tools take the slots first: propose_fix
+// maxStrictTools caps the tools sent with strict: true on Claude, the Claude
+// adapter's Capabilities.MaxStrictTools (see anthropicllm.MaxStrictTools for
+// the live bisect behind it). Room tools take the slots first: propose_fix
 // guards the write path, where a malformed input costs the most. Its strict
 // schema holds only an enum of action names and the params as JSON text; each
 // action's own params are checked in code (see proposeFixTool.checkStep), so
@@ -41,13 +39,14 @@ type toolList struct {
 // strictReadTools fill the rest. Tools sent without strict are still checked in
 // code: validateInput runs on every read-tool input before Tool.Run, so nothing
 // goes unvalidated.
-const maxStrictTools = 8
+const maxStrictTools = anthropicllm.MaxStrictTools
 
 // maxStrictSchemaBytes caps the summed size of the marshalled input_schema of
-// every strict tool. Bytes are only a proxy for the compiled grammar size the
-// API limits, but they grow with it. The budget sits just under the largest
-// sum the API is known to accept (liveAcceptedSchemaBytes); configurations
-// that were never sent live do not count.
+// every strict tool (anthropicllm.MaxStrictSchemaBytes, the Claude adapter's
+// Capabilities.MaxStrictBytes). Bytes are only a proxy for the compiled
+// grammar size the API limits, but they grow with it. The budget sits just
+// under the largest sum the API is known to accept (liveAcceptedSchemaBytes);
+// configurations that were never sent live do not count.
 //
 // History of the shipped cap-8 set (production registry, the real actions):
 // 4491 bytes on 2026-10-12, which ran live in LEAD-ARCH's M2 check; 5319 bytes
@@ -56,7 +55,19 @@ const maxStrictTools = 8
 // params as JSON text. A new action adds about its name length to that enum
 // (TestProposeFixStrictBytesDoNotGrowWithActions holds the line). The current
 // shape has not been sent live yet: re-run TestLiveStrictToolCap once.
-const maxStrictSchemaBytes = 5400
+const maxStrictSchemaBytes = anthropicllm.MaxStrictSchemaBytes
+
+// strictCap is how many tools the model may get with strict set: none when
+// the provider has no strict tools, every one when it sets no cap.
+func strictCap(c llm.Capabilities) int {
+	switch {
+	case !c.StrictTools:
+		return 0
+	case c.MaxStrictTools <= 0:
+		return math.MaxInt
+	}
+	return c.MaxStrictTools
+}
 
 // liveAcceptedSchemaBytes is the largest strict schema sum the API accepted in
 // the live bisect of 2026-10-12 (TestLiveStrictToolCap, cap 16; that run used
@@ -74,7 +85,8 @@ func strictReadTools() []string {
 	}
 }
 
-// buildToolList assembles the model-facing tool definitions. Registry (read)
+// buildToolList assembles the model-facing tool definitions with Claude's
+// strict cap; the loop uses buildToolListWithCap with its model's. Registry (read)
 // tools keep their registration order; room tools follow in a fixed order. The
 // order is stable so the tool list is byte-identical across requests and the
 // prompt cache stays warm.
@@ -97,7 +109,7 @@ func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolL
 	strictReads := strictReadSet(reads, max(cap-len(room), 0))
 	for _, t := range reads {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
-		tl.params = append(tl.params, toolParam(t, true, strictReads[t.Name()]))
+		tl.defs = append(tl.defs, toolParam(t, true, strictReads[t.Name()]))
 	}
 	for i, t := range room {
 		schema := t.InputSchema()
@@ -105,14 +117,7 @@ func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolL
 			schema = v.validationSchema() // a tool whose Run checks some fields itself
 		}
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: schema, isRoom: true}
-		tl.params = append(tl.params, toolParam(t, false, i < cap))
-	}
-	// Put a cache breakpoint after the tool list (the last tool).
-	if n := len(tl.params); n > 0 {
-		if tp := tl.params[n-1].OfTool; tp != nil {
-			tp.CacheControl = anthropic.NewBetaCacheControlEphemeralParam()
-			tl.params[n-1] = anthropic.BetaToolUnionParam{OfTool: tp}
-		}
+		tl.defs = append(tl.defs, toolParam(t, false, i < cap))
 	}
 	return tl
 }
@@ -144,13 +149,13 @@ func strictReadSet(reads []tools.Tool, n int) map[string]bool {
 	return set
 }
 
-// toolParam converts one Piperoom tool into an SDK tool definition. When
+// toolParam converts one Piperoom tool into a model tool definition. When
 // wrapWhy is set, an extra required string property "why" is injected into the
 // schema; the agent strips it before calling Tool.Run and uses it as the step
 // title. strict asks the API to validate inputs against the schema (see
 // maxStrictTools); the schema is shaped the same either way, so what the model
 // sees does not depend on which slot the tool landed in.
-func toolParam(t tools.Tool, wrapWhy, strict bool) anthropic.BetaToolUnionParam {
+func toolParam(t tools.Tool, wrapWhy, strict bool) llm.ToolDef {
 	schema := t.InputSchema()
 
 	props := map[string]any{}
@@ -181,21 +186,18 @@ func toolParam(t tools.Tool, wrapWhy, strict bool) anthropic.BetaToolUnionParam 
 		addAdditionalPropertiesFalse(v)
 	}
 
-	tp := anthropic.BetaToolParam{
+	// A strict schema needs additionalProperties:false at the top too.
+	schema = map[string]any{"type": "object", "properties": props}
+	if required != nil {
+		schema["required"] = required
+	}
+	schema["additionalProperties"] = false
+	return llm.ToolDef{
 		Name:        t.Name(),
-		Description: anthropic.String(t.Description()),
-		InputSchema: anthropic.BetaToolInputSchemaParam{
-			Properties:  props,
-			Required:    required,
-			ExtraFields: map[string]any{"additionalProperties": false},
-		},
-		EagerInputStreaming: anthropic.Bool(true),
-		Type:                anthropic.BetaToolTypeCustom,
+		Description: t.Description(),
+		Schema:      schema,
+		Strict:      strict,
 	}
-	if strict {
-		tp.Strict = anthropic.Bool(true)
-	}
-	return anthropic.BetaToolUnionParam{OfTool: &tp}
 }
 
 // cloneSchema deep-copies a JSON Schema fragment so adding strictness flags to

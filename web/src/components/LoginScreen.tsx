@@ -5,6 +5,7 @@ import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Kbd } from '@/components/ui/kbd'
+import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { useAuthUsers } from '../hooks/useAuthUsers'
 import { envLabel } from '@/lib/envLabel'
@@ -46,7 +47,9 @@ export function LoginScreen({
       <Card className="flex w-full max-w-[400px] flex-col gap-4 p-6 shadow-md">
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
-          <p className="text-muted-foreground">Your identity is attached to every approval you give.</p>
+          <p className="text-muted-foreground">
+            {ssoHref ? '' : 'Pick a dev user. '}Your identity is attached to every approval you give.
+          </p>
           {notice && (
             <p role="status" className="m-0 text-xs text-muted-foreground">
               {notice.kind === 'replaced'
@@ -57,35 +60,33 @@ export function LoginScreen({
           )}
         </div>
 
-        {ssoHref ? (
-          <Button asChild className="h-9 w-full">
-            <a href={ssoHref}>
-              <LogIn aria-hidden="true" />
-              Continue with SSO
-            </a>
-          </Button>
-        ) : (
+        {ssoHref && (
           <>
-            <Button className="h-9 w-full" disabled aria-describedby="sso-off">
-              <LogIn aria-hidden="true" />
-              Continue with SSO
+            <Button asChild className="h-9 w-full">
+              <a href={ssoHref}>
+                <LogIn aria-hidden="true" />
+                Continue with SSO
+              </a>
             </Button>
-            <p id="sso-off" className="-mt-2 text-xs text-subtle-foreground">
-              SSO is not enabled on this server.
-            </p>
+            <div className="flex items-center gap-2.5 text-xs text-subtle-foreground" aria-hidden="true">
+              <span className="h-px flex-1 bg-border" />
+              or pick a dev user
+              <span className="h-px flex-1 bg-border" />
+            </div>
           </>
         )}
 
-        <div className="flex items-center gap-2.5 text-xs text-subtle-foreground" aria-hidden="true">
-          <span className="h-px flex-1 bg-border" />
-          or pick a dev user
-          <span className="h-px flex-1 bg-border" />
-        </div>
-
         {loaded.status === 'loading' && (
-          <p role="status" className="m-0 text-muted-foreground">
-            Loading users…
-          </p>
+          <div role="status" aria-label="Loading users" className="-mx-1 flex flex-col gap-0.5">
+            <span className="sr-only">Loading users…</span>
+            {[0, 1, 2].map((i) => (
+              <div key={i} aria-hidden="true" className="flex min-h-11 items-center gap-2.5 px-2.5">
+                <Skeleton className="size-7 rounded-full" />
+                <Skeleton className="h-3.5 w-16" />
+                <Skeleton className="h-4 w-20" />
+              </div>
+            ))}
+          </div>
         )}
         {loaded.status === 'error' && (
           <div role="alert" className="flex flex-col items-start gap-2">
@@ -150,8 +151,9 @@ export function LoginScreen({
         </ul>
       </Card>
 
-      <p className="font-mono text-xs text-subtle-foreground">
-        {env ? `${env} · ` : ''}dev users are off in production
+      <p className="m-0 text-center text-xs text-subtle-foreground">
+        {env ? `${env} · ` : ''}
+        {ssoHref ? '' : 'SSO is not enabled on this server · '}dev users are off in production
       </p>
     </main>
   )

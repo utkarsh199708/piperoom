@@ -125,21 +125,46 @@ function RanLine({ call }: { call: ToolCall }) {
   )
 }
 
-function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistWiring }) {
+// `header` says what the step's own header row already shows for its first call: "md" (a finished
+// step: first arg from md, time from sm), "all" (the running card: tool and first arg at every width).
+// A step with one call drops only that from its call row, so nothing prints twice; the other args are
+// evidence and always stay.
+function CallRow({ t, single, header }: { t: ToolCallState; single: boolean; header: 'md' | 'all' }) {
+  const args = argTags(t.input)
+  const extra = args.length > 1
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-x-2 gap-y-1',
+        single && header === 'md' && !extra && 'md:hidden',
+        single && header === 'all' && !extra && t.took_ms == null && 'hidden',
+      )}
+      data-testid="call-row"
+    >
+      <span className={cn('contents', single && (header === 'md' ? '[&>*]:md:hidden' : '[&>*]:hidden'))}>
+        <ToolBadge tool={t.tool} />
+        {args[0] && <ArgTag>{args[0]}</ArgTag>}
+      </span>
+      {args.slice(1).map((a) => (
+        <ArgTag key={a}>{a}</ArgTag>
+      ))}
+      {t.took_ms != null && (
+        <span className={cn('ml-auto font-mono text-xs text-subtle-foreground', single && header === 'md' && 'sm:hidden')}>
+          {formatMs(t.took_ms)}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Evidence({ step, checklist, header }: { step: StepState; checklist?: ChecklistWiring; header: 'md' | 'all' }) {
   if (step.tool_calls.length === 0) return null
+  const single = step.tool_calls.length === 1
   return (
     <ul className="m-0 flex list-none flex-col gap-3 p-0">
       {step.tool_calls.map((t) => (
         <li key={t.tool_use_id} className="flex flex-col gap-1.5">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ToolBadge tool={t.tool} />
-            {argTags(t.input).map((a) => (
-              <ArgTag key={a}>{a}</ArgTag>
-            ))}
-            {t.took_ms != null && (
-              <span className="ml-auto font-mono text-xs text-subtle-foreground">{formatMs(t.took_ms)}</span>
-            )}
-          </div>
+          <CallRow t={t} single={single} header={header} />
           {t.provenance?.map((c, i) => <RanLine key={i} call={c} />)}
           {t.summary != null && <ToolSummary t={t} />}
           {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
@@ -186,6 +211,37 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
   )
 }
 
+// Settles a send's client_id with its composer and says whether the Retry strip belongs under it.
+// The strip is for a send that did not get through but is still owed: kept for the reconnect, or
+// sent with no answer (SteerBox draws the same line with retryId.owns). A refused send (4xx, 409
+// room_closed) is neither: the ledger dropped it, the room error says why, and a Retry would only
+// be a new send. One the person edited away while it was on the wire (retryId.drop) is not the
+// composer's any more when it ends, so it cannot be told from a refusal here; it keeps the strip,
+// as before, since a slow network failure is the likelier end of a send that was still out.
+function settleSend(retryId: ReturnType<typeof useRetryId>, clientId: string, ok: boolean): boolean {
+  const mine = retryId.owns(clientId)
+  retryId.settle(clientId, ok)
+  const refused = !ok && mine && !retryId.owns(clientId)
+  return !ok && !refused
+}
+
+// The line under a box for a send the server refused: the room error banner says it too, but it is
+// off-screen when the person is down at the step (KAN-580). Not role="alert": the banner is.
+function RefusalLine({ text, className }: { text: string; className?: string }) {
+  const ref = useRef<HTMLParagraphElement>(null)
+  // Bring a new refusal into view with the smallest scroll. <main>'s scroll-padding-bottom already
+  // reserves --composer-h, so 'nearest' stops above the sticky composer; scroll-mb adds a little air.
+  // Focus stays in the box. scrollIntoView is optional: jsdom has none.
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [text])
+  return (
+    <p ref={ref} role="status" className={cn('m-0 scroll-mb-2 text-xs text-destructive-fg', className)}>
+      {text}
+    </p>
+  )
+}
+
 function CommentThread({
   comment,
   onReply,
@@ -199,9 +255,12 @@ function CommentThread({
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const sends = useContext(SendsContext)
   // The failed reply landed after all (reconnect copy or its event): close it like a success.
-  const retryId = useRetryId(useContext(SendsContext), () => {
+  const retryId = useRetryId(sends, () => {
     setOffline(false)
+    setRefusal(null)
     setText('')
     setOpen(false)
   })
@@ -213,10 +272,12 @@ function CommentThread({
     setSending(true)
     // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
     const clientId = retryId.next(offline)
+    setRefusal(null)
     const ok = (await onReply(t, clientId)) !== false
     setSending(false)
-    setOffline(!ok)
-    retryId.settle(clientId, ok)
+    const keep = settleSend(retryId, clientId, ok)
+    setOffline(keep)
+    setRefusal(!ok && !keep ? (sends?.refusal?.(clientId) ?? null) : null)
     if (ok) {
       setText('')
       setOpen(false)
@@ -259,6 +320,7 @@ function CommentThread({
             value={text}
             onChange={(e) => {
               setText(e.target.value)
+              setRefusal(null)
               retryId.drop() // edited words: the failed action is cancelled, the next send is new
             }}
             placeholder="Reply…"
@@ -274,9 +336,10 @@ function CommentThread({
           Reply
         </Button>
       )}
+      {open && refusal && <RefusalLine text={refusal} className="ml-7" />}
       {open && offline && (
         <div className="ml-7">
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip onRetry={() => void send()} disabled={sending} sends={sends} actionId={retryId.current} />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent reply.</p>
         </div>
       )}
@@ -291,9 +354,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const sends = useContext(SendsContext)
   // The failed comment landed after all (reconnect copy or its event): clear it like a success.
-  const retryId = useRetryId(useContext(SendsContext), () => {
+  const retryId = useRetryId(sends, () => {
     setOffline(false)
+    setRefusal(null)
     setText('')
   })
   // The field clears only once the server took the comment; a failed send keeps the words.
@@ -303,10 +369,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
     setSending(true)
     // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
     const clientId = retryId.next(offline)
+    setRefusal(null)
     const ok = (await onSubmit(t, clientId)) !== false
     setSending(false)
-    setOffline(!ok)
-    retryId.settle(clientId, ok)
+    const keep = settleSend(retryId, clientId, ok)
+    setOffline(keep)
+    setRefusal(!ok && !keep ? (sends?.refusal?.(clientId) ?? null) : null)
     if (ok) setText('')
   }
   const submit = (e: FormEvent) => {
@@ -320,6 +388,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           value={text}
           onChange={(e) => {
             setText(e.target.value)
+            setRefusal(null)
             retryId.drop() // edited words: the failed action is cancelled, the next send is new
           }}
           placeholder="Comment on this step…"
@@ -329,9 +398,10 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           {sending ? 'Sending…' : 'Comment'}
         </Button>
       </form>
+      {refusal && <RefusalLine text={refusal} />}
       {offline && (
         <>
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip onRetry={() => void send()} disabled={sending} sends={sends} actionId={retryId.current} />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent comment.</p>
         </>
       )}
@@ -441,14 +511,14 @@ function DoneStep({
         aria-expanded={open}
         aria-controls={regionId}
         onClick={() => setOpen((o) => !o)}
-        className="flex min-h-9 coarse:min-h-11 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-h-9 coarse:min-h-11 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn('size-3.5 shrink-0 text-subtle-foreground transition-transform motion-reduce:transition-none', open && 'rotate-90')}
         />
         <StepNumber n={n} error={failed} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium sm:flex-none">{step.title}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{step.title}</span>
         {first && <ToolBadge tool={first.tool} />}
         {more > 0 && <span className="font-mono text-xs text-subtle-foreground">+{more}</span>}
         {tags[0] && (
@@ -466,7 +536,7 @@ function DoneStep({
       </button>
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
-        <Evidence step={step} checklist={checklist} />
+        <Evidence step={step} checklist={checklist} header="md" />
         {!readOnly && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
       </div>
 
@@ -533,7 +603,7 @@ function LiveStep({
         className="h-0.5 rounded-sm bg-agent-subtle"
         indicatorClassName="rounded-sm bg-agent"
       />
-      <Evidence step={step} checklist={checklist} />
+      <Evidence step={step} checklist={checklist} header="all" />
       <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox />
     </li>
   )

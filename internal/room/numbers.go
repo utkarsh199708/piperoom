@@ -129,7 +129,8 @@ func hasOutOfRangeNumber(raw []byte) bool {
 // (so jcs.Transform cannot fail on it). inexact counts the numbers whose hashed
 // form differs from the exact value: out of range or not exactly representable.
 func hashForm(exact []byte) (out []byte, inexact int) {
-	out = make([]byte, 0, len(exact)+8)
+	// Capacity len(exact): append grows the slice for the few quoted numbers.
+	out = make([]byte, 0, len(exact))
 	last := 0
 	jsonnum.Scan(exact, func(s, e int) {
 		switch classifyNumber(string(exact[s:e])) {

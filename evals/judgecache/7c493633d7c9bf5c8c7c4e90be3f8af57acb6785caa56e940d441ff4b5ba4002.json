@@ -2,12 +2,12 @@
   "prompt_version": "judge-2026-10-15.1",
   "scenario": "replication-slot-lost-failover",
   "hypothesis": "The standby promotion did not carry the publication dbz_publication, so slot debezium_orders streams nothing; recreate the publication.",
-  "truth_sha256": "fa26ddedfcae6870adcbc11dafafd1a20906d1be5d2195baa67147e10141c233",
-  "model": "claude-opus-5-5",
+  "truth_sha256": "80fc3dfb77bda06bb86aaa85b3613eb145ae3a2e74b71e7781e7baaa93ad6255",
+  "model": "anthropic:claude-opus-5-5",
   "verdict": {
-    "layer_correct": true,
+    "layer_correct": false,
     "root_cause_correct": false,
     "root_cause_layer_correct": true,
-    "reason": "The hypothesis blames a missing publication and claims the slot exists but streams nothing, whereas the truth is that the slot itself is missing after the failover. It does place the failure in postgres, so the layers match."
+    "reason": "The hypothesis blames a missing publication and claims the slot exists but streams nothing, whereas the real cause is that the slot debezium_orders itself is missing on the new primary. It does not clearly identify a first failing layer at kafka-connect, and the root cause it gives is wrong, even though it sits at the postgres layer."
   }
 }

@@ -361,4 +361,19 @@ func TestFakeIdPCodeRules(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("authorize without RedirectURIs refuses a non-test host", func(t *testing.T) {
+		f2 := NewFakeIdP(t)
+		for _, redirect := range []string{"https://evil.example/cb", "https://evil.test.example/cb", "//evil.example/cb"} {
+			raw := f2.Issuer + "/authorize?response_type=code&client_id=" + f2.ClientID + "&redirect_uri=" + url.QueryEscape(redirect)
+			resp, err := http.Get(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("%s: status %d, want 400", redirect, resp.StatusCode)
+			}
+		}
+	})
 }

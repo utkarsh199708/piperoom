@@ -211,6 +211,7 @@ func TestPeekDLQTransactionalWrites(t *testing.T) {
 	}
 	write(2, kgo.TryAbort, "aborted")
 	write(3, kgo.TryCommit, "committed")
+	waitForBrokerOffsets(t, adm, topic, 7, 7) // both markers are on the partition
 
 	offs := waitForTopic(t, c, topic)
 	if p := offs[topic][0]; p.End-p.Start != 7 { // 2 + abort marker + 3 + commit marker

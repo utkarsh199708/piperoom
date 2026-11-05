@@ -15,6 +15,11 @@ export const BACKOFF_MIN_MS = 1_000
 export const BACKOFF_MAX_MS = 30_000
 /** Opens that fail in a row before the list falls back to polling. */
 export const MAX_FAILED_OPENS = 3
+// A socket that stays in CONNECTING forever (a proxy that neither upgrades
+// nor rejects) fires no open and no close, so the failed-opens fallback below
+// would never fire. After this long the watchdog counts it as a failed open
+// and closes it, letting the backoff/fallback machinery run (KAN-553).
+export const OPEN_TIMEOUT_MS = 10_000
 /** The server closes a list socket silent for 60 s; ping well inside that. */
 const PING_MS = 20_000
 
@@ -104,6 +109,7 @@ export function useRoomList({
     let cancelled = false
     let ws: WebSocket | null = null
     let reconnectTimer: number | undefined
+    let openTimer: number | undefined
     let pingTimer: number | undefined
     let backoff = BACKOFF_MIN_MS
     let failedOpens = 0
@@ -122,6 +128,7 @@ export function useRoomList({
     const connect = () => {
       if (cancelled) return
       let gotList = false
+      let timedOut = false
       let sock: WebSocket
       try {
         sock = openListWs()
@@ -131,7 +138,17 @@ export function useRoomList({
         return
       }
       ws = sock
+      // KAN-553: a stuck CONNECTING fires no open and no close, so the
+      // fallback never runs. The watchdog counts it as one failed open and
+      // closes it; the onclose below then retries as usual.
+      openTimer = window.setTimeout(() => {
+        if (cancelled || sock.readyState !== WebSocket.CONNECTING) return
+        timedOut = true
+        failedOpens++
+        sock.close()
+      }, OPEN_TIMEOUT_MS)
       sock.onopen = () => {
+        window.clearTimeout(openTimer)
         pingTimer = window.setInterval(() => {
           if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: 'ping' }))
         }, PING_MS)
@@ -162,12 +179,14 @@ export function useRoomList({
       }
       sock.onclose = (ev: CloseEvent) => {
         window.clearInterval(pingTimer)
+        window.clearTimeout(openTimer)
         if (cancelled) return
         if (ev?.reason === 'session_expired') {
           reportAuthProblem({ kind: 'session_expired', message: 'session_expired', epoch: sessionEpoch })
           return
         }
-        if (!gotList) failedOpens++
+        // The watchdog already counted its own close as a failed open.
+        if (!gotList && !timedOut) failedOpens++
         retry()
       }
     }
@@ -176,6 +195,7 @@ export function useRoomList({
     return () => {
       cancelled = true
       window.clearTimeout(reconnectTimer)
+      window.clearTimeout(openTimer)
       window.clearInterval(pingTimer)
       if (ws) {
         ws.onclose = null

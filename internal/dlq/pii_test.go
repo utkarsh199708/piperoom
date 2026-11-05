@@ -421,8 +421,8 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "gap", in: "card 4111 1111 1111 1111 2 items", want: "card 4111 1111 1111 1111 2 items", why: "#469"},
 		{kind: "gap", in: "phone+44 20 7946 0958", want: "phone+44 20 7946 0958", why: "#469"},
 		{kind: "gap", in: "bearer=abc123def456 rejected", want: "bearer=abc123def456 rejected", why: "#469"},
-		{kind: "gap", in: "connect to postgres://app:S3cr!t@db.example.com/x failed", want: "connect to postgres://app:S3cr!<redacted>/x failed", why: "#469"},
-		{kind: "gap", in: "connect to postgres://app:S3cr/t9x@db.example.com/orders failed", want: "connect to postgres://app:S3cr/<redacted>/orders failed", why: "redact urlFind password with raw '/'; #469"},
+		{kind: "mask", in: "connect to postgres://app:S3cr!t@db.example.com/x failed", gone: "S3cr!", want: "connect to postgres://app:<redacted><redacted>/x failed"},
+		{kind: "mask", in: "connect to postgres://app:S3cr/t9x@db.example.com/orders failed", gone: "S3cr/", want: "connect to postgres://app:<redacted><redacted>/orders failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind+" "+tt.in, func(t *testing.T) {

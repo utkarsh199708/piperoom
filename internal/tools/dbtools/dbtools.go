@@ -1,5 +1,6 @@
 // Package dbtools registers the read-only tools that inspect the source
-// Postgres, the warehouse, and the pipeline topology.
+// database (Postgres, or MySQL with Deps.SourceKind mysql), the warehouse,
+// and the pipeline topology.
 package dbtools
 
 import (
@@ -23,14 +24,30 @@ import (
 // Deps are the collaborators the tools read from.
 type Deps struct {
 	Src clients.SourceDB
-	Wh  clients.Warehouse
-	// WarehouseKind is "postgres" (or empty) or "snowflake". It only decides
-	// which table and column names the warehouse tools accept as input.
+	// SourceKind is the kind of Src, as owners.yaml source_kind spells it:
+	// "" or "postgres" (the default) or "mysql" (Q8n). It picks Register's
+	// tool list: a MySQL source gets no pg_* tool (PostgresOnlyTools), gets
+	// source_row and source_long_transactions (MySQLOnlyTools) and the
+	// MySQL descriptions of the source_* tools; a Postgres source's list is
+	// the one it always had. Wiring (Q8g) sets it from the set's pipelines.
+	SourceKind string
+	Wh         clients.Warehouse
+	// WarehouseKind is the configured warehouse kind: "postgres" (or empty, the
+	// default), "snowflake", "clickhouse", "bigquery", or "databricks" (the
+	// constants in internal/wiring/warehouse.go). It decides only how the
+	// warehouse tools validate input: the identifier rules in whIdentRe
+	// (Snowflake adds '$'), the table forms validWarehouseTable accepts
+	// ("schema.table" everywhere; "db.schema.table" on Snowflake), and the
+	// case-insensitive column checks: Snowflake folds both ts_column and
+	// pk_column, Databricks folds pk_column (unquoted names fold to upper case
+	// in Snowflake and lower case in Databricks). Other column and table rules
+	// are the Postgres ones.
 	WarehouseKind string
 	Builder       topology.Builder
-	// Connect reads live Kafka Connect connector configs. Only
-	// pg_publication_tables uses it, so it is nil-able; the tool reports a
-	// clear error when it needs Connect and the field is nil.
+	// Connect reads live Kafka Connect connector configs and status.
+	// pg_publication_tables and pg_streaming_liveness use it, so it is
+	// nil-able; the tool reports a clear error when it needs Connect and the
+	// field is nil.
 	Connect clients.ConnectClient
 	// Kafka is read by reconcile for per-bucket topic counts (clients.RateReader,
 	// asserted at use time). Nil-able: reconcile then leaves the topic column out.
@@ -39,6 +56,11 @@ type Deps struct {
 	// to the pipeline named by pipeline_id (security finding F4). It must be
 	// non-nil; the row tools refuse to run without it.
 	Owners *owners.Owners
+	// wait blocks for the given duration or until ctx ends; nil uses a timer.
+	// pg_streaming_liveness samples the slot twice, and tests replace the wait
+	// so they do not sleep. It is unexported so the test hook stays out of the
+	// production wiring surface.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // pipeline resolves the owners.Pipeline for id. A nil Owners is a wiring fault
@@ -94,18 +116,14 @@ func Register(reg *tools.Registry, d Deps) error {
 	if d.Owners == nil {
 		return fmt.Errorf("dbtools: Owners is nil (wiring error)")
 	}
-	list := []tools.Tool{
-		pgReplicationSlotsTool(d),
-		pgRecentDDLTool(d),
-		pgLongTransactionsTool(d),
-		pgRowTool(d),
-		pgPublicationTablesTool(d),
-		warehouseFreshnessTool(d),
-		warehouseRowTool(d),
-		warehouseLoadErrorsTool(d),
-		reconcileTool(d),
-		pipelineMapTool(d),
-		traceRecordTool(d),
+	var list []tools.Tool
+	switch d.SourceKind {
+	case "", owners.SourceKindPostgres:
+		list = postgresTools(d)
+	case owners.SourceKindMySQL:
+		list = mysqlTools(d)
+	default:
+		return fmt.Errorf("dbtools: unknown SourceKind %q (want postgres or mysql)", d.SourceKind)
 	}
 	for _, t := range list {
 		if err := reg.Register(t); err != nil {
@@ -113,6 +131,31 @@ func Register(reg *tools.Registry, d Deps) error {
 		}
 	}
 	return nil
+}
+
+// postgresTools is the Postgres tool list in registration order (the order
+// of the model's tool list), unchanged by Q8n.
+func postgresTools(d Deps) []tools.Tool {
+	return []tools.Tool{
+		pgReplicationSlotsTool(d),
+		pgStreamingLivenessTool(d),
+		pgRecentDDLTool(d),
+		pgLongTransactionsTool(d),
+		pgRowTool(d),
+		pgPublicationTablesTool(d),
+		connectorScopeGapTool(d),
+		pgToastRiskTool(d),
+		sourceSettingsTool(d),
+		sourceTableReplicationTool(d),
+		sourceRoleGrantsTool(d),
+		sourceBlockingSessionsTool(d),
+		warehouseFreshnessTool(d),
+		warehouseRowTool(d),
+		warehouseLoadErrorsTool(d),
+		reconcileTool(d),
+		pipelineMapTool(d),
+		traceRecordTool(d),
+	}
 }
 
 // tool is a small Tool implementation backed by a run function.
@@ -190,6 +233,12 @@ func (d Deps) isSnowflake() bool {
 	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "snowflake")
 }
 
+// isDatabricks reports whether the warehouse is Databricks. Empty means the
+// default, Postgres.
+func (d Deps) isDatabricks() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "databricks")
+}
+
 // whIdentRe is the identifier regex for the configured warehouse kind.
 func (d Deps) whIdentRe() *regexp.Regexp {
 	if d.isSnowflake() {
@@ -198,14 +247,29 @@ func (d Deps) whIdentRe() *regexp.Regexp {
 	return identRe
 }
 
-// validWarehouseTable reports whether name is a valid warehouse table. Postgres
-// takes "schema.table". A Snowflake sink table can live in another database
-// than the DSN's default one, so Snowflake also takes "db.schema.table". Each
-// part has to match the kind's identifier regex (AGENTS.md section 4, rule 6);
-// the client quotes it again.
+// isBigQuery reports whether the warehouse is BigQuery. Empty means the
+// default, Postgres.
+func (d Deps) isBigQuery() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "bigquery")
+}
+
+// threePartTables reports whether the kind addresses a table as
+// "database.schema.table" rather than "schema.table". Only Snowflake does: the
+// Databricks and BigQuery clients deliberately refuse a catalog/project prefix
+// (every table is read in the DSN's catalog/project), so accepting one here
+// would only turn a bad tool input into a client error.
+func (d Deps) threePartTables() bool {
+	return d.isSnowflake()
+}
+
+// validWarehouseTable reports whether name is a valid warehouse table. Postgres,
+// ClickHouse, Databricks and BigQuery take "schema.table"; Snowflake also takes
+// "db.schema.table", because its sinks can live in another database than the
+// connection's default. Each part has to match the kind's identifier regex
+// (AGENTS.md section 4, rule 6); the client quotes it again.
 func (d Deps) validWarehouseTable(name string) bool {
 	parts := strings.Split(name, ".")
-	if len(parts) != 2 && !(len(parts) == 3 && d.isSnowflake()) {
+	if len(parts) != 2 && !(len(parts) == 3 && d.threePartTables()) {
 		return false
 	}
 	re := d.whIdentRe()

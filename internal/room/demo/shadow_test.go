@@ -35,27 +35,28 @@ func (c *closedInbox) Wait(context.Context) error {
 	return agent.ErrInboxClosed
 }
 
-// With Proposals == nil (a shadow room) the scripted run emits its five steps
-// and the hypothesis, says idle, and ends on the closed inbox with nil.
+// With Proposals == nil (a shadow room) the scripted run emits every story
+// step and the hypothesis, says idle, and ends on the closed inbox with nil.
 func TestRunWithoutProposalsEndsOnClosedInbox(t *testing.T) {
 	t.Parallel()
 	sink := &recSink{}
 	in := &closedInbox{}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := Run(ctx, agent.Alert{RoomID: "r", PipelineID: "orders"}, agent.Deps{Sink: sink, Inbox: in}, agent.Options{})
+	err := runFast(ctx, agent.Alert{RoomID: "r", PipelineID: "orders"}, agent.Deps{Sink: sink, Inbox: in})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if ctx.Err() != nil {
 		t.Fatal("Run ended by the test deadline, not by the closed inbox")
 	}
+	want := len(storySteps(time.Now(), "orders"))
 	count := map[events.Type]int{}
 	for _, e := range sink.evs {
 		count[e]++
 	}
-	if count[events.AgentStepStart] != 5 || count[events.AgentToolResult] != 5 || count[events.AgentHypothesis] != 1 {
-		t.Fatalf("events = %v", count)
+	if count[events.AgentStepStart] != want || count[events.AgentToolResult] != want || count[events.AgentHypothesis] != 1 {
+		t.Fatalf("events = %v, want %d story steps", count, want)
 	}
 	last := sink.st[len(sink.st)-1]
 	if last.State != "idle" {

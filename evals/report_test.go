@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,9 @@ func TestReportRoundTripAndMarkdown(t *testing.T) {
 	if err != nil || back.Overall != r.Overall || len(back.Results) != 2 {
 		t.Fatalf("round trip: %v %+v", err, back.Overall)
 	}
+	if len(back.Scenarios) != 2 || !back.Scenarios[0].SourceKindExcluded || sourceKindOf(back.Scenarios[0]) != "" {
+		t.Errorf("incident source grouping marker did not survive report round trip: %+v", back.Scenarios)
+	}
 	if _, err := LoadReport(filepath.Join(t.TempDir(), "none.json")); err == nil {
 		t.Error("missing report accepted")
 	}
@@ -133,5 +137,72 @@ func TestReportRoundTripAndMarkdown(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown lacks %q:\n%s", want, md)
 		}
+	}
+}
+
+// TestReportPerSourceAndPerTargetRates is the U1-20 rate math: runs are
+// pooled within setup groups (not averaged over scenarios), incident
+// scenarios are excluded from setup groups, and a legacy row without a source
+// kind still counts as postgres.
+func TestReportPerSourceAndPerTargetRates(t *testing.T) {
+	scs := []Scenario{
+		{Name: "a", Setup: &ScenarioSetup{SourceKind: "postgres", Target: "compose"}},
+		{Name: "b", Setup: &ScenarioSetup{SourceKind: "postgres", Target: "host"}},
+		{Name: "c", Setup: &ScenarioSetup{SourceKind: "mysql", Target: "compose"}},
+		{Name: "d"}, // no setup block: postgres, no target
+	}
+	res := []RunResult{
+		{Scenario: "a", Run: 1, Pass: true},
+		{Scenario: "a", Run: 2, Pass: true},
+		{Scenario: "a", Run: 3, Pass: false},
+		{Scenario: "b", Run: 1, Pass: true},
+		{Scenario: "c", Run: 1, Pass: false},
+		{Scenario: "d", Run: 1, Pass: true},
+		{Scenario: "d", Run: 2, Pass: true},
+	}
+	r := buildReport(Config{Label: "rates", Runs: 3}, scs, res, timeZero())
+
+	if got := r.Scenarios[3].SourceKind; got != "" {
+		t.Errorf("incident scenario d source = %q, want empty", got)
+	}
+	if !r.Scenarios[3].SourceKindExcluded {
+		t.Error("incident scenario d must be excluded from setup source rates")
+	}
+	wantSource := []Breakdown{
+		{Kind: "mysql", Scenarios: 1, Runs: 1, Passes: 0, PassRate: 0},
+		{Kind: "postgres", Scenarios: 2, Runs: 4, Passes: 3, PassRate: 3.0 / 4},
+	}
+	if !reflect.DeepEqual(r.BySource, wantSource) {
+		t.Errorf("by source = %+v, want %+v", r.BySource, wantSource)
+	}
+	wantTarget := []Breakdown{
+		{Kind: "compose", Scenarios: 2, Runs: 4, Passes: 2, PassRate: 0.5},
+		{Kind: "host", Scenarios: 1, Runs: 1, Passes: 1, PassRate: 1},
+	}
+	if !reflect.DeepEqual(r.ByTarget, wantTarget) {
+		t.Errorf("by target = %+v, want %+v", r.ByTarget, wantTarget)
+	}
+
+	// Restrict keeps only the kept scenarios and recomputes both groups.
+	only := r.Restrict([]string{"a", "c", "d"})
+	if want := []Breakdown{{Kind: "mysql", Scenarios: 1, Runs: 1, Passes: 0}, {Kind: "postgres", Scenarios: 1, Runs: 3, Passes: 2, PassRate: 2.0 / 3}}; !reflect.DeepEqual(only.BySource, want) {
+		t.Errorf("restricted by source = %+v, want %+v", only.BySource, want)
+	}
+	if want := []Breakdown{{Kind: "compose", Scenarios: 2, Runs: 4, Passes: 2, PassRate: 0.5}}; !reflect.DeepEqual(only.ByTarget, want) {
+		t.Errorf("restricted by target = %+v, want %+v", only.ByTarget, want)
+	}
+	if got := sourceKindOf(ScenarioSummary{SourceKind: ""}); got != DefaultSourceKind {
+		t.Errorf("legacy empty source kind = %q, want %q", got, DefaultSourceKind)
+	}
+
+	// The markdown names both rates; a report with no target groups prints
+	// only the source line.
+	var b bytes.Buffer
+	if err := r.WriteMarkdown(&b); err != nil {
+		t.Fatal(err)
+	}
+	if md := b.String(); !strings.Contains(md, "by source: mysql 0/1 (0%) · postgres 3/4 (75%)") ||
+		!strings.Contains(md, "by target: compose 2/4 (50%) · host 1/1 (100%)") {
+		t.Errorf("markdown lacks the breakdown lines:\n%s", md)
 	}
 }

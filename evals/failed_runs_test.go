@@ -39,6 +39,7 @@ func TestMarkdownPrintsFailedRunDetailsRedactedAndCut(t *testing.T) {
 		{
 			Scenario: "s1", Run: 1, Failures: []string{"wrong root cause"},
 			FinalHypothesis:    "Connect failed because of " + secret + " " + strings.Repeat("x", 400),
+			LastMessage:        "Task 0 is stuck; key " + secret + " " + strings.Repeat("y", 500),
 			Confidence:         "high",
 			ProposedActions:    []string{"connect_restart_task", "schema_register"},
 			MissingCauseGroups: []string{"group 2: [missing, gone]"},
@@ -57,6 +58,7 @@ func TestMarkdownPrintsFailedRunDetailsRedactedAndCut(t *testing.T) {
 		"proposed actions: connect_restart_task, schema_register",
 		"missing group 2: [missing, gone]",
 		"- s3 #1: no hypothesis",
+		"last message: Task 0 is stuck; key ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("markdown lacks %q:\n%s", want, out)
@@ -77,8 +79,90 @@ func TestMarkdownPrintsFailedRunDetailsRedactedAndCut(t *testing.T) {
 			}
 		}
 	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "- last message: ") {
+			text := line[strings.Index(line, "- last message: ")+len("- last message: "):]
+			if n := len([]rune(text)); n > 401 {
+				t.Errorf("last message text is %d runes, want at most 401", n)
+			}
+		}
+	}
 	// s3 has no hypothesis, no actions, no groups: nothing under it.
 	if strings.Contains(out, "- s3 #1: no hypothesis\n  -") {
 		t.Errorf("empty details printed under s3:\n%s", out)
+	}
+}
+
+// TestMarkdownExplainsFailedHealthyVerdict: a healthy run that failed its
+// verdict prints the fault term and the clause that tripped it, or that the
+// text has no healthy phrase, so the job log alone diagnoses it.
+func TestMarkdownExplainsFailedHealthyVerdict(t *testing.T) {
+	rep := Report{Results: []RunResult{
+		{
+			Scenario: "h1", Run: 1, Outcome: OutcomeHealthy,
+			Failures:        []string{"final message does not say the pipeline is healthy or that there is nothing to fix"},
+			FinalHypothesis: "Pipeline orders is healthy now: warehouse 1m stale (s_01).",
+			Confidence:      "low",
+			LastMessage:     "Nothing to fix. The warehouse is 41m stale, which the DBA knows.",
+		},
+		{
+			Scenario: "h2", Run: 1, Outcome: OutcomeHealthy,
+			Failures:    []string{"final message does not say the pipeline is healthy or that there is nothing to fix"},
+			LastMessage: "I checked the slot and the connector.",
+		},
+		{
+			Scenario: "h3", Run: 1, Outcome: OutcomeHealthy, SaysHealthy: true,
+			Failures:    []string{"proposed a fix on a healthy pipeline"},
+			LastMessage: "All good.",
+		},
+	}}
+	var b bytes.Buffer
+	if err := rep.WriteMarkdown(&b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		`healthy verdict failed: last message: fault "stale" in "the warehouse is 41m stale"`,
+		"healthy verdict failed: last message: no healthy phrase",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "hypothesis: fault") || strings.Contains(out, "hypothesis: no healthy") {
+		t.Errorf("a healthy hypothesis got a note:\n%s", out)
+	}
+	if strings.Count(out, "healthy verdict failed") != 2 {
+		t.Errorf("want the note under h1 and h2 only:\n%s", out)
+	}
+}
+
+// TestMarkdownHealthyNoteRedactsTheClause: the tripping clause is made from
+// tokens with the punctuation gone, which the secret patterns no longer
+// match, so the text is redacted before the note, not after.
+func TestMarkdownHealthyNoteRedactsTheClause(t *testing.T) {
+	secret := "hunter2topsecret"
+	rep := Report{Results: []RunResult{{
+		Scenario: "h1", Run: 1, Outcome: OutcomeHealthy,
+		Failures:        []string{"final message does not say the pipeline is healthy or that there is nothing to fix"},
+		FinalHypothesis: "Healthy: the sink is stuck with password=" + secret + " in its config.",
+		Confidence:      "low",
+		LastMessage:     "The connector is stuck with password=" + secret,
+	}}}
+	var b bytes.Buffer
+	if err := rep.WriteMarkdown(&b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if strings.Contains(out, secret) {
+		t.Errorf("secret reached the markdown:\n%s", out)
+	}
+	for _, want := range []string{
+		`healthy verdict failed: last message: fault "stuck" in "`,
+		`hypothesis: fault "stuck" in "`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown lacks %q:\n%s", want, out)
+		}
 	}
 }

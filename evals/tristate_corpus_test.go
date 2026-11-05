@@ -106,7 +106,7 @@ func pinnedCorpusTexts(t *testing.T, scs map[string]Scenario) []corpusText {
 func keywordGrade(sc Scenario, c corpusText) bool {
 	got := rootCauseMatches(sc.Expect, c.text)
 	if c.kind == "correct" {
-		got = got && namesLayer(layerTermsFor(sc.Pipeline, sc.Expect.RootCauseLayer), c.text)
+		got = got && keywordRootCauseLayer(sc, c.text)
 	}
 	return got
 }
@@ -206,7 +206,7 @@ func (j *invertingJudge) JudgeHypothesis(_ context.Context, sc Scenario, h strin
 	return Verdict{
 		RootCauseCorrect:      !rootCauseMatches(sc.Expect, h),
 		LayerCorrect:          !keywordLayer(sc, sc.Expect.FirstFailingLayer, h),
-		RootCauseLayerCorrect: !keywordLayer(sc, sc.Expect.RootCauseLayer, h),
+		RootCauseLayerCorrect: !keywordRootCauseLayer(sc, h),
 		Reason:                "inverted",
 	}, nil
 }
@@ -220,7 +220,7 @@ func keywordResult(sc Scenario, text string) RunResult {
 	res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, text)
 	res.HedgedOn, res.Hedged = causeHedge(text)
 	res.LayerNamed = keywordLayer(sc, sc.Expect.FirstFailingLayer, text)
-	res.RootCauseLayerNamed = keywordLayer(sc, sc.Expect.RootCauseLayer, text)
+	res.RootCauseLayerNamed = keywordRootCauseLayer(sc, text)
 	finish(sc, &res)
 	return res
 }
@@ -292,7 +292,7 @@ func TestJudgedCorpusGrades(t *testing.T) {
 		t.Fatal("the ambiguous-set manifest has no entries")
 	}
 	if n < len(set.Entries) {
-		t.Fatalf("judge cache holds %d verdict(s) for %d manifest entries: refill with go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json (paid, needs the owner's approval, #454)", n, len(set.Entries))
+		t.Fatalf("judge cache holds %d verdict(s) for %d manifest entries: refill with go run -tags livejudge ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json (paid, needs the owner's approval, #454)", n, len(set.Entries))
 	}
 	cfg := Config{DefaultJudge: JudgeAuto, JudgeCache: "judgecache", JudgeCacheOnly: true}
 	g := newJudgeGate(cfg)

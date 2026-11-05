@@ -353,22 +353,23 @@ func listDigest(s *room.RoomSnapshot) [32]byte {
 		Approvals map[string]string `json:"approvals"`
 	}
 	d := struct {
-		Status      string       `json:"status"`
-		Title       string       `json:"title"`
-		Severity    string       `json:"severity"`
-		Driver      string       `json:"driver"`
-		LeaseGone   bool         `json:"lease_expired"`
-		Agent       string       `json:"agent"`
-		Triage      *room.Triage `json:"triage"`
-		HypText     string       `json:"hyp_text"`
-		HypConf     string       `json:"hyp_conf"`
-		Proposals   []proposal   `json:"proposals"`
-		Suggestions int          `json:"suggestions"`
-		ClosedAt    *time.Time   `json:"closed_at"`
-		Resolution  string       `json:"resolution"`
+		Status      string        `json:"status"`
+		Title       string        `json:"title"`
+		Severity    string        `json:"severity"`
+		Driver      string        `json:"driver"`
+		LeaseGone   bool          `json:"lease_expired"`
+		Agent       string        `json:"agent"`
+		Triage      *room.Triage  `json:"triage"`
+		HypText     string        `json:"hyp_text"`
+		HypConf     string        `json:"hyp_conf"`
+		Proposals   []proposal    `json:"proposals"`
+		LastFix     *room.LastFix `json:"last_fix"`
+		Suggestions int           `json:"suggestions"`
+		ClosedAt    *time.Time    `json:"closed_at"`
+		Resolution  string        `json:"resolution"`
 	}{
 		Status: s.Status, Title: s.Title, Severity: s.Severity, Agent: s.AgentStatus.State,
-		Triage: s.Triage, Suggestions: len(s.PendingSuggestions), ClosedAt: s.ClosedAt, Resolution: s.Resolution,
+		Triage: s.Triage, LastFix: s.LastFix, Suggestions: len(s.PendingSuggestions), ClosedAt: s.ClosedAt, Resolution: s.Resolution,
 	}
 	if s.Driver != nil {
 		d.Driver, d.LeaseGone = s.Driver.ID, s.Driver.LeaseExpired

@@ -1,0 +1,50 @@
+# dev/owners.yaml plus what the Q2 scenario idle-wal-growth needs (dev/scenarios.md
+# §23). Start the server with OWNERS_FILE=dev/owners.q2.yaml to run it. Kept apart from
+# the baseline because evals/gen derives fixtures from dev/owners.yaml.
+# Keep the rest in step with dev/owners.yaml: TestOwnersQ2MatchesBaseline fails when
+# they drift.
+pipelines:
+  - id: orders
+    title: Orders CDC
+    topic_prefix: pg # Debezium topic.prefix of pg-orders-connector (topics span pg.public.orders)
+    # public.devctl_heartbeat (the table `devctl fix idle-wal-growth` creates) is NOT
+    # listed here: source_create_heartbeat_table refuses a heartbeat table that is one
+    # of the pipeline's source_tables, and devctl fix adds the table to dbz_publication
+    # itself, so pg_add_publication_table is not on the dev fix path.
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at
+    # Short `for` so `devctl break ...` trips the watcher within a few intervals.
+    # slot_wal fires at 32MiB here, not the 1GiB default a dev disk never reaches: a
+    # healthy dev slot retains 0.8-1.1 MB under load (dev/scenarios.md), far below it.
+    watch:
+      enabled: true
+      signals:
+        connector_down: {for: 30s}
+        slot_inactive: {for: 30s}
+        # cmd/devctl idleWALFire / idleWALClear hold the same values.
+        slot_wal: {fire: 32MiB, clear: 16MiB, for: 30s}
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch
+    dags: [revenue_daily]
+    dbt_project: dev/batch/dbt/analytics
+    models: [stg_orders, fct_revenue]
+    sink_tables: [analytics.fct_revenue]
+    sink_ts_column: loaded_at
+    # The batch layers are not in the top-level `layers:` map (that map stays the
+    # six CDC layers, which TestExistingFilesStayValid pins), so they are owned
+    # here per-pipeline.
+    owners:
+      orchestrator: {approvers: priya}
+      transform: {approvers: priya}
+      warehouse: {approvers: meera}
+layers:
+  postgres: priya
+  kafka-connect: arjun
+  schema-registry: priya
+  kafka: arjun
+  consumer: kabir
+  warehouse: meera

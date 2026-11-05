@@ -10,8 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools"
@@ -126,10 +125,10 @@ func IsPastIncidentsLookup(ctx context.Context) bool {
 
 // openingBlocks is the start of a first user turn: the alert message, then
 // the worked-examples block when there is one, as its own text block.
-func openingBlocks(alert Alert, past string) []anthropic.BetaContentBlockParamUnion {
-	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(alert))}
+func openingBlocks(alert Alert, past string) []llm.Part {
+	blocks := []llm.Part{textPart(firstUserMessage(alert))}
 	if past != "" {
-		blocks = append(blocks, anthropic.NewBetaTextBlock(past))
+		blocks = append(blocks, textPart(past))
 	}
 	return blocks
 }

@@ -27,7 +27,8 @@ func Important(t events.Type) bool {
 	case events.RoomCreated, events.AgentHypothesis, events.ProposalCreated,
 		events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
 		events.HandoffCreated, events.HandoffAccepted, events.RoomClosed,
-		events.ControlLeaseExpired, events.ApprovalNudged:
+		events.ControlLeaseExpired, events.ApprovalNudged,
+		events.ProposalScheduled, events.ProposalCancelled:
 		return true
 	}
 	return false
@@ -72,6 +73,15 @@ func (r *renderer) linkElement(roomID string) []textObj {
 	return nil
 }
 
+// cancelLink is trusted markup (our URL + a fixed label) pointing at the room
+// where a scheduled proposal can be cancelled; empty when PublicURL is unset.
+func (r *renderer) cancelLink(roomID string) string {
+	if r.publicURL == "" {
+		return ""
+	}
+	return fmt.Sprintf("<%s/rooms/%s|Cancel>", r.publicURL, url.PathEscape(roomID))
+}
+
 func fallback(prefix, untrusted string) string {
 	return prefix + clip(untrusted, fallbackBytes-len(prefix))
 }
@@ -108,6 +118,16 @@ func (r *renderer) proposalName(id string) string {
 		return "“" + clip(t, 200) + "”"
 	}
 	return inlineCode(id, 100)
+}
+
+// policyName renders a policy list name as "policy <name>". The name is
+// server-set but treated as untrusted text, so it is escaped like any other
+// value; an empty name reads just "policy".
+func policyName(policy string) string {
+	if strings.TrimSpace(policy) == "" {
+		return "policy"
+	}
+	return "policy " + clip(policy, 40)
 }
 
 // reply renders a thread reply. ok is false when the event should be skipped.
@@ -173,6 +193,12 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 		p, err := events.Decode[events.ApprovalGivenPayload](e)
 		if err != nil {
 			return m, false, err
+		}
+		// A policy approval (the auto-approve countdown ran out) is made by the
+		// system actor and names the owners.yaml list, never a person.
+		if p.Grant == events.GrantPolicy && e.Actor.Kind == events.ActorSystem {
+			t := fmt.Sprintf(":+1: *%s* approved %s for layer %s", policyName(p.Policy), r.proposalName(p.ProposalID), inlineCode(p.Layer, 60))
+			return message{Text: fallback("Policy approval: ", p.Layer), Blocks: []block{section(t)}}, true, nil
 		}
 		t := fmt.Sprintf(":+1: *%s* approved %s for layer %s", who, r.proposalName(p.ProposalID), inlineCode(p.Layer, 60))
 		return message{Text: fallback("Approval: ", actorName(e.Actor)+" / "+p.Layer), Blocks: []block{section(t)}}, true, nil
@@ -244,6 +270,43 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 			blocks = append(blocks, block{Type: "context", Elements: link})
 		}
 		return message{Text: fallback("Nudge: ", p.Layer+" / "+actorName(e.Actor)), Blocks: blocks}, true, nil
+
+	case events.ProposalScheduled:
+		p, err := events.Decode[events.ProposalScheduledPayload](e)
+		if err != nil {
+			return m, false, err
+		}
+		// cancel_until is advertised, never a deadline: "may run from", never
+		// "cancel by" (a cancel after it still wins if it lands first). RunAt
+		// is the single printed time; cancel_until only appears when it differs
+		// (in this wave it is always equal to RunAt, so it is never repeated).
+		t := fmt.Sprintf(":clock1: *Scheduled (%s):* %s runs at %s unless cancelled.",
+			policyName(p.Policy), r.proposalName(p.ProposalID),
+			p.RunAt.UTC().Format(time.RFC3339))
+		if !p.CancelUntil.Equal(p.RunAt) {
+			t += fmt.Sprintf("\nThe policy may run from %s.", p.CancelUntil.UTC().Format(time.RFC3339))
+		}
+		blocks := []block{section(t)}
+		if link := r.cancelLink(e.RoomID); link != "" {
+			blocks = append(blocks, block{Type: "context", Elements: []textObj{{Type: "mrkdwn", Text: link, Verbatim: false}}})
+		}
+		return message{Text: fallback("Scheduled: ", r.proposalName(p.ProposalID)), Blocks: blocks}, true, nil
+
+	case events.ProposalCancelled:
+		p, err := events.Decode[events.ProposalCancelledPayload](e)
+		if err != nil {
+			return m, false, err
+		}
+		by := actorName(e.Actor)
+		if p.By.ID != "" || p.By.Name != "" {
+			by = actorName(p.By)
+		}
+		t := fmt.Sprintf(":no_entry_sign: *%s* cancelled the policy countdown for %s — the fix waits for approval.",
+			clip(by, 100), r.proposalName(p.ProposalID))
+		if p.Reason != "" {
+			t += " Reason: " + clip(p.Reason, 500)
+		}
+		return message{Text: fallback("Cancelled: ", by), Blocks: []block{section(t)}}, true, nil
 
 	case events.RoomClosed:
 		p, err := events.Decode[events.RoomClosedPayload](e)

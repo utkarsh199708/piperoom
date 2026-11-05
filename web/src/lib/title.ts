@@ -26,6 +26,14 @@ export function stripBidi(text: string): string {
 
 export const LIST_TITLE = 'Rooms · Piperoom'
 
+/** The tab title of a page outside a room: the page's own name, the room list's otherwise. */
+export function pageTitle(pathname: string): string {
+  if (pathname.startsWith('/settings')) return 'Settings · Piperoom'
+  if (pathname.startsWith('/shadow')) return 'Shadow results · Piperoom'
+  if (pathname.startsWith('/fleet') || pathname.startsWith('/pipelines/')) return 'Fleet · Piperoom'
+  return LIST_TITLE
+}
+
 export function documentTitle(input: {
   status: RoomStatusInfo
   roomTitle: string

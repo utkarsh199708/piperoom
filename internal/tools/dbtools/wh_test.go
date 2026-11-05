@@ -32,6 +32,19 @@ func TestValidWarehouseTable(t *testing.T) {
 		{"snowflake", "a..b", false},
 		{"snowflake", "$a.b", false},
 		{"snowflake", "", false},
+		// Databricks and BigQuery clients refuse a catalog/project prefix: every
+		// table is read in the DSN's catalog/project, so a three-part name is
+		// bad input for the agent, not a valid read.
+		{"databricks", "analytics.orders", true},
+		{"databricks", "main.analytics.orders", false},
+		{"databricks", "main.analytics.orders.extra", false},
+		{"bigquery", "analytics.orders", true},
+		{"bigquery", "my-project.analytics.orders", false},
+		{"bigquery", "a..b", false},
+		// The two kinds that keep two parts.
+		{"clickhouse", "analytics.orders", true},
+		{"clickhouse", "dwh.analytics.orders", false},
+		{"postgres", "dwh.analytics.orders", false},
 	}
 	for _, tc := range cases {
 		d := Deps{WarehouseKind: tc.kind}

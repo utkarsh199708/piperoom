@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,11 +39,55 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 // update_hypothesis checks the cited steps against. A nil ledger turns those
 // checks off, for harnesses that build room tools without a runner.
 func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
+	return newRoomToolsWithGaps(d, track, steps, nil)
+}
+
+// newRoomToolsWithGaps is newRoomToolsWith with the run's read failures, so a
+// healthy verdict is refused while a component is unreachable (KAN-408). A nil
+// gaps turns the guard off, for the same harnesses as a nil ledger.
+func newRoomToolsWithGaps(d Deps, track *proposalTracker, steps *stepLedger, gaps *readFailures) []tools.Tool {
+	return newRoomToolsWithCauses(d, track, steps, gaps, nil)
+}
+
+// newRoomToolsWithCauses is newRoomToolsWithGaps with the run's external
+// causes (X4c): update_hypothesis checks scope, team and change_id against
+// them, and propose_fix labels a proposal a mitigation while the hypothesis
+// puts the cause outside the pipeline. A nil causes knows no change and no team.
+func newRoomToolsWithCauses(d Deps, track *proposalTracker, steps *stepLedger, gaps *readFailures, causes *externalCauses) []tools.Tool {
 	return []tools.Tool{
-		&updateHypothesisTool{sink: d.Sink, steps: steps},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
-		&postMessageTool{sink: d.Sink},
+		&updateHypothesisTool{sink: d.Sink, steps: steps, gaps: gaps, causes: causes},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger, causes: causes},
+		&postMessageTool{sink: d.Sink, gaps: gaps, steps: steps},
 	}
+}
+
+// roomToolServesKind reports whether a room of pipeline kind (already
+// normalised, see RoomKind) whose propose_fix would list nActions write
+// actions offers the room tool called name. A batch room with no action
+// (ActionsForKind keeps no CDC action, and no action declares batch yet) is
+// not offered propose_fix at all: its prompt says a person runs every fix, and
+// an empty action enum with CDC examples would invite the call it forbids.
+// Every other room tool serves every kind, and a CDC room keeps all three
+// whatever its actions, so its tool list is unchanged.
+func roomToolServesKind(name, kind string, nActions int) bool {
+	return !(name == "propose_fix" && kind == events.PipelineKindBatch && nActions == 0)
+}
+
+// roomToolsForKind returns the room tools of all that a room of kind with
+// acts (its kind's actions, ActionsForKind; nil is none) offers, in all's
+// order, so the tool list of every room of one kind is the same.
+func roomToolsForKind(all []tools.Tool, kind string, acts *actions.Registry) []tools.Tool {
+	n := 0
+	if acts != nil {
+		n = len(acts.All())
+	}
+	out := make([]tools.Tool, 0, len(all))
+	for _, t := range all {
+		if roomToolServesKind(t.Name(), kind, n) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // RoomToolNames returns the names of the room tools the agent adds on top of
@@ -69,6 +114,14 @@ type updateHypothesisTool struct {
 	sink Sink
 	// steps is the run's step ledger; nil means the cited steps are not checked.
 	steps *stepLedger
+	// gaps is the run's failed reads; an unresolved unreachable component
+	// refuses a healthy verdict (KAN-408). Nil turns the guard off.
+	gaps *readFailures
+	// causes checks scope, team and change_id (X4c); nil knows no change
+	// and no team, so only a hypothesis without them passes.
+	causes *externalCauses
+	// guard is the run's hypothesis guard (guard.go); nil is off.
+	guard *hypothesisGuard
 }
 
 // stepIDRe is the shape of a step id (newStepID): "s_" and 26 Crockford digits.
@@ -128,7 +181,9 @@ func (t *updateHypothesisTool) unbacked(in hypothesisInput) []string {
 	// with (the model named the connector or topic there), and the alert text and
 	// pipeline map it was handed up front. Naming a component from those is not
 	// inventing it; the note must not push the model to drop it.
-	backing := make([]string, 0, 2*len(in.BasedOnSteps)+1)
+	// The capacity is a hint only (append grows past it); no arithmetic on the
+	// model-chosen length, so the allocation size cannot overflow.
+	backing := make([]string, 0, len(in.BasedOnSteps))
 	for _, id := range in.BasedOnSteps {
 		if f, ok := t.steps.get(id); ok {
 			backing = append(backing, f.summary, f.input)
@@ -182,6 +237,14 @@ func (t *updateHypothesisTool) InputSchema() map[string]any {
 			"type": "string",
 			"enum": []string{"low", "medium", "high"},
 		},
+		// X4c: optional, so a hypothesis written as before still passes.
+		"scope": map[string]any{
+			"type":        "string",
+			"enum":        []string{string(events.ScopePipeline), string(events.ScopeUpstreamApp), string(events.ScopeVendor), string(events.ScopeUnknown)},
+			"description": "where the cause is: pipeline, upstream_app (an application deploy or migration), vendor (a vendor incident) or unknown",
+		},
+		"team":      map[string]any{"type": "string", "description": "upstream_app or vendor only: the owning team's id"},
+		"change_id": map[string]any{"type": "integer", "description": "the change_id of the deploy, migration or vendor incident it rests on"},
 	}, "text", "based_on_steps", "confidence")
 }
 
@@ -189,6 +252,10 @@ type hypothesisInput struct {
 	Text         string   `json:"text"`
 	BasedOnSteps []string `json:"based_on_steps"`
 	Confidence   string   `json:"confidence"`
+	// Scope, Team and ChangeID are X4c's; externalCauses.resolve checks them.
+	Scope    string `json:"scope"`
+	Team     string `json:"team"`
+	ChangeID int64  `json:"change_id"`
 }
 
 func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -207,26 +274,99 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if err := t.checkSteps(in); err != nil {
 		return tools.Result{}, err
 	}
+	// A healthy verdict is refused while a read left a component unreachable
+	// (KAN-408): the eval's scenario 13 read a registry connection error as
+	// benign because the pipeline still moved data. The refusal names the gap
+	// and lets "no data loss yet, risk rising" through.
+	if err := checkHealthyVerdict(t.gaps, in.Text); err != nil {
+		return tools.Result{}, err
+	}
+	scope, team, changeID, err := t.causes.resolve(in)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
+	// The hypothesis guard runs last, so a refusal it counts is one the call
+	// would otherwise have been accepted without (guard.go). Rule 1 reads the
+	// store, so it comes after rule 2: a rule 2 refusal never costs a read.
+	g, err := t.guard.check(t.Name(), t.ruledOutCheck(in), t.guard.symptomCheck(ctx, in.Text))
+	if err != nil {
+		return tools.Result{}, err
+	}
 	unbacked := t.unbacked(in)
+	if g.capped {
+		in.Confidence = "low"
+		unbacked = mergeUnbacked(unbacked, g.unbacked)
+	}
 	if err := t.sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{
 		Text:          in.Text,
 		BasedOnSteps:  in.BasedOnSteps,
 		Confidence:    in.Confidence,
 		Confirmed:     false,
 		UnbackedTerms: unbacked,
+		Scope:         scope,
+		Team:          team,
+		ChangeID:      changeID,
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
-	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
+	t.steps.setHypothesisSteps(in.BasedOnSteps)
+	t.causes.record(scope, team)
+	t.guard.reset()
+	t.guard.healthyAccepted(in.Text)
+	t.guard.post(ctx, t.sink, g.notes)
+	return tools.Result{Summary: "hypothesis recorded" + guardCappedNote(g) + scopeNote(scope, team) + unbackedNote(unbacked)}, nil
+}
+
+// ruledOutCheck is rule 2 over update_hypothesis: the cited steps back a
+// claim, and an uncited step that would is named in the refusal. Without a
+// ledger nothing is known about the reads, so the rule does not run.
+func (t *updateHypothesisTool) ruledOutCheck(in hypothesisInput) func() *guardFinding {
+	return func() *guardFinding {
+		if t.steps == nil {
+			return nil
+		}
+		return checkRuledOut(in.Text, t.steps.citedSteps(in.BasedOnSteps), t.steps.snapshot(), t.guard.offeredTool)
+	}
+}
+
+// guardCappedNote tells the model its verdict went in at low confidence.
+func guardCappedNote(g guardResult) string {
+	if !g.capped {
+		return ""
+	}
+	if len(g.unbacked) == 0 {
+		return fmt.Sprintf("; hypothesis guard: recorded at low confidence after %d refusals", guardMaxRefusals)
+	}
+	return fmt.Sprintf("; hypothesis guard: recorded at low confidence after %d refusals, with the unbacked items marked", guardMaxRefusals)
+}
+
+// scopeNote tells the model the scope it recorded when the cause is outside
+// the pipeline, and what that means for its proposals.
+func scopeNote(scope events.HypothesisScope, team string) string {
+	owner := rootFixOwner(scope, team)
+	if owner == "" {
+		return ""
+	}
+	return "; scope " + string(scope) + ": the root fix is " + owner + "'s, so a proposal of yours is labelled a mitigation"
 }
 
 // ---- post_message ----
 
 type postMessageTool struct {
 	sink Sink
+	// gaps is the run's failed reads; a message that claims a healthy verdict
+	// is refused while a component is unreachable (KAN-408). Nil turns the
+	// guard off.
+	gaps *readFailures
+	// steps is the run's step ledger, for the hypothesis guard's rule 2:
+	// a message has no citations, so any step of the run backs a rule-out.
+	// Nil turns rule 2 off here.
+	steps *stepLedger
+	// guard is the run's hypothesis guard (guard.go); nil is off.
+	guard *hypothesisGuard
 }
 
 func (t *postMessageTool) Name() string { return "post_message" }
@@ -256,8 +396,20 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 	if in.Text == "" {
 		return tools.Result{}, fmt.Errorf("%w: text is required", tools.ErrBadInput)
 	}
+	if err := checkHealthyVerdict(t.gaps, in.Text); err != nil {
+		return tools.Result{}, err
+	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for post_message")
+	}
+	g, err := t.guard.check(t.Name(), func() *guardFinding {
+		if t.steps == nil {
+			return nil
+		}
+		return checkRuledOut(in.Text, t.steps.snapshot(), nil, t.guard.offeredTool)
+	}, t.guard.symptomCheck(ctx, in.Text))
+	if err != nil {
+		return tools.Result{}, err
 	}
 	if err := t.sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 		Text:    in.Text,
@@ -265,6 +417,9 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit message: %w", err)
 	}
+	t.guard.reset()
+	t.guard.healthyAccepted(in.Text)
+	t.guard.post(ctx, t.sink, g.notes)
 	return tools.Result{Summary: "message posted"}, nil
 }
 
@@ -275,6 +430,71 @@ type proposeFixTool struct {
 	proposals Proposals
 	sink      Sink
 	track     *proposalTracker
+	// steps is the run's step ledger, which holds the injection-flagged
+	// reads the echo guard checks each step against (echoguard.go); nil
+	// turns the guard off, for harnesses that build the tool without a
+	// runner.
+	steps *stepLedger
+	// log takes the guard's one warn line per refused step; nil logs nothing.
+	log *slog.Logger
+	// causes holds the latest hypothesis's scope (X4c): while it is
+	// upstream_app or vendor every proposal is labelled a mitigation. Nil
+	// labels none.
+	causes *externalCauses
+	// source is the room's source kind (SourceKind; "" reads as postgres). A
+	// step's layer is actions.StepLayer with the room's pipeline (stepLayer),
+	// so a source admin step of a MySQL room goes to the mysql owner and a
+	// fix-PR step to its files' layer, as the room checks it (Q8o, Q7k).
+	source string
+	// setup is the run's setup state in a setup room (setRoomSetup), nil
+	// elsewhere: it refuses a proposal past the steps bound.
+	setup *setupRun
+}
+
+// layerOf is the layer the action list shows for a in this tool's room,
+// without params: a Layered action (a fix PR) has none until its files are
+// known, so the list says where it comes from.
+func (t *proposeFixTool) layerOf(a actions.Action) string {
+	if _, ok := a.(actions.Layered); ok {
+		return "layer of the files' globs"
+	}
+	return actions.LayerFor(a, t.source)
+}
+
+// stepLayer is the approving layer of one step of a with params:
+// actions.StepLayer with the room's pipeline from ctx (the room service puts
+// it in the run ctx). Without one, a pipeline of the room's source kind
+// stands in, which gives every action but a Layered one its layer as
+// before; a Layered action then fails closed (no repos, no layer).
+func (t *proposeFixTool) stepLayer(ctx context.Context, a actions.Action, params json.RawMessage) (string, error) {
+	p, _ := tools.PipelineFrom(ctx)
+	if p.SourceKind == "" {
+		p.SourceKind = t.source
+	}
+	return actions.StepLayer(a, p, params)
+}
+
+// checkDeferred applies the Deferred proposal rule before anything is
+// stored (the room applies it again, Q7k): a proposal with a fix-PR step
+// holds only fix-PR steps, at most actions.MaxDeferredSteps, so a live
+// stop-gap is a proposal of its own and a PR is never verified together
+// with a step that ran at once.
+func checkDeferred(acts []actions.Action) error {
+	n := 0
+	for _, a := range acts {
+		if _, ok := a.(actions.Deferred); ok {
+			n++
+		}
+	}
+	switch {
+	case n == 0:
+		return nil
+	case n != len(acts):
+		return fmt.Errorf("%w: a proposal with a pull-request step (repo_open_pull_request) holds only pull-request steps; propose a live stop-gap as a separate proposal", tools.ErrBadInput)
+	case n > actions.MaxDeferredSteps:
+		return fmt.Errorf("%w: a proposal holds at most %d pull-request steps, not %d", tools.ErrBadInput, actions.MaxDeferredSteps, n)
+	}
+	return nil
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -297,7 +517,7 @@ func (t *proposeFixTool) Description() string {
 		b.WriteString("(none)\n")
 	}
 	for _, a := range acts {
-		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
+		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), t.layerOf(a), describeFor(a, t.source))
 	}
 	b.WriteString("steps is an array; each step has action, params and a short description, and may have verify (at most 200 characters): what you will check after the step runs, for example \"task 0 RUNNING within 60 s\". ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
@@ -488,6 +708,43 @@ func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
 	return &proposeFixTool{actions: reg, proposals: proposals}
 }
 
+// NewProposeFixToolForSource is NewProposeFixTool for a room whose source is
+// of sourceKind ("" = postgres, or mysql): its steps carry the layer
+// actions.LayerFor gives (a source admin step of a MySQL room is the mysql
+// owner's) and its action list the source's descriptions (Q8g). An unknown
+// kind is an error, as in SourceKind.
+func NewProposeFixToolForSource(reg *actions.Registry, proposals Proposals, sourceKind string) (tools.Tool, error) {
+	sk, err := SourceKind(sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	return &proposeFixTool{actions: reg, proposals: proposals, source: sk}, nil
+}
+
+// setRoomSetup gives propose_fix the run's setup state, so it applies the
+// steps bound (setupRun.admitProposal) before a proposal reaches the room. A
+// nil setup (every room but a setup room) leaves the tool unchanged.
+func setRoomSetup(room []tools.Tool, s *setupRun) {
+	if s == nil {
+		return
+	}
+	for _, t := range room {
+		if p, ok := t.(*proposeFixTool); ok {
+			p.setup = s
+		}
+	}
+}
+
+// setRoomSource gives the room tools that depend on it the room's source
+// kind (Q8g): today propose_fix alone.
+func setRoomSource(room []tools.Tool, sourceKind string) {
+	for _, t := range room {
+		if p, ok := t.(*proposeFixTool); ok {
+			p.source = sourceKind
+		}
+	}
+}
+
 // checkStep resolves a step to its action and decoded params, or returns the
 // error the model sees. Order: the action must exist, params must be a JSON
 // object that fits the action's ParamsSchema (types, required fields, enums,
@@ -515,6 +772,16 @@ func (t *proposeFixTool) checkStep(ctx context.Context, i int, action string, ra
 	}
 	if err := a.Validate(ctx, params); err != nil {
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
+	}
+	if kinds, err := t.steps.echoedInjection(i+1, action, params); err != nil {
+		// The echo guard (P3-W3b): the step repeats what an injection-flagged
+		// read asked for. The model sees the error; the room sees nothing
+		// but this failed tool call. The log line carries no span text.
+		if t.log != nil {
+			t.log.Warn("agent: propose_fix step echoes injection-flagged text", "tool", t.Name(), "step", i+1, "action", action, "kinds", kinds)
+		}
+		observeStep(a, params, err)
+		return nil, nil, err
 	}
 	return a, params, nil
 }
@@ -628,19 +895,55 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if t.proposals == nil {
 		return tools.Result{}, fmt.Errorf("agent: proposals are not available")
 	}
+	if t.setup != nil {
+		names := make([]string, 0, len(in.Steps))
+		for _, s := range in.Steps {
+			names = append(names, s.Action)
+		}
+		if err := t.setup.admitProposal(names); err != nil {
+			return tools.Result{}, err
+		}
+	}
 
 	steps := make([]events.ProposalStep, 0, len(in.Steps))
 	seenLayers := map[string]bool{}
 	var layers []string
+	acts := make([]actions.Action, 0, len(in.Steps))
+	for _, s := range in.Steps {
+		if t.actions == nil {
+			break
+		}
+		if a, ok := t.actions.Get(s.Action); ok {
+			acts = append(acts, a)
+		}
+	}
+	// An unknown action is refused by checkStep below with its own error.
+	if len(acts) == len(in.Steps) {
+		if err := checkDeferred(acts); err != nil {
+			return tools.Result{}, err
+		}
+	}
 	for i, s := range in.Steps {
 		a, params, err := t.checkStep(ctx, i, s.Action, s.Params)
 		if err != nil {
 			return tools.Result{}, err
 		}
-		layer := a.Layer()
+		// One step, one layer: a fix PR whose files sit under globs of two
+		// layers has no layer and is refused here (two layers are two steps,
+		// so two approvals are never folded into one).
+		layer, err := t.stepLayer(ctx, a, params)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, s.Action, err)
+		}
 		verify := strings.TrimSpace(s.Verify)
 		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
 			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)
+		}
+		if actions.ClassOf(a) == actions.ClassPerformance {
+			// X6c: a tuning only on a measured bottleneck (tuning_gate.go).
+			if err := t.steps.tuningEvidence(i+1, s.Action, s.Description+"\n"+verify); err != nil {
+				return tools.Result{}, err
+			}
 		}
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
@@ -655,10 +958,23 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		}
 	}
 
+	// H4: a restore after a dependent step goes in its own proposal
+	// (restoreguard.go). The log line names step numbers only: params can
+	// carry text the model copied from untrusted reads.
+	if err := restoreBeforeSettle(steps); err != nil {
+		if t.log != nil {
+			t.log.Warn("agent: propose_fix restores a setting before its dependent step settles", "tool", t.Name(), "steps", len(steps))
+		}
+		return tools.Result{}, err
+	}
+
+	// X4c: with the cause outside the pipeline, no pipeline change is the
+	// root fix; the proposal says it is a mitigation.
+	title, owner := t.causes.mitigationTitle(in.Title)
 	createCtx, cancel := context.WithTimeout(ctx, proposalTimeout)
 	defer cancel()
 	id, err := t.proposals.Create(createCtx, events.ProposalCreatedPayload{
-		Title:          in.Title,
+		Title:          title,
 		Steps:          steps,
 		Risk:           in.Risk,
 		Rollback:       in.Rollback,
@@ -670,8 +986,12 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if t.track != nil {
 		t.track.record(id, steps)
 	}
+	summary := fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))
+	if owner != "" {
+		summary += "; labelled a mitigation: your hypothesis puts the cause outside the pipeline, so the root fix is " + owner + "'s"
+	}
 	return tools.Result{
-		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", ")),
+		Summary: summary,
 		Data:    proposeFixResult{ProposalID: id},
 	}, nil
 }

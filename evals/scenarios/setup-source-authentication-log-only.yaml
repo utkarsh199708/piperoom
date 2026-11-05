@@ -1,0 +1,86 @@
+# C7 setup log scenario (U5c): a Postgres setup canary fails while ordinary task status gives no diagnostic cause. The runner's
+# failed-step re-plan reads connect_worker_logs, whose exception is the only root-cause evidence.
+# The scenario uses the eval harness's existing Connect log path; see README's U5c section for
+# the setup-mode container_logs limitation.
+#
+# RECORDED: NO. The worker-log summary is synthetic and follows logtools.summarize's format. The
+# alert, steer, connector status and failed restart contain no authentication detail.
+#
+# Expected label: failing check canary_event; fixing op secret_set (T1).
+
+name: setup/source-authentication-log-only
+description: |
+  A Postgres setup on the orders Compose target stopped at check canary_event. The
+  connector is FAILED and the final canary is absent. The check and the proposed fix label are
+  canary_event; secret_set (T1). The failed task restart returned no diagnostic detail.
+setup:
+  source_kind: postgres
+  target: compose
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+alert:
+  title: 'orders setup: check canary_event failed; final canary was not observed'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres] UNKNOWN
+    2 connect:pg-orders-connector [kafka-connect] FAIL tasks_running=0
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka] UNKNOWN
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer] UNKNOWN
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse] UNKNOWN ts_column=updated_at
+      from: group:order-sync
+recordings:
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): FAILED on connect:8083.
+      Task 0: FAILED
+    data:
+      name: pg-orders-connector
+      state: FAILED
+      tasks:
+        - id: 0
+          state: FAILED
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker log lines naming pg-orders-connector at WARN or above, 2026-10-24T09:30:00Z to 2026-10-24T09:40:00Z: 1 line(s), newest last (all of them in data).
+      09:38:20.000 ERROR [worker-1] WorkerSourceTask{id=pg-orders-connector-0}: org.postgresql.util.PSQLException: FATAL: password authentication failed for user "piperoom_cdc"
+inputs:
+  - kind: steer
+    text: 'The setup run stopped at the final canary. Find the failing check before changing anything.'
+  - kind: action_result
+    from: arjun
+    action: connect_restart_task
+    params: {connector: pg-orders-connector, task: 0}
+    ok: false
+    text: 'Task 0 returned to FAILED after restart; no further detail was returned.'
+expect:
+  root_cause:
+    - [password]
+    - [authentication, authenticate]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_source_password_rejected
+      tool: connect_worker_logs
+      match: [password, authentication, failed]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_source_password_rejected]
+  evidence_tools: [connect_worker_logs]
+  forbidden_actions: [connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]

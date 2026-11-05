@@ -6,8 +6,6 @@ import (
 	"sort"
 
 	"gopkg.in/yaml.v3"
-
-	"piperoom/internal/events"
 )
 
 // LayerRights is one entry of a pipeline `owners:` block:
@@ -155,7 +153,7 @@ func (o *Owners) Named(userID string, groups []string) bool {
 // LayersFor returns the layers the session may approve, for GET /api/me
 // "layers": every layer where the session is an approver or backup in
 // `layers:` or in any pipeline `owners:` block. The result is in
-// events.Layers order, without duplicates, and is never nil.
+// KnownLayers order, without duplicates, and is never nil.
 func (o *Owners) LayersFor(userID string, groups []string) []string {
 	out := []string{}
 	if o == nil {
@@ -170,7 +168,7 @@ func (o *Owners) LayersFor(userID string, groups []string) []string {
 			hit[layer] = true
 		}
 	})
-	for _, l := range events.Layers {
+	for _, l := range KnownLayers() {
 		if hit[l] {
 			out = append(out, l)
 		}
@@ -191,8 +189,8 @@ func (o *Owners) LayerOwner(layer string) (string, bool) {
 }
 
 // NamedPrincipals returns every distinct principal the file names (layers,
-// pipeline owners approvers and backups, auditors, tenant members), sorted by
-// canonical form.
+// pipeline owners approvers and backups, auditors, tenant members and admins),
+// sorted by canonical form.
 func (o *Owners) NamedPrincipals() []Principal {
 	if o == nil {
 		return nil
@@ -210,6 +208,7 @@ func (o *Owners) NamedPrincipals() []Principal {
 	add(o.Auditors)
 	for _, t := range o.Tenants {
 		add(t.Members)
+		add(t.Admins)
 	}
 	out := make([]Principal, 0, len(set))
 	for p := range set {
@@ -242,8 +241,8 @@ func (o *Owners) validateRights() error {
 	}
 	sort.Strings(layers) // same error for the same file
 	for _, layer := range layers {
-		if !slices.Contains(events.Layers, layer) {
-			return fmt.Errorf("unknown layer %q (known: %v)", layer, events.Layers)
+		if !slices.Contains(KnownLayers(), layer) {
+			return fmt.Errorf("unknown layer %q (known: %v)", layer, KnownLayers())
 		}
 		if len(o.Layers[layer]) == 0 {
 			return fmt.Errorf("layers: %q has no owner (want a user id, user:<id> or group:<name>)", layer)
@@ -257,8 +256,8 @@ func (o *Owners) validateRights() error {
 		}
 		sort.Strings(pl)
 		for _, layer := range pl {
-			if !slices.Contains(events.Layers, layer) {
-				return fmt.Errorf("pipeline %q: owners: unknown layer %q (known: %v)", p.ID, layer, events.Layers)
+			if !slices.Contains(KnownLayers(), layer) {
+				return fmt.Errorf("pipeline %q: owners: unknown layer %q (known: %v)", p.ID, layer, KnownLayers())
 			}
 			if len(p.Owners[layer].Approvers) == 0 {
 				return fmt.Errorf("pipeline %q: owners: layer %q has no approvers", p.ID, layer)

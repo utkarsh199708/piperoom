@@ -26,7 +26,7 @@ export function CostChip({ state }: { state: RoomState }) {
             type="button"
             data-testid="cost-chip"
             aria-describedby={tipId}
-            className="cursor-default whitespace-nowrap rounded-sm border-0 bg-transparent p-0 font-mono text-xs tabular-nums text-subtle-foreground"
+            className="cursor-default whitespace-nowrap rounded-sm border-0 bg-transparent p-0 text-xs tabular-nums text-subtle-foreground"
           >
             {text}
           </button>

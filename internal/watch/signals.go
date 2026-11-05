@@ -72,11 +72,15 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		if t.cfg.ConnectorDown.Enabled {
 			w.apply(now, t, ps, owners.SignalConnectorDown, t.cfg.ConnectorDown, cr.reading(), fired)
 		}
-		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
+		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.LongTx.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
+		}
+		if !t.cfg.LongTx.Enabled {
+			ps.ltx = nil
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.evaluateLag(now, t, ps, obs, fired)
+		w.evaluateConfigDrift(now, t, ps, obs, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
@@ -92,6 +96,9 @@ func (w *Watcher) evaluateSlot(now time.Time, t target, ps *pipeState, cr connRe
 		if t.cfg.SlotWAL.Enabled {
 			w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, unknown, fired)
 		}
+		if t.cfg.LongTx.Enabled {
+			w.apply(now, t, ps, owners.SignalLongTx, t.cfg.LongTx.WatchSignal, unknown, fired)
+		}
 		return
 	}
 	if t.cfg.SlotInactive.Enabled {
@@ -101,6 +108,10 @@ func (w *Watcher) evaluateSlot(now time.Time, t target, ps *pipeState, cr connRe
 		ss := ps.sig(owners.SignalSlotWAL)
 		r := w.slotWALReading(now, t, ps, ss, row, cr, heartbeatOf(t, obs))
 		w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, r, fired)
+	}
+	if t.cfg.LongTx.Enabled {
+		r := longTxReading(now, t, ps, ps.sig(owners.SignalLongTx), row)
+		w.apply(now, t, ps, owners.SignalLongTx, t.cfg.LongTx.WatchSignal, r, fired)
 	}
 }
 
@@ -174,7 +185,7 @@ func (w *Watcher) logStill(now time.Time, t target, ps *pipeState) {
 	if now.Sub(ps.lastStill) < stillFiringEvery {
 		return
 	}
-	for _, id := range signalIDs {
+	for _, id := range ps.ids() {
 		ss := ps.sigs[id]
 		if ss == nil || ss.phase == phaseOK {
 			continue

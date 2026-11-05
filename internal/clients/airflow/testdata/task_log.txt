@@ -1,0 +1,17 @@
+*** Found local files:
+***   * /opt/airflow/logs/dag_id=revenue_daily/run_id=scheduled__2026-10-17T00:00:00+00:00/task_id=dbt_run_fct_revenue/attempt=2.log
+[2026-10-18, 00:05:12 UTC] {taskinstance.py:1956} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: revenue_daily.dbt_run_fct_revenue scheduled__2026-10-17T00:00:00+00:00 [queued]>
+[2026-10-18, 00:05:12 UTC] {taskinstance.py:2170} INFO - Starting attempt 2 of 3
+[2026-10-18, 00:05:12 UTC] {subprocess.py:75} INFO - Running command: ['/usr/bin/bash', '-c', 'dbt run --select fct_revenue']
+[2026-10-18, 00:05:19 UTC] {subprocess.py:93} INFO - 00:05:19  1 of 1 START sql table model analytics.fct_revenue ........ [RUN]
+[2026-10-18, 00:05:20 UTC] {subprocess.py:93} INFO - 00:05:20  1 of 1 ERROR creating sql table model analytics.fct_revenue  [ERROR in 0.41s]
+[2026-10-18, 00:05:20 UTC] {subprocess.py:93} INFO - 00:05:20    Database Error in model fct_revenue (models/marts/fct_revenue.sql)
+[2026-10-18, 00:05:20 UTC] {subprocess.py:93} INFO - 00:05:20      column "discount_cents" does not exist
+[2026-10-18, 00:05:21 UTC] {subprocess.py:97} INFO - Command exited with return code 1
+[2026-10-18, 00:05:21 UTC] {taskinstance.py:2698} ERROR - Task failed with exception
+Traceback (most recent call last):
+  File "/home/airflow/.local/lib/python3.11/site-packages/airflow/operators/bash.py", line 210, in execute
+    raise AirflowException(
+airflow.exceptions.AirflowException: Bash command failed. The command returned a non-zero exit code 1.
+[2026-10-18, 00:05:21 UTC] {taskinstance.py:1138} INFO - Marking task as UP_FOR_RETRY. dag_id=revenue_daily, task_id=dbt_run_fct_revenue, run_id=scheduled__2026-10-17T00:00:00+00:00, execution_date=20261017T000000, start_date=20261018T000512, end_date=20261018T000521
+[2026-10-18, 00:05:21 UTC] {local_task_job_runner.py:234} INFO - Task exited with return code 1

@@ -31,7 +31,7 @@ func productionToolSet(t *testing.T) (*tools.Registry, []tools.Tool) {
 // request sends with strict: true, read back from the wire JSON.
 func strictSchemaBytes(t *testing.T, tl toolList) (total, count int) {
 	t.Helper()
-	for _, p := range tl.params {
+	for _, p := range tl.wire() {
 		b, err := json.Marshal(p)
 		if err != nil {
 			t.Fatalf("marshal tool param: %v", err)

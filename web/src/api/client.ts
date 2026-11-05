@@ -7,7 +7,9 @@
 // This client never sends the old user-id header: with a cookie for another user
 // the server answers 403 proxy_identity (docs/design/auth.md section 5.2).
 import type {
+  ActionInfo,
   ApiError,
+  CreateProposalBody,
   AuthUser,
   ChecklistStepDonePayload,
   Event,
@@ -16,14 +18,25 @@ import type {
   LabelInput,
   Me,
   Person,
+  ProbeResult,
+  AdminConfig,
   AgentStats,
+  ModelChoice,
+  ModelPanel,
+  FleetChangesPage,
+  FleetPipeline,
   PipelineInfo,
+  CreateSetupResponse,
   RoomSnapshot,
+  SetupPipelineExtendBody,
+  SetupRequest,
   ShadowBlindBody,
   ShadowGradeBody,
   ShadowMetrics,
   ShadowResponse,
   Topology,
+  TrendPoint,
+  WatchMetric,
 } from './types'
 import { classifyAuthProblem, getAuthEpoch, reportAuthProblem } from '../lib/auth'
 import type { AuthMode } from '../lib/auth'
@@ -143,6 +156,12 @@ export interface ApproveExtras {
 }
 
 /**
+ * Body of POST /api/proposals/{pid}/approve-all (P2b): the same `params_hash` rule as approve, and
+ * for the solo user `confirm: "<pipeline_id>/*"`, typed once for every layer of the call.
+ */
+export type ApproveAllExtras = ApproveExtras
+
+/**
  * Download the room's export document (GET /api/rooms/{id}/export). Returned as text, not parsed, so the
  * saved file is byte-for-byte what the server hashed; `sha256` is the X-Piperoom-Export-SHA256 header.
  */
@@ -181,6 +200,13 @@ async function fetchText(url: string, accept?: string): Promise<Response> {
   return res
 }
 
+/**
+ * The config export (GET /api/admin/config/export, admin only): the owners file, `---`, the users file, as a
+ * `piperoom-config.yaml` attachment. The page links to it instead of fetching it, so the browser saves the
+ * bytes the server sent and the session cookie authorises it.
+ */
+export const ADMIN_CONFIG_EXPORT_URL = '/api/admin/config/export'
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {
@@ -198,11 +224,56 @@ export const api = {
   rooms: () => request<RoomSnapshot[]>('/api/rooms'),
   createRoom: (body: { title: string; severity: string; pipeline_id: string }) =>
     request<RoomSnapshot>('/api/rooms', { method: 'POST', body: JSON.stringify(body) }),
+  // U: opens a setup room; the answer carries the single-use pairing code and the line to paste.
+  createSetup: (body: SetupRequest) =>
+    request<CreateSetupResponse>('/api/setup', { method: 'POST', body: JSON.stringify(body) }),
+  // U1-5b: a driver's setup clicks (docs/api.md "Setup rooms"). Every one is driver only and
+  // answers the event the room log received; the runner re-checks the resolved IP at dial time.
+  setupTarget: (roomId: string, body: { kind: string; address: string; class?: string }) =>
+    request<Event>(`${room(roomId)}/setup/targets`, { method: 'POST', body: JSON.stringify(body) }),
+  // Raise only: the server answers 400 class_lowered for a class that is not higher.
+  setupTargetClass: (roomId: string, target: string, body: { class: string }) =>
+    request<Event>(`${room(roomId)}/setup/targets/${encodeURIComponent(target)}/class`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  setupPipeline: (roomId: string, body: SetupPipelineExtendBody) =>
+    request<Event>(`${room(roomId)}/setup/pipeline`, { method: 'POST', body: JSON.stringify(body) }),
+  setupMaintenanceWindow: (roomId: string, body: { start: string; end: string }) =>
+    request<Event>(`${room(roomId)}/setup/maintenance-window`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // 204: the value goes to the paired runner and is stored nowhere on the server, so it is in no
+  // answer, event or log line (the route is excluded from request logging).
+  setupSecret: (roomId: string, body: { name: string; value: string }) =>
+    request<void>(`${room(roomId)}/setup/secret`, { method: 'POST', body: JSON.stringify(body) }),
+  // 202, no body: asks the runner to register the read credentials it generated. The values travel
+  // in the runner's frame after the person confirms on its terminal, never in this request.
+  setupCredentials: (roomId: string) =>
+    request<void>(`${room(roomId)}/setup/credentials`, { method: 'POST' }),
   room: (roomId: string) => request<RoomSnapshot>(room(roomId)),
   events: (roomId: string, after: number, limit = 500) =>
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  // X3: the watcher's samples of one metric, oldest first; [] before the first sample. 404 for an unknown
+  // pipeline and for one outside the caller's tenants.
+  trends: (pipelineId: string, metric: WatchMetric, days = 1) =>
+    request<TrendPoint[]>(
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/trends?metric=${encodeURIComponent(metric)}&days=${days}`,
+    ),
+  // X5: one row per pipeline the caller can see, [] when there are none; filtered and sorted in the browser.
+  fleet: () => request<FleetPipeline[]>('/api/fleet'),
+  // X5: what changed across the caller's pipelines (default the last 7 days), newest first, one page per call.
+  // `cursor` is the previous page's `next`, opaque.
+  fleetChanges: (page: { cursor?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (page.limit) q.set('limit', String(page.limit))
+    if (page.cursor) q.set('cursor', page.cursor)
+    const qs = q.toString()
+    return request<FleetChangesPage>(`/api/fleet/changes${qs ? `?${qs}` : ''}`)
+  },
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>
@@ -250,6 +321,35 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ layer, ...extra }),
     }),
+  // One approval.given per pending required layer, in required_layers order, then the steps run
+  // as after the last approve. Answers those events.
+  approveAll: (proposalId: string, extra: ApproveAllExtras) =>
+    request<Event[]>(`/api/proposals/${encodeURIComponent(proposalId)}/approve-all`, {
+      method: 'POST',
+      body: JSON.stringify(extra),
+    }),
+  // P2b: stops a pending policy countdown (proposal.cancelled). 409 not_scheduled when none is
+  // pending (the policy ran, or someone cancelled first); the proposal stays open either way.
+  cancelProposal: (proposalId: string, reason?: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
+  // X8: the driver tries the proposal on the staging stack. Answers 202 with proposal.stage_started at once; the
+  // result is a proposal.staged over the socket. 409 no_staging / not_stageable / stage_in_progress / staging_required,
+  // 429 rate_limited (a sixth stage of one proposal).
+  stageProposal: (proposalId: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/stage`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  // P3c: the registered write actions (any member, viewers included); the propose dialog builds its form from params_schema.
+  actions: () => request<ActionInfo[]>('/api/actions'),
+  // P3c: a driver-authored fix. Answers proposal.created (origin "driver"); the preview follows as
+  // proposal.previewed over the socket. 403 not_driver, 409 room_closed, 400 validation (names the
+  // step index), 429 too_many_proposals (a sixth open driver-authored proposal).
+  proposeFix: (roomId: string, body: CreateProposalBody) =>
+    request<Event>(`${room(roomId)}/proposals`, { method: 'POST', body: JSON.stringify(body) }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
@@ -281,6 +381,17 @@ export const api = {
     request<ShadowResponse>(`${room(roomId)}/shadow${include.length ? `?include=${include.join(',')}` : ''}`),
   shadowGrade: (roomId: string, body: ShadowGradeBody) =>
     request<Event>(`${room(roomId)}/shadow/grade`, { method: 'POST', body: JSON.stringify(body) }),
+  // Admin only: any other member gets 403 not_allowed, a viewer 403 viewer. Nothing here changes configuration.
+  adminConfig: () => request<AdminConfig>('/api/admin/config'),
+  // A failed check is a 200 with ok: false. 404 not_found: unknown id. 429 rate_limited: 10 tests a minute.
+  testConnection: (id: string) =>
+    request<ProbeResult>('/api/admin/connections/test', { method: 'POST', body: JSON.stringify({ id }) }),
+  // Any logged-in user. A team server answers read-only data; a standalone one with no usable model answers state no_model.
+  models: () => request<ModelPanel>('/api/models'),
+  // Standalone and quickstart only (a team server: 404). The key travels here and nowhere else; 400 key_required
+  // and 400 validation are shown next to their field, 403 origin / not_allowed / viewer explain themselves.
+  putModels: (choice: ModelChoice) =>
+    request<ModelPanel>('/api/models', { method: 'PUT', body: JSON.stringify(choice) }),
   shadowMetrics: (filter: { pipeline?: string; since?: string } = {}) => {
     const q = new URLSearchParams()
     if (filter.pipeline) q.set('pipeline', filter.pipeline)

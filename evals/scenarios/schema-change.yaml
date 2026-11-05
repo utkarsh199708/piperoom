@@ -98,11 +98,19 @@ recordings:
       pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, to_version: 2}
-    error: "schemareg: GET /subjects/pg.public.orders-value/versions/2: not found: schema registry error 40402: Version 2 not found."
+    error: 'bad tool input: to_version 2 is not a registered version of pg.public.orders-value (available versions: [1])'
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     summary: |-
-      no field changes
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
+    data:
+      changes: []
+      from_version: 1
+      single_version: true
+      subject: pg.public.orders-value
+      to_version: 1
+      versions:
+        - 1
 
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}

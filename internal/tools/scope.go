@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"piperoom/internal/clients"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -92,6 +94,14 @@ func PipelineFrom(ctx context.Context) (owners.Pipeline, bool) {
 type Scope struct {
 	p        owners.Pipeline
 	unscoped bool
+	// derived reads the consumer groups the topology derived from the
+	// pipeline's own sink engines (owners.Owners.DerivedConsumerGroups): a
+	// ClickHouse Kafka engine table's kafka_group_name is not in owners.yaml,
+	// but the read tools accept it (CheckReadGroup, FilterReadGroups). The
+	// write guard (CheckGroup) never does. It is nil when the call was resolved
+	// without an Owners instance (an unscoped call, or a context carrying the
+	// full pipeline and no config).
+	derived func(pipelineID string) []string
 }
 
 // ScopeFor resolves the scope of a tool call from ctx. o is the tool's owners
@@ -102,9 +112,13 @@ type Scope struct {
 //   - ErrNoScope otherwise.
 func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 	v := scopeOf(ctx)
+	var derived func(string) []string
+	if o != nil {
+		derived = o.DerivedConsumerGroups
+	}
 	switch {
 	case v.hasPipeline:
-		return Scope{p: v.pipeline}, nil
+		return Scope{p: v.pipeline, derived: derived}, nil
 	case v.pipelineID != "":
 		if o == nil {
 			return Scope{}, fmt.Errorf("tools: owners not configured, cannot resolve the room's pipeline %q (wiring must pass Owners)", v.pipelineID)
@@ -113,9 +127,9 @@ func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 		if !ok {
 			return Scope{}, fmt.Errorf("%w: the room's pipeline %q is not in the owners config", ErrOutOfScope, v.pipelineID)
 		}
-		return Scope{p: p}, nil
+		return Scope{p: p, derived: derived}, nil
 	case v.unscoped:
-		return Scope{unscoped: true}, nil
+		return Scope{unscoped: true, derived: derived}, nil
 	}
 	return Scope{}, fmt.Errorf("%w: this tool call has no room pipeline, so read tools are refused (CLI/dev callers must opt out explicitly)", ErrNoScope)
 }
@@ -175,12 +189,54 @@ func (s Scope) CheckConnector(name string) error {
 	return refuse("connector", name, s, "allowed connectors: "+strings.Join(s.p.Connectors, ", "))
 }
 
-// CheckGroup refuses a consumer group that is not one of the pipeline's groups.
+// derivedGroups returns the consumer groups the topology derived from the
+// pipeline's own sink engines, or nil. They are part of the pipeline for the
+// read tools (CheckReadGroup, FilterReadGroups); CheckGroup, the write guard,
+// does not accept them. The set is read from the pipeline's own objects and
+// replaced on every topology build (owners.SetDerivedConsumerGroups), and the
+// owners config drops any group a pipeline declares, so a DDL author cannot
+// widen scope with kafka_group_name.
+func (s Scope) derivedGroups() []string {
+	if s.derived == nil || s.p.ID == "" {
+		return nil
+	}
+	return s.derived(s.p.ID)
+}
+
+// groupAllowed reports whether name is one of the read tools' consumer groups:
+// declared in owners.yaml or derived from a sink engine the pipeline owns.
+func (s Scope) groupAllowed(name string) bool {
+	return contains(s.p.ConsumerGroups, name) || contains(s.derivedGroups(), name)
+}
+
+// allowedGroups lists the consumer groups the read tools accept for an error:
+// the declared ones and the ones derived from the pipeline's own engines.
+func (s Scope) allowedGroups() []string {
+	return slices.Concat(s.p.ConsumerGroups, s.derivedGroups())
+}
+
+// CheckGroup refuses a consumer group that owners.yaml does not declare for the
+// pipeline. It is the write guard: actions (kafka_reset_offsets) and
+// clients/kafka.Writer.ResetGroupOffsets both call it, so a group derived from
+// warehouse DDL is never enough to reset offsets, whatever the engine's
+// kafka_group_name says. The read tools use CheckReadGroup.
 func (s Scope) CheckGroup(name string) error {
 	if s.unscoped || contains(s.p.ConsumerGroups, name) {
 		return nil
 	}
-	return refuse("consumer group", name, s, "allowed consumer groups: "+strings.Join(s.p.ConsumerGroups, ", "))
+	return refuse("consumer group", name, s, allowed("consumer groups", s.p.ConsumerGroups))
+}
+
+// CheckReadGroup refuses a consumer group that is neither declared in
+// owners.yaml nor derived from one of the pipeline's own sink engines (a
+// ClickHouse Kafka engine table's kafka_group_name, read by the topology). The
+// read tools (kafka_consumer_lag) use it; CheckGroup stays declared-only for
+// the write paths.
+func (s Scope) CheckReadGroup(name string) error {
+	if s.unscoped || s.groupAllowed(name) {
+		return nil
+	}
+	return refuse("consumer group", name, s, allowed("consumer groups", s.allowedGroups()))
 }
 
 // Topics returns the pipeline's topics: "<topic_prefix>.<source_table>" for
@@ -267,7 +323,20 @@ func (s Scope) CheckSubject(subject string) error {
 	return refuse("subject", subject, s, "allowed subjects: "+strings.Join(allowed, ", "))
 }
 
-// CheckSourceTable refuses a table that is not one of the pipeline's source tables.
+// SourceKind returns the room pipeline's source kind, owners.SourceKindPostgres
+// or owners.SourceKindMySQL; "" when unscoped and for a batch pipeline (no
+// source database). The source-table rules do not depend on it: a MySQL
+// source_tables entry is db.table, the same two-part shape as a Postgres
+// schema.table, and its topic is <topic_prefix>.<db>.<table> (Q8d).
+func (s Scope) SourceKind() string {
+	if s.unscoped || s.p.KindOrDefault() != events.PipelineKindCDC {
+		return ""
+	}
+	return s.p.SourceKindOrDefault()
+}
+
+// CheckSourceTable refuses a table that is not one of the pipeline's source
+// tables (schema.table on Postgres, db.table on MySQL).
 func (s Scope) CheckSourceTable(table string) error {
 	if s.unscoped || contains(s.p.SourceTables, table) {
 		return nil
@@ -281,6 +350,93 @@ func (s Scope) CheckSinkTable(table string) error {
 		return nil
 	}
 	return refuse("table", table, s, "allowed sink tables: "+strings.Join(s.p.SinkTables, ", "))
+}
+
+// ---- batch pipelines (P4) ----
+//
+// A batch pipeline's scope is its dags, models and sink_tables (CheckSinkTable
+// above serves both kinds). It has no topic prefix, source tables, connectors
+// or consumer groups, so every cdc check refuses on it, and a cdc pipeline has
+// no dags or models, so CheckDAG and CheckModel refuse on it.
+
+// Kind returns the room pipeline's kind, events.PipelineKindCDC or
+// events.PipelineKindBatch; "" when unscoped, where no pipeline applies.
+func (s Scope) Kind() string {
+	if s.unscoped {
+		return ""
+	}
+	return s.p.KindOrDefault()
+}
+
+// CheckDAG refuses a DAG id that is not one of the pipeline's dags.
+func (s Scope) CheckDAG(dagID string) error {
+	if s.unscoped || contains(s.p.DAGs, dagID) {
+		return nil
+	}
+	return refuse("DAG", dagID, s, allowed("DAGs", s.p.DAGs))
+}
+
+// CheckModel refuses a model that is not one of the pipeline's models. name
+// is a model name as owners.yaml writes it, or a model unique_id
+// (model.<package>.<name>[.<version>]); owners.ModelsContain applies the same
+// rule as the topology builder: a bare entry admits any package, a unique_id
+// entry only its own package (and version, when it names one).
+func (s Scope) CheckModel(name string) error {
+	if s.unscoped || owners.ModelsContain(s.p.Models, name) {
+		return nil
+	}
+	return refuse("model", name, s, allowed("models", s.p.Models))
+}
+
+// LineageReader reads one model's direct parents and children.
+// clients.TransformReader satisfies it.
+type LineageReader interface {
+	ModelLineage(ctx context.Context, model string) (clients.Lineage, error)
+}
+
+// CheckModelOrAdjacent allows one of the pipeline's models or a direct parent
+// or child of one, by the manifest's lineage: the rule of the dbt tools that
+// read a model's lineage or SQL. Lineage is read only for a name that is not a
+// pipeline model. It fails closed: a lineage read that fails is an error,
+// never "in scope". A pipeline model that the manifest no longer has
+// (clients.ErrNotFound) only has no neighbours. A nil reader is an error that
+// wraps clients.ErrNotSupported.
+func (s Scope) CheckModelOrAdjacent(ctx context.Context, name string, lr LineageReader) error {
+	if s.unscoped || owners.ModelsContain(s.p.Models, name) {
+		return nil
+	}
+	why := allowed("models", s.p.Models) + " and their direct parents and children"
+	// A plain name only: a unique_id would let "model.other_pkg.x" pass as x.
+	if n, ok := owners.ModelName(name); !ok || n != name {
+		return refuse("model", name, s, why)
+	}
+	if len(s.p.Models) > 0 && lr == nil {
+		return fmt.Errorf("tools: pipeline %q: no transform reader to read the lineage of its models: %w", s.p.ID, clients.ErrNotSupported)
+	}
+	for _, m := range s.p.Models {
+		l, err := lr.ModelLineage(ctx, m)
+		if errors.Is(err, clients.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("tools: pipeline %q: read the lineage of model %q to check %q: %w", s.p.ID, m, shorten(name), err)
+		}
+		for _, ref := range slices.Concat(l.Parents, l.Children) {
+			if n, ok := owners.ModelName(ref); ok && n == name {
+				return nil
+			}
+		}
+	}
+	return refuse("model", name, s, why)
+}
+
+// allowed lists names for a refusal, or says there are none: a cdc pipeline
+// asked for a DAG gets "this pipeline has no DAGs", not an empty list.
+func allowed(what string, names []string) string {
+	if len(names) == 0 {
+		return "this pipeline has no " + what
+	}
+	return "allowed " + what + ": " + strings.Join(names, ", ")
 }
 
 // TopicInScope reports whether topic is one of the pipeline's topics (always
@@ -306,9 +462,17 @@ func (s Scope) FilterConnectors(names []string) []string {
 	return s.filter(names, func(n string) bool { return contains(s.p.Connectors, n) })
 }
 
-// FilterGroups keeps only the pipeline's consumer groups.
+// FilterGroups keeps only the pipeline's declared consumer groups. It is the
+// listing rule of the write guard (CheckGroup); read tools use FilterReadGroups.
 func (s Scope) FilterGroups(names []string) []string {
 	return s.filter(names, func(n string) bool { return contains(s.p.ConsumerGroups, n) })
+}
+
+// FilterReadGroups keeps only the consumer groups the read tools may list:
+// declared in owners.yaml or derived from a sink engine the pipeline owns.
+func (s Scope) FilterReadGroups(names []string) []string {
+	allowed := s.allowedGroups()
+	return s.filter(names, func(n string) bool { return contains(allowed, n) })
 }
 
 // FilterSubjects keeps only subjects derived from the pipeline's topics.
@@ -367,15 +531,26 @@ type ConfigReader interface {
 // not a valid slot name (blank included) is an error too, so it never turns
 // into the default slot, which can belong to another pipeline. Only a config
 // with no slot.name key means the default. An empty list with a nil error
-// means no connector of the pipeline is a Debezium Postgres source.
+// means no connector of the pipeline is a Debezium Postgres source, or the
+// pipeline's source_kind is mysql.
 //
 // Unscoped callers do not filter, so calling it unscoped is an error.
 func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
 	if s.unscoped {
 		return nil, errors.New("tools: Slots needs a room pipeline (unscoped callers do not filter)")
 	}
+	if s.p.IsMySQL() {
+		// MySQL has no replication slots (Load refuses watch.slot on it), so
+		// no Connect call and no default "debezium" slot that could be
+		// another pipeline's.
+		return nil, nil
+	}
 	if declared := s.p.Watch().Slot; declared != "" {
 		return []string{declared}, nil
+	}
+	if len(s.p.Connectors) == 0 {
+		// A batch pipeline: no connector, so no slot, whatever Connect says.
+		return nil, nil
 	}
 	if cr == nil {
 		return nil, fmt.Errorf("tools: pipeline %q: no Connect client to read the connector configs, and owners.yaml sets no watch.slot", s.p.ID)

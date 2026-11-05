@@ -27,17 +27,16 @@ func repoStack(t *testing.T) *stack {
 }
 
 func TestParseShadowFlags(t *testing.T) {
-	defShell := defaultShell(runtime.GOOS)
 	tests := []struct {
 		name    string
 		args    []string
 		want    shadowOpts
 		wantErr string
 	}{
-		{"none", nil, shadowOpts{Shell: defShell}, ""},
+		{"none", nil, shadowOpts{Shell: defaultShell(runtime.GOOS)}, ""},
 		{"all set", []string{"--grace", "10m", "--token-budget", "100000", "--max-turns", "8", "--watch-interval", "20s", "--watch-cooldown", "2m", "--shell", "powershell"},
 			shadowOpts{Grace: "10m", TokenBudget: "100000", MaxTurns: "8", WatchInterval: "20s", WatchCooldown: "2m", Shell: "powershell"}, ""},
-		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: defShell}, ""},
+		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: defaultShell(runtime.GOOS)}, ""},
 		{"bad grace", []string{"--grace", "soon"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"negative grace", []string{"--grace", "-5s"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"bad budget", []string{"--token-budget", "12k"}, shadowOpts{}, "PIPEROOM_SHADOW_TOKEN_BUDGET"},
@@ -87,9 +86,8 @@ func TestEnvPairsSkipsUnset(t *testing.T) {
 func TestHostEnvLines(t *testing.T) {
 	t.Run("sh is sorted and quoted", func(t *testing.T) {
 		got := hostEnvLines("/repo with 'quote", shadowOpts{Shell: "sh", Grace: "1m"})
-		ownersPath := filepath.Join("/repo with 'quote", filepath.FromSlash("dev/owners.shadow.yaml"))
 		want := []string{
-			"export OWNERS_FILE=" + shQuote(ownersPath),
+			"export OWNERS_FILE=" + shQuote(filepath.Join("/repo with 'quote", "dev", "owners.shadow.yaml")),
 			`export PIPEROOM_SHADOW_GRACE='1m'`,
 			`export PIPEROOM_WATCH_COOLDOWN='5m'`,
 			`export PIPEROOM_WATCH_INTERVAL='15s'`,
@@ -248,9 +246,20 @@ func TestComposeShadowService(t *testing.T) {
 	if !reflect.DeepEqual(svc.Profiles, []string{shadowProfile}) {
 		t.Fatalf("profiles = %v, want [%s]", svc.Profiles, shadowProfile)
 	}
+	// The batch profile's services are opt-in too (dev/batch.md, TestComposeBatchProfile).
 	for name, s := range doc.Services {
-		if name != shadowService && len(s.Profiles) != 0 {
-			t.Errorf("service %q has profiles %v: only the shadow server may be opt-in", name, s.Profiles)
+		allowedProfile := reflect.DeepEqual(s.Profiles, []string{"batch"}) ||
+			reflect.DeepEqual(s.Profiles, []string{"clickhouse"}) ||
+			reflect.DeepEqual(s.Profiles, []string{stagingProfile}) ||
+			reflect.DeepEqual(s.Profiles, []string{"logs"}) ||
+			reflect.DeepEqual(s.Profiles, []string{oracleProfile}) ||
+			reflect.DeepEqual(s.Profiles, []string{"mssql"}) ||
+			reflect.DeepEqual(s.Profiles, []string{mongoProfile}) ||
+			reflect.DeepEqual(s.Profiles, []string{"mysql"}) || // the MySQL source (Q8a)
+			reflect.DeepEqual(s.Profiles, []string{hostProfile}) || // the fake host (U8c)
+			reflect.DeepEqual(s.Profiles, []string{"llm"}) // local Ollama (V17)
+		if name != shadowService && len(s.Profiles) != 0 && !allowedProfile {
+			t.Errorf("service %q has profiles %v: only the shadow server, batch, clickhouse, staging, logs, llm, source (oracle, mssql, mongo, mysql) and host profiles may be opt-in", name, s.Profiles)
 		}
 	}
 	if len(svc.Ports) != 1 || !strings.HasPrefix(svc.Ports[0], "127.0.0.1:") {

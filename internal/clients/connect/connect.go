@@ -210,17 +210,50 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
+	// Read one byte past the cap so an oversized answer is reported as
+	// such, not as the JSON syntax error a cut body would give.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("connect: %s %s: read: %w", method, path, err)
+	}
+	if len(b) > maxResponseBytes {
+		return fmt.Errorf("connect: %s %s: %w", method, path, ErrResponseTooLarge)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	// UseNumber keeps a 64-bit source position (a Postgres LSN, a MySQL file
+	// position) exact in a map[string]any; a float64 loses digits past 2^53.
+	dec.UseNumber()
+	if err := dec.Decode(out); err != nil {
 		return fmt.Errorf("connect: %s %s: decode: %w", method, path, err)
 	}
 	return nil
 }
+
+// maxResponseBytes caps every response body Connect sends (AGENTS.md rule 7).
+const maxResponseBytes = 4 << 20
+
+// ErrResponseTooLarge is wrapped when a response body is over the 4 MB cap.
+var ErrResponseTooLarge = errors.New("response larger than the 4 MB cap")
 
 // ValidateResult is Connect's verdict on a config. Errors maps a config key to
 // its error messages; values are never kept, because they can be secrets.
 type ValidateResult struct {
 	ErrorCount int
 	Errors     map[string][]string
+}
+
+// ConfigKeyDef is one configuration definition a connector plugin reports
+// (Q4a): the key's name, its Connect type, whether it is required, and its
+// default. Default is "" when Connect has no default or reports null.
+//
+// It is the type behind clients.ConfigValidator.PluginConfigDef in the Q0
+// contract change request; until that lands the kafkatools validator uses
+// this package's type directly.
+type ConfigKeyDef struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+	Default  string `json:"default,omitempty"`
 }
 
 // ValidateConfig asks Connect to validate cfg for the connector plugin class
@@ -251,4 +284,59 @@ func (c *Client) ValidateConfig(ctx context.Context, class string, cfg map[strin
 		}
 	}
 	return res, nil
+}
+
+// PluginConfigDef lists the configuration definitions of a connector plugin
+// (GET /connector-plugins/{class}/config, Kafka Connect 3.2+). It reads only;
+// it creates nothing. A Connect without the endpoint answers 404 (wrapped
+// clients.ErrNotFound) or 405. It is not on clients.ConnectReader: the Q4a
+// config validator finds it by a type assertion, so existing clients, fakes
+// and the eval replay compile unchanged (see the Q0 contract change request).
+func (c *Client) PluginConfigDef(ctx context.Context, class string) ([]ConfigKeyDef, error) {
+	if class == "" {
+		return nil, fmt.Errorf("connect: plugin config defs: empty connector.class")
+	}
+	// KIP-769: the endpoint answers a TOP-LEVEL JSON array of ConfigKeyInfo
+	// objects (apache/kafka ConnectorPluginsResource.getConnectorConfigDef
+	// returns List<ConfigKeyInfo>), not an envelope object.
+	var out []struct {
+		Name       string          `json:"name"`
+		Type       string          `json:"type"`
+		Required   bool            `json:"required"`
+		DefaultRaw json.RawMessage `json:"default_value"`
+	}
+	path := "/connector-plugins/" + url.PathEscape(class) + "/config"
+	if err := c.do(ctx, http.MethodGet, path, &out); err != nil {
+		var se *statusError
+		if errors.As(err, &se) && se.Code == http.StatusMethodNotAllowed {
+			return nil, fmt.Errorf("connect: plugin config defs: %w", clients.ErrNotSupported)
+		}
+		return nil, err
+	}
+	defs := make([]ConfigKeyDef, 0, len(out))
+	for _, d := range out {
+		if d.Name == "" {
+			continue
+		}
+		defs = append(defs, ConfigKeyDef{
+			Name:     d.Name,
+			Type:     d.Type,
+			Required: d.Required,
+			Default:  defaultValue(d.DefaultRaw),
+		})
+	}
+	return defs, nil
+}
+
+// defaultValue renders Connect's default_value, which may be null, a string or
+// any JSON scalar, as the string ConfigKeyDef.Default holds.
+func defaultValue(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }

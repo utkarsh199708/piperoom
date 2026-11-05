@@ -80,10 +80,17 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 // publicationMembers lists the relations in publication with role's SELECT
 // privilege on each. The relation oid is resolved through pg_class so the
 // privilege check can use the oid form of has_table_privilege.
+//
+// The CASE is a role-existence guard: has_table_privilege raises "role ...
+// does not exist" for a role that is not there, which would turn a check the
+// caller wants a verdict for into a read error. A missing role has no
+// privilege on anything, so the answer is false.
 func (d *DB) publicationMembers(ctx context.Context, publication, role string) ([]PublicationTable, error) {
 	rows, err := d.query(ctx, `
 		SELECT pt.schemaname, pt.tablename,
-		       has_table_privilege($2::name, c.oid, 'SELECT')
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = $2)
+		            THEN has_table_privilege($2::name, c.oid, 'SELECT')
+		            ELSE false END
 		FROM pg_publication_tables pt
 		JOIN pg_namespace n ON n.nspname = pt.schemaname
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename
@@ -141,7 +148,9 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		WITH ` + publishedCTEs + `
 		SELECT v.schemaname, v.tablename,
 		       (c.oid IS NOT NULL AND ` + publishedMember("c.oid") + `) AS in_publication,
-		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
+		       (c.oid IS NOT NULL AND CASE WHEN EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = $2)
+		                                  THEN has_table_privilege($2::name, c.oid, 'SELECT')
+		                                  ELSE false END) AS selectable
 		FROM (VALUES `)
 	for i := range sources {
 		if i > 0 {

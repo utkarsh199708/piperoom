@@ -10,7 +10,9 @@ import (
 	"unicode"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/tools"
 )
 
 // Score weights. They add up to 100. Root cause dominates on purpose: a
@@ -75,6 +77,10 @@ type RunResult struct {
 	HedgedOn        string `json:"hedged_on,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
+	// LastMessage is the agent's last room message, the text SaysHealthy
+	// checks for a current fault; the failed-runs section of the report
+	// prints it so a CI log shows what cancelled a healthy verdict.
+	LastMessage string `json:"last_message,omitempty"`
 	// ProposedActions are the actions of every proposed step, sorted. The
 	// failed-runs section of the markdown report prints them so a CI log shows
 	// what a failing run proposed.
@@ -115,6 +121,9 @@ type RunResult struct {
 	// Judged is set when an LLM judge graded the run (ApplyVerdict): RootCause
 	// and LayerNamed then hold the judge's verdicts, Judged the terms ones.
 	Judged *JudgeResult `json:"judged,omitempty"`
+	// HealthyJudged is the judge's verdict on an ambiguous healthy verdict
+	// (gradeHealthy); SaysHealthy then holds it.
+	HealthyJudged *HealthyVerdict `json:"healthy_judged,omitempty"`
 	// Ambiguity is set when the tri-state keyword pass could not decide an
 	// item of the final hypothesis (tristate.go); it says what settled it.
 	Ambiguity *Ambiguity `json:"ambiguity,omitempty"`
@@ -148,6 +157,9 @@ type RunResult struct {
 	// from attempts too: trying one is the failure, even if it was rejected.
 	Attempts         []ActionAttempt `json:"action_attempts,omitempty"`
 	RejectedAttempts int             `json:"rejected_attempts"`
+	// Writes are the writes the run's actions took on the replay clients,
+	// action and target only (at most maxWriteNotes); nothing was performed.
+	Writes []WriteNote `json:"replay_writes,omitempty"`
 	// BadSteps are proposal steps that name an unregistered action, fail its
 	// Validate, or fail its CheckScope against the scenario pipeline.
 	BadSteps  []string `json:"bad_steps,omitempty"`
@@ -162,9 +174,26 @@ type RunResult struct {
 	Misses      []Miss `json:"misses,omitempty"`
 	Idles       int    `json:"idles"`
 
+	// GuardRefusals is how many calls the hypothesis guard refused in the run
+	// (Transcript.GuardRefusals, counted from the guard's own log record).
+	// GuardMode is the
+	// mode the run used ("" = log), the one in which the count is 0 by
+	// construction. UnbackedRuleOuts counts the "ruled out X" claims of the
+	// final hypothesis that no cited successful step read (agent.UnbackedRuledOut).
+	GuardRefusals    int    `json:"guard_refusals"`
+	GuardMode        string `json:"guard_mode,omitempty"`
+	UnbackedRuleOuts int    `json:"unbacked_rule_outs"`
+	// UnbackedRuledOut names them, for the failure line.
+	UnbackedRuledOut []string `json:"unbacked_ruled_out,omitempty"`
+
 	DurationMS int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// SetupReplay is the recorded setup session and ladder replayed for this
+	// run (U1-20, setup_replay.go). nil on an incident scenario. A failure
+	// fails the run and takes its score to 0: the setup evidence is part of
+	// what the scenario tests, not a decoration.
+	SetupReplay *SetupReplayResult `json:"setup_replay,omitempty"`
 	ReplayResult
 	Provenance
 }
@@ -179,8 +208,11 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		FixExpected:          len(sc.Expect.Fix) > 0,
 		Misses:               tr.Misses,
 		Attempts:             tr.Attempts,
+		Writes:               writeNotes(tr.Writes),
 		Idles:                tr.Idles,
 		TimedOut:             timedOut,
+		GuardMode:            tr.GuardMode,
+		GuardRefusals:        tr.GuardRefusals,
 	}
 	if runErr != nil {
 		res.Error = runErr.Error()
@@ -284,15 +316,22 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
 		res.HedgedOn, res.Hedged = causeHedge(last.Text)
 		res.CitesSteps = atLast.citesSteps(last.BasedOnSteps, last.Confidence)
+		for _, c := range agent.UnbackedRuledOut(last.Text, atLast.citedTools(last.BasedOnSteps)) {
+			res.UnbackedRuledOut = append(res.UnbackedRuledOut, c.Item)
+		}
+		res.UnbackedRuleOuts = len(res.UnbackedRuledOut)
 		if res.Outcome == OutcomeDiagnose {
 			basis = atLast
 		}
 	}
 	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
-	res.RootCauseLayerNamed = layerGraded(sc, sc.Expect.RootCauseLayer, last)
+	res.RootCauseLayerNamed = rootCauseLayerGraded(sc, last)
 	// The healthy verdict may come from the final hypothesis or the last
-	// message; a current fault in the last message cancels it.
-	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)
+	// message; a current fault in the last message cancels it. A healthy
+	// phrase beside a fault word is ambiguous and not healthy here; the
+	// judge mode may settle it (gradeHealthy).
+	res.LastMessage = lastMessage
+	res.SaysHealthy, _ = healthyGrade(lastMessage, res.FinalHypothesis)
 	res.ClaimsCause = last != nil && (last.Confidence == "medium" || last.Confidence == "high") &&
 		!(res.Outcome == OutcomeHealthy && healthyVerdict(last.Text))
 
@@ -356,7 +395,7 @@ func layerGraded(sc Scenario, layer string, last *events.AgentHypothesisPayload)
 	if layer == "" {
 		return true
 	}
-	return last != nil && namesLayer(layerTermsFor(sc.Pipeline, layer), last.Text)
+	return last != nil && namesPipelineLayer(sc.Pipeline, layer, last.Text)
 }
 
 // finish derives the outcome verdict, Correct, Abstained, the score and the
@@ -395,6 +434,12 @@ func finish(sc Scenario, res *RunResult) {
 }
 
 func score(sc Scenario, res RunResult) float64 {
+	if res.SetupReplay != nil && len(res.SetupReplay.Failures) > 0 {
+		// A setup scenario whose recorded session or ladder does not replay
+		// has no setup evidence to score; the zero is the harness's, not the
+		// agent's (failures names the recording).
+		return 0
+	}
 	var s float64
 	switch {
 	case res.Outcome != OutcomeDiagnose:
@@ -487,7 +532,11 @@ func failures(sc Scenario, res RunResult) []string {
 		if res.ClaimsCause {
 			f = append(f, fmt.Sprintf("claimed a cause at %s confidence on a healthy pipeline", res.Confidence))
 		}
-		if !res.SaysHealthy {
+		switch {
+		case res.SaysHealthy:
+		case res.Ambiguity.Unjudged() && res.Ambiguity.Healthy:
+			f = append(f, unjudgedFailure("healthy verdict", res.Ambiguity))
+		default:
 			f = append(f, "final message does not say the pipeline is healthy or that there is nothing to fix")
 		}
 	case OutcomeAbstain:
@@ -528,6 +577,12 @@ func failures(sc Scenario, res RunResult) []string {
 	if budget := sc.Expect.MaxToolCalls; budget > 0 && res.ToolCalls > budget {
 		f = append(f, fmt.Sprintf("over tool budget: %d > %d", res.ToolCalls, budget))
 	}
+	if sr := res.SetupReplay; sr != nil {
+		for _, why := range sr.Failures {
+			f = append(f, "setup replay: "+why)
+		}
+	}
+	f = append(f, guardFailures(sc, res)...)
 	f = append(f, verifyFailures(sc, res)...)
 	return f
 }
@@ -739,8 +794,11 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 			continue
 		}
 		// Judge is pure scoring with no caller context to inherit, and Validate
-		// runs against recorded resources; its own deadline bounds it.
-		if err := a.Validate(context.Background(), st.Params); err != nil {
+		// runs against recorded resources; its own deadline bounds it. The
+		// scenario's pipeline is in ctx as the room puts it there: an action
+		// that refuses without the room's pipeline (pg_resnapshot_rows, X2a)
+		// would otherwise never validate here.
+		if err := a.Validate(tools.WithPipeline(context.Background(), sc.Pipeline), st.Params); err != nil {
 			bad = append(bad, fmt.Sprintf("step %d (%s): %v", i, st.Action, err))
 			continue
 		}
@@ -754,4 +812,19 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 		}
 	}
 	return bad
+}
+
+// guardFailures grades the hypothesis guard's expectations. The refusal bound
+// holds only for a run in enforce mode: in log or off mode nothing is refused,
+// so a minimum could never be met and says nothing about the agent.
+// max_unbacked_rule_outs holds in every mode: it grades the final text.
+func guardFailures(sc Scenario, res RunResult) []string {
+	var f []string
+	if r := sc.Expect.GuardRefusals; r != nil && res.GuardMode == agent.GuardEnforce && !r.has(res.GuardRefusals) {
+		f = append(f, fmt.Sprintf("hypothesis guard refused %d call(s), want %s", res.GuardRefusals, r))
+	}
+	if n := sc.Expect.MaxUnbackedRuleOuts; n != nil && res.UnbackedRuleOuts > *n {
+		f = append(f, fmt.Sprintf("%d rule-out claim(s) no cited read backs (max %d): %s", res.UnbackedRuleOuts, *n, strings.Join(res.UnbackedRuledOut, "; ")))
+	}
+	return f
 }

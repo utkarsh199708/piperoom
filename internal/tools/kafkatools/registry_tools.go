@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -12,6 +13,18 @@ import (
 	"piperoom/internal/tools"
 )
 
+// deletedSubjectReader is the local adapter for the registry's deleted-state
+// reads until they land on clients.SchemaRegistryReader (contract change
+// request in the PR). The real client (internal/clients/schemareg) implements
+// it; the tools assert it at use time, so fakes and the eval replay need not.
+// It is the only way to tell a soft-deleted subject or version (still in the
+// registry, restorable) from a hard-deleted or never-registered one (gone),
+// because both are absent from the plain listings. (#KAN-407)
+type deletedSubjectReader interface {
+	SubjectsIncludingDeleted(ctx context.Context) ([]string, error)
+	VersionsIncludingDeleted(ctx context.Context, subject string) ([]int, error)
+}
+
 // ---- schema_registry_subjects ----
 
 type registrySubjects struct{ d Deps }
@@ -19,15 +32,19 @@ type registrySubjects struct{ d Deps }
 func (t *registrySubjects) Name() string     { return "schema_registry_subjects" }
 func (t *registrySubjects) Kind() tools.Kind { return tools.KindRead }
 func (t *registrySubjects) InputSchema() map[string]any {
-	return objectSchema(map[string]any{"prefix": strProp("optional subject prefix filter")})
+	return objectSchema(map[string]any{
+		"prefix":          strProp("optional subject prefix filter"),
+		"include_deleted": map[string]any{"type": "boolean", "description": "list soft-deleted subjects too, marked \"(soft-deleted)\" (default false); a soft-deleted subject still exists and can be restored"},
+	})
 }
 func (t *registrySubjects) Description() string {
-	return "Lists the pipeline's schema registry subjects, optionally filtered by a prefix."
+	return "Lists the pipeline's schema registry subjects, optionally filtered by a prefix. With include_deleted, soft-deleted subjects are listed too and marked."
 }
 
 func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
-		Prefix string `json:"prefix"`
+		Prefix         string `json:"prefix"`
+		IncludeDeleted bool   `json:"include_deleted"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
@@ -49,17 +66,55 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	// only counted, before the prefix filter, so a prefix cannot probe for
 	// other subjects' names through the count.
 	all := len(subjects)
-	subjects = sc.FilterSubjects(subjects)
-	other := all - len(subjects)
-	var out []string
-	for _, s := range subjects {
+	live := sc.FilterSubjects(subjects)
+	other := all - len(live)
+
+	// Soft-deleted subjects are absent from Subjects(); ask for them only when
+	// the caller did, so the common listing costs one request as before.
+	var deleted []string
+	if p.IncludeDeleted {
+		dr, ok := t.d.Registry.(deletedSubjectReader)
+		if !ok {
+			return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_subjects: registry client does not support listing soft-deleted subjects")
+		}
+		withDeleted, err := dr.SubjectsIncludingDeleted(cctx)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_subjects: list subjects including deleted: %w", err)
+		}
+		isLive := make(map[string]bool, len(subjects))
+		for _, s := range subjects {
+			isLive[s] = true
+		}
+		var deletedAll []string
+		for _, s := range withDeleted {
+			if !isLive[s] {
+				deletedAll = append(deletedAll, s)
+			}
+		}
+		deleted = sc.FilterSubjects(deletedAll)
+		other += len(deletedAll) - len(deleted)
+	}
+
+	var out, deletedOut []string
+	for _, s := range live {
 		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
 			out = append(out, s)
 		}
 	}
+	for _, s := range deleted {
+		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
+			deletedOut = append(deletedOut, s)
+		}
+	}
 	var sb strings.Builder
 	sb.WriteString(strings.Join(out, "\n"))
+	for _, s := range deletedOut {
+		appendLine(&sb, s+" (soft-deleted)")
+	}
 	appendLine(&sb, tools.NotShown(other, "subject", "subjects"))
+	if p.IncludeDeleted {
+		return res(sb.String(), map[string]any{"subjects": out, "deleted_subjects": deletedOut}), nil
+	}
 	return res(sb.String(), out), nil
 }
 
@@ -73,7 +128,7 @@ func (t *registryVersions) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"subject": strProp("subject name")}, "subject")
 }
 func (t *registryVersions) Description() string {
-	return "Lists a subject's versions, its latest schema id, and its compatibility level (subject or global)."
+	return "Lists a subject's versions, its latest schema id, and its compatibility level (subject or global). A subject that is missing or soft-deleted is reported as such, with its deleted state."
 }
 
 func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -97,10 +152,22 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	defer cancel()
 	versions, err := t.d.Registry.Versions(cctx, p.Subject)
 	if err != nil {
+		// A 404 is a finding, not a tool error: a subject the connector or a
+		// consumer still needs and the registry no longer lists is exactly the
+		// incident this read must surface. Every other error (unreachable,
+		// 5xx) stays an error so it is never read as "missing". (#KAN-407)
+		if errors.Is(err, clients.ErrNotFound) {
+			return t.missingSubject(cctx, p.Subject), nil
+		}
 		return tools.Result{}, err
 	}
 	latest, err := t.d.Registry.Schema(cctx, p.Subject, -1)
 	if err != nil {
+		// A subject deleted between the two reads lands here; report the same
+		// missing-subject finding rather than an opaque 404 error.
+		if errors.Is(err, clients.ErrNotFound) {
+			return t.missingSubject(cctx, p.Subject), nil
+		}
 		return tools.Result{}, err
 	}
 	level, subjectLevel, err := t.d.Registry.Compatibility(cctx, p.Subject)
@@ -113,10 +180,75 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	}
 	summary := fmt.Sprintf("%s: versions %v, latest id %d, compatibility %s (%s)",
 		p.Subject, versions, latest.ID, level, scope)
-	return res(summary, map[string]any{
+	data := map[string]any{
 		"subject": p.Subject, "versions": versions, "latest_id": latest.ID,
 		"compatibility": level, "compatibility_scope": scope,
-	}), nil
+	}
+	// Versions() hides soft-deleted versions. When the client can list them,
+	// say so: a version deleted while a consumer still stamps its id is the
+	// same incident one level down, and the caller cannot see it otherwise.
+	if dr, ok := t.d.Registry.(deletedSubjectReader); ok {
+		withDeleted, err := dr.VersionsIncludingDeleted(cctx, p.Subject)
+		switch {
+		case err != nil && !errors.Is(err, clients.ErrNotFound):
+			// Enrichment only: the live listing above is valid, so report it
+			// and say the deleted-version check failed instead of failing the call.
+			data["deleted_versions_error"] = err.Error()
+		case err == nil:
+			if extra := missingInts(versions, withDeleted); len(extra) > 0 {
+				data["deleted_versions"] = extra
+				summary += fmt.Sprintf("; soft-deleted versions %v still exist and can be restored (list with deleted=true)", extra)
+			}
+		}
+	}
+	return res(summary, data), nil
+}
+
+// missingSubject builds the finding for a subject the live listing does not
+// have. The Summary always carries the restorable/soft-delete caveat; with a
+// client that lists deleted versions it also names the state: soft-deleted
+// (versions still exist, restorable) or hard-deleted/never registered. A
+// failed probe leaves the state unknown; it never turns the missing subject
+// into a healthy one. (#KAN-407)
+func (t *registryVersions) missingSubject(ctx context.Context, subject string) tools.Result {
+	summary := fmt.Sprintf("%s: subject not found (soft-deleted subjects can be listed with deleted=true)", subject)
+	data := map[string]any{"subject": subject, "found": false, "deleted_state": "unknown"}
+	dr, ok := t.d.Registry.(deletedSubjectReader)
+	if !ok {
+		return res(summary, data)
+	}
+	versions, err := dr.VersionsIncludingDeleted(ctx, subject)
+	switch {
+	case err != nil && !errors.Is(err, clients.ErrNotFound):
+		data["deleted_probe_error"] = err.Error()
+		summary += "; deleted-state check failed, so soft- or hard-deleted is unknown"
+	case len(versions) > 0:
+		data["deleted_state"] = "soft"
+		data["versions"] = versions
+		summary += fmt.Sprintf("; soft-deleted: versions %v still exist and can be restored", versions)
+	default:
+		data["deleted_state"] = "hard"
+		summary += "; no soft-deleted versions exist (hard-deleted or never registered)"
+	}
+	return res(summary, data)
+}
+
+// missingInts returns the elements of all that want does not have, sorted.
+// It is used for the versions a deleted-inclusive listing shows but the live
+// listing hides.
+func missingInts(want, all []int) []int {
+	have := make(map[int]bool, len(want))
+	for _, v := range want {
+		have[v] = true
+	}
+	var out []int
+	for _, v := range all {
+		if !have[v] {
+			out = append(out, v)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ---- schema_registry_diff ----
@@ -132,13 +264,13 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647); with schema, the registered side of the diff"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
+		"from_version": map[string]any{"type": "integer", "description": "optional: registered version to diff from (at most 2147483647). Default: the version just before to_version, i.e. latest vs previous when both are omitted; with schema, the registered side of the diff"},
+		"to_version":   map[string]any{"type": "integer", "description": "optional: registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
 		"schema":       strProp("optional raw candidate Avro schema JSON; when set, it is the to side: the registered version (from_version, else to_version, else latest) is diffed to it, so a field the candidate adds shows as added. Reported as to_version 0"),
 	}, "subject")
 }
 func (t *registryDiff) Description() string {
-	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Diff either two registered versions, or a raw schema against a version."
+	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Only subject is required: with no from_version, to_version or schema it diffs the latest version against the one before it and names both versions. Or diff two registered versions (from_version, to_version), or a raw schema against a version."
 }
 
 func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -198,7 +330,7 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		fromVersion, outTo = v, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
-			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
+			return t.diffPrevious(cctx, p.Subject, p.ToVersion)
 		}
 		v, to, err := fetch(p.ToVersion)
 		if err != nil {
@@ -219,6 +351,75 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	return res(formatChanges(changes), map[string]any{
 		"subject": p.Subject, "from_version": fromVersion, "to_version": outTo, "changes": changes,
 	}), nil
+}
+
+// diffPrevious answers a call with no from_version and no schema: it diffs
+// toVersion (0 = latest) against the registered version just before it, and
+// names both in the Summary. Models call the tool with only a subject; a bare
+// "from_version required" error made them repeat the same call until the tool
+// budget ran out. A subject with nothing earlier to compare is answered plainly,
+// and a to_version the registry does not hold is refused with the versions it
+// does hold, so the caller can pick one.
+func (t *registryDiff) diffPrevious(ctx context.Context, subject string, toVersion int) (tools.Result, error) {
+	versions, err := t.d.Registry.Versions(ctx, subject)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_diff: list versions of %s: %w", subject, err)
+	}
+	versions = append([]int(nil), versions...)
+	sort.Ints(versions)
+	if len(versions) == 0 {
+		return res(fmt.Sprintf("%s has no registered versions, so there is nothing to diff", subject),
+			map[string]any{"subject": subject, "versions": versions, "changes": []fieldChange{}}), nil
+	}
+	to := versions[len(versions)-1]
+	if toVersion > 0 {
+		if !containsInt(versions, toVersion) {
+			return tools.Result{}, fmt.Errorf("%w: to_version %d is not a registered version of %s (available versions: %v)",
+				tools.ErrBadInput, toVersion, subject, versions)
+		}
+		to = toVersion
+	}
+	from := 0
+	for _, v := range versions {
+		if v < to {
+			from = v
+		}
+	}
+	if from == 0 {
+		return res(fmt.Sprintf("%s version %d has no earlier version (available versions: %v), so there is nothing to diff; pass schema to compare a candidate against it", subject, to, versions),
+			map[string]any{"subject": subject, "versions": versions, "from_version": to, "to_version": to, "single_version": true, "changes": []fieldChange{}}), nil
+	}
+	fromSV, err := t.d.Registry.Schema(ctx, subject, from)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	toSV, err := t.d.Registry.Schema(ctx, subject, to)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	changes, err := diffFields(fromSV.Schema, toSV.Schema)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
+	}
+	which := "latest vs previous"
+	if toVersion > 0 {
+		which = "to_version vs the version before it"
+	}
+	// The header comes first so a capped Summary keeps the versions.
+	summary := fmt.Sprintf("%s: v%d → v%d (%s; pass from_version to pick another pair)\n%s", subject, from, to, which, formatChanges(changes))
+	return res(summary, map[string]any{
+		"subject": subject, "versions": versions, "from_version": from, "to_version": to, "changes": changes,
+	}), nil
+}
+
+// containsInt reports whether list holds v.
+func containsInt(list []int, v int) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // fieldChange is one field-level difference between two Avro schemas.

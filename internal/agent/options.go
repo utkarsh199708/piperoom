@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"piperoom/internal/actions"
+)
 
 // defaultModel is the Claude model the agent uses unless Options says otherwise.
 const defaultModel = "claude-opus-5-5"
@@ -83,6 +87,27 @@ type timing struct {
 	// stepResultWait is how long a turn waits for the step results of a
 	// proposal approved in full before it starts without them.
 	stepResultWait time.Duration
+	// recoveryFirstPoll, recoveryMaxPoll and recoveryTimeout are the poll
+	// schedule of a recovery proposal's counted verification (X2c,
+	// verify_recovery.go): the actions.RecoveryVerify* defaults.
+	recoveryFirstPoll time.Duration
+	recoveryMaxPoll   time.Duration
+	recoveryTimeout   time.Duration
+	// perfWindow, perfSettle and perfTimeout are the schedule of a
+	// performance proposal's throughput verification (X6c,
+	// verify_performance.go): the actions.PerformanceVerify* defaults. A
+	// failed call is retried every recoveryMaxPoll.
+	perfWindow  time.Duration
+	perfSettle  time.Duration
+	perfTimeout time.Duration
+	// applyPoll, applyTimeout and applySettle are the wait of a merged fix
+	// PR for its applied_when (Q7f, fixpr.go): a check every applyPoll up to
+	// applyTimeout after the merge (PIPEROOM_FIXPR_APPLY_TIMEOUT through
+	// EndpointConfig.FixPRApplyTimeout), and the default settle of the merge
+	// kind.
+	applyPoll    time.Duration
+	applyTimeout time.Duration
+	applySettle  time.Duration
 }
 
 // defaultTiming returns the production waits and deadlines.
@@ -96,5 +121,17 @@ func defaultTiming() timing {
 		settleWait:      defaultSettleWait,
 		baselineTimeout: defaultBaselineTimeout,
 		stepResultWait:  defaultStepResultWait,
+
+		recoveryFirstPoll: actions.RecoveryVerifyFirstPoll,
+		recoveryMaxPoll:   actions.RecoveryVerifyMaxPoll,
+		recoveryTimeout:   actions.RecoveryVerifyTimeout,
+
+		perfWindow:  actions.PerformanceVerifyWindow,
+		perfSettle:  actions.PerformanceVerifySettle,
+		perfTimeout: actions.PerformanceVerifyTimeout,
+
+		applyPoll:    defaultApplyPoll,
+		applyTimeout: defaultApplyTimeout,
+		applySettle:  defaultApplySettle,
 	}
 }

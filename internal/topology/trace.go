@@ -27,6 +27,9 @@ const maxScan = 1000
 
 // traceFacts holds the observations Trace gathers before deciding statuses.
 type traceFacts struct {
+	// sourceLayer is the layer of the source stage: the pipeline's
+	// SourceLayer ("postgres" or "mysql"); "" reads as "postgres".
+	sourceLayer    string
 	table          string
 	connector      string
 	topic          string
@@ -64,10 +67,13 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if !ok {
 		return nil, fmt.Errorf("%w: pipeline %q not found", ErrBadInput, pipelineID)
 	}
+	if k := p.KindOrDefault(); k == events.PipelineKindBatch {
+		return nil, fmt.Errorf("%w: trace follows a row through a cdc pipeline; pipeline %q is kind %s (read its DAG runs, task logs and dbt results instead)", ErrBadInput, p.ID, k)
+	}
 	if key == "" {
 		return nil, fmt.Errorf("%w: trace: empty key", ErrBadInput)
 	}
-	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
+	if len(p.ConsumerGroupNames()) == 0 || len(p.SinkTableNames()) == 0 {
 		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
 	}
 	// owners.yaml decides which tables a room may trace, whether Connect is up
@@ -79,10 +85,18 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 
 	f := traceFacts{
+		sourceLayer:    p.SourceLayer(),
 		table:          table,
 		groupCommitted: -1,
 	}
-	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTables)
+	ref, err := sinkFor(table, p.SourceTables, p.SinkRefs())
+	f.sink = ref.Table
+	f.sinkErr = err
+	// A sink whose declared warehouse has no connected client must not be read
+	// through another warehouse's client (#KAN-481).
+	if _, ok := b.sinkClient(p, ref); f.sinkErr == nil && !ok {
+		f.sinkErr = errWarehouseNotConnected
+	}
 
 	// Resolve the connector and topic. A Connect outage must not fail the
 	// trace: fall back to placeholder names and mark the connector unknown.
@@ -97,16 +111,22 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 	f.connector, f.topic = conn, topic
 
-	// Primary key lookup. A failure here means the source DB is unreachable;
-	// fall back to "id" and let the source row read report the problem.
+	// Primary key lookup. It fails closed: only a source client that has no
+	// key lookup at all reads by "id". A composite key, a table without a
+	// key (ErrNotFound from the Postgres client) or a failed lookup leaves
+	// every stage unknown and reads nothing: a read by a guessed column could
+	// return another row (another tenant's, with its timestamps) (#483).
 	pk, err := b.pkColumn(ctx, table)
-	if errors.Is(err, clients.ErrNotSupported) {
-		// A composite key: the row, its Kafka key and its sink row cannot be
-		// found by one value, so no stage can be judged (#483).
+	switch {
+	case errors.Is(err, clients.ErrNotSupported):
 		return compositeKeyTrace(f), nil
-	}
-	if err != nil {
-		pk = "id"
+	case errors.Is(err, clients.ErrNotFound):
+		return keyUnknownTrace(f, "no primary key, or the table is not visible: the trace needs one key column"), nil
+	case err != nil:
+		// Driver errors can carry host, user or SQL: a fixed phrase in the
+		// trace, the raw error in the debug log only.
+		b.log.DebugContext(ctx, "topology: source key lookup failed", "table", table, "err", err)
+		return keyUnknownTrace(f, "primary key lookup failed: the trace does not read by a guessed key"), nil
 	}
 
 	// 1. Source row.
@@ -157,10 +177,10 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 
 	// 4. Consumer group: the one that reads the topic, and its committed
 	// offset for the record's partition.
-	f.group = strings.Join(p.ConsumerGroups, ",")
+	f.group = strings.Join(p.ConsumerGroupNames(), ",")
 	if f.topicFound {
 		var lag clients.GroupLag
-		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroups, topic)
+		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroupNames(), topic)
 		f.groupCommitted, f.groupUnknown = committedFor(lag, topic, f.topicPartition)
 	}
 
@@ -264,36 +284,53 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 // never another table's row.
 var errNoSink = errors.New("no sink table of the pipeline matches the source table")
 
+// errWarehouseNotConnected means the sink's declared warehouse has no
+// connected client of that kind, so its row cannot be read here without
+// asking another warehouse (#KAN-481).
+var errWarehouseNotConnected = errors.New("warehouse not connected")
+
 // errNoGroup means none of the pipeline's consumer groups has partitions of
 // the record's topic, so no committed offset tells whether it was consumed.
 var errNoGroup = errors.New("no consumer group of the pipeline reads the topic")
 
-// sinkFor picks the sink table of a source table: the only sink of a
-// pipeline with one source table, else the one sink with the same table name
-// (#401). Unlike reconcile_counts, a trace has no sink_table override, so a
-// lone sink of a pipeline with several source tables is not assumed to hold
-// every table's rows, and a name two source tables share (public.orders,
-// archive.orders) tells nothing.
-func sinkFor(source string, sources, sinks []string) (string, error) {
+// sinkFor picks the sink of a source table: the only sink of a pipeline with
+// one source table, else the one sink with the same table name (#401). Unlike
+// reconcile_counts, a trace has no sink_table override, so a lone sink of a
+// pipeline with several source tables is not assumed to hold every table's
+// rows, and a name two source tables share (public.orders, archive.orders)
+// tells nothing. Two sinks that share a table name in different warehouses
+// (the dev Postgres and ClickHouse analytics.orders) cannot be told apart by
+// name either: the trace returns errNoSink rather than reading one of them.
+func sinkFor(source string, sources []string, sinks []owners.SinkRef) (owners.SinkRef, error) {
 	if len(sources) == 1 && len(sinks) == 1 {
 		return sinks[0], nil
 	}
-	name := source[strings.LastIndex(source, ".")+1:]
+	name := lastSegment(source)
 	for _, s := range sources {
-		if s != source && s[strings.LastIndex(s, ".")+1:] == name {
-			return strings.Join(sinks, ","), errNoSink
+		if s != source && lastSegment(s) == name {
+			return owners.SinkRef{Table: strings.Join(sinkTables(sinks), ",")}, errNoSink
 		}
 	}
-	var match []string
+	var match []owners.SinkRef
 	for _, s := range sinks {
-		if s[strings.LastIndex(s, ".")+1:] == name {
+		if lastSegment(s.Table) == name {
 			match = append(match, s)
 		}
 	}
 	if len(match) == 1 {
 		return match[0], nil
 	}
-	return strings.Join(sinks, ","), errNoSink
+	return owners.SinkRef{Table: strings.Join(sinkTables(sinks), ",")}, errNoSink
+}
+
+// sinkTables returns the display names of refs, in order, for the trace stage
+// of a sink that could not be chosen.
+func sinkTables(refs []owners.SinkRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r.Table)
+	}
+	return out
 }
 
 // groupFor returns the consumer group whose partitions include topic, with
@@ -371,28 +408,47 @@ func (b *builder) checkSinkKey(ctx context.Context, sink, pk string) error {
 	return nil
 }
 
+// pkColumn returns the source key column of table. Only a source client
+// without a key lookup (no pkColumner) gets the "id" fallback; an empty
+// answer from one that has it is ErrNotFound, never "id".
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
-	if d, ok := b.src.(pkColumner); ok {
-		col, err := d.PrimaryKeyColumn(ctx, table)
-		if err != nil {
-			return "", fmt.Errorf("topology: primary key of %s: %w", table, err)
-		}
-		if col != "" {
-			return col, nil
-		}
+	d, ok := b.src.(pkColumner)
+	if !ok {
+		return "id", nil
 	}
-	return "id", nil
+	col, err := d.PrimaryKeyColumn(ctx, table)
+	if err != nil {
+		return "", fmt.Errorf("topology: primary key of %s: %w", table, err)
+	}
+	if col == "" {
+		return "", fmt.Errorf("topology: primary key of %s: empty key column: %w", table, clients.ErrNotFound)
+	}
+	return col, nil
+}
+
+// srcLayer is the layer of the trace's source stage.
+func (f traceFacts) srcLayer() string {
+	if f.sourceLayer == "" {
+		return "postgres"
+	}
+	return f.sourceLayer
 }
 
 // compositeKeyTrace is the trace of a table whose primary key has more than
 // one column: a lookup by one value would read another row (another tenant's,
 // with its timestamps), so every stage is unknown, never "seen" or "not_seen".
 func compositeKeyTrace(f traceFacts) []events.TraceStage {
+	return keyUnknownTrace(f, "composite primary key: the trace needs every key column")
+}
+
+// keyUnknownTrace is the trace of a table whose one key column is not known
+// (composite, absent, or the lookup failed): every stage unknown with why.
+func keyUnknownTrace(f traceFacts, why string) []events.TraceStage {
 	facts := func() map[string]string {
-		return map[string]string{"error": "composite primary key: the trace needs every key column"}
+		return map[string]string{"error": why}
 	}
 	return []events.TraceStage{
-		{Layer: "postgres", Name: f.table, Status: "unknown", Facts: facts()},
+		{Layer: f.srcLayer(), Name: f.table, Status: "unknown", Facts: facts()},
 		{Layer: "kafka-connect", Name: f.connector, Status: "unknown", Facts: facts()},
 		{Layer: "kafka", Name: f.topic, Status: "unknown", Facts: facts()},
 		{Layer: "consumer", Name: f.group, Status: "unknown", Facts: facts()},
@@ -410,9 +466,9 @@ func decideTrace(f traceFacts) []events.TraceStage {
 
 	// 1. Source.
 	if f.sourceErr != nil {
-		stage("postgres", f.table, "unknown", map[string]string{"error": "unreachable"})
+		stage(f.srcLayer(), f.table, "unknown", map[string]string{"error": "unreachable"})
 	} else if !f.sourceFound {
-		stage("postgres", f.table, "not_seen", nil)
+		stage(f.srcLayer(), f.table, "not_seen", nil)
 		stage("kafka-connect", f.connector, "not_seen", nil)
 		stage("kafka", f.topic, "not_seen", nil)
 		stage("consumer", f.group, "not_seen", nil)
@@ -423,7 +479,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		if !f.sourceTS.IsZero() {
 			srcFacts["updated_at"] = FormatTS(f.sourceTS)
 		}
-		stage("postgres", f.table, "seen", srcFacts)
+		stage(f.srcLayer(), f.table, "seen", srcFacts)
 	}
 
 	// 2. Connector. It is "seen" only when the record actually reached the
@@ -583,6 +639,8 @@ func unknownReason(err error) string {
 		return "no matching sink table"
 	case errors.Is(err, errNoGroup):
 		return "no group reads the topic"
+	case errors.Is(err, errWarehouseNotConnected):
+		return "warehouse not connected"
 	case errors.Is(err, errSinkKey):
 		return "sink primary key is composite or differs from the source key: the trace cannot look up its row"
 	}
