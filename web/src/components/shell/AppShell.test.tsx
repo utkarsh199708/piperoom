@@ -113,6 +113,18 @@ describe('AppShell skip link', () => {
   })
 })
 
+describe('AppShell main', () => {
+  // KAN-598: the phone sheet covers the bottom; the composer sticks above it, so the scroll area
+  // needs the sheet's height as bottom padding or the composer rests over the end of the content.
+  it('pads the bottom by the decision sheet height, on the wrapper inside the scroller', () => {
+    renderShell('/rooms/r_x')
+    const main = document.getElementById('main')
+    expect(main?.firstElementChild).toHaveClass('pb-[var(--sheet-h,0px)]')
+    // On <main> itself the padding also comes off the composer's sticky area, which lifted it twice.
+    expect(main).not.toHaveClass('pb-[var(--sheet-h,0px)]')
+  })
+})
+
 describe('AppShell sidebar', () => {
   it('shows the nav with the open-room count and a pipeline with its health', () => {
     renderShell()

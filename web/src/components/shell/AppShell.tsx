@@ -224,7 +224,12 @@ export function AppShell() {
                   </div>
                 </header>
                 <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:calc(var(--composer-h,0px)+var(--sheet-h,0px))] [scroll-padding-top:3rem] focus:outline-none">
-                  <div className="min-h-full">
+                  {/* pb: the phone decision sheet is fixed over the bottom, and the composer sticks above it
+                      (sticky bottom-[--sheet-h]). Without this room at the end of the scroll the composer rests
+                      one sheet height over the content (KAN-598). Not on <main>: a scroll container's padding
+                      comes off the sticky area too, which lifted the composer by the sheet twice. --sheet-h is
+                      unset, so 0, with no sheet. */}
+                  <div className="min-h-full pb-[var(--sheet-h,0px)]">
                     <Outlet />
                   </div>
                 </main>
