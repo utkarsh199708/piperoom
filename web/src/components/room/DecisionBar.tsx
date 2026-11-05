@@ -116,6 +116,11 @@ export function DecisionBar({
       </Button>
     ) : null;
 
+  // On the sheet these two put the sentence above a full-width button row. Beside two buttons, the
+  // setup sentence had 6 px at 320 wide (KAN-597).
+  const stacked = (kind: string) =>
+    sheet && (kind === "needs-you" || kind === "setup");
+
   // The bar's frame, shared by every decision and by the driver's quiet bar.
   const frame = (
     kind: string,
@@ -142,7 +147,7 @@ export function DecisionBar({
           tone,
           sheet &&
             "border-b-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-4",
-          sheet && kind === "needs-you" && "flex-col flex-nowrap items-stretch",
+          stacked(kind) && "flex-col flex-nowrap items-stretch",
         )}
       >
         <div
@@ -161,7 +166,7 @@ export function DecisionBar({
               "flex max-w-full flex-wrap items-center gap-2",
               // The sheet's two buttons share a row until a long Approve label can't fit: a button is
               // never narrower than its label, so that one then takes a row of its own (KAN-595).
-              sheet && kind === "needs-you" ? "w-full" : "shrink-0",
+              stacked(kind) ? "w-full" : "shrink-0",
             )}
           >
             {actions}
@@ -170,7 +175,11 @@ export function DecisionBar({
         {(decision?.kind === "executing" ||
           (decision?.kind === "setup" && decision.status === "running")) && (
           <Progress
-            className="h-0.5 basis-full bg-transparent"
+            // basis-full gives it a row of its own; in a stacked column it would set the height, to 0.
+            className={cn(
+              "h-0.5 bg-transparent",
+              !stacked(kind) && "basis-full",
+            )}
             indicatorClassName="bg-agent"
             aria-label="Running the step"
           />
@@ -359,6 +368,9 @@ export function DecisionBar({
     case "setup": {
       // The setup room between proposals: pairing, planning, running a step, a question, or
       // the registered pipeline. The step text is the plan's; `question` is agent text.
+      // The sheet gives the sentence two lines, as its instruction is cut off after ~40 characters
+      // on one; the desktop bar keeps one (KAN-597).
+      const line = sheet ? "line-clamp-2" : "truncate";
       const at = stepLabel(
         decision.step ?? null,
         decision.number ?? 0,
@@ -372,7 +384,7 @@ export function DecisionBar({
           text = (
             <>
               <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
-              <span aria-live="polite" className="min-w-0 truncate">
+              <span aria-live="polite" className={`min-w-0 ${line}`}>
                 No runner paired — paste the pairing command in a terminal
               </span>
             </>
@@ -397,7 +409,7 @@ export function DecisionBar({
           text = (
             <>
               <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
-              <span aria-live="polite" className="min-w-0 truncate">
+              <span aria-live="polite" className={`min-w-0 ${line}`}>
                 {live}
               </span>
             </>
@@ -408,7 +420,7 @@ export function DecisionBar({
           tone = "bg-agent-subtle text-agent-foreground";
           live = `Runner ${decision.label ?? ""} paired — the agent is planning the setup`;
           text = (
-            <span aria-live="polite" className="min-w-0 truncate">
+            <span aria-live="polite" className={`min-w-0 ${line}`}>
               {live}
             </span>
           );
@@ -417,7 +429,7 @@ export function DecisionBar({
         case "planning":
           live = `${at} — planning the next step`;
           text = (
-            <span aria-live="polite" className="min-w-0 truncate">
+            <span aria-live="polite" className={`min-w-0 ${line}`}>
               {live}
             </span>
           );
@@ -427,7 +439,7 @@ export function DecisionBar({
           tone = "bg-agent-subtle text-agent-foreground";
           live = `${at} is running${decision.action ? ` · ${decision.action}` : ""}`;
           text = (
-            <span aria-live="polite" className="min-w-0 truncate">
+            <span aria-live="polite" className={`min-w-0 ${line}`}>
               {at}
               {decision.action ? (
                 <>
@@ -450,7 +462,7 @@ export function DecisionBar({
               <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
               <span
                 aria-live="polite"
-                className="min-w-0 truncate"
+                className={`min-w-0 ${line}`}
                 title={live}
               >
                 {at} blocked — {decision.question || decision.reason}
@@ -467,7 +479,7 @@ export function DecisionBar({
               <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
               <span
                 aria-live="polite"
-                className="min-w-0 truncate"
+                className={`min-w-0 ${line}`}
                 title={decision.exampleSQL || live}
               >
                 {at} — make a change to{" "}
@@ -482,7 +494,7 @@ export function DecisionBar({
           tone = "bg-success-subtle text-success-foreground";
           live = `Pipeline registered — watched by ${decision.watchedBy === "local" ? "the local runner" : "the server"}`;
           text = (
-            <span aria-live="polite" className="min-w-0 truncate">
+            <span aria-live="polite" className={`min-w-0 ${line}`}>
               {live}
             </span>
           );
