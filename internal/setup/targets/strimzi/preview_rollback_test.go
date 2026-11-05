@@ -184,3 +184,37 @@ func TestPreviewK8sUnapplyDryRunRefused(t *testing.T) {
 		t.Fatalf("preview = %+v (dry run %+v)", pr, pr.DryRun)
 	}
 }
+
+// Every Strimzi preview runs D11's production gate as its write does (a read
+// of the policy binding), so a preview never passes for a step the write
+// refuses on production.
+func TestPreviewsRunTheProductionGate(t *testing.T) {
+	for _, tc := range []struct {
+		op     string
+		params map[string]any
+	}{
+		// delete is refused on production before the gate (design §7).
+		{"preview_k8s_apply", topicApply()},
+		{"preview_k8s_unapply", map[string]any{"kind": "KafkaUser", "name": "orders-connect"}},
+		{"preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}}},
+		{"preview_k8s_delete", map[string]any{"kind": "KafkaConnector", "name": "orders-src"}},
+	} {
+		h := newHarness(t, protocol.ClassProduction, map[string]string{"source_password": "s3cr3t-value"})
+		h.shell("KafkaTopic", "orders-canary", map[string]any{})
+		h.shell("KafkaConnector", "orders-src", map[string]any{})
+		h.shell("KafkaUser", "orders-connect", map[string]any{})
+		_, err := run(t, h, tc.op, tc.params)
+		want := "card must confirm"
+		if tc.op == "preview_k8s_delete" {
+			want = "refused on a production target"
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s on production without the card: %v, want %q", tc.op, err, want)
+		}
+		for _, r := range h.api.requests {
+			if !strings.HasPrefix(r, "GET ") {
+				t.Errorf("%s sent %s", tc.op, r)
+			}
+		}
+	}
+}

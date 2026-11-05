@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkedStrimzi,
   commandOrigin,
   pairingOf,
+  setupPairing,
   strimziPairingFrom,
   strimziPairingSteps,
 } from "./setup";
@@ -63,10 +65,61 @@ describe("strimziPairingSteps", () => {
   it("puts a placeholder in the confirm Secret when the fingerprint is not 12 hex", () => {
     const p = strimziPairingFrom(req, res)!;
     const steps = strimziPairingSteps(p, "nope");
-    expect(steps[5].command).toContain("--from-literal=fingerprint=<the 12 characters the Job logs>");
+    expect(steps[5].command).toContain('--from-literal=fingerprint="$FINGERPRINT"');
     expect(strimziPairingSteps({ ...p, registry: undefined }, "3fa9c1d2e4b5")[0].command).toContain(
-      "--docker-server=<registry>",
+      '--docker-server="$REGISTRY_SERVER"',
     );
+  });
+
+  // A placeholder the shell reads as a redirection (<user>, <registry>) would turn an unedited
+  // paste into `< user > --docker-password=...`; every command is safe to paste as printed.
+  it("prints no bare shell metacharacter outside quotes", () => {
+    const p = strimziPairingFrom(req, res)!;
+    for (const fp of ["3fa9c1d2e4b5", "nope"]) {
+      for (const reg of [p.registry, undefined]) {
+        for (const step of strimziPairingSteps({ ...p, registry: reg }, fp)) {
+          const bare = step.command.replace(/'[^']*'|"[^"]*"/g, "");
+          expect(bare, step.label).not.toMatch(/[<>|;&`$(){}]/);
+        }
+      }
+    }
+  });
+});
+
+describe("checkedStrimzi", () => {
+  it("keeps facts that are all plain names", () => {
+    const p = strimziPairingFrom(req, res)!;
+    expect(checkedStrimzi(JSON.parse(JSON.stringify(p)))).toEqual(p);
+  });
+
+  it.each([
+    ["a namespace with a command", { namespace: "data; rm -rf ~" }],
+    ["a connector list that is not an array", { connectors: "a,b" }],
+    ["a connector with a space", { connectors: ["a b"] }],
+    ["a server that is not an origin", { server: "https://x/$(id)" }],
+    ["a code with a dollar", { code: "ABCD$(x)" }],
+    ["a registry with a quote", { registry: "r'eg" }],
+    ["a missing context", { context: undefined }],
+  ])("refuses stored facts with %s", (_, change) => {
+    const p = strimziPairingFrom(req, res)!;
+    expect(checkedStrimzi({ ...p, ...change })).toBeUndefined();
+  });
+
+  it("is applied to what the tab's storage hands back", () => {
+    const p = strimziPairingFrom(req, res)!;
+    sessionStorage.setItem(
+      "piperoom.setup.pairing.r_x",
+      JSON.stringify({ command: res.command, strimzi: { ...p, namespace: "a b" } }),
+    );
+    expect(setupPairing("r_x")?.strimzi).toBeUndefined();
+    sessionStorage.setItem("piperoom.setup.pairing.r_x", JSON.stringify({ command: res.command, strimzi: p }));
+    expect(setupPairing("r_x")?.strimzi).toEqual(p);
+    sessionStorage.removeItem("piperoom.setup.pairing.r_x");
+  });
+
+  it("refuses what is not an object", () => {
+    expect(checkedStrimzi(null)).toBeUndefined();
+    expect(checkedStrimzi("x")).toBeUndefined();
   });
 });
 

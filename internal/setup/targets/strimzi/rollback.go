@@ -428,6 +428,11 @@ func (o k8sDeleteOp) Preview(ctx context.Context, params json.RawMessage, env op
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
+	// The preview refuses what Execute would: D11's production gate is a
+	// read (the binding GET), so a preview can run it without writing.
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
+		return events.PreviewResult{}, err
+	}
 	pr := events.PreviewResult{
 		Target:   p.Kind + " " + ns + "/" + p.Name,
 		Rollback: notReversibleRollback(p.Kind),
@@ -529,12 +534,17 @@ func (o previewUnapplyOp) Execute(ctx context.Context, params json.RawMessage, e
 // Preview is k8s_unapply's preview: the object now, and the rollback patch
 // sent with dryRun=All.
 func (o k8sUnapplyOp) Preview(ctx context.Context, params json.RawMessage, env ops.Env) (events.PreviewResult, error) {
-	_, t, err := o.decode(params)
+	p, t, err := o.decode(params)
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
 	ns, kafka, err := scope(env)
 	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	// The preview refuses what Execute would: D11's production gate is a
+	// read (the binding GET), so a preview can run it without writing.
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
 		return events.PreviewResult{}, err
 	}
 	path := unapplyPath(ns, t)
@@ -606,6 +616,11 @@ func (o k8sSecretApplyOp) Preview(ctx context.Context, params json.RawMessage, e
 	}
 	ns, _, err := scope(env)
 	if err != nil {
+		return events.PreviewResult{}, err
+	}
+	// The preview refuses what Execute would: D11's production gate is a
+	// read (the binding GET), so a preview can run it without writing.
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
 		return events.PreviewResult{}, err
 	}
 	// The preview refuses what Execute would (round 8, S5): a credential
