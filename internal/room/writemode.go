@@ -1,6 +1,9 @@
 package room
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // Write mode (PIPEROOM_WRITE_MODE, P0 item 1; docs/product/fit-2026-10.md
 // §2 row 1). With it off the room works as usual up to the last approval;
@@ -58,16 +61,48 @@ func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnaps
 	// A countdown past run_at plus the grace is not shown (P2b-4b); the
 	// published snapshot keeps it, as the log does.
 	s.hideStaleCountdowns(&snap)
-	if s.writeOff {
-		// GetRoom returned a clone, so these writes never reach the
-		// published snapshot.
-		for i := range snap.OpenProposals {
-			if fullyApproved(snap.OpenProposals[i]) {
-				snap.OpenProposals[i].Blocked = BlockedWriteModeOff
-			}
+	// GetRoom returned a clone, so this write never reaches the published snapshot.
+	s.markBlocked(snap.OpenProposals)
+	return snap, nil
+}
+
+// markBlocked sets Blocked on every fully approved proposal when write mode is
+// off. It writes into ps, so callers pass a clone (KAN-596: the room view and
+// the list rows share this one definition of "blocked").
+func (s *Service) markBlocked(ps []Proposal) {
+	if !s.writeOff {
+		return
+	}
+	for i := range ps {
+		if fullyApproved(ps[i]) {
+			ps[i].Blocked = BlockedWriteModeOff
 		}
 	}
-	return snap, nil
+}
+
+// ListRow is snap as a list row: the published snapshot with Blocked set the
+// way markBlocked does, on a copy. It returns snap itself when there is
+// nothing to mark and never writes into snap, which every subscriber shares
+// (KAN-596).
+func (s *Service) ListRow(snap *RoomSnapshot) *RoomSnapshot {
+	if !s.writeOff {
+		return snap
+	}
+	need := false
+	for _, p := range snap.OpenProposals {
+		if p.Blocked == "" && fullyApproved(p) {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return snap
+	}
+	// Shallow copy: the only write is Proposal.Blocked, a string, on a cloned slice.
+	c := *snap
+	c.OpenProposals = slices.Clone(snap.OpenProposals)
+	s.markBlocked(c.OpenProposals)
+	return &c
 }
 
 // soloFor and autoApproveFor, the mode's solo and auto_approve, are in

@@ -202,6 +202,14 @@ describe('status and agent cells', () => {
     })
     expect(roomStatusCell(r).label).toMatch(/^No driver · /)
   })
+  it('a fully approved proposal held by write mode reads as waiting, the agent cell unchanged (KAN-596)', () => {
+    const held = withProposal({ ...r, driver: { id: 'k', name: 'K' }, agent_status: { state: 'waiting_approval' } }, { a: 'approved', b: 'approved' })
+    const blocked = { ...held, open_proposals: held.open_proposals.map((p) => ({ ...p, blocked: 'write_mode_off' as const })) }
+    expect(roomStatusCell(blocked).label).toBe('Approved · waiting for write mode')
+    expect(roomStatusCell(held).label).toBe('Executing fix')
+    expect(agentCell(blocked).label).toBe('waiting · 2 of 2')
+    expect(needsApproval(blocked)).toBe(needsApproval(held))
+  })
   it('agent cell', () => {
     expect(agentCell(r)).toMatchObject({ label: 'idle', agent: false })
     expect(agentCell({ ...r, agent_status: { state: 'working', detail: 'step 2' } })).toMatchObject({

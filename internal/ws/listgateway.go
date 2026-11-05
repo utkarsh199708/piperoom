@@ -260,7 +260,8 @@ func (l *listConn) changed(snap *room.RoomSnapshot) bool {
 }
 
 func (l *listConn) sendRoom(snap *room.RoomSnapshot) bool {
-	b, err := json.Marshal(listMsg{Type: "room", Room: snap})
+	// snap is the hub's shared snapshot: Blocked goes on a copy (KAN-596).
+	b, err := json.Marshal(listMsg{Type: "room", Room: l.g.svc.ListRow(snap)})
 	if err != nil {
 		return true
 	}
@@ -346,7 +347,8 @@ func (l *listConn) nextDue() (time.Duration, bool) {
 }
 
 // listDigest hashes the fields the list shows (docs/api.md): a change to
-// anything else (steps, last_seq, members) sends nothing.
+// anything else (steps, last_seq, members) sends nothing. Blocked is not
+// hashed: it follows from the approvals plus this process's write mode.
 func listDigest(s *room.RoomSnapshot) [32]byte {
 	type proposal struct {
 		ID        string            `json:"id"`

@@ -43,8 +43,10 @@ export interface StatusProposal {
   executed: { ok: boolean }[]
   /** The agent's verdict on the fix, once it ran (on the list snapshot, only last_fix has one). */
   verification?: { recovered: boolean; verdict?: string }
-  /** P1a: approved by every layer, held back because write mode is off (the list snapshot has none). */
+  /** P1a: approved by every layer, held back because write mode is off (list rows carry it as `blocked`, KAN-596). */
   waitingForWriteMode?: boolean
+  /** Approved by every layer with write mode on, so in flight; the list has no step count (KAN-596). */
+  running?: boolean
 }
 
 export interface RoomStatusInput {
@@ -99,6 +101,8 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
     return info('awaiting-write-mode', WAITING_FOR_WRITE_MODE, 'muted')
   }
   if (approved && !approved.waitingForWriteMode) {
+    // A list row's fully approved proposal: it runs, and the snapshot has no step to name.
+    if (approved.running) return info('executing', 'Executing fix', 'agent')
     const failed = approved.executed.findIndex((e) => !e.ok)
     if (failed >= 0 && !newerAwaiting) return info('fix-failed', `Fix failed · step ${failed + 1}`, 'fail', failed + 1)
     if (failed < 0 && approved.steps > 0 && approved.executed.length < approved.steps) {
@@ -148,6 +152,11 @@ export function statusInputFromState(s: RoomState): RoomStatusInput {
   }
 }
 
+/** The server's fullyApproved: no required layers means a proposal that never runs. */
+function fullyApproved(p: { required_layers: string[]; approvals: Record<string, string> }): boolean {
+  return p.required_layers.length > 0 && p.required_layers.every((l) => p.approvals[l] === 'approved')
+}
+
 /** The snapshot's last_fix as the proposal it was: every step ran, or those up to the one that failed. */
 function finishedFix(fix: LastFixSummary): StatusProposal {
   // At least one entry: a run ended, even for a proposal with no steps.
@@ -172,16 +181,16 @@ export function statusInputFromSnapshot(r: RoomSnapshot): RoomStatusInput {
   const newer = fix ? open.filter((p) => (p.seq ?? 0) > fix.seq) : []
   // A newer proposal with every layer approved is running, which the snapshot can't follow. The
   // title row says "Executing fix" then, so the older fix must not read as the room's latest word.
-  const running = newer.some((p) => p.required_layers.every((l) => p.approvals[l] === 'approved'))
-  const proposals: StatusProposal[] = open.map((p) => ({
-    status: 'open',
-    required_layers: p.required_layers,
-    approvals: p.approvals,
-    steps: 0,
-    executed: [],
-  }))
+  // One held back by write mode is not running (KAN-596).
+  const inFlight = newer.some((p) => p.blocked !== 'write_mode_off' && fullyApproved(p))
+  const proposals: StatusProposal[] = open.map((p) => {
+    const base = { required_layers: p.required_layers, approvals: p.approvals, steps: 0, executed: [] }
+    if (p.blocked === 'write_mode_off') return { ...base, status: 'approved', waitingForWriteMode: true }
+    if (fullyApproved(p)) return { ...base, status: 'approved', running: true }
+    return { ...base, status: 'open' }
+  })
   // Open proposals keep their creation order, so the newer ones are the last ones.
-  if (fix && !running) proposals.splice(open.length - newer.length, 0, finishedFix(fix))
+  if (fix && !inFlight) proposals.splice(open.length - newer.length, 0, finishedFix(fix))
   return {
     status: r.status,
     opened_at: r.opened_at,

@@ -204,6 +204,7 @@ func (s *Service) ListRoomsFor(ctx context.Context, u User) ([]RoomSnapshot, err
 	}
 	for i := range out {
 		trimSetupForList(&out[i])
+		s.markBlocked(out[i].OpenProposals)
 	}
 	return out, nil
 }
