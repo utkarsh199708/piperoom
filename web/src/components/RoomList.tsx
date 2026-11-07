@@ -608,7 +608,7 @@ function RoomRow({
   const tinted = needsYou(room, user) // only for layers this person owns
   const resolved = room.status !== 'open'
   const status = roomStatusCell(room)
-  // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
+  // A closed room reads "Resolved · 6 min" or "Closed · 6 min": how long it was open, not a stale live state.
   const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
   // A shadow room's log holds no agent events, so agentCell would say "idle" while the silent run works.
   const silentRun = room.shadow === true && !resolved
@@ -673,7 +673,8 @@ function RoomRow({
       <td className={cn(TD, 'max-md:hidden')}>
         <span className="inline-flex items-center gap-1.5">
           <StatusDot dot={status.dot} />
-          {resolved && duration ? `Resolved · ${duration}` : status.label}
+          {/* roomStatus decides the word (KAN-605): a room closed with no resolution is "Closed", not "Resolved". */}
+          {resolved && duration ? `${status.kind === 'closed' ? 'Closed' : 'Resolved'} · ${duration}` : status.label}
         </span>
       </td>
       <td className={cn(TD, 'font-mono text-muted-foreground max-md:hidden')}>{room.pipeline_id}</td>
