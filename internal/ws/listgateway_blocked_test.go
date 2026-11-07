@@ -59,6 +59,20 @@ func TestListGatewayCarriesBlockedWithWriteModeOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The proposal's preview is appended in the background (KAN-610). Wait
+	// for it, or it lands mid-test and the frames and GET below fold
+	// different logs.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		pub, err := svc.GetRoom(ctx, snap.ID)
+		if err == nil && len(pub.OpenProposals) == 1 && pub.OpenProposals[0].Preview != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no preview for %s: %+v %v", pid, pub.OpenProposals, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	hash := func() string {
 		rooms, _ := svc.ListRooms(ctx)
 		return rooms[0].OpenProposals[0].ParamsHash
