@@ -123,6 +123,13 @@ describe('AppShell main', () => {
     // On <main> itself the padding also comes off the composer's sticky area, which lifted it twice.
     expect(main).not.toHaveClass('pb-[var(--sheet-h,0px)]')
   })
+
+  // KAN-603: the wrapper is a flex column so the room screen (flex-1) fills it and the composer's
+  // mt-auto reaches the bottom; as a plain block the room's min-h-full had nothing to resolve against.
+  it('makes the wrapper a full-height flex column for the routed screen', () => {
+    renderShell('/rooms/r_x')
+    expect(document.getElementById('main')?.firstElementChild).toHaveClass('flex', 'min-h-full', 'flex-col')
+  })
 })
 
 describe('AppShell sidebar', () => {
