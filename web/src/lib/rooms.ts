@@ -187,7 +187,10 @@ export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent:
     case 'working':
       return { dot: 'agent', label: detail ? `working · ${detail}` : 'working', agent: true }
     case 'waiting_approval': {
-      const p = room.open_proposals?.[0]
+      // Count the proposal the Status column and the pill describe (KAN-606): the newest one still
+      // waiting on a layer. With none waiting (all approved, held or running), the newest one.
+      const open = room.open_proposals ?? []
+      const p = [...open].reverse().find((q) => q.required_layers.some((l) => q.approvals[l] === 'pending')) ?? open[open.length - 1]
       const done = p ? p.required_layers.filter((l) => p.approvals[l] === 'approved').length : 0
       const label = p ? `waiting · ${done} of ${p.required_layers.length}` : 'waiting'
       return { dot: 'idle', label, agent: false }

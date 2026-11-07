@@ -210,6 +210,21 @@ describe('status and agent cells', () => {
     expect(agentCell(blocked).label).toBe('waiting · 2 of 2')
     expect(needsApproval(blocked)).toBe(needsApproval(held))
   })
+  it('the agent cell counts the newest proposal that still waits, as the pill does (KAN-606)', () => {
+    const base = { title: 't', steps: [], risk: 'low' as const, rollback: 'none' }
+    const approved = 'approved' as const
+    const pending = 'pending' as const
+    const older = { ...base, proposal_id: 'p1', seq: 3, required_layers: ['a', 'b'], approvals: { a: approved, b: approved } }
+    const newer = { ...base, proposal_id: 'p2', seq: 5, required_layers: ['a'], approvals: { a: pending } }
+    const two = { ...r, agent_status: { state: 'waiting_approval' }, open_proposals: [older, newer] }
+    expect(agentCell(two).label).toBe('waiting · 0 of 1')
+    // Newest still waits, an older one waiting too: the newest wins.
+    const both = { ...two, open_proposals: [{ ...older, approvals: { a: approved, b: pending } }, newer] }
+    expect(agentCell(both).label).toBe('waiting · 0 of 1')
+    // Newest is fully approved and nothing waits: the newest, not the oldest.
+    const none = { ...two, open_proposals: [{ ...older, required_layers: ['a'], approvals: { a: approved } }, { ...older, proposal_id: 'p3' }] }
+    expect(agentCell(none).label).toBe('waiting · 2 of 2')
+  })
   it('agent cell', () => {
     expect(agentCell(r)).toMatchObject({ label: 'idle', agent: false })
     expect(agentCell({ ...r, agent_status: { state: 'working', detail: 'step 2' } })).toMatchObject({
