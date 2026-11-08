@@ -864,7 +864,8 @@ describe('shadow marker', () => {
     renderList()
     fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
     const row = screen.getByText('Closed shadow').closest('tr')!
-    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    // No resolution, so the agent cell says closed, as the Status cell does (KAN-605).
+    expect(within(row).getByText('closed')).toBeInTheDocument()
     expect(within(row).queryByText('silent run')).toBeNull()
     expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
   })

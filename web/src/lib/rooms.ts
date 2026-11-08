@@ -181,8 +181,13 @@ export function roomStatusCell(room: RoomSnapshot, now = Date.now()): RoomStatus
 /** The agent column ("working · step 2", "waiting · 1 of 2", "idle"). */
 export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent: boolean } {
   const { state, detail } = room.agent_status
-  // A closed room's agent is finished, whatever its last status event said.
-  if (room.status !== 'open') return { dot: 'ok', label: 'resolved', agent: false }
+  // A closed room's agent is finished, whatever its last status event said. roomStatus decides resolved or
+  // just closed, so this cell never says "resolved" beside a Status of "Closed" (KAN-605).
+  if (room.status !== 'open') {
+    return roomStatusCell(room).kind === 'closed'
+      ? { dot: 'idle', label: 'closed', agent: false }
+      : { dot: 'ok', label: 'resolved', agent: false }
+  }
   switch (state) {
     case 'working':
       return { dot: 'agent', label: detail ? `working · ${detail}` : 'working', agent: true }

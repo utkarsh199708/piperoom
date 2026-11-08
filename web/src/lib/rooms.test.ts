@@ -219,10 +219,14 @@ describe('status and agent cells', () => {
     const waiting = withProposal({ ...r, agent_status: { state: 'waiting_approval' } }, { a: 'approved', b: 'pending' })
     expect(agentCell(waiting).label).toBe('waiting · 1 of 2')
     expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'done' } }).label).toBe('resolved')
+    // A room closed with no resolution and no verified fix reads closed, as its Status does (KAN-605).
     expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'waiting_approval' } })).toMatchObject({
-      dot: 'ok',
-      label: 'resolved',
+      dot: 'idle',
+      label: 'closed',
     })
+    expect(
+      agentCell({ ...r, status: 'closed', resolution: 'restarted the task', agent_status: { state: 'waiting_approval' } }),
+    ).toMatchObject({ dot: 'ok', label: 'resolved' })
     expect(agentCell({ ...r, agent_status: { state: 'error' } })).toMatchObject({ dot: 'fail', label: 'error' })
   })
 })
