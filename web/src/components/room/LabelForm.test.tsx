@@ -107,6 +107,35 @@ describe('label draft after recovery (KAN-695)', () => {
     expect(later.proposals[1].hypothesis_text).toBe(H2)
   })
 
+  it('gives the same draft after a reload: snapshot seeded with H2, full log replayed from seq 1', () => {
+    seqN = 0
+    const log = [hyp(H1), prop('A', 'Allow amount decimal and restart task 0'), ran('A'), verified('A', true), hyp(H2), prop('B', 'Restore BACKWARD compatibility'), ran('B')]
+    const h2seq = log[4].seq
+    const snap = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: log[log.length - 1].seq,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: { text: H2, based_on_steps: [], confidence: 'high', confirmed: false, seq: h2seq },
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    } as unknown as RoomSnapshot
+    const r = log.reduce(applyEvent, fromSnapshot(snap))
+    const d = initialDraft(r)
+    expect(d.cause).toBe(H1)
+    expect(d.layer).toBe(guessLayer(H1))
+    expect(d.fix).toBe('Allow amount decimal and restart task 0')
+    expect(draftToInput(r, d)).toMatchObject({ fix_proposal_id: 'A' })
+    // Same draft as the live session.
+    expect(d).toEqual(initialDraft(recoveredThenCleanup()))
+  })
+
   it('falls back to the last executed proposal and the latest hypothesis without a recovery', () => {
     const r = replay([hyp(H1), prop('A', 'Fix A'), ran('A'), verified('A', false), hyp(H2), prop('B', 'Cleanup B'), ran('B')])
     const d = initialDraft(r)
