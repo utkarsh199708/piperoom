@@ -160,17 +160,23 @@ func (s *Service) checkVisible(ctx context.Context, u User, roomID string) error
 	return nil
 }
 
+// CanSeeRoom is canSeeRoom for the list socket, so its live frames and
+// GET /api/rooms agree on who sees a room (KAN-602).
+func (s *Service) CanSeeRoom(u User, snap *RoomSnapshot) bool { return s.canSeeRoom(u, snap) }
+
 // canSeeRoom reports whether the person may see the room: the setup room's
-// tenant, or the pipeline's tenant for every other room.
+// tenant, or the pipeline's tenant for every other room. It reads the current
+// owners set like CanSeePipeline does.
 func (s *Service) canSeeRoom(u User, snap *RoomSnapshot) bool {
 	if !s.TenancyOn() || s.IsSolo(u.ID) {
 		return true
 	}
+	o := s.ownersNow()
 	if snap.IsSetupRoom() {
 		tenant := snap.SetupTenant()
-		return tenant != "" && s.owners.InTenant(tenant, u.ID, u.Groups)
+		return tenant != "" && o.InTenant(tenant, u.ID, u.Groups)
 	}
-	return s.owners.CanSeePipeline(snap.PipelineID, u.ID, u.Groups)
+	return o.CanSeePipeline(snap.PipelineID, u.ID, u.Groups)
 }
 
 // checkTargetVisible refuses to give control or a hand-off to a person who
