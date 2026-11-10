@@ -132,24 +132,31 @@ func TestTargetRegistrarIdempotent(t *testing.T) {
 	}
 }
 
-// The driver's class is the highest class of the room's host targets; a class
-// on the database or Kafka never raises it.
+// A driver's class is the highest class of the room targets of its own kind;
+// a class on the database, Kafka or another driver's target never raises it.
 func TestTargetClass(t *testing.T) {
+	host := func(c string) events.SetupTarget { return events.SetupTarget{Kind: "host", Address: "h", Class: c} }
+	comp := func(c string) events.SetupTarget { return events.SetupTarget{Kind: "compose", Address: "c", Class: c} }
+	dbz := func(c string) events.SetupTarget {
+		return events.SetupTarget{Kind: "dbzserver", Address: "d", Class: c}
+	}
 	tests := []struct {
 		name    string
 		targets []events.SetupTarget
+		kinds   []string
 		want    string
 	}{
-		{"none", nil, ""},
-		{"database only", []events.SetupTarget{{Kind: "postgres", Address: "db:5432", Class: protocol.ClassProduction}}, ""},
-		{"host shared", []events.SetupTarget{{Kind: "host", Address: "h", Class: protocol.ClassShared}}, protocol.ClassShared},
-		{"highest host wins", []events.SetupTarget{
-			{Kind: "host", Address: "a", Class: protocol.ClassProduction},
-			{Kind: "host", Address: "b", Class: protocol.ClassLocal},
-		}, protocol.ClassProduction},
+		{"none", nil, []string{"host"}, ""},
+		{"database only", []events.SetupTarget{{Kind: "postgres", Address: "db:5432", Class: protocol.ClassProduction}}, []string{"host"}, ""},
+		{"host shared", []events.SetupTarget{host(protocol.ClassShared)}, []string{"host"}, protocol.ClassShared},
+		{"highest host wins", []events.SetupTarget{host(protocol.ClassProduction), host(protocol.ClassLocal)}, []string{"host"}, protocol.ClassProduction},
+		{"compose ignores a raised host", []events.SetupTarget{host(protocol.ClassProduction)}, []string{"compose"}, ""},
+		{"compose takes its own", []events.SetupTarget{comp(protocol.ClassShared), host(protocol.ClassProduction)}, []string{"compose"}, protocol.ClassShared},
+		{"host ignores a raised compose", []events.SetupTarget{comp(protocol.ClassProduction)}, []string{"host"}, ""},
+		{"dbzserver stack takes the higher", []events.SetupTarget{comp(protocol.ClassShared), dbz(protocol.ClassProduction), host(protocol.ClassLocal)}, []string{"compose", "dbzserver"}, protocol.ClassProduction},
 	}
 	for _, tt := range tests {
-		if got := targetClass(tt.targets); got != tt.want {
+		if got := targetClass(tt.targets, tt.kinds...); got != tt.want {
 			t.Errorf("%s: class = %q, want %q", tt.name, got, tt.want)
 		}
 	}

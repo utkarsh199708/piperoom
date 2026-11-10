@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"piperoom/internal/config"
@@ -141,6 +142,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 // targetRegistrar returns the runner's RegisterTarget hook: it registers the
 // driver ops for the room's SetupRequest.Target in reg. Registering twice (a
 // pairing retried after a failed handshake) is a no-op for the same target.
+// done is unsynchronised on purpose: pair() calls the hook sequentially.
 func targetRegistrar(reg *ops.Registry) func(target string, targets []events.SetupTarget) error {
 	var done string
 	return func(target string, targets []events.SetupTarget) error {
@@ -150,7 +152,7 @@ func targetRegistrar(reg *ops.Registry) func(target string, targets []events.Set
 		if done != "" {
 			return fmt.Errorf("room target %q differs from %q registered earlier", target, done)
 		}
-		if err := registerTarget(reg, target, targetClass(targets)); err != nil {
+		if err := registerTarget(reg, target, targets); err != nil {
 			return err
 		}
 		done = target
@@ -163,16 +165,20 @@ func targetRegistrar(reg *ops.Registry) func(target string, targets []events.Set
 // host.Register in its place (the two are exclusive in one registry);
 // dbzserver -> server.Register (ModeCompose) next to compose.Register, since
 // the server's Compose stack is started by the compose ops. Any other target
-// has no driver in this build and is refused by name.
-func registerTarget(reg *ops.Registry, target, class string) error {
+// has no driver in this build and is refused by name. Each driver registers
+// with the class of the room targets of its own kind (targetClass).
+func registerTarget(reg *ops.Registry, target string, targets []events.SetupTarget) error {
 	switch target {
 	case "compose":
-		_, err := compose.Register(reg, compose.Options{Class: class})
+		_, err := compose.Register(reg, compose.Options{Class: targetClass(targets, "compose")})
 		return err
 	case "host":
-		_, err := host.Register(reg, host.Options{Class: class})
+		_, err := host.Register(reg, host.Options{Class: targetClass(targets, "host")})
 		return err
 	case "dbzserver":
+		// The Compose stack and the server run on it are one stack: both drivers
+		// take the highest class the person raised on either target.
+		class := targetClass(targets, "compose", "dbzserver")
 		if _, err := compose.Register(reg, compose.Options{Class: class}); err != nil {
 			return err
 		}
@@ -183,15 +189,16 @@ func registerTarget(reg *ops.Registry, target, class string) error {
 	}
 }
 
-// targetClass is the class the driver registers with: the highest class of the
-// room's "host" targets, "" (local) when the room names none. Only a host the
-// person raised lets a driver render a non-loopback publish, so a class on the
-// source database or Kafka never loosens it.
-func targetClass(targets []events.SetupTarget) string {
+// targetClass is the class a driver registers with: the highest class of the
+// room targets whose Kind is one of kinds (the target kind the driver's own
+// ops report), "" (local) when the room names none. A class raised on another
+// target (the source database, Kafka, or a host in a compose room) never
+// changes the driver, so it cannot loosen a guard the person did not raise.
+func targetClass(targets []events.SetupTarget, kinds ...string) string {
 	class := ""
 	rank := map[string]int{protocol.ClassLocal: 1, protocol.ClassShared: 2, protocol.ClassProduction: 3}
 	for _, t := range targets {
-		if t.Kind == "host" && rank[t.Class] > rank[class] {
+		if slices.Contains(kinds, t.Kind) && rank[t.Class] > rank[class] {
 			class = t.Class
 		}
 	}
