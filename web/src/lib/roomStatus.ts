@@ -109,7 +109,9 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
       const k = approved.executed.length + 1
       return info('executing', `Executing fix · ${k} of ${approved.steps}`, 'agent', k)
     }
-    if (approved.executed.length > 0 && agent !== 'done' && !newerAwaiting) {
+    // Agent "done" keeps a verdict that is in (KAN-694): an open room must not read idle while the pill
+    // says verified. Without a verdict, "done" still ends the fix status.
+    if (approved.executed.length > 0 && (agent !== 'done' || approved.verification != null) && !newerAwaiting) {
       // The verdict is in: a fix that did not recover the pipeline must not read as a green "verifying".
       const v = approved.verification ? verdictKind(approved.verification) : null
       if (v === 'not-recovered') return info('fix-failed', 'Fix ran · not recovered', 'fail')
