@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { LabelForm } from './LabelForm'
 import { MAX_CAUSE, draftToInput, guessLayer, initialDraft } from '@/lib/label'
-import { emptyRoomState } from '@/state/types'
+import { emptyRoomState, fromSnapshot } from '@/state/types'
 import { applyEvent } from '@/state/reducer'
-import type { Event } from '@/api/types'
+import type { Event, RoomSnapshot } from '@/api/types'
 import type { RoomState } from '@/state/types'
 
 function room(over: Partial<RoomState> = {}): RoomState {
@@ -76,9 +76,35 @@ describe('label draft after recovery (KAN-695)', () => {
     expect(d.cause).not.toContain('healthy now')
   })
 
-  it('gives the same draft when the log is replayed again (reload)', () => {
-    const first = initialDraft(recoveredThenCleanup())
-    expect(initialDraft(recoveredThenCleanup())).toEqual(first)
+  it('does not take the snapshot-seeded hypothesis for a proposal created before it (reload)', () => {
+    // A reload seeds state.hypothesis from the snapshot (H2, seq 7). The log then replays a proposal
+    // created at seq 3, before any agent.hypothesis event: H2 is not the hypothesis current at seq 3.
+    const snap = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 7,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: { text: H2, based_on_steps: [], confidence: 'high', confirmed: false, seq: 7 },
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    } as unknown as RoomSnapshot
+    const at = (seq: number, e: Event): Event => ({ ...e, seq })
+    const r = [
+      at(3, prop('A', 'Allow amount decimal and restart task 0')),
+      at(4, ran('A')),
+      at(5, verified('A', true)),
+    ].reduce(applyEvent, fromSnapshot(snap))
+    expect(r.hypothesis?.text).toBe(H2)
+    expect(r.proposals[0].hypothesis_text).toBeUndefined()
+    // A proposal created after the snapshot's hypothesis still records it.
+    const later = applyEvent(r, at(9, prop('B', 'Cleanup')))
+    expect(later.proposals[1].hypothesis_text).toBe(H2)
   })
 
   it('falls back to the last executed proposal and the latest hypothesis without a recovery', () => {
