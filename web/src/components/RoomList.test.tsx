@@ -816,6 +816,27 @@ describe('resolved rows', () => {
   })
 })
 
+describe('closed rows (KAN-605)', () => {
+  const closed = { status: 'closed', opened_at: '2026-10-11T10:00:00Z', closed_at: '2026-10-11T10:06:00Z' } as const
+
+  it('a room closed with no resolution reads Closed · duration, never Resolved', () => {
+    mockList([room({ id: 'c1', title: 'Abandoned', ...closed })])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Abandoned').closest('tr')!
+    expect(within(row).getByText('Closed · 6 min')).toBeInTheDocument()
+    expect(within(row).queryByText(/^Resolved/)).toBeNull()
+  })
+
+  it('a closed room whose agent verified the fix reads Resolved · duration, as its title row says Resolved', () => {
+    mockList([room({ id: 'c1', title: 'Verified', ...closed, agent_status: { state: 'done' } })])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Verified').closest('tr')!
+    expect(within(row).getByText('Resolved · 6 min')).toBeInTheDocument()
+  })
+})
+
 describe('shadow marker', () => {
   it('marks a shadow room and does not call its agent idle; an ordinary room is unchanged', () => {
     mockList([room({ id: 'quiet', shadow: true }), room({ id: 'plain' })])
@@ -843,7 +864,8 @@ describe('shadow marker', () => {
     renderList()
     fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
     const row = screen.getByText('Closed shadow').closest('tr')!
-    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    // No resolution, so the agent cell says closed, as the Status cell does (KAN-605).
+    expect(within(row).getByText('closed')).toBeInTheDocument()
     expect(within(row).queryByText('silent run')).toBeNull()
     expect(within(row).getByLabelText('Shadow room')).toBeInTheDocument()
   })
