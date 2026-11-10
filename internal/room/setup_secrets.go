@@ -72,11 +72,30 @@ type pendingCredentials struct {
 	names     []string
 }
 
+// cloudSetupSecretMessage is the refusal of a cloud setup credential's name
+// on the room's secret route (docs/api.md POST /api/rooms/{id}/setup/secret;
+// docs/design/setup-managed.md §2).
+const cloudSetupSecretMessage = "enter cloud credentials on the runner: ccloud_*, aiven_token and aws_* are never sent through the room"
+
+// isCloudSetupSecretName reports whether name is a managed-cloud setup
+// credential (ccloud_*, aiven_token, aws_*; case-insensitive prefix match),
+// the same rule as runner.IsCloudSetupSecret, which the server does not
+// link. Such a value is typed on the runner's terminal only: the server
+// never forwards it, never records its name (setup.secret_set) and never
+// asks the runner to register it.
+func isCloudSetupSecretName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.HasPrefix(n, "ccloud_") || strings.HasPrefix(n, "aws_") || n == "aiven_token"
+}
+
 // checkSetupSecretNameValue validates one secret before anything touches the
 // network or the disk. The messages never echo the value.
 func checkSetupSecretNameValue(name, value string) error {
 	if !setupSecretNameRe.MatchString(name) {
 		return validation("name must match ^[a-zA-Z_][a-zA-Z0-9_]*$")
+	}
+	if isCloudSetupSecretName(name) {
+		return validation(cloudSetupSecretMessage)
 	}
 	if len(value) < minSetupSecretBytes {
 		return validation(fmt.Sprintf("value must be at least %d bytes", minSetupSecretBytes))
@@ -163,6 +182,11 @@ func (s *Service) RegisterSetupCredentials(ctx context.Context, user User, roomI
 	for _, name := range names {
 		if !setupSecretNameRe.MatchString(name) {
 			return validation("a recorded secret name is not a valid secret name")
+		}
+		if isCloudSetupSecretName(name) {
+			// The projection drops such names (setup_snapshot.go); this is
+			// the second line: a cloud setup credential is never requested.
+			return validation(cloudSetupSecretMessage)
 		}
 	}
 	pending := pendingCredentials{requestID: NewID("cred_"), names: names}
