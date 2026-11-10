@@ -193,6 +193,12 @@ export interface ProposalState {
   /** The agent's verdict after the last step ran. */
   verification?: AgentVerificationPayload;
   /**
+   * The text of the hypothesis that was current when this proposal was created (or, when none was
+   * yet, when it was verified). The close label's default cause uses it, so a later "healthy now"
+   * hypothesis does not replace the root cause. Recomputed on log replay.
+   */
+  hypothesis_text?: string;
+  /**
    * X8: step indexes whose action can be staged. From the snapshot (open_proposals[].stageable, the
    * server's registry knows it, the log does not) or, for a stage that starts, from its `steps`.
    * Absent until one of them says so.
