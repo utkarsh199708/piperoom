@@ -450,7 +450,7 @@ export function RoomScreen() {
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
-    <div className="flex min-h-full flex-col text-sm">
+    <div className="flex flex-1 flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && (
         <div
