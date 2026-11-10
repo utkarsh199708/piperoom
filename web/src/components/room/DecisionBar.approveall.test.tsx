@@ -118,6 +118,16 @@ describe('DecisionBar phone sheet, Approve and run headline (KAN-599)', () => {
     expect(screen.getByText('Restart the task').className).toContain('truncate')
   })
 
+  // KAN-613: at 375 the headline broke "kafka-" / "connect" at the hyphen. Each layer name is one unit.
+  it('makes each layer name a no-wrap unit so a hyphen never breaks it', () => {
+    showBar('sheet')
+    const region = screen.getByRole('region', { name: 'Decision' })
+    const names = Array.from(region.querySelectorAll('[data-layer-name]'))
+    expect(names.map((n) => n.textContent)).toEqual(['schema-registry', 'kafka-connect'])
+    for (const n of names) expect(n.className).toContain('whitespace-nowrap')
+    expect(region.querySelector('[aria-live="polite"]')).toHaveTextContent(live)
+  })
+
   it('keeps the desktop bar one truncating line', () => {
     showBar('top')
     const headline = screen.getByText(live)
