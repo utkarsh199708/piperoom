@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { RoomActions } from '../hooks/useRoom'
 import type { ConnState } from '../hooks/useRoom'
@@ -183,5 +183,62 @@ describe('decision bar on the tabbed layout', () => {
     const reason = await screen.findByLabelText('Rejection reason for kafka-connect')
     expect(screen.getByRole('tab', { name: /^Fix/ })).toHaveAttribute('aria-selected', 'true')
     await waitFor(() => expect(reason).toHaveFocus())
+  })
+})
+
+describe('Jump to latest pill (KAN-604)', () => {
+  const entry = (seq: number) => ({ seq, at: '', actor: { kind: 'human' as const, id: 'kabir', name: 'Kabir' }, text: 'x', kind: 'human' as const })
+  let report: (e: Array<{ isIntersecting: boolean }>) => void
+
+  // The sentinel is on screen only on the Investigation tab; scrolled up there, new events pile up unseen.
+  function arriveWhileScrolledUp(px: number, tabName: RegExp | string | null) {
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(c: typeof report) {
+          report = c
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    setWidth(px)
+    const view = show(arjun, room({ activity: [entry(1)] }))
+    act(() => report([{ isIntersecting: false }]))
+    vi.mocked(useRoom).mockReturnValue({
+      state: room({ activity: [entry(1), entry(2), entry(3)] }),
+      presence: [],
+      conn: 'live',
+      error: null,
+      actions,
+      stale: null,
+      dismissStale: vi.fn(),
+      reload,
+    })
+    view.rerender(
+      <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
+        <Routes>
+          <Route path="/rooms/:roomId" element={<RoomScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    if (!tabName) return
+    fireEvent.mouseDown(screen.getByRole('tab', { name: tabName }))
+    fireEvent.click(screen.getByRole('tab', { name: tabName }))
+  }
+
+  it('is not drawn over the Fix tab, where the unseen count cannot clear', () => {
+    arriveWhileScrolledUp(390, /^Fix/)
+    expect(screen.queryByRole('button', { name: /Jump to latest/ })).not.toBeInTheDocument()
+  })
+
+  it('shows on the Investigation tab and jumps from there', () => {
+    arriveWhileScrolledUp(390, 'Investigation')
+    fireEvent.click(screen.getByRole('button', { name: /Jump to latest/ }))
+    expect(screen.queryByRole('button', { name: /Jump to latest/ })).not.toBeInTheDocument()
+  })
+  it('keeps showing on the one-column wide layout, which has no tabs', () => {
+    arriveWhileScrolledUp(1440, null)
+    expect(screen.getByRole('button', { name: /Jump to latest/ })).toBeInTheDocument()
   })
 })

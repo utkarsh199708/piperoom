@@ -585,7 +585,9 @@ export function RoomScreen() {
             </Tabs>
           )}
 
-          {unseen > 0 && (
+          {/* The sentinel only lives on the Investigation timeline (or the single wide column), so the pill
+              means nothing on the other tabs and would sit over their last item (KAN-604). */}
+          {unseen > 0 && (wide || tab === 'investigation') && (
             <button
               type="button"
               onClick={jump}
