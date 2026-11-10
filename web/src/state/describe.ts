@@ -41,6 +41,13 @@ import type {
   RoomLabelledPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
+  SetupMaintenanceWindowPayload,
+  SetupPipelineExtendedPayload,
+  SetupRunnerAttachedPayload,
+  SetupRunnerLostPayload,
+  SetupSecretSetPayload,
+  SetupTargetClassedPayload,
+  SetupTargetRegisteredPayload,
   TracePinnedPayload,
 } from '../api/types'
 import { argTags } from '../lib/toolLayers'
@@ -354,6 +361,48 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: 'Post-mortem draft ready', kind: 'system' }
     case 'postmortem.failed':
       return { text: 'Post-mortem draft failed', kind: 'system' }
+    case 'setup.secret_set': {
+      // The name only: the payload carries no value, and none is read here.
+      const p = as<SetupSecretSetPayload>(e)
+      return { text: `${who} set secret ${clip(p.name, 60)}`, kind: 'system' }
+    }
+    case 'setup.target_registered': {
+      const p = as<SetupTargetRegisteredPayload>(e)
+      const cls = clip(p.class, 30)
+      return { text: `Target ${clip(p.address, 80)} registered${cls ? ` as ${cls}` : ''}`, kind: 'system' }
+    }
+    case 'setup.target_classed': {
+      const p = as<SetupTargetClassedPayload>(e)
+      return {
+        text: `Target ${clip(p.target, 80)} classed ${clip(p.class, 30)}`,
+        detail: clip(p.reason, 200) || undefined,
+        kind: 'system',
+      }
+    }
+    case 'setup.pipeline_extended': {
+      const p = as<SetupPipelineExtendedPayload>(e)
+      const parts: string[] = []
+      const add = (list: string[] | undefined, one: string, many: string) => {
+        if (list?.length) parts.push(`${list.length} ${list.length === 1 ? one : many}`)
+      }
+      add(p.add_connectors, 'connector', 'connectors')
+      add(p.add_tables, 'table', 'tables')
+      add(p.add_consumer_groups, 'consumer group', 'consumer groups')
+      add(p.add_sink_tables, 'sink table', 'sink tables')
+      return { text: parts.length ? `Pipeline extended with ${parts.join(', ')}` : 'Pipeline extended', kind: 'system' }
+    }
+    case 'setup.maintenance_window': {
+      const p = as<SetupMaintenanceWindowPayload>(e)
+      return { text: `Maintenance window set, ${clip(p.start, 40)} to ${clip(p.end, 40)}`, kind: 'system' }
+    }
+    case 'setup.runner_attached': {
+      const p = as<SetupRunnerAttachedPayload>(e)
+      return { text: `Runner ${clip(p.runner_label, 40)} attached`, kind: 'system' }
+    }
+    case 'setup.runner_lost': {
+      const p = as<SetupRunnerLostPayload>(e)
+      return { text: `Runner ${clip(p.runner_label, 40)} lost`, kind: 'system' }
+    }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }

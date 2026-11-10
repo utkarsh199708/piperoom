@@ -65,6 +65,15 @@ describe('describeEvent', () => {
     ['hypothesis.verdict', ev('hypothesis.verdict', { verdict: 'disputed', note: 'DDL never ran', hypothesis_seq: 1 }), { text: 'Arjun disputed the hypothesis: DDL never ran', kind: 'human' }],
     ['approval.nudged', ev('approval.nudged', { proposal_id: 'p_01M4ABCDEFGHJKMNPQRSTVWXYZ', layer: 'kafka-connect' }), { text: 'Arjun nudged kafka-connect owners', kind: 'human' }],
     ['unknown', ev('agent.usage' as Event['type'], {}, agent), { text: 'agent.usage', kind: 'system' }],
+    ['setup.secret_set', ev('setup.secret_set', { name: 'db_pass' }, { kind: 'human', id: 'priya', name: 'priya' }), { text: 'priya set secret db_pass', kind: 'system' }],
+    ['setup.secret_set never a value', ev('setup.secret_set', { name: 'db_pass', value: 'hunter2', secret: 'hunter2' }, { kind: 'human', id: 'priya', name: 'priya' }), { text: 'priya set secret db_pass' }],
+    ['setup.target_registered', ev('setup.target_registered', { kind: 'postgres', address: 'pg.example.test:5432', class: 'shared' }), { text: 'Target pg.example.test:5432 registered as shared', kind: 'system' }],
+    ['setup.target_classed', ev('setup.target_classed', { target: 'pg.example.test:5432', class: 'shared', reason: 'matches a shared host', by: 'server' }, system), { text: 'Target pg.example.test:5432 classed shared', detail: 'matches a shared host', kind: 'system' }],
+    ['setup.pipeline_extended', ev('setup.pipeline_extended', { add_connectors: ['c1'], add_tables: ['a', 'b'] }), { text: 'Pipeline extended with 1 connector, 2 tables', kind: 'system' }],
+    ['setup.pipeline_extended empty', ev('setup.pipeline_extended', {}), { text: 'Pipeline extended', kind: 'system' }],
+    ['setup.maintenance_window', ev('setup.maintenance_window', { start: '2026-10-11T02:00:00Z', end: '2026-10-11T04:00:00Z' }), { text: 'Maintenance window set, 2026-10-11T02:00:00Z to 2026-10-11T04:00:00Z', kind: 'system' }],
+    ['setup.runner_attached', ev('setup.runner_attached', { runner_label: 'qa6', os: 'linux', arch: 'amd64' }, system), { text: 'Runner qa6 attached', kind: 'system' }],
+    ['setup.runner_lost', ev('setup.runner_lost', { runner_label: 'qa6', last_seen: 'x' }, system), { text: 'Runner qa6 lost', kind: 'system' }],
   ]
   it.each(cases)('%s', (_n, e, want) => {
     const d = describeEvent(e, ctx)
