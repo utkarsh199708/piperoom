@@ -118,6 +118,18 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	// A runner that cannot serve the room's target (runner.pair refuses with op
+	// pair, reason target) answers the Welcome with a Refused instead of Hello.
+	// It is a clean goodbye, not a violation: the room is told why the runner
+	// left, and nothing attaches.
+	if hello.Type == protocol.FrameRefused && hello.Refused != nil &&
+		hello.Refused.Op == "pair" && hello.Refused.Reason == protocol.RefuseTarget {
+		_ = s.svc.EmitSetup(r.Context(), res.RoomID, events.SetupPairing, events.SetupPairingPayload{
+			Outcome: events.PairingRefused, Source: source,
+		})
+		closeRunner(conn, websocket.StatusNormalClosure, "target refused")
+		return
+	}
 	if hello.Type != protocol.FrameHello || hello.Hello == nil {
 		closeRunner(conn, websocket.StatusPolicyViolation, "hello frame required")
 		return

@@ -139,3 +139,50 @@ func TestRunnerWelcomeNoSetupFieldsOnPlainRoom(t *testing.T) {
 		t.Errorf("plain room Welcome = target %q, targets %+v", w.Target, w.Targets)
 	}
 }
+
+// A runner that cannot serve the room's target answers the Welcome with a
+// Refused (op pair, reason target) where Hello belongs. The server records the
+// refusal in the room and closes normally; it is not a policy violation.
+func TestRunnerWSTargetRefusalInHelloSlot(t *testing.T) {
+	env := newSetupAPIEnv(t, true)
+	res, code := newSetupRoomCode(t, env, "strimzi")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(env.srv.URL, "http") + "/api/runners/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	pair := protocol.Pair{Code: code, ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor}
+	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FramePair, Pair: &pair}); err != nil {
+		t.Fatalf("write pair: %v", err)
+	}
+	if f, err := readRunnerFrame(ctx, conn); err != nil || f.Type != protocol.FrameWelcome {
+		t.Fatalf("read welcome: %+v, %v", f, err)
+	}
+	ref := protocol.Refusal{Op: "pair", Reason: protocol.RefuseTarget}
+	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FrameRefused, Refused: &ref}); err != nil {
+		t.Fatalf("write refused: %v", err)
+	}
+	_, _, err = conn.Read(ctx)
+	if sc := websocket.CloseStatus(err); sc != websocket.StatusNormalClosure {
+		t.Fatalf("close status = %d (%v), want normal closure", sc, err)
+	}
+	evs, _, err := env.svc.Events(context.Background(), res.Room.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var refused bool
+	for _, e := range evs {
+		if e.Type != events.SetupPairing {
+			continue
+		}
+		if p, err := events.Decode[events.SetupPairingPayload](e); err == nil && p.Outcome == events.PairingRefused {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Error("no setup.pairing refused event in the room log")
+	}
+}
