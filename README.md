@@ -13,7 +13,7 @@ while your team watches, steers and approves the fix together in one live room.
 [![Setup matrix](https://github.com/utkarsh199708/piperoom/actions/workflows/setup-matrix.yml/badge.svg?branch=main)](https://github.com/utkarsh199708/piperoom/actions/workflows/setup-matrix.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/utkarsh199708/piperoom?logo=go&logoColor=white)](go.mod)
 [![Agent: Claude](https://img.shields.io/badge/agent-Claude-D97757)](docs/design/model-providers.md)
-[![License: source-available](https://img.shields.io/badge/license-source--available-lightgrey)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [Quickstart](#quickstart) · [How it works](#how-it-works) · [Features](#features) · [Integrations](#integrations) · [Docs](#documentation) · [Status](#project-status)
 
@@ -285,6 +285,9 @@ collaboration protocol is in [`docs/collab.md`](docs/collab.md).
 
 ## License
 
-Copyright © 2026 Utkarsh. All rights reserved. The source is published for viewing only: no licence is granted to
-use, copy, modify or distribute it without written permission. See [`LICENSE`](LICENSE); for licensing enquiries,
-contact the copyright holder through GitHub.
+Piperoom is licensed under the [Apache License 2.0](LICENSE). See [`NOTICE`](NOTICE) for attribution.
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md), and report security problems as
+[`SECURITY.md`](SECURITY.md) describes.
