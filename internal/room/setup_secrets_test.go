@@ -707,3 +707,43 @@ func TestSetupSecretNameLengthCap(t *testing.T) {
 		t.Fatalf("128-character name: %v", err)
 	}
 }
+
+// TestSetupSecretRefusesCloudSetupNames: the secret route refuses a managed
+// cloud setup credential's name (ccloud_*, aiven_token, aws_*, any case)
+// with 400 validation before anything moves: no secret frame reaches the
+// runner and no setup.secret_set is written, so the name is never asked for
+// in a register_credentials request either (docs/api.md; setup-managed.md
+// §2).
+func TestSetupSecretRefusesCloudSetupNames(t *testing.T) {
+	ctx := context.Background()
+	env := newSetupEnv(t, setupOptions{})
+	res := createSetup(t, env, secretSetupRequest("orders-setup"))
+	roomID := res.Room.ID
+	w, _ := attachSetupRunner(t, env, roomID)
+	const value = "cloud-setup-value-9"
+	for _, name := range []string{"ccloud_api_key", "CCLOUD_CLUSTER_SECRET", "aiven_token", "Aiven_Token", "aws_access_key_id", "AWS_SESSION_TOKEN"} {
+		err := env.svc.SetSetupSecret(ctx, alice(), roomID, name, value)
+		wantSetupError(t, err, 400, "validation")
+		if !strings.Contains(err.Error(), "runner") || strings.Contains(err.Error(), value) {
+			t.Fatalf("%s: refusal = %v, want one that names the runner and not the value", name, err)
+		}
+	}
+	if n := len(framesOfType(w, protocol.FrameSecret)); n != 0 {
+		t.Fatalf("%d secret frames reached the runner, want 0", n)
+	}
+	if n := len(eventsOf[events.SetupSecretSetPayload](t, env.svc, roomID, events.SetupSecretSet)); n != 0 {
+		t.Fatalf("%d setup.secret_set events, want 0", n)
+	}
+
+	// An ordinary name still works, and the register request names it alone.
+	if err := env.svc.SetSetupSecret(ctx, alice(), roomID, "source_password", value); err != nil {
+		t.Fatalf("SetSetupSecret(source_password): %v", err)
+	}
+	if err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID); err != nil {
+		t.Fatalf("RegisterSetupCredentials: %v", err)
+	}
+	reg := framesOfType(w, protocol.FrameRegisterCredentials)
+	if len(reg) != 1 || len(reg[0].RegisterCredentials.Names) != 1 || reg[0].RegisterCredentials.Names[0] != "source_password" {
+		t.Fatalf("register frames = %+v, want one naming source_password only", reg)
+	}
+}
