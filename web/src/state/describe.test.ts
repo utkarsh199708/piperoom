@@ -74,12 +74,43 @@ describe('describeEvent', () => {
     ['setup.maintenance_window', ev('setup.maintenance_window', { start: '2026-10-11T02:00:00Z', end: '2026-10-11T04:00:00Z' }), { text: 'Maintenance window set, 2026-10-11T02:00:00Z to 2026-10-11T04:00:00Z', kind: 'system' }],
     ['setup.runner_attached', ev('setup.runner_attached', { runner_label: 'qa6', os: 'linux', arch: 'amd64' }, system), { text: 'Runner qa6 attached', kind: 'system' }],
     ['setup.runner_lost', ev('setup.runner_lost', { runner_label: 'qa6', last_seen: 'x' }, system), { text: 'Runner qa6 lost', kind: 'system' }],
+    ['setup.pairing ok', ev('setup.pairing', { outcome: 'ok', source: 'x', runner_label: 'qa6' }, system), { text: 'Paired with runner qa6', kind: 'system' }],
+    ['setup.pairing bad_code', ev('setup.pairing', { outcome: 'bad_code', source: 'x' }, system), { text: 'Pairing failed: wrong code' }],
+    ['setup.pairing expired', ev('setup.pairing', { outcome: 'expired', source: 'x' }, system), { text: 'Pairing failed: the code expired' }],
+    ['setup.pairing rate_limited', ev('setup.pairing', { outcome: 'rate_limited', source: 'x' }, system), { text: 'Pairing paused: too many attempts' }],
+    ['setup.pairing replaced', ev('setup.pairing', { outcome: 'replaced', source: 'x', runner_label: 'qa7' }, system), { text: 'Replaced the lost runner with runner qa7' }],
+    ['setup.pairing refused', ev('setup.pairing', { outcome: 'refused', source: 'x' }, system), { text: 'Pairing refused' }],
+    ['setup.runner_refused', ev('setup.runner_refused', { op: 'psql.exec', reason: 'not_in_catalogue' }, system), { text: 'Runner refused to run psql.exec', detail: 'not_in_catalogue', kind: 'system' }],
+    ['setup.plan', ev('setup.plan', { plan_id: 'x', phases: [{ name: 'a', steps: [{}, {}] }, { name: 'b', steps: [{}] }] }, agent), { text: 'Agent proposed a setup plan (3 steps)', kind: 'step' }],
+    ['setup.plan superseding', ev('setup.plan', { plan_id: 'y', supersedes: 'x', phases: [{ name: 'a', steps: [{}] }] }, agent), { text: 'Agent replaced its setup plan (1 step)' }],
+    ['setup.credentials_registered names only', ev('setup.credentials_registered', { pipeline_id: 'orders', names: ['db_pass', 'api_key'], runner_label: 'qa6', values: ['hunter2'] }, system), { text: '2 read credentials registered', kind: 'system' }],
+    ['setup.verified all', ev('setup.verified', { plan_id: 'x', nonce_hash: 'h', rungs: [{ name: 'a', ok: true }, { name: 'b', ok: true }] }, system), { text: 'Setup verified: 2 of 2 checks passed', kind: 'decision' }],
+    ['setup.verified partial', ev('setup.verified', { plan_id: 'x', nonce_hash: 'h', rungs: [{ name: 'a', ok: true }, { name: 'b', ok: false }] }, system), { text: 'Setup not verified: 1 of 2 checks passed' }],
+    ['setup.awaiting_change', ev('setup.awaiting_change', { table: 'public.orders', example_sql: 'UPDATE x' }, system), { text: 'Waiting for a change to public.orders', kind: 'system' }],
+    ['setup.blocked', ev('setup.blocked', { reason: 'budget', question: 'Raise the budget?' }, agent), { text: 'Setup paused: the token budget was reached', detail: 'Raise the budget?', kind: 'system' }],
+    ['setup.verification_requested', ev('setup.verification_requested' as Event['type'], {}, agent), { text: 'Agent asked to verify the setup', kind: 'step' }],
   ]
   it.each(cases)('%s', (_n, e, want) => {
     const d = describeEvent(e, ctx)
     expect(d).toMatchObject(want)
     expect(d.text).not.toMatch(ID)
     expect(d.detail ?? '').not.toMatch(ID)
+  })
+
+  // Every setup.* type in internal/events/events.go; none may fall through to the raw type name.
+  const SETUP_TYPES = [
+    'setup.pairing', 'setup.runner_attached', 'setup.runner_lost', 'setup.runner_refused', 'setup.plan',
+    'setup.target_registered', 'setup.target_classed', 'setup.pipeline_extended', 'setup.secret_set',
+    'setup.credentials_registered', 'setup.maintenance_window', 'setup.verified', 'setup.awaiting_change',
+    'setup.blocked', 'setup.verification_requested',
+  ]
+  it.each(SETUP_TYPES)('%s never renders as its raw type name', (type) => {
+    for (const payload of [{}, { outcome: 'ok', name: 'n', rungs: [], phases: [], names: [] }]) {
+      const d = describeEvent(ev(type as Event['type'], payload, system), ctx)
+      expect(d.text).not.toContain(type)
+      expect(d.text).not.toMatch(/setup\.[a-z_]+/)
+      expect(d.text.trim()).not.toBe('')
+    }
   })
 
   it('clips rune-safe and keeps detail within 200 characters', () => {

@@ -41,17 +41,42 @@ import type {
   RoomLabelledPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
+  SetupAwaitingChangePayload,
+  SetupBlockedPayload,
+  SetupCredentialsRegisteredPayload,
   SetupMaintenanceWindowPayload,
+  SetupPlanPayload,
   SetupPipelineExtendedPayload,
   SetupRunnerAttachedPayload,
   SetupRunnerLostPayload,
   SetupSecretSetPayload,
   SetupTargetClassedPayload,
   SetupTargetRegisteredPayload,
+  SetupVerifiedPayload,
   TracePinnedPayload,
 } from '../api/types'
 import { argTags } from '../lib/toolLayers'
 import { prLine } from '../lib/fixpr'
+
+// Payloads of two setup events that api/types.ts does not declare (events.SetupPairingPayload,
+// events.SetupRunnerRefusedPayload). Only the fields read here.
+interface SetupPairingPayload {
+  outcome: string
+  runner_label?: string
+}
+interface SetupRunnerRefusedPayload {
+  op?: string
+  reason?: string
+}
+
+const SETUP_BLOCKED_WORDS: Record<string, string> = {
+  attempts: 'too many attempts on one step',
+  steps: 'the plan reached its step limit',
+  wall_clock: 'the time limit was reached',
+  budget: 'the token budget was reached',
+  runner_lost: 'the runner was lost',
+  refused: 'the runner refused a step twice',
+}
 
 const STAGE_WORDS: Record<StagedVerdict, string> = {
   healthy: 'healthy',
@@ -403,6 +428,64 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<SetupRunnerLostPayload>(e)
       return { text: `Runner ${clip(p.runner_label, 40)} lost`, kind: 'system' }
     }
+    case 'setup.pairing': {
+      // Outcome and runner label only; the payload's code and token never reach here.
+      const p = as<SetupPairingPayload>(e)
+      const label = clip(p.runner_label, 40)
+      const runner = label ? `runner ${label}` : 'a runner'
+      switch (p.outcome) {
+        case 'ok':
+          return { text: `Paired with ${runner}`, kind: 'system' }
+        case 'bad_code':
+          return { text: 'Pairing failed: wrong code', kind: 'system' }
+        case 'expired':
+          return { text: 'Pairing failed: the code expired', kind: 'system' }
+        case 'rate_limited':
+          return { text: 'Pairing paused: too many attempts', kind: 'system' }
+        case 'replaced':
+          return { text: `Replaced the lost runner with ${runner}`, kind: 'system' }
+        case 'refused':
+          return { text: `Pairing refused${label ? ` by runner ${label}` : ''}`, kind: 'system' }
+        default:
+          return { text: 'Pairing attempt', kind: 'system' }
+      }
+    }
+    case 'setup.runner_refused': {
+      const p = as<SetupRunnerRefusedPayload>(e)
+      const op = clip(p.op, 40)
+      return { text: `Runner refused ${op ? `to run ${op}` : 'a step'}`, detail: clip(p.reason, 200) || undefined, kind: 'system' }
+    }
+    case 'setup.plan': {
+      const p = as<SetupPlanPayload>(e)
+      const n = (p.phases ?? []).reduce((sum, ph) => sum + (ph.steps?.length ?? 0), 0)
+      const steps = `${n} ${n === 1 ? 'step' : 'steps'}`
+      return { text: p.supersedes ? `Agent replaced its setup plan (${steps})` : `Agent proposed a setup plan (${steps})`, kind: 'step' }
+    }
+    case 'setup.credentials_registered': {
+      // Names only: the payload has no values, and none is read here.
+      const p = as<SetupCredentialsRegisteredPayload>(e)
+      const n = p.names?.length ?? 0
+      return { text: `${n} read ${n === 1 ? 'credential' : 'credentials'} registered`, kind: 'system' }
+    }
+    case 'setup.verified': {
+      const p = as<SetupVerifiedPayload>(e)
+      const rungs = p.rungs ?? []
+      const ok = rungs.filter((r) => r.ok).length
+      const all = rungs.length > 0 && ok === rungs.length
+      return { text: all ? `Setup verified: ${ok} of ${rungs.length} checks passed` : `Setup not verified: ${ok} of ${rungs.length} checks passed`, kind: 'decision' }
+    }
+    case 'setup.awaiting_change': {
+      const p = as<SetupAwaitingChangePayload>(e)
+      return { text: `Waiting for a change to ${clip(p.table, 60) || 'the table'}`, kind: 'system' }
+    }
+    case 'setup.blocked': {
+      const p = as<SetupBlockedPayload>(e)
+      return { text: `Setup paused: ${SETUP_BLOCKED_WORDS[p.reason] ?? 'a limit was reached'}`, detail: clip(p.question, 200) || undefined, kind: 'system' }
+    }
+    // The server's request marker for the verification ladder; its payload is empty and the
+    // result is setup.verified, so one line is enough.
+    case 'setup.verification_requested' as Event['type']:
+      return { text: 'Agent asked to verify the setup', kind: 'step' }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }
