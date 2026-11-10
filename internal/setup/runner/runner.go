@@ -54,7 +54,10 @@ const (
 var (
 	ErrPairingRefused = errors.New("setup: pairing refused")
 	ErrYesOffLoopback = errors.New("setup: --yes is refused unless the server is loopback")
-	ErrFrameTooBig    = errors.New("setup: frame exceeds the 1 MiB cap")
+	// ErrTargetUnsupported wraps the RegisterTarget error: the room's target
+	// has no driver in this runner. It is terminal, never retried.
+	ErrTargetUnsupported = errors.New("setup: room target not supported by this runner")
+	ErrFrameTooBig       = errors.New("setup: frame exceeds the 1 MiB cap")
 	// ErrTokenExpired reports that the runner's token is past its idle expiry
 	// (or was rejected by the server); the person must pair again with a new
 	// code.
@@ -100,6 +103,15 @@ type Options struct {
 	// nil = knowledge.Check, the digest check of the shipped knowledge index
 	// (U1-24): a corrupt index must never reach a template or a download.
 	Check func() error
+	// RegisterTarget (KAN-617) adds the target driver's ops to the catalogue
+	// for the room's SetupRequest.Target (Welcome.Target, since 1.2). It runs
+	// once, after the Welcome and before the person is asked and before any op,
+	// with the Welcome's targets. A non-nil error is a refusal: the runner
+	// tells the server (Refused, op "pair", reason RefuseTarget) and does not
+	// pair, so an op never meets a missing driver as unknown_op. It is not
+	// called when the Welcome carries no target (a server older than 1.2 or a
+	// room without one), which keeps the catalogue as it was. nil = never.
+	RegisterTarget func(target string, targets []events.SetupTarget) error
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -119,6 +131,7 @@ type Runner struct {
 	catalogueV string
 	backoff    func(attempt int) time.Duration
 	check      func() error
+	regTarget  func(target string, targets []events.SetupTarget) error
 	url        *url.URL
 	secretsF   string
 
@@ -190,6 +203,7 @@ func New(o Options) (*Runner, error) {
 		catalogueV: orDefault(o.CatalogueVersion, catalogueVersion),
 		backoff:    o.Backoff,
 		check:      o.Check,
+		regTarget:  o.RegisterTarget,
 		secretsF:   o.SecretsFile,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
@@ -327,6 +341,7 @@ func connectTransient(err error) bool {
 	switch {
 	case errors.Is(err, ErrPairingRefused),
 		errors.Is(err, ErrDeclined),
+		errors.Is(err, ErrTargetUnsupported),
 		errors.Is(err, ErrTokenExpired),
 		errors.Is(err, ErrDialNotLoopback),
 		errors.Is(err, ErrFrameTooBig),
@@ -484,6 +499,16 @@ func (r *Runner) pair(ctx context.Context) error {
 	r.negotiated = protocol.Negotiate(cur, welcome.Version())
 	r.roomID = welcome.RoomID
 	r.applyTargets(welcome.Targets)
+	if welcome.Target != "" && r.regTarget != nil {
+		if err := r.regTarget(welcome.Target, welcome.Targets); err != nil {
+			r.log.Warn("target driver refused", "target", welcome.Target)
+			_ = r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: &protocol.Refusal{
+				ID: "", Op: "pair", Reason: protocol.RefuseTarget,
+			}})
+			fmt.Fprintf(r.stdout, "setup: this runner cannot serve a room whose target is %q: %v\n", welcome.Target, err)
+			return fmt.Errorf("%w: target %q: %v", ErrTargetUnsupported, welcome.Target, err)
+		}
+	}
 
 	ok, err := r.confirm(ctx, welcome)
 	if err != nil {
