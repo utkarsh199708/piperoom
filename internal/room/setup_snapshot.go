@@ -524,7 +524,12 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			return snap
 		}
 		snap.Setup = snap.Setup.clone()
-		snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
+		// A cloud setup credential's name is never a read credential to
+		// register (the route refuses it; a log written before that rule
+		// may still hold one).
+		if !isCloudSetupSecretName(p.Name) {
+			snap.Setup.secretNames = appendUnique(snap.Setup.secretNames, []string{p.Name})
+		}
 
 	case events.SetupCredentialsRegistered:
 		// The names the runner's Credentials frame wrote under the server's
@@ -612,14 +617,16 @@ func appendUnique(list, add []string) []string {
 }
 
 // trimSetupForList keeps only the members GET /api/rooms rows carry: mode,
-// runner.connected and phase (docs/api.md). It mutates a snapshot ListRooms
-// just cloned.
+// runner.connected and phase (docs/api.md). It points snap.Setup at a new
+// member and never writes into the old one, so snap may be a shallow copy of
+// a shared snapshot (ListRow, KAN-602). The tenant stays, unexported, so
+// canSeeRoom still answers for a trimmed row.
 func trimSetupForList(snap *RoomSnapshot) {
 	if snap.Setup == nil {
 		return
 	}
 	full := snap.Setup
-	trimmed := &SetupSnapshot{Mode: full.Mode, Phase: full.Phase, list: true}
+	trimmed := &SetupSnapshot{Mode: full.Mode, Phase: full.Phase, tenant: full.tenant, list: true}
 	if full.Runner != nil {
 		trimmed.Runner = &SetupRunnerState{Connected: full.Runner.Connected}
 	}

@@ -59,10 +59,10 @@ import (
 // file, under the rule in the package comment. 1.0 is the U0 shape (Pair
 // without a version; Hello and Welcome with protocol_version only); 1.1
 // (U1-0) adds protocol_version to Pair and protocol_minor to Pair, Welcome
-// and Hello, and nothing else.
+// and Hello, and nothing else; 1.2 (KAN-617) adds Welcome.Target.
 const (
 	CurrentMajor = 1
-	CurrentMinor = 1
+	CurrentMinor = 2
 )
 
 // Version is a protocol version, Major.Minor. On the wire it is two integer
@@ -76,7 +76,7 @@ type Version struct {
 // Current is the version this build speaks.
 func Current() Version { return Version{Major: CurrentMajor, Minor: CurrentMinor} }
 
-// String prints "1.1".
+// String prints "1.2".
 func (v Version) String() string {
 	return strconv.Itoa(v.Major) + "." + strconv.Itoa(v.Minor)
 }
@@ -361,6 +361,12 @@ type Welcome struct {
 	// setup.target_registered so far) with their classes: the runner's own
 	// floor registry starts from them.
 	Targets []events.SetupTarget `json:"targets,omitempty"`
+	// Target (since 1.2) is the room's SetupRequest.Target: the driver the
+	// runner registers ("compose", "host", "dbzserver", ...). It is not a
+	// SetupTarget.Kind; those name hosts. Absent (a server older than 1.2, or
+	// a room with no target) means no target driver, exactly as before the
+	// field existed. The server sends it only when the negotiated minor has it.
+	Target string `json:"target,omitempty"`
 	// PublicOrigin is the server's PIPEROOM_PUBLIC_URL as the server states
 	// it; "" when none is configured. The in-cluster runner (target strimzi)
 	// has no terminal to show the origin it dialed, so the person compares

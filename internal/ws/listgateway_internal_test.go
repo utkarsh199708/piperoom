@@ -87,3 +87,69 @@ func TestListConnSendsLastFix(t *testing.T) {
 		now = now.Add(listCoalesce)
 	}
 }
+
+// KAN-596: with write mode off a "room" frame carries blocked for a fully
+// approved proposal, also when it was held and sent by flushDue, and the
+// hub's shared snapshot is not written.
+func TestListConnRoomFrameCarriesBlocked(t *testing.T) {
+	now := time.Date(2026, 10, 14, 3, 0, 0, 0, time.UTC)
+	frame := func(off bool, approved bool, held bool) (blocked string, snap *room.RoomSnapshot) {
+		svc := room.New(room.Deps{Store: memstore.New(), WriteModeOff: off})
+		defer svc.Close()
+		g := &Gateway{svc: svc, now: func() time.Time { return now }}
+		c := &client{send: make(chan []byte, 16)}
+		l := &listConn{g: g, c: c, known: map[string][32]byte{}, sent: map[string]time.Time{}, pending: map[string]*room.RoomSnapshot{}}
+		base := room.NewSnapshot()
+		base.ID, base.Status = "r_1", "open"
+		pend := room.Proposal{ProposalID: "p_1", RequiredLayers: []string{"a", "b"}, Approvals: map[string]string{"a": "pending", "b": "pending"}}
+		base.OpenProposals = []room.Proposal{pend}
+		first := base
+		l.changed(&first)
+		<-c.send
+		next := base
+		ap := pend
+		ap.Approvals = map[string]string{"a": "approved", "b": "pending"}
+		if approved {
+			ap.Approvals = map[string]string{"a": "approved", "b": "approved"}
+		}
+		next.OpenProposals = []room.Proposal{ap}
+		if held {
+			// Inside listCoalesce of the first frame: held, then flushed.
+			l.changed(&next)
+			if len(c.send) != 0 {
+				t.Fatal("the change was not held")
+			}
+			now = now.Add(listCoalesce)
+			defer func() { now = now.Add(-listCoalesce) }()
+			l.flushDue()
+		} else {
+			now = now.Add(listCoalesce)
+			defer func() { now = now.Add(-listCoalesce) }()
+			l.changed(&next)
+		}
+		if len(c.send) != 1 {
+			t.Fatalf("off=%v approved=%v held=%v: %d frames", off, approved, held, len(c.send))
+		}
+		var f listMsg
+		if err := json.Unmarshal(<-c.send, &f); err != nil || f.Type != "room" {
+			t.Fatalf("frame = %+v %v", f, err)
+		}
+		return f.Room.OpenProposals[0].Blocked, &next
+	}
+	for _, held := range []bool{false, true} {
+		// The last approval is the digest change that sends the frame.
+		b, snap := frame(true, true, held)
+		if b != room.BlockedWriteModeOff {
+			t.Fatalf("held=%v: blocked = %q", held, b)
+		}
+		if snap.OpenProposals[0].Blocked != "" {
+			t.Fatalf("held=%v: the shared snapshot was written", held)
+		}
+		if b, _ := frame(true, false, held); b != "" {
+			t.Fatalf("held=%v: a layer pending, blocked = %q", held, b)
+		}
+		if b, _ := frame(false, true, held); b != "" {
+			t.Fatalf("held=%v: write mode on, blocked = %q", held, b)
+		}
+	}
+}

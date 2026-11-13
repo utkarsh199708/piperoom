@@ -113,6 +113,25 @@ describe('AppShell skip link', () => {
   })
 })
 
+describe('AppShell main', () => {
+  // KAN-598: the phone sheet covers the bottom; the composer sticks above it, so the scroll area
+  // needs the sheet's height as bottom padding or the composer rests over the end of the content.
+  it('pads the bottom by the decision sheet height, on the wrapper inside the scroller', () => {
+    renderShell('/rooms/r_x')
+    const main = document.getElementById('main')
+    expect(main?.firstElementChild).toHaveClass('pb-[var(--sheet-h,0px)]')
+    // On <main> itself the padding also comes off the composer's sticky area, which lifted it twice.
+    expect(main).not.toHaveClass('pb-[var(--sheet-h,0px)]')
+  })
+
+  // KAN-603: the wrapper is a flex column so the room screen (flex-1) fills it and the composer's
+  // mt-auto reaches the bottom; as a plain block the room's min-h-full had nothing to resolve against.
+  it('makes the wrapper a full-height flex column for the routed screen', () => {
+    renderShell('/rooms/r_x')
+    expect(document.getElementById('main')?.firstElementChild).toHaveClass('flex', 'min-h-full', 'flex-col')
+  })
+})
+
 describe('AppShell sidebar', () => {
   it('shows the nav with the open-room count and a pipeline with its health', () => {
     renderShell()

@@ -86,6 +86,17 @@ export type SetupStatus =
     }
   | { kind: "registered"; watchedBy: string };
 
+/**
+ * A setup room whose pipeline is not registered yet (KAN-601): the server has no topology or
+ * agent stats for it and answers 404. A list row carries `mode` but not `watched_by`, so there
+ * it reads as provisional until the room closes (registration closes it).
+ */
+export function isProvisionalSetup(
+  setup: { mode?: boolean; watched_by?: string } | null | undefined,
+): boolean {
+  return !!setup && setup.mode !== false && !setup.watched_by;
+}
+
 /** The step the plan is on: the blocked step when the server named one, else setup.step_index. */
 export function currentSetupStep(state: RoomState): SetupStepView | null {
   const steps = setupSteps(state.setup);

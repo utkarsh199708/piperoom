@@ -687,6 +687,9 @@ Additive, same rule as the F-wave fields: absent until the task lands, and an ab
 - `open_proposals[].blocked` (item 1, P1a): `"write_mode_off"` when every required layer approved and the executor
   did not run the steps because write mode is off. The proposal stays open with every required layer approved; no `action.executed` is written.
   It is the only value in this wave.
+  `GET /api/rooms` rows and `GET /api/rooms/ws` frames (the first frame, a resync and every `room` frame) carry it
+  too, set the same way (write mode off and every required layer approved; KAN-596), so the room list can say
+  "waiting for write mode". It is added when the row is sent; the published snapshot stays a pure fold of the log.
 - `open_proposals[].scheduled` (item 4, P2b): from the pending `proposal.scheduled`; cleared by
   `proposal.cancelled`, by the policy's approvals, or by any human `approval.*` on the proposal; the room view
   (`GET /api/rooms/{id}`) leaves it out once `run_at` is more than 45 s in the past; the proposal stays open for manual
@@ -1728,6 +1731,8 @@ driver, agent state, triage, hypothesis text and confidence, open proposals and 
 suggestion count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
 500 ms; a full send buffer closes the socket with a policy-violation status and the client reconnects (it gets a
 fresh `rooms` frame). Clients fall back to polling `GET /api/rooms` when the socket cannot be opened.
+Open proposals in a `room` frame carry `blocked` as `GET /api/rooms` rows do; it is not a separate digest field
+because it follows from the approvals.
 
 ### Runner socket (U0; implemented by A5, runner A9; frames in `internal/setup/protocol/protocol.go`)
 

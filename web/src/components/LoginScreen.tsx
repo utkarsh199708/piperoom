@@ -52,9 +52,7 @@ export function LoginScreen({
           </p>
           {notice && (
             <p role="status" className="m-0 text-xs text-muted-foreground">
-              {notice.kind === 'replaced'
-                ? 'This tab was signed out because someone signed in as another user in a different tab. Sign in again'
-                : 'Your session ended \u2014 sign in'}
+              {'Your session ended — sign in'}
               {notice.title ? ` to return to \u201c${notice.title}\u201d.` : ' to return.'}
             </p>
           )}
