@@ -106,14 +106,13 @@ func TestSoloModeApprovalNeedsConfirm(t *testing.T) {
 		}
 		resp.Body.Close()
 	}
-	// The normal rule is unchanged for everybody else, and their confirm is ignored.
+	// Everybody else is refused outright in solo mode (KAN-612).
 	resp := approve("arjun", pid, `{"layer":"kafka","confirm":"orders/kafka"}`)
-	if resp.StatusCode != http.StatusOK { // arjun owns kafka in the default users.yaml
-		t.Fatalf("arjun (the users.yaml owner) = %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("arjun (not the solo user) = %d, want 401", resp.StatusCode)
 	}
 	resp.Body.Close()
 
-	pid = newProposal("kafka")
 	resp = approve("priya", pid, fmt.Sprintf(`{"layer":%q,"confirm":%q}`, "kafka", "orders/kafka"))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("solo approval with the right confirm = %d", resp.StatusCode)

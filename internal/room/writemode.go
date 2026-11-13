@@ -80,29 +80,39 @@ func (s *Service) markBlocked(ps []Proposal) {
 	}
 }
 
-// ListRow is snap as a list row: the published snapshot with Blocked set the
-// way markBlocked does, on a copy. It returns snap itself when there is
-// nothing to mark and never writes into snap, which every subscriber shares
-// (KAN-596).
+// ListRow is snap as a list row: the published snapshot with a setup member
+// trimmed the way ListRoomsFor does (KAN-602) and Blocked set the way
+// markBlocked does, on a copy. It returns snap itself when there is nothing to
+// change and never writes into snap, which every subscriber shares (KAN-596).
 func (s *Service) ListRow(snap *RoomSnapshot) *RoomSnapshot {
+	row := snap
+	if snap.Setup != nil && !snap.Setup.list {
+		// Shallow copy: trimSetupForList only replaces the Setup pointer.
+		c := *snap
+		trimSetupForList(&c)
+		row = &c
+	}
 	if !s.writeOff {
-		return snap
+		return row
 	}
 	need := false
-	for _, p := range snap.OpenProposals {
+	for _, p := range row.OpenProposals {
 		if p.Blocked == "" && fullyApproved(p) {
 			need = true
 			break
 		}
 	}
 	if !need {
-		return snap
+		return row
 	}
-	// Shallow copy: the only write is Proposal.Blocked, a string, on a cloned slice.
-	c := *snap
-	c.OpenProposals = slices.Clone(snap.OpenProposals)
-	s.markBlocked(c.OpenProposals)
-	return &c
+	if row == snap {
+		c := *snap
+		row = &c
+	}
+	// The only write is Proposal.Blocked, a string, on a cloned slice.
+	row.OpenProposals = slices.Clone(row.OpenProposals)
+	s.markBlocked(row.OpenProposals)
+	return row
 }
 
 // soloFor and autoApproveFor, the mode's solo and auto_approve, are in

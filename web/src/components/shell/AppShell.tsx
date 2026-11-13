@@ -228,8 +228,11 @@ export function AppShell() {
                       (sticky bottom-[--sheet-h]). Without this room at the end of the scroll the composer rests
                       one sheet height over the content (KAN-598). Not on <main>: a scroll container's padding
                       comes off the sticky area too, which lifted the composer by the sheet twice. --sheet-h is
-                      unset, so 0, with no sheet. */}
-                  <div className="min-h-full pb-[var(--sheet-h,0px)]">
+                      unset, so 0, with no sheet.
+                      A flex column, so the room screen can grow (flex-1) to the full height and its composer's
+                      mt-auto sits at the bottom on a short tab; a percentage min-h-full had no height to resolve
+                      against (KAN-603). */}
+                  <div className="flex min-h-full flex-col pb-[var(--sheet-h,0px)]">
                     <Outlet />
                   </div>
                 </main>

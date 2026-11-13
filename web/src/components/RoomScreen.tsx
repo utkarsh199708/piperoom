@@ -450,7 +450,7 @@ export function RoomScreen() {
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
-    <div className="flex min-h-full flex-col text-sm">
+    <div className="flex flex-1 flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && (
         <div
@@ -585,7 +585,9 @@ export function RoomScreen() {
             </Tabs>
           )}
 
-          {unseen > 0 && (
+          {/* The sentinel only lives on the Investigation timeline (or the single wide column), so the pill
+              means nothing on the other tabs and would sit over their last item (KAN-604). */}
+          {unseen > 0 && (wide || tab === 'investigation') && (
             <button
               type="button"
               onClick={jump}

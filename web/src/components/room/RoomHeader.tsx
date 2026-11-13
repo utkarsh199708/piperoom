@@ -303,7 +303,8 @@ export function RoomHeader({
         ))}
       </p>
 
-      {closed && (onExport || onPostmortem) && (
+      {/* The Resolved strip carries these two buttons when it shows (KAN-607); only a room closed with no resolution keeps them here. */}
+      {closed && !state.resolution && (onExport || onPostmortem) && (
         <div className="flex flex-wrap items-center gap-2">
           <ClosedRoomActions onExport={onExport} onPostmortem={onPostmortem} exporting={exporting} />
         </div>

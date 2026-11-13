@@ -115,9 +115,9 @@ describe('LoginScreen — why you are here', () => {
     render(<LoginScreen onPick={vi.fn()} busy={false} notice={{ kind: 'expired', title: 'orders stale' }} />)
     expect(screen.getByText('Your session ended \u2014 sign in to return to \u201corders stale\u201d.')).toBeInTheDocument()
   })
-  it('explains a sign-in in another tab', () => {
-    render(<LoginScreen onPick={vi.fn()} busy={false} notice={{ kind: 'replaced', title: 'orders stale' }} />)
-    expect(screen.getByText(/signed in as another user in a different tab/)).toBeInTheDocument()
+  it('says "to return." when the notice has no title', () => {
+    render(<LoginScreen onPick={vi.fn()} busy={false} notice={{ kind: 'expired' }} />)
+    expect(screen.getByText('Your session ended — sign in to return.')).toBeInTheDocument()
   })
   it('shows nothing without a notice', () => {
     render(<LoginScreen onPick={vi.fn()} busy={false} />)

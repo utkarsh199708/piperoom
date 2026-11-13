@@ -14,7 +14,7 @@ Six agents share one repo on one machine, so **each agent works in its own git w
 never in the main folder:
 
 ```powershell
-cd C:\Users\Utkarsh\Desktop\interview\piperoom
+cd <repo>
 git worktree add ..\piperoom-a2 -b a2/connect-client main   # example for A2
 cd ..\piperoom-a2
 ```
@@ -36,7 +36,7 @@ Agents raise PRs (branch + `READY FOR REVIEW` post, or a GitHub pull request) �
 ```
 [A2] READY FOR REVIEW
 branch: a2/connect-client
-worktree: C:\Users\Utkarsh\Desktop\interview\piperoom-a2
+worktree: <repo>-a2
 what: Connect + Schema Registry clients, 6 tools
 tests: go test ./internal/clients/... ./internal/tools/kafkatools/...  → PASS
        go test -tags integration ./internal/clients/connect/...         → PASS
@@ -59,7 +59,7 @@ thread** of your message:
 - Fix everything, commit to the same branch, reply in the same thread `[A2] READY FOR REVIEW (round 2)`.
   **A round-N post must list every must-fix item from BOTH leads by number** (`LEAD-REVIEW #4: …`,
   `LEAD-ARCH #2: …`) with one line on how it was fixed (or why not). A round that skips items is sent back.
-- Both leads save full reviews in the **main folder**: `C:\Users\Utkarsh\Desktop\interview\piperoom\reviews\`.
+- Both leads save full reviews in the **main folder**: `<repo>\reviews\`.
 - **Every verdict, answer and merge notice @mentions Qoder (`<@U0C8GM1SUVA>`).** Qoder only acts on
   messages that mention it — a verdict without the mention is never seen (lost ~2 h on 2026-10-11).
   Post it as a **top-level** channel message whose first characters are the mention, then your tag:
