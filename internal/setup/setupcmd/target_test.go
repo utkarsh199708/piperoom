@@ -21,8 +21,8 @@ func (f *fakeExec) exec(_ context.Context, name string, args ...string) ([]byte,
 	return nil, 0, nil
 }
 
-// newCatalogue builds the catalogue as Run does (ops.New), with a fake exec.
-func newCatalogue(t *testing.T) (*ops.Registry, *fakeExec) {
+// newExecCatalogue builds the catalogue as Run does (ops.New), with a fake exec.
+func newExecCatalogue(t *testing.T) (*ops.Registry, *fakeExec) {
 	t.Helper()
 	fe := &fakeExec{}
 	reg, err := ops.New(ops.Config{ProjectDir: t.TempDir(), Exec: fe.exec})
@@ -45,7 +45,7 @@ func has(names []string, want ...string) bool {
 // Before a driver is registered the runner's catalogue is the generic ops
 // only: a compose op answers unknown_op. This is the bug (KAN-617).
 func TestCatalogueWithoutDriverKnowsNoDriverOps(t *testing.T) {
-	reg, _ := newCatalogue(t)
+	reg, _ := newExecCatalogue(t)
 	if has(reg.Names(), "compose_ps") {
 		t.Fatal("ops.New alone registered a compose op")
 	}
@@ -59,8 +59,8 @@ func TestCatalogueWithoutDriverKnowsNoDriverOps(t *testing.T) {
 // and an op is run through the driver (it does not answer unknown_op), and the
 // host driver is not registered.
 func TestRegisterTargetCompose(t *testing.T) {
-	reg, _ := newCatalogue(t)
-	if err := targetRegistrar(reg)("compose", nil); err != nil {
+	reg, _ := newExecCatalogue(t)
+	if err := applyTarget(reg, "compose", nil); err != nil {
 		t.Fatalf("register compose: %v", err)
 	}
 	names := reg.Names()
@@ -79,8 +79,8 @@ func TestRegisterTargetCompose(t *testing.T) {
 // A room whose target is host gets the host driver in place of compose (the
 // two are exclusive in one registry).
 func TestRegisterTargetHost(t *testing.T) {
-	reg, _ := newCatalogue(t)
-	if err := targetRegistrar(reg)("host", nil); err != nil {
+	reg, _ := newExecCatalogue(t)
+	if err := applyTarget(reg, "host", nil); err != nil {
 		t.Fatalf("register host: %v", err)
 	}
 	names := reg.Names()
@@ -95,8 +95,8 @@ func TestRegisterTargetHost(t *testing.T) {
 // dbzserver registers the Debezium Server driver next to Compose, whose ops
 // start and read the server's stack.
 func TestRegisterTargetDbzServer(t *testing.T) {
-	reg, _ := newCatalogue(t)
-	if err := targetRegistrar(reg)("dbzserver", nil); err != nil {
+	reg, _ := newExecCatalogue(t)
+	if err := applyTarget(reg, "dbzserver", nil); err != nil {
 		t.Fatalf("register dbzserver: %v", err)
 	}
 	if names := reg.Names(); !has(names, "server_status", "server_properties_write", "compose_up") {
@@ -104,32 +104,38 @@ func TestRegisterTargetDbzServer(t *testing.T) {
 	}
 }
 
-// A target with no driver is refused by name, not left to unknown_op.
+// A target with no driver in this runner is refused by name, not left to
+// unknown_op: an unknown one, strimzi outside the in-cluster Job, and a
+// managed service whose room names no account of its kind.
 func TestRegisterTargetUnsupported(t *testing.T) {
-	for _, target := range []string{"strimzi", "msk", "confluent", "aiven", "embedded", "nonsense"} {
-		reg, _ := newCatalogue(t)
-		err := targetRegistrar(reg)(target, nil)
-		if err == nil || !strings.Contains(err.Error(), target) {
-			t.Errorf("target %q: err = %v, want a refusal naming it", target, err)
+	for _, target := range []string{"strimzi", "msk", "confluent", "aiven", "nonsense"} {
+		reg, _ := newExecCatalogue(t)
+		err := applyTarget(reg, target, nil)
+		if err == nil || !strings.Contains(err.Error(), target) || !errors.Is(err, errTargetUnsupported) {
+			t.Errorf("target %q: err = %v, want errTargetUnsupported naming it", target, err)
 		}
 	}
 }
 
-// Registering the same target again (a pairing retried after a failed
-// handshake) is a no-op; a different target is refused rather than mixing
-// drivers in one registry.
+// Registering the same target again (a reconnect) is a no-op; a different
+// target is refused rather than mixing drivers in one registry.
 func TestTargetRegistrarIdempotent(t *testing.T) {
-	reg, _ := newCatalogue(t)
-	register := targetRegistrar(reg)
-	if err := register("compose", nil); err != nil {
+	reg, _ := newExecCatalogue(t)
+	r := newTargetRegistrar(reg, nil)
+	if err := r.Apply(context.Background(), "r1", "compose", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := register("compose", nil); err != nil {
+	if err := r.Apply(context.Background(), "r1", "compose", nil); err != nil {
 		t.Errorf("second registration of the same target: %v", err)
 	}
-	if err := register("host", nil); err == nil {
-		t.Error("a different target registered into the same registry")
+	if err := r.Apply(context.Background(), "r1", "host", nil); !errors.Is(err, errOtherTarget) {
+		t.Errorf("a different target: err = %v, want errOtherTarget", err)
 	}
+}
+
+// applyTarget registers one room target the way the runner's hook does.
+func applyTarget(reg *ops.Registry, target string, targets []events.SetupTarget) error {
+	return newTargetRegistrar(reg, nil).Apply(context.Background(), "r1", target, targets)
 }
 
 // A driver's class is the highest class of the room targets of its own kind;
@@ -156,7 +162,7 @@ func TestTargetClass(t *testing.T) {
 		{"dbzserver stack takes the higher", []events.SetupTarget{comp(protocol.ClassShared), dbz(protocol.ClassProduction), host(protocol.ClassLocal)}, []string{"compose", "dbzserver"}, protocol.ClassProduction},
 	}
 	for _, tt := range tests {
-		if got := targetClass(tt.targets, tt.kinds...); got != tt.want {
+		if got := highestClass(tt.targets, tt.kinds...); got != tt.want {
 			t.Errorf("%s: class = %q, want %q", tt.name, got, tt.want)
 		}
 	}

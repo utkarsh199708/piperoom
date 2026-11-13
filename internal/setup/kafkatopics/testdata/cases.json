@@ -1,0 +1,17 @@
+[
+ {"name": "dlq under the prefix", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "pg.dlq", "topics": "pg.public.orders", "ok": true},
+ {"name": "dlq with topics.regex", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "pg.dlq", "topics": "", "ok": true},
+ {"name": "dlq under a dotted prefix", "prefix": "prod.orders", "key": "errors.deadletterqueue.topic.name", "topic": "prod.orders.dlq", "topics": "prod.orders.public.t", "ok": true},
+ {"name": "dlq under the first segment of a dotted prefix", "prefix": "prod.orders", "key": "errors.deadletterqueue.topic.name", "topic": "prod.dlq", "topics": "prod.orders.public.t", "ok": false},
+ {"name": "dlq off the prefix", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "payments.dlq", "topics": "pg.public.orders", "ok": false},
+ {"name": "dlq that is a read topic", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "pg.public.orders", "topics": "pg.public.orders", "ok": false},
+ {"name": "dlq the bare prefix", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "pg.", "topics": "", "ok": false},
+ {"name": "dlq a prefix lookalike", "prefix": "pg", "key": "errors.deadletterqueue.topic.name", "topic": "pgx.dlq", "topics": "", "ok": false},
+ {"name": "history under the prefix", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "pg.history", "ok": true},
+ {"name": "history schemahistory.<prefix>", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "schemahistory.pg", "ok": true},
+ {"name": "history schemahistory.<prefix>.<name>", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "schemahistory.pg.inventory", "ok": true},
+ {"name": "history schemahistory.<other>", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "schemahistory.payments", "ok": false},
+ {"name": "history schemahistory.<prefix lookalike>", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "schemahistory.pgx", "ok": false},
+ {"name": "history off the prefix", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "payments.history", "ok": false},
+ {"name": "history the bare prefix", "prefix": "pg", "key": "schema.history.internal.kafka.topic", "topic": "pg", "ok": false}
+]

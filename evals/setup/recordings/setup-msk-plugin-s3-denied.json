@@ -1,0 +1,180 @@
+{
+ "scenario": "setup/msk-plugin-s3-denied",
+ "source": "postgres",
+ "target": "msk",
+ "sink": "none",
+ "recorded_at": "2026-10-30T10:10:00Z",
+ "note": "Composed from the managed ops' own summaries and Data (internal/setup/targets/managed) over the hand-written cassettes of internal/setup/targets/managed/testdata, on the scenario's fixed clock. No sandbox account was used and no runner ran: re-record per evals/scenarios/README.md, Setup scenarios: managed targets (U13e). Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC.",
+ "ops": [
+  {
+   "op": "msk_describe_cluster",
+   "tier": "T0",
+   "class": "shared",
+   "params": {},
+   "result": {
+    "ok": true,
+    "summary": "MSK cluster demo is ACTIVE, Kafka 3.6.0, 2 subnets, IAM listener on",
+    "data": {
+     "arn": "arn:aws:kafka:us-east-1:000000000000:cluster/demo/0a1b2c3d-4e5f-6789-abcd-ef0123456789-1",
+     "name": "demo",
+     "type": "PROVISIONED",
+     "state": "ACTIVE",
+     "kafka_version": "3.6.0",
+     "subnets": [
+      "subnet-0a1b2c3d4e5f60001",
+      "subnet-0a1b2c3d4e5f60002"
+     ],
+     "security_groups": [
+      "sg-0a1b2c3d4e5f60001"
+     ],
+     "bootstrap_iam": "scrubbed.amazonaws.com:9098,scrubbed.amazonaws.com:9098"
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aws:000000000000/us-east-1",
+     "exit_code": 0,
+     "at": "2026-10-30T10:04:02Z",
+     "took_ms": 412,
+     "out_mac": "f23e9e41c316850328445dc48b6881ed0221b35d8047fcdbea8ef573fa514da8"
+    }
+   }
+  },
+  {
+   "op": "msk_plugin_object_check",
+   "tier": "T0",
+   "class": "shared",
+   "params": {
+    "bucket": "piperoom-plugins-0",
+    "key": "plugins/debezium-connector-postgres-2.7.3.zip",
+    "expected_size": 48213977
+   },
+   "result": {
+    "ok": false,
+    "summary": "failed msk_plugin_object_check: mskconnect: access denied: head object: Forbidden",
+    "data": {
+     "error_class": "forbidden",
+     "hint": "the runner's identity needs s3:GetObject on the plugin object, and so does the MSK Connect service when it builds the plugin"
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aws:000000000000/us-east-1",
+     "exit_code": 0,
+     "at": "2026-10-30T10:05:11Z",
+     "took_ms": 96,
+     "out_mac": "6305e026f0ccf3b7f39b9db71c19795af129acfe0858252f8999976d462c0cfd"
+    }
+   }
+  },
+  {
+   "op": "msk_create_plugin",
+   "tier": "T2",
+   "class": "shared",
+   "params": {
+    "name": "debezium-pg",
+    "bucket": "piperoom-plugins-0",
+    "key": "plugins/debezium-connector-postgres-2.7.3.zip",
+    "version": "3HL4kqtJlcpXroDTDmJ.rmSpXd3dIbrHY",
+    "content_type": "ZIP",
+    "expected_size": 48213977
+   },
+   "result": {
+    "ok": false,
+    "summary": "refused msk_create_plugin: the plugin archive check failed",
+    "data": {
+     "error_class": "forbidden",
+     "hint": "the runner's identity needs s3:GetObject on the plugin object, and so does the MSK Connect service when it builds the plugin"
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aws:000000000000/us-east-1",
+     "exit_code": 0,
+     "at": "2026-10-30T10:06:30Z",
+     "took_ms": 88,
+     "out_mac": "d53b0b000be1e5818259c53cca9cbf57d0964e76deee281712cf2a85eb2e3b10"
+    }
+   },
+   "proposal_id": "pr_orders_msk_plugin",
+   "step_index": 0,
+   "params_hash": "6aaf9a0d273456b79a0fc024edf41611f3b797b46ac352b0b67d11e8cccdd2fe"
+  }
+ ],
+ "ladder": {
+  "plan_id": "pl_orders_msk_setup",
+  "nonce_hash": "6f3e3f3657937d28053f7a4ed4514808beda6219e9916e40af2dd7285000455e",
+  "reads": [
+   {
+    "tool": "msk_describe_connector",
+    "error": "mskconnect: not found: connector \"orders-msk-connector\""
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "debezium_metrics",
+    "error": "debezium_metrics: no metrics for orders-msk-connector"
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "kafka_find_by_key",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "schema_registry_subjects",
+    "data": {
+     "subjects": [],
+     "deleted_subjects": []
+    }
+   }
+  ],
+  "table": "public.orders",
+  "example_sql": "INSERT INTO public.orders (customer_id, amount, status) VALUES (42, 4250, 'packed');",
+  "verified": {
+   "rungs": [
+    {
+     "name": "connector_running",
+     "note": "the read msk_describe_connector failed: mskconnect: not found: connector \"orders-msk-connector\"",
+     "ok": false
+    },
+    {
+     "name": "tasks_running",
+     "note": "MSK Connect reports no per-task state; rung 1 reads the connector's state",
+     "ok": true
+    },
+    {
+     "name": "canary_topic",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "snapshot_complete",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_event",
+     "note": "the read kafka_find_by_key failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_subject",
+     "note": "no subject under the canary topic's prefix yet",
+     "ok": false
+    },
+    {
+     "name": "sink_row",
+     "note": "no sink was set up",
+     "ok": true
+    },
+    {
+     "name": "person_change",
+     "note": "awaiting the person's change",
+     "ok": false
+    }
+   ]
+  }
+ }
+}

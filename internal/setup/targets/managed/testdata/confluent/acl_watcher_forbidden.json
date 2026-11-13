@@ -1,0 +1,42 @@
+{
+  "provider": "confluent",
+  "name": "acl_watcher_forbidden",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"DESCRIBE\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "8ef82c13bb335a9cf512611b2034a9b2d311a0ee497aaf07c68421a87d307629",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "POST",
+        "path": "/kafka/v3/clusters/lkc-00000/acls",
+        "body": "{\"host\":\"*\",\"operation\":\"READ\",\"pattern_type\":\"PREFIXED\",\"permission\":\"ALLOW\",\"principal\":\"User:sa-00000\",\"resource_name\":\"orders.\",\"resource_type\":\"TOPIC\"}",
+        "body_sha256": "ee6f9f0dccea65e63e86bc67ae055d61e8911d26dcafc5f16f586d38ebf5e2aa",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"error_code\":40301,\"message\":\"Request is not authorized\"}"
+      }
+    }
+  ]
+}

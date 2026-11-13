@@ -3,7 +3,9 @@ package room
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -76,10 +78,14 @@ type runnerKey struct {
 // never logged and never leaves the registry except to the one caller that
 // issued it.
 type pairingCode struct {
-	code     string
-	tenant   string
-	roomID   string
-	creator  events.Actor
+	code    string
+	tenant  string
+	roomID  string
+	creator events.Actor
+	// nonce is drawn with the code and kept with it, never shown: it makes
+	// the pairing fingerprint (SetupFingerprint) impossible to precompute
+	// from the room's public fields.
+	nonce    string
 	expires  time.Time
 	attempts int
 }
@@ -117,6 +123,9 @@ type PairResult struct {
 	Tenant  string
 	RoomID  string
 	Creator events.Actor
+	// Nonce is the code's fingerprint nonce, set on Outcome ok only. It is
+	// never logged and never in an event.
+	Nonce string
 }
 
 // emitFunc writes one setup.* audit event. roomID may be "" when the attempt
@@ -186,6 +195,10 @@ func (r *RunnerRegistry) IssuePairingCode(tenant, roomID string, creator events.
 	if err != nil {
 		return "", fmt.Errorf("room: issue pairing code: %w", err)
 	}
+	var raw [16]byte
+	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
+		return "", fmt.Errorf("room: issue pairing code: drawing the fingerprint nonce: %w", err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
@@ -193,7 +206,7 @@ func (r *RunnerRegistry) IssuePairingCode(tenant, roomID string, creator events.
 	r.pruneCodesLocked(now)
 	r.codes[code] = &pairingCode{
 		code: code, tenant: tenant, roomID: roomID, creator: creator,
-		expires: now.Add(protocol.CodeTTL),
+		nonce: hex.EncodeToString(raw[:]), expires: now.Add(protocol.CodeTTL),
 	}
 	return code, nil
 }
@@ -282,7 +295,28 @@ func (r *RunnerRegistry) PairCode(ctx context.Context, code, source string) (Pai
 	// between Welcome and Hello may retry up to maxCodeAttempts times. A
 	// room's one runner is enforced in Attach.
 	r.audit(ctx, pc.roomID, events.PairingOK, source, "")
-	return PairResult{Outcome: events.PairingOK, Tenant: pc.tenant, RoomID: pc.roomID, Creator: pc.creator}, nil
+	return PairResult{Outcome: events.PairingOK, Tenant: pc.tenant, RoomID: pc.roomID, Creator: pc.creator, Nonce: pc.nonce}, nil
+}
+
+// codeNonce is the fingerprint nonce of a live code, or "" when the code is
+// unknown or expired.
+func (r *RunnerRegistry) codeNonce(code string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pc := r.lookupCode(code); pc != nil && r.now().Before(pc.expires) {
+		return pc.nonce
+	}
+	return ""
+}
+
+// SetupFingerprint is the pairing fingerprint of docs/api.md (POST /api/setup)
+// and protocol.Welcome: the first 12 hex characters of SHA-256 over the
+// public origin, room id, pipeline id, creator id and the code's nonce, one
+// per line. The person compares the value the runner shows with the Set up
+// card; the runner never computes it.
+func SetupFingerprint(publicOrigin, roomID, pipelineID, creatorID, nonce string) string {
+	sum := sha256.Sum256([]byte(publicOrigin + "\n" + roomID + "\n" + pipelineID + "\n" + creatorID + "\n" + nonce))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // lookupCode finds a live code by constant-time comparison against every

@@ -1,0 +1,54 @@
+{
+  "provider": "aws",
+  "name": "describe_connector_creating",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the AWS SDK for Go v2 shapes (kafkaconnect v1.33.0, kafka v1.56.0, ec2 v1.317.0, iam v1.56.0, s3 v1.106.0, sts v1.45.0); requests as the managed ops send them through mskconnect; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/",
+        "body": "Action=GetCallerIdentity&Version=2011-06-15",
+        "body_sha256": "ab821ae955788b0e33ebd34c208442ccfc2d406e2edc5e7a39bd6458fbb4f843",
+        "headers": {
+          "Content-Type": "application/x-www-form-urlencoded"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "text/xml"
+        },
+        "body": "<GetCallerIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><GetCallerIdentityResult><Arn>arn:aws:sts::000000000000:assumed-role/PiperoomSetup/piperoom-runner</Arn><UserId>AROAEXAMPLEROLE:piperoom-runner</UserId><Account>000000000000</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ResponseMetadata></GetCallerIdentityResponse>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/connectors",
+        "query": "connectorNamePrefix=it_orders&maxResults=100"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connectors\":[{\"connectorArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders/0a1b2c3d-4e5f-6789-abcd-ef0123456789-2\",\"connectorName\":\"it_orders\",\"connectorState\":\"RUNNING\"}]}"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "path": "/v1/connectors/arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders/0a1b2c3d-4e5f-6789-abcd-ef0123456789-2"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connectorArn\":\"arn:aws:kafkaconnect:us-east-1:000000000000:connector/it_orders/0a1b2c3d-4e5f-6789-abcd-ef0123456789-2\",\"connectorConfiguration\":{\"connector.class\":\"io.debezium.connector.postgresql.PostgresConnector\",\"database.hostname\":\"10.0.3.15\",\"database.password\":\"REDACTED\",\"topic.prefix\":\"orders\"},\"connectorName\":\"it_orders\",\"connectorState\":\"CREATING\",\"currentVersion\":\"K3AEGXETSR30VB\",\"kafkaConnectVersion\":\"2.7.1\",\"logDelivery\":{\"workerLogDelivery\":{\"cloudWatchLogs\":{\"enabled\":true,\"logGroup\":\"/piperoom/it_orders\"}}}}"
+      }
+    }
+  ]
+}

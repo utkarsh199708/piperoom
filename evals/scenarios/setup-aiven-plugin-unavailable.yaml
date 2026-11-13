@@ -1,0 +1,152 @@
+# C7 setup scenario (U13e): an Aiven setup names the Debezium PostgreSQL connector class, but the
+# Kafka Connect service the person pointed the room at (connect-0) does not offer it: its
+# available connectors list Debezium for MySQL and the Aiven JDBC sink, not Debezium for
+# PostgreSQL. aiven_create_connector checks the class against that list and refuses before any
+# create. The label names the failing step and the fix (Jira KAN-5 rows U13d, U13e; design
+# docs/design/setup-managed.md §3.3). Format: evals/README.md (C6).
+#
+# RECORDED: NO. No sandbox account was used. The runner session (evals/setup/recordings/
+# setup-aiven-plugin-unavailable.json) is composed from the managed ops' summaries and Data over
+# the hand-written cassettes of internal/setup/targets/managed/testdata/aiven
+# (create_plugin_unavailable.json is this refusal). The shape of Aiven's available-connectors
+# response is unconfirmed (internal/clients/aiven reads "plugins"[]); the manual sandbox run
+# confirms it. The room's connect_plugins reads the Connect service's own REST API (design §7:
+# today's REST client over basic auth), so its summary follows kafkatools' connect_plugins
+# format. Clock: 2026-10-30T13:10:00Z. To re-record on the sandbox, see
+# evals/scenarios/README.md, "Setup scenarios: managed targets (U13e)".
+#
+# Timeline: 13:00 the setup room for orders-av (aiven target project-0/connect-0). 13:03
+#   aiven_service_get: connect-0 is a kafka_connect service, RUNNING, plan startup-4. 13:04
+#   aiven_integration_create kafka-0 -> connect-0 (T2). 13:06 aiven_create_connector (T2,
+#   approved) refused: io.debezium.connector.postgresql.PostgresConnector is not an available
+#   plugin on connect-0; available sources: io.debezium.connector.mysql.MySqlConnector. Nothing
+#   was created. 13:08 the ladder: rung connector_running red (no connector).
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the Connect service's
+#   plugin set).
+#
+# Expected label: failing step aiven_create_connector (plugin not available on connect-0); fix: a
+#   Kafka Connect service that offers the Debezium PostgreSQL connector (the person enables it on
+#   the service or picks another service; which Aiven setting or plan governs the list is not
+#   confirmed - a documented ask), then aiven_create_connector again (T2). No room action, so
+#   there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_delete_connector - there is no connector.
+#   Forbidden: schema_register, schema_set_compatibility - nothing was produced.
+#
+# Traps:
+#   - The Connect service is RUNNING and integrated with Kafka: the service is fine, its plugin
+#     set is not.
+#   - Debezium is installed - for MySQL. A hypothesis that names "Debezium is missing" is close but
+#     not the cause; the PostgreSQL connector class is.
+#
+# Sources:
+#   - internal/setup/targets/managed/aiven.go: createConnector's refusal "<class> is not an
+#     available plugin on <service>; available sources: ...".
+#   - aiven/aiven-client client.py: get_available_kafka_connectors
+#     (GET /project/{project}/service/{service}/available-connectors).
+#   - internal/tools/kafkatools/connect_plugins.go: the connect_plugins summary format.
+
+name: setup/aiven-plugin-unavailable
+description: |
+  The person set up orders-av on Aiven (project project-0, Kafka Connect service connect-0,
+  integrated with the Kafka service kafka-0). The approved aiven_create_connector step refused:
+  io.debezium.connector.postgresql.PostgresConnector is not an available plugin on connect-0; the
+  service offers io.debezium.connector.mysql.MySqlConnector and the Aiven JDBC sink. Nothing was
+  created, and the ladder's first rung is red.
+
+  Root cause: the Kafka Connect service connect-0 does not offer the Debezium PostgreSQL
+  connector plugin, so the connector cannot be created there.
+
+  Expected label: failing step aiven_create_connector (plugin not available); fix: a Connect
+  service that offers the Debezium PostgreSQL connector (a documented ask), then
+  aiven_create_connector again (T2).
+
+setup:
+  source_kind: postgres
+  target: aiven
+
+pipeline:
+  id: orders-av
+  title: Orders CDC (Aiven)
+  topic_prefix: orders
+  source_tables: [public.orders]
+  connectors: [orders-av-connector]
+
+resources:
+  connectors: [orders-av-connector]
+  subjects: [orders.public.orders-key, orders.public.orders-value]
+
+alert:
+  title: 'orders-av setup: step aiven_create_connector refused; verification red at rung connector_running'
+  pipeline_map: |
+    pipeline orders-av
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] UNKNOWN
+    2 connect:orders-av-connector [kafka-connect, owner arjun] UNKNOWN
+      from: pg:public.orders
+    3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+      from: connect:orders-av-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-av}
+    summary: |
+      pipeline orders-av
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] UNKNOWN
+      2 connect:orders-av-connector [kafka-connect, owner arjun] UNKNOWN
+        from: pg:public.orders
+      3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+        from: connect:orders-av-connector
+  - tool: connect_plugins
+    summary: |-
+      Kafka 3.8.1: 4 plugins
+      2 source, 1 sink, 1 converter
+      - source io.debezium.connector.mysql.MySqlConnector 2.7.3.Final
+      - source org.apache.kafka.connect.mirror.MirrorSourceConnector 3.8.1
+      - sink io.aiven.connect.jdbc.JdbcSinkConnector 6.10.0
+      - converter org.apache.kafka.connect.json.JsonConverter 3.8.1
+  - tool: connect_status
+    input: {connector: orders-av-connector}
+    error: 'connect: GET /connectors/orders-av-connector/status: not found'
+  - tool: kafka_topic_offsets
+    input: {topic: orders.public.orders}
+    error: 'kafka: topic orders.public.orders: not found'
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-av (0 past rooms searched).
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-av"; read tools only work on the room''s own pipeline'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The create step on Aiven was refused and nothing got created. The Connect service is running and joined to Kafka. Why can't it create the connector?"
+
+expect:
+  root_cause:
+    - [postgresconnector, postgresql connector, postgres connector, debezium postgres*, postgres plugin, postgresql plugin]
+    - [not available, unavailable, missing, not offered, not installed, does not offer, lacks]
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [database, down]
+    - [network, unreachable]
+    - [acl*, not authorized]
+    - [token, expired]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_no_pg_plugin
+      tool: connect_plugins
+      match: [io debezium connector mysql, io aiven connect jdbc]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_no_pg_plugin]
+  evidence_tools: [connect_plugins]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

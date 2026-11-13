@@ -931,6 +931,8 @@ export interface CreateSetupResponse {
   code: string
   expires_at: string
   command: string
+  /** 12 hex characters the runner shows in its Welcome block; the person compares the two. */
+  fingerprint?: string
 }
 
 /** The document's snapshot shape of a setup room (`setup` on the room GET; absent on list rows). */

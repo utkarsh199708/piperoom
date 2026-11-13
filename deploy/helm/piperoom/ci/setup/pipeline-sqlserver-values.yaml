@@ -1,0 +1,6 @@
+# An overlay on pipeline-values.yaml (golden.sh passes both): the same
+# pipeline release for a SQL Server source, whose canary topic carries the
+# database (setup.pipeline.sourceDatabase).
+setup:
+  pipeline:
+    sourceDatabase: shop

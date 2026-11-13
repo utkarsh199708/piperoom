@@ -71,7 +71,7 @@ func TestRegisterTargetRunsBeforeHello(t *testing.T) {
 
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
-		RegisterTarget: func(target string, targets []events.SetupTarget) error {
+		RegisterTargets: func(_ context.Context, _, target string, targets []events.SetupTarget) error {
 			calls.Add(1)
 			gotTarget, gotTargets = target, targets
 			return nil
@@ -87,7 +87,7 @@ func TestRegisterTargetRunsBeforeHello(t *testing.T) {
 	}
 	<-done
 	if calls.Load() != 1 || gotTarget != "compose" {
-		t.Fatalf("RegisterTarget calls = %d, target %q; want 1 and compose", calls.Load(), gotTarget)
+		t.Fatalf("RegisterTargets calls = %d, target %q; want 1 and compose", calls.Load(), gotTarget)
 	}
 	if len(gotTargets) != 1 || gotTargets[0].Class != "shared" {
 		t.Errorf("targets = %+v, want the Welcome's", gotTargets)
@@ -97,10 +97,12 @@ func TestRegisterTargetRunsBeforeHello(t *testing.T) {
 	}
 }
 
-// A Welcome with no target (a server older than 1.2, or a room without one)
-// never calls RegisterTarget: the catalogue stays as it was.
-func TestRegisterTargetNotCalledWithoutTarget(t *testing.T) {
+// A Welcome with no target (a server older than 1.2) still reaches the hook,
+// with target "": the registrar then infers the driver from the targets'
+// kinds, as it did before 1.2.
+func TestRegisterTargetsWithoutTarget(t *testing.T) {
 	var calls atomic.Int32
+	var gotTarget = "unset"
 	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
 		if _, err := welcomeWith(conn, ctx, "", nil); err != nil {
 			t.Errorf("handshake: %v", err)
@@ -110,7 +112,11 @@ func TestRegisterTargetNotCalledWithoutTarget(t *testing.T) {
 
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
-		RegisterTarget: func(string, []events.SetupTarget) error { calls.Add(1); return nil },
+		RegisterTargets: func(_ context.Context, _, target string, _ []events.SetupTarget) error {
+			calls.Add(1)
+			gotTarget = target
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -121,8 +127,8 @@ func TestRegisterTargetNotCalledWithoutTarget(t *testing.T) {
 		t.Fatalf("Run = %v", err)
 	}
 	<-done
-	if calls.Load() != 0 {
-		t.Fatalf("RegisterTarget called %d times for a Welcome with no target", calls.Load())
+	if calls.Load() != 1 || gotTarget != "" {
+		t.Fatalf("RegisterTargets calls = %d, target %q; want 1 and \"\"", calls.Load(), gotTarget)
 	}
 }
 
@@ -142,7 +148,7 @@ func TestRegisterTargetErrorRefusesPairing(t *testing.T) {
 	var out strings.Builder
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: &out, Log: quiet(),
-		RegisterTarget: func(target string, _ []events.SetupTarget) error {
+		RegisterTargets: func(_ context.Context, _, target string, _ []events.SetupTarget) error {
 			return errors.New("no setup driver for target " + target)
 		},
 	})

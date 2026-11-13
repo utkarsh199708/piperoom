@@ -1,0 +1,528 @@
+{
+  "scenario": "setup/binlog-statement",
+  "source": "mysql",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-29T09:40:00Z",
+  "note": "Composed from the U2a MySQL driver's reads (internal/setup/sources/mysql: Reader.Settings, TableReplication and RoleInfo, recorded under the remote clients' source op names source_settings, source_table_replication and source_role_info with the Q8 client's DTOs), the driver's writer (CreateCanaryTable) and ConnectorConfig, the compose driver's summaries and the ladder's notes, on the fixed clock of the U2c scenarios. The `debezium` user exists in the mysql profile, so no source_create_read_role. Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC. No Docker session: re-record on the mysql profile per evals/scenarios/README.md, Setup scenarios: MySQL (U2c).",
+  "ops": [
+    {
+      "op": "env_detect",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "linux/amd64; docker on PATH",
+        "data": {
+          "os": "linux",
+          "arch": "amd64",
+          "project_dir": "/home/priya/shop",
+          "project_files": [],
+          "tools": [
+            "docker"
+          ]
+        },
+        "receipt": {
+          "kind": "",
+          "target": "/home/priya/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:10:01Z",
+          "took_ms": 12,
+          "out_mac": "50cf0eb42a5a57056343c4b6b0d176deea18c84eafdee0108bab453a3d1381d3"
+        }
+      }
+    },
+    {
+      "op": "compose_write",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "bb3269dcbabdc9c465c4578c259d390a9550cdd189436cab211d737fb468e2c6",
+      "params": {
+        "templates": [
+          "kafka-kraft",
+          "connect",
+          "registry"
+        ],
+        "project": "piperoom-shop",
+        "file": "compose.yaml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "wrote compose.yaml (3120 bytes), services: connect, kafka, schema-registry",
+        "data": {
+          "file": "compose.yaml",
+          "bytes": 3120,
+          "changed": true,
+          "services": [
+            "connect",
+            "kafka",
+            "schema-registry"
+          ]
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "compose.yaml",
+          "exit_code": 0,
+          "at": "2026-10-29T09:10:24Z",
+          "took_ms": 7,
+          "out_mac": "92845fb2d2eea8f35bb6a110eed5ce22fd5a1993de819b2e490ec18ae378332b"
+        }
+      }
+    },
+    {
+      "op": "compose_up",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "b981f31ffbc87c8c2a36f0c0029654fdb48587b4f31503b1b761f02030082361",
+      "params": {
+        "file": "compose.yaml"
+      },
+      "result": {
+        "ok": true,
+        "summary": "compose up: connect (healthy), kafka (healthy), schema-registry (healthy)",
+        "data": {
+          "project": "piperoom-shop",
+          "services": [
+            {
+              "service": "connect",
+              "state": "running",
+              "health": "healthy"
+            },
+            {
+              "service": "kafka",
+              "state": "running",
+              "health": "healthy"
+            },
+            {
+              "service": "schema-registry",
+              "state": "running",
+              "health": "healthy"
+            }
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": [
+            "docker",
+            "compose",
+            "--project-directory",
+            "/home/priya/shop",
+            "-f",
+            "compose.yaml",
+            "--env-file",
+            ".env",
+            "up",
+            "-d",
+            "--wait"
+          ],
+          "target": "piperoom-shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:11:52Z",
+          "took_ms": 81344,
+          "out_mac": "251a9d1b053087ff77b011f6740204d696bf59ba078fbf2c3f0469300279cd0f"
+        }
+      }
+    },
+    {
+      "op": "source_settings",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "MySQL 8.4.13; log_bin=ON, binlog_format=ROW, binlog_row_image=FULL, gtid_mode=ON, server_id=223344, binlog_expire_logs_seconds=86400",
+        "data": [
+          {
+            "name": "version",
+            "value": "8.4.13"
+          },
+          {
+            "name": "log_bin",
+            "value": "ON"
+          },
+          {
+            "name": "binlog_format",
+            "value": "ROW"
+          },
+          {
+            "name": "binlog_row_image",
+            "value": "FULL"
+          },
+          {
+            "name": "gtid_mode",
+            "value": "ON"
+          },
+          {
+            "name": "enforce_gtid_consistency",
+            "value": "ON"
+          },
+          {
+            "name": "server_id",
+            "value": "223344"
+          },
+          {
+            "name": "binlog_expire_logs_seconds",
+            "value": "86400",
+            "unit": "s"
+          },
+          {
+            "name": "binlog_expire_logs_auto_purge",
+            "value": "ON"
+          },
+          {
+            "name": "lower_case_table_names",
+            "value": "0"
+          }
+        ],
+        "receipt": {
+          "kind": "sql",
+          "target": "mysql:3306/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:12:10Z",
+          "took_ms": 18,
+          "out_mac": "2586d44c4429d026b8d5e46cbba404b323274ba5c2b4b9de874d0fcba5f03401"
+        }
+      }
+    },
+    {
+      "op": "source_table_replication",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "tables": [
+          "shop.orders",
+          "shop.order_items"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "shop.orders: primary key, InnoDB; shop.order_items: primary key, InnoDB",
+        "data": [
+          {
+            "table": "shop.orders",
+            "has_primary_key": true,
+            "engine": "InnoDB"
+          },
+          {
+            "table": "shop.order_items",
+            "has_primary_key": true,
+            "engine": "InnoDB"
+          }
+        ],
+        "receipt": {
+          "kind": "sql",
+          "target": "mysql:3306/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:12:11Z",
+          "took_ms": 14,
+          "out_mac": "4ebbaf4edb6b8c04cf4636b8e0808755090a9e42572aafbaf001ab62bf9fd85f"
+        }
+      }
+    },
+    {
+      "op": "source_role_info",
+      "tier": "T0",
+      "class": "local",
+      "params": {
+        "role": "debezium",
+        "tables": [
+          "shop.orders",
+          "shop.order_items"
+        ]
+      },
+      "result": {
+        "ok": true,
+        "summary": "user debezium (debezium@%): exists, can log in, REPLICATION SLAVE and REPLICATION CLIENT; RELOAD, SHOW DATABASES; SELECT on shop.orders, shop.order_items",
+        "data": {
+          "role": "debezium",
+          "exists": true,
+          "can_login": true,
+          "replication": true,
+          "selectable": {
+            "shop.orders": true,
+            "shop.order_items": true
+          },
+          "accounts": [
+            "debezium@%"
+          ],
+          "privileges": {
+            "LOCK TABLES": false,
+            "RELOAD": true,
+            "REPLICATION CLIENT": true,
+            "REPLICATION SLAVE": true,
+            "SHOW DATABASES": true
+          }
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "mysql:3306/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:12:12Z",
+          "took_ms": 21,
+          "out_mac": "6e293fdc07cddd13ccdc9b321d70e96b33124930a576580b5ec017c870588c98"
+        }
+      }
+    },
+    {
+      "op": "source_create_canary_table",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_3",
+      "step_index": 0,
+      "params_hash": "1d2ce46ac7ac7816753b136be00b0d96ee5c12d922d5f181c49f786ee835dc1d",
+      "params": {
+        "table": "shop.piperoom_canary"
+      },
+      "result": {
+        "ok": true,
+        "summary": "created shop.piperoom_canary (nonce primary key, InnoDB)",
+        "data": {
+          "table": "shop.piperoom_canary"
+        },
+        "receipt": {
+          "kind": "sql",
+          "target": "mysql:3306/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:15:02Z",
+          "took_ms": 64,
+          "out_mac": "221cdd2fd61e1dadd121ac211c15c868982234533c57c91d07cc0355b390f233"
+        }
+      }
+    },
+    {
+      "op": "connect_create_connector",
+      "tier": "T2",
+      "class": "local",
+      "proposal_id": "p_setup_4",
+      "step_index": 0,
+      "params_hash": "5ad7afc61a098da1d34862edb2d913ee7d421e204b7222baae5892d418e3bb95",
+      "params": {
+        "connector": "orders-mysql",
+        "config": {
+          "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+          "database.hostname": "mysql",
+          "database.include.list": "shop",
+          "database.password": "${secret:source_read_debezium}",
+          "database.port": "3306",
+          "database.server.id": "5401",
+          "database.user": "debezium",
+          "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+          "schema.history.internal.kafka.topic": "schema-history.shop",
+          "table.include.list": "shop.orders,shop.order_items,shop.piperoom_canary",
+          "tasks.max": "1",
+          "topic.prefix": "shop"
+        }
+      },
+      "result": {
+        "ok": true,
+        "summary": "created orders-mysql (RUNNING, 1 task)",
+        "data": {
+          "connector": "orders-mysql",
+          "state": "RUNNING",
+          "tasks": 1
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "http://127.0.0.1:8083/connectors",
+          "exit_code": 0,
+          "at": "2026-10-29T09:20:03Z",
+          "took_ms": 388,
+          "out_mac": "30cfef4c3c74bcfa327fa33ea38c0cd6e5e81c0cc4578f37d178c1c3f7f085ee"
+        }
+      }
+    },
+    {
+      "op": "source_settings",
+      "tier": "T0",
+      "class": "local",
+      "params": {},
+      "result": {
+        "ok": true,
+        "summary": "MySQL 8.4.13; log_bin=ON, binlog_format=STATEMENT, binlog_row_image=FULL, gtid_mode=ON, server_id=223344, binlog_expire_logs_seconds=86400",
+        "data": [
+          {
+            "name": "version",
+            "value": "8.4.13"
+          },
+          {
+            "name": "log_bin",
+            "value": "ON"
+          },
+          {
+            "name": "binlog_format",
+            "value": "STATEMENT"
+          },
+          {
+            "name": "binlog_row_image",
+            "value": "FULL"
+          },
+          {
+            "name": "gtid_mode",
+            "value": "ON"
+          },
+          {
+            "name": "enforce_gtid_consistency",
+            "value": "ON"
+          },
+          {
+            "name": "server_id",
+            "value": "223344"
+          },
+          {
+            "name": "binlog_expire_logs_seconds",
+            "value": "86400",
+            "unit": "s"
+          },
+          {
+            "name": "binlog_expire_logs_auto_purge",
+            "value": "ON"
+          },
+          {
+            "name": "lower_case_table_names",
+            "value": "0"
+          }
+        ],
+        "receipt": {
+          "kind": "sql",
+          "target": "mysql:3306/shop",
+          "exit_code": 0,
+          "at": "2026-10-29T09:40:00Z",
+          "took_ms": 17,
+          "out_mac": "a2df5d8103cd9c9e53f558b33092b80205e575273394f106b2ce4640a72bb38e"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_mysql_setup",
+    "nonce_hash": "6b361cf2aea08483667ff25b7de727727a0347c552b635597dec81ef4685200d",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "orders-mysql",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "RUNNING"
+            }
+          ]
+        },
+        "at": "2026-10-29T09:39:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {
+          "name": "orders-mysql",
+          "state": "RUNNING",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "RUNNING"
+            }
+          ]
+        },
+        "at": "2026-10-29T09:39:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {
+          "topic": "shop.shop.piperoom_canary",
+          "partitions": [
+            {
+              "partition": 0,
+              "start": 0,
+              "end": 1
+            }
+          ],
+          "total_records": 1
+        },
+        "at": "2026-10-29T09:39:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {
+          "connector": "orders-mysql",
+          "metrics_found": 12,
+          "snapshot": {
+            "SnapshotCompleted": 1,
+            "SnapshotRunning": 0
+          }
+        },
+        "at": "2026-10-29T09:39:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {
+          "topic": "shop.shop.piperoom_canary",
+          "key": "4f2a9c71e0b85d36a1c7e2f09b4d8a65",
+          "found": false
+        },
+        "at": "2026-10-29T09:39:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {
+          "subjects": [
+            "shop.shop.piperoom_canary-key",
+            "shop.shop.piperoom_canary-value"
+          ],
+          "deleted_subjects": []
+        },
+        "at": "2026-10-29T09:39:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {
+          "name": "connector_running",
+          "ok": true,
+          "note": "the connector is RUNNING"
+        },
+        {
+          "name": "tasks_running",
+          "ok": true,
+          "note": "1 task(s) RUNNING"
+        },
+        {
+          "name": "canary_topic",
+          "ok": true,
+          "note": "the topic exists with 1 partition(s)"
+        },
+        {
+          "name": "snapshot_complete",
+          "ok": true,
+          "note": "SnapshotCompleted"
+        },
+        {
+          "name": "canary_event",
+          "ok": false,
+          "note": "no record with the canary key yet"
+        },
+        {
+          "name": "canary_subject",
+          "ok": true,
+          "note": "2 subject(s) under the canary topic's prefix"
+        },
+        {
+          "name": "sink_row",
+          "ok": true,
+          "note": "no sink was set up"
+        },
+        {
+          "name": "person_change",
+          "ok": false,
+          "note": "awaiting the person's change"
+        }
+      ]
+    },
+    "table": "shop.orders",
+    "example_sql": "INSERT INTO shop.orders (customer_id, amount, status) VALUES (42, 42.50, 'packed');"
+  }
+}

@@ -1,0 +1,187 @@
+{
+ "scenario": "setup/aiven-plugin-unavailable",
+ "source": "postgres",
+ "target": "aiven",
+ "sink": "none",
+ "recorded_at": "2026-10-30T13:10:00Z",
+ "note": "Composed from the managed ops' own summaries and Data (internal/setup/targets/managed) over the hand-written cassettes of internal/setup/targets/managed/testdata, on the scenario's fixed clock. No sandbox account was used and no runner ran: re-record per evals/scenarios/README.md, Setup scenarios: managed targets (U13e). Digests are synthetic placeholders (sha256 of a label), not a runner's HMAC.",
+ "ops": [
+  {
+   "op": "aiven_service_get",
+   "tier": "T0",
+   "class": "shared",
+   "params": {},
+   "result": {
+    "ok": true,
+    "summary": "Aiven service connect-0 (kafka_connect) is RUNNING, plan startup-4, aws-us-east-1",
+    "data": {
+     "name": "connect-0",
+     "type": "kafka_connect",
+     "state": "RUNNING",
+     "plan": "startup-4",
+     "cloud": "aws-us-east-1",
+     "users": [
+      "avnadmin"
+     ]
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aiven:project-0/connect-0",
+     "exit_code": 0,
+     "at": "2026-10-30T13:03:02Z",
+     "took_ms": 280,
+     "out_mac": "42d3909d4bef6c3eba4586f355548bc455cfd7e25f34b48c477bca0a98e998a2"
+    }
+   }
+  },
+  {
+   "op": "aiven_integration_create",
+   "tier": "T2",
+   "class": "shared",
+   "params": {
+    "source_service": "kafka-0"
+   },
+   "result": {
+    "ok": true,
+    "summary": "integration kafka-0 -> connect-0 (kafka_connect) created",
+    "data": {
+     "integration_id": "0a1b2c3d-0000-4000-8000-000000000001"
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aiven:project-0/connect-0",
+     "exit_code": 0,
+     "at": "2026-10-30T13:04:15Z",
+     "took_ms": 1120,
+     "out_mac": "37e9a01cb9972884ba9ffa156a470ff3b60758d8d347f7449dcb4892b0d00cc4"
+    }
+   },
+   "proposal_id": "pr_orders_av_setup",
+   "step_index": 0,
+   "params_hash": "b5401d1e37ec68d215abf3fb7f6d5f07aeb346ecee68ea6ca6177bee80c6c2df"
+  },
+  {
+   "op": "aiven_create_connector",
+   "tier": "T2",
+   "class": "shared",
+   "params": {
+    "name": "orders-av-connector",
+    "config": {
+     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+     "database.hostname": "orders.example.com",
+     "database.port": "5432",
+     "database.user": "debezium",
+     "database.password": "${secret:db_password}",
+     "database.dbname": "orders",
+     "topic.prefix": "orders",
+     "plugin.name": "pgoutput"
+    }
+   },
+   "result": {
+    "ok": false,
+    "summary": "refused aiven_create_connector: io.debezium.connector.postgresql.PostgresConnector is not an available plugin on connect-0; available sources: io.debezium.connector.mysql.MySqlConnector",
+    "data": {
+     "class": "io.debezium.connector.postgresql.PostgresConnector",
+     "available_sources": [
+      "io.debezium.connector.mysql.MySqlConnector"
+     ],
+     "created": false
+    },
+    "receipt": {
+     "kind": "http",
+     "target": "aiven:project-0/connect-0",
+     "exit_code": 0,
+     "at": "2026-10-30T13:06:31Z",
+     "took_ms": 240,
+     "out_mac": "376e551360e63ce432899e4d70d72bdf606c78e037f6bd27e5881467dfd96a8f"
+    }
+   },
+   "proposal_id": "pr_orders_av_setup",
+   "step_index": 1,
+   "params_hash": "f6e3d6b6222d7e57247321575ae24b1eabe42ba8202cee95b490c2d5a4862719"
+  }
+ ],
+ "ladder": {
+  "plan_id": "pl_orders_av_setup",
+  "nonce_hash": "f261292ef313db706d61514f0e1d15c3d7c79593404fdbd02700e8ea8cba7fcf",
+  "reads": [
+   {
+    "tool": "aiven_connector_status",
+    "error": "aiven: not found: read connector status: HTTP 404: Connector orders-av-connector does not exist"
+   },
+   {
+    "tool": "aiven_connector_status",
+    "error": "aiven: not found: read connector status: HTTP 404: Connector orders-av-connector does not exist"
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "debezium_metrics",
+    "error": "debezium_metrics: no metrics for orders-av-connector"
+   },
+   {
+    "tool": "kafka_topic_offsets",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "kafka_find_by_key",
+    "error": "kafka: topic orders.public.piperoom_canary: not found"
+   },
+   {
+    "tool": "schema_registry_subjects",
+    "data": {
+     "subjects": [],
+     "deleted_subjects": []
+    }
+   }
+  ],
+  "table": "public.orders",
+  "example_sql": "INSERT INTO public.orders (customer_id, amount, status) VALUES (42, 4250, 'packed');",
+  "verified": {
+   "rungs": [
+    {
+     "name": "connector_running",
+     "note": "the read aiven_connector_status failed: aiven: not found: read connector status: HTTP 404: Connector orders-av-connector does not exist",
+     "ok": false
+    },
+    {
+     "name": "tasks_running",
+     "note": "the read aiven_connector_status failed: aiven: not found: read connector status: HTTP 404: Connector orders-av-connector does not exist",
+     "ok": false
+    },
+    {
+     "name": "canary_topic",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "snapshot_complete",
+     "note": "the read kafka_topic_offsets failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_event",
+     "note": "the read kafka_find_by_key failed: kafka: topic orders.public.piperoom_canary: not found",
+     "ok": false
+    },
+    {
+     "name": "canary_subject",
+     "note": "no subject under the canary topic's prefix yet",
+     "ok": false
+    },
+    {
+     "name": "sink_row",
+     "note": "no sink was set up",
+     "ok": true
+    },
+    {
+     "name": "person_change",
+     "note": "awaiting the person's change",
+     "ok": false
+    }
+   ]
+  }
+ }
+}

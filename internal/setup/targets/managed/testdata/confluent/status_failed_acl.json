@@ -1,0 +1,22 @@
+{
+  "provider": "confluent",
+  "name": "status_failed_acl",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "GET",
+        "path": "/connect/v1/environments/env-00000/clusters/lkc-00000/connectors/it_orders/status"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"connector\":{\"state\":\"FAILED\",\"trace\":\"\",\"worker_id\":\"it_orders\"},\"name\":\"it_orders\",\"tasks\":[{\"id\":0,\"msg\":\"org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [orders.public.orders]\",\"state\":\"FAILED\",\"worker_id\":\"it_orders\"}],\"type\":\"source\"}"
+      }
+    }
+  ]
+}

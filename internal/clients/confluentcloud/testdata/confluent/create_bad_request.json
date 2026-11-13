@@ -1,0 +1,27 @@
+{
+  "provider": "confluent",
+  "name": "create_bad_request",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as this client sends them; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/connect/v1/environments/env-00000/clusters/lkc-00000/connectors",
+        "body": "{\"config\":{\"name\":\"it_orders\"},\"name\":\"it_orders\"}",
+        "body_sha256": "beb05bcebc2af66beae720f7907ce1c67f80d91cc50bc8ae71b830f283bf0377",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"error\":{\"code\":400,\"message\":\"Invalid configuration: connector.class is required\"}}"
+      }
+    }
+  ]
+}

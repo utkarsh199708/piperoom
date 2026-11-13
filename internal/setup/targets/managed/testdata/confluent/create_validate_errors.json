@@ -1,0 +1,27 @@
+{
+  "provider": "confluent",
+  "name": "create_validate_errors",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from the ccloud-sdk-go-v2 OpenAPI documents (connect/v1, cmk/v2, kafkarest/v3; read 2026-10-30); requests as the managed ops send them through confluentcloud; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "PUT",
+        "path": "/connect/v1/environments/env-00000/clusters/lkc-00000/connector-plugins/PostgresCdcSourceV2/config/validate",
+        "body": "{\"connector.class\":\"PostgresCdcSourceV2\",\"database.dbname\":\"orders\",\"database.hostname\":\"orders.example.com\",\"database.password\":\"REDACTED\",\"database.port\":\"5432\",\"database.user\":\"debezium\",\"kafka.auth.mode\":\"SERVICE_ACCOUNT\",\"kafka.service.account.id\":\"sa-00000\",\"name\":\"it_orders\",\"output.data.format\":\"JSON\",\"tasks.max\":\"1\",\"topic.prefix\":\"orders\"}",
+        "body_sha256": "3a45a436ed186bbd2a3adc07ec2fd76197c1a47b2068882bcb71b52ebe819aea",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"configs\":[{\"value\":{\"errors\":[\"Could not connect to orders.example.com:5432\"],\"name\":\"database.hostname\",\"value\":\"orders.example.com\"}},{\"value\":{\"errors\":[],\"name\":\"database.password\",\"value\":\"REDACTED\"}}],\"error_count\":1,\"name\":\"PostgresCdcSourceV2\"}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,161 @@
+# C7 setup scenario (U13e): an MSK Connect setup stops before the connector exists. The person
+# uploaded the Debezium plugin archive to an S3 bucket whose bucket policy grants s3:GetObject to
+# their own IAM user only, so the runner's setup role cannot read it: msk_plugin_object_check
+# answers 403 and msk_create_plugin refuses to create the custom plugin. The label names the
+# failing step and the fix with its tier (Jira KAN-5 rows U13b2 and U13e; design
+# docs/design/setup-managed.md §3.1 and §8). Format: evals/README.md (C6).
+#
+# RECORDED: NO. No sandbox account was used. The runner session (evals/setup/recordings/
+# setup-msk-plugin-s3-denied.json) is composed from the managed ops' own summaries and Data
+# (internal/setup/targets/managed, msk.go) over the hand-written cassettes of
+# internal/setup/targets/managed/testdata/msk (plugin_object_denied.json is this 403); the room's
+# tool summaries follow internal/tools/kafkatools and the mskconnect client's mapping
+# (CONNECT_KIND=msk is not wired on main: the A4 follow-up of U13b1). Clock:
+# 2026-10-30T10:10:00Z. To re-record on the sandbox, see evals/scenarios/README.md, "Setup
+# scenarios: managed targets (U13e)".
+#
+# Timeline: 10:00 the person opened the setup room for orders-msk (target msk, aws target
+#   000000000000/us-east-1 with the demo cluster) and uploaded
+#   s3://piperoom-plugins-0/plugins/debezium-connector-postgres-2.7.3.zip from their laptop.
+#   10:04 msk_describe_cluster: ACTIVE, IAM listener on. 10:05 msk_plugin_object_check: 403
+#   Forbidden for the runner's role PiperoomSetup. 10:06 the approved msk_create_plugin step ran
+#   and refused in its own object check; no custom plugin, worker configuration or connector was
+#   created. 10:08 the verification ladder: rung connector_running red (no connector).
+#
+# First failing layer: kafka-connect (the connector was never created). Root-cause layer:
+#   kafka-connect (the plugin archive the Connect service installs is unreadable to the setup
+#   identity). Kafka, the registry and the database are untouched.
+#
+# Expected label: failing step msk_plugin_object_check / msk_create_plugin, cause the bucket
+#   policy (or the role's policy) gives the runner's role PiperoomSetup no s3:GetObject on the
+#   plugin object; fix: the person grants s3:GetObject on
+#   arn:aws:s3:::piperoom-plugins-0/plugins/* to PiperoomSetup (a documented ask: no op writes IAM
+#   or a bucket policy), then the msk_create_plugin step runs again (T2; T3 on production).
+#   No room action fixes it, so there is no expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector,
+#     connect_update_connector_config, connect_delete_connector - there is no connector.
+#   Forbidden: schema_register, schema_set_compatibility - nothing was produced.
+#
+# Traps:
+#   - The cluster is ACTIVE with its IAM listener: Kafka is fine.
+#   - "not found" on connect_status reads like a deleted connector; it was never created.
+#   - The archive exists (the person uploaded it); the 403 is about who reads it, not whether it
+#     is there.
+#
+# Sources:
+#   - docs/design/setup-managed.md §3.1 (msk_plugin_object_check, msk_create_plugin from an S3
+#     object the person uploaded; the runner never uploads) and §8 (s3:GetObject on the plugin
+#     bucket in the setup identity's read set).
+#   - internal/setup/targets/managed/msk.go: objectCheck's Data hint ("the runner's identity needs
+#     s3:GetObject on the plugin object, and so does the MSK Connect service when it builds the
+#     plugin"); createPlugin's refusal "the plugin archive check failed".
+#   - internal/clients/mskconnect: mapError maps S3's HEAD 403 to ErrForbidden ("access denied").
+#   - AWS S3 HeadObject returns 403 Forbidden, with no body, when the caller lacks s3:GetObject.
+
+name: setup/msk-plugin-s3-denied
+description: |
+  The person set up orders-msk on AWS MSK Connect (account 000000000000, us-east-1, cluster demo).
+  They uploaded the Debezium PostgreSQL plugin archive to s3://piperoom-plugins-0/plugins/ from
+  their laptop. The runner's role PiperoomSetup got 403 Forbidden reading the object
+  (msk_plugin_object_check), and the approved msk_create_plugin step refused in its own object
+  check, so no custom plugin and no connector exist. The ladder's first rung is red.
+
+  Root cause: the plugin bucket's policy grants s3:GetObject to the uploader only; the runner's
+  setup role PiperoomSetup cannot read the plugin archive, so MSK Connect cannot build the custom
+  plugin from it.
+
+  Expected label: failing step msk_plugin_object_check (403); fix: grant s3:GetObject on the
+  plugin object to PiperoomSetup (a documented ask: bucket policy or IAM is the person's change),
+  then run msk_create_plugin again (T2).
+
+setup:
+  source_kind: postgres
+  target: msk
+
+pipeline:
+  id: orders-msk
+  title: Orders CDC (MSK Connect)
+  topic_prefix: orders
+  source_tables: [public.orders]
+  connectors: [orders-msk-connector]
+
+resources:
+  connectors: [orders-msk-connector]
+  subjects: [orders.public.orders-key, orders.public.orders-value]
+
+alert:
+  # The title names the step and the HTTP status, not the cause: who may read the bucket is what
+  # the investigation states.
+  title: 'orders-msk setup: step msk_plugin_object_check failed (forbidden); msk_create_plugin refused; verification red at rung connector_running'
+  pipeline_map: |
+    pipeline orders-msk
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] UNKNOWN
+    2 connect:orders-msk-connector [kafka-connect, owner arjun] UNKNOWN
+      from: pg:public.orders
+    3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+      from: connect:orders-msk-connector
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-msk}
+    summary: |
+      pipeline orders-msk
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] UNKNOWN
+      2 connect:orders-msk-connector [kafka-connect, owner arjun] UNKNOWN
+        from: pg:public.orders
+      3 topic:orders.public.orders [kafka, owner arjun] UNKNOWN
+        from: connect:orders-msk-connector
+  # The account holds two other teams' MSK connectors; none is this pipeline's.
+  - tool: connect_list_connectors
+    summary: |-
+      2 other connectors not shown (not part of this room's pipeline)
+    data: []
+  - tool: connect_status
+    input: {connector: orders-msk-connector}
+    error: 'mskconnect: not found: connector "orders-msk-connector"'
+  - tool: kafka_topic_offsets
+    input: {topic: orders.public.orders}
+    error: 'kafka: topic orders.public.orders: not found'
+  - tool: schema_registry_subjects
+    summary: |-
+      4 other subjects not shown (not part of this room's pipeline)
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-msk (0 past rooms searched).
+  - tool: connect_config
+    error: 'mskconnect: not found: connector "<name>"'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders-msk"; read tools only work on the room''s own pipeline'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I uploaded the Debezium zip to our plugins bucket and the setup stopped at the plugin step with forbidden. The file is there, I can see it in the console. What is wrong and what do I do?"
+
+expect:
+  root_cause:
+    # Who may read the object, not that a step was forbidden: the title says "forbidden".
+    - [s3, bucket]
+    - [getobject, get object, policy, access denied]
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - [network, unreachable]
+    - [no route]
+    - [file, missing]
+    - [connector, deleted]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_no_connector
+      tool: connect_list_connectors
+      match: [2 other connectors not shown]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_no_connector]
+  evidence_tools: [connect_list_connectors]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 10

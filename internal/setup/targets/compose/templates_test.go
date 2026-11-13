@@ -27,6 +27,7 @@ func TestRenderGolden(t *testing.T) {
 		{"connect", WriteParams{Templates: []string{TemplateKafka, TemplateConnect}}},
 		{"registry", WriteParams{Templates: []string{TemplateKafka, TemplateRegistry}}},
 		{"full", WriteParams{Templates: []string{TemplateKafka, TemplatePostgres, TemplateConnect}, Registry: true}},
+		{"sink", WriteParams{Templates: []string{TemplateKafka, TemplatePostgres, TemplateConnect, TemplateSinkPostgres}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

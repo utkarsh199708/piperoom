@@ -11,7 +11,7 @@ import { setupCreateResponse } from '@/fixtures/setup'
 import { useCurrentUser } from '@/context/user'
 import { isViewer } from '@/state/permissions'
 import { errorText } from '@/lib/errors'
-import { rememberSetupPairing } from '@/lib/setup'
+import { pairingOf, rememberSetupPairing } from '@/lib/setup'
 import {
   EMPTY_SETUP_FORM,
   SETUP_CLASSES,
@@ -126,12 +126,12 @@ function SetupForm() {
       if (isFixtures()) {
         const res = setupCreateResponse()
         addFixtureRoom(res.room)
-        rememberSetupPairing(res.room.id, { command: res.command, expires_at: res.expires_at })
+        rememberSetupPairing(res.room.id, pairingOf(req, res))
         navigate(`/rooms/${res.room.id}`)
         return
       }
       const res = await api.createSetup(req)
-      rememberSetupPairing(res.room.id, { command: res.command, expires_at: res.expires_at })
+      rememberSetupPairing(res.room.id, pairingOf(req, res))
       navigate(`/rooms/${res.room.id}`)
     } catch (err) {
       setSendError(errorText(err))

@@ -1,0 +1,27 @@
+{
+  "provider": "aiven",
+  "name": "integration_conflict",
+  "recorded_at": "2026-10-30T00:00:00Z",
+  "recorded": false,
+  "source": "hand-written from aiven/aiven-client's client.py paths (read 2026-10-30); response shapes beyond the result keys it names are unconfirmed; not from a live account",
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "path": "/v1/project/project-0/integration",
+        "body": "{\"dest_endpoint_id\":null,\"dest_service\":\"connect-0\",\"integration_type\":\"kafka_connect\",\"source_endpoint_id\":null,\"source_service\":\"kafka-0\",\"user_config\":{}}",
+        "body_sha256": "0e54e158c85468f97ad64fbcc4e18f879c7f29bc3e43d35ebf322a59c9a83ca4",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "response": {
+        "status": 409,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"errors\":[{\"message\":\"Integration already exists\",\"status\":409}],\"message\":\"Integration already exists\"}"
+      }
+    }
+  ]
+}

@@ -45,9 +45,35 @@ import (
 // CatalogueVersion names this catalogue build in Hello.CatalogueVersion.
 const CatalogueVersion = "u1-2"
 
-// defaultOpTimeout bounds one op when the request carries no deadline; a
-// request deadline always wins (design §2.2, rule 4: 10 s for tools).
+// defaultOpTimeout bounds one op; a nearer request deadline always wins
+// (design §2.2, rule 4: 10 s for tools). An op that implements Deadliner
+// may take longer, up to MaxOpTimeout.
 const defaultOpTimeout = 10 * time.Second
+
+// MaxOpTimeout caps a Deadliner's own deadline: no op holds the runner for
+// longer, whatever it asks for.
+const MaxOpTimeout = 20 * time.Minute
+
+// Deadliner is implemented by an op that legitimately runs longer than the
+// default (msk_wait polling a connector MSK provisions for 5 to 15
+// minutes). Deadline is its own bound; Registry.Execute uses it clamped to
+// [default, MaxOpTimeout], so it can raise the bound but never lower it,
+// and the request's deadline still wins when it is nearer.
+type Deadliner interface {
+	Deadline() time.Duration
+}
+
+// opTimeout is the bound of one run of op before the request's deadline
+// is applied.
+func opTimeout(op Op) time.Duration {
+	d := defaultOpTimeout
+	if dl, ok := op.(Deadliner); ok {
+		if own := dl.Deadline(); own > d {
+			d = min(own, MaxOpTimeout)
+		}
+	}
+	return d
+}
 
 // maxLoggedNameBytes caps an op name in an error or summary; the name is
 // peer-supplied text.
@@ -111,6 +137,18 @@ type Op interface {
 // floor for that kind before the guard runs.
 type ParamTargeter interface {
 	ParamTarget(params json.RawMessage, env Env) string
+}
+
+// ClassGuarder is implemented by an op whose driver derives its target's
+// class itself (the managed drivers: the account, environment or project
+// against PIPEROOM_SETUP_PROD_PATTERNS, at registration). GuardForbidden
+// reports whether the guard forbids the op on the higher of class (the
+// request's, raised to the runner's Welcome floors) and the driver's own
+// class, so a production delete is refused even when the server under-classes
+// the target or never named it, and whatever tier the runner allows
+// (Options.AllowT3).
+type ClassGuarder interface {
+	GuardForbidden(class string) bool
 }
 
 // ParamTierer is implemented by an op whose tier for one step depends on its
@@ -196,6 +234,9 @@ type Registry struct {
 	order  []Op
 	env    Env
 	mounts []string
+	// embedded is set by RegisterEmbedded: every write op other than
+	// reference_write is refused (embeddedRefusal).
+	embedded bool
 }
 
 // New opens the project root and registers the T0 and T1 ops of this row.
@@ -395,9 +436,17 @@ func (r *Registry) Target(req protocol.OpRequest) string {
 // is already raised to the runner's own floor. The table is deliberately
 // short here: this catalogue has no T2 or T3 op, and the one destructive
 // class it has (local file writes) is refused on a production target.
+//
+// An op that implements ClassGuarder is asked as well, with the same class:
+// its driver's own classification can only add a refusal, never lift one.
 func (r *Registry) GuardForbidden(op, class string) bool {
 	for _, forbidden := range guardTable[op] {
 		if class == forbidden {
+			return true
+		}
+	}
+	if o, ok := r.Get(op); ok {
+		if g, ok := o.(ClassGuarder); ok && g.GuardForbidden(class) {
 			return true
 		}
 	}
@@ -406,9 +455,16 @@ func (r *Registry) GuardForbidden(op, class string) bool {
 
 // guardTable is the runner's side of design §3.5 / plan §3.6: op -> classes
 // it must not run on. Every entry has a test.
+//
+// k8s_delete is the Strimzi driver's (registered into this catalogue in the
+// in-cluster Job): refused on production whatever the driver's class says.
+// k8s_unapply has no row here: its production row allows a KafkaUser or the
+// logging ConfigMap, a kind this table cannot see, so the driver's
+// ClassGuarder raises its class and its Execute refuses the other kinds.
 var guardTable = map[string][]string{
 	"file_write":  {protocol.ClassProduction},
 	"file_delete": {protocol.ClassProduction},
+	"k8s_delete":  {protocol.ClassProduction},
 }
 
 // StepAction returns the proposal-step action name op executes. The runner's
@@ -429,6 +485,11 @@ func (r *Registry) CheckTarget(req protocol.OpRequest) string {
 	op, ok := r.Get(req.Op)
 	if !ok {
 		return protocol.RefuseUnknownOp
+	}
+	if r.embeddedRefusal(op) != nil {
+		// Writing outside the reference project is reaching outside what an
+		// embedded room may touch.
+		return protocol.RefuseTarget
 	}
 	tc, ok := op.(targetChecker)
 	if !ok {
@@ -455,8 +516,9 @@ type targetChecker interface {
 // CatalogueVersion reports the version the runner advertises in Hello.
 func (r *Registry) CatalogueVersion() string { return CatalogueVersion }
 
-// Execute satisfies runner.Catalogue: it validates, runs one op with the
-// request's deadline (or the default), and caps and redacts the result.
+// Execute satisfies runner.Catalogue: it validates, runs one op under the
+// nearer of the request's deadline and the op's own bound (the default, or
+// a Deadliner's clamped deadline), and caps and redacts the result.
 func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
 	op, ok := r.Get(req.Op)
 	if !ok {
@@ -464,12 +526,16 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 		return out, fmt.Errorf("%w: %q", ErrUnknownOp, clipName(req.Op))
 	}
 	env := r.snapshotEnv()
+	if err := r.embeddedRefusal(op); err != nil {
+		out := Result{Summary: "refused " + op.Name() + ": " + err.Error()}
+		return r.finish(req.ID, out, err), err
+	}
 	if err := op.Validate(req.Params, env); err != nil {
 		out := Result{Summary: "refused " + op.Name() + ": " + err.Error()}
 		return r.finish(req.ID, out, err), err
 	}
 
-	timeout := defaultOpTimeout
+	timeout := opTimeout(op)
 	if !req.Deadline.IsZero() {
 		if left := time.Until(req.Deadline); left < timeout {
 			timeout = left

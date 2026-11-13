@@ -180,7 +180,8 @@ or without an extension), a junction and a reparse point. The runner is built wi
 U1-2 PR.
 
 What `os.Root` does by itself (U1-0, from `go doc os.Root` and `os/root_windows.go`, `os/root_openat.go`,
-`internal/filepathlite/path_windows.go` in Go 1.27.2; spike `cmd/setup-spike/osroot`): on Windows it **refuses**
+`internal/filepathlite/path_windows.go` in Go 1.27.2; the U1-0 spike `cmd/setup-spike/osroot`, deleted by U8-C once
+`internal/setup/ops/paths.go` and its tests carried its cases): on Windows it **refuses**
 drive-relative (`C:foo`) and every path with a colon (so ADS too: `filepathlite.IsLocal` rejects `:`), every path
 starting with a separator (UNC `\\host\share`, `//host/share`, `\\?\`, `\\.\`, `\x`), any `?`, an escape by `..`,
 the reserved names (`CON`, `NUL`, `COM1`, `CONIN$`, with trailing spaces), and a junction (its target is absolute
@@ -251,6 +252,55 @@ that slipped past the rule is visible before the click.
 - `OutMAC` is an HMAC-SHA256 under a per-runner key generated at first start and kept in the store, so a short
   output is not a guessing oracle; a dispute is settled by the person re-running the receipt on the runner, which
   recomputes the MAC.
+
+#### Design ruling needed: how the runner opens its source connection (U4e follow-up, 2026-10-31)
+
+**Open; nothing is implemented.** The source ops exist and are tested (`internal/setup/ops/source_ops.go` for
+Postgres, `RegisterSQLServerSource` in `sqlserver_ops.go`; the MySQL, MongoDB and Oracle clients have their setup
+writers), but `internal/setup/setupcmd` opens no source connection for any source kind: `ops.Config.Source` is never
+set and `RegisterSQLServerSource` is never called, so every source read and write answers `not_supported` on a real
+runner. This design says the runner *holds* the database passwords (§7) and that `Env` carries a reader over "a
+connection the runner opened, never its DSN" (`ops.Env`), but not **where the runner gets the address, database,
+login and password from, or when it opens the connection**. Three ways it could; the leads pick one.
+
+| | A. Typed parts from the room, credentials from the store (recommended) | B. One DSN secret | C. A runner flag or environment variable |
+|---|---|---|---|
+| Address | the room's registered source target (`SetupRequest.Targets`, `setup.target_registered`): already denylisted on the server and classed, and the runner's dial hook checks it again | inside the DSN | inside the DSN |
+| Database | a new person-typed `SetupRequest` field (contract change below) | inside the DSN | inside the DSN |
+| Login, password | two `${secret:}` names in the runner's store (`source_admin_user`, `source_admin_password`), set by `secret_set` on the terminal or through `POST /api/rooms/{id}/setup/secret`, like every other secret | one name (`source_admin_dsn`) holding the whole DSN | `--source-dsn` or `PIPEROOM_SETUP_SOURCE_DSN` read once at start |
+| How the driver gets it | the runner builds the driver's config struct itself (`pgx.ParseConfig` of a URL it assembles from `url.URL` parts, `mysql.Config`, `go-mssqldb`'s URL form, MongoDB `options.Client().SetHosts/SetAuth`, `go-ora`'s `BuildUrl`), with TLS verification fixed on; no parameter comes from the person or the model | the person's text is parsed by each driver, parameters included | the same as B |
+| Fits AGENTS.md §4 rule 6 ("never a DSN parameter from configuration passed to the driver", MySQL) | yes | no | no |
+| Bound to the room's target | yes: a connection can only reach the address the room registered | no: the DSN may name any host, and the runner's dial hook is then the only check | no, and one runner process serves one source only |
+| Visible elsewhere | nowhere: the values are in the store, which no op can read back (§2.4) | the same | `ps`, `/proc/<pid>/environ`, shell history |
+
+**Recommendation: A.** It is the only option that keeps the database address on the same server-checked path as
+every other target, and the only one that never hands a driver a string the person or the model wrote. It also
+gives the SQL Server canary topic (`<prefix>.<db>.<schema>.piperoom_canary`) and `database.names` the database name
+from a typed field instead of model text.
+
+What A needs, in order:
+
+1. **Contract change (leads):** `events.SetupRequest` gains ``SourceDatabase string `json:"source_database,omitempty"` ``
+   (required for `sqlserver`, `mysql` with one database, `oracle` as the PDB or service name; optional for
+   `postgres`, default the login's database; absent for `mongodb`), `docs/api.md`'s `POST /api/setup` row names it,
+   and `protocol.Welcome` gains `SourceKind` and `SourceDatabase` so the runner knows which driver to build without
+   asking the model. The server validates the name with the rule 6 identifier shape (64 characters, and `-` for
+   Oracle service names) before it is stored.
+2. **Runner (A9, `internal/setup/setupcmd`):** after the pairing confirmation, alongside `RegisterTargets`, register
+   the source ops of `Welcome.SourceKind` with a lazily opened connection: the first source op dials the room's
+   single source target through the runner's dial hook, with the login and password materialised from the store
+   at that moment and kept only in the driver's config. No store entry, no source op: the op answers
+   `not_supported` naming the two secret names to set, never a prompt. A second source target, or a target whose
+   class is above the room's floor for it, is a refusal, not a choice. The connection closes with the runner.
+3. **Per driver (A3 Postgres, A8 MySQL, A10 SQL Server, MongoDB, Oracle):** a `Open<Kind>Source(ctx, target,
+   database, user, password)` constructor in each client package returning the reader and setup writer the ops
+   take; the read pool is read-only where the driver allows it (`default_transaction_read_only` on Postgres,
+   `ApplicationIntent=ReadOnly` is **not** used for SQL Server, whose setup writes go through the same login).
+4. **Tests:** setupcmd registers exactly the Welcome's source kind; a missing secret name answers `not_supported`
+   without dialing; a DSN-shaped value in `source_admin_user` is refused; the dial hook refuses an address that is
+   not the registered target.
+
+Until the leads rule, the PR that raised this (the U-wave follow-up stacked on #1114) implements none of it.
 
 ### 2.5 Catalogue rules and artifact validators (S1)
 
@@ -326,6 +376,31 @@ The catalogue at the end of U1 (Compose, Postgres), by tier floor:
 | T1 | `compose_write`, `properties_write`, `file_write` (non-executed files only), `file_delete`, `compose_up`, `compose_restart`, `compose_down`, `plugin_install`, `secret_set` |
 | T2 | the Q actions through the remote clients: `connect_create_connector`, `connect_delete_connector` (Q5c), `pg_set_replica_identity` (Q2c, its own name), `source_grant_select`, `source_create_heartbeat_table` (Q2c, Q2d); the setup-only source ops over `SetupSourceWriter` (§4 item 4): `source_create_publication`, `source_create_canary_table`, `source_insert_canary` (the nonce comes from the ladder runner, §3.4), `source_create_read_role` (§3.7) |
 | T3 | `source_alter_system` (allow-list: `wal_level`, `max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`, `wal_sender_timeout`; `pending_restart` in the preview), `source_restart` (only a database this room created, by receipt) |
+
+#### U4-0 ruling: `service_restart` and the SQL Server units (2026-10-30)
+
+The host target accepts only `piperoom-<name>` units (`host.UnitPrefix`), and that prefix is a security property:
+the service ops can never reach another service on the host, so no approved step can become a restart of `sshd` or
+of a database the room does not manage. U4b's Agent check collides with it: on a host target the stopped SQL Server
+Agent's documented fix is a service restart, which the runner refuses today. The ruling:
+
+- **Windows: yes, the Agent services only.** `service_restart` may reach exactly `SQLSERVERAGENT` (the default
+  instance) and `SQLAgent$<instance>` (a named one) beside the `piperoom-` units. The engine services
+  (`MSSQLSERVER`, `MSSQL$<instance>`) stay out: restarting the customer's database engine is never a setup op (the
+  same line §2.5 draws for `source_restart`, which reaches only a database this room created, by receipt). The
+  instance segment is validated against the service-name shape before it reaches the service control manager, and
+  the op still goes through the same manager calls — nothing about the unit's definition is written or changed.
+- **Linux: no; the fix stays an ask.** There is no separate agent unit: the Agent runs inside `mssql-server`, which
+  is the engine, so any restart that helps is an engine restart. The U4b check's ask names the exact commands
+  (`sudo systemctl restart mssql-server`; `sudo /opt/mssql/bin/mssql-conf set sqlagent.enabled true` first when the
+  Agent is disabled) and the room re-reads after the person acts. RDS and the Azure flavours already ask toward the
+  provider's console and are unchanged.
+- **Tier and the list's owner.** The allowed-units list is compile-time in the host driver, extended only by a lead
+  PR against this section — never by a param, a config variable, an owners key or model text. The op keeps its T2
+  floor; the class raises it as usual (T3 on production), and the guard table is unchanged.
+
+Until the Windows allow-list lands (a C19 row; the A10 driver then routes `TargetHost` on Windows to
+`service_restart` and keeps the ask elsewhere), the Agent-stopped fix on every host target stays an ask.
 
 ### 2.6 Targets and reach (S7)
 
@@ -690,10 +765,10 @@ Snapshot gains `setup: {mode: true, runner: {label, connected, tools}, plan_id, 
 
 `U1-0` (done): the protocol's final field list and the compatibility rule (item 1 above); the Windows service API
 (`golang.org/x/sys/windows/svc/mgr`: `Connect`, `CreateService`, `Service.Start`, `Query`, `Control`, `Delete`,
-spike `cmd/setup-spike/winsvc`; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
+the spike `cmd/setup-spike/winsvc`, deleted by U8-C after U8b; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
 and an args slice, so no free-form command line exists; a plain `java.exe` cannot answer the service control
 manager, so U8b's Connect service runs `piperoom-setup` itself as the service (`svc.Run`) supervising the Java child
-by argv); the `os.Root` analysis of §2.3 (spike `cmd/setup-spike/osroot`). `U12-0`: the Strimzi
+by argv); the `os.Root` analysis of §2.3 (the spike `cmd/setup-spike/osroot`, likewise deleted). `U12-0`: the Strimzi
 CRD versions, the in-cluster runner Job and its RBAC, how the pairing code reaches a Job. `U13-0`: the three managed
 clients' auth and operations.
 

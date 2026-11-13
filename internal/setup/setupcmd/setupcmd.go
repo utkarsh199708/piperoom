@@ -18,18 +18,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 
 	"piperoom/internal/config"
-	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/runner"
 	"piperoom/internal/setup/standalone"
-	"piperoom/internal/setup/targets/compose"
 	"piperoom/internal/setup/targets/host"
-	"piperoom/internal/setup/targets/server"
 )
 
 // Run parses args as piperoom-setup's flags and runs the mode they name until
@@ -57,6 +53,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	standaloneMode := fs.Bool("standalone", false, "run the Piperoom server for this machine in-process (write mode and setup on, loopback only) and keep serving; prints the URL to open")
 	watch := fs.Bool("watch", false, "with --standalone: restart the server whenever owners.yaml is written")
 	watchInterval := fs.Duration("watch-interval", standalone.DefaultWatchInterval, "with --watch: how often to poll owners.yaml")
+	embedded := fs.Bool("embedded", false, "the room's target is embedded (the Debezium Engine in your own application): register only the reference project and log reads, and refuse every other write")
+	codeFile := fs.String("code-file", "", "read the pairing code from this file (the in-cluster Job's mounted Secret) instead of --code")
+	confirmPrefix := fs.String("confirm-secret-prefix", "", "in a Kubernetes Job: confirm the pairing with the Secret of this name, created by the person with the fingerprint (docs/design/setup-strimzi.md section 3.2)")
+	strimziPipeline := fs.String("strimzi-pipeline", "", "in a Kubernetes Job: the pipeline whose chart-made objects the Strimzi driver may touch")
+	strimziConnectors := fs.String("strimzi-connectors", "", "in a Kubernetes Job: the chart's KafkaConnector names, comma-separated")
+	strimziSourceDB := fs.String("strimzi-source-database", "", "in a Kubernetes Job: a SQL Server source's database (setup.runner.sourceDatabase), the canary topic's database segment")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -70,8 +72,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	if *standaloneMode {
 		// Standalone means this process is the server: a server origin or a
 		// pairing code would name a different one.
-		if *server != "" || *code != "" || *label != "" {
-			return errors.New("setup: --standalone runs its own server; --server, --code and --label pair with an existing one")
+		if *server != "" || *code != "" || *label != "" || *embedded || *codeFile != "" || *confirmPrefix != "" {
+			return errors.New("setup: --standalone runs its own server; --server, --code, --label and --embedded pair a runner with an existing one")
 		}
 		return standalone.Run(ctx, standalone.Options{
 			Config:        config.Load(),
@@ -98,22 +100,50 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		serverURL = cfg.ServerURL
 	}
 	codeStr := *code
+	if *codeFile != "" {
+		if codeStr != "" {
+			return errors.New("setup: --code and --code-file name two codes; give one")
+		}
+		if codeStr, err = readCodeFile(*codeFile); err != nil {
+			return err
+		}
+	}
 	if codeStr == "" {
 		codeStr = cfg.Code
 	}
+	if (*strimziPipeline != "") != (*confirmPrefix != "") {
+		return errors.New("setup: --strimzi-pipeline and --confirm-secret-prefix go together (the in-cluster Job passes both)")
+	}
+	if *strimziSourceDB != "" && *strimziPipeline == "" {
+		return errors.New("setup: --strimzi-source-database is the in-cluster Job's, with --strimzi-pipeline")
+	}
 
 	log := newLogger(stderr)
-	// The real catalogue (U1-2). The generic file, env, http_get and net_probe
-	// ops are registered here; the room's target driver (compose, host,
-	// dbzserver) is added when the Welcome names it (KAN-617, targetRegistrar).
-	// Targets arrive with the Welcome, and the runner's target registry is a
-	// later row: until it hands them over, http_get and net_probe refuse every
-	// host.
+	// The real catalogue (U1-2). Targets arrive with the Welcome: the target
+	// driver registers then, through the registrar (by the room's
+	// SetupRequest.Target since protocol 1.2, KAN-617, else by the targets'
+	// kinds); until the handshake hands them over, http_get and net_probe
+	// refuse every host and the file and env ops work.
 	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
 	if err != nil {
 		return err
 	}
 	defer catalogue.Close()
+	env := config.Load()
+	registrar := newTargetRegistrar(catalogue, parsePluginHosts(env.SetupPluginHosts))
+	registrar.prodPatterns = parseProdPatterns(env.SetupProdPatterns)
+	if *embedded {
+		registrar.embedded = true
+	}
+	var confirm func(context.Context, *protocol.Welcome, func()) (bool, error)
+	if *confirmPrefix != "" {
+		job, err := newInClusterJob(*confirmPrefix, *strimziPipeline, *strimziConnectors, *strimziSourceDB)
+		if err != nil {
+			return err
+		}
+		registrar.strimzi = &job.strimzi
+		confirm = job.confirmer.Confirm
+	}
 	r, err := runner.New(runner.Options{
 		ServerURL:        serverURL,
 		Code:             codeStr,
@@ -123,11 +153,17 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		Log:              log,
 		Catalogue:        catalogue,
 		CatalogueVersion: ops.CatalogueVersion,
-		RegisterTarget:   targetRegistrar(catalogue),
+		RegisterTargets:  registrar.Apply,
+		Confirm:          confirm,
+		SecretsFile:      cfg.SecretsFile,
 	})
 	if err != nil {
 		return err
 	}
+	// The drivers resolve ${secret:} references and the managed setup
+	// credentials from the runner's own store: the one secret_set writes.
+	// It is set before Run, which is where the Welcome registers a driver.
+	registrar.secrets = r.SecretStore
 
 	if err := r.Run(ctx); err != nil {
 		if errors.Is(err, runner.ErrDeclined) {
@@ -137,72 +173,6 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
-}
-
-// targetRegistrar returns the runner's RegisterTarget hook: it registers the
-// driver ops for the room's SetupRequest.Target in reg. Registering twice (a
-// pairing retried after a failed handshake) is a no-op for the same target.
-// done is unsynchronised on purpose: pair() calls the hook sequentially.
-func targetRegistrar(reg *ops.Registry) func(target string, targets []events.SetupTarget) error {
-	var done string
-	return func(target string, targets []events.SetupTarget) error {
-		if done == target {
-			return nil
-		}
-		if done != "" {
-			return fmt.Errorf("room target %q differs from %q registered earlier", target, done)
-		}
-		if err := registerTarget(reg, target, targets); err != nil {
-			return err
-		}
-		done = target
-		return nil
-	}
-}
-
-// registerTarget adds the driver ops a SetupRequest.Target needs, as the
-// drivers' own package docs wire them: compose -> compose.Register; host ->
-// host.Register in its place (the two are exclusive in one registry);
-// dbzserver -> server.Register (ModeCompose) next to compose.Register, since
-// the server's Compose stack is started by the compose ops. Any other target
-// has no driver in this build and is refused by name. Each driver registers
-// with the class of the room targets of its own kind (targetClass).
-func registerTarget(reg *ops.Registry, target string, targets []events.SetupTarget) error {
-	switch target {
-	case "compose":
-		_, err := compose.Register(reg, compose.Options{Class: targetClass(targets, "compose")})
-		return err
-	case "host":
-		_, err := host.Register(reg, host.Options{Class: targetClass(targets, "host")})
-		return err
-	case "dbzserver":
-		// The Compose stack and the server run on it are one stack: both drivers
-		// take the highest class the person raised on either target.
-		class := targetClass(targets, "compose", "dbzserver")
-		if _, err := compose.Register(reg, compose.Options{Class: class}); err != nil {
-			return err
-		}
-		_, err := server.Register(reg, server.Options{Class: class, Mode: server.ModeCompose})
-		return err
-	default:
-		return fmt.Errorf("no setup driver for target %q in this runner (supported: compose, host, dbzserver)", target)
-	}
-}
-
-// targetClass is the class a driver registers with: the highest class of the
-// room targets whose Kind is one of kinds (the target kind the driver's own
-// ops report), "" (local) when the room names none. A class raised on another
-// target (the source database, Kafka, or a host in a compose room) never
-// changes the driver, so it cannot loosen a guard the person did not raise.
-func targetClass(targets []events.SetupTarget, kinds ...string) string {
-	class := ""
-	rank := map[string]int{protocol.ClassLocal: 1, protocol.ClassShared: 2, protocol.ClassProduction: 3}
-	for _, t := range targets {
-		if slices.Contains(kinds, t.Kind) && rank[t.Class] > rank[class] {
-			class = t.Class
-		}
-	}
-	return class
 }
 
 // ExitCode maps Run's error to the process exit code and prints a failure to

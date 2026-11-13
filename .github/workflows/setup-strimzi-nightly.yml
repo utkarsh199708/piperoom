@@ -1,0 +1,127 @@
+name: Setup nightly (Strimzi on kind)
+
+# U12c (Jira KAN-374; design docs/design/setup-strimzi.md sections 3, 4 and 10):
+# the chart's two setup releases on a real Kubernetes API server and a real
+# Strimzi operator, in kind on ubuntu-latest, inside a 20-minute budget.
+#
+# Legs that run today:
+#   1. install the operator (pinned release asset, not install/latest) and a
+#      one-broker KRaft Kafka with a scram-sha-512 TLS listener;
+#   2. install the pipeline release and assert the paused shells created
+#      nothing (no Connect pods, no user Secrets, no topic in Kafka);
+#   3. install the room release and check the runner's Role with
+#      `kubectl auth can-i` against rbac-expect.txt (every name outside the
+#      chart's set is refused);
+#   4. run the driver's writes with the runner ServiceAccount's own token
+#      (internal/setup/targets/strimzi kind_integration_test.go): fill and
+#      unpause the canary topic and both KafkaUsers, wait for Ready, and get a
+#      403 for an object outside the set.
+# Not yet: the Job pairing with a recorded-model server from the shells to
+# "pipeline live", and the broken-build leg (a KafkaConnect build needs a
+# registry kaniko can push to without --insecure, which the field allow-list
+# refuses). Both need a Piperoom server in the cluster with the recorded-model
+# agent; the runner's in-cluster pairing (--code-file, --confirm-secret-prefix)
+# is unit-tested against a fake API server.
+#
+# Trigger: schedule and workflow_dispatch only, never a required check.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"   # nightly, 05:17 UTC (after the Windows setup nightly)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-strimzi-nightly
+  cancel-in-progress: false
+
+env:
+  # The pinned Strimzi release; the driver speaks kafka.strimzi.io/v1, so it
+  # must be a release that serves v1.
+  STRIMZI_VERSION: "0.49.0"
+  KIND_VERSION: "v0.24.0"
+  HELM_VERSION: "v3.16.3"
+  NS: data
+  ROOM: 01jbz3k7q8x9v2m4n6p8r0s2t4
+
+jobs:
+  strimzi-kind:
+    name: Strimzi target on kind
+    runs-on: ubuntu-latest
+    if: github.repository == 'utkarsh199708/piperoom'
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Install kind and helm (pinned, built by the Go module proxy)
+        run: |
+          go install "sigs.k8s.io/kind@${KIND_VERSION}"
+          go install "helm.sh/helm/v3/cmd/helm@${HELM_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Create the cluster
+        run: |
+          kind create cluster --name piperoom --config deploy/helm/piperoom/ci/setup/kind/kind-config.yaml --wait 120s
+          kubectl create namespace "$NS"
+      - name: Install the Strimzi operator (watching the data namespace)
+        run: |
+          curl -fsSL -o strimzi.yaml "https://github.com/strimzi/strimzi-kafka-operator/releases/download/${STRIMZI_VERSION}/strimzi-cluster-operator-${STRIMZI_VERSION}.yaml"
+          sed -i "s/namespace: .*/namespace: ${NS}/" strimzi.yaml
+          kubectl -n "$NS" apply -f strimzi.yaml
+          kubectl -n "$NS" rollout status deployment/strimzi-cluster-operator --timeout=180s
+      - name: Kafka (one KRaft broker)
+        run: |
+          kubectl -n "$NS" apply -f deploy/helm/piperoom/ci/setup/kind/kafka.yaml
+          kubectl -n "$NS" wait kafka/prod-kafka --for=condition=Ready --timeout=360s
+      - name: Pipeline release; the paused shells create nothing
+        run: |
+          # The CI values' Connect egress names example addresses, not kind's.
+          helm install piperoom-pipeline-orders deploy/helm/piperoom -n "$NS" -f deploy/helm/piperoom/ci/setup/pipeline-values.yaml --set setup.pipeline.admissionPolicy=false --set networkPolicy.enabled=false
+          sleep 30
+          for o in kafkaconnect/orders-connect kafkatopic/orders-canary kafkauser/orders-connect kafkauser/orders-piperoom-ro; do
+            kubectl -n "$NS" get "$o" -o jsonpath='{.status.conditions[*].type}' | grep -q ReconciliationPaused || { echo "$o is not ReconciliationPaused"; kubectl -n "$NS" get "$o" -o yaml; exit 1; }
+          done
+          if kubectl -n "$NS" get kafkaconnector/orders-src -o jsonpath='{.status.connectorStatus}' | grep -q .; then echo "a connector on a paused KafkaConnect has a Connect status"; exit 1; fi
+          if kubectl -n "$NS" get pods -l strimzi.io/cluster=orders-connect -o name | grep -q .; then echo "a paused KafkaConnect started pods"; exit 1; fi
+          if kubectl -n "$NS" get secret orders-connect orders-piperoom-ro 2>/dev/null | grep -q .; then echo "a paused KafkaUser got credentials"; exit 1; fi
+      - name: Room release; the runner's Role refuses every name outside the chart's set
+        run: |
+          kubectl -n "$NS" create secret generic "piperoom-setup-${ROOM}-pairing" --from-literal=code=unused-in-this-leg
+          helm install "piperoom-setup-${ROOM}" deploy/helm/piperoom -n "$NS" -f deploy/helm/piperoom/ci/setup/runner-values.yaml
+          # The Job would pair with a server this run does not start; stop it.
+          kubectl -n "$NS" delete job "piperoom-setup-${ROOM}" --wait=false
+          sa="system:serviceaccount:${NS}:piperoom-setup-${ROOM}"
+          fail=0
+          while read -r verb res name want; do
+            case "$verb" in ""|"#"*) continue ;; esac
+            sub=""
+            case "$res" in */*) sub="--subresource=${res#*/}"; res="${res%%/*}" ;; esac
+            target="$res"; [ "$name" != "-" ] && target="$res/$name"
+            got=$(kubectl -n "$NS" auth can-i "$verb" "$target" $sub --as="$sa" || true)
+            if [ "$got" != "$want" ]; then echo "can-i $verb $target = $got, want $want"; fail=1; fi
+          done < deploy/helm/piperoom/ci/setup/kind/rbac-expect.txt
+          exit "$fail"
+      - name: Driver writes with the runner's own token
+        run: |
+          kubectl -n "$NS" create token "piperoom-setup-${ROOM}" --duration=1h > "$RUNNER_TEMP/token"
+          kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$RUNNER_TEMP/ca.crt"
+          export PIPEROOM_IT_K8S_API="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')"
+          export PIPEROOM_IT_K8S_CA_FILE="$RUNNER_TEMP/ca.crt" PIPEROOM_IT_K8S_TOKEN_FILE="$RUNNER_TEMP/token"
+          go test -tags integration -run TestKindRunnerWrites -count=1 -v ./internal/setup/targets/strimzi
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n "$NS" get all,kafkas,kafkaconnects,kafkaconnectors,kafkausers,kafkatopics -o wide || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -50 || true
+          kubectl -n "$NS" logs deployment/strimzi-cluster-operator --tail=200 || true

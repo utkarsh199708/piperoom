@@ -945,6 +945,16 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 				return tools.Result{}, err
 			}
 		}
+		if t.setup != nil {
+			// U10b: in a setup room a step whose config keys map to a tuning
+			// entry needs a cited symptom (tuning_gate.go); a new pipeline is
+			// never tuned by default.
+			if keys := setupTuningKeys(t.source, params); len(keys) > 0 {
+				if err := t.steps.setupTuningEvidence(i+1, s.Action, keys, s.Description+"\n"+verify); err != nil {
+					return tools.Result{}, err
+				}
+			}
+		}
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
 			Layer:       layer,
