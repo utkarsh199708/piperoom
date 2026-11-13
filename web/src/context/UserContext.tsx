@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { clearSigninNotice, noticeForExpiredSession } from '../lib/signinNotice'
+import { clearSigninNotice, noticeForExpiredSession, noticeForRoute } from '../lib/signinNotice'
 import type { SigninNotice } from '../lib/signinNotice'
 import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
@@ -175,7 +175,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
             if (m === 'oidc' && redirectToLogin()) return
             // dev, unknown, or oidc with the loop guard on: show the sign-in choice
             setMode(m ?? null)
-            setNotice(noticeForExpiredSession(m === 'dev'))
+            setNotice(noticeForExpiredSession())
             setUser(null)
             setPhase('login')
             bumpEpoch()
@@ -186,6 +186,13 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
       }),
     [bumpEpoch, loadMe, setPhase],
   )
+
+  // The notice names the room that was on screen; moving this tab to another room drops that name.
+  useEffect(() => {
+    const onHash = () => setNotice((n) => noticeForRoute(n))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   useEffect(() => {
     setAuthEpoch(0)

@@ -1,7 +1,7 @@
 // The one line that answers "what does this room need from me?" and stays on screen while the
 // room scrolls (F1b). It draws `decisionFor`; its buttons go through the approval card's own
 // handlers (DecisionHandleContext), so there is no second copy of the approval logic.
-import { useContext, useEffect, useRef, useState } from "react";
+import { Fragment, useContext, useEffect, useRef, useState } from "react";
 import { ArrowDown, TriangleAlert, Wrench } from "lucide-react";
 import type { RoomState } from "@/state/types";
 import type { CurrentUser } from "@/state/permissions";
@@ -256,7 +256,18 @@ export function DecisionBar({
           >
             {split ? (
               <>
-                <span className="break-words">{lead}</span>
+                <span className="break-words">
+                  {setupPrefix}Needs your approval
+                  {(decision.all ?? []).map((name) => (
+                    <Fragment key={name}>
+                      {" · "}
+                      <span data-layer-name className="whitespace-nowrap">
+                        {name}
+                      </span>
+                    </Fragment>
+                  ))}
+                  {" — "}
+                </span>
                 <span className="inline-block max-w-full truncate align-bottom">
                   {rest}
                 </span>

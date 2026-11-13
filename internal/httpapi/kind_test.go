@@ -95,10 +95,10 @@ func TestMeLayersScopedByKind(t *testing.T) {
 		if got := me(t, srv, "meera"); !slices.Equal(got, want) {
 			t.Fatalf("solo = %v, want %v", got, want)
 		}
-		// A non-solo user keeps their own layers.
-		if got := me(t, srv, "arjun"); !slices.Equal(got, []string{"kafka-connect", "kafka"}) {
-			t.Fatalf("arjun = %v", got)
-		}
+		// A non-solo user cannot sign in on a solo server (KAN-612).
+		resp := doJSON(t, http.MethodGet, srv.URL+"/api/me", "arjun", "")
+		defer resp.Body.Close()
+		wantStatus(t, resp, http.StatusUnauthorized)
 	})
 	t.Run("batch only: users.yaml CDC layers drop out", func(t *testing.T) {
 		srv := kindServer(t, "pipelines:\n"+kindRevenue, "")
