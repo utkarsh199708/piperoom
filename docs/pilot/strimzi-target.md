@@ -211,6 +211,72 @@ install needs cluster-admin. On a `production` target the runner refuses T2 writ
   build leg (a kind registry needs kaniko's `--insecure`, which the allow-list refuses).
 - The real run on a cluster the owner names (U12-R) has not happened.
 
+## Incident tools (read-only, incident rooms)
+
+Separate from setup: once a pipeline runs on Strimzi, an incident room can read why a `KafkaConnector` or
+`KafkaConnect` is not ready and how the operator is doing. These tools run in the **server** (not the setup runner),
+send only `GET` requests (`internal/clients/kubernetes`), and are registered only for a pipeline whose own
+`connections:` block names the Kubernetes API:
+
+```yaml
+pipelines:
+  - id: orders
+    connectors: [pg-orders]          # the KafkaConnector names
+    connections:
+      # ... the usual source_db_url, kafka_brokers, connect_url, ... keys
+      kubernetes_api_url: {value: "https://kubernetes.default.svc:443"}
+      kubernetes_token: {file: /var/run/secrets/kubernetes.io/serviceaccount/token}   # re-read per request
+      kubernetes_ca_file: {file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
+      strimzi_namespace: {value: kafka}
+      strimzi_operator_deployment: {value: strimzi-cluster-operator}   # optional, this is the default
+      strimzi_operator_namespace: {value: strimzi}                     # optional, default strimzi_namespace
+```
+
+| Tool | Reads | Reports |
+|---|---|---|
+| `strimzi_connector_status {connector}` | the pipeline connector's `KafkaConnector`, then its `KafkaConnect` | conditions (reason, message), connector and task states with condensed traces from `.status.connectorStatus`, `spec.state`/`pause`, the `strimzi.io/pause-reconciliation` annotation, `observedGeneration` against `metadata.generation`, the owning `KafkaConnect`'s Ready condition and `strimzi.io/use-connector-resources` |
+| `strimzi_connect_status {connect?}` | the `KafkaConnect` (found from the pipeline's `KafkaConnector`s' `strimzi.io/cluster` label when omitted) and its pods | conditions, desired replicas against ready pods, each pod's phase, restarts, current problem (`CrashLoopBackOff`) and last termination (`OOMKilled`, exit code), `.status.url` |
+| `strimzi_operator_status` | the operator `Deployment` and its pods | desired, ready and available replicas, conditions, pod restarts and last terminations |
+| `k8s_object_events {kind, name}` | events of a pipeline `KafkaConnector`, its `KafkaConnect`, or one of their pods or an operator pod | the last 20: type, reason, message, count, last time |
+
+Every name is checked against the room's pipeline before any request (a `KafkaConnect` or pod must belong to one of
+its connectors' clusters) and against DNS-1123 before a path is built. Responses are capped at 4 MB; the client
+decodes only status, labels and `strimzi.io/` annotations, never a pod spec, an env value, a connector's `config` or
+`kubectl.kubernetes.io/last-applied-configuration`. Condition messages, traces and event messages are redacted
+(`internal/redact`), cut and labelled untrusted.
+
+The server's ServiceAccount (or the account whose token `kubernetes_token` holds) needs this read-only access and
+nothing else; no Secret, no `watch`, no write:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: piperoom-incident-read, namespace: kafka}        # strimzi_namespace
+rules:
+  - apiGroups: [kafka.strimzi.io]
+    resources: [kafkaconnectors, kafkaconnects, kafkas, kafkatopics]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods, events]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: piperoom-operator-read, namespace: strimzi}      # strimzi_operator_namespace
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [strimzi-cluster-operator]                     # strimzi_operator_deployment
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods, events]
+    verbs: [get, list]
+```
+
+Bind both to the server's ServiceAccount with a `RoleBinding` in each namespace (one Role is enough when the operator
+runs in `strimzi_namespace`). The client tries `kafka.strimzi.io/v1` first and falls back to `v1beta2` when the API
+server does not serve `v1`. A 401 or 403 comes back to the room as a tool error naming the token or this Role.
+
 ## 9. Known gaps
 
 1. The server sends no targets in the `Welcome`, so the Job never registers the Strimzi driver until it does.

@@ -2,6 +2,7 @@ package strimzi
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -207,7 +208,7 @@ func TestGetMasksEnvCredentials(t *testing.T) {
 func TestMaskingCostIsBounded(t *testing.T) {
 	best := func(f func()) time.Duration {
 		var min time.Duration
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 5; i++ {
 			start := time.Now()
 			f()
 			if d := time.Since(start); i == 0 || d < min {
@@ -225,14 +226,28 @@ func TestMaskingCostIsBounded(t *testing.T) {
 		{"password: |\n  x\n", nil}, {"user,password\nu,", nil}, {"password is x ", nil}, {"pass\u200b", nil},
 		{"\xff", []string{"\xff\xff\xff\xff\xff\xff\xff\xff"}}, {"a", []string{"aaaaaaaa"}}, {`A`, []string{"AAAAAAAA"}},
 	} {
-		small := best(func() { maskCredentials(fill(g.unit, 16<<10), g.written) })
-		full := best(func() { maskCredentials(fill(g.unit, 64<<10), g.written) })
-		huge := best(func() { maskCredentials(fill(g.unit, 1<<20), g.written) })
-		if r := float64(full) / float64(small); r > 12 {
-			t.Errorf("%q: 16 KiB %v, 64 KiB %v (x%.1f): not linear", g.unit, small, full, r)
+		// A loaded runner (the full-stack CI job) can stall one sample for
+		// tens of milliseconds, so a round that misses either bound is
+		// measured again. A real super-linear cost misses every round: it
+		// is x16 or worse on each, not once.
+		var fails []string
+		for round := 0; round < 3; round++ {
+			fails = fails[:0]
+			small := best(func() { maskCredentials(fill(g.unit, 16<<10), g.written) })
+			full := best(func() { maskCredentials(fill(g.unit, 64<<10), g.written) })
+			huge := best(func() { maskCredentials(fill(g.unit, 1<<20), g.written) })
+			if r := float64(full) / float64(small); r > 12 {
+				fails = append(fails, fmt.Sprintf("%q: 16 KiB %v, 64 KiB %v (x%.1f): not linear", g.unit, small, full, r))
+			}
+			if r := float64(huge) / float64(full); r > 6 {
+				fails = append(fails, fmt.Sprintf("%q: 64 KiB %v, 1 MiB %v (x%.1f): not capped", g.unit, full, huge, r))
+			}
+			if len(fails) == 0 {
+				break
+			}
 		}
-		if r := float64(huge) / float64(full); r > 6 {
-			t.Errorf("%q: 64 KiB %v, 1 MiB %v (x%.1f): not capped", g.unit, full, huge, r)
+		for _, f := range fails {
+			t.Error(f)
 		}
 	}
 	// One 1 MiB string in a k8s_get object costs about what 64 KiB does,

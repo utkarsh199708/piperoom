@@ -374,6 +374,7 @@ var syntheticLabels = map[string]Label{
 	// The Q6c network-probe scenarios (KAN-250).
 	"advertised-listener-wrong":   {"kafka-connect", []string{"advertis*", "cluster.local", "headless"}},
 	"db-unreachable-from-connect": {"kafka-connect", []string{"segmentation", "network policy", "firewall*"}},
+	"source-restart-reconnect":    {"kafka-connect", []string{"restart*", "patch*", "administrator command"}},
 	// The X2e recovery scenarios (KAN-427).
 	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
 	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
@@ -567,6 +568,7 @@ var syntheticTruth = map[string]map[string]truth{
 	// (kafka) and a down database (postgres).
 	"advertised-listener-wrong":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"source-restart-reconnect":    {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// X2e: the lazy texts are the reconciliation titles, which name the
 	// source and the warehouse and no cause. The wrong texts blame the
 	// connector (kafka-connect, not kafka) and a consumer filter (the right

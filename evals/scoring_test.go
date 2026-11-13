@@ -307,6 +307,11 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The Kafka Connect workers are blocked from Postgres: since the 09:05 segmentation policy on the database subnet, their connections to orders-db.internal:5432 are refused, so task 0 of pg-orders-connector FAILED after 5 retries and the slot debezium_orders sits inactive. The database itself is up: Piperoom reads the slot and a row updated a minute ago. Allow the Connect workers' subnet to 5432 in the network policy, then restart task 0.",
 		wrong: "The orders database crashed at 09:05 and has been down since; restart Postgres and then the connector.",
 	},
+	// Partner incident: Postgres restarted for a patch release.
+	"source-restart-reconnect": {
+		good:  "orders-db was restarted at 09:20 for the 16.4 patch release: Postgres terminated the walsender with an administrator command, the connector's reconnect retries ran out before the database came back up, and task 0 of pg-orders-connector FAILED. The database is back and reachable from Connect, and the slot debezium_orders is intact and retains the WAL written since 09:20. Restart task 0 and it resumes from the slot.",
+		wrong: "A firewall rule blocks the Connect workers from orders-db.internal:5432 since a network policy change; allow the subnet in the policy.",
+	},
 	// Q1e version-knowledge scenarios (C7, KAN-182).
 	"renamed-property-after-upgrade": {
 		good:  "Task 0 of pg-orders-connector is RUNNING but blocked: after the 08:57 upgrade to Debezium 2.7.3.Final its stored config still sets heartbeat.topics.prefix=heartbeats, a key Debezium 2.0 renamed to topic.heartbeat.prefix (known issue dbz-topic-heartbeat-transaction), so 2.7 ignores it and sends heartbeats to the default topic __debezium-heartbeat.pg, a topic missing from the cluster because auto topic creation is off. The producer waits for that topic's metadata and the change events queued behind the heartbeat stay in the task, short of pg.public.orders (newest record 42 min ago, Debezium queue 8192/8192). Rename the key to topic.heartbeat.prefix=heartbeats and restart the connector.",

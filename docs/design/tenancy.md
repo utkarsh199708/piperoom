@@ -125,6 +125,17 @@ exactly one reference:
 | `schema_registry_url` | `SCHEMA_REGISTRY_URL` | required |
 | `schema_registry_username`, `schema_registry_password` | `SCHEMA_REGISTRY_USERNAME`, `SCHEMA_REGISTRY_PASSWORD` | |
 | `schema_registry_tls_ca_file`, `schema_registry_tls_cert_file`, `schema_registry_tls_key_file` | `SCHEMA_REGISTRY_TLS_*_FILE` | path |
+| `kubernetes_api_url` | – (no server-wide variable) | optional, `cdc` only; literal allowed: `https://host[:port]` of the Kubernetes API server, for the read-only Strimzi incident tools (`internal/tools/k8stools`, [strimzi-target.md](../pilot/strimzi-target.md) "Incident tools"). Without it no Strimzi tool is registered |
+| `kubernetes_token` | – | `{env}` (the bearer token) or `{file}` (a token file the client re-reads before every request, so a projected ServiceAccount token keeps working); never a literal |
+| `kubernetes_ca_file` | – | path, CA bundle (not a shared reference); empty = the system roots |
+| `strimzi_namespace` | – | literal allowed; the namespace of the `KafkaConnect`, its `KafkaConnector`s and pods |
+| `strimzi_operator_deployment`, `strimzi_operator_namespace` | – | literal allowed; default `strimzi-cluster-operator` in `strimzi_namespace` |
+
+The six Kubernetes keys are "pipeline-only" (`owners.PipelineOnlyKeys`): they have no process-wide variable, so they
+are not in `owners.ConnectionKeys`, `ProcessRefs`, `staging:` or the admin settings view, and a pipeline without its
+own `connections:` has no Strimzi tools. Setting any of them requires `kubernetes_api_url`, `kubernetes_token` and
+`strimzi_namespace`. `wiring/strimzi.go` resolves them apart from `config.Config` and checks the URL (https) and the
+names (DNS-1123) without quoting a value.
 
 - **No inheritance.** A pipeline with `connections:` uses only what it lists. A key it leaves out is
   empty (PLAINTEXT, no login, the system CA roots), never the process-wide value: one tenant's broker

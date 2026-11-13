@@ -142,6 +142,10 @@ type Wired struct {
 	// repo_open_pull_request use it; its writer only with write mode on.
 	// Zero (no forge) unless the caller of openClients sets it.
 	forge forgeSet
+	// strimzi is the set's Kubernetes reader for the Strimzi incident tools
+	// (strimzi.go): only a pipeline's own connections: block can give one.
+	// Zero (no tools) unless OpenStacks sets it.
+	strimzi strimziSet
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.

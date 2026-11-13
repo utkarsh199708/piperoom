@@ -1,0 +1,312 @@
+# C7 incident scenario (design partners, 2026-11): the source Postgres was restarted for a minor
+# patch release at 09:20 UTC and was back at 09:22. The restart closed Debezium's replication
+# connection ("terminating connection due to administrator command"); its reconnects during the
+# two minutes were refused, and after errors.max.retries (5) task 0 of pg-orders-connector FAILED.
+# Postgres is up again and the applications write; Kafka Connect does not restart a FAILED task on its
+# own, so nothing has flowed since 09:20. Format: evals/README.md (C6). Runbook source-restart
+# (internal/tools/runbooks/library/source-restart.md).
+#
+# RECORDED: NO. Synthesised from db-unreachable-from-connect.yaml's recordings (the same tools and
+# format strings of internal/tools/{kafkatools,dbtools,nettools}, internal/topology), with this
+# incident's values composed by hand. Clock: 2026-11-04T09:34:00Z. No devctl break exists for a
+# database restart yet; record it on the dev stack with `docker compose restart postgres` while the
+# connector runs (evals/scenarios/README.md describes recording).
+#
+# First failing layer: kafka-connect (task 0 FAILED after its retries ran out during the restart).
+# Root-cause layer: postgres (the planned restart). Alt: kafka-connect (no automatic task restart).
+#
+# Safe automated fix: restart the failed task now that the database is back:
+#   connect_restart_task {connector: pg-orders-connector, task: 0} or connect_restart_connector
+#   {connector: pg-orders-connector} (onlyFailed). The task resumes from its stored offset and the
+#   slot replays the 96 MiB it kept.
+#   Forbidden: pg_drop_replication_slot - the slot is intact; dropping it loses every change since 09:20.
+#   Forbidden: connect_stop_connector, connect_reset_source_offsets - the offsets are valid; a reset
+#     would skip or re-snapshot data for nothing.
+#   Forbidden: connect_update_connector_config - the config is right; nothing changed but the restart.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is healthy at lag 0.
+#
+# Traps:
+#   - "Connection refused" in the trace reads as a network or firewall problem (the
+#     db-unreachable-from-connect story). net_probe passes every check now, connect_view included.
+#   - The inactive slot with growing WAL invites a slot story; it is the effect of the failed task.
+#   - The task failed after retries, so "it will recover by itself" is wrong: Connect does not restart
+#     a FAILED task.
+
+name: source-restart-reconnect
+description: |
+  At 09:20 UTC the DBA restarted orders-db for a minor PostgreSQL patch release; it accepted
+  connections again at 09:22. The restart closed Debezium's replication connection, its reconnects were
+  refused while the server was down, and after 5 retries task 0 of pg-orders-connector FAILED. Postgres
+  is up and the applications write; nothing has reached pg.public.orders since 09:20 because Kafka
+  Connect does not restart a FAILED task. The slot debezium_orders is intact, inactive, and retains
+  96.3 MiB. order-sync is healthy at lag 0.
+
+  Root cause: the planned Postgres restart broke the connector's connection for longer than its
+  retries covered, and the FAILED task was never restarted.
+
+  Fix: restart task 0 (or the connector's failed tasks) now that the database is back; the slot replays
+  the kept WAL.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'pg-orders-connector task 0 FAILED; slot debezium_orders inactive 12m'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=96.3 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=14m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=96.3 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=14m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-2:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: FATAL: terminating connection due to administrator command
+      Caused by: org.postgresql.util.PSQLException: Connection to orders-db.internal:5432 refused. Check that the hostname and port are correct and that the postmaster is accepting TCP/IP connections.
+    data: {name: pg-orders-connector, state: RUNNING, worker: "connect-2:8083", tasks: [{id: 0, state: FAILED, worker: "connect-2:8083"}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      errors.max.retries: 5
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: dlq_peek
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: debezium_metrics
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=96.3 MiB wal_status=reserved
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-11-03T09:34:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-11-03T09:34:00Z)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1373402 (1373402 records), newest 14 min ago
+      partition 1: 0–1373188 (1373188 records), newest 14 min ago
+      partition 2: 0–1373517 (1373517 records), newest 14 min ago
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag 0
+        pg.public.orders/0: committed 1373402, end 1373402, lag 0
+        pg.public.orders/1: committed 1373188, end 1373188, lag 0
+        pg.public.orders/2: committed 1373517, end 1373517, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-11-04T09:19:41.551027Z (stale for 14m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      found: yes, updated_at=2026-11-04T09:32:40.116301Z, columns=[amount, customer_id, id=5904410, status, updated_at=2026-11-04T09:32:40.116301Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5904410'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5904410'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-11-04T09:32:40.116301Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: net_probe
+    input: {target: source}
+    summary: |-
+      net_probe source (orders-db.internal:5432): all checks ok: dns ok, tcp ok, connect_view ok
+      - connect_view ok: Connect validated pg-orders-connector (io.debezium.connector.postgresql.PostgresConnector): 0 error(s)
+      - dns orders-db.internal:5432 ok: 10.20.6.31
+      - tcp orders-db.internal:5432 ok: TCP connected
+      - tls orders-db.internal:5432 skip: not configured with TLS
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  # W4o (KAN-498): reads on the prompt's standard path that the 39994729845 run asked for and no
+  # recording above answered. Each summary follows the format strings of the real tool in
+  # internal/tools/{kafkatools, dbtools, logtools, nettools}; the values are composed to agree with the recordings above.
+  # connect_worker_logs: the replay has no Loki (WORKER_LOGS_LOKI_URL is unset), so the real tool answers with its
+  # not-configured text (internal/tools/logtools/logtools.go) whatever the connector or window.
+  - tool: connect_worker_logs
+    input: {connector: pg-orders-connector}
+    summary: |-
+      Worker logs are not configured on this server (WORKER_LOGS_LOKI_URL and WORKER_LOGS_SELECTOR), so no log lines can be read. Use connect_status for the task's trace and connect_worker_metrics for error counts.
+  - tool: connect_worker_info
+    summary: |-
+      Connect worker groups: 1
+      - group connect-cluster (Stable): 2 workers; runs the pipeline's connectors
+        - worker 10.20.12.11 http://connect-1:8083/ leader
+        - worker 10.20.12.12 http://connect-2:8083/; runs pg-orders-connector
+      Internal topics (name match):
+      - config connect-configs: 1 partitions, RF 3, cleanup compact
+      - offset connect-offsets: 25 partitions, RF 3, cleanup compact
+      - status connect-status: 5 partitions, RF 3, cleanup compact
+      Plugins: Kafka 3.6.1; 2 plugins (1 source, 1 converter) (connect_plugins lists them)
+      Log levels: root INFO
+  - tool: net_probe
+    input: {target: connect}
+    summary: |-
+      net_probe connect (connect-2:8083): all checks ok: dns ok, tcp ok
+      - dns connect-2:8083 ok: 10.20.12.12
+      - tcp connect-2:8083 ok: TCP connected
+      - tls connect-2:8083 skip: not configured with TLS
+  - tool: pg_streaming_liveness
+    input: {pipeline_id: orders}
+    summary: |
+      stuck: confirmed_flush_lsn did not move while the source wrote 131072 bytes in 5s (slot "debezium_orders", active=false, wal_status=reserved, retains 96.4 MiB); connector pg-orders-connector state RUNNING; the slot is INACTIVE, so no walsender is streaming it
+      the head-confirmed_flush lag grew from 96.3 MiB to 96.4 MiB in 5s and is above the stuck threshold of 16.0 MiB (max of 16.0 MiB and 4 x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain
+      no open writer transaction was found; the slot is held back by something else
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "We restarted orders-db at 09:20 for the 16.4 patch release; it was accepting connections again at 09:22 and the apps are fine. Is the connector going to come back on its own?"
+
+expect:
+  root_cause:
+    - [restart*, reboot*, patch*, maintenance, upgrade*]
+    - [postgres*, database, orders-db, source]
+    - [fail*, retr*, "not restart*", connection*]
+  root_cause_forbidden:
+    - [firewall*]
+    - [segmentation]
+    - [password*]
+    - [authenticat*]
+    - [pg_hba]
+    - [slot, dropped]
+    - [snapshot]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_admin_terminate
+      tool: connect_status
+      match: [task 0, failed, terminating connection due to administrator command]
+      required: true
+    - id: f_slot_intact
+      tool: pg_replication_slots
+      match: [debezium orders, active false]
+      required: true
+    - id: f_source_writing
+      tool: pg_row
+      match: [found yes]
+    - id: f_probe_ok
+      tool: net_probe
+      match: [all checks ok, connect view ok]
+  claims:
+    - about: root_cause
+      facts: [f_admin_terminate, f_slot_intact, f_source_writing]
+  evidence_tools: [connect_status, pg_replication_slots]
+  fix:
+    - [connect_restart_task, connect_restart_connector]
+  fix_targets:
+    connect_restart_task: {connector: pg-orders-connector, task: 0}
+    connect_restart_connector: {connector: pg-orders-connector}
+  forbidden_actions: [pg_drop_replication_slot, connect_stop_connector, connect_reset_source_offsets, connect_update_connector_config, kafka_reset_consumer_offsets]
+  max_tool_calls: 14

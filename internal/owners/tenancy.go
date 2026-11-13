@@ -145,11 +145,18 @@ type connKey struct {
 	// ca: a CA bundle path. It is public material and a shared corporate CA
 	// is normal, so it is not a connection reference (CheckSharedRefs).
 	ca bool
+	// pipelineOnly: the key has no process-wide variable and no
+	// config.Config field (the Kubernetes and Strimzi keys of the incident
+	// tools). It is accepted only in a pipeline's connections:, left out of
+	// ConnectionKeys (and so of ProcessRefs, staging: and the admin view),
+	// and wiring resolves it on its own (PipelineOnlyKeys).
+	pipelineOnly bool
 }
 
 // connKeys are the lower-case names of the process-wide settings a pipeline
-// can replace (internal/config/config.go). wiring maps each to its field; a
-// test there keeps the two lists equal.
+// can replace (internal/config/config.go), plus the pipeline-only keys
+// (pipelineOnly). wiring maps each process-wide one to its field; a test
+// there keeps the two lists equal.
 //
 // The warehouse keys belong to both kinds; every other key today is a cdc
 // one. The Airflow and dbt keys of a batch pipeline join when wiring maps
@@ -185,7 +192,26 @@ var connKeys = map[string]connKey{
 	"schema_registry_tls_ca_file":   {kind: cdc, path: true, ca: true},
 	"schema_registry_tls_cert_file": {kind: cdc, path: true},
 	"schema_registry_tls_key_file":  {kind: cdc, path: true},
+
+	// The Kubernetes API of a Strimzi deployment, for the read-only incident
+	// tools of internal/tools/k8stools (docs/pilot/strimzi-target.md,
+	// "Incident tools"). Per pipeline only; all optional, but any one needs
+	// k8sNeeds (checkK8sKeys). kubernetes_token is a bearer token: env:
+	// holds the token, file: names a token file the client re-reads before
+	// every request (a projected ServiceAccount token rotates); never a
+	// literal. The URL is checked to be https by wiring, the names to be
+	// DNS-1123 labels.
+	"kubernetes_api_url":          {kind: cdc, literal: true, pipelineOnly: true},
+	"kubernetes_token":            {kind: cdc, pipelineOnly: true},
+	"kubernetes_ca_file":          {kind: cdc, path: true, ca: true, pipelineOnly: true},
+	"strimzi_namespace":           {kind: cdc, literal: true, pipelineOnly: true},
+	"strimzi_operator_deployment": {kind: cdc, literal: true, pipelineOnly: true},
+	"strimzi_operator_namespace":  {kind: cdc, literal: true, pipelineOnly: true},
 }
+
+// k8sNeeds are the keys a block that sets any pipeline-only key must also
+// set: without the API URL, the token or the namespace no tool can read.
+var k8sNeeds = []string{"kubernetes_api_url", "kubernetes_token", "strimzi_namespace"}
 
 // cdc is events.PipelineKindCDC, short for the table above.
 const cdc = events.PipelineKindCDC
@@ -193,15 +219,42 @@ const cdc = events.PipelineKindCDC
 // belongsTo reports whether a pipeline of kind may set the key.
 func (k connKey) belongsTo(kind string) bool { return k.kind == "" || k.kind == kind }
 
-// ConnectionKeys returns every key a connections: block may hold, sorted.
+// ConnectionKeys returns the keys of a connections: block that replace a
+// process-wide setting (a config.Config field), sorted. The pipeline-only
+// keys are in PipelineOnlyKeys; AllConnectionKeys is both.
 func ConnectionKeys() []string {
 	out := make([]string, 0, len(connKeys))
-	for k := range connKeys {
-		out = append(out, k)
+	for k, info := range connKeys {
+		if !info.pipelineOnly {
+			out = append(out, k)
+		}
 	}
 	sort.Strings(out)
 	return out
 }
+
+// PipelineOnlyKeys returns the keys a connections: block may hold that have
+// no process-wide setting (the Kubernetes and Strimzi keys), sorted.
+func PipelineOnlyKeys() []string {
+	var out []string
+	for k, info := range connKeys {
+		if info.pipelineOnly {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AllConnectionKeys returns every key a connections: block may hold, sorted.
+func AllConnectionKeys() []string {
+	out := append(ConnectionKeys(), PipelineOnlyKeys()...)
+	sort.Strings(out)
+	return out
+}
+
+// IsPipelineOnlyKey reports whether the key has no process-wide setting.
+func IsPipelineOnlyKey(key string) bool { return connKeys[key].pipelineOnly }
 
 // IsPathKey reports whether the key's value is a file path (the TLS *_file
 // keys): a {file: p} reference then means the path p itself.
@@ -555,7 +608,7 @@ func validateConnections(c Connections, kind string) error {
 	for _, k := range keys {
 		info, ok := connKeys[k]
 		if !ok {
-			return fmt.Errorf("connections: unknown key %s (allowed: %s)", quoteName(k), strings.Join(ConnectionKeys(), ", "))
+			return fmt.Errorf("connections: unknown key %s (allowed: %s)", quoteName(k), strings.Join(AllConnectionKeys(), ", "))
 		}
 		if !info.belongsTo(kind) {
 			// A batch pipeline has no Kafka or Connect: a key for one would
@@ -567,6 +620,9 @@ func validateConnections(c Connections, kind string) error {
 		}
 	}
 	if err := checkWriteRole(c); err != nil {
+		return err
+	}
+	if err := checkK8sKeys(c); err != nil {
 		return err
 	}
 	for _, k := range ConnectionKeys() {
@@ -618,6 +674,28 @@ func checkWriteRole(c Connections) error {
 	}
 	if cw, cr := canonRef(w), canonRef(r); cw != "" && cw == cr {
 		return fmt.Errorf("connections.source_db_write_url: is the same reference as source_db_url; the write role needs its own credentials")
+	}
+	return nil
+}
+
+// checkK8sKeys refuses a block that sets a pipeline-only key but not every
+// key of k8sNeeds: the Strimzi tools would then not be registered, and the
+// half-written settings would be dropped without a word.
+func checkK8sKeys(c Connections) error {
+	set := false
+	for _, k := range PipelineOnlyKeys() {
+		if _, ok := c[k]; ok {
+			set = true
+			break
+		}
+	}
+	if !set {
+		return nil
+	}
+	for _, k := range k8sNeeds {
+		if _, ok := c[k]; !ok {
+			return fmt.Errorf("connections: %s is required with any kubernetes_* or strimzi_* key (the Strimzi incident tools need %s)", k, strings.Join(k8sNeeds, ", "))
+		}
 	}
 	return nil
 }
