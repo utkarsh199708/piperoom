@@ -18,13 +18,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"piperoom/internal/config"
+	"piperoom/internal/events"
 	"piperoom/internal/setup/ops"
+	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/runner"
 	"piperoom/internal/setup/standalone"
+	"piperoom/internal/setup/targets/compose"
 	"piperoom/internal/setup/targets/host"
+	"piperoom/internal/setup/targets/server"
 )
 
 // Run parses args as piperoom-setup's flags and runs the mode they name until
@@ -98,9 +103,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	log := newLogger(stderr)
-	// The real catalogue (U1-2). Targets arrive with the Welcome, and the
-	// runner's target registry is a later row: until it hands them over,
-	// http_get and net_probe refuse every host and the file and env ops work.
+	// The real catalogue (U1-2). The generic file, env, http_get and net_probe
+	// ops are registered here; the room's target driver (compose, host,
+	// dbzserver) is added when the Welcome names it (KAN-617, targetRegistrar).
+	// Targets arrive with the Welcome, and the runner's target registry is a
+	// later row: until it hands them over, http_get and net_probe refuse every
+	// host.
 	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
 	if err != nil {
 		return err
@@ -115,6 +123,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		Log:              log,
 		Catalogue:        catalogue,
 		CatalogueVersion: ops.CatalogueVersion,
+		RegisterTarget:   targetRegistrar(catalogue),
 	})
 	if err != nil {
 		return err
@@ -128,6 +137,72 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// targetRegistrar returns the runner's RegisterTarget hook: it registers the
+// driver ops for the room's SetupRequest.Target in reg. Registering twice (a
+// pairing retried after a failed handshake) is a no-op for the same target.
+// done is unsynchronised on purpose: pair() calls the hook sequentially.
+func targetRegistrar(reg *ops.Registry) func(target string, targets []events.SetupTarget) error {
+	var done string
+	return func(target string, targets []events.SetupTarget) error {
+		if done == target {
+			return nil
+		}
+		if done != "" {
+			return fmt.Errorf("room target %q differs from %q registered earlier", target, done)
+		}
+		if err := registerTarget(reg, target, targets); err != nil {
+			return err
+		}
+		done = target
+		return nil
+	}
+}
+
+// registerTarget adds the driver ops a SetupRequest.Target needs, as the
+// drivers' own package docs wire them: compose -> compose.Register; host ->
+// host.Register in its place (the two are exclusive in one registry);
+// dbzserver -> server.Register (ModeCompose) next to compose.Register, since
+// the server's Compose stack is started by the compose ops. Any other target
+// has no driver in this build and is refused by name. Each driver registers
+// with the class of the room targets of its own kind (targetClass).
+func registerTarget(reg *ops.Registry, target string, targets []events.SetupTarget) error {
+	switch target {
+	case "compose":
+		_, err := compose.Register(reg, compose.Options{Class: targetClass(targets, "compose")})
+		return err
+	case "host":
+		_, err := host.Register(reg, host.Options{Class: targetClass(targets, "host")})
+		return err
+	case "dbzserver":
+		// The Compose stack and the server run on it are one stack: both drivers
+		// take the highest class the person raised on either target.
+		class := targetClass(targets, "compose", "dbzserver")
+		if _, err := compose.Register(reg, compose.Options{Class: class}); err != nil {
+			return err
+		}
+		_, err := server.Register(reg, server.Options{Class: class, Mode: server.ModeCompose})
+		return err
+	default:
+		return fmt.Errorf("no setup driver for target %q in this runner (supported: compose, host, dbzserver)", target)
+	}
+}
+
+// targetClass is the class a driver registers with: the highest class of the
+// room targets whose Kind is one of kinds (the target kind the driver's own
+// ops report), "" (local) when the room names none. A class raised on another
+// target (the source database, Kafka, or a host in a compose room) never
+// changes the driver, so it cannot loosen a guard the person did not raise.
+func targetClass(targets []events.SetupTarget, kinds ...string) string {
+	class := ""
+	rank := map[string]int{protocol.ClassLocal: 1, protocol.ClassShared: 2, protocol.ClassProduction: 3}
+	for _, t := range targets {
+		if slices.Contains(kinds, t.Kind) && rank[t.Class] > rank[class] {
+			class = t.Class
+		}
+	}
+	return class
 }
 
 // ExitCode maps Run's error to the process exit code and prints a failure to

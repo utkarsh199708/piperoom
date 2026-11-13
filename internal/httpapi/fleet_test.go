@@ -685,3 +685,43 @@ func BenchmarkFleet200(b *testing.B) {
 		}
 	}
 }
+
+// KAN-618: OwnersNow is read on every request, so what an owners reload
+// publishes (here the "healthy" pipeline's team) reaches the fleet at once,
+// where Owners alone is the snapshot the server started with.
+func TestFleetOwnersNowIsReadPerRequest(t *testing.T) {
+	teamOf := func(rows []httpapi.FleetPipeline, id string) string {
+		for _, r := range rows {
+			if r.PipelineID == id {
+				return r.Team
+			}
+		}
+		t.Fatalf("pipeline %s missing from the fleet", id)
+		return ""
+	}
+	write := func(yaml string) *owners.Owners {
+		path := filepath.Join(t.TempDir(), "owners.yaml")
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		o, err := owners.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	stale := write(strings.Replace(fleetOwners, "    team: orders-core\n", "", 1))
+	var cur atomic.Pointer[owners.Owners]
+	cur.Store(stale)
+	e := newFleetEnv(t, fleetSetup{ownersYAML: fleetOwners, fleet: func(f *httpapi.Fleet) {
+		f.Owners = stale
+		f.OwnersNow = cur.Load
+	}})
+	if got := teamOf(e.fleet(t, "meera", ""), "healthy"); got != "" {
+		t.Fatalf("team before the reload = %q", got)
+	}
+	cur.Store(write(fleetOwners)) // an owners reload publishes a new set
+	if got := teamOf(e.fleet(t, "meera", ""), "healthy"); got != "orders-core" {
+		t.Fatalf("team after the reload = %q, want orders-core", got)
+	}
+}
