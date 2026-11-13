@@ -1,6 +1,7 @@
 package strimzi
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -104,10 +105,14 @@ func TestRound14Regressions(t *testing.T) {
 // once a token, so a line of many skipped tokens costs linear time (the
 // reviewer's inputs at a quarter and at full size: x4 is linear, x16
 // quadratic). Ratios, so the race detector's slowdown does not matter.
+// A loaded CI machine can stall one sample (x10.6 seen while the integration
+// suite ran alongside), so the ratio is measured up to three times and fails
+// only if every attempt is above the bound: quadratic code stays near x16 on
+// every attempt, noise does not.
 func TestRound14JacksonCostIsLinear(t *testing.T) {
 	best := func(s string) time.Duration {
 		var min time.Duration
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 5; i++ {
 			start := time.Now()
 			maskCredentials(s, nil)
 			if d := time.Since(start); i == 0 || d < min {
@@ -120,10 +125,19 @@ func TestRound14JacksonCostIsLinear(t *testing.T) {
 		{"Unrecognized token 'a' x", "': was expecting"},
 		{"Unexpected token '}' ", "at [Source: x]"},
 	} {
-		small := best(strings.Repeat(in.unit, 700) + in.tail)
-		full := best(strings.Repeat(in.unit, 2800) + in.tail)
-		if r := float64(full) / float64(small); r > 9 {
-			t.Errorf("%q: x700 %v, x2800 %v (x%.1f): not linear", in.unit, small, full, r)
+		var tries []string
+		for attempt := 0; attempt < 3; attempt++ {
+			small := best(strings.Repeat(in.unit, 700) + in.tail)
+			full := best(strings.Repeat(in.unit, 2800) + in.tail)
+			r := float64(full) / float64(small)
+			if r <= 9 {
+				tries = nil
+				break
+			}
+			tries = append(tries, fmt.Sprintf("x700 %v, x2800 %v (x%.1f)", small, full, r))
+		}
+		if tries != nil {
+			t.Errorf("%q: not linear on every attempt: %s", in.unit, strings.Join(tries, "; "))
 		}
 	}
 }
