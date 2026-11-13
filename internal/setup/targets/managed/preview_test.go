@@ -198,7 +198,7 @@ func TestConfluentPreviewOps(t *testing.T) {
 	f := &fakeCC{}
 	acl := &countingACL{}
 	principal := func(string) (string, error) { return "sa-00000", nil }
-	reg, _ := ccReg(t, ccPlugins{f}, ConfluentOptions{ACL: acl, Principal: principal})
+	reg, _ := ccReg(t, ccPlugins{f}, ConfluentOptions{ACL: acl, Principal: principal, Secrets: fakeStore{}})
 	env := ops.Env{Targets: []events.SetupTarget{ccTarget}}
 
 	res, err := exec(t, reg, PreviewName("ccloud_create_connector"), ccParams())
@@ -274,5 +274,54 @@ func TestAivenPreviewOps(t *testing.T) {
 	create["config"] = map[string]string{"connector.class": "com.example.Other"}
 	if _, err := exec(t, reg, PreviewName("aiven_create_connector"), create); !errors.Is(err, ErrCheckFailed) {
 		t.Errorf("an unavailable plugin: err = %v", err)
+	}
+}
+
+// A connector create preview refuses what the create's materialise refuses:
+// no secret store, or a ${secret:} reference the store cannot resolve. The
+// error names the config key, never a value.
+func TestConnectorPreviewsResolveSecrets(t *testing.T) {
+	missing := func(p map[string]any) map[string]any {
+		cfg := map[string]string{}
+		for k, v := range p["config"].(map[string]string) {
+			cfg[k] = v
+		}
+		cfg["database.password"] = "${secret:missing}"
+		p["config"] = cfg
+		return p
+	}
+
+	ccNone, _ := ccReg(t, ccPlugins{&fakeCC{}}, ConfluentOptions{})
+	if _, err := exec(t, ccNone, PreviewName("ccloud_create_connector"), ccParams()); !errors.Is(err, ErrNoSecrets) {
+		t.Errorf("confluent, no store: err = %v, want ErrNoSecrets", err)
+	}
+	cc, _ := ccReg(t, ccPlugins{&fakeCC{}}, ConfluentOptions{Secrets: fakeStore{}})
+	_, err := exec(t, cc, PreviewName("ccloud_create_connector"), missing(ccParams()))
+	checkSecretRefusal(t, "confluent", err)
+
+	mskReg, _ := newMSK(t, newFake(), "", nil)
+	_, err = exec(t, mskReg, PreviewName("msk_create_connector"), missing(connectorParams()))
+	checkSecretRefusal(t, "msk", err)
+
+	av, err := ops.New(ops.Config{ProjectDir: t.TempDir(), Targets: []events.SetupTarget{avTarget}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = av.Close() })
+	if _, err := RegisterAiven(av, AivenOptions{Client: &fakeAiven{}, Target: avTarget, Secrets: fakeStore{}}); err != nil {
+		t.Fatal(err)
+	}
+	create := map[string]any{"name": "it_orders", "config": map[string]string{"connector.class": "io.debezium.connector.postgresql.PostgresConnector", "database.password": "${secret:db_password}"}}
+	_, err = exec(t, av, PreviewName("aiven_create_connector"), missing(create))
+	checkSecretRefusal(t, "aiven", err)
+}
+
+func checkSecretRefusal(t *testing.T, name string, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "database.password") {
+		t.Errorf("%s, unresolvable reference: err = %v, want a refusal naming database.password", name, err)
+	}
+	if err != nil && strings.Contains(err.Error(), "pw-live-1") {
+		t.Errorf("%s: a secret value reached the error", name)
 	}
 }

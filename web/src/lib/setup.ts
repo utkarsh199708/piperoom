@@ -86,6 +86,17 @@ export type SetupStatus =
     }
   | { kind: "registered"; watchedBy: string };
 
+/**
+ * A setup room whose pipeline is not registered yet (KAN-601): the server has no topology or
+ * agent stats for it and answers 404. A list row carries `mode` but not `watched_by`, so there
+ * it reads as provisional until the room closes (registration closes it).
+ */
+export function isProvisionalSetup(
+  setup: { mode?: boolean; watched_by?: string } | null | undefined,
+): boolean {
+  return !!setup && setup.mode !== false && !setup.watched_by;
+}
+
 /** The step the plan is on: the blocked step when the server named one, else setup.step_index. */
 export function currentSetupStep(state: RoomState): SetupStepView | null {
   const steps = setupSteps(state.setup);
@@ -398,7 +409,7 @@ export function strimziPairingFrom(
     origin.test(server) &&
     pairingCode.test(res.code);
   if (!ok) return undefined;
-  return {
+  return checkedStrimzi({
     context,
     namespace,
     kafka,
@@ -411,6 +422,48 @@ export function strimziPairingFrom(
       registry && registryHost.test(registry.toLowerCase())
         ? registry.toLowerCase()
         : undefined,
+  });
+}
+
+/**
+ * The Strimzi facts when every one is a plain name, else undefined. Run again on what the tab's
+ * storage hands back, so no stored value reaches a copyable command line unchecked.
+ */
+export function checkedStrimzi(v: unknown): StrimziPairing | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const p = v as Record<string, unknown>;
+  const str = (x: unknown): x is string => typeof x === "string";
+  const connectors = p.connectors;
+  const ok =
+    str(p.context) &&
+    kubeContext.test(p.context) &&
+    str(p.namespace) &&
+    dnsLabel.test(p.namespace) &&
+    str(p.kafka) &&
+    dnsLabel.test(p.kafka) &&
+    str(p.pipeline) &&
+    dnsLabel.test(p.pipeline) &&
+    str(p.room) &&
+    dnsLabel.test(p.room) &&
+    Array.isArray(connectors) &&
+    connectors.length > 0 &&
+    connectors.every((c) => str(c) && dnsLabel.test(c)) &&
+    str(p.server) &&
+    origin.test(p.server) &&
+    str(p.code) &&
+    pairingCode.test(p.code) &&
+    (p.registry === undefined || (str(p.registry) && registryHost.test(p.registry)));
+  if (!ok) return undefined;
+  return {
+    context: p.context as string,
+    namespace: p.namespace as string,
+    kafka: p.kafka as string,
+    pipeline: p.pipeline as string,
+    connectors: [...(connectors as string[])],
+    room: p.room as string,
+    server: p.server as string,
+    code: p.code as string,
+    registry: p.registry as string | undefined,
   };
 }
 
@@ -431,13 +484,13 @@ export function strimziPairingSteps(
   const job = `piperoom-setup-${p.room}`;
   const confirm = fingerprintShape.test(fingerprint)
     ? fingerprint
-    : "<the 12 characters the Job logs>";
+    : '"$FINGERPRINT"';
   return [
     {
       label: "Registry push Secret (skip when the pipeline release exists)",
       command:
         `${kubectl} create secret docker-registry ${p.pipeline}-registry-push ` +
-        `--docker-server=${p.registry ?? "<registry>"} --docker-username=<user> --docker-password="$REGISTRY_PASSWORD"`,
+        `--docker-server=${p.registry ?? '"$REGISTRY_SERVER"'} --docker-username="$REGISTRY_USER" --docker-password="$REGISTRY_PASSWORD"`,
     },
     {
       label: "Pipeline release (skip when it exists)",
@@ -501,7 +554,7 @@ export function setupPairing(roomId: string): SetupPairing | null {
           ? parsed.fingerprint
           : undefined,
       target: typeof parsed.target === "string" ? parsed.target : undefined,
-      strimzi: parsed.strimzi,
+      strimzi: checkedStrimzi(parsed.strimzi),
     };
   } catch {
     return null;

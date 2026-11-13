@@ -117,7 +117,7 @@ func TestPairingRefusedBeforeWelcome(t *testing.T) {
 
 // TestVersionOneMinorBehindPairs: a server one minor behind the runner still
 // pairs. The runner accepts Welcome 1.0, sends Hello with its own Current
-// (1.1), and answers a ping with a pong.
+// (current), and answers a ping with a pong.
 func TestVersionOneMinorBehindPairs(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -127,7 +127,7 @@ func TestVersionOneMinorBehindPairs(t *testing.T) {
 	pong := make(chan struct{}, 1)
 
 	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
-		p, h, err := handshake(conn, ctx, 0, "tok-secret-value") // 0 = one minor behind
+		p, h, err := handshake(conn, ctx, protocol.CurrentMinor-1, "tok-secret-value") // one minor behind
 		if err != nil {
 			t.Errorf("handshake: %v", err)
 			return
@@ -163,11 +163,11 @@ func TestVersionOneMinorBehindPairs(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if pair.Code != "ABCDEFGH" || pair.ProtocolVersion != 1 || pair.ProtocolMinor != 1 {
-		t.Errorf("pair = %+v, want code ABCDEFGH version 1.1", pair)
+	if pair.Code != "ABCDEFGH" || pair.ProtocolVersion != 1 || pair.ProtocolMinor != protocol.CurrentMinor {
+		t.Errorf("pair = %+v, want code ABCDEFGH the current version", pair)
 	}
-	if hello.ProtocolVersion != 1 || hello.ProtocolMinor != 1 || hello.Label == "" {
-		t.Errorf("hello = %+v, want version 1.1 and a label", hello)
+	if hello.ProtocolVersion != 1 || hello.ProtocolMinor != protocol.CurrentMinor || hello.Label == "" {
+		t.Errorf("hello = %+v, want the current version and a label", hello)
 	}
 	select {
 	case <-pong:

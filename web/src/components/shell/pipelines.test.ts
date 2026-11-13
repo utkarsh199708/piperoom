@@ -23,6 +23,24 @@ describe('pipelineSummaries', () => {
   })
 })
 
+describe('pipelineSummaries, setup rooms (KAN-601)', () => {
+  const setupRoom = (id: string, pipeline_id: string, status = 'open') =>
+    ({ id, pipeline_id, status, setup: { mode: true, runner: null } }) as RoomSnapshot
+
+  it('marks a pipeline whose open rooms are all setup rooms as provisional', () => {
+    expect(pipelineSummaries([setupRoom('1', 'regsetup')])).toEqual([{ id: 'regsetup', open: 1, provisional: true }])
+  })
+
+  it('does not mark a pipeline that also has an open normal room', () => {
+    const list = pipelineSummaries([setupRoom('1', 'orders'), room('2', 'orders')])
+    expect(list).toEqual([{ id: 'orders', open: 2 }])
+  })
+
+  it('does not mark a pipeline with no open room at all', () => {
+    expect(pipelineSummaries([setupRoom('1', 'orders', 'closed')])).toEqual([{ id: 'orders', open: 0 }])
+  })
+})
+
 describe('pipelineHealth', () => {
   it('is the worst node health', () => {
     expect(pipelineHealth(topo('ok', 'ok'))).toBe('ok')

@@ -222,6 +222,11 @@ func registerHappy(t *testing.T, env *registerEnv) (roomID, pid string) {
 		snap, err := env.svc.GetRoom(ctx, roomID)
 		return err == nil && snap.ClosedAt != nil
 	})
+	// The label is appended after the close, in a separate write, so a
+	// closed room is not yet a labelled one.
+	waitFor(t, 5*time.Second, func() bool {
+		return len(eventsOf[events.RoomLabelledPayload](t, env.svc, roomID, events.RoomLabelled)) > 0
+	})
 	return roomID, pid
 }
 

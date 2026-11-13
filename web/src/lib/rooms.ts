@@ -181,13 +181,22 @@ export function roomStatusCell(room: RoomSnapshot, now = Date.now()): RoomStatus
 /** The agent column ("working · step 2", "waiting · 1 of 2", "idle"). */
 export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent: boolean } {
   const { state, detail } = room.agent_status
-  // A closed room's agent is finished, whatever its last status event said.
-  if (room.status !== 'open') return { dot: 'ok', label: 'resolved', agent: false }
+  // A closed room's agent is finished, whatever its last status event said. roomStatus decides resolved or
+  // just closed, so this cell never says "resolved" beside a Status of "Closed" (KAN-605).
+  if (room.status !== 'open') {
+    return roomStatusCell(room).kind === 'closed'
+      ? { dot: 'idle', label: 'closed', agent: false }
+      : { dot: 'ok', label: 'resolved', agent: false }
+  }
   switch (state) {
     case 'working':
       return { dot: 'agent', label: detail ? `working · ${detail}` : 'working', agent: true }
     case 'waiting_approval': {
-      const p = room.open_proposals?.[0]
+      // Count the proposal the room page describes (KAN-606): the oldest one still waiting on a layer,
+      // as the decision bar (decision.ts) and the agent pill (agentPill.ts) pick it. With none waiting
+      // (all approved, held or running), the newest one.
+      const open = room.open_proposals ?? []
+      const p = open.find((q) => q.required_layers.some((l) => q.approvals[l] === 'pending')) ?? open[open.length - 1]
       const done = p ? p.required_layers.filter((l) => p.approvals[l] === 'approved').length : 0
       const label = p ? `waiting · ${done} of ${p.required_layers.length}` : 'waiting'
       return { dot: 'idle', label, agent: false }

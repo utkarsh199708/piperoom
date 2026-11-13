@@ -113,7 +113,7 @@ func TestRegistrarManagedKinds(t *testing.T) {
 			cat := newCatalogue(t)
 			reg, calls := fakeManagedRegistrar(t, cat)
 			targets := []events.SetupTarget{tc.target, {Kind: "postgres", Address: "db.example.com:5432"}}
-			if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+			if err := reg.Apply(context.Background(), "room-1", "", targets); err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
 			if _, missing := registered(cat, tc.want); len(missing) > 0 {
@@ -156,7 +156,7 @@ func TestRegistrarManagedProdPattern(t *testing.T) {
 	cat := newCatalogue(t)
 	reg, _ := fakeManagedRegistrar(t, cat)
 	reg.prodPatterns = parseProdPatterns(" 123456789012 ,")
-	if err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if tier, _, _ := cat.FloorFor("msk_create_connector", []byte(`{}`)); tier != protocol.TierT3 {
@@ -177,7 +177,7 @@ func TestRegistrarNoManagedTarget(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cat := newCatalogue(t)
 			reg, calls := fakeManagedRegistrar(t, cat)
-			if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+			if err := reg.Apply(context.Background(), "room-1", "", targets); err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
 			all := append(append(append([]string(nil), mskOps...), confluentOps...), aivenOps...)
@@ -200,10 +200,10 @@ func TestRegistrarManagedErrors(t *testing.T) {
 	reg, calls := fakeManagedRegistrar(t, cat)
 	calls.mskErr, calls.mskFails = errors.New("no credentials"), -1
 	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
-	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, calls.mskErr) {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); !errors.Is(err, calls.mskErr) {
 		t.Fatalf("Apply = %v, want the credential error", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, calls.mskErr) {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); !errors.Is(err, calls.mskErr) {
 		t.Fatalf("second Apply = %v, want the first error again", err)
 	}
 	if len(calls.regions) != 1 {
@@ -212,13 +212,13 @@ func TestRegistrarManagedErrors(t *testing.T) {
 
 	reg2, _ := fakeManagedRegistrar(t, newCatalogue(t))
 	two := []events.SetupTarget{{Kind: "aiven", Address: "a-proj/conn"}, {Kind: "aiven", Address: "b-proj/conn"}}
-	if err := reg2.Apply(context.Background(), "room-1", two); !errors.Is(err, errManagedTargets) {
+	if err := reg2.Apply(context.Background(), "room-1", "", two); !errors.Is(err, errManagedTargets) {
 		t.Fatalf("two aiven targets: Apply = %v, want errManagedTargets", err)
 	}
 
 	reg3, calls3 := fakeManagedRegistrar(t, newCatalogue(t))
 	bad := []events.SetupTarget{{Kind: "aws", Address: "123456789012/evil.example.com"}}
-	if err := reg3.Apply(context.Background(), "room-1", bad); err == nil {
+	if err := reg3.Apply(context.Background(), "room-1", "", bad); err == nil {
 		t.Fatal("a bad region was accepted")
 	}
 	if len(calls3.regions) != 0 {
@@ -226,7 +226,7 @@ func TestRegistrarManagedErrors(t *testing.T) {
 	}
 
 	reg4, _ := fakeManagedRegistrar(t, newCatalogue(t))
-	if err := reg4.Apply(context.Background(), "", aws); err == nil || !strings.Contains(err.Error(), "room id") {
+	if err := reg4.Apply(context.Background(), "", "", aws); err == nil || !strings.Contains(err.Error(), "room id") {
 		t.Fatalf("an empty room id: Apply = %v, want the MSK driver's room id refusal", err)
 	}
 }
@@ -394,7 +394,7 @@ func TestRegistrarRetriesAnInnerTimeoutOnce(t *testing.T) {
 	cat := newCatalogue(t)
 	reg, calls := fakeManagedRegistrar(t, cat)
 	calls.mskErr, calls.mskFails = timeout, 1
-	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); err != nil {
 		t.Fatalf("Apply after one slow fetch = %v, want the retry to register", err)
 	}
 	if len(calls.regions) != 2 {
@@ -406,10 +406,10 @@ func TestRegistrarRetriesAnInnerTimeoutOnce(t *testing.T) {
 
 	reg, calls = fakeManagedRegistrar(t, newCatalogue(t))
 	calls.mskErr, calls.mskFails = timeout, -1
-	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Apply = %v, want the deadline", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", aws); !errors.Is(err, context.DeadlineExceeded) {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("second Apply = %v, want the cached deadline", err)
 	}
 	if len(calls.regions) != 2 {
@@ -420,10 +420,10 @@ func TestRegistrarRetriesAnInnerTimeoutOnce(t *testing.T) {
 	calls.mskErr, calls.mskFails = context.Canceled, 1
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := reg.Apply(ctx, "room-1", aws); !errors.Is(err, context.Canceled) {
+	if err := reg.Apply(ctx, "room-1", "", aws); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Apply on a stopped runner = %v, want Canceled", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); err != nil {
 		t.Fatalf("Apply after a stop = %v, want a fresh registration", err)
 	}
 	if len(calls.regions) != 2 {
@@ -438,14 +438,14 @@ func TestRegistrarRefusesAnotherRoom(t *testing.T) {
 	cat := newCatalogue(t)
 	reg, _ := fakeManagedRegistrar(t, cat)
 	aws := []events.SetupTarget{{Kind: "aws", Address: "123456789012/eu-west-1"}}
-	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); err != nil {
 		t.Fatal(err)
 	}
-	err := reg.Apply(context.Background(), "room-2", aws)
+	err := reg.Apply(context.Background(), "room-2", "", aws)
 	if !errors.Is(err, errOtherRoom) || !strings.Contains(err.Error(), "restart") {
 		t.Fatalf("Apply(room-2) = %v, want errOtherRoom naming a restart", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", aws); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", aws); err != nil {
 		t.Fatalf("Apply(room-1) again = %v", err)
 	}
 }

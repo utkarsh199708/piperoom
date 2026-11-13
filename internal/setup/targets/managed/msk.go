@@ -1060,6 +1060,9 @@ func (d *MSKDriver) previewConnector(ctx context.Context, raw json.RawMessage) (
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
+	if err := secretsResolve(d.secrets, p.Config); err != nil {
+		return events.PreviewResult{}, err
+	}
 	b, _ := json.Marshal(p.Config)
 	pr := events.PreviewResult{
 		Expected: fmt.Sprintf("connector %s on Kafka Connect %s, 1 MCU x 1 worker, IAM auth, TLS; config %s", p.Name, p.KafkaConnectVersion, b),

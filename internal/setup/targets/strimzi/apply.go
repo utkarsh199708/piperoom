@@ -389,6 +389,11 @@ func (o k8sApplyOp) Preview(ctx context.Context, params json.RawMessage, env ops
 	if err != nil {
 		return events.PreviewResult{}, err
 	}
+	// The preview refuses what Execute would: D11's production gate is a
+	// read (the binding GET), so a preview can run it without writing.
+	if err := o.d.productionGate(ctx, p.AdmissionPolicyConfirmed); err != nil {
+		return events.PreviewResult{}, err
+	}
 	r, err := o.d.renderTemplate(p.Kind, p.Template, kafka, ns, p.Params)
 	if err != nil {
 		return events.PreviewResult{}, err

@@ -166,8 +166,22 @@ describe('closed room', () => {
     expect(h.textContent?.match(/1 h 12 min/g)).toHaveLength(1)
     expect(h).not.toHaveTextContent('is driving')
     expect(h.querySelector('[data-tone]')).toBeNull()
-    expect(within(h).getByRole('button', { name: 'Export JSON' })).toBeInTheDocument()
-    expect(within(h).getByRole('button', { name: 'Post-mortem draft' })).toBeInTheDocument()
+  })
+
+  it('a resolved room shows Export JSON and Post-mortem draft once, in the Resolved strip, not the header (KAN-607)', () => {
+    show(member, closedRoom())
+    expect(screen.getAllByRole('button', { name: 'Export JSON' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Post-mortem draft' })).toHaveLength(1)
+    expect(within(header()).queryByRole('button', { name: 'Export JSON' })).toBeNull()
+    expect(within(header()).queryByRole('button', { name: 'Post-mortem draft' })).toBeNull()
+  })
+
+  it('a room closed with no resolution has no strip, so the header keeps both buttons, once (KAN-607)', () => {
+    show(member, closedRoom({ resolution: undefined }))
+    expect(screen.getAllByRole('button', { name: 'Export JSON' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Post-mortem draft' })).toHaveLength(1)
+    expect(within(header()).getByRole('button', { name: 'Export JSON' })).toBeInTheDocument()
+    expect(within(header()).getByRole('button', { name: 'Post-mortem draft' })).toBeInTheDocument()
   })
 
   it('a retention close names Piperoom, not a person', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { useMemo, useState } from 'react'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { RollbackButton } from './RollbackButton'
 import { ApiClientError } from '../../api/client'
 import type { Event } from '../../api/types'
@@ -26,9 +26,12 @@ function ok(item: SendItem, clientId: string): Event {
 function Harness({
   post,
   dedupes = null,
+  noReason = false,
 }: {
   post: (item: SendItem, clientId: string) => Promise<Event | undefined>
   dedupes?: boolean | null
+  /** The send controls offer no refusal text (an older host). */
+  noReason?: boolean
 }) {
   const [error, setError] = useState<string | null>(null)
   const ledger = useMemo(() => {
@@ -43,8 +46,9 @@ function Harness({
       onDelivered: (listener) => ledger.onDelivered(listener),
       cancel: (clientId) => ledger.cancel(clientId),
       isPending: (clientId) => ledger.isPending(clientId),
+      refusal: noReason ? undefined : (clientId) => ledger.refusal(clientId),
     }),
-    [ledger],
+    [ledger, noReason],
   )
   return (
     <>
@@ -72,7 +76,10 @@ describe('rollback dialog: refused versus kept', () => {
     render(<Harness post={post} />)
     ask()
     await waitFor(() => expect(screen.getByTestId('room-error')).toHaveTextContent(errorText(ROOM_CLOSED)))
-    expect(await screen.findByText(/Piperoom refused this request/)).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog')
+    // KAN-587: the dialog carries the reason itself; the banner may be scrolled out of view.
+    expect(await within(dialog).findByText(errorText(ROOM_CLOSED))).toBeInTheDocument()
+    expect(within(dialog).queryByText(/banner/)).not.toBeInTheDocument()
     expect(screen.queryByText(OFFLINE_TEXT)).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
@@ -84,7 +91,16 @@ describe('rollback dialog: refused versus kept', () => {
     const post = vi.fn().mockRejectedValue(FORBIDDEN)
     render(<Harness post={post} />)
     ask()
-    expect(await screen.findByText(/Piperoom refused this request/)).toBeInTheDocument()
+    expect(await within(await screen.findByRole('dialog')).findByText(errorText(FORBIDDEN))).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
+  it('a refusal with no reason text says nothing was sent, without pointing to a banner', async () => {
+    const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
+    render(<Harness post={post} noReason />)
+    ask()
+    const line = await screen.findByText('Piperoom refused this request, so nothing was sent.')
+    expect(line).not.toHaveTextContent(/banner/)
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
@@ -92,7 +108,7 @@ describe('rollback dialog: refused versus kept', () => {
     const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
     render(<Harness post={post} />)
     ask()
-    await screen.findByText(/Piperoom refused this request/)
+    await screen.findByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
     expect(post.mock.calls[1][1]).not.toBe(post.mock.calls[0][1])
@@ -105,7 +121,7 @@ describe('rollback dialog: refused versus kept', () => {
     ask()
     expect(await screen.findByRole('alert')).toHaveTextContent(OFFLINE_TEXT)
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
-    expect(screen.queryByText(/Piperoom refused this request/)).not.toBeInTheDocument()
+    expect(screen.queryByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })).not.toBeInTheDocument()
   })
 
   it('a kept request whose Retry resends the same client id, then closes on success', async () => {
@@ -125,7 +141,7 @@ describe('rollback dialog: refused versus kept', () => {
     render(<Harness post={post} dedupes />)
     ask()
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText(/Piperoom refused this request/)).toBeInTheDocument()
+    expect(await screen.findByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
     expect(post.mock.calls[1][1]).toBe(post.mock.calls[0][1])
@@ -135,11 +151,11 @@ describe('rollback dialog: refused versus kept', () => {
     const post = vi.fn().mockRejectedValue(ROOM_CLOSED)
     render(<Harness post={post} />)
     ask()
-    await screen.findByText(/Piperoom refused this request/)
+    await screen.findByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.queryByText(/Piperoom refused this request/)).not.toBeInTheDocument()
+    expect(screen.queryByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })).not.toBeInTheDocument()
   })
 
   it('a request cancelled mid-send and then refused leaves no stale refusal on the reopened dialog', async () => {
@@ -155,7 +171,7 @@ describe('rollback dialog: refused versus kept', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     expect(screen.getByRole('dialog')).toBeInTheDocument()
-    expect(screen.queryByText(/Piperoom refused this request/)).not.toBeInTheDocument()
+    expect(screen.queryByText(errorText(ROOM_CLOSED), { selector: '[role="status"]' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 })

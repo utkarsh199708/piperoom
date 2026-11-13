@@ -258,6 +258,15 @@ func materialise(s Materialiser, cfg map[string]string) (map[string]string, erro
 	return out, nil
 }
 
+// secretsResolve is the refusal materialise makes, for a preview: each
+// ${secret:} reference must resolve in the runner's store, or the preview
+// fails as the write would. The values are dropped here; none leaves the
+// runner or reaches the preview's text.
+func secretsResolve(s Materialiser, cfg map[string]string) error {
+	_, err := materialise(s, cfg)
+	return err
+}
+
 // clipText cuts s for an error, with no control characters.
 func clipText(s string, max int) string {
 	s = strings.Map(func(r rune) rune {

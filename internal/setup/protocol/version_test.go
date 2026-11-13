@@ -80,7 +80,7 @@ func TestRefusalText(t *testing.T) {
 // This build pairs with itself and with a runner one minor behind.
 func TestCurrent(t *testing.T) {
 	cur := protocol.Current()
-	if cur != v(protocol.CurrentMajor, protocol.CurrentMinor) || cur.String() != "1.1" {
+	if cur != v(protocol.CurrentMajor, protocol.CurrentMinor) || cur.String() != "1.2" {
 		t.Fatalf("Current = %s", cur)
 	}
 	behind := v(cur.Major, cur.Minor-1)
@@ -112,7 +112,7 @@ func TestHasAndFrameSince(t *testing.T) {
 	}
 }
 
-// A 1.0 runner's frames (the U0 shapes) decode unchanged under 1.1 and pair;
+// A 1.0 runner's frames (the U0 shapes) decode unchanged under 1.1 and later;
 // a 1.1 Pair, Hello and Welcome carry the minor.
 func TestWireBackwardCompatible(t *testing.T) {
 	var f protocol.Frame
@@ -128,8 +128,10 @@ func TestWireBackwardCompatible(t *testing.T) {
 	if got := f.Hello.Version(); got != v(1, 0) {
 		t.Errorf("1.0 hello = %s", got)
 	}
-	if err := protocol.ServerAccepts(protocol.Current(), f.Hello.Version()); err != nil {
-		t.Errorf("a 1.0 runner does not pair with this server: %v", err)
+	// 1.2 is two minors ahead of a 1.0 runner, so the "one minor behind" rule
+	// refuses it (KAN-617 bumped CurrentMinor to 2); the frames still decode.
+	if err := protocol.ServerAccepts(protocol.Current(), f.Hello.Version()); !errors.Is(err, protocol.ErrProtocolVersion) {
+		t.Errorf("a 1.0 runner against this server = %v, want ErrProtocolVersion", err)
 	}
 	var w protocol.Welcome
 	if err := json.Unmarshal([]byte(`{"room_id":"r","title":"t","pipeline_id":"p","creator":{"kind":"human","id":"a"},"protocol_version":1}`), &w); err != nil {
@@ -222,5 +224,34 @@ func TestFrameCheck(t *testing.T) {
 				t.Errorf("Check = %v, want %v", err, c.want)
 			}
 		})
+	}
+}
+
+// Welcome.Target is a 1.2 field: absent on a 1.1 welcome (omitempty), and an
+// absent field decodes to "" (no target driver).
+func TestWelcomeTargetSince12(t *testing.T) {
+	if protocol.CurrentMinor < 2 {
+		t.Fatalf("CurrentMinor = %d; Welcome.Target needs 1.2", protocol.CurrentMinor)
+	}
+	raw, err := json.Marshal(protocol.Welcome{RoomID: "r", ProtocolVersion: 1, ProtocolMinor: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"target"`) {
+		t.Errorf("a welcome with no target wrote one: %s", raw)
+	}
+	raw, err = json.Marshal(protocol.Welcome{RoomID: "r", ProtocolVersion: 1, ProtocolMinor: 2, Target: "compose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"target":"compose"`) {
+		t.Errorf("welcome = %s", raw)
+	}
+	var w protocol.Welcome
+	if err := json.Unmarshal([]byte(`{"room_id":"r","protocol_version":1,"protocol_minor":1}`), &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Target != "" {
+		t.Errorf("a 1.1 welcome decoded Target %q", w.Target)
 	}
 }

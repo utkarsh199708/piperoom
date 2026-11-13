@@ -195,7 +195,35 @@ describe('status and agent cells', () => {
     const driven = { ...r, driver: { id: 'k', name: 'K' } }
     expect(roomStatusCell({ ...driven, agent_status: { state: 'working' } })).toMatchObject({ dot: 'agent', label: 'Investigating' })
     expect(roomStatusCell(driven).label).toBe('Idle · waiting for a steer')
+    const verification = { recovered: true, verdict: 'recovered: all good' }
+    expect(roomStatusCell({ ...driven, last_fix: { proposal_id: 'p', seq: 5, steps: 1, failed_step: 0, verification } })).toMatchObject({
+      dot: 'ok',
+      label: 'Fix ran · recovered',
+    })
     expect(roomStatusCell(r).label).toMatch(/^No driver · /)
+  })
+  it('a fully approved proposal held by write mode reads as waiting, the agent cell unchanged (KAN-596)', () => {
+    const held = withProposal({ ...r, driver: { id: 'k', name: 'K' }, agent_status: { state: 'waiting_approval' } }, { a: 'approved', b: 'approved' })
+    const blocked = { ...held, open_proposals: held.open_proposals.map((p) => ({ ...p, blocked: 'write_mode_off' as const })) }
+    expect(roomStatusCell(blocked).label).toBe('Approved · waiting for write mode')
+    expect(roomStatusCell(held).label).toBe('Executing fix')
+    expect(agentCell(blocked).label).toBe('waiting · 2 of 2')
+    expect(needsApproval(blocked)).toBe(needsApproval(held))
+  })
+  it('the agent cell counts the oldest proposal that still waits, as the room page does (KAN-606)', () => {
+    const base = { title: 't', steps: [], risk: 'low' as const, rollback: 'none' }
+    const approved = 'approved' as const
+    const pending = 'pending' as const
+    const older = { ...base, proposal_id: 'p1', seq: 3, required_layers: ['a', 'b'], approvals: { a: approved, b: approved } }
+    const newer = { ...base, proposal_id: 'p2', seq: 5, required_layers: ['a'], approvals: { a: pending } }
+    const two = { ...r, agent_status: { state: 'waiting_approval' }, open_proposals: [older, newer] }
+    expect(agentCell(two).label).toBe('waiting · 0 of 1')
+    // Both still wait: the oldest wins, as the decision bar and the agent pill pick it.
+    const both = { ...two, open_proposals: [{ ...older, approvals: { a: approved, b: pending } }, newer] }
+    expect(agentCell(both).label).toBe('waiting · 1 of 2')
+    // Newest is fully approved and nothing waits: the newest, not the oldest.
+    const none = { ...two, open_proposals: [{ ...older, required_layers: ['a'], approvals: { a: approved } }, { ...older, proposal_id: 'p3' }] }
+    expect(agentCell(none).label).toBe('waiting · 2 of 2')
   })
   it('agent cell', () => {
     expect(agentCell(r)).toMatchObject({ label: 'idle', agent: false })
@@ -206,10 +234,14 @@ describe('status and agent cells', () => {
     const waiting = withProposal({ ...r, agent_status: { state: 'waiting_approval' } }, { a: 'approved', b: 'pending' })
     expect(agentCell(waiting).label).toBe('waiting · 1 of 2')
     expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'done' } }).label).toBe('resolved')
+    // A room closed with no resolution and no verified fix reads closed, as its Status does (KAN-605).
     expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'waiting_approval' } })).toMatchObject({
-      dot: 'ok',
-      label: 'resolved',
+      dot: 'idle',
+      label: 'closed',
     })
+    expect(
+      agentCell({ ...r, status: 'closed', resolution: 'restarted the task', agent_status: { state: 'waiting_approval' } }),
+    ).toMatchObject({ dot: 'ok', label: 'resolved' })
     expect(agentCell({ ...r, agent_status: { state: 'error' } })).toMatchObject({ dot: 'fail', label: 'error' })
   })
 })
