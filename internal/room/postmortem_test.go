@@ -409,3 +409,45 @@ func TestPostmortemVerificationSection(t *testing.T) {
 		})
 	}
 }
+
+// A proposal that never ran in a closed room reads "not run (room closed)",
+// as on the card, and is not listed under Still open (KAN-614).
+func TestPostmortemClosedRoomProposalOutcome(t *testing.T) {
+	mk := func(t *testing.T, ran, closed bool) string {
+		svc, st, c := newTestService(t)
+		r := createRoom(t, svc, "arjun")
+		app(t, st, c, r.ID, events.ProposalCreated, events.AgentActor, events.ProposalCreatedPayload{
+			ProposalID: "p_9", Title: "Do it", Risk: "low", RequiredLayers: []string{"kafka"},
+			Steps: []events.ProposalStep{{Action: "set_compat", Layer: "kafka", Params: json.RawMessage(`{}`), Description: "d"}},
+		})
+		if ran {
+			app(t, st, c, r.ID, events.ActionExecuted, events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor"},
+				events.ActionExecutedPayload{ProposalID: "p_9", StepIndex: 0, OK: true, Output: "ok"})
+		}
+		if closed {
+			app(t, st, c, r.ID, events.RoomClosed, pmHuman("priya", "Priya"), events.RoomClosedPayload{Resolution: "fixed"})
+		}
+		return renderRoom(t, svc, r.ID)
+	}
+	t.Run("closed and never run", func(t *testing.T) {
+		md := mk(t, false, true)
+		if !strings.Contains(md, "Outcome: not run (room closed)") {
+			t.Errorf("outcome not reworded:\n%s", md)
+		}
+		if strings.Contains(md, "waiting for approval") || strings.Contains(md, "is still waiting") {
+			t.Errorf("closed proposal still listed as waiting:\n%s", md)
+		}
+	})
+	t.Run("closed and ran", func(t *testing.T) {
+		md := mk(t, true, true)
+		if !strings.Contains(md, "Outcome: executed") || strings.Contains(md, "not run") {
+			t.Errorf("ran proposal changed:\n%s", md)
+		}
+	})
+	t.Run("open room still waits", func(t *testing.T) {
+		md := mk(t, false, false)
+		if !strings.Contains(md, "Outcome: waiting for approval") || !strings.Contains(md, "is still waiting for approval") {
+			t.Errorf("open room changed:\n%s", md)
+		}
+	})
+}
