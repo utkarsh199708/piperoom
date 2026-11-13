@@ -352,6 +352,13 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	defer cancel()
 
 	log := m.log
+	// Registration wiring (KAN-618): with setup on and OWNERS_DIR set, the
+	// owners are a reloadable set that includes the registered pipelines.
+	reg, err := setupRegisterWiring(cfg, own, s.setupCfg, s.writeOn)
+	if err != nil {
+		return err
+	}
+	own = reg.own
 	// memStore: the in-memory room store, which --demo and --quickstart use.
 	memStore := m.demo || m.quickstart
 
@@ -588,7 +595,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		return err
 	}
 
-	svc := newRoomService(room.Deps{
+	svc := newRoomService(reg.apply(room.Deps{
 		PullRequests:      prReader,
 		Store:             st,
 		Actions:           acts,
@@ -627,7 +634,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		OnActionResult:    lineage.ActionHook(),
 		OnRoomDeleted:     deletedHook.onDeleted,
 		TeamPager:         slack.teamPager(),
-	}, s.authSettings, usage)
+	}, log), s.authSettings, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
@@ -712,7 +719,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	// The fleet view (X5a) reads the watcher's status rows, which the leader's
 	// watcher writes, so every replica answers alike.
 	fleetStore, _ := st.(store.FleetStore)
-	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
+	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, reg.ownersNow, st, fleetStore, s.watchCfg, changesDays)))
 	// Connector config versions (X5c): the watcher writes them, the
 	// config-versions routes read them; the change-log retention above
 	// purges them (configVersionsPurger).
