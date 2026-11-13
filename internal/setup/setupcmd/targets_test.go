@@ -41,7 +41,7 @@ var genericOps = []string{
 func TestRegistrarHostTarget(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
-	err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{
+	err := reg.Apply(context.Background(), "room-1", "", []events.SetupTarget{
 		{Kind: "postgres", Address: "db.example.com:5432", Class: protocol.ClassShared},
 		{Kind: "host", Address: "127.0.0.1", Class: protocol.ClassShared},
 	})
@@ -72,7 +72,7 @@ func TestRegistrarComposeDefault(t *testing.T) {
 		"stack hosts": {{Kind: "kafka", Address: "localhost:9092"}, {Kind: "connect", Address: "http://localhost:8083"}},
 	} {
 		cat := newCatalogue(t)
-		if err := newTargetRegistrar(cat, nil).Apply(context.Background(), "room-1", targets); err != nil {
+		if err := newTargetRegistrar(cat, nil).Apply(context.Background(), "room-1", "", targets); err != nil {
 			t.Fatalf("%s: Apply: %v", name, err)
 		}
 		if _, ok := cat.Floor("compose_up"); !ok {
@@ -89,7 +89,7 @@ func TestRegistrarComposeDefault(t *testing.T) {
 func TestRegistrarManagedTargetRegistersNoLocalDriver(t *testing.T) {
 	cat := newCatalogue(t)
 	reg, _ := fakeManagedRegistrar(t, cat)
-	err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{
+	err := reg.Apply(context.Background(), "room-1", "", []events.SetupTarget{
 		{Kind: "aws", Address: "123456789012/eu-west-1", Class: protocol.ClassProduction},
 	})
 	if err != nil {
@@ -114,13 +114,13 @@ func TestRegistrarIdempotent(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
 	host := []events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}
-	if err := reg.Apply(context.Background(), "room-1", host); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", host); err != nil {
 		t.Fatalf("first Apply: %v", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", host); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", host); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
-	if err := reg.Apply(context.Background(), "room-1", nil); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", nil); err != nil {
 		t.Fatalf("Apply after a targetless Welcome: %v", err)
 	}
 	if _, ok := cat.Floor("compose_up"); ok {
@@ -181,7 +181,7 @@ func TestRegistrarEmbedded(t *testing.T) {
 	cat := newCatalogue(t)
 	reg := newTargetRegistrar(cat, nil)
 	reg.embedded = true
-	if err := reg.Apply(context.Background(), "room-1", []events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", []events.SetupTarget{{Kind: "host", Address: "127.0.0.1"}}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for _, op := range []string{ops.OpProjectInspect, ops.OpReferenceWrite, ops.OpEmbeddedLogRead} {
@@ -210,7 +210,7 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
 	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassProduction}, {Kind: "kafka", Address: "strimzi://prod-kafka"}}
-	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", targets); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	for _, op := range []string{"k8s_get", "k8s_apply", "k8s_secret_apply"} {
@@ -223,7 +223,7 @@ func TestRegistrarStrimziInJob(t *testing.T) {
 	}
 
 	plain := newCatalogue(t)
-	if err := newTargetRegistrar(plain, nil).Apply(context.Background(), "room-1", targets); err != nil {
+	if err := newTargetRegistrar(plain, nil).Apply(context.Background(), "room-1", "", targets); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := plain.Floor("k8s_get"); ok {
@@ -261,7 +261,7 @@ func TestKubernetesClassIsTheRoomsHighest(t *testing.T) {
 	}
 	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
 	targets := []events.SetupTarget{{Kind: "kubernetes", Address: "kind/data", Class: protocol.ClassShared}, {Kind: "kafka", Address: "strimzi://prod-kafka", Class: protocol.ClassProduction}}
-	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", targets); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	op, ok := cat.Get("k8s_delete")
@@ -344,7 +344,7 @@ func TestRegistrarStrimziSecretFromStore(t *testing.T) {
 	reg := newTargetRegistrar(cat, nil)
 	reg.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
 	reg.secrets = open
-	if err := reg.Apply(context.Background(), "room-1", targets); err != nil {
+	if err := reg.Apply(context.Background(), "room-1", "", targets); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	op, ok := cat.Get("k8s_secret_apply")
@@ -373,7 +373,7 @@ func TestRegistrarStrimziSecretFromStore(t *testing.T) {
 	bare := newCatalogue(t)
 	reg2 := newTargetRegistrar(bare, nil)
 	reg2.strimzi = &strimzi.Options{Pipeline: "orders", Connectors: []string{"orders-src"}, API: api}
-	if err := reg2.Apply(context.Background(), "room-1", targets); err != nil {
+	if err := reg2.Apply(context.Background(), "room-1", "", targets); err != nil {
 		t.Fatal(err)
 	}
 	op2, _ := bare.Get("k8s_secret_apply")

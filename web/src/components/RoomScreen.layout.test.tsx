@@ -230,6 +230,19 @@ describe('RoomScreen rail and column', () => {
   })
 })
 
+describe('RoomScreen column height', () => {
+  // KAN-603: the shell's wrapper is a flex column; the root fills it (flex-1) so the composer's
+  // mt-auto sits at the bottom on a short tab. min-h-full had no height to resolve against.
+  it('grows to fill the shell column so the composer can sit at the bottom', () => {
+    show(kabir, room())
+    const steer = screen.getByRole('region', { name: 'Steer' })
+    const root = steer.closest('.text-sm') as HTMLElement
+    expect(root).toHaveClass('flex', 'flex-1', 'flex-col')
+    expect(root).not.toHaveClass('min-h-full')
+    expect(steer).toHaveClass('mt-auto')
+  })
+})
+
 describe('RoomScreen close room', () => {
   it('the driver sees Close room; it opens the close dialog', () => {
     show(kabir, room())

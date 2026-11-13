@@ -7,6 +7,7 @@ import { canClose, canHandoff, isViewer, roomPeopleCount } from '@/state/permiss
 import type { ConnState } from '@/hooks/useRoom'
 import { Clock } from './Clock'
 import { roomStatus, statusInputFromState } from '@/lib/roomStatus'
+import { agentPill } from '@/lib/agentPill'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -102,6 +103,9 @@ export function RoomHeader({
   // useRoomShortcuts does not depend on the buttons.
   const roomy = useMediaQuery('(min-width: 768px)')
   const status = roomStatus(statusInputFromState(state))
+  // A finished or held-back fix gives the badge and the pill one sentence (KAN-600): the pill is then
+  // not drawn. Compared by sentence, so "Executing fix" next to "Executing fix · 1 of 2" still shows both.
+  const pillRepeatsBadge = state.status === 'open' && agentPill(state).text === status.label
   // Hand-off needs someone to take it (P2): RoomScreen's count of targets, else the people shown here.
   const peopleHere = handoffTargets ?? roomPeopleCount(state, members.map((m) => m.id), user.id)
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
@@ -179,7 +183,7 @@ export function RoomHeader({
             </span>
           )}
           {/* The driver role and the agent are retired at close: no pill on a closed room. */}
-          {!closed && <AgentPill state={state} />}
+          {!closed && <AgentPill state={state} hidden={pillRepeatsBadge} />}
           {!closed && state.agent_status.state === 'error' && state.agent_status.detail && (
             <span
               className="max-w-[48ch] truncate text-xs text-destructive-fg"
@@ -299,7 +303,8 @@ export function RoomHeader({
         ))}
       </p>
 
-      {closed && (onExport || onPostmortem) && (
+      {/* The Resolved strip carries these two buttons when it shows (KAN-607); only a room closed with no resolution keeps them here. */}
+      {closed && !state.resolution && (onExport || onPostmortem) && (
         <div className="flex flex-wrap items-center gap-2">
           <ClosedRoomActions onExport={onExport} onPostmortem={onPostmortem} exporting={exporting} />
         </div>

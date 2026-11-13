@@ -60,7 +60,7 @@ func TestRegisterTargetsSeesTheWelcome(t *testing.T) {
 	)
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
-		RegisterTargets: func(_ context.Context, roomID string, targets []events.SetupTarget) error {
+		RegisterTargets: func(_ context.Context, roomID, _ string, targets []events.SetupTarget) error {
 			mu.Lock()
 			defer mu.Unlock()
 			got = append(got, targets)
@@ -108,7 +108,7 @@ func TestRegisterTargetsErrorFailsTheHandshake(t *testing.T) {
 	r, err := runner.New(runner.Options{
 		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Stdout: io.Discard, Log: quiet(),
 		Backoff: func(int) time.Duration { return 0 },
-		RegisterTargets: func(context.Context, string, []events.SetupTarget) error {
+		RegisterTargets: func(context.Context, string, string, []events.SetupTarget) error {
 			calls.Add(1)
 			return boom
 		},
@@ -159,7 +159,7 @@ func TestRegisterTargetsAfterConfirmation(t *testing.T) {
 		ServerURL: srv.URL, Code: "ABCDEFGH", Stdin: strings.NewReader("n\n"),
 		Stdout: writerFunc(func(p []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return stdout.Write(p) }),
 		Log:    quiet(),
-		RegisterTargets: func(context.Context, string, []events.SetupTarget) error {
+		RegisterTargets: func(context.Context, string, string, []events.SetupTarget) error {
 			calls.Add(1)
 			return nil
 		},

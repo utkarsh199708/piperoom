@@ -118,6 +118,9 @@ type Proposal struct {
 	Rollback       string                `json:"rollback"`
 	RequiredLayers []string              `json:"required_layers"`
 	Approvals      map[string]string     `json:"approvals"` // layer -> approved|pending|rejected
+	// Seq is the seq of the proposal.created: it orders an open proposal
+	// against RoomSnapshot.LastFix, which has left this list (docs/api.md).
+	Seq int64 `json:"seq"`
 	// ParamsHash is the proposal's params_hash (design section 3.1); the UI
 	// sends it back with approve and reject. "" only for a proposal that
 	// predates the hash and cannot be hashed.
@@ -203,6 +206,33 @@ type finishedProposal struct {
 	proposalID string
 	origin     string
 	outcomes   []stepOutcome // one per step; outcomeNotRun for a step that never ran
+}
+
+// LastFix is the room's newest fix whose run ended (docs/api.md "Last fix"):
+// the newest proposal, by its proposal.created, whose last step ran or whose
+// step failed. An executed proposal has left OpenProposals, so this is what
+// tells the room list that a fix ran (KAN-594). Never mutated once set: Apply
+// replaces it.
+type LastFix struct {
+	ProposalID string `json:"proposal_id"`
+	// Seq is the seq of its proposal.created, like Proposal.Seq.
+	Seq   int64 `json:"seq"`
+	Steps int   `json:"steps"`
+	// FailedStep is the 1-based step that failed or has an unknown outcome
+	// (the executor stops there); 0 when every step ran.
+	FailedStep int `json:"failed_step"`
+	// Verification is from the proposal's newest agent.verification; nil before
+	// one exists.
+	Verification *FixVerification `json:"verification,omitempty"`
+}
+
+// FixVerification is the part of an agent.verification the room's status reads.
+type FixVerification struct {
+	Recovered bool   `json:"recovered"`
+	Verdict   string `json:"verdict"`
+	// repeat is agent.verification.repeat: a repeat never overwrites a full
+	// verdict (foldFixVerdict).
+	repeat bool
 }
 
 // proposalOrigin normalises proposal.created.origin for the room view: "" (an
@@ -307,6 +337,8 @@ type RoomSnapshot struct {
 	// maxSnapshotPullRequests; never null. An executed proposal leaves
 	// OpenProposals, but its PR stays here and stays followed (Q7e).
 	PullRequests []PullRequest `json:"pull_requests"`
+	// LastFix is the room's newest fix whose run ended; omitted until one exists.
+	LastFix *LastFix `json:"last_fix,omitempty"`
 
 	// finished is the driver-authored proposal the last folded event ended
 	// (action.executed), nil after any other event. Never mutated once set.
@@ -487,6 +519,14 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		m := *s.Mode
 		m.AutoApprove = append([]string{}, s.Mode.AutoApprove...)
 		c.Mode = &m
+	}
+	if s.LastFix != nil {
+		f := *s.LastFix
+		if s.LastFix.Verification != nil {
+			v := *s.LastFix.Verification
+			f.Verification = &v
+		}
+		c.LastFix = &f
 	}
 	c.Setup = s.Setup.clone()
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
@@ -852,6 +892,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		np := Proposal{
 			ProposalID:     p.ProposalID,
+			Seq:            e.Seq,
 			Title:          p.Title,
 			Steps:          p.Steps,
 			Risk:           p.Risk,
@@ -967,6 +1008,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		// The proposal leaves the open list when its last step runs, or when
 		// any step fails (the executor stops there, so it is decided).
 		if !p.OK || isLastStep(snap.OpenProposals, p.ProposalID, p.StepIndex) {
+			snap.LastFix = foldLastFix(snap.LastFix, snap.OpenProposals, p)
 			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 		}
 
@@ -979,6 +1021,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	case events.AgentVerification:
 		if p, ok := decode[events.AgentVerificationPayload](e); ok {
 			snap.PullRequests = notePRVerified(snap.PullRequests, p.ProposalID)
+			snap.LastFix = foldFixVerdict(snap.LastFix, p)
 		}
 	}
 
@@ -1157,6 +1200,36 @@ func foldStepOutcome(snap *RoomSnapshot, seq int64, p events.ActionExecutedPaylo
 		return
 	}
 	snap.finished = &finishedProposal{seq: seq, proposalID: pr.ProposalID, origin: pr.Origin, outcomes: out}
+}
+
+// foldLastFix returns last_fix after the action.executed p ended an open
+// proposal's run. The newest proposal by proposal.created wins, as in the
+// room's title row, so an older fix that finishes later replaces nothing.
+func foldLastFix(last *LastFix, open []Proposal, p events.ActionExecutedPayload) *LastFix {
+	i := slices.IndexFunc(open, func(pr Proposal) bool { return pr.ProposalID == p.ProposalID })
+	if i < 0 || (last != nil && open[i].Seq < last.Seq) {
+		return last
+	}
+	fix := &LastFix{ProposalID: p.ProposalID, Seq: open[i].Seq, Steps: len(open[i].Steps)}
+	if !p.OK {
+		fix.FailedStep = max(p.StepIndex, 0) + 1
+	}
+	return fix
+}
+
+// foldFixVerdict returns last_fix with the verdict of an agent.verification
+// of that proposal. A repeat (already verified, no checks) never overwrites a
+// full verdict, as in the web reducer.
+func foldFixVerdict(last *LastFix, p events.AgentVerificationPayload) *LastFix {
+	if last == nil || last.ProposalID != p.ProposalID {
+		return last
+	}
+	if p.Repeat && last.Verification != nil && !last.Verification.repeat {
+		return last
+	}
+	fix := *last
+	fix.Verification = &FixVerification{Recovered: p.Recovered, Verdict: p.Verdict, repeat: p.Repeat}
+	return &fix
 }
 
 func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {

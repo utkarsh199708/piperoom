@@ -7,6 +7,7 @@ import { exportRoom, isFixtures } from '../api/client'
 import { downloadText, exportErrorText } from '../lib/postmortem'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { isProvisionalSetup } from '../lib/setup'
 import { useTrends } from '../hooks/useTrends'
 import { ForecastChart } from './room/TrendChart'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -169,10 +170,15 @@ export function RoomScreen() {
     () => (state ? state.proposals.reduce((n, p) => n + p.executed.length + (p.verification ? 1 : 0), 0) : 0),
     [state],
   )
-  const { topology, updatedAt, notFound, retry: retryTopology } = useTopology(state?.pipeline_id ?? '', {
+  // A setup room's pipeline is not registered yet, so the server would 404 (KAN-601): ask for nothing
+  // and draw the not-found map it drew after that 404. Registration flips watched_by and the load starts.
+  const provisional = isProvisionalSetup(state?.setup)
+  const topologyState = useTopology(provisional ? '' : (state?.pipeline_id ?? ''), {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  const { topology, updatedAt, retry: retryTopology } = topologyState
+  const notFound = provisional || topologyState.notFound
   // X3 sparklines: asked for once the pipeline's topology answered, so an unknown pipeline costs no more requests.
   const trends = useTrends(state?.pipeline_id ?? '', topology !== null && !notFound)
   // The sign-in screen names this room if the session ends while it is open.
@@ -376,7 +382,7 @@ export function RoomScreen() {
       selfId={user.id}
       canDecide={!viewer && state.status === 'open'}
       onVerdict={actions.hypothesisVerdict}
-      pipelineId={state.pipeline_id}
+      pipelineId={provisional ? '' : state.pipeline_id}
       insight={state.insight}
       onCite={citeStep}
     />
@@ -438,13 +444,13 @@ export function RoomScreen() {
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
   // Pipeline-wide (X6), not this room's spend: the room's own cost is the header chip.
-  const pipelineCost = <PipelineCostPanel pipelineId={state.pipeline_id} />
+  const pipelineCost = <PipelineCostPanel pipelineId={provisional ? '' : state.pipeline_id} />
   // A closed room has nothing left to act on: its unapproved proposal reads "Not run", so no count (KAN-579).
   const openProposals = state.status === 'closed' ? 0 : state.proposals.filter((p) => p.status === 'open').length
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
-    <div className="flex min-h-full flex-col text-sm">
+    <div className="flex flex-1 flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && (
         <div
@@ -579,7 +585,9 @@ export function RoomScreen() {
             </Tabs>
           )}
 
-          {unseen > 0 && (
+          {/* The sentinel only lives on the Investigation timeline (or the single wide column), so the pill
+              means nothing on the other tabs and would sit over their last item (KAN-604). */}
+          {unseen > 0 && (wide || tab === 'investigation') && (
             <button
               type="button"
               onClick={jump}

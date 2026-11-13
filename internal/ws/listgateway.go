@@ -245,7 +245,9 @@ func (l *listConn) loop(ctx context.Context, updates <-chan room.RoomUpdate) {
 // room it is held and sent when due. It reports false when the connection
 // was closed.
 func (l *listConn) changed(snap *room.RoomSnapshot) bool {
-	if !l.g.svc.CanSeePipeline(l.user, snap.PipelineID) {
+	// The rule of GET /api/rooms: a setup room's provisional pipeline is in no
+	// tenant, its own tenant decides (KAN-602).
+	if !l.g.svc.CanSeeRoom(l.user, snap) {
 		return true
 	}
 	if d, ok := l.known[snap.ID]; ok && d == listDigest(snap) {
@@ -260,7 +262,8 @@ func (l *listConn) changed(snap *room.RoomSnapshot) bool {
 }
 
 func (l *listConn) sendRoom(snap *room.RoomSnapshot) bool {
-	b, err := json.Marshal(listMsg{Type: "room", Room: snap})
+	// snap is the hub's shared snapshot: Blocked goes on a copy (KAN-596).
+	b, err := json.Marshal(listMsg{Type: "room", Room: l.g.svc.ListRow(snap)})
 	if err != nil {
 		return true
 	}
@@ -346,29 +349,42 @@ func (l *listConn) nextDue() (time.Duration, bool) {
 }
 
 // listDigest hashes the fields the list shows (docs/api.md): a change to
-// anything else (steps, last_seq, members) sends nothing.
+// anything else (steps, last_seq, members) sends nothing. Blocked is not
+// hashed: it follows from the approvals plus this process's write mode. A setup
+// room's row shows mode, phase and runner.connected, so those are hashed
+// (KAN-602); a room without setup hashes as before.
 func listDigest(s *room.RoomSnapshot) [32]byte {
+	type setup struct {
+		Mode      bool   `json:"mode"`
+		Phase     string `json:"phase"`
+		Connected bool   `json:"connected"`
+	}
 	type proposal struct {
 		ID        string            `json:"id"`
 		Approvals map[string]string `json:"approvals"`
 	}
 	d := struct {
-		Status      string       `json:"status"`
-		Title       string       `json:"title"`
-		Severity    string       `json:"severity"`
-		Driver      string       `json:"driver"`
-		LeaseGone   bool         `json:"lease_expired"`
-		Agent       string       `json:"agent"`
-		Triage      *room.Triage `json:"triage"`
-		HypText     string       `json:"hyp_text"`
-		HypConf     string       `json:"hyp_conf"`
-		Proposals   []proposal   `json:"proposals"`
-		Suggestions int          `json:"suggestions"`
-		ClosedAt    *time.Time   `json:"closed_at"`
-		Resolution  string       `json:"resolution"`
+		Status      string        `json:"status"`
+		Title       string        `json:"title"`
+		Severity    string        `json:"severity"`
+		Driver      string        `json:"driver"`
+		LeaseGone   bool          `json:"lease_expired"`
+		Agent       string        `json:"agent"`
+		Triage      *room.Triage  `json:"triage"`
+		HypText     string        `json:"hyp_text"`
+		HypConf     string        `json:"hyp_conf"`
+		Proposals   []proposal    `json:"proposals"`
+		LastFix     *room.LastFix `json:"last_fix"`
+		Suggestions int           `json:"suggestions"`
+		ClosedAt    *time.Time    `json:"closed_at"`
+		Resolution  string        `json:"resolution"`
+		Setup       *setup        `json:"setup,omitempty"`
 	}{
 		Status: s.Status, Title: s.Title, Severity: s.Severity, Agent: s.AgentStatus.State,
-		Triage: s.Triage, Suggestions: len(s.PendingSuggestions), ClosedAt: s.ClosedAt, Resolution: s.Resolution,
+		Triage: s.Triage, LastFix: s.LastFix, Suggestions: len(s.PendingSuggestions), ClosedAt: s.ClosedAt, Resolution: s.Resolution,
+	}
+	if s.Setup != nil {
+		d.Setup = &setup{Mode: s.Setup.Mode, Phase: s.Setup.Phase, Connected: s.Setup.Runner != nil && s.Setup.Runner.Connected}
 	}
 	if s.Driver != nil {
 		d.Driver, d.LeaseGone = s.Driver.ID, s.Driver.LeaseExpired

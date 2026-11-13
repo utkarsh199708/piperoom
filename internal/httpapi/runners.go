@@ -72,7 +72,7 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if pair.Pair.Token != "" {
-		s.runnerReconnect(connCtx, conn, pair.Pair.Token, source)
+		s.runnerReconnect(connCtx, conn, pair.Pair, source)
 		return
 	}
 
@@ -107,6 +107,7 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		PublicOrigin:    origin,
 		Fingerprint:     room.SetupFingerprint(origin, res.RoomID, snap.PipelineID, res.Creator.ID, res.Nonce),
 	}
+	s.fillWelcomeSetup(r.Context(), &welcome, snap, pairNegotiated(pair.Pair))
 	if err := writeRunnerFrame(connCtx, conn, protocol.Frame{Type: protocol.FrameWelcome, Welcome: &welcome}); err != nil {
 		return
 	}
@@ -119,6 +120,18 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 	hello, err := readRunnerFrame(hctx, conn)
 	hcancel()
 	if err != nil {
+		return
+	}
+	// A runner that cannot serve the room's target (runner.pair refuses with op
+	// pair, reason target) answers the Welcome with a Refused instead of Hello.
+	// It is a clean goodbye, not a violation: the room is told why the runner
+	// left, and nothing attaches.
+	if hello.Type == protocol.FrameRefused && hello.Refused != nil &&
+		hello.Refused.Op == "pair" && hello.Refused.Reason == protocol.RefuseTarget {
+		_ = s.svc.EmitSetup(r.Context(), res.RoomID, events.SetupPairing, events.SetupPairingPayload{
+			Outcome: events.PairingRefused, Source: source,
+		})
+		closeRunner(conn, websocket.StatusNormalClosure, "target refused")
 		return
 	}
 	if hello.Type != protocol.FrameHello || hello.Hello == nil {
@@ -187,7 +200,8 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 // rotated (the old one never authenticates again), setup.runner_attached is
 // emitted, the runner gets a Welcome (updated room target list) and its new
 // Token, and the loop reconciles the Resume it sends next.
-func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, token, source string) {
+func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, pair *protocol.Pair, source string) {
+	token := pair.Token
 	newToken, expires, err := newRunnerToken()
 	if err != nil {
 		s.log.Error("httpapi: runner token generation failed", "err", err)
@@ -224,6 +238,7 @@ func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, toke
 		Targets:         welcomeTargets(snap),
 		PublicOrigin:    s.publicOriginString(),
 	}
+	s.fillWelcomeSetup(ctx, &welcome, snap, pairNegotiated(pair))
 	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FrameWelcome, Welcome: &welcome}); err != nil {
 		return
 	}
@@ -360,4 +375,48 @@ func (s *Server) publicOriginString() string {
 		return s.public.Scheme + "://" + s.public.Host
 	}
 	return ""
+}
+
+// pairNegotiated is the version the session will speak as far as the server
+// knows at Welcome time: the lower of its own and the one the Pair states. A
+// Pair with no version is a 1.0 runner (the version check is deferred to Hello).
+func pairNegotiated(p *protocol.Pair) protocol.Version {
+	if v, ok := p.Version(); ok {
+		return protocol.Negotiate(protocol.Current(), v)
+	}
+	return protocol.Version{Major: protocol.CurrentMajor, Minor: 0}
+}
+
+// fillWelcomeSetup adds the setup room's SetupRequest.Target driver name
+// (KAN-617) when the negotiated minor has it (since 1.2); the targets
+// themselves are welcomeTargets'. A room that is not a setup room leaves the
+// Welcome as it was.
+func (s *Server) fillWelcomeSetup(ctx context.Context, w *protocol.Welcome, snap room.RoomSnapshot, negotiated protocol.Version) {
+	if snap.Setup == nil {
+		return
+	}
+	if !negotiated.Has(2) {
+		return
+	}
+	w.Target = s.setupRequestTarget(ctx, snap.ID)
+}
+
+// setupRequestTarget reads SetupRequest.Target from the room.created event,
+// which carries the request (the snapshot keeps it unexported). "" when the
+// log cannot be read or the request does not decode: the runner then registers
+// no driver, as it did before 1.2.
+func (s *Server) setupRequestTarget(ctx context.Context, roomID string) string {
+	evs, _, err := s.svc.Events(ctx, roomID, 0, 1)
+	if err != nil || len(evs) == 0 || evs[0].Type != events.RoomCreated {
+		return ""
+	}
+	p, err := events.Decode[events.RoomCreatedPayload](evs[0])
+	if err != nil || p.Mode != events.RoomModeSetup || len(p.Alert) == 0 {
+		return ""
+	}
+	var req events.SetupRequest
+	if err := json.Unmarshal(p.Alert, &req); err != nil {
+		return ""
+	}
+	return req.Target
 }

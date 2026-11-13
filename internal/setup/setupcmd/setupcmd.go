@@ -120,8 +120,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 
 	log := newLogger(stderr)
 	// The real catalogue (U1-2). Targets arrive with the Welcome: the target
-	// driver (compose or host, row U8f) registers then, through the
-	// registrar; until the handshake hands them over, http_get and net_probe
+	// driver registers then, through the registrar (by the room's
+	// SetupRequest.Target since protocol 1.2, KAN-617, else by the targets'
+	// kinds); until the handshake hands them over, http_get and net_probe
 	// refuse every host and the file and env ops work.
 	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
 	if err != nil {

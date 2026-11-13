@@ -17,15 +17,20 @@ const TEXT: Record<PillTone, string> = {
  * already has banners with that role) holds only the state words, so a screen reader hears
  * "Agent working" once and "resolved — verified" at the end, not every new step. The
  * "· step N" is drawn next to it, hidden from assistive technology.
+ *
+ * `hidden` (KAN-600): the header badge already shows this sentence, so the pill is not drawn. It stays
+ * in the same place in the tree, visually hidden, so its live region keeps announcing that a fix finished.
  */
-export function AgentPill({ state }: { state: RoomState }) {
+export function AgentPill({ state, hidden = false }: { state: RoomState; hidden?: boolean }) {
   const p = agentPill(state)
   return (
     <span
       data-tone={p.tone}
-      title={p.title}
+      title={hidden ? undefined : p.title}
       className={cn(
-        'inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-card px-2 text-xs font-medium',
+        hidden
+          ? 'sr-only'
+          : 'inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-card px-2 text-xs font-medium',
         TEXT[p.tone],
       )}
     >
