@@ -831,6 +831,11 @@ function applyCore(state: RoomState, event: Event): RoomState {
             status: "open",
             executed: [],
             created_at: event.at,
+            // Not when the hypothesis was seeded by a snapshot taken after this event:
+            // that is a later hypothesis, not the one current at creation.
+            ...(state.hypothesis?.text && (state.hypothesis.seq ?? 0) < event.seq
+              ? { hypothesis_text: state.hypothesis.text }
+              : {}),
             // Only the snapshot says so for a proposal that was already blocked when it was taken.
             ...(state.snapshot_blocked?.[p.proposal_id]
               ? { blocked: state.snapshot_blocked[p.proposal_id] }
@@ -980,6 +985,11 @@ function applyCore(state: RoomState, event: Event): RoomState {
           return {
             ...prop,
             verification: p,
+            ...(!prop.hypothesis_text &&
+            state.hypothesis?.text &&
+            (state.hypothesis.seq ?? 0) < event.seq
+              ? { hypothesis_text: state.hypothesis.text }
+              : {}),
             ...(counted
               ? { recovery: { ...prop.recovery, verified_at: event.at } }
               : {}),

@@ -326,7 +326,7 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 	}
 	// Dev only, curl only: X-User names a users.yaml user, so the gate passes
 	// as a member.
-	if _, ok := s.svc.LookupUser(xuser); !ok {
+	if _, ok := s.svc.LookupLoginUser(xuser); !ok {
 		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
 	}
 	user, role, ok := s.person(xuser, "", "", nil, false)
@@ -474,7 +474,7 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, validation("user is required"))
 		return
 	}
-	user, ok := s.svc.LookupUser(body.User)
+	user, ok := s.svc.LookupLoginUser(body.User)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "unknown user "+body.User)
 		return

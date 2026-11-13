@@ -22,11 +22,20 @@ export function guessLayer(text: string): string {
   return hits.length === 1 ? hits[0] : ''
 }
 
-/** The last executed proposal whose step ran ok: what "fix that worked" starts from. */
-export function executedFix(state: RoomState): { id: string; title: string } | null {
+/**
+ * The proposal "fix that worked" starts from: the newest one whose verification reported recovered
+ * (what the close nudge's resolution names), else the last executed proposal whose step ran ok.
+ * `hypothesis` is the hypothesis text that was current for that proposal, when the log recorded one.
+ */
+export function executedFix(state: RoomState): { id: string; title: string; hypothesis?: string } | null {
+  const pick = (p: RoomState['proposals'][number]) => ({ id: p.proposal_id, title: p.title, hypothesis: p.hypothesis_text })
   for (let i = state.proposals.length - 1; i >= 0; i--) {
     const p = state.proposals[i]
-    if (p.executed.some((e) => e.ok)) return { id: p.proposal_id, title: p.title }
+    if (p.verification?.recovered === true) return pick(p)
+  }
+  for (let i = state.proposals.length - 1; i >= 0; i--) {
+    const p = state.proposals[i]
+    if (p.executed.some((e) => e.ok)) return pick(p)
   }
   return null
 }
@@ -42,11 +51,15 @@ export interface LabelDraft {
 
 /** The form's starting values: the hypothesis text (cause, layer) and the executed proposal (fix). */
 export function initialDraft(state: RoomState): LabelDraft {
-  const hyp = state.hypothesis?.text ?? ''
+  const fix = executedFix(state)
+  const recovered = state.proposals.some((p) => p.verification?.recovered === true)
+  // The cause is the hypothesis behind the recovering fix; without a recovery, or without a
+  // recorded hypothesis, it is the latest one.
+  const hyp = (recovered ? fix?.hypothesis : undefined) || state.hypothesis?.text || ''
   return {
     layer: guessLayer(hyp),
     cause: hyp.slice(0, MAX_CAUSE),
-    fix: (executedFix(state)?.title ?? '').slice(0, MAX_FIX),
+    fix: (fix?.title ?? '').slice(0, MAX_FIX),
     helped: 'skip',
   }
 }

@@ -326,3 +326,54 @@ describe('statusInputFromSnapshot with last_fix (KAN-594)', () => {
     expect(cell(snap({ last_fix: fix({ verification }) }))).toEqual(roomStatus(statusInputFromState(state), now))
   })
 })
+
+describe('roomStatus, agent done on an open room (KAN-694)', () => {
+  const rec = { recovered: true, verdict: 'recovered: all good' }
+  const idleLabel = 'Idle · waiting for a steer'
+  const doneRun = (verification: StatusProposal['verification']) =>
+    run({ agent: { state: 'done' }, proposals: [prop({ status: 'approved', executed: ok(2), verification })] })
+
+  it('state adapter keeps the recovered verdict', () => {
+    const state = {
+      ...emptyRoomState('r'),
+      opened_at: base.opened_at,
+      driver: { id: 'k', name: 'K' },
+      agent_status: { state: 'done', detail: 'pipeline recovered; waiting for input' },
+      proposals: [
+        {
+          proposal_id: 'p1', title: 'x', steps: [{ tool: 't' }, { tool: 't' }], risk: 'low', rollback: '',
+          required_layers: ['a'], approvals: { a: 'approved' as const }, decisions: {}, params_hash: '',
+          status: 'approved' as const, executed: ok(2), verification: rec,
+        },
+      ],
+    } as unknown as Parameters<typeof statusInputFromState>[0]
+    const st = roomStatus(statusInputFromState(state), now)
+    expect(st.label).not.toBe(idleLabel)
+    expect(st).toMatchObject({ kind: 'fixed', label: 'Fix ran · recovered', tone: 'ok' })
+  })
+
+  it('snapshot adapter agrees with the state adapter', () => {
+    const snap = {
+      id: 'r', title: 't', severity: 'sev2', pipeline_id: 'p', status: 'open', opened_at: base.opened_at,
+      last_seq: 1, driver: { id: 'k', name: 'K' }, agent_status: { state: 'done' }, hypothesis: null,
+      open_proposals: [], pending_suggestions: [], members: [],
+      last_fix: { proposal_id: 'p1', seq: 1, steps: 2, failed_step: 0, verification: rec },
+    } as unknown as RoomSnapshot
+    const st = roomStatus(statusInputFromSnapshot(snap), now)
+    expect(st.label).not.toBe(idleLabel)
+    expect(st).toEqual(doneRun(rec))
+    expect(st.label).toBe('Fix ran · recovered')
+  })
+
+  it('a not-recovered verdict still reads as a failure', () => {
+    expect(doneRun({ recovered: false, verdict: 'NOT recovered: a layer check did not pass.' })).toMatchObject({
+      kind: 'fix-failed', label: 'Fix ran · not recovered', tone: 'fail',
+    })
+  })
+
+  it('a closed room with agent done still reads Resolved · verified', () => {
+    expect(run({ status: 'closed', agent: { state: 'done' }, proposals: [prop({ status: 'approved', executed: ok(2), verification: rec })] })).toMatchObject({
+      kind: 'resolved', label: 'Resolved · verified', tone: 'ok',
+    })
+  })
+})
