@@ -1,9 +1,12 @@
 import type { RoomSnapshot, Topology } from '@/api/types'
+import { isProvisionalSetup } from '@/lib/setup'
 
 export interface PipelineSummary {
   id: string
   /** Rooms still open on this pipeline. */
   open: number
+  /** Every open room is a setup room: the pipeline is not registered, so it has no topology (KAN-601). */
+  provisional?: boolean
 }
 
 /**
@@ -15,12 +18,16 @@ export const MAX_SIDEBAR_PIPELINES = 10
 
 export function pipelineSummaries(rooms: RoomSnapshot[], limit = MAX_SIDEBAR_PIPELINES): PipelineSummary[] {
   const counts = new Map<string, number>()
+  const normalOpen = new Map<string, number>()
   for (const r of rooms) {
     if (!r.pipeline_id) continue
-    counts.set(r.pipeline_id, (counts.get(r.pipeline_id) ?? 0) + (r.status === 'open' ? 1 : 0))
+    const open = r.status === 'open'
+    counts.set(r.pipeline_id, (counts.get(r.pipeline_id) ?? 0) + (open ? 1 : 0))
+    // A setup room does not vouch for its pipeline; a normal open room does (the pipeline is registered).
+    if (open && !isProvisionalSetup(r.setup)) normalOpen.set(r.pipeline_id, (normalOpen.get(r.pipeline_id) ?? 0) + 1)
   }
   return [...counts.entries()]
-    .map(([id, open]) => ({ id, open }))
+    .map(([id, open]) => (open > 0 && !normalOpen.has(id) ? { id, open, provisional: true } : { id, open }))
     .sort((a, b) => b.open - a.open || a.id.localeCompare(b.id))
     .slice(0, limit)
 }

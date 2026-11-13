@@ -339,7 +339,7 @@ function CommentThread({
       {open && refusal && <RefusalLine text={refusal} className="ml-7" />}
       {open && offline && (
         <div className="ml-7">
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip onRetry={() => void send()} disabled={sending} sends={sends} actionId={retryId.current} />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent reply.</p>
         </div>
       )}
@@ -401,7 +401,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
       {refusal && <RefusalLine text={refusal} />}
       {offline && (
         <>
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip onRetry={() => void send()} disabled={sending} sends={sends} actionId={retryId.current} />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent comment.</p>
         </>
       )}

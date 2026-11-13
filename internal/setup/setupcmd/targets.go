@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -11,6 +12,7 @@ import (
 	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/targets/compose"
 	"piperoom/internal/setup/targets/host"
+	"piperoom/internal/setup/targets/server"
 	"piperoom/internal/setup/targets/strimzi"
 )
 
@@ -38,7 +40,10 @@ type targetRegistrar struct {
 	// room is the room the drivers were registered for: they tag what they
 	// create with it, so an Apply for another room is refused
 	// (errOtherRoom) rather than answered with this room's drivers.
-	room        string
+	room string
+	// target is the SetupRequest.Target the drivers were registered for; a
+	// later Welcome naming another one is refused (errOtherTarget).
+	target      string
 	cat         *ops.Registry
 	pluginHosts []string
 	// prodPatterns are PIPEROOM_SETUP_PROD_PATTERNS: a managed target whose
@@ -79,28 +84,31 @@ func newTargetRegistrar(cat *ops.Registry, pluginHosts []string) *targetRegistra
 // runner process re-paired with a second code) is refused with errOtherRoom,
 // because the registered drivers tag and guard by the first room's id; the
 // person restarts the runner to set up another room.
-func (t *targetRegistrar) Apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
+func (t *targetRegistrar) Apply(ctx context.Context, roomID, target string, targets []events.SetupTarget) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.done {
 		if roomID != t.room {
 			return fmt.Errorf("%w: this runner registered room %s's target drivers; restart it to pair with room %s", errOtherRoom, t.room, roomID)
 		}
+		if target != "" && t.target != "" && target != t.target {
+			return fmt.Errorf("%w: registered for %q, the Welcome now names %q", errOtherTarget, t.target, target)
+		}
 		return t.err
 	}
 	before := len(t.cat.Names())
 	untouched := func() bool { return len(t.cat.Names()) == before }
-	err := t.apply(ctx, roomID, targets)
+	err := t.apply(ctx, roomID, target, targets)
 	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && untouched() {
 		// One retry: a slow first credential refresh (SSO, IMDS) is the
 		// usual cause, and the runner will not ask again.
-		err = t.apply(ctx, roomID, targets)
+		err = t.apply(ctx, roomID, target, targets)
 	}
 	if err != nil && ctx.Err() != nil && untouched() {
 		// The runner is stopping; nothing registered, nothing to cache.
 		return err
 	}
-	t.err, t.done, t.room = err, true, roomID
+	t.err, t.done, t.room, t.target = err, true, roomID, target
 	return err
 }
 
@@ -108,8 +116,20 @@ func (t *targetRegistrar) Apply(ctx context.Context, roomID string, targets []ev
 // registered for.
 var errOtherRoom = errors.New("setup: the runner is already set up for another room")
 
-func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []events.SetupTarget) error {
+// errOtherTarget: a Welcome named a target other than the one the drivers
+// were registered for; drivers are never mixed in one registry.
+var errOtherTarget = errors.New("setup: the runner's drivers are registered for another target")
+
+func (t *targetRegistrar) apply(ctx context.Context, roomID, target string, targets []events.SetupTarget) error {
 	driver, class := chooseTargetDriver(targets)
+	if target != "" {
+		// The room's SetupRequest.Target (Welcome.Target, protocol 1.2) names
+		// the driver; the kinds are only a guess for an older server.
+		var err error
+		if driver, class, err = t.driverForTarget(target, targets); err != nil {
+			return err
+		}
+	}
 	if t.embedded {
 		driver = "embedded"
 	}
@@ -119,6 +139,15 @@ func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []ev
 		}
 	}
 	switch driver {
+	case "dbzserver":
+		// Debezium Server runs on the Compose stack the compose ops start:
+		// both drivers take the higher class the person set on either.
+		if _, err := compose.Register(t.cat, compose.Options{Class: class, PluginHosts: t.pluginHosts}); err != nil {
+			return fmt.Errorf("setup: registering the compose target: %w", err)
+		}
+		if _, err := server.Register(t.cat, server.Options{Class: class, Mode: server.ModeCompose}); err != nil {
+			return fmt.Errorf("setup: registering the Debezium Server target: %w", err)
+		}
 	case "embedded":
 		if err := ops.RegisterEmbedded(t.cat); err != nil {
 			return fmt.Errorf("setup: registering the embedded target: %w", err)
@@ -154,6 +183,53 @@ func (t *targetRegistrar) apply(ctx context.Context, roomID string, targets []ev
 		}
 	}
 	return nil
+}
+
+// errTargetUnsupported: the room's SetupRequest.Target has no driver in
+// this runner.
+var errTargetUnsupported = errors.New("setup: no driver for the room's target in this runner")
+
+// driverForTarget maps the room's SetupRequest.Target to the registrar's
+// driver and class. A managed service maps to "" (registerManaged reads the
+// targets' kinds); strimzi registers only in the in-cluster Job.
+func (t *targetRegistrar) driverForTarget(target string, targets []events.SetupTarget) (driver, class string, err error) {
+	switch target {
+	case "compose":
+		// The class the person set on the room's compose target; with none,
+		// local (rendered loopback-only), as chooseTargetDriver does.
+		return "compose", highestClass(targets, "compose"), nil
+	case "host":
+		return "host", highestClass(targets, "host"), nil
+	case "dbzserver":
+		return "dbzserver", highestClass(targets, "compose", "dbzserver"), nil
+	case "embedded":
+		return "embedded", "", nil
+	case "msk", "confluent", "aiven":
+		kind := map[string]string{"msk": "aws", "confluent": "confluent", "aiven": "aiven"}[target]
+		if !slices.ContainsFunc(targets, func(st events.SetupTarget) bool { return st.Kind == kind }) {
+			return "", "", fmt.Errorf("%w: a %s room needs a %s target (the account to set up in), and this one names none", errTargetUnsupported, target, kind)
+		}
+		return "", "", nil
+	case "strimzi":
+		if t.strimzi == nil {
+			return "", "", fmt.Errorf("%w: a strimzi room's runner is the in-cluster Job of the Helm chart (setup.runner), not this one", errTargetUnsupported)
+		}
+		return "", "", nil
+	}
+	return "", "", fmt.Errorf("%w: %q (supported: compose, host, dbzserver, embedded, strimzi in the in-cluster Job, msk, confluent, aiven)", errTargetUnsupported, target)
+}
+
+// highestClass is the highest class of the targets whose kind is one of
+// kinds, "" (local) when there are none. A class raised on another target
+// never changes the driver's.
+func highestClass(targets []events.SetupTarget, kinds ...string) string {
+	class := ""
+	for _, t := range targets {
+		if slices.Contains(kinds, t.Kind) && classRank(t.Class) > classRank(class) {
+			class = t.Class
+		}
+	}
+	return class
 }
 
 // managedKinds are the target kinds whose driver is not a local one: a room

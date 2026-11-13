@@ -1,7 +1,7 @@
 // "New pipeline" → Set up (U1-12a): the form that opens a setup room (POST /api/setup) and
 // hands the person the pairing command. Every field is the server's SetupRequest; the rules a
 // first pass can check live in lib/setupForm.ts, and the server stays the authority.
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react'
@@ -76,6 +76,17 @@ function SetupForm() {
   const [error, setError] = useState<{ field: string; message: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+  const sendErrorRef = useRef<HTMLDivElement>(null)
+
+  // A server refusal renders above the form; when the person submitted from the bottom it would be
+  // out of view. Bring it into view and move focus to it (client-side errors focus their field).
+  useEffect(() => {
+    if (!sendError) return
+    const el = sendErrorRef.current
+    if (!el) return
+    el.scrollIntoView?.({ block: 'center' })
+    el.focus({ preventScroll: true })
+  }, [sendError])
 
   const set = <K extends keyof SetupFormValues>(key: K, value: SetupFormValues[K]) =>
     setValues((v) => ({ ...v, [key]: value }))
@@ -144,7 +155,11 @@ function SetupForm() {
       </div>
 
       {sendError && (
-        <div role="alert" className="rounded-md border border-border bg-destructive-subtle px-3 py-2 text-sm text-destructive-fg">
+        <div
+          ref={sendErrorRef}
+          role="alert"
+          tabIndex={-1}
+          className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/30 border border-border bg-destructive-subtle px-3 py-2 text-sm text-destructive-fg">
           {sendError}
         </div>
       )}

@@ -349,6 +349,13 @@ func TestLiveComposeConfig(t *testing.T) {
 	if err != nil && strings.Contains(string(out), "is not a docker command") {
 		t.Skip("the docker compose plugin is not installed")
 	}
+	// A render compose rejects fails fast with its reason. A compose that
+	// answers nothing at all for 30 s is a Docker that is not reachable (seen
+	// on hosted Windows runners, where the hung process outlives the job),
+	// the same "unavailable" as no docker on PATH.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Skipf("docker compose did not answer within 30 s (Docker unreachable): %v %s", err, out)
+	}
 	if err != nil {
 		t.Fatalf("docker compose config refused the render: %v\n%s", err, out)
 	}

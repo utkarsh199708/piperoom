@@ -674,7 +674,12 @@ export function SteerBox({
       </form>
       {offline && (
         <div>
-          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <OfflineStrip
+            onRetry={() => void send()}
+            disabled={sending}
+            sends={actions.sends}
+            actionId={() => adoptedRef.current?.clientId ?? retryId.current()}
+          />
           <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent message.</p>
         </div>
       )}

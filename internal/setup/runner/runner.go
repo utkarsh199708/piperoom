@@ -101,7 +101,10 @@ type Options struct {
 	// (U1-24): a corrupt index must never reach a template or a download.
 	Check func() error
 	// RegisterTargets is called with the room id and the targets each
-	// Welcome names, after the runner's class floors are seeded from them,
+	// Welcome names, and the room's SetupRequest.Target the Welcome carries
+	// since protocol 1.2 ("" from an older server: the callee then infers the
+	// driver from the targets' kinds), after the runner's class floors are
+	// seeded from them,
 	// after the person confirmed the pairing (never before: a managed
 	// driver loads the cloud credential chain when it registers) and before
 	// any op of the session executes: setupcmd registers the target driver
@@ -114,8 +117,10 @@ type Options struct {
 	// room's target driver would refuse every step the plan sends; the
 	// callee is idempotent across reconnects and retries a transient
 	// failure of its own (setupcmd retries an inner AWS timeout once)
-	// before it returns one.
-	RegisterTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
+	// before it returns one. On an error the runner also tells the server
+	// (Refused, op "pair", reason RefuseTarget, in place of the Hello), so the
+	// room shows why the runner did not attach.
+	RegisterTargets func(ctx context.Context, roomID, target string, targets []events.SetupTarget) error
 	// Confirm replaces the terminal y/N for a runner that has no terminal
 	// (the in-cluster Job, docs/design/setup-strimzi.md §3.2): it is called
 	// with the Welcome and a show func that prints the Welcome block (origin,
@@ -141,7 +146,7 @@ type Runner struct {
 	catalogueV string
 	backoff    func(attempt int) time.Duration
 	check      func() error
-	regTargets func(ctx context.Context, roomID string, targets []events.SetupTarget) error
+	regTargets func(ctx context.Context, roomID, target string, targets []events.SetupTarget) error
 	extConfirm func(ctx context.Context, w *protocol.Welcome, show func()) (bool, error)
 	url        *url.URL
 	secretsF   string
@@ -350,6 +355,10 @@ func (r *Runner) connectLoop(ctx context.Context, loopback bool, wsURL string) e
 // only fail the same way.
 var ErrRegisterTargets = errors.New("setup: registering the room's target driver")
 
+// ErrTargetUnsupported is ErrRegisterTargets under the name KAN-617 gave it:
+// the room's target has no driver in this runner. Terminal, never retried.
+var ErrTargetUnsupported = ErrRegisterTargets
+
 // registerTargetsErr wraps a RegisterTargets failure in ErrRegisterTargets,
 // unless ctx ended (the runner is stopping: Run returns as it does for any
 // other cancelled handshake).
@@ -545,7 +554,14 @@ func (r *Runner) pair(ctx context.Context) error {
 	// for a room nobody said yes to. The room is the confirmed one; a resume
 	// passes the same pinned id.
 	if r.regTargets != nil {
-		if err := r.regTargets(ctx, welcome.RoomID, welcome.Targets); err != nil {
+		if err := r.regTargets(ctx, welcome.RoomID, welcome.Target, welcome.Targets); err != nil {
+			if ctx.Err() == nil {
+				r.log.Warn("target driver refused", "target", welcome.Target)
+				_ = r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameRefused, Refused: &protocol.Refusal{
+					ID: "", Op: "pair", Reason: protocol.RefuseTarget,
+				}})
+				fmt.Fprintf(r.stdout, "setup: this runner cannot serve this room's target %q: %v\n", welcome.Target, err)
+			}
 			return registerTargetsErr(ctx, err)
 		}
 	}
@@ -605,7 +621,7 @@ func (r *Runner) resume(ctx context.Context) error {
 			if r.regTargets != nil {
 				// The room the person confirmed at pairing, never one a
 				// later Welcome names.
-				if err := r.regTargets(ctx, r.roomID, f.Welcome.Targets); err != nil {
+				if err := r.regTargets(ctx, r.roomID, f.Welcome.Target, f.Welcome.Targets); err != nil {
 					return false, registerTargetsErr(ctx, err)
 				}
 			}

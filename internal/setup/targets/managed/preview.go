@@ -103,6 +103,9 @@ func (d *ConfluentDriver) previewCreate(ctx context.Context, raw json.RawMessage
 	if err := decode(raw, &p); err != nil {
 		return events.PreviewResult{}, err
 	}
+	if err := secretsResolve(d.secrets, p.Config); err != nil {
+		return events.PreviewResult{}, err
+	}
 	pr := events.PreviewResult{
 		Expected: fmt.Sprintf("validate the config of %s (%d keys) against plugin %s, then create the connector only if validation finds no errors; ${secret:} values are materialised on the runner at that call, the preview sends none",
 			p.Name, len(p.Config), p.Plugin),
@@ -179,6 +182,9 @@ func (d *ConfluentDriver) previewACLs(ctx context.Context, raw json.RawMessage) 
 func (d *AivenDriver) previewCreate(ctx context.Context, raw json.RawMessage) (events.PreviewResult, error) {
 	var p AivenCreateParams
 	if err := decode(raw, &p); err != nil {
+		return events.PreviewResult{}, err
+	}
+	if err := secretsResolve(d.secrets, p.Config); err != nil {
 		return events.PreviewResult{}, err
 	}
 	class := p.Config["connector.class"]

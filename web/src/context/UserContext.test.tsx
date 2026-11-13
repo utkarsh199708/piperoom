@@ -35,6 +35,7 @@ import { getAuthEpoch, getSessionChanges, reportAuthProblem, redirectToLogin } f
 import { UserProvider } from './UserContext'
 import { useCurrentUser } from './user'
 import { GROUPS_MISSING_TEXT } from '../components/GroupsMissingNotice'
+import { rememberRoomTitle } from '../lib/signinNotice'
 
 function Who() {
   const { user, setUserId, logout, sessionEpoch, busy } = useCurrentUser()
@@ -404,5 +405,69 @@ describe('UserProvider: roles, groups notice, switcher, login errors', () => {
       renderWith(<Role />)
       expect(screen.getByRole('heading', { name: 'Too many sign-in attempts' })).toBeInTheDocument()
     })
+  })
+})
+
+describe('UserProvider sign-in notice (KAN-696)', () => {
+  const ENDED = 'Your session ended — sign in'
+  afterEach(() => {
+    rememberRoomTitle(undefined)
+    window.location.hash = ''
+    sessionStorage.clear()
+  })
+
+  it('unknown cookie in dev mode on a room URL: neutral notice, no "different tab" claim', async () => {
+    window.location.hash = '#/rooms/r_a'
+    vi.mocked(api.me).mockImplementation(() => {
+      sessionExpired({ authMode: 'dev' })
+      return Promise.reject(expired())
+    })
+    vi.mocked(probeSession).mockResolvedValue({ valid: false, mode: 'dev' })
+    renderProvider()
+    expect(await screen.findByText(`${ENDED} to return.`)).toBeInTheDocument()
+    expect(screen.queryByText(/different tab/)).not.toBeInTheDocument()
+  })
+
+  it('session expiring with room A open names room A', async () => {
+    window.location.hash = '#/rooms/r_a'
+    rememberRoomTitle('orders stale')
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    vi.mocked(probeSession).mockResolvedValue({ valid: false, mode: 'dev' })
+    renderProvider()
+    await screen.findByTestId('who')
+    act(() => sessionExpired({ authMode: 'dev', epoch: 0 }))
+    expect(await screen.findByText(`${ENDED} to return to “orders stale”.`)).toBeInTheDocument()
+    expect(screen.queryByText(/different tab/)).not.toBeInTheDocument()
+  })
+
+  it('navigating to room B before signing in drops room A from the notice', async () => {
+    window.location.hash = '#/rooms/r_a'
+    rememberRoomTitle('orders stale')
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    vi.mocked(probeSession).mockResolvedValue({ valid: false, mode: 'dev' })
+    renderProvider()
+    await screen.findByTestId('who')
+    act(() => sessionExpired({ authMode: 'dev', epoch: 0 }))
+    await screen.findByText(/orders stale/)
+    act(() => {
+      window.location.hash = '#/rooms/r_b'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(await screen.findByText(`${ENDED} to return.`)).toBeInTheDocument()
+    expect(screen.queryByText(/orders stale/)).not.toBeInTheDocument()
+  })
+
+  it('a dev-login in another tab (valid probe) reloads the user without the sign-in screen', async () => {
+    window.location.hash = '#/rooms/r_a'
+    rememberRoomTitle('orders stale')
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    renderProvider()
+    await screen.findByTestId('who')
+    vi.mocked(api.me).mockResolvedValue(meOf('priya'))
+    vi.mocked(probeSession).mockResolvedValue({ valid: true })
+    act(() => sessionExpired({ authMode: 'dev', epoch: 0 }))
+    await waitFor(() => expect(screen.getByTestId('who')).toHaveTextContent('priya'))
+    expect(screen.queryByText('Sign in')).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })

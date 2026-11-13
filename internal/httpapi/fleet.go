@@ -54,6 +54,10 @@ type Fleet struct {
 	// Owners gives each pipeline its tenant and team, and the pipeline list
 	// the shared facts cover.
 	Owners *owners.Owners
+	// OwnersNow, when set, returns the current owners config and is read on
+	// every request, so a pipeline registered at run time (owners.Live
+	// reload) shows in the fleet at once. Nil falls back to Owners.
+	OwnersNow func() *owners.Owners
 	// Status is the watcher's status rows (the room store's watch_status).
 	Status clients.WatchStatusReader
 	// Changes pages pipeline_changes across pipelines.
@@ -206,14 +210,23 @@ func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// owners is the current owners config: OwnersNow when set, else Owners.
+func (f *fleetView) owners() *owners.Owners {
+	if f.cfg.OwnersNow != nil {
+		return f.cfg.OwnersNow()
+	}
+	return f.cfg.Owners
+}
+
 // tenantTeam returns a pipeline's owners.yaml tenant and team: (X5-0), ""
 // when unset. The owners loader has checked that a team of a teams: list
 // serves the pipeline's own tenant.
 func (f *fleetView) tenantTeam(pipelineID string) (tenant, team string) {
-	if f.cfg.Owners == nil {
+	own := f.owners()
+	if own == nil {
 		return "", ""
 	}
-	p, ok := f.cfg.Owners.Pipeline(pipelineID)
+	p, ok := own.Pipeline(pipelineID)
 	if !ok {
 		return "", ""
 	}
@@ -234,9 +247,9 @@ func (f *fleetView) get(ctx context.Context, ids []string, now time.Time) (*flee
 		return c, nil
 	}
 	all := ids
-	if f.cfg.Owners != nil {
-		all = make([]string, 0, len(f.cfg.Owners.Pipelines))
-		for _, p := range f.cfg.Owners.Pipelines {
+	if own := f.owners(); own != nil {
+		all = make([]string, 0, len(own.Pipelines))
+		for _, p := range own.Pipelines {
 			all = append(all, p.ID)
 		}
 		for _, id := range ids {

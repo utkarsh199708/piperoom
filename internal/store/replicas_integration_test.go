@@ -493,7 +493,15 @@ func TestSubscribeAcrossReplicas(t *testing.T) {
 				t.Fatal(err)
 			}
 			const n = 100
+			appended := make(chan struct{})
+			// On an early Fatalf the deferred cancel stops the appends, and the
+			// wait keeps the goroutine from reporting after the test ended.
+			defer func() {
+				cancel()
+				<-appended
+			}()
 			go func() {
+				defer close(appended)
 				for i := 1; i <= n; i++ {
 					if _, err := a.Append(ctx, roomID, events.CommentAdded, commentActor(), events.CommentAddedPayload{CommentID: fmt.Sprintf("c_%d", i), Text: "x"}); err != nil {
 						t.Errorf("append: %v", err)
@@ -518,6 +526,9 @@ func TestSubscribeAcrossReplicas(t *testing.T) {
 					}
 				}
 			}
+			// The last event can reach the subscribers before its Append has
+			// returned; let it finish before the deferred cancel can abort it.
+			<-appended
 		})
 	}
 }

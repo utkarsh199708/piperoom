@@ -93,3 +93,60 @@ describe('DecisionBar with Approve and run', () => {
     await waitFor(() => expect(approveAll).toHaveBeenCalledWith('p1', { params_hash: 'h' }))
   })
 })
+
+describe('DecisionBar phone sheet, Approve and run headline (KAN-599)', () => {
+  const showBar = (placement: 'sheet' | 'top') =>
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => null, set: () => undefined }}>
+        <DecisionBar state={room(prop())} user={sam} placement={placement} />
+      </DecisionHandleContext.Provider>,
+    )
+  const live = 'Needs your approval · schema-registry · kafka-connect — Restart the task'
+
+  // jsdom has no layout: assert the classes. The layers wrap, so "every layer" holds however many a
+  // proposal covers; only the title stays on one truncated line.
+  it('lets the layers wrap and truncates only the title, with the same text overall', () => {
+    showBar('sheet')
+    const region = screen.getByRole('region', { name: 'Decision' })
+    const headline = region.querySelector('[aria-live="polite"]') as HTMLElement
+    expect(headline).toHaveTextContent(live)
+    expect(headline).toHaveAttribute('title', live)
+    expect(headline.className).not.toContain('truncate')
+    const layers = screen.getByText(/Needs your approval/)
+    expect(layers.className).toContain('break-words')
+    expect(layers.className).not.toContain('truncate')
+    expect(screen.getByText('Restart the task').className).toContain('truncate')
+  })
+
+  // KAN-613: at 375 the headline broke "kafka-" / "connect" at the hyphen. Each layer name is one unit.
+  it('makes each layer name a no-wrap unit so a hyphen never breaks it', () => {
+    showBar('sheet')
+    const region = screen.getByRole('region', { name: 'Decision' })
+    const names = Array.from(region.querySelectorAll('[data-layer-name]'))
+    expect(names.map((n) => n.textContent)).toEqual(['schema-registry', 'kafka-connect'])
+    for (const n of names) expect(n.className).toContain('whitespace-nowrap')
+    expect(region.querySelector('[aria-live="polite"]')).toHaveTextContent(live)
+  })
+
+  it('keeps the desktop bar one truncating line', () => {
+    showBar('top')
+    const headline = screen.getByText(live)
+    expect(headline.className).toContain('truncate')
+    expect(headline.children).toHaveLength(0)
+  })
+
+  it('keeps one truncating line when approve-all covers a single layer', () => {
+    const one = prop({ required_layers: ['kafka-connect'], approvals: { 'kafka-connect': 'pending' } })
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => null, set: () => undefined }}>
+        <DecisionBar
+          state={room(one, { write: true, solo: true, auto_approve: [] })}
+          user={{ id: 'lee', name: 'Lee', layers: [] }}
+          placement="sheet"
+        />
+      </DecisionHandleContext.Provider>,
+    )
+    expect(screen.getByRole('button', { name: 'Approve and run' })).toBeInTheDocument()
+    expect(screen.getByText('Needs your approval · kafka-connect — Restart the task').className).toContain('truncate')
+  })
+})

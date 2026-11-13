@@ -434,6 +434,10 @@ func (f *pmFold) outcome(p *pmProposal) string {
 		return "executed"
 	case len(p.ran) > 0:
 		return "partly executed"
+	case f.closed:
+		// Nothing ran and the room is over: it can no longer be approved, so
+		// say what the card says rather than "waiting".
+		return "not run (room closed)"
 	}
 	return "waiting for approval"
 }

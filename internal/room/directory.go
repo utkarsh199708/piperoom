@@ -32,6 +32,16 @@ func (s *Service) LoginPicker() []PickerUser {
 	return out
 }
 
+// LookupLoginUser is LookupUser for the dev sign-in paths (POST /auth/dev-login
+// and the X-User header): with PIPEROOM_SOLO_USER set, only the solo user
+// counts as a known user, the same set LoginPicker offers.
+func (s *Service) LookupLoginUser(id string) (User, bool) {
+	if s.soloUser != "" && id != s.soloUser {
+		return User{}, false
+	}
+	return s.users.Get(id)
+}
+
 // PipelineInfo is one entry of GET /api/pipelines.
 type PipelineInfo struct {
 	ID     string `json:"id"`

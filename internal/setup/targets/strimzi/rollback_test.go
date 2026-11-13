@@ -462,7 +462,11 @@ func TestSecretApplyOnProduction(t *testing.T) {
 	h := newHarness(t, protocol.ClassProduction, map[string]string{"source_password": "s3cr3t-value"})
 	path := coreObjectPath(testNS, "secrets", "orders-db-credentials")
 	h.api.put(path, map[string]any{"kind": "Secret", "type": "Opaque", "metadata": map[string]any{"name": "orders-db-credentials"}})
-	res, err := run(t, h, "preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}})
+	// The preview refuses what the write refuses: D11 without the card.
+	if _, err := run(t, h, "preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}}); err == nil || !strings.Contains(err.Error(), "card must confirm") {
+		t.Fatalf("preview on production without the card: %v", err)
+	}
+	res, err := run(t, h, "preview_k8s_secret_apply", map[string]any{"keys": map[string]string{"password": "${secret:source_password}"}, "admission_policy_confirmed": true})
 	if err != nil {
 		t.Fatal(err)
 	}

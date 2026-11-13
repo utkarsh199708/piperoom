@@ -103,4 +103,24 @@ describe('Set up page (U1-12a)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open the setup room' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('pipeline_exists')
   })
+
+  it('scrolls the server error into view and focuses it', async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    createSetup.mockRejectedValue(new Error('address_refused'))
+    show()
+    fillValid()
+    fireEvent.click(screen.getByRole('button', { name: 'Open the setup room' }))
+    const alert = await screen.findByRole('alert')
+    await waitFor(() => expect(alert).toHaveFocus())
+    expect(scrollIntoView).toHaveBeenCalled()
+  })
+
+  it('still focuses the field for a client-side error', async () => {
+    show()
+    fillValid()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: '  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Open the setup room' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveFocus())
+  })
 })

@@ -298,3 +298,39 @@ func TestRoomViewModeSoloIgnoresEnvironmentLayer(t *testing.T) {
 		t.Errorf("priya without warehouse: mode = %+v, want solo false", snap.Mode)
 	}
 }
+
+// KAN-596: the list rows (GET /api/rooms, the list socket's first frame and
+// resync) carry blocked the way the room view does.
+func TestListRoomsForCarriesBlocked(t *testing.T) {
+	for _, off := range []bool{true, false} {
+		pg := &fakeAction{name: "pg_act", layer: "postgres"}
+		wh := &fakeAction{name: "wh_act", layer: "warehouse"}
+		svc, _ := newWriteModeService(t, nil, off, "", pg, wh)
+		roomID := createRoom(t, svc, "arjun").ID
+		pid := writeModeProposal(t, svc, roomID)
+		list := func() room.Proposal {
+			rows, err := svc.ListRoomsFor(context.Background(), mustUser(t, svc, "priya"))
+			if err != nil || len(rows) != 1 || len(rows[0].OpenProposals) != 1 {
+				t.Fatalf("list: %v %+v", err, rows)
+			}
+			return rows[0].OpenProposals[0]
+		}
+		approveLayer(t, svc, "priya", pid, "postgres")
+		if b := list().Blocked; b != "" {
+			t.Fatalf("off=%v: a layer pending, blocked = %q", off, b)
+		}
+		approveLayer(t, svc, "meera", pid, "warehouse")
+		want := ""
+		if off {
+			want = room.BlockedWriteModeOff
+		}
+		if b := list().Blocked; b != want {
+			t.Fatalf("off=%v: list blocked = %q, want %q", off, b, want)
+		}
+		if off {
+			if _, p := viewProposal(t, svc, "priya", roomID, pid); p.Blocked != list().Blocked {
+				t.Fatalf("room view blocked %q, list %q", p.Blocked, list().Blocked)
+			}
+		}
+	}
+}

@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { LabelForm } from './LabelForm'
 import { MAX_CAUSE, draftToInput, guessLayer, initialDraft } from '@/lib/label'
-import { emptyRoomState } from '@/state/types'
+import { emptyRoomState, fromSnapshot } from '@/state/types'
+import { applyEvent } from '@/state/reducer'
+import type { Event, RoomSnapshot } from '@/api/types'
 import type { RoomState } from '@/state/types'
 
 function room(over: Partial<RoomState> = {}): RoomState {
@@ -33,6 +35,125 @@ describe('label draft', () => {
     expect(draftToInput(r, { ...d, helped: 'yes' })?.agent_helped).toBe(true)
     expect(draftToInput(r, { ...d, helped: 'no' })?.agent_helped).toBe(false)
     expect(draftToInput(r, d)).not.toHaveProperty('agent_helped')
+  })
+})
+
+const agentActor = { kind: 'agent' as const, id: 'agent', name: 'Agent' }
+let seqN = 0
+function ev(type: Event['type'], payload: unknown): Event {
+  seqN += 1
+  return { room_id: 'r1', seq: seqN, type, actor: agentActor, payload, at: `2026-10-11T10:00:${String(seqN % 60).padStart(2, '0')}Z` }
+}
+const hyp = (text: string) => ev('agent.hypothesis', { text, based_on_steps: [], confidence: 'high', confirmed: false })
+const prop = (id: string, title: string) =>
+  ev('proposal.created', { proposal_id: id, title, steps: [], risk: 'low', rollback: '', required_layers: [], params_hash: 'h' })
+const ran = (id: string) => ev('action.executed', { proposal_id: id, step_index: 0, ok: true, output: '' })
+const verified = (id: string, recovered: boolean) =>
+  ev('agent.verification', { proposal_id: id, checks: [], recovered, verdict: recovered ? 'recovered' : 'not recovered' })
+const H1 = 'The connector task failed after a schema change'
+const H2 = "The pipeline is healthy now and there's nothing left to fix"
+
+function replay(events: Event[]): RoomState {
+  seqN = 0
+  return events.reduce(applyEvent, emptyRoomState('r1'))
+}
+
+describe('label draft after recovery (KAN-695)', () => {
+  const recoveredThenCleanup = () =>
+    replay([hyp(H1), prop('A', 'Allow amount decimal and restart task 0'), ran('A'), verified('A', true), hyp(H2), prop('B', 'Restore BACKWARD compatibility'), ran('B')])
+
+  it('names the recovering proposal, not the later cleanup, and sends its id', () => {
+    const r = recoveredThenCleanup()
+    const d = initialDraft(r)
+    expect(d.fix).toBe('Allow amount decimal and restart task 0')
+    expect(draftToInput(r, d)).toMatchObject({ fix_proposal_id: 'A' })
+  })
+
+  it('takes the cause and layer from the hypothesis behind the recovering fix', () => {
+    const d = initialDraft(recoveredThenCleanup())
+    expect(d.cause).toBe(H1)
+    expect(d.layer).toBe(guessLayer(H1))
+    expect(d.cause).not.toContain('healthy now')
+  })
+
+  it('does not take the snapshot-seeded hypothesis for a proposal created before it (reload)', () => {
+    // A reload seeds state.hypothesis from the snapshot (H2, seq 7). The log then replays a proposal
+    // created at seq 3, before any agent.hypothesis event: H2 is not the hypothesis current at seq 3.
+    const snap = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 7,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: { text: H2, based_on_steps: [], confidence: 'high', confirmed: false, seq: 7 },
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    } as unknown as RoomSnapshot
+    const at = (seq: number, e: Event): Event => ({ ...e, seq })
+    const r = [
+      at(3, prop('A', 'Allow amount decimal and restart task 0')),
+      at(4, ran('A')),
+      at(5, verified('A', true)),
+    ].reduce(applyEvent, fromSnapshot(snap))
+    expect(r.hypothesis?.text).toBe(H2)
+    expect(r.proposals[0].hypothesis_text).toBeUndefined()
+    // A proposal created after the snapshot's hypothesis still records it.
+    const later = applyEvent(r, at(9, prop('B', 'Cleanup')))
+    expect(later.proposals[1].hypothesis_text).toBe(H2)
+  })
+
+  it('gives the same draft after a reload: snapshot seeded with H2, full log replayed from seq 1', () => {
+    seqN = 0
+    const log = [hyp(H1), prop('A', 'Allow amount decimal and restart task 0'), ran('A'), verified('A', true), hyp(H2), prop('B', 'Restore BACKWARD compatibility'), ran('B')]
+    const h2seq = log[4].seq
+    const snap = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: log[log.length - 1].seq,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: { text: H2, based_on_steps: [], confidence: 'high', confirmed: false, seq: h2seq },
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    } as unknown as RoomSnapshot
+    const r = log.reduce(applyEvent, fromSnapshot(snap))
+    const d = initialDraft(r)
+    expect(d.cause).toBe(H1)
+    expect(d.layer).toBe(guessLayer(H1))
+    expect(d.fix).toBe('Allow amount decimal and restart task 0')
+    expect(draftToInput(r, d)).toMatchObject({ fix_proposal_id: 'A' })
+    // Same draft as the live session.
+    expect(d).toEqual(initialDraft(recoveredThenCleanup()))
+  })
+
+  it('falls back to the last executed proposal and the latest hypothesis without a recovery', () => {
+    const r = replay([hyp(H1), prop('A', 'Fix A'), ran('A'), verified('A', false), hyp(H2), prop('B', 'Cleanup B'), ran('B')])
+    const d = initialDraft(r)
+    expect(d.fix).toBe('Cleanup B')
+    expect(d.cause).toBe(H2)
+    expect(draftToInput(r, d)).toMatchObject({ fix_proposal_id: 'B' })
+  })
+
+  it('agrees with the close nudge, which says Fixed by the recovered proposal title', () => {
+    const r = recoveredThenCleanup()
+    const nudgeTitle = r.proposals.find((p) => p.verification?.recovered)?.title
+    expect(initialDraft(r).fix).toBe(nudgeTitle)
+  })
+
+  it('pre-fills the form with the recovering fix and the earlier hypothesis', () => {
+    render(<LabelForm state={recoveredThenCleanup()} onSubmit={vi.fn()} onSkip={vi.fn()} />)
+    expect(screen.getByDisplayValue(H1)).toBeInTheDocument()
+    expect(screen.getByDisplayValue('Allow amount decimal and restart task 0')).toBeInTheDocument()
   })
 })
 

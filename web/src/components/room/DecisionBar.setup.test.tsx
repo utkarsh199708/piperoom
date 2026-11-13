@@ -145,6 +145,81 @@ describe("DecisionBar in a setup room (U1-12a)", () => {
     ).toContain("h-11");
   });
 
+  // KAN-597: beside two buttons the sentence had 6 px at 320 wide; the sheet stacks it above them.
+  it("the bottom sheet stacks the setup sentence above its buttons and lets it take two lines", () => {
+    render(<DecisionBar state={setupState()} user={arjun} placement="sheet" />);
+    const row = bar().firstElementChild as HTMLElement;
+    expect(row.className).toContain("flex-col");
+    const buttons = screen.getByRole("button", { name: "Pairing command" })
+      .parentElement as HTMLElement;
+    expect(buttons.className).toContain("w-full");
+    expect(buttons.className).not.toContain("shrink-0");
+    const sentence = screen.getByText(/No runner paired/);
+    expect(sentence.className).toContain("line-clamp-2");
+    expect(sentence.className).not.toContain("truncate");
+  });
+
+  it("the bottom sheet stacks every setup state that shows View steps", () => {
+    render(
+      <DecisionBar
+        state={setupState({ events: planningEvents() })}
+        user={arjun}
+        placement="sheet"
+      />,
+    );
+    expect((bar().firstElementChild as HTMLElement).className).toContain(
+      "flex-col",
+    );
+    expect(
+      screen.getByRole("button", { name: /View steps/ }).parentElement
+        ?.className,
+    ).toContain("w-full");
+    expect(screen.getByText(/planning the next step/).className).toContain(
+      "line-clamp-2",
+    );
+  });
+
+  it("the registered setup state on the sheet has no buttons and still reads", () => {
+    render(
+      <DecisionBar
+        state={setupState({ snapshot: { runner, watched_by: "local" } })}
+        user={arjun}
+        placement="sheet"
+      />,
+    );
+    expect(bar()).toHaveTextContent("Pipeline registered");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  // In the stacked column basis-full sets the height, and the line has no content, so it drew 0 px.
+  it("the running step keeps its progress line on both placements", () => {
+    const { unmount } = render(
+      <DecisionBar state={runningState()} user={arjun} placement="sheet" />,
+    );
+    const name = { name: "Running the step" };
+    expect(screen.getByRole("progressbar", name).className).not.toContain(
+      "basis-full",
+    );
+    unmount();
+    render(<DecisionBar state={runningState()} user={arjun} />);
+    expect(screen.getByRole("progressbar", name).className).toContain(
+      "basis-full",
+    );
+  });
+
+  it("the desktop bar keeps the setup row and truncates", () => {
+    render(<DecisionBar state={setupState()} user={arjun} />);
+    expect((bar().firstElementChild as HTMLElement).className).not.toContain(
+      "flex-col",
+    );
+    const buttons = screen.getByRole("button", { name: "Pairing command" })
+      .parentElement as HTMLElement;
+    expect(buttons.className).toContain("shrink-0");
+    const sentence = screen.getByText(/No runner paired/);
+    expect(sentence.className).toContain("truncate");
+    expect(sentence.className).not.toContain("line-clamp-2");
+  });
+
   it("an incident room decision is unchanged", () => {
     const state = setupState();
     delete state.setup;
