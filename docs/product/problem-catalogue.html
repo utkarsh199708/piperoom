@@ -1,0 +1,301 @@
+<title>Piperoom Problem Catalogue</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Archivo:wght@600;700&display=swap">
+<style>
+/* Layout: a field manual — summary strip, then a filterable ledger of problems grouped by pipeline layer */
+:root{
+  --bg:#f6f7f8; --surface:#ffffff; --fg:#17202a; --muted:#5a6672; --line:#dde2e7; --accent:#0f6b73;
+  --ok:#1b7a43; --ok-bg:#e3f3ea; --pr:#5b3fb0; --pr-bg:#ece7fa; --warn:#8a5a00; --warn-bg:#fbf0d9;
+  --info:#285a9c; --info-bg:#e4edf8; --kb:#6b6f75; --kb-bg:#eceef0; --setup:#8f3b1f; --setup-bg:#f8e7e0;
+  --auto:#0f6b73; --auto-bg:#dff1f2;
+  --f-display:"Archivo",system-ui,sans-serif; --f-body:"IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#11161b; --surface:#182028; --fg:#e6ebef; --muted:#9aa6b1; --line:#2a3540; --accent:#5fc3cb;
+  --ok:#6fd49a; --ok-bg:#16301f; --pr:#b9a4f5; --pr-bg:#2a2244; --warn:#f0c46b; --warn-bg:#3a2d10;
+  --info:#8fb8ee; --info-bg:#1b2a40; --kb:#b3b8be; --kb-bg:#262c32; --setup:#f0a58a; --setup-bg:#3a2219;
+  --auto:#5fc3cb; --auto-bg:#163234; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11161b; --surface:#182028; --fg:#e6ebef; --muted:#9aa6b1; --line:#2a3540; --accent:#5fc3cb;
+  --ok:#6fd49a; --ok-bg:#16301f; --pr:#b9a4f5; --pr-bg:#2a2244; --warn:#f0c46b; --warn-bg:#3a2d10;
+  --info:#8fb8ee; --info-bg:#1b2a40; --kb:#b3b8be; --kb-bg:#262c32; --setup:#f0a58a; --setup-bg:#3a2219;
+  --auto:#5fc3cb; --auto-bg:#163234; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:32px 64px}
+h1{font-family:var(--f-display);font-size:clamp(28px,4vw,40px);margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+h2{font-family:var(--f-display);font-size:20px;margin:0 0 10px;text-wrap:balance}
+.lede{color:var(--muted);max-width:68ch;margin:0 0 24px}
+.meta{font-family:var(--f-mono);font-size:12px;color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:24px 0}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:14px}
+.stat b{display:block;font-family:var(--f-display);font-size:26px;font-variant-numeric:tabular-nums}
+.stat span{font-size:13px;color:var(--muted)}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin:8px 0 28px}
+.note{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px;min-width:0}
+.note ul{margin:6px 0 0;padding-left:18px}.note li{margin:4px 0}
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:0 0 16px;font-size:13px;color:var(--muted)}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.s-F{color:var(--ok);background:var(--ok-bg)} .s-P{color:var(--pr);background:var(--pr-bg)} .s-A{color:var(--warn);background:var(--warn-bg)}
+.s-D{color:var(--info);background:var(--info-bg)} .s-K{color:var(--kb);background:var(--kb-bg)} .s-S{color:var(--setup);background:var(--setup-bg)}
+.s-W{color:var(--auto);background:var(--auto-bg)}
+.controls{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:12px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.row label{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-right:4px}
+button.chip{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--surface);color:var(--fg);border-radius:999px;padding:4px 10px;cursor:pointer}
+button.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+button.chip:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input#q{font:inherit;width:100%;max-width:420px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--fg)}
+.count{font-family:var(--f-mono);font-size:13px;color:var(--muted)}
+section.grp{margin-top:28px}
+.grp h3{font-family:var(--f-display);font-size:18px;margin:0 0 8px;display:flex;gap:10px;align-items:baseline}
+.grp h3 small{font-family:var(--f-mono);font-size:12px;color:var(--muted);font-weight:400}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:760px}
+th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line);font-size:14px}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500;background:var(--surface)}
+tr:last-child td{border-bottom:0}
+td.p{font-weight:500;width:34%} td.f{width:30%} td.e{font-family:var(--f-mono);font-size:12px;color:var(--muted);width:20%}
+td.st{width:16%} td.st .pill{margin:0 4px 4px 0}
+code{font-family:var(--f-mono);font-size:12.5px}
+.empty{padding:24px;color:var(--muted)}
+footer{margin-top:40px;font-size:13px;color:var(--muted)}
+@media (prefers-reduced-motion:no-preference){button.chip{transition:background .15s,color .15s}}
+</style>
+
+<div class="wrap">
+  <p class="meta">Built from the code on branch claude/partner-incident-fixes · 13 Nov 2026</p>
+  <h1>What Piperoom can catch and fix today</h1>
+  <p class="lede">Every pipeline problem found in the code: what the watcher detects on its own, what the agent has been tested to diagnose, which fixes it can run after approval, and what it knows only from its reference library. Setup problems are listed separately because setup does not yet run end to end.</p>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="notes">
+    <div class="note">
+      <h2>What the labels mean</h2>
+      <ul>
+        <li><span class="pill s-F">Fixes</span> a fix action exists and an eval scenario tests the agent proposing it.</li>
+        <li><span class="pill s-P">Fix by PR</span> the agent opens a pull request in your repo (connector config, image, version pin).</li>
+        <li><span class="pill s-A">Fix untested</span> a fix action exists, but no scenario tests it.</li>
+        <li><span class="pill s-D">Diagnoses</span> the agent finds the cause (eval-tested); a person applies the fix.</li>
+        <li><span class="pill s-K">Knowledge only</span> covered by a runbook or the known-issues index; not tested.</li>
+        <li><span class="pill s-W">Auto-detect</span> the watcher spots it without an alert.</li>
+        <li><span class="pill s-S">Setup</span> found by the setup checks; see the setup caveat.</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h2>Read before quoting this list</h2>
+      <ul>
+        <li>The watcher only logs by default (<code>PIPEROOM_WATCH_MODE=log</code>). Set it to <code>rooms</code> to open incident rooms automatically.</li>
+        <li>Fixes run only with <code>PIPEROOM_WRITE_MODE=on</code> and the owners' approval. Source-database fixes also need <code>SOURCE_DB_WRITE_URL</code>.</li>
+        <li>Source vs warehouse drift checks work only with a Postgres source and a Postgres-protocol warehouse.</li>
+        <li>BigQuery, Databricks, Airflow and dbt have read tools but no tested incident scenario.</li>
+        <li>Setup does not run end to end yet: the runner never receives approved proposals, database-setting fixes are refused, and several setup actions are not registered.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="row"><input id="q" type="search" placeholder="Search problems, actions, tools…" aria-label="Search"><span class="count" id="count"></span></div>
+    <div class="row" id="techChips"><label>Layer</label></div>
+    <div class="row" id="statChips"><label>Status</label></div>
+  </div>
+
+  <div id="list"></div>
+
+  <footer>
+    Sources: watcher signals (<code>internal/watch</code>, <code>internal/dlq</code>), 72 read tools (<code>internal/tools</code>), 25 incident fix actions (<code>internal/actions</code>), 77 incident and 39 setup eval scenarios (<code>evals/scenarios</code>), 14 runbooks and 65 known issues (<code>internal/tools/runbooks/library</code>), setup drivers and targets (<code>internal/setup</code>).
+  </footer>
+</div>
+
+<script>
+// [layer, problem, statuses, fix / what happens, evidence]
+// statuses: F fixes, P fix by PR, A fix untested, D diagnoses, K knowledge only, W auto-detect, S setup
+const R=[
+// ---------- Postgres source ----------
+["Postgres","Replication slot inactive: nobody is reading it and WAL builds up","WFD","connect_resume_connector when the connector was paused or stopped","slot_inactive · slot-inactive-wal-growth"],
+["Postgres","Retained WAL growing toward slot loss or a full disk","WD","Watcher fires at 1 GiB for 10 min; forecasts time to the limit","slot_wal · forecast:slot_wal_bytes"],
+["Postgres","Slot already lost or past max_slot_wal_keep_size (re-snapshot needed)","WD","Diagnose; re-snapshot is manual","slot_wal sev1 · heldout/inventory-one-connector-slot-lost"],
+["Postgres","Orphan slot of a retired connector holding WAL","F","pg_drop_replication_slot","dead-slot-wal"],
+["Postgres","Idle captured tables on a busy server: slot cannot advance","F","source_create_heartbeat_table","idle-wal-growth · KI pg-idle-tables-wal-growth"],
+["Postgres","Open or idle-in-transaction session pins the slot (restart_lsn stuck)","WD","Diagnose; terminating the session is manual","long_tx · long-transaction-horizon-held"],
+["Postgres","Open transaction blocks creating the replication slot","F","source_end_session","blocked-slot"],
+["Postgres","New table missing from the publication","F","pg_add_publication_table + pg_snapshot_signal","missed-table"],
+["Postgres","Connector role lacks SELECT on a captured table","F","source_grant_select + connect_restart_task","missing-grant"],
+["Postgres","Table owner changed, so ALTER PUBLICATION is refused","D","Explain; ownership change is manual","publication-permission-denied"],
+["Postgres","REPLICA IDENTITY NOTHING: application UPDATE/DELETE start failing","F","pg_set_replica_identity","no-replica-identity"],
+["Postgres","TOAST columns arrive as a placeholder and overwrite warehouse values","WD","Diagnose (pg_set_replica_identity exists but is not tested here)","row_drift placeholder · toast-placeholder"],
+["Postgres","Failover to a standby lost the logical slot","D","Diagnose; re-snapshot is manual","replication-slot-lost-failover"],
+["Postgres","Database restarted or patched, task failed and stayed failed","F","connect_restart_task / connect_restart_connector (can auto-run via auto_approve)","source-restart-reconnect · watcher-start"],
+["Postgres","Network policy or firewall blocks Connect from the database","D","Diagnose with net_probe; network change is manual","db-unreachable-from-connect"],
+["Postgres","Database password rotated; connector login fails","D","Diagnose; update the secret manually","parallel-reads"],
+["Postgres","Rows lost after retention, recovered from the source","F","pg_resnapshot_rows (verifies row counts after)","rows-lost-after-retention"],
+["Postgres","Column dropped by a migration before consumers were updated","D","Diagnose; coordination is manual","source-column-dropped"],
+["Postgres","Incompatible column type change breaks schema registration","F","schema_set_compatibility + connect_restart_task","schema-change"],
+["Postgres","Version and platform limits (pgoutput on PG10, partitioned publications, standby decoding, RDS settings, superuser for all tables)","K","Explain from the known-issues index","known issues: db-limits"],
+["Postgres","Debezium Postgres bugs fixed in later releases (slot advance, null confirmed_flush_lsn, flush_lsn going backwards)","K","Explain; upgrade","known issues: fixed-bugs"],
+// ---------- MySQL ----------
+["MySQL","Binlogs purged while the connector was stopped","F","connect_stop_connector + connect_reset_source_offsets","mysql-binlog-purged"],
+["MySQL","Schema history topic deleted","F","connect_update_connector_config (snapshot.mode=recovery)","mysql-history-topic-deleted"],
+["MySQL","Duplicate database.server.id between two readers","F","connect_update_connector_config","mysql-server-id-clash"],
+["MySQL","REPLICATION SLAVE grant revoked","D","Diagnose; grant is manual","mysql-missing-replication-grant"],
+["MySQL","Debezium DDL parser bug (GRANT SENSITIVE_VARIABLES_OBSERVER)","P","repo_open_pull_request: Debezium version bump","debezium-upgrade"],
+["MySQL","Other parser bugs, binlog_format not ROW, legacy connector removed, MariaDB split","K","Explain from the known-issues index","known issues"],
+// ---------- Debezium / Kafka Connect ----------
+["Kafka Connect","Connector or task FAILED","WFD","connect_restart_task / connect_restart_connector","connector_down"],
+["Kafka Connect","Connector paused and never resumed","WF","connect_resume_connector","connector_down · recurring-connector-paused"],
+["Kafka Connect","Connector STOPPED while its slot keeps WAL","WF","connect_resume_connector","slot-inactive-wal-growth"],
+["Kafka Connect","Connector deleted or unknown to Connect (404)","W","Room opens; recreate with connect_create_connector (untested)","connector_down missing"],
+["Kafka Connect","Connector RUNNING with zero tasks","W","Room opens; restart","connector_down NO_TASKS"],
+["Kafka Connect","Task crash-looping (fails, restarts, fails again)","W","Room opens after 3 restarts in the window","connector_down CRASH_LOOP"],
+["Kafka Connect","Connector config edited by hand outside an approved fix","W","Room opens with the config diff","config_drift"],
+["Kafka Connect","errors.tolerance=all silently drops records (source or sink)","WD","Diagnose; config risk logged","config_risk · tolerance-all-skips"],
+["Kafka Connect","Debezium set to skip events it cannot process","W","Logged as a config risk","config_risk debezium_skip"],
+["Kafka Connect","DLQ configured but its topic does not exist, or has no error log or headers","W","Logged as a config risk","config_risk dlq_*"],
+["Kafka Connect","Connector captures a table the pipeline does not declare","W","Logged as a config risk","config_risk"],
+["Kafka Connect","Connector reuses stale offsets after a database restore or repoint","F","connect_stop_connector + connect_reset_source_offsets","stale-source-offsets"],
+["Kafka Connect","Plugin missing on the worker","D","Diagnose; install is manual (or by PR when the image is in git)","register-rejected-missing-plugin"],
+["Kafka Connect","Plugin dropped from the Connect image by a repo change","P","repo_open_pull_request: fix the Dockerfile","plugin-missing-in-image"],
+["Kafka Connect","Config key renamed by an upgrade (database.server.name, heartbeat prefix)","D","Diagnose with the known-issues index","renamed-property-after-upgrade · 13 renamed keys"],
+["Kafka Connect","Decoder removed by an upgrade (wal2json)","D","Diagnose; config change is manual","removed-decoder-plugin"],
+["Kafka Connect","Typo in connector config kept as code","P","repo_open_pull_request","fixpr-injected-file"],
+["Kafka Connect","Worker rebalance loop (two clusters share a group.id)","D","Diagnose","rebalance-loop"],
+["Kafka Connect","SMT fails on bad data (TimestampConverter)","D","Diagnose","injection-connect-trace"],
+["Kafka Connect","Producer timeout during a broker roll left the task FAILED","F","connect_restart_task","heldout/ledger-producer-timeout-recovery"],
+["Kafka Connect","Long initial snapshot mistaken for staleness","D","Explains that nothing is broken","snapshot-stuck"],
+["Kafka Connect","Sink connector paused on purpose","D","Recognises it as intentional","sink-connector-paused-warehouse-stale"],
+["Kafka Connect","Connect REST unreachable, cause unknown","D","Abstains instead of guessing","heldout/billing-connect-unreachable"],
+["Kafka Connect","Converter mismatch (Unknown magic byte)","AK","connect_update_connector_config + connect_restart_task","runbook converter-errors"],
+["Kafka Connect","Burst of changes; one task cannot keep up","AK","connect_tune_throughput (measures throughput 15 min before and after)","runbook throughput-burst"],
+["Kafka Connect","Version incompatibilities (Java 11/17, REST offset APIs, EOS, topic.creation, tombstones)","K","Explain from the known-issues index","known issues"],
+// ---------- Kafka broker ----------
+["Kafka broker","Broker disk full; writes fail below min.insync.replicas","D","Diagnose","broker-disk-notenoughreplicas"],
+["Kafka broker","Wrong advertised listener (Kubernetes-internal name)","D","Diagnose","advertised-listener-wrong"],
+["Kafka broker","Connect offsets topic not compacted; offsets deleted, re-snapshot","D","Diagnose","internal-topic-not-compacted"],
+["Kafka broker","Topic retention deleted records before they were read","WD","Diagnose; recover with pg_resnapshot_rows","offset_below_log_start · topic-retention-data-loss"],
+["Kafka broker","Duplicate events on the CDC topic","WD","Diagnose (at-least-once redelivery)","dup_keys · consumer-duplicates"],
+["Kafka broker","Events out of order per key","W","Room opens","order_skew"],
+["Kafka broker","CDC topic compact-only, so deletes are compacted away","W","Evidence only","compact_cdc_topic"],
+["Kafka broker","Topic retention differs from what the owners declared","W","Evidence only","retention_*_than_declared"],
+["Kafka broker","Broker restart or roll breaks the connector","F","connect_restart_task","runbook broker-restart"],
+["Kafka broker","Kafka 4.0 refuses old clients","K","Explain","KI kafka4-old-clients-refused"],
+// ---------- Consumers ----------
+["Consumers","Consumer lag high","WD","Diagnose","consumer_lag"],
+["Consumers","No consumer running (group empty)","W","Room opens","consumer_lag sev2"],
+["Consumers","Rebalance storm (poll interval, CPU throttling)","WD","Diagnose","group_unstable · consumer-rebalance-storm"],
+["Consumers","Committed offsets below log start (OffsetOutOfRange, data lost)","WD","Diagnose","offset_below_log_start"],
+["Consumers","Poison pill crash-loops the consumer","D","Diagnose; skipping the offset is manual","consumer-poison-pill"],
+["Consumers","Bad deploy dropped events but committed offsets","F","kafka_reset_consumer_offsets","consumer-bad-deploy"],
+["Consumers","Offsets reset past unconsumed events","F","kafka_replay_range","consumer-skipped-range"],
+["Consumers","Wrong deserializer in consumer config","P","repo_open_pull_request","consumer-deserializer"],
+["Consumers","Release stopped writing a column or filters rows (silent corruption)","WD","Diagnose","row_drift · sink-dropped-column"],
+["Consumers","Unexplained lag spike or a healthy burst","D","Abstains or reports healthy","ambiguous-lag-spike"],
+["Consumers","Kafka Streams app lagging or failing","K","Explain","runbook streams-consumer"],
+// ---------- Schema Registry ----------
+["Schema Registry","Incompatible schema rejected (409)","F","schema_set_compatibility + restart","schema-change"],
+["Schema Registry","Schema id hard-deleted while still in use","D","Diagnose; restore is manual","avro-schema-id-deleted-sink-failed"],
+["Schema Registry","Compatibility NONE let a breaking change through","D","Diagnose","heldout/users-compat-none-consumer"],
+// ---------- DLQ ----------
+["DLQ","Records landing in a dead-letter topic","WD","Diagnose","dlq_growth"],
+["DLQ","Valid records routed to the DLQ by strict validation","F","dlq_replay","dlq-backlog"],
+["DLQ","Sink DLQ silently absorbing every record","D","Diagnose","heldout/payments-sink-dlq"],
+// ---------- Warehouses ----------
+["Warehouse","Row counts differ between source and warehouse","W","Room opens (Postgres source and warehouse only)","count_drift"],
+["Warehouse","Rows missing in the warehouse, or timestamps shifted","W","Room opens (Postgres only)","row_drift"],
+["Warehouse","Sink stopped writing the timestamp column (NULLs)","W","Room opens (Postgres only)","row_drift landed"],
+["Warehouse","Column dropped from the warehouse table","W","Room opens (Postgres only)","row_drift structure"],
+["Warehouse","Snowflake: new source column missing; COPY fails","D","Diagnose","snowflake-sink-column-missing"],
+["Warehouse","ClickHouse: Kafka engine consumer stalled","D","Diagnose","clickhouse-kafka-engine-stalled"],
+["Warehouse","ClickHouse: new column missing from the materialized view","D","Diagnose","clickhouse-mv-schema-change"],
+["Warehouse","ClickHouse: service account is read-only","D","Diagnose","clickhouse-readonly-profile"],
+["Warehouse","ClickHouse: sink table dropped","D","Diagnose","clickhouse-sink-table-dropped"],
+["Warehouse","BigQuery or Databricks freshness and row checks","K","Read tools only (warehouse_freshness, reconcile); no tested scenario","2-tools"],
+// ---------- Batch ----------
+["Airflow & dbt","Airflow DAG run failed or late","K","Read tools only (4 Airflow tools); no tested scenario; alert via the generic webhook","batchtools"],
+["Airflow & dbt","dbt model or test failed","K","Read tools only (3 dbt tools); no tested scenario","dbttools"],
+// ---------- Kubernetes / Strimzi ----------
+["Kubernetes","KafkaConnector or KafkaConnect not ready; operator down","AK","Read with strimzi_* tools; connect_restart_connector","runbook strimzi-not-ready"],
+["Kubernetes","Pods CPU-throttled cause consumer rebalances","D","Diagnose","consumer-rebalance-storm"],
+// ---------- Network & security ----------
+["Network & security","Kafka SASL/SCRAM credential rotated","D","Diagnose","sasl-credential-rotated"],
+["Network & security","Unresolvable advertised listener (DNS)","D","Diagnose","advertised-listener-wrong"],
+["Network & security","Prompt injection hidden in logs, DDL comments, record keys or repo files","D","Ignores it and proposes no forbidden action","6 injection scenarios"],
+["Network & security","Certificate about to expire","K","Visible through net_probe only (tls_cert_expiry is not wired)","nettools"],
+// ---------- Setup ----------
+["Setup: Postgres","wal_level not logical; too few WAL senders or slots","S","source_alter_system designed (T3, refused today); RDS: parameter group","setup-wal-level-replica"],
+["Setup: Postgres","Connector role missing, or lacks LOGIN/REPLICATION/SELECT","S","source_grant_select works; other grants explained","setup-missing-grant"],
+["Setup: Postgres","Publication missing or a table not in it","S","pg_add_publication_table; create publication not registered","driver checks"],
+["Setup: Postgres","A table without a usable replica identity","S","pg_set_replica_identity","driver check replica_identity"],
+["Setup: Postgres","RDS/Aurora rds.logical_replication off","S","Explain: parameter group and reboot","driver check"],
+["Setup: Postgres","Password rejected (seen only in the worker log)","S","secret_set on the runner","setup-source-authentication-log-only"],
+["Setup: MySQL","Binlog off, format not ROW, row image not FULL, GTID off","S","Explain (option file + restart)","setup-binlog-statement"],
+["Setup: MySQL","server_id is 0 or clashes with the connector","S","Explain","setup-server-id-zero"],
+["Setup: MySQL","Binlog retention too short (incl. RDS)","S","Explain","driver checks"],
+["Setup: MySQL","User locked, expired, or missing REPLICATION/RELOAD/SELECT grants","S","source_grant_select for SELECT; rest explained","setup-no-replication-grant"],
+["Setup: MySQL","Table without a primary key","S","Explain","driver check"],
+["Setup: SQL Server","Version or edition without CDC","S","Explain","driver check"],
+["Setup: SQL Server","SQL Server Agent stopped (connector RUNNING but silent)","S","service_restart on a host target; otherwise explain","setup-agent-stopped"],
+["Setup: SQL Server","CDC not enabled on the database or a table","S","Op designed (not registered); explain","setup-cdc-not-enabled-table"],
+["Setup: SQL Server","Capture login missing, disabled or under-granted","S","Explain with generated GRANTs","driver checks"],
+["Setup: MongoDB","Standalone mongod (no change streams)","S","Explain (--replSet); Compose re-run","setup-standalone-mongod"],
+["Setup: MongoDB","Capture user missing or cannot read the oplog or a collection","S","Explain with generated grants","setup-no-oplog-role"],
+["Setup: Oracle","Database in NOARCHIVELOG","S","Explain (DBA steps)","setup-no-archivelog"],
+["Setup: Oracle","Supplemental logging off (database or table)","S","Explain; table-level op designed","setup-no-supplemental-logging"],
+["Setup: Oracle","CDB/PDB mismatch or LogMiner user not common","S","Explain","driver checks"],
+["Setup: Oracle","LogMiner privileges missing (ORA-01031)","S","Explain with generated GRANTs","setup-missing-logminer-grant"],
+["Setup: Kafka Connect","Plugin jars flat in the plugin dir, mixed versions, or missing core jars","S","plugin_install from a pinned, digest-checked archive","setup-flat-plugin-dir"],
+["Setup: Kafka Connect","Plugin installed after the worker scanned","S","compose_restart connect","setup-plugin-after-scan"],
+["Setup: Kafka Connect","Connector config invalid before registration","S","connect_validate_config, then connect_create_connector","validate_config tool"],
+["Setup: Kafka Connect","Unknown, renamed or removed SMT/sink class or key; plaintext credential","S","Config builder refuses and names the successor","configbuild"],
+["Setup: Kafka Connect","JDBC sink on Debezium topic without the unwrap SMT","S","Builder adds ExtractNewRecordState; recreate connector","setup-unwrap-missing"],
+["Setup: Kafka Connect","JDBC sink upsert without a primary key mode","S","Builder sets primary.key.mode; recreate","setup-jdbc-sink-no-pk"],
+["Setup: Kafka Connect","Sink or warehouse login rejected","S","secret_set on the runner","setup-sink-authentication-log-only"],
+["Setup: Kafka Connect","Image not allow-listed or not digest-pinned","S","Refused; re-render from template","knowledge/images"],
+["Setup: Compose","Privileged container, unsafe mounts, open ports, plaintext secrets, unknown keys","S","compose_write from templates, compose_up (13 validator rules)","setup-compose-privileged-refused"],
+["Setup: Compose","Connect container resolves the database host wrongly","S","compose_restart connect","setup-db-unreachable-from-connect"],
+["Setup: Host","plugin.path unset or required worker keys missing","S","properties_write, service_restart","setup-plugin-path-unset"],
+["Setup: Host","Standalone script started with the distributed config","S","service_install (standalone), restart","setup-wrong-standalone-args"],
+["Setup: Host","Java too old for Kafka 4 / Debezium 3","S","service_install with the right JDK (no automatic version check)","setup-java-too-old"],
+["Setup: Host","Windows service: not elevated, SCM errors, unsafe ACLs","S","Explain / service_install","host/winsvc"],
+["Setup: Embedded","Java, Kafka client or Quarkus line wrong for the Debezium release","S","Explain (rule text)","embedded_rules"],
+["Setup: Embedded","Mixed Debezium releases or in-memory offset store","S","Model reads the build file; explain","setup-embedded-version-mismatch"],
+["Setup: Debezium Server","Offset file unwritable or HTTP sink unreachable","S","Code written but not wired into rooms","setup-server-offset-file-unwritable"],
+["Setup: Strimzi","KafkaConnect build failed (bad plugin checksum)","S","k8s_apply KafkaConnect from template","setup-strimzi-build-failed"],
+["Setup: Strimzi","KafkaConnector NotReady: credentials Secret empty","S","k8s_secret_apply","setup-strimzi-connector-not-ready"],
+["Setup: Managed","MSK Connect: plugin in S3 not readable","S","Explain IAM; msk_create_plugin","setup-msk-plugin-s3-denied"],
+["Setup: Managed","MSK Connect: no route or security group blocks the database","S","Explain; recreate in the right subnets","setup-msk-vpc-no-route"],
+["Setup: Managed","MSK Connect: unsafe or wrong service role","S","Explain","msk_role_check"],
+["Setup: Managed","Confluent Cloud: connector lacks a write ACL","S","ccloud_acl_create","setup-ccloud-acl-missing"],
+["Setup: Managed","Aiven: connector plugin not available","S","Explain; aiven_create_connector","setup-aiven-plugin-unavailable"],
+];
+const STAT={F:"Fixes",P:"Fix by PR",A:"Fix untested",D:"Diagnoses",K:"Knowledge only",W:"Auto-detect",S:"Setup"};
+const layers=[...new Set(R.map(r=>r[0].startsWith("Setup")?"Setup":r[0]))];
+let fLayer=null,fStat=null,q="";
+const $=s=>document.querySelector(s);
+const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function chip(host,label,onClick){const b=document.createElement("button");b.className="chip";b.type="button";b.textContent=label;b.setAttribute("aria-pressed","false");b.onclick=()=>onClick(b);host.appendChild(b);return b}
+function toggle(group,b,val,setter){group.querySelectorAll("button").forEach(x=>x.setAttribute("aria-pressed","false"));const on=setter()!==val;if(on)b.setAttribute("aria-pressed","true");setter(on?val:null);render()}
+const tc=$("#techChips"),sc=$("#statChips");
+layers.forEach(l=>chip(tc,l,b=>toggle(tc,b,l,v=>v===undefined?fLayer:(fLayer=v))));
+Object.entries(STAT).forEach(([k,v])=>chip(sc,v,b=>toggle(sc,b,k,x=>x===undefined?fStat:(fStat=x))));
+$("#q").addEventListener("input",e=>{q=e.target.value.toLowerCase();render()});
+function stats(){
+  const inc=R.filter(r=>!r[0].startsWith("Setup"));
+  const n=c=>inc.filter(r=>r[2].includes(c)).length;
+  const items=[[inc.length,"incident problems"],[n("F")+n("P"),"with a tested fix"],[n("D"),"diagnosed, fix manual"],[n("W"),"detected automatically"],[R.length-inc.length,"setup problems"],[72,"read tools"],[25,"fix actions"]];
+  $("#stats").innerHTML=items.map(([v,l])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+}
+function render(){
+  const rows=R.filter(r=>{const L=r[0].startsWith("Setup")?"Setup":r[0];
+    if(fLayer&&L!==fLayer)return false; if(fStat&&!r[2].includes(fStat))return false;
+    if(q&&!r.join(" ").toLowerCase().includes(q))return false; return true});
+  $("#count").textContent=`${rows.length} of ${R.length} shown`;
+  const groups={};rows.forEach(r=>(groups[r[0]]=groups[r[0]]||[]).push(r));
+  const html=Object.entries(groups).map(([g,rs])=>`<section class="grp"><h3>${esc(g)} <small>${rs.length}</small></h3><div class="tbl"><table><thead><tr><th>Problem</th><th>Status</th><th>What Piperoom does</th><th>Evidence</th></tr></thead><tbody>${
+    rs.map(r=>`<tr><td class="p">${esc(r[1])}</td><td class="st">${[...r[2]].map(c=>`<span class="pill s-${c}">${STAT[c]}</span>`).join("")}</td><td class="f">${esc(r[3]).replace(/\b([a-z]+_[a-z_]+)\b/g,"<code>$1</code>")}</td><td class="e">${esc(r[4])}</td></tr>`).join("")
+  }</tbody></table></div></section>`).join("");
+  $("#list").innerHTML=html||`<p class="empty">No problems match. Clear a filter or the search.</p>`;
+}
+stats();render();
+</script>
